@@ -38,11 +38,14 @@
    ```bash
    docker compose up -d --build
    ```
-   服务将默认在 `3100` 端口运行。
+   服务将默认在 `9880` 端口运行。
 
 ### 方式二：直接拉取镜像部署 (无需源码)
 
-如果你不想拉取源码，可以直接使用预构建的 Docker 镜像部署：
+如果你不想拉取源码，可以直接使用预构建的 Docker 镜像部署。
+
+**💡 关于数据安全与更新的说明：**
+由于本服务是完全**无状态 (Stateless)** 的设计，没有任何本地数据库（所有账号数据都会通过 API 直接持久化储存在你原有的 Sub2API 数据库中）。因此，**未来每次拉取新镜像重启（`docker pull` + `docker compose up -d`），绝对不会造成任何数据丢失或数据库重置**，请放心更新！
 
 1. 创建一个 `docker-compose.yml` 文件：
    ```yaml
@@ -52,7 +55,7 @@
        container_name: sub2api-extra
        restart: unless-stopped
        ports:
-         - "3100:3100"
+         - "9880:3100"
        environment:
          - PORT=3100
          # 改为你的 Sub2API 后端地址

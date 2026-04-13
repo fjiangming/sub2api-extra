@@ -4,7 +4,7 @@ services:
     container_name: sub2api-extra
     restart: unless-stopped
     ports:
-      - "3100:3100"
+      - "9880:3100"
     environment:
       - PORT=3100
       # 改为你的 Sub2API 后端地址（Docker 内部网络或外部地址）
