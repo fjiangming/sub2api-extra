@@ -6,6 +6,25 @@ const PORT = process.env.PORT || 3100;
 const SUB2API_BASE_URL = (process.env.SUB2API_BASE_URL || 'http://localhost:8080').replace(/\/+$/, '');
 
 app.use(express.json());
+
+// Allow iframe embedding and cross-origin access
+app.use((req, res, next) => {
+  // Remove any restrictive iframe headers
+  res.removeHeader('X-Frame-Options');
+  // Allow embedding from any origin
+  res.setHeader('Content-Security-Policy', "frame-ancestors *");
+  // CORS for cross-origin iframe
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ──────────────────────────────────────────────
