@@ -65,7 +65,10 @@ app.get('/api/auth/me', async (req, res) => {
     res.status(result.status).json(result.data);
   } catch (err) {
     console.error('Auth/me proxy error:', err.message);
-    res.status(502).json({ error: 'Failed to connect to Sub2API' });
+    res.status(502).json({
+      error: `无法连接到 Sub2API 后端 (${SUB2API_BASE_URL})`,
+      detail: err.message
+    });
   }
 });
 

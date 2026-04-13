@@ -38,7 +38,16 @@ let searchTimer = null;
   // Verify identity
   try {
     const resp = await apiFetch('/api/auth/me');
-    if (!resp.ok) throw new Error('Token 无效或已过期');
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      if (resp.status === 502) {
+        throw new Error('无法连接到 Sub2API 后端服务，请检查 SUB2API_BASE_URL 配置是否正确。');
+      } else if (resp.status === 401) {
+        throw new Error('Token 无效或已过期，请从 Sub2API 系统中重新访问。');
+      } else {
+        throw new Error(errData.error || errData.message || `认证失败 (${resp.status})`);
+      }
+    }
     currentUser = await resp.json();
 
     // Check admin role
@@ -68,7 +77,7 @@ let searchTimer = null;
     });
 
   } catch (err) {
-    showError(err.message || '连接失败');
+    showError(err.message || '无法连接到服务，请检查网络和服务状态。');
   }
 })();
 
