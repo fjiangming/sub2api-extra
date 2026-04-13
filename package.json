@@ -1,0 +1,13 @@
+{
+  "name": "sub2api-extra",
+  "version": "1.0.0",
+  "description": "Independent account management page for Sub2API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  }
+}

@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>账号管理</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Loading State -->
+    <div id="loading-screen" class="loading-screen">
+      <div class="spinner"></div>
+      <p>正在验证身份...</p>
+    </div>
+
+    <!-- Error State -->
+    <div id="error-screen" class="error-screen hidden">
+      <div class="error-icon">⚠️</div>
+      <h2>连接失败</h2>
+      <p id="error-message">无法验证身份或连接到 Sub2API</p>
+      <button onclick="location.reload()" class="btn btn-primary">重试</button>
+    </div>
+
+    <!-- Main Content -->
+    <div id="main-content" class="main-content hidden">
+      <!-- Header -->
+      <div class="page-header">
+        <div class="header-left">
+          <h1>账号管理</h1>
+          <span id="user-badge" class="user-badge"></span>
+        </div>
+        <div class="header-right">
+          <div class="search-box">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input id="search-input" type="text" placeholder="搜索账号..." />
+          </div>
+          <button id="btn-add" class="btn btn-primary" onclick="openAddModal()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            添加账号
+          </button>
+        </div>
+      </div>
+
+      <!-- Stats -->
+      <div class="stats-bar">
+        <span id="stats-text">共 0 个账号</span>
+      </div>
+
+      <!-- Table -->
+      <div class="table-container">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>平台</th>
+              <th>类型</th>
+              <th>状态</th>
+              <th>备注</th>
+              <th>创建时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="accounts-tbody">
+            <tr class="empty-row">
+              <td colspan="7">
+                <div class="empty-state">
+                  <div class="empty-icon">📋</div>
+                  <p>暂无账号</p>
+                  <p class="empty-sub">点击"添加账号"开始</p>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Pagination -->
+      <div id="pagination" class="pagination hidden"></div>
+    </div>
+  </div>
+
+  <!-- Add Account Modal -->
+  <div id="add-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>添加账号</h2>
+        <button class="modal-close" onclick="closeAddModal()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <form id="add-form" onsubmit="handleAddAccount(event)">
+          <!-- Platform -->
+          <div class="form-group">
+            <label>平台 <span class="required">*</span></label>
+            <select id="form-platform" onchange="onPlatformChange()" required>
+              <option value="anthropic">Anthropic (Claude)</option>
+              <option value="openai">OpenAI (ChatGPT)</option>
+              <option value="gemini">Gemini (Google)</option>
+              <option value="antigravity">Antigravity</option>
+            </select>
+          </div>
+
+          <!-- Type -->
+          <div class="form-group">
+            <label>类型 <span class="required">*</span></label>
+            <select id="form-type" onchange="onTypeChange()" required>
+              <option value="oauth">OAuth</option>
+              <option value="setup-token">Setup Token</option>
+              <option value="apikey">API Key</option>
+              <option value="upstream">Upstream</option>
+              <option value="bedrock">Bedrock</option>
+            </select>
+          </div>
+
+          <!-- Name -->
+          <div class="form-group">
+            <label>名称 <span class="required">*</span></label>
+            <div class="input-with-prefix">
+              <span id="name-prefix" class="input-prefix"></span>
+              <input id="form-name" type="text" placeholder="输入账号名称" required />
+            </div>
+            <small class="form-hint">名称将自动添加用户名前缀用于区分</small>
+          </div>
+
+          <!-- Credentials: Session Key (Anthropic OAuth / Setup Token / Antigravity) -->
+          <div id="cred-session-key" class="form-group cred-field">
+            <label>Session Key <span class="required">*</span></label>
+            <textarea id="form-session-key" rows="3" placeholder="粘贴 session key..."></textarea>
+          </div>
+
+          <!-- Credentials: API Key (OpenAI / Gemini APIKey) -->
+          <div id="cred-api-key" class="form-group cred-field hidden">
+            <label>API Key <span class="required">*</span></label>
+            <input id="form-api-key" type="text" placeholder="sk-... 或 AIza..." />
+          </div>
+
+          <!-- Credentials: Refresh Token (OpenAI OAuth) -->
+          <div id="cred-refresh-token" class="form-group cred-field hidden">
+            <label>Refresh Token <span class="required">*</span></label>
+            <textarea id="form-refresh-token" rows="3" placeholder="粘贴 refresh token..."></textarea>
+          </div>
+
+          <!-- Credentials: Gemini OAuth -->
+          <div id="cred-gemini-oauth" class="form-group cred-field hidden">
+            <label>Access Token</label>
+            <textarea id="form-gemini-access-token" rows="2" placeholder="粘贴 access token..."></textarea>
+            <label class="mt-2">Refresh Token <span class="required">*</span></label>
+            <textarea id="form-gemini-refresh-token" rows="2" placeholder="粘贴 refresh token..."></textarea>
+            <label class="mt-2">OAuth 类型</label>
+            <select id="form-gemini-oauth-type">
+              <option value="">默认</option>
+              <option value="code_assist">Code Assist</option>
+              <option value="google_one">Google One</option>
+              <option value="ai_studio">AI Studio</option>
+            </select>
+          </div>
+
+          <!-- Credentials: Upstream URL -->
+          <div id="cred-upstream" class="form-group cred-field hidden">
+            <label>Upstream Base URL <span class="required">*</span></label>
+            <input id="form-upstream-url" type="text" placeholder="https://api.example.com" />
+            <label class="mt-2">API Key</label>
+            <input id="form-upstream-key" type="text" placeholder="可选 API Key" />
+          </div>
+
+          <!-- Credentials: Bedrock -->
+          <div id="cred-bedrock" class="form-group cred-field hidden">
+            <label>AWS Access Key ID <span class="required">*</span></label>
+            <input id="form-bedrock-access-key" type="text" placeholder="AKIA..." />
+            <label class="mt-2">AWS Secret Access Key <span class="required">*</span></label>
+            <input id="form-bedrock-secret-key" type="password" placeholder="secret key" />
+            <label class="mt-2">AWS Region</label>
+            <input id="form-bedrock-region" type="text" placeholder="us-east-1" value="us-east-1" />
+          </div>
+
+          <!-- Groups -->
+          <div class="form-group">
+            <label>分组</label>
+            <div id="groups-container" class="checkbox-group">
+              <span class="loading-text">加载中...</span>
+            </div>
+          </div>
+
+          <!-- Notes -->
+          <div class="form-group">
+            <label>备注</label>
+            <input id="form-notes" type="text" placeholder="可选备注信息" />
+          </div>
+
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeAddModal()">取消</button>
+            <button type="submit" class="btn btn-primary" id="btn-submit">
+              <span id="btn-submit-text">确认添加</span>
+              <div id="btn-submit-spinner" class="btn-spinner hidden"></div>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

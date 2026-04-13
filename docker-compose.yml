@@ -1,0 +1,11 @@
+services:
+  account-manager:
+    build: .
+    container_name: sub2api-extra
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    environment:
+      - PORT=3100
+      # 改为你的 Sub2API 后端地址（Docker 内部网络或外部地址）
+      - SUB2API_BASE_URL=http://host.docker.internal:8080
