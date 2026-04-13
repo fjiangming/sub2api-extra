@@ -30,9 +30,9 @@
    ```
 
 2. 配置文件：
-   打开项目中的 `docker-compose.yml` 文件，修改 `SUB2API_BASE_URL` 环境变量。它必须能够从这个新容器内访问到 Sub2API 的后端服务。
+   打开项目中的 `docker-compose.yml` 文件，修改 `SUB2API_BASE_URL` 环境变量。它必须能够从 Docker 容器内部访问到 Sub2API 的后端服务。
    
-   *提示：如果它们部署在同一台机器上，通常使用 `http://host.docker.internal:8080` (Mac/Windows 或 Docker Bridge) 或实际的内网 IP。*
+   > ⚠️ **注意**：Docker 容器内的 `127.0.0.1` 指的是容器自身，而非宿主机。如果 Sub2API 部署在同一台机器上，需要通过 `host.docker.internal` 来访问宿主机端口。Linux 服务器必须搭配 `extra_hosts: ["host.docker.internal:host-gateway"]` 配置才能生效（Mac/Windows 的 Docker Desktop 默认已支持）。
 
 3. 启动服务：
    ```bash
@@ -56,10 +56,12 @@
        restart: unless-stopped
        ports:
          - "9870:3100"
+       extra_hosts:
+         - "host.docker.internal:host-gateway"  # Linux 必须，使容器能访问宿主机
        environment:
          - PORT=3100
-         # 改为你的 Sub2API 后端地址
-         - SUB2API_BASE_URL=http://host.docker.internal:8080
+         # 改为你的 Sub2API 后端地址（端口号改为你实际的 Sub2API 后端端口）
+         - SUB2API_BASE_URL=http://host.docker.internal:9000
    ```
 2. 在该文件所在目录执行启动服务：
    ```bash
@@ -109,7 +111,7 @@
 3. 点击 **添加自定义菜单**。
 4. 填写如下信息：
    - **标签 (Label)**: 账号管理 (或我的账号)
-   - **URL**: `http://<部署sub2api-extra的IP或域名>:3100`  (请确保用户浏览器能访问这个URL)
+   - **URL**: `http://<部署sub2api-extra的IP或域名>:9870`  (请确保用户浏览器能访问这个URL)
    - **可见性 (Visibility)**: 建议设为 `admin` (根据需求决定，但后端接口现阶段要求管理员权限)
 5. 保存设置。
 
