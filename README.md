@@ -61,9 +61,23 @@
          # 改为你的 Sub2API 后端地址
          - SUB2API_BASE_URL=http://host.docker.internal:8080
    ```
-2. 在该文件所在目录执行：
+2. 在该文件所在目录执行启动服务：
    ```bash
    docker compose up -d
+   ```
+
+3. **如何拉取更新：**
+   来到 `docker-compose.yml` 所在的目录，运行以下命令即可完成无缝更新（对原生数据库零影响）：
+   ```bash
+   docker compose pull
+   docker compose up -d
+   docker image prune -f  # (可选) 清除旧版本闲置镜像以节省空间
+   ```
+
+4. **如何完全卸载：**
+   如果随后不想使用该独立面板了，执行以下命令即可清理容器及镜像（同样**完全不影响**你加在原有 Sub2API 系统里的任何账号）：
+   ```bash
+   docker compose down --rmi all
    ```
 
 ### 方式三：本地 Node.js 部署
