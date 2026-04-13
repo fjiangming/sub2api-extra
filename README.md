@@ -38,7 +38,7 @@
    ```bash
    docker compose up -d --build
    ```
-   服务将默认在 `9880` 端口运行。
+   服务将默认在 `9870` 端口运行。
 
 ### 方式二：直接拉取镜像部署 (无需源码)
 
@@ -55,7 +55,7 @@
        container_name: sub2api-extra
        restart: unless-stopped
        ports:
-         - "9880:3100"
+         - "9870:3100"
        environment:
          - PORT=3100
          # 改为你的 Sub2API 后端地址
