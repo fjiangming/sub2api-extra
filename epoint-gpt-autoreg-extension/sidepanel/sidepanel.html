@@ -13,58 +13,69 @@
   <link rel="stylesheet" href="sidepanel.css">
 </head>
 
-<body>
-  <button id="btn-theme" class="theme-toggle global-theme-toggle" title="切换主题">
-    <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-    </svg>
-    <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="12" cy="12" r="5" />
-      <line x1="12" y1="1" x2="12" y2="3" />
-      <line x1="12" y1="21" x2="12" y2="23" />
-      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
-      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-      <line x1="1" y1="12" x2="3" y2="12" />
-      <line x1="21" y1="12" x2="23" y2="12" />
-      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
-      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-    </svg>
-  </button>
-  <!-- 登录全屏页面 -->
-  <div id="login-section" class="login-fullscreen" style="display: flex;">
-    <div class="login-container">
-      <div class="login-logo">
-        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
-          stroke-linecap="round" stroke-linejoin="round">
-          <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
-        </svg>
+<body class="auth-pending">
+  <!-- ═══ Login Screen ═══ -->
+  <section id="login-screen" class="login-screen">
+    <div class="login-card">
+      <div class="login-header-block">
+        <div class="login-logo">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+          </svg>
+        </div>
+        <h2 class="login-title">EpointGPT公益注册站</h2>
+        <p class="login-subtitle">请登录以继续使用</p>
       </div>
-      <h1 class="login-title">EpointGPT 公益注册站</h1>
-      <p class="login-subtitle">请登录以继续使用服务端及自动化管理功能</p>
-      
-      <div class="data-card login-card">
-        <div class="data-row login-row">
-          <span class="data-label">服务端地址</span>
-          <input type="text" id="login-input-url" class="data-input" placeholder="https://sub2api.hisence.fun/admin/accounts" value="https://sub2api.hisence.fun/admin/accounts" />
+      <form id="login-form" class="login-form" autocomplete="on">
+        <div class="login-field">
+          <label for="login-server-url" class="login-label">服务端地址</label>
+          <input type="url" id="login-server-url" class="login-input" placeholder="https://your-server.com" required
+            autocomplete="url" />
         </div>
-        <div class="data-row login-row">
-          <span class="data-label">邮箱</span>
-          <input type="text" id="login-input-email" class="data-input" placeholder="输入 SUB2API 邮箱" />
+        <div class="login-field">
+          <label for="login-email" class="login-label">邮箱</label>
+          <input type="email" id="login-email" class="login-input" placeholder="you@example.com" required
+            autocomplete="email" />
         </div>
-        <div class="data-row login-row">
-          <span class="data-label">密码</span>
-          <input type="password" id="login-input-password" class="data-input" placeholder="输入密码" />
+        <div class="login-field">
+          <label for="login-password" class="login-label">密码</label>
+          <div class="login-password-wrap">
+            <input type="password" id="login-password" class="login-input login-input-pwd" placeholder="请输入密码"
+              required autocomplete="current-password" />
+            <button type="button" id="btn-login-toggle-pwd" class="login-eye-btn" aria-label="显示密码"></button>
+          </div>
         </div>
-        
-        <div class="login-actions">
-          <button id="btn-login-submit" class="btn btn-primary login-btn">登录并同步</button>
-        </div>
+        <div id="login-error" class="login-error" style="display:none;"></div>
+        <button type="submit" id="btn-login" class="btn btn-primary login-submit-btn">
+          <span id="btn-login-text">登 录</span>
+        </button>
+      </form>
+      <div class="login-footer">
+        <span class="login-footer-text">Sub2API 统一认证</span>
+        <button id="btn-login-theme" class="theme-toggle login-theme-btn" title="切换主题" type="button">
+          <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+          </svg>
+          <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5" />
+            <line x1="12" y1="1" x2="12" y2="3" />
+            <line x1="12" y1="21" x2="12" y2="23" />
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+            <line x1="1" y1="12" x2="3" y2="12" />
+            <line x1="21" y1="12" x2="23" y2="12" />
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+          </svg>
+        </button>
       </div>
     </div>
-  </div>
+  </section>
 
-  <div id="app-section" class="screen-section" style="display: none;">
-    <header>
+  <header>
     <div class="header-left">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
         stroke-linecap="round" stroke-linejoin="round">
@@ -90,22 +101,183 @@
           <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
         </svg>
       </button>
+      <button id="btn-theme" class="theme-toggle" title="切换主题">
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+        </svg>
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="5" />
+          <line x1="12" y1="1" x2="12" y2="3" />
+          <line x1="12" y1="21" x2="12" y2="23" />
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+          <line x1="1" y1="12" x2="3" y2="12" />
+          <line x1="21" y1="12" x2="23" y2="12" />
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+        </svg>
+      </button>
       <div id="config-menu-shell" class="header-menu">
         <button id="btn-config-menu" class="btn btn-ghost btn-sm header-config-btn" type="button" aria-haspopup="menu"
           aria-expanded="false">配置</button>
         <div id="config-menu" class="header-dropdown" role="menu" aria-labelledby="btn-config-menu" hidden>
           <button id="btn-export-settings" class="header-dropdown-item" type="button" role="menuitem">导出配置</button>
           <button id="btn-import-settings" class="header-dropdown-item" type="button" role="menuitem">导入配置</button>
+          <button id="btn-logout" class="header-dropdown-item header-dropdown-logout" type="button" role="menuitem">退出登录</button>
         </div>
       </div>
     </div>
   </header>
 
   <section id="data-section">
-    <!-- migrated config card was here -->
-    <div id="execution-status-card" class="data-card">
-      <div class="section-mini-header">
-        <span class="section-label">运行状态</span>
+    <div id="settings-card" class="data-card">
+      <div class="data-row">
+        <span class="data-label">来源</span>
+        <select id="select-panel-mode" class="data-select">
+          <option value="cpa">CPA 面板</option>
+          <option value="sub2api">SUB2API</option>
+        </select>
+      </div>
+      <div class="data-row" id="row-vps-url">
+        <span class="data-label">CPA</span>
+        <div class="input-with-icon">
+          <input type="password" id="input-vps-url" class="data-input data-input-with-icon"
+            placeholder="http://ip:port/management.html#/oauth" />
+          <button id="btn-toggle-vps-url" class="input-icon-btn" type="button" aria-label="显示 CPA 地址"
+            title="显示 CPA 地址"></button>
+        </div>
+      </div>
+      <div class="data-row" id="row-vps-password">
+        <span class="data-label">管理密钥</span>
+        <div class="input-with-icon">
+          <input type="password" id="input-vps-password" class="data-input data-input-with-icon" placeholder="请输入 CPA 管理密钥" />
+          <button id="btn-toggle-vps-password" class="input-icon-btn" type="button" aria-label="显示管理密钥"
+            title="显示管理密钥"></button>
+        </div>
+      </div>
+      <div class="data-row" id="row-local-cpa-step9-mode">
+        <span class="data-label">本地 CPA</span>
+        <div id="local-cpa-step9-mode-group" class="choice-group" role="group" aria-label="本地 CPA 第 9 步策略">
+          <button type="button" class="choice-btn" data-local-cpa-step9-mode="submit">全部回调</button>
+          <button type="button" class="choice-btn" data-local-cpa-step9-mode="bypass">跳过第9步</button>
+        </div>
+      </div>
+      <div class="data-row" id="row-sub2api-url" style="display:none;">
+        <span class="data-label">SUB2API</span>
+        <input type="text" id="input-sub2api-url" class="data-input" placeholder="https://sub2api.hisence.fun/admin/accounts" />
+      </div>
+      <div class="data-row" id="row-sub2api-email" style="display:none;">
+        <span class="data-label">账号</span>
+        <input type="text" id="input-sub2api-email" class="data-input" placeholder="请输入 SUB2API 登录邮箱" />
+      </div>
+      <div class="data-row" id="row-sub2api-password" style="display:none;">
+        <span class="data-label">密码</span>
+        <input type="password" id="input-sub2api-password" class="data-input" placeholder="请输入 SUB2API 登录密码" />
+      </div>
+      <div class="data-row" id="row-sub2api-group" style="display:none;">
+        <span class="data-label">分组</span>
+        <input type="text" id="input-sub2api-group" class="data-input" placeholder="默认 codex" />
+      </div>
+      <div class="data-row">
+        <span class="data-label">codex密码</span>
+        <div class="input-with-icon">
+          <input type="password" id="input-password" class="data-input data-input-with-icon"
+              placeholder="codex密码，留空则自动生成" />
+            <button id="btn-toggle-password" class="input-icon-btn" type="button" aria-label="显示密码"
+              title="显示密码"></button>
+        </div>
+      </div>
+      <div class="data-row">
+        <span class="data-label">邮箱服务</span>
+        <div class="data-inline">
+          <select id="select-mail-provider" class="data-select">
+            <option value="hotmail-api">Hotmail（微软 Graph）</option>
+            <option value="2925">2925 邮箱 (www.2925.com)</option>
+            <option value="163">163 邮箱 (mail.163.com)</option>
+            <option value="163-vip">163 VIP 邮箱 (webmail.vip.163.com)</option>
+            <option value="qq">QQ 邮箱 (wx.mail.qq.com)</option>
+            <option value="inbucket">Inbucket（自定义主机）</option>
+          </select>
+          <button id="btn-mail-login" class="btn btn-outline btn-sm" type="button" disabled>登录</button>
+        </div>
+      </div>
+      <div class="data-row" id="row-email-generator">
+        <span class="data-label">邮箱生成</span>
+        <select id="select-email-generator" class="data-select">
+          <option value="duck">DuckDuckGo</option>
+          <option value="cloudflare">Cloudflare</option>
+        </select>
+      </div>
+      <div class="data-row" id="row-cf-domain" style="display:none;">
+        <span class="data-label">CF 域名</span>
+        <div class="data-inline">
+          <select id="select-cf-domain" class="data-select"></select>
+          <input type="text" id="input-cf-domain" class="data-input" placeholder="例如 yourdomain.xyz"
+            style="display:none;" />
+          <button id="btn-cf-domain-mode" class="btn btn-outline btn-sm" type="button">添加</button>
+        </div>
+      </div>
+      <div class="data-row" id="row-inbucket-host" style="display:none;">
+        <span class="data-label">Inbucket</span>
+        <input type="text" id="input-inbucket-host" class="data-input" placeholder="填写主机或 https://主机地址" />
+      </div>
+      <div class="data-row" id="row-inbucket-mailbox" style="display:none;">
+        <span class="data-label">邮箱名</span>
+        <input type="text" id="input-inbucket-mailbox" class="data-input" placeholder="例如 zju2001" />
+      </div>
+      <div class="data-row" id="row-2925-main-email" style="display:none;">
+        <span class="data-label">2925 主邮箱</span>
+        <span id="display-2925-main-email" class="data-value mono truncate">未识别</span>
+      </div>
+      <div class="data-row">
+        <span class="data-label">注册邮箱</span>
+        <div class="data-inline">
+          <input type="text" id="input-email" class="data-input" placeholder="自动生成或手动粘贴邮箱" />
+          <button id="btn-fetch-email" class="btn btn-outline btn-sm" type="button">获取</button>
+        </div>
+      </div>
+      <div class="data-row data-check-row">
+        <span class="data-label">兜底</span>
+        <label class="data-check" for="input-auto-skip-failures">
+          <input type="checkbox" id="input-auto-skip-failures" />
+          <span>出现错误无法继续时，直接丢弃当前线程并新开一轮，直到补足目标运行次数</span>
+        </label>
+      </div>
+      <div class="data-row data-check-row">
+        <span class="data-label">跳步9</span>
+        <label class="data-check" for="input-skip-step9">
+          <input type="checkbox" id="input-skip-step9" />
+          <span>持续跳过步骤 9（多轮自动运行时，不执行平台回调验证）</span>
+        </label>
+      </div>
+      <div class="data-row">
+        <span class="data-label">延迟</span>
+        <div class="data-inline auto-delay-inline">
+          <label class="data-check auto-delay-check" for="input-auto-delay-enabled">
+            <input type="checkbox" id="input-auto-delay-enabled" />
+            <span>启动前倒计时</span>
+          </label>
+          <div class="auto-delay-controls">
+            <input type="number" id="input-auto-delay-minutes" class="data-input auto-delay-input" value="30" min="1"
+              max="1440" step="1" title="启动前倒计时分钟数" />
+            <span class="data-unit">分钟</span>
+          </div>
+        </div>
+      </div>
+      <div class="data-row">
+        <span class="data-label">步间随机</span>
+        <div class="data-inline auto-delay-inline">
+          <div class="auto-delay-controls">
+            <input type="number" id="input-auto-step-delay-min-seconds" class="data-input auto-delay-input" value="12" min="0"
+              max="600" step="1" title="自动运行每一步执行前的最小随机等待秒数" />
+            <span class="data-unit">~</span>
+            <input type="number" id="input-auto-step-delay-max-seconds" class="data-input auto-delay-input" value="18" min="0"
+              max="600" step="1" title="自动运行每一步执行前的最大随机等待秒数" />
+            <span class="data-unit">秒</span>
+          </div>
+        </div>
       </div>
       <div class="data-row">
         <span class="data-label">OAuth</span>
@@ -113,7 +285,10 @@
       </div>
       <div class="data-row">
         <span class="data-label">回调</span>
-        <span id="display-localhost-url" class="data-value data-value-fill mono truncate">等待中...</span>
+        <div class="data-inline data-value-actions">
+          <span id="display-localhost-url" class="data-value data-value-fill mono truncate">等待中...</span>
+          <button id="btn-save-settings" class="btn btn-outline btn-sm" type="button">保存</button>
+        </div>
       </div>
     </div>
     <div id="hotmail-section" class="data-card hotmail-card" style="display:none;">
@@ -265,11 +440,10 @@
     </div>
   </div>
 
-  </div>
-
   <div id="toast-container"></div>
   <input id="input-import-settings-file" type="file" accept=".json,application/json" hidden />
   <script src="../hotmail-utils.js"></script>
+  <script src="login.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 

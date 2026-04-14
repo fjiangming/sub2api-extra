@@ -85,18 +85,73 @@ async function sub2apiRequest(method, apiPath, token, body) {
 }
 
 // ──────────────────────────────────────────────
-// API: Verify user identity (proxy to /auth/me)
+// API: Verify user identity
+// Decode JWT directly to avoid Sub2API admin-only
+// /api/v1/auth/me restrictions
 // ──────────────────────────────────────────────
+
+function decodeJwtPayload(token) {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    // Check expiration
+    if (payload.exp && payload.exp * 1000 < Date.now()) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
 
 app.get('/api/auth/me', async (req, res) => {
   try {
     const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'No token provided' });
 
+    // First try to decode JWT directly (works for all users)
+    const jwtPayload = decodeJwtPayload(token);
+    if (jwtPayload) {
+      const user = {
+        id: jwtPayload.sub || jwtPayload.id || jwtPayload.user_id,
+        username: jwtPayload.username || jwtPayload.name || jwtPayload.email || 'user',
+        email: jwtPayload.email || '',
+        role: jwtPayload.role || 'user',
+      };
+      if (user.id) return res.json(user);
+    }
+
+    // Fallback: proxy to Sub2API (may fail for non-admin)
     const result = await sub2apiRequest('GET', '/api/v1/auth/me', token);
+    if (result.status === 200) {
+      return res.json(result.data);
+    }
+
+    // If Sub2API returns 403 but JWT was valid, use JWT data
+    if (result.status === 403 && jwtPayload) {
+      return res.json({
+        id: jwtPayload.sub || jwtPayload.id || 'unknown',
+        username: jwtPayload.username || jwtPayload.name || jwtPayload.email || 'user',
+        email: jwtPayload.email || '',
+        role: jwtPayload.role || 'user',
+      });
+    }
+
     res.status(result.status).json(result.data);
   } catch (err) {
-    console.error('Auth/me proxy error:', err.message);
+    console.error('Auth/me error:', err.message);
+    // Last resort: try JWT decode even on network error
+    const token = extractToken(req);
+    if (token) {
+      const jwtPayload = decodeJwtPayload(token);
+      if (jwtPayload) {
+        return res.json({
+          id: jwtPayload.sub || jwtPayload.id || 'unknown',
+          username: jwtPayload.username || jwtPayload.name || jwtPayload.email || 'user',
+          email: jwtPayload.email || '',
+          role: jwtPayload.role || 'user',
+        });
+      }
+    }
     res.status(502).json({
       error: `无法连接到 Sub2API 后端 (${SUB2API_BASE_URL})`,
       detail: err.message

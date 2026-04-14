@@ -96,6 +96,233 @@ body {
 }
 
 /* ============================================================
+   Auth Gate — Login / Main content visibility
+   ============================================================ */
+
+body.auth-pending header,
+body.auth-pending #data-section,
+body.auth-pending #steps-section,
+body.auth-pending #log-section,
+body.auth-pending .modal-overlay,
+body.auth-pending #toast-container,
+body.auth-pending #input-import-settings-file {
+  display: none !important;
+}
+
+#login-screen {
+  display: none;
+}
+
+body.auth-pending #login-screen {
+  display: flex;
+}
+
+body.auth-pending {
+  padding: 0;
+}
+
+/* ============================================================
+   Login Screen
+   ============================================================ */
+
+.login-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: var(--bg-body-gradient);
+  background-attachment: fixed;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 360px;
+  background: var(--bg-surface);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 32px 28px 24px;
+  box-shadow: var(--shadow-glass), var(--shadow-md);
+  position: relative;
+  overflow: hidden;
+  animation: loginCardIn 500ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.login-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+}
+
+@keyframes loginCardIn {
+  from { opacity: 0; transform: translateY(16px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.login-header-block {
+  text-align: center;
+  margin-bottom: 28px;
+}
+
+.login-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: var(--blue-soft);
+  border: 1px solid var(--blue-glow);
+  margin-bottom: 16px;
+  box-shadow: 0 0 28px var(--blue-glow);
+}
+
+.login-logo svg {
+  color: var(--blue);
+  filter: drop-shadow(0 0 8px var(--blue-glow));
+}
+
+.login-title {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--text-primary);
+  letter-spacing: -0.02em;
+  margin-bottom: 6px;
+}
+
+.login-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.login-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.login-input {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  outline: none;
+  transition: all var(--transition);
+  box-shadow: inset 0 2px 4px rgba(0,0,0,0.02);
+}
+
+.login-input::placeholder {
+  color: var(--text-muted);
+}
+
+.login-input:focus {
+  border-color: var(--blue);
+  background: var(--bg-hover);
+  box-shadow: 0 0 0 3px var(--blue-glow);
+}
+
+.login-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.login-password-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.login-input-pwd {
+  padding-right: 42px;
+}
+
+.login-eye-btn {
+  position: absolute;
+  right: 6px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 999px;
+  transition: all var(--transition);
+}
+
+.login-eye-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.login-error {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--red-soft);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--red);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  animation: fadeIn 200ms ease-out;
+}
+
+.login-submit-btn {
+  width: 100%;
+  padding: 12px;
+  font-size: 15px;
+  font-weight: 700;
+  margin-top: 4px;
+  letter-spacing: 0.1em;
+}
+
+.login-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.login-footer-text {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.login-theme-btn {
+  width: 28px;
+  height: 28px;
+}
+
+/* ============================================================
    Header
    ============================================================ */
 
@@ -217,6 +444,18 @@ header {
   cursor: not-allowed;
 }
 
+/* Logout button styling in config dropdown */
+.header-dropdown-logout {
+  color: var(--red) !important;
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 2px;
+  padding-top: 10px;
+}
+.header-dropdown-logout:hover:not(:disabled) {
+  background: var(--red-soft) !important;
+  color: var(--red) !important;
+}
+
 /* ============================================================
    Buttons
    ============================================================ */
@@ -322,7 +561,7 @@ header {
 #data-section { margin-bottom: 18px; }
 
 .data-card {
-  background: var(--bg-card);
+  background: var(--bg-surface);
   backdrop-filter: var(--blur);
   -webkit-backdrop-filter: var(--blur);
   border: 1px solid var(--border);
@@ -349,7 +588,7 @@ header {
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  background: color-mix(in srgb, var(--bg-base) 40%, transparent);
+  background: color-mix(in srgb, var(--bg-surface) 40%, transparent);
   pointer-events: none;
   backdrop-filter: blur(2px);
   z-index: 10;
@@ -453,7 +692,7 @@ header {
 .data-input {
   flex: 1;
   padding: 8px 12px;
-  background: var(--bg-input);
+  background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
@@ -472,7 +711,7 @@ header {
   min-height: 96px;
   resize: vertical;
   padding: 10px 12px;
-  background: var(--bg-input);
+  background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
@@ -515,7 +754,7 @@ header {
   display: inline-flex;
   align-items: center;
   gap: 0;
-  background: var(--bg-input);
+  background: var(--bg-elevated);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   padding: 3px;
@@ -573,7 +812,7 @@ header {
 .hotmail-list-shell {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: var(--bg-input);
+  background: var(--bg-elevated);
   overflow-y: auto;
   overflow-x: hidden;
   padding: 4px;
@@ -752,7 +991,7 @@ header {
 .data-select {
   flex: 1;
   padding: 8px 12px;
-  background: var(--bg-input);
+  background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
@@ -769,8 +1008,8 @@ header {
   background-size: 14px;
 }
 .data-select:focus { border-color: var(--blue); background: var(--bg-hover); box-shadow: 0 0 0 3px var(--blue-glow); }
-[data-theme="dark"] .data-select { 
-  color-scheme: dark; 
+[data-theme="dark"] .data-select {
+  color-scheme: dark;
   background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
 }
 
@@ -784,7 +1023,7 @@ header {
   line-height: 1.5;
   color: var(--text-secondary);
   cursor: pointer;
-  background: var(--bg-input);
+  background: var(--bg-elevated);
   padding: 8px 12px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
@@ -841,7 +1080,7 @@ header {
   gap: 10px;
   margin-top: 10px;
   padding: 10px 14px;
-  background: var(--bg-card);
+  background: var(--bg-surface);
   backdrop-filter: var(--blur);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -988,7 +1227,7 @@ header {
   font-size: 12px;
   font-weight: 700;
   color: var(--text-primary);
-  background: var(--bg-card);
+  background: var(--bg-surface);
   backdrop-filter: var(--blur);
   padding: 4px 12px;
   border-radius: 12px;
@@ -1000,7 +1239,7 @@ header {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  background: var(--bg-card);
+  background: var(--bg-surface);
   backdrop-filter: var(--blur);
   padding: 12px;
   border-radius: var(--radius-md);
@@ -1021,7 +1260,7 @@ header {
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  background: var(--bg-input);
+  background: var(--bg-elevated);
   border: 1px solid var(--border);
   display: flex;
   align-items: center;
@@ -1064,7 +1303,7 @@ header {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
-  background: var(--bg-input);
+  background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   cursor: pointer;
@@ -1100,7 +1339,7 @@ header {
   justify-content: center;
   border: 1px solid var(--border);
   border-radius: 999px;
-  background: var(--bg-input);
+  background: var(--bg-elevated);
   color: var(--text-muted);
   cursor: pointer;
   transition: all var(--transition);
@@ -1144,7 +1383,7 @@ header {
 }
 
 #log-area {
-  background: var(--bg-card);
+  background: var(--bg-surface);
   backdrop-filter: var(--blur);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -1210,6 +1449,16 @@ header {
 
 .log-line { animation: fadeIn 200ms cubic-bezier(0.16, 1, 0.3, 1); }
 
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes toastOut {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(10px); }
+}
+
 /* ============================================================
    Modal
    ============================================================ */
@@ -1233,7 +1482,7 @@ header {
 
 .modal-card {
   width: min(100%, 340px);
-  background: var(--bg-card);
+  background: var(--bg-surface);
   backdrop-filter: var(--blur);
   border: 1px solid rgba(255, 255, 255, 0.15);
   border-radius: var(--radius-md);
@@ -1375,75 +1624,3 @@ header {
     transition-duration: 0.01ms !important;
   }
 }
-
- / *   = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = 
-       L o g i n   S e c t i o n 
-       = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = = =   * / 
- 
- # l o g i n - s e c t i o n   { 
-     d i s p l a y :   f l e x ; 
-     f l e x - d i r e c t i o n :   c o l u m n ; 
-     m i n - h e i g h t :   1 0 0 v h ; 
- } 
- 
- . l o g i n - h e a d e r   { 
-     d i s p l a y :   f l e x ; 
-     j u s t i f y - c o n t e n t :   s p a c e - b e t w e e n ; 
-     a l i g n - i t e m s :   c e n t e r ; 
-     p a d d i n g :   1 2 p x   1 6 p x ; 
-     b a c k g r o u n d - c o l o r :   v a r ( - - b g - c a r d ) ; 
-     b a c k d r o p - f i l t e r :   b l u r ( 1 6 p x ) ; 
-     - w e b k i t - b a c k d r o p - f i l t e r :   b l u r ( 1 6 p x ) ; 
-     b o r d e r - b o t t o m :   1 p x   s o l i d   v a r ( - - b o r d e r - c o l o r ) ; 
-     z - i n d e x :   1 0 0 ; 
- } 
- 
- . l o g i n - c o n t a i n e r   { 
-     f l e x :   1 ; 
-     d i s p l a y :   f l e x ; 
-     a l i g n - i t e m s :   c e n t e r ; 
-     j u s t i f y - c o n t e n t :   c e n t e r ; 
-     p a d d i n g :   2 4 p x ; 
- } 
- 
- . l o g i n - c a r d   { 
-     w i d t h :   1 0 0 % ; 
-     m a x - w i d t h :   4 0 0 p x ; 
-     p a d d i n g :   3 2 p x   2 4 p x ; 
-     d i s p l a y :   f l e x ; 
-     f l e x - d i r e c t i o n :   c o l u m n ; 
-     g a p :   2 0 p x ; 
-     a n i m a t i o n :   f a d e I n   0 . 4 s   e a s e - o u t ; 
- } 
- 
- . l o g i n - t i t l e   { 
-     f o n t - s i z e :   2 0 p x ; 
-     f o n t - w e i g h t :   6 0 0 ; 
-     c o l o r :   v a r ( - - t e x t - p r i m a r y ) ; 
-     t e x t - a l i g n :   c e n t e r ; 
-     m a r g i n - b o t t o m :   8 p x ; 
-     l e t t e r - s p a c i n g :   0 . 5 p x ; 
- } 
- 
- . l o g i n - s u b m i t - b t n   { 
-     m a r g i n - t o p :   1 2 p x ; 
-     h e i g h t :   4 0 p x ; 
-     f o n t - s i z e :   1 5 p x ; 
-     f o n t - w e i g h t :   6 0 0 ; 
-     w i d t h :   1 0 0 % ; 
-     j u s t i f y - c o n t e n t :   c e n t e r ; 
- } 
- 
- / *   A n i m a t i o n s   * / 
- @ k e y f r a m e s   f a d e I n   { 
-     f r o m   { 
-         o p a c i t y :   0 ; 
-         t r a n s f o r m :   t r a n s l a t e Y ( 1 0 p x ) ; 
-     } 
-     t o   { 
-         o p a c i t y :   1 ; 
-         t r a n s f o r m :   t r a n s l a t e Y ( 0 ) ; 
-     } 
- } 
-  
- 
