@@ -367,13 +367,10 @@ app.get('/api/extension/settings', async (req, res) => {
     const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'No token provided' });
 
-    // Verify token and get userId via sub2api auth endpoint
-    const authResult = await sub2apiRequest('GET', '/api/v1/auth/me', token);
-    if (authResult.status !== 200) {
-      return res.status(authResult.status).json(authResult.data);
-    }
-    const userId = authResult.data.id || authResult.data.data?.id;
-    if (!userId) return res.status(401).json({ error: 'Unable to parse user identity' });
+    // Decode JWT directly to get userId (avoid admin-only restrictions)
+    const jwtPayload = decodeJwtPayload(token);
+    const userId = jwtPayload?.sub || jwtPayload?.id || jwtPayload?.user_id;
+    if (!userId) return res.status(401).json({ error: 'Unable to parse user identity from token' });
 
     const fileContent = await fs.readFile(DATA_FILE, 'utf8');
     const allSettings = JSON.parse(fileContent);
@@ -392,13 +389,10 @@ app.post('/api/extension/settings', async (req, res) => {
     const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'No token provided' });
 
-    // Verify token and get userId
-    const authResult = await sub2apiRequest('GET', '/api/v1/auth/me', token);
-    if (authResult.status !== 200) {
-      return res.status(authResult.status).json(authResult.data);
-    }
-    const userId = authResult.data.id || authResult.data.data?.id;
-    if (!userId) return res.status(401).json({ error: 'Unable to parse user identity' });
+    // Decode JWT directly to get userId
+    const jwtPayload = decodeJwtPayload(token);
+    const userId = jwtPayload?.sub || jwtPayload?.id || jwtPayload?.user_id;
+    if (!userId) return res.status(401).json({ error: 'Unable to parse user identity from token' });
 
     const { payload } = req.body;
     if (!payload) return res.status(400).json({ error: 'Missing encrypted payload' });

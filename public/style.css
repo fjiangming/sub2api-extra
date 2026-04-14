@@ -480,6 +480,23 @@ body {
   animation: slideUp 0.25s ease;
 }
 
+.modal.modal-wide {
+  max-width: 640px;
+}
+
+.form-section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 20px 0 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.form-section-title:first-child {
+  margin-top: 0;
+}
+
 .modal-header {
   display: flex;
   align-items: center;

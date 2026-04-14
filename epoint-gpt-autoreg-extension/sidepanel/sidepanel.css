@@ -338,7 +338,7 @@ header {
 .header-left {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .header-left svg { color: var(--blue); transition: all var(--transition); filter: drop-shadow(0 0 6px var(--blue-glow)); }

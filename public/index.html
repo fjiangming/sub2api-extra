@@ -210,7 +210,7 @@
 
   <!-- Extension Configuration Modal -->
   <div id="config-modal" class="modal-overlay hidden">
-    <div class="modal">
+    <div class="modal modal-wide">
       <div class="modal-header">
         <h2>自动化注册配置</h2>
         <button class="modal-close" onclick="closeConfigModal()">
@@ -219,80 +219,131 @@
       </div>
       <div class="modal-body">
         <form id="config-form" onsubmit="handleSaveConfig(event)">
-          <!-- panel mode -->
+          <!-- ── 来源模式 ── -->
+          <div class="form-section-title">🔗 来源与认证</div>
           <div class="form-group">
-            <label>面板来源模式</label>
-            <select id="cfg-panel-mode">
-              <option value="INJECT">打开目标站内置面板</option>
-              <option value="SIDEPANEL">使用独立侧边栏</option>
+            <label>来源</label>
+            <select id="cfg-panel-mode" onchange="onCfgPanelModeChange()">
+              <option value="cpa">CPA 面板</option>
+              <option value="sub2api">SUB2API</option>
             </select>
           </div>
 
-          <!-- URL / pwd -->
-          <div class="form-group">
-            <label>CPA 服务地址</label>
-            <input id="cfg-vps-url" type="text" placeholder="https://..." />
-          </div>
-          <div class="form-group">
-            <label>管理密钥</label>
-            <input id="cfg-vps-password" type="password" placeholder="输入密钥" />
-          </div>
-          <div class="form-group">
-            <label>CODEX密码</label>
-            <input id="cfg-custom-password" type="text" placeholder="留空则随机生成" />
+          <!-- CPA fields (shown when panelMode = cpa) -->
+          <div id="cfg-cpa-group">
+            <div class="form-group">
+              <label>CPA 服务地址</label>
+              <input id="cfg-vps-url" type="text" placeholder="http://ip:port/management.html#/oauth" />
+            </div>
+            <div class="form-group">
+              <label>管理密钥</label>
+              <input id="cfg-vps-password" type="password" placeholder="请输入 CPA 管理密钥" />
+            </div>
+            <div class="form-group">
+              <label>本地 CPA 第9步策略</label>
+              <select id="cfg-local-cpa-step9-mode">
+                <option value="submit">全部回调</option>
+                <option value="bypass">跳过第9步</option>
+              </select>
+            </div>
           </div>
 
-          <!-- Email -->
+          <!-- SUB2API fields (shown when panelMode = sub2api) -->
+          <div id="cfg-sub2api-group" class="hidden">
+            <div class="form-group">
+              <label>SUB2API 地址</label>
+              <input id="cfg-sub2api-url" type="text" placeholder="https://sub2api.hisence.fun/admin/accounts" />
+            </div>
+            <div class="form-group">
+              <label>SUB2API 账号</label>
+              <input id="cfg-sub2api-email" type="text" placeholder="请输入 SUB2API 登录邮箱" />
+            </div>
+            <div class="form-group">
+              <label>SUB2API 密码</label>
+              <input id="cfg-sub2api-password" type="password" placeholder="请输入 SUB2API 登录密码" />
+            </div>
+            <div class="form-group">
+              <label>SUB2API 分组</label>
+              <input id="cfg-sub2api-group" type="text" placeholder="默认 codex" />
+            </div>
+          </div>
+
+          <!-- ── 密码 ── -->
+          <div class="form-section-title">🔑 账号密码</div>
+          <div class="form-group">
+            <label>CODEX 密码</label>
+            <input id="cfg-custom-password" type="text" placeholder="codex密码，留空则自动生成" />
+          </div>
+
+          <!-- ── 邮箱 ── -->
+          <div class="form-section-title">📧 邮箱配置</div>
           <div class="form-group">
             <label>邮箱服务</label>
-            <select id="cfg-mail-provider">
-              <option value="inbucket">Inbucket 聚合</option>
-              <option value="hotmail">Hotmail (别名)</option>
-              <option value="duckduckgo">DuckDuckGo</option>
-              <option value="custom">第三方生成</option>
-              <option value="manual">手动输入</option>
+            <select id="cfg-mail-provider" onchange="onCfgMailProviderChange()">
+              <option value="hotmail-api">Hotmail（微软 Graph）</option>
+              <option value="2925">2925 邮箱 (www.2925.com)</option>
+              <option value="163">163 邮箱 (mail.163.com)</option>
+              <option value="163-vip">163 VIP 邮箱</option>
+              <option value="qq">QQ 邮箱 (wx.mail.qq.com)</option>
+              <option value="inbucket">Inbucket（自定义主机）</option>
             </select>
           </div>
           <div class="form-group">
-            <label>邮箱生成规则</label>
-            <select id="cfg-email-generator">
-              <option value="UUID">UUID</option>
-              <option value="RANDOM">RANDOM (10位小写)</option>
-              <option value="ID">ID (32位小写)</option>
-              <option value="USERNAME">USERNAME</option>
+            <label>邮箱生成</label>
+            <select id="cfg-email-generator" onchange="onCfgEmailGeneratorChange()">
+              <option value="duck">DuckDuckGo</option>
+              <option value="cloudflare">Cloudflare</option>
             </select>
-          </div>
-          <div class="form-group">
-            <label>自定义域名 / 注册邮箱</label>
-            <input id="cfg-registration-email" type="text" placeholder="输入域名或邮箱" />
           </div>
 
-          <!-- Checkboxes and timeouts -->
+          <!-- Inbucket fields (conditional) -->
+          <div id="cfg-inbucket-group" class="hidden">
+            <div class="form-group">
+              <label>Inbucket 主机地址</label>
+              <input id="cfg-inbucket-host" type="text" placeholder="填写主机或 https://主机地址" />
+            </div>
+            <div class="form-group">
+              <label>Inbucket 邮箱名</label>
+              <input id="cfg-inbucket-mailbox" type="text" placeholder="例如 zju2001" />
+            </div>
+          </div>
+
+          <!-- Cloudflare domain (conditional) -->
+          <div id="cfg-cf-group" class="hidden">
+            <div class="form-group">
+              <label>Cloudflare 自定义域名</label>
+              <input id="cfg-cf-domain" type="text" placeholder="yourdomain.xyz" />
+            </div>
+          </div>
+
+          <!-- ── 自动化行为 ── -->
+          <div class="form-section-title">⚙️ 自动化行为</div>
           <div class="form-group">
             <label style="display: flex; align-items: center; gap: 8px; font-weight: normal; font-size: 14px; cursor: pointer;">
-              <input type="checkbox" id="cfg-autoRunSkipFailures"> 开启注册兜底，失败后强制刷新
+              <input type="checkbox" id="cfg-autoRunSkipFailures"> 兜底：出现错误时丢弃当前线程并新开一轮
             </label>
           </div>
           <div class="form-group">
             <label style="display: flex; align-items: center; gap: 8px; font-weight: normal; font-size: 14px; cursor: pointer;">
-              <input type="checkbox" id="cfg-autoStep9SkipEnabled"> 跳步9：利用跳步9规则注册
+              <input type="checkbox" id="cfg-skipStep9Enabled"> 跳步9：持续跳过步骤 9（多轮自动运行时不执行平台回调验证）
             </label>
           </div>
           <div class="form-group">
             <label style="display: flex; align-items: center; gap: 8px; font-weight: normal; font-size: 14px; cursor: pointer;">
-              <input type="checkbox" id="cfg-autoRunDelayEnabled"> 失败后重试延迟开启
+              <input type="checkbox" id="cfg-autoRunDelayEnabled"> 启动前倒计时
             </label>
             <div style="display: flex; align-items: center; gap: 8px; margin-top: 8px;">
-              <input type="number" id="cfg-autoRunDelayMinutes" style="width: 80px;" min="0" value="0">
-              <span>分钟后</span>
+              <input type="number" id="cfg-autoRunDelayMinutes" style="width: 80px;" min="0" value="30">
+              <span>分钟</span>
             </div>
           </div>
           <div class="form-group">
             <label>步间随机延迟 (秒)</label>
             <div style="display: flex; align-items: center; gap: 8px;">
-              <input type="number" id="cfg-autoStepRandomDelayMin" style="width: 80px;" min="0" value="2">
-              <span>到</span>
-              <input type="number" id="cfg-autoStepRandomDelayMax" style="width: 80px;" min="0" value="5">
+              <input type="number" id="cfg-autoStepRandomDelayMin" style="width: 80px;" min="0" value="12">
+              <span>~</span>
+              <input type="number" id="cfg-autoStepRandomDelayMax" style="width: 80px;" min="0" value="18">
+              <span>秒</span>
             </div>
           </div>
 

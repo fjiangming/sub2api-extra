@@ -532,24 +532,39 @@ async function openConfigModal() {
     if (resp.ok) {
       const data = await resp.json();
       const config = data.payload ? decryptConfig(data.payload) : {};
-      
-      // Populate fields
-      document.getElementById('cfg-panel-mode').value = config.panelMode || 'INJECT';
+
+      // ── 来源与认证 ──
+      document.getElementById('cfg-panel-mode').value = config.panelMode || 'cpa';
       document.getElementById('cfg-vps-url').value = config.vpsUrl || '';
       document.getElementById('cfg-vps-password').value = config.vpsPassword || '';
-      document.getElementById('cfg-custom-password').value = config.customPassword || '';
-      
-      document.getElementById('cfg-mail-provider').value = config.mailProvider || 'inbucket';
-      document.getElementById('cfg-email-generator').value = config.emailGenerator || 'RANDOM';
-      document.getElementById('cfg-registration-email').value = config.registrationEmail || '';
+      document.getElementById('cfg-local-cpa-step9-mode').value = config.localCpaStep9Mode || 'submit';
+      document.getElementById('cfg-sub2api-url').value = config.sub2apiUrl || '';
+      document.getElementById('cfg-sub2api-email').value = config.sub2apiEmail || '';
+      document.getElementById('cfg-sub2api-password').value = config.sub2apiPassword || '';
+      document.getElementById('cfg-sub2api-group').value = config.sub2apiGroupName || '';
 
+      // ── 密码 ──
+      document.getElementById('cfg-custom-password').value = config.customPassword || '';
+
+      // ── 邮箱 ──
+      document.getElementById('cfg-mail-provider').value = config.mailProvider || '163';
+      document.getElementById('cfg-email-generator').value = config.emailGenerator || 'duck';
+      document.getElementById('cfg-inbucket-host').value = config.inbucketHost || '';
+      document.getElementById('cfg-inbucket-mailbox').value = config.inbucketMailbox || '';
+      document.getElementById('cfg-cf-domain').value = config.cloudflareDomain || '';
+
+      // ── 自动化行为 ──
       document.getElementById('cfg-autoRunSkipFailures').checked = !!config.autoRunSkipFailures;
-      document.getElementById('cfg-autoStep9SkipEnabled').checked = !!config.autoStep9SkipEnabled;
+      document.getElementById('cfg-skipStep9Enabled').checked = !!config.skipStep9Enabled;
       document.getElementById('cfg-autoRunDelayEnabled').checked = !!config.autoRunDelayEnabled;
-      
-      document.getElementById('cfg-autoRunDelayMinutes').value = config.autoRunDelayMinutes || 0;
-      document.getElementById('cfg-autoStepRandomDelayMin').value = config.autoStepRandomDelayMinSeconds || 2;
-      document.getElementById('cfg-autoStepRandomDelayMax').value = config.autoStepRandomDelayMaxSeconds || 5;
+      document.getElementById('cfg-autoRunDelayMinutes').value = config.autoRunDelayMinutes || 30;
+      document.getElementById('cfg-autoStepRandomDelayMin').value = config.autoStepRandomDelayMinSeconds ?? 12;
+      document.getElementById('cfg-autoStepRandomDelayMax').value = config.autoStepRandomDelayMaxSeconds ?? 18;
+
+      // Apply conditional visibility
+      onCfgPanelModeChange();
+      onCfgMailProviderChange();
+      onCfgEmailGeneratorChange();
     }
   } catch (e) {
     showToast('error', '无法加载配置');
@@ -563,26 +578,57 @@ function closeConfigModal() {
   document.getElementById('config-modal').classList.add('hidden');
 }
 
+// ── Conditional visibility helpers ──
+
+function onCfgPanelModeChange() {
+  const useSub2Api = document.getElementById('cfg-panel-mode').value === 'sub2api';
+  document.getElementById('cfg-cpa-group').classList.toggle('hidden', useSub2Api);
+  document.getElementById('cfg-sub2api-group').classList.toggle('hidden', !useSub2Api);
+}
+
+function onCfgMailProviderChange() {
+  const provider = document.getElementById('cfg-mail-provider').value;
+  document.getElementById('cfg-inbucket-group').classList.toggle('hidden', provider !== 'inbucket');
+}
+
+function onCfgEmailGeneratorChange() {
+  const generator = document.getElementById('cfg-email-generator').value;
+  document.getElementById('cfg-cf-group').classList.toggle('hidden', generator !== 'cloudflare');
+}
+
+// ── Save ──
+
 async function handleSaveConfig(e) {
   e.preventDefault();
-  
+
   const config = {
+    // 来源与认证
     panelMode: document.getElementById('cfg-panel-mode').value,
-    vpsUrl: document.getElementById('cfg-vps-url').value,
+    vpsUrl: document.getElementById('cfg-vps-url').value.trim(),
     vpsPassword: document.getElementById('cfg-vps-password').value,
+    localCpaStep9Mode: document.getElementById('cfg-local-cpa-step9-mode').value,
+    sub2apiUrl: document.getElementById('cfg-sub2api-url').value.trim(),
+    sub2apiEmail: document.getElementById('cfg-sub2api-email').value.trim(),
+    sub2apiPassword: document.getElementById('cfg-sub2api-password').value,
+    sub2apiGroupName: document.getElementById('cfg-sub2api-group').value.trim(),
+
+    // 密码
     customPassword: document.getElementById('cfg-custom-password').value,
-    
+
+    // 邮箱
     mailProvider: document.getElementById('cfg-mail-provider').value,
     emailGenerator: document.getElementById('cfg-email-generator').value,
-    registrationEmail: document.getElementById('cfg-registration-email').value,
+    inbucketHost: document.getElementById('cfg-inbucket-host').value.trim(),
+    inbucketMailbox: document.getElementById('cfg-inbucket-mailbox').value.trim(),
+    cloudflareDomain: document.getElementById('cfg-cf-domain').value.trim(),
 
+    // 自动化行为
     autoRunSkipFailures: document.getElementById('cfg-autoRunSkipFailures').checked,
-    autoStep9SkipEnabled: document.getElementById('cfg-autoStep9SkipEnabled').checked,
+    skipStep9Enabled: document.getElementById('cfg-skipStep9Enabled').checked,
     autoRunDelayEnabled: document.getElementById('cfg-autoRunDelayEnabled').checked,
-
-    autoRunDelayMinutes: parseInt(document.getElementById('cfg-autoRunDelayMinutes').value) || 0,
-    autoStepRandomDelayMinSeconds: parseInt(document.getElementById('cfg-autoStepRandomDelayMin').value) || 2,
-    autoStepRandomDelayMaxSeconds: parseInt(document.getElementById('cfg-autoStepRandomDelayMax').value) || 5,
+    autoRunDelayMinutes: parseInt(document.getElementById('cfg-autoRunDelayMinutes').value) || 30,
+    autoStepRandomDelayMinSeconds: parseInt(document.getElementById('cfg-autoStepRandomDelayMin').value) || 12,
+    autoStepRandomDelayMaxSeconds: parseInt(document.getElementById('cfg-autoStepRandomDelayMax').value) || 18,
   };
 
   const payload = encryptConfig(config);
@@ -590,7 +636,7 @@ async function handleSaveConfig(e) {
   const btn = document.getElementById('btn-save-cfg');
   const text = document.getElementById('btn-save-cfg-text');
   const spinner = document.getElementById('btn-save-cfg-spinner');
-  
+
   btn.disabled = true;
   text.textContent = '保存中...';
   spinner.classList.remove('hidden');

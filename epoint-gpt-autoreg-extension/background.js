@@ -2692,7 +2692,14 @@ async function handleMessage(message, sender) {
     }
 
     case 'GET_STATE': {
+      // Fire-and-forget: sync remote settings when sidepanel opens
+      syncRemoteExtensionSettings().catch(() => {});
       return await getState();
+    }
+
+    case 'SYNC_REMOTE_SETTINGS': {
+      syncRemoteExtensionSettings().catch(() => {});
+      return { ok: true };
     }
 
     case 'RESET': {
@@ -5226,25 +5233,26 @@ restoreScheduledAutoRunIfNeeded().catch((err) => {
 
 async function syncRemoteExtensionSettings() {
   try {
-    const { sub2api_token, sub2apiUrl } = await chrome.storage.local.get(['sub2api_token', 'sub2apiUrl']);
-    if (!sub2api_token || !sub2apiUrl) return;
-    
-    const res = await fetch(`${sub2apiUrl}/api/extension/settings`, {
-      headers: { 'Authorization': `Bearer ${sub2api_token}` }
+    const stored = await chrome.storage.local.get('epointgpt_auth');
+    const auth = stored.epointgpt_auth;
+    if (!auth?.token || !auth?.serverUrl) return;
+
+    const res = await fetch(`${auth.serverUrl}/api/extension/settings`, {
+      headers: { 'Authorization': `Bearer ${auth.token}` }
     });
     if (!res.ok) return;
-    
+
     const data = await res.json();
-    if (!data.data) return;
-    
-    const encryptedTextHexWithIv = data.data;
+    const encryptedTextHexWithIv = data.payload;
+    if (!encryptedTextHexWithIv) return;
+
     const parts = encryptedTextHexWithIv.split(':');
     if (parts.length !== 2) return;
-    
+
     const hexToBuf = hex => new Uint8Array(hex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
     const iv = hexToBuf(parts[0]);
     const encryptedData = hexToBuf(parts[1]);
-    
+
     const secretKey = 'sub2api_ext_settings_secret_key_1';
     let keyBytes = new TextEncoder().encode(secretKey);
     if (keyBytes.length < 32) {
@@ -5254,13 +5262,14 @@ async function syncRemoteExtensionSettings() {
     } else {
       keyBytes = keyBytes.slice(0, 32);
     }
-    
+
     const key = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-CBC" }, false, ["decrypt"]);
     const decryptedBuf = await crypto.subtle.decrypt({ name: "AES-CBC", iv }, key, encryptedData);
     const decryptedStr = new TextDecoder().decode(decryptedBuf);
     const remoteSettings = JSON.parse(decryptedStr);
-    
+
     if (remoteSettings && typeof remoteSettings === 'object') {
+      console.log('====== 成功获取到服务端配置参数 ======', remoteSettings);
       const updates = buildPersistentSettingsPayload(remoteSettings);
       await setPersistentSettings(updates);
       await setState(updates);

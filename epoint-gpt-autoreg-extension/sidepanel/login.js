@@ -81,6 +81,33 @@
     });
   }
 
+  // ── 自动探测浏览器中已打开的 Sub2API 页面 ──
+
+  async function detectSub2ApiUrl() {
+    try {
+      const tabs = await chrome.tabs.query({});
+      for (const tab of tabs) {
+        if (!tab.url) continue;
+        try {
+          const u = new URL(tab.url);
+          // 特征 1：URL 带 token 参数（sub2api-extra 前端 / Sub2API 管理面板）
+          if (u.searchParams.has('token')) {
+            return u.origin;
+          }
+          // 特征 2：路径包含 /admin（Sub2API 原始管理后台）
+          if (u.pathname.startsWith('/admin')) {
+            return u.origin;
+          }
+        } catch {
+          // 忽略无效 URL（如 chrome:// 页面）
+        }
+      }
+    } catch {
+      // tabs 查询失败时静默降级
+    }
+    return null;
+  }
+
   // ── Network ──
 
   async function verifyToken(serverUrl, token) {
@@ -170,6 +197,14 @@
 
     // Token 无效或不存在 → 显示登录
     showLogin();
+
+    // 当服务端地址为空时，自动探测浏览器中已打开的 Sub2API 页面
+    if (inputServerUrl && !inputServerUrl.value.trim()) {
+      const detected = await detectSub2ApiUrl();
+      if (detected) {
+        inputServerUrl.value = detected;
+      }
+    }
   }
 
   initAuth();
@@ -192,8 +227,8 @@
       setLoginLoading(true);
       try {
         const result = await loginRequest(serverUrl, email, password);
-        // sub2api 返回格式：{ token: "..." } 或 { data: { token: "..." } }
-        const token = result.token || result.access_token || result.data?.token;
+        // sub2api 返回格式：{ code: 0, data: { access_token: "..." } }
+        const token = result.data?.access_token || result.data?.token || result.access_token || result.token;
         if (!token) {
           throw new Error('服务端返回格式异常，未获取到 Token');
         }
@@ -211,6 +246,13 @@
           email,
           loginAt: Date.now(),
         });
+
+        // 登录成功后立刻触发后台获取服务端配置，以便用户打开侧边栏时配置已就绪
+        try {
+          chrome.runtime.sendMessage({ type: 'SYNC_REMOTE_SETTINGS' });
+        } catch (e) {
+          // 忽略扩展通信可能抛出的异常
+        }
 
         hideLogin();
       } catch (err) {

@@ -17,11 +17,11 @@ const displayLocalhostUrl = document.getElementById('display-localhost-url');
 const displayStatus = document.getElementById('display-status');
 const statusBar = document.getElementById('status-bar');
 const inputEmail = document.getElementById('input-email');
-const inputPassword = document.getElementById('input-password');
-const btnToggleVpsUrl = document.getElementById('btn-toggle-vps-url');
-const btnToggleVpsPassword = document.getElementById('btn-toggle-vps-password');
+const inputPassword = null; // Removed: now managed by server config
+const btnToggleVpsUrl = null; // Removed
+const btnToggleVpsPassword = null; // Removed
 const btnFetchEmail = document.getElementById('btn-fetch-email');
-const btnTogglePassword = document.getElementById('btn-toggle-password');
+const btnTogglePassword = null; // Removed
 const btnSaveSettings = document.getElementById('btn-save-settings');
 const btnStop = document.getElementById('btn-stop');
 const btnReset = document.getElementById('btn-reset');
@@ -35,31 +35,26 @@ const autoScheduleMeta = document.getElementById('auto-schedule-meta');
 const btnAutoRunNow = document.getElementById('btn-auto-run-now');
 const btnAutoCancelSchedule = document.getElementById('btn-auto-cancel-schedule');
 const btnClearLog = document.getElementById('btn-clear-log');
-const configMenuShell = document.getElementById('config-menu-shell');
-const btnConfigMenu = document.getElementById('btn-config-menu');
-const configMenu = document.getElementById('config-menu');
-const btnExportSettings = document.getElementById('btn-export-settings');
-const btnImportSettings = document.getElementById('btn-import-settings');
-const inputImportSettingsFile = document.getElementById('input-import-settings-file');
-const selectPanelMode = document.getElementById('select-panel-mode');
-const rowVpsUrl = document.getElementById('row-vps-url');
-const inputVpsUrl = document.getElementById('input-vps-url');
-const rowVpsPassword = document.getElementById('row-vps-password');
-const inputVpsPassword = document.getElementById('input-vps-password');
-const rowLocalCpaStep9Mode = document.getElementById('row-local-cpa-step9-mode');
-const localCpaStep9ModeButtons = Array.from(document.querySelectorAll('[data-local-cpa-step9-mode]'));
-const rowSub2ApiUrl = document.getElementById('row-sub2api-url');
-const inputSub2ApiUrl = document.getElementById('input-sub2api-url');
-const rowSub2ApiEmail = document.getElementById('row-sub2api-email');
-const inputSub2ApiEmail = document.getElementById('input-sub2api-email');
-const rowSub2ApiPassword = document.getElementById('row-sub2api-password');
-const inputSub2ApiPassword = document.getElementById('input-sub2api-password');
-const rowSub2ApiGroup = document.getElementById('row-sub2api-group');
-const inputSub2ApiGroup = document.getElementById('input-sub2api-group');
-const selectMailProvider = document.getElementById('select-mail-provider');
-const btnMailLogin = document.getElementById('btn-mail-login');
-const rowEmailGenerator = document.getElementById('row-email-generator');
-const selectEmailGenerator = document.getElementById('select-email-generator');
+const btnLogout = document.getElementById('btn-logout');
+const selectPanelMode = null; // Removed: now managed by server config
+const rowVpsUrl = null; // Removed
+const inputVpsUrl = null; // Removed
+const rowVpsPassword = null; // Removed
+const inputVpsPassword = null; // Removed
+const rowLocalCpaStep9Mode = null; // Removed
+const localCpaStep9ModeButtons = []; // Removed
+const rowSub2ApiUrl = null; // Removed
+const inputSub2ApiUrl = null; // Removed
+const rowSub2ApiEmail = null; // Removed
+const inputSub2ApiEmail = null; // Removed
+const rowSub2ApiPassword = null; // Removed
+const inputSub2ApiPassword = null; // Removed
+const rowSub2ApiGroup = null; // Removed
+const inputSub2ApiGroup = null; // Removed
+const selectMailProvider = null; // Removed: now managed by server config
+const btnMailLogin = null; // Removed
+const rowEmailGenerator = null; // Removed
+const selectEmailGenerator = null; // Removed: now managed by server config
 const hotmailSection = document.getElementById('hotmail-section');
 const inputHotmailEmail = document.getElementById('input-hotmail-email');
 const inputHotmailClientId = document.getElementById('input-hotmail-client-id');
@@ -73,23 +68,23 @@ const btnDeleteAllHotmailAccounts = document.getElementById('btn-delete-all-hotm
 const btnToggleHotmailList = document.getElementById('btn-toggle-hotmail-list');
 const hotmailListShell = document.getElementById('hotmail-list-shell');
 const hotmailAccountsList = document.getElementById('hotmail-accounts-list');
-const rowInbucketHost = document.getElementById('row-inbucket-host');
-const inputInbucketHost = document.getElementById('input-inbucket-host');
-const rowInbucketMailbox = document.getElementById('row-inbucket-mailbox');
-const inputInbucketMailbox = document.getElementById('input-inbucket-mailbox');
-const rowCfDomain = document.getElementById('row-cf-domain');
-const selectCfDomain = document.getElementById('select-cf-domain');
-const inputCfDomain = document.getElementById('input-cf-domain');
-const btnCfDomainMode = document.getElementById('btn-cf-domain-mode');
+const rowInbucketHost = null; // Removed
+const inputInbucketHost = null; // Removed
+const rowInbucketMailbox = null; // Removed
+const inputInbucketMailbox = null; // Removed
+const rowCfDomain = null; // Removed
+const selectCfDomain = null; // Removed
+const inputCfDomain = null; // Removed
+const btnCfDomainMode = null; // Removed
 const inputRunCount = document.getElementById('input-run-count');
-const inputAutoSkipFailures = document.getElementById('input-auto-skip-failures');
-const inputSkipStep9 = document.getElementById('input-skip-step9');
-const row2925MainEmail = document.getElementById('row-2925-main-email');
-const display2925MainEmail = document.getElementById('display-2925-main-email');
-const inputAutoDelayEnabled = document.getElementById('input-auto-delay-enabled');
-const inputAutoDelayMinutes = document.getElementById('input-auto-delay-minutes');
-const inputAutoStepDelayMinSeconds = document.getElementById('input-auto-step-delay-min-seconds');
-const inputAutoStepDelayMaxSeconds = document.getElementById('input-auto-step-delay-max-seconds');
+const inputAutoSkipFailures = null; // Removed: now managed by server config
+const inputSkipStep9 = null; // Removed: now managed by server config
+const row2925MainEmail = null; // Removed
+const display2925MainEmail = null; // Removed
+const inputAutoDelayEnabled = null; // Removed: now managed by server config
+const inputAutoDelayMinutes = null; // Removed: now managed by server config
+const inputAutoStepDelayMinSeconds = null; // Removed
+const inputAutoStepDelayMaxSeconds = null; // Removed
 const autoStartModal = document.getElementById('auto-start-modal');
 const autoStartTitle = autoStartModal?.querySelector('.modal-title');
 const autoStartMessage = document.getElementById('auto-start-message');
@@ -478,9 +473,7 @@ function normalizeAutoStepDelayRange(minValue, maxValue) {
 }
 
 function updateAutoDelayInputState() {
-  const scheduled = isAutoRunScheduledPhase();
-  inputAutoDelayEnabled.disabled = scheduled;
-  inputAutoDelayMinutes.disabled = scheduled || !inputAutoDelayEnabled.checked;
+  // DOM elements removed — auto delay is now managed by server config
 }
 
 function formatCountdown(remainingMs) {
@@ -582,77 +575,37 @@ function getCloudflareDomainsFromState() {
 }
 
 function renderCloudflareDomainOptions(preferredDomain = '') {
-  const preferred = normalizeCloudflareDomainValue(preferredDomain);
-  const { domains, activeDomain } = getCloudflareDomainsFromState();
-  const selected = preferred || activeDomain;
-
-  selectCfDomain.innerHTML = '';
-  if (domains.length === 0) {
-    const option = document.createElement('option');
-    option.value = '';
-    option.textContent = '请先添加域名';
-    selectCfDomain.appendChild(option);
-    selectCfDomain.disabled = true;
-    selectCfDomain.value = '';
-    return;
-  }
-
-  for (const domain of domains) {
-    const option = document.createElement('option');
-    option.value = domain;
-    option.textContent = domain;
-    selectCfDomain.appendChild(option);
-  }
-  selectCfDomain.disabled = false;
-  selectCfDomain.value = domains.includes(selected) ? selected : domains[0];
+  // selectCfDomain DOM removed — cloudflare domain managed by server config
 }
 
 function setCloudflareDomainEditMode(editing, options = {}) {
-  const { clearInput = false } = options;
+  // CF domain DOM removed — managed by server config
   cloudflareDomainEditMode = Boolean(editing);
-  selectCfDomain.style.display = cloudflareDomainEditMode ? 'none' : '';
-  inputCfDomain.style.display = cloudflareDomainEditMode ? '' : 'none';
-  btnCfDomainMode.textContent = cloudflareDomainEditMode ? '保存' : '添加';
-  if (cloudflareDomainEditMode) {
-    if (clearInput) {
-      inputCfDomain.value = '';
-    }
-    inputCfDomain.focus();
-  } else if (clearInput) {
-    inputCfDomain.value = '';
-  }
 }
 
 function collectSettingsPayload() {
-  const { domains, activeDomain } = getCloudflareDomainsFromState();
-  const selectedCloudflareDomain = normalizeCloudflareDomainValue(
-    !cloudflareDomainEditMode ? selectCfDomain.value : activeDomain
-  ) || activeDomain;
-  const autoStepDelayRange = normalizeAutoStepDelayRange(
-    inputAutoStepDelayMinSeconds.value,
-    inputAutoStepDelayMaxSeconds.value
-  );
+  const s = latestState || {};
   return {
-    panelMode: selectPanelMode.value,
-    vpsUrl: inputVpsUrl.value.trim(),
-    vpsPassword: inputVpsPassword.value,
-    localCpaStep9Mode: getSelectedLocalCpaStep9Mode(),
-    sub2apiUrl: inputSub2ApiUrl.value.trim(),
-    sub2apiEmail: inputSub2ApiEmail.value.trim(),
-    sub2apiPassword: inputSub2ApiPassword.value,
-    sub2apiGroupName: inputSub2ApiGroup.value.trim(),
-    customPassword: inputPassword.value,
-    mailProvider: selectMailProvider.value,
-    emailGenerator: selectEmailGenerator.value,
-    inbucketHost: inputInbucketHost.value.trim(),
-    inbucketMailbox: inputInbucketMailbox.value.trim(),
-    cloudflareDomain: selectedCloudflareDomain,
-    cloudflareDomains: domains,
-    autoRunSkipFailures: inputAutoSkipFailures.checked,
-    autoRunDelayEnabled: inputAutoDelayEnabled.checked,
-    autoRunDelayMinutes: normalizeAutoDelayMinutes(inputAutoDelayMinutes.value),
-    autoStepRandomDelayMinSeconds: autoStepDelayRange.minSeconds,
-    autoStepRandomDelayMaxSeconds: autoStepDelayRange.maxSeconds,
+    panelMode: s.panelMode || 'cpa',
+    vpsUrl: s.vpsUrl || '',
+    vpsPassword: s.vpsPassword || '',
+    localCpaStep9Mode: s.localCpaStep9Mode || 'submit',
+    sub2apiUrl: s.sub2apiUrl || '',
+    sub2apiEmail: s.sub2apiEmail || '',
+    sub2apiPassword: s.sub2apiPassword || '',
+    sub2apiGroupName: s.sub2apiGroupName || '',
+    customPassword: s.customPassword || '',
+    mailProvider: s.mailProvider || '163',
+    emailGenerator: s.emailGenerator || 'duck',
+    inbucketHost: s.inbucketHost || '',
+    inbucketMailbox: s.inbucketMailbox || '',
+    cloudflareDomain: s.cloudflareDomain || '',
+    cloudflareDomains: s.cloudflareDomains || [],
+    autoRunSkipFailures: !!s.autoRunSkipFailures,
+    autoRunDelayEnabled: !!s.autoRunDelayEnabled,
+    autoRunDelayMinutes: normalizeAutoDelayMinutes(s.autoRunDelayMinutes),
+    autoStepRandomDelayMinSeconds: s.autoStepRandomDelayMinSeconds ?? 12,
+    autoStepRandomDelayMaxSeconds: s.autoStepRandomDelayMaxSeconds ?? 18,
   };
 }
 
@@ -720,63 +673,18 @@ async function clearRegistrationEmail(options = {}) {
 
 function markSettingsDirty(isDirty = true) {
   settingsDirty = isDirty;
-  updateSaveButtonState();
 }
 
 function updateSaveButtonState() {
-  btnSaveSettings.disabled = settingsSaveInFlight || !settingsDirty;
-  updateConfigMenuControls();
-  btnSaveSettings.textContent = settingsSaveInFlight ? '保存中' : '保存';
+  // btnSaveSettings removed
 }
 
 function scheduleSettingsAutoSave() {
-  clearTimeout(settingsAutoSaveTimer);
-  settingsAutoSaveTimer = setTimeout(() => {
-    saveSettings({ silent: true }).catch(() => { });
-  }, 500);
+  // Auto save removed (config managed by server)
 }
 
 async function saveSettings(options = {}) {
-  const { silent = false } = options;
-  clearTimeout(settingsAutoSaveTimer);
-
-  if (!settingsDirty && !settingsSaveInFlight && silent) {
-    return;
-  }
-
-  const payload = collectSettingsPayload();
-  settingsSaveInFlight = true;
-  updateSaveButtonState();
-
-  try {
-    const response = await chrome.runtime.sendMessage({
-      type: 'SAVE_SETTING',
-      source: 'sidepanel',
-      payload,
-    });
-
-    if (response?.error) {
-      throw new Error(response.error);
-    }
-
-    syncLatestState(payload);
-    markSettingsDirty(false);
-    updatePanelModeUI();
-    updateMailProviderUI();
-    updateButtonStates();
-    if (!silent) {
-      showToast('配置已保存', 'success', 1800);
-    }
-  } catch (err) {
-    markSettingsDirty(true);
-    if (!silent) {
-      showToast(`保存失败：${err.message}`, 'error');
-    }
-    throw err;
-  } finally {
-    settingsSaveInFlight = false;
-    updateSaveButtonState();
-  }
+  return Promise.resolve();
 }
 
 function applyAutoRunStatus(payload = currentAutoRun) {
@@ -793,7 +701,7 @@ function applyAutoRunStatus(payload = currentAutoRun) {
   btnAutoRun.disabled = currentAutoRun.autoRunning;
   btnFetchEmail.disabled = locked;
   inputEmail.disabled = locked;
-  inputAutoSkipFailures.disabled = scheduled;
+  // inputAutoSkipFailures DOM removed — managed by server config
 
   if (currentAutoRun.totalRuns > 0) {
     inputRunCount.value = String(currentAutoRun.totalRuns);
@@ -877,44 +785,14 @@ function applySettingsState(state) {
 
   inputEmail.value = state?.email || '';
   syncPasswordField(state || {});
-  inputVpsUrl.value = state?.vpsUrl || '';
-  inputVpsPassword.value = state?.vpsPassword || '';
-  setLocalCpaStep9Mode(state?.localCpaStep9Mode);
-  selectPanelMode.value = state?.panelMode || 'cpa';
-  inputSub2ApiUrl.value = state?.sub2apiUrl || '';
-  inputSub2ApiEmail.value = state?.sub2apiEmail || '';
-  inputSub2ApiPassword.value = state?.sub2apiPassword || '';
-  inputSub2ApiGroup.value = state?.sub2apiGroupName || '';
-  selectMailProvider.value = state?.mailProvider || '163';
-  selectEmailGenerator.value = state?.emailGenerator || 'duck';
-  inputInbucketHost.value = state?.inbucketHost || '';
-  inputInbucketMailbox.value = state?.inbucketMailbox || '';
-  renderCloudflareDomainOptions(state?.cloudflareDomain || '');
-  setCloudflareDomainEditMode(false, { clearInput: true });
-  inputAutoSkipFailures.checked = Boolean(state?.autoRunSkipFailures);
-  if (inputSkipStep9) {
-    inputSkipStep9.checked = Boolean(state?.skipStep9Enabled);
-  }
-  if (display2925MainEmail) {
-    display2925MainEmail.textContent = state?.mail2925MainEmail || '未识别';
-  }
-  inputAutoDelayEnabled.checked = Boolean(state?.autoRunDelayEnabled);
-  inputAutoDelayMinutes.value = String(normalizeAutoDelayMinutes(state?.autoRunDelayMinutes));
-  const autoStepDelayRange = normalizeAutoStepDelayRange(
-    state?.autoStepRandomDelayMinSeconds,
-    state?.autoStepRandomDelayMaxSeconds
-  );
-  inputAutoStepDelayMinSeconds.value = String(autoStepDelayRange.minSeconds);
-  inputAutoStepDelayMaxSeconds.value = String(autoStepDelayRange.maxSeconds);
+  // Config fields (panelMode, vpsUrl, mailProvider, etc.) are now managed
+  // by remote server config — no local DOM to populate.
   if (state?.autoRunTotalRuns) {
     inputRunCount.value = String(state.autoRunTotalRuns);
   }
 
   applyAutoRunStatus(state);
   markSettingsDirty(false);
-  updateAutoDelayInputState();
-  updatePanelModeUI();
-  updateMailProviderUI();
   updateButtonStates();
 }
 
@@ -951,15 +829,15 @@ async function restoreState() {
 }
 
 function syncPasswordField(state) {
-  inputPassword.value = state.customPassword || state.password || '';
+  // inputPassword DOM removed; password is managed by server config
 }
 
 function getSelectedEmailGenerator() {
-  return selectEmailGenerator.value === 'cloudflare' ? 'cloudflare' : 'duck';
+  return (latestState?.emailGenerator || 'duck') === 'cloudflare' ? 'cloudflare' : 'duck';
 }
 
 function getEmailGeneratorUiCopy() {
-  if (selectMailProvider.value === '2925') {
+  if ((latestState?.mailProvider || '163') === '2925') {
     return {
       buttonLabel: '获2925',
       placeholder: '点击获取 2925 子邮箱，或手动粘贴邮箱',
@@ -998,7 +876,7 @@ function getCurrentHotmailEmail(state = latestState) {
   return String(getCurrentHotmailAccount(state)?.email || '').trim();
 }
 
-function getMailProviderLoginConfig(provider = selectMailProvider.value) {
+function getMailProviderLoginConfig(provider = (latestState?.mailProvider || '163')) {
   return MAIL_PROVIDER_LOGIN_CONFIGS[String(provider || '').trim()] || null;
 }
 
@@ -1116,7 +994,7 @@ function upsertHotmailAccountListLocally(accounts, nextAccount) {
 
 function refreshHotmailSelectionUI() {
   renderHotmailAccounts();
-  if (selectMailProvider.value === 'hotmail-api') {
+  if ((latestState?.mailProvider || '163') === 'hotmail-api') {
     inputEmail.value = getCurrentHotmailEmail();
   }
 }
@@ -1133,7 +1011,7 @@ function applyHotmailAccountMutation(account, options = {}) {
     && latestState?.currentHotmailAccountId === account.id
     && shouldClearCurrentHotmailSelectionLocally(account)) {
     nextState.currentHotmailAccountId = null;
-    if (selectMailProvider.value === 'hotmail-api') {
+    if ((latestState?.mailProvider || '163') === 'hotmail-api') {
       nextState.email = null;
     }
   }
@@ -1228,33 +1106,15 @@ function renderHotmailAccounts() {
 }
 
 function updateMailProviderUI() {
-  const useInbucket = selectMailProvider.value === 'inbucket';
-  const useHotmail = selectMailProvider.value === 'hotmail-api';
-  const use2925 = selectMailProvider.value === '2925';
-  const useEmailGenerator = !useHotmail && !use2925;
-  updateMailLoginButtonState();
-  rowInbucketHost.style.display = useInbucket ? '' : 'none';
-  rowInbucketMailbox.style.display = useInbucket ? '' : 'none';
-  if (row2925MainEmail) {
-    row2925MainEmail.style.display = use2925 ? '' : 'none';
-  }
-  const useCloudflare = selectEmailGenerator.value === 'cloudflare';
-  const showCloudflareDomain = useEmailGenerator && useCloudflare;
-  if (rowEmailGenerator) {
-    rowEmailGenerator.style.display = useEmailGenerator ? '' : 'none';
-  }
-  rowCfDomain.style.display = showCloudflareDomain ? '' : 'none';
-  const { domains } = getCloudflareDomainsFromState();
-  if (showCloudflareDomain) {
-    setCloudflareDomainEditMode(cloudflareDomainEditMode || domains.length === 0, { clearInput: false });
-  } else {
-    setCloudflareDomainEditMode(false, { clearInput: false });
-  }
+  const provider = latestState?.mailProvider || '163';
+  const useHotmail = provider === 'hotmail-api';
+  const use2925 = provider === '2925';
+  // Removed DOM rows (inbucket, cf-domain, email-generator, 2925-main-email)
+  // are no longer in the page — skip all their visibility toggles.
 
   if (hotmailSection) {
     hotmailSection.style.display = useHotmail ? '' : 'none';
   }
-  selectEmailGenerator.disabled = useHotmail;
   btnFetchEmail.hidden = useHotmail;
   inputEmail.readOnly = useHotmail;
   const uiCopy = getEmailGeneratorUiCopy();
@@ -1308,15 +1168,9 @@ async function saveCloudflareDomainSettings(domains, activeDomain, options = {})
 }
 
 function updatePanelModeUI() {
-  const useSub2Api = selectPanelMode.value === 'sub2api';
-  rowVpsUrl.style.display = useSub2Api ? 'none' : '';
-  rowVpsPassword.style.display = useSub2Api ? 'none' : '';
-  rowLocalCpaStep9Mode.style.display = useSub2Api ? 'none' : '';
-  rowSub2ApiUrl.style.display = useSub2Api ? '' : 'none';
-  rowSub2ApiEmail.style.display = useSub2Api ? '' : 'none';
-  rowSub2ApiPassword.style.display = useSub2Api ? '' : 'none';
-  rowSub2ApiGroup.style.display = useSub2Api ? '' : 'none';
-
+  const useSub2Api = (latestState?.panelMode || 'cpa') === 'sub2api';
+  // All config DOM rows (vps, sub2api, localCpa) have been removed from the page.
+  // Only update the step 9 button label based on current mode.
   const step9Btn = document.querySelector('.step-btn[data-step="9"]');
   if (step9Btn) {
     step9Btn.textContent = useSub2Api ? 'SUB2API 回调验证' : 'CPA 回调验证';
@@ -1516,11 +1370,11 @@ async function fetchGeneratedEmail(options = {}) {
   btnFetchEmail.textContent = '...';
 
   try {
-    const is2925 = selectMailProvider.value === '2925';
+    const is2925 = (latestState?.mailProvider || '163') === '2925';
     const messageType = is2925 ? 'FETCH_2925_EMAIL' : 'FETCH_GENERATED_EMAIL';
     const payload = is2925
       ? { generateNew: true }
-      : { generateNew: true, generator: selectEmailGenerator.value };
+      : { generateNew: true, generator: (latestState?.emailGenerator || 'duck') };
     const response = await chrome.runtime.sendMessage({
       type: messageType,
       source: 'sidepanel',
@@ -1692,7 +1546,7 @@ async function deleteHotmailAccountsByMode(mode) {
   const nextState = { hotmailAccounts: nextAccounts };
   if (latestState?.currentHotmailAccountId && targetIds.has(latestState.currentHotmailAccountId)) {
     nextState.currentHotmailAccountId = null;
-    if (selectMailProvider.value === 'hotmail-api') {
+    if ((latestState?.mailProvider || '163') === 'hotmail-api') {
       nextState.email = null;
     }
   }
@@ -1709,24 +1563,15 @@ async function deleteHotmailAccountsByMode(mode) {
 }
 
 function syncPasswordToggleLabel() {
-  syncToggleButtonLabel(btnTogglePassword, inputPassword, {
-    show: '显示密码',
-    hide: '隐藏密码',
-  });
+  // Toggle buttons removed — config now managed by server
 }
 
 function syncVpsUrlToggleLabel() {
-  syncToggleButtonLabel(btnToggleVpsUrl, inputVpsUrl, {
-    show: '显示 CPA 地址',
-    hide: '隐藏 CPA 地址',
-  });
+  // Toggle buttons removed
 }
 
 function syncVpsPasswordToggleLabel() {
-  syncToggleButtonLabel(btnToggleVpsPassword, inputVpsPassword, {
-    show: '显示管理密钥',
-    hide: '隐藏管理密钥',
-  });
+  // Toggle buttons removed
 }
 
 async function maybeTakeoverAutoRun(actionLabel) {
@@ -1785,16 +1630,9 @@ document.querySelectorAll('.step-btn').forEach(btn => {
         return;
       }
       if (step === 3) {
-        if (inputPassword.value !== (latestState?.customPassword || '')) {
-          await chrome.runtime.sendMessage({
-            type: 'SAVE_SETTING',
-            source: 'sidepanel',
-            payload: { customPassword: inputPassword.value },
-          });
-          syncLatestState({ customPassword: inputPassword.value });
-        }
+        // Password is now managed by server config; no local DOM to sync
         let email = inputEmail.value.trim();
-        if (selectMailProvider.value === 'hotmail-api') {
+        if ((latestState?.mailProvider || '163') === 'hotmail-api') {
           const response = await chrome.runtime.sendMessage({ type: 'EXECUTE_STEP', source: 'sidepanel', payload: { step } });
           if (response?.error) {
             throw new Error(response.error);
@@ -1827,29 +1665,13 @@ document.querySelectorAll('.step-btn').forEach(btn => {
 });
 
 btnFetchEmail.addEventListener('click', async () => {
-  if (selectMailProvider.value === 'hotmail-api') {
+  if ((latestState?.mailProvider || '163') === 'hotmail-api') {
     return;
   }
   await fetchGeneratedEmail().catch(() => { });
 });
 
-if (inputSkipStep9) {
-  inputSkipStep9.addEventListener('change', async () => {
-    try {
-      const response = await chrome.runtime.sendMessage({
-        type: 'BYPASS_STEP9',
-        source: 'sidepanel',
-        payload: { enabled: inputSkipStep9.checked },
-      });
-      if (response?.error) {
-        throw new Error(response.error);
-      }
-    } catch (err) {
-      inputSkipStep9.checked = !inputSkipStep9.checked;
-      showToast(`切换跳过步骤 9 失败：${err.message}`, 'error');
-    }
-  });
-}
+// inputSkipStep9 event listener removed — skipStep9 is now managed by server config
 
 btnToggleHotmailList?.addEventListener('click', () => {
   setHotmailListExpanded(!hotmailListExpanded);
@@ -2073,20 +1895,7 @@ hotmailAccountsList?.addEventListener('click', async (event) => {
   }
 });
 
-btnTogglePassword.addEventListener('click', () => {
-  inputPassword.type = inputPassword.type === 'password' ? 'text' : 'password';
-  syncPasswordToggleLabel();
-});
-
-btnToggleVpsUrl.addEventListener('click', () => {
-  inputVpsUrl.type = inputVpsUrl.type === 'password' ? 'text' : 'password';
-  syncVpsUrlToggleLabel();
-});
-
-btnToggleVpsPassword.addEventListener('click', () => {
-  inputVpsPassword.type = inputVpsPassword.type === 'password' ? 'text' : 'password';
-  syncVpsPasswordToggleLabel();
-});
+// Toggle buttons for password/vpsUrl/vpsPassword removed — config managed by server
 
 btnMailLogin?.addEventListener('click', async () => {
   const config = getMailProviderLoginConfig();
@@ -2127,13 +1936,8 @@ btnStop.addEventListener('click', async () => {
   showToast(isAutoRunScheduledPhase() ? '正在取消倒计时计划...' : '正在停止当前流程...', 'warn', 2000);
 });
 
-btnConfigMenu?.addEventListener('click', (event) => {
-  event.stopPropagation();
-  toggleConfigMenu();
-});
-
-configMenu?.addEventListener('click', (event) => {
-  event.stopPropagation();
+btnLogout?.addEventListener('click', () => {
+  logout();
 });
 
 btnExportSettings?.addEventListener('click', async () => {
@@ -2184,9 +1988,8 @@ btnAutoRun.addEventListener('click', async () => {
 
     btnAutoRun.disabled = true;
     inputRunCount.disabled = true;
-    const delayEnabled = inputAutoDelayEnabled.checked;
-    const delayMinutes = normalizeAutoDelayMinutes(inputAutoDelayMinutes.value);
-    inputAutoDelayMinutes.value = String(delayMinutes);
+    const delayEnabled = !!latestState?.autoRunDelayEnabled;
+    const delayMinutes = normalizeAutoDelayMinutes(latestState?.autoRunDelayMinutes);
     btnAutoRun.innerHTML = delayEnabled
       ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 计划中...'
       : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> 运行中...';
@@ -2196,7 +1999,7 @@ btnAutoRun.addEventListener('click', async () => {
       payload: {
         totalRuns,
         delayMinutes,
-        autoRunSkipFailures: inputAutoSkipFailures.checked,
+        autoRunSkipFailures: !!latestState?.autoRunSkipFailures,
         mode,
       },
     });
@@ -2291,7 +2094,7 @@ btnClearLog.addEventListener('click', () => {
 
 // Save settings on change
 inputEmail.addEventListener('change', async () => {
-  if (selectMailProvider.value === 'hotmail-api') {
+  if ((latestState?.mailProvider || '163') === 'hotmail-api') {
     return;
   }
   const email = inputEmail.value.trim();
@@ -2310,185 +2113,14 @@ inputEmail.addEventListener('change', async () => {
   }
 });
 inputEmail.addEventListener('input', updateButtonStates);
-inputVpsUrl.addEventListener('input', () => {
-  markSettingsDirty(true);
-  scheduleSettingsAutoSave();
-});
-inputVpsUrl.addEventListener('blur', () => {
-  saveSettings({ silent: true }).catch(() => { });
-});
+// All config input event listeners (vpsUrl, vpsPassword, inputPassword,
+// selectMailProvider, selectEmailGenerator, selectPanelMode, selectCfDomain,
+// btnCfDomainMode, inputCfDomain, inputSub2Api*, inputInbucket*,
+// inputAutoSkipFailures, inputAutoDelay*, inputAutoStepDelay*)
+// have been removed — configuration is now managed by the server-side config panel.
 
-inputVpsPassword.addEventListener('input', () => {
-  markSettingsDirty(true);
-  scheduleSettingsAutoSave();
-});
-inputVpsPassword.addEventListener('blur', () => {
-  saveSettings({ silent: true }).catch(() => { });
-});
 
-inputPassword.addEventListener('input', () => {
-  markSettingsDirty(true);
-  updateButtonStates();
-  scheduleSettingsAutoSave();
-});
-inputPassword.addEventListener('blur', () => {
-  saveSettings({ silent: true }).catch(() => { });
-});
 
-selectMailProvider.addEventListener('change', async () => {
-  const previousProvider = latestState?.mailProvider || '';
-  const nextProvider = selectMailProvider.value;
-  updateMailProviderUI();
-  if (previousProvider === 'hotmail-api' && nextProvider !== 'hotmail-api' && isCurrentEmailManagedByHotmail()) {
-    await clearRegistrationEmail({ silent: true }).catch(() => { });
-  }
-  markSettingsDirty(true);
-  saveSettings({ silent: true }).catch(() => { });
-});
-
-selectEmailGenerator.addEventListener('change', () => {
-  updateMailProviderUI();
-  clearRegistrationEmail({ silent: true }).catch(() => { });
-  markSettingsDirty(true);
-  saveSettings({ silent: true }).catch(() => { });
-});
-
-selectPanelMode.addEventListener('change', () => {
-  updatePanelModeUI();
-  markSettingsDirty(true);
-  saveSettings({ silent: true }).catch(() => { });
-});
-
-selectCfDomain.addEventListener('change', () => {
-  if (selectCfDomain.disabled) {
-    return;
-  }
-  markSettingsDirty(true);
-  saveSettings({ silent: true }).catch(() => { });
-});
-
-btnCfDomainMode.addEventListener('click', async () => {
-  try {
-    if (!cloudflareDomainEditMode) {
-      setCloudflareDomainEditMode(true, { clearInput: true });
-      return;
-    }
-
-    const newDomain = normalizeCloudflareDomainValue(inputCfDomain.value);
-    if (!newDomain) {
-      showToast('请输入有效的 Cloudflare 域名。', 'warn');
-      inputCfDomain.focus();
-      return;
-    }
-
-    const { domains } = getCloudflareDomainsFromState();
-    await saveCloudflareDomainSettings([...domains, newDomain], newDomain);
-  } catch (err) {
-    showToast(err.message, 'error');
-  }
-});
-
-inputCfDomain.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter') {
-    event.preventDefault();
-    btnCfDomainMode.click();
-  }
-});
-
-inputSub2ApiUrl.addEventListener('input', () => {
-  markSettingsDirty(true);
-  scheduleSettingsAutoSave();
-});
-inputSub2ApiUrl.addEventListener('blur', () => {
-  saveSettings({ silent: true }).catch(() => { });
-});
-
-inputSub2ApiEmail.addEventListener('input', () => {
-  markSettingsDirty(true);
-  scheduleSettingsAutoSave();
-});
-inputSub2ApiEmail.addEventListener('blur', () => {
-  saveSettings({ silent: true }).catch(() => { });
-});
-
-inputSub2ApiPassword.addEventListener('input', () => {
-  markSettingsDirty(true);
-  scheduleSettingsAutoSave();
-});
-inputSub2ApiPassword.addEventListener('blur', () => {
-  saveSettings({ silent: true }).catch(() => { });
-});
-
-inputSub2ApiGroup.addEventListener('input', () => {
-  markSettingsDirty(true);
-  scheduleSettingsAutoSave();
-});
-inputSub2ApiGroup.addEventListener('blur', () => {
-  saveSettings({ silent: true }).catch(() => { });
-});
-
-inputInbucketMailbox.addEventListener('input', () => {
-  markSettingsDirty(true);
-  scheduleSettingsAutoSave();
-});
-inputInbucketMailbox.addEventListener('blur', () => {
-  saveSettings({ silent: true }).catch(() => { });
-});
-
-inputInbucketHost.addEventListener('input', () => {
-  markSettingsDirty(true);
-  scheduleSettingsAutoSave();
-});
-inputInbucketHost.addEventListener('blur', () => {
-  saveSettings({ silent: true }).catch(() => { });
-});
-
-inputAutoSkipFailures.addEventListener('change', () => {
-  markSettingsDirty(true);
-  saveSettings({ silent: true }).catch(() => { });
-});
-
-inputAutoDelayEnabled.addEventListener('change', () => {
-  updateAutoDelayInputState();
-  markSettingsDirty(true);
-  saveSettings({ silent: true }).catch(() => { });
-});
-
-inputAutoDelayMinutes.addEventListener('input', () => {
-  markSettingsDirty(true);
-  scheduleSettingsAutoSave();
-});
-inputAutoDelayMinutes.addEventListener('blur', () => {
-  inputAutoDelayMinutes.value = String(normalizeAutoDelayMinutes(inputAutoDelayMinutes.value));
-  saveSettings({ silent: true }).catch(() => { });
-});
-
-function syncAutoStepDelayInputs() {
-  const range = normalizeAutoStepDelayRange(
-    inputAutoStepDelayMinSeconds.value,
-    inputAutoStepDelayMaxSeconds.value
-  );
-  inputAutoStepDelayMinSeconds.value = String(range.minSeconds);
-  inputAutoStepDelayMaxSeconds.value = String(range.maxSeconds);
-}
-
-inputAutoStepDelayMinSeconds.addEventListener('input', () => {
-  markSettingsDirty(true);
-  scheduleSettingsAutoSave();
-});
-inputAutoStepDelayMinSeconds.addEventListener('blur', () => {
-  syncAutoStepDelayInputs();
-  saveSettings({ silent: true }).catch(() => { });
-});
-
-inputAutoStepDelayMaxSeconds.addEventListener('input', () => {
-  markSettingsDirty(true);
-  scheduleSettingsAutoSave();
-});
-inputAutoStepDelayMaxSeconds.addEventListener('blur', () => {
-  syncAutoStepDelayInputs();
-  saveSettings({ silent: true }).catch(() => { });
-});
 
 // ============================================================
 // Listen for Background broadcasts
@@ -2560,12 +2192,8 @@ chrome.runtime.onMessage.addListener((message) => {
       if (message.payload.email !== undefined) {
         inputEmail.value = message.payload.email || '';
       }
-      if (message.payload.password !== undefined) {
-        inputPassword.value = message.payload.password || '';
-      }
-      if (message.payload.localCpaStep9Mode !== undefined) {
-        setLocalCpaStep9Mode(message.payload.localCpaStep9Mode);
-      }
+      // password, localCpaStep9Mode, autoDelay*, autoStepDelay*, skipStep9, display2925 DOM removed
+      // — these are now managed by server config; only update latestState (already done above).
       if (message.payload.oauthUrl !== undefined) {
         displayOauthUrl.textContent = message.payload.oauthUrl || '等待中...';
         displayOauthUrl.classList.toggle('has-value', Boolean(message.payload.oauthUrl));
@@ -2576,30 +2204,9 @@ chrome.runtime.onMessage.addListener((message) => {
       }
       if (message.payload.currentHotmailAccountId !== undefined || message.payload.hotmailAccounts !== undefined) {
         renderHotmailAccounts();
-        if (selectMailProvider.value === 'hotmail-api') {
+        if ((latestState?.mailProvider || '163') === 'hotmail-api') {
           inputEmail.value = getCurrentHotmailEmail();
         }
-      }
-      if (message.payload.autoRunDelayEnabled !== undefined) {
-        inputAutoDelayEnabled.checked = Boolean(message.payload.autoRunDelayEnabled);
-        updateAutoDelayInputState();
-      }
-      if (message.payload.autoRunDelayMinutes !== undefined) {
-        inputAutoDelayMinutes.value = String(normalizeAutoDelayMinutes(message.payload.autoRunDelayMinutes));
-      }
-      if (message.payload.autoStepRandomDelayMinSeconds !== undefined || message.payload.autoStepRandomDelayMaxSeconds !== undefined) {
-        const autoStepDelayRange = normalizeAutoStepDelayRange(
-          message.payload.autoStepRandomDelayMinSeconds ?? inputAutoStepDelayMinSeconds.value,
-          message.payload.autoStepRandomDelayMaxSeconds ?? inputAutoStepDelayMaxSeconds.value
-        );
-        inputAutoStepDelayMinSeconds.value = String(autoStepDelayRange.minSeconds);
-        inputAutoStepDelayMaxSeconds.value = String(autoStepDelayRange.maxSeconds);
-      }
-      if (message.payload.mail2925MainEmail !== undefined && display2925MainEmail) {
-        display2925MainEmail.textContent = message.payload.mail2925MainEmail || '未识别';
-      }
-      if (message.payload.skipStep9Enabled !== undefined && inputSkipStep9) {
-        inputSkipStep9.checked = Boolean(message.payload.skipStep9Enabled);
       }
       break;
     }
@@ -2647,19 +2254,7 @@ btnTheme.addEventListener('click', () => {
 });
 
 document.addEventListener('click', (event) => {
-  if (!configMenuOpen) {
-    return;
-  }
-  if (configMenuShell?.contains(event.target)) {
-    return;
-  }
-  closeConfigMenu();
-});
-
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && configMenuOpen) {
-    closeConfigMenu();
-  }
+  // removed click outside logic for config menu
 });
 
 // ============================================================
