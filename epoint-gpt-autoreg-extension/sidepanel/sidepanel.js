@@ -1978,7 +1978,7 @@ btnAutoStartClose?.addEventListener('click', () => resolveModalChoice(null));
 // Auto Run
 btnAutoRun.addEventListener('click', async () => {
   try {
-    const totalRuns = Math.min(50, Math.max(1, parseInt(inputRunCount.value, 10) || 1));
+    const totalRuns = Math.max(1, parseInt(inputRunCount.value, 10) || 1);
     let mode = 'restart';
 
     if (shouldOfferAutoModeChoice()) {
