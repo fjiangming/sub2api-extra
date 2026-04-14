@@ -12,3 +12,5 @@ services:
       # 改为你的 Sub2API 后端地址
       # Linux 服务器请使用 host.docker.internal（需搭配上方 extra_hosts 配置）
       - SUB2API_BASE_URL=http://host.docker.internal:8080
+    volumes:
+      - ./data:/app/data
