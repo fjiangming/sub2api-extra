@@ -738,3 +738,19 @@ function escapeHtml(str) {
   if (!str) return '';
   return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+
+window.openConfigModal = openConfigModal;
+window.closeConfigModal = closeConfigModal;
+window.handleSaveConfig = handleSaveConfig;
+window.onCfgPanelModeChange = onCfgPanelModeChange;
+window.onCfgMailProviderChange = onCfgMailProviderChange;
+window.onCfgEmailGeneratorChange = onCfgEmailGeneratorChange;
+
+// Exposed functions for user list / accounts
+window.openAddModal = openAddModal;
+window.closeAddModal = closeAddModal;
+window.handleAddAccount = handleAddAccount;
+window.onPlatformChange = onPlatformChange;
+window.onTypeChange = onTypeChange;
+window.deleteAccount = deleteAccount;
+window.goToPage = goToPage;
