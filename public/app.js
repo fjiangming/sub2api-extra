@@ -50,14 +50,9 @@ let searchTimer = null;
     }
     currentUser = await resp.json();
 
-    // Check admin role
-    if (currentUser.role !== 'admin') {
-      showError('需要管理员权限才能使用此功能。');
-      return;
-    }
-
     // Update UI
     document.getElementById('user-badge').textContent = currentUser.username;
+
     document.getElementById('name-prefix').textContent = currentUser.username + '-';
 
     // Show main content
@@ -487,6 +482,138 @@ async function deleteAccount(id, name) {
     await loadAccounts();
   } catch (err) {
     showToast('error', err.message);
+  }
+}
+
+// ══════════════════════════════════════
+// Extension Configuration Modal
+// ══════════════════════════════════════
+
+const CONFIG_ENCRYPTION_KEY = CryptoJS.enc.Utf8.parse("sub2api_ext_settings_secret_key_");
+
+function encryptConfig(configObj) {
+  const text = JSON.stringify(configObj);
+  const iv = CryptoJS.lib.WordArray.random(16);
+  const encrypted = CryptoJS.AES.encrypt(text, CONFIG_ENCRYPTION_KEY, {
+    iv: iv,
+    mode: CryptoJS.mode.CBC,
+    padding: CryptoJS.pad.Pkcs7
+  });
+  return iv.toString(CryptoJS.enc.Hex) + ':' + encrypted.ciphertext.toString(CryptoJS.enc.Hex);
+}
+
+function decryptConfig(payloadString) {
+  try {
+    const parts = payloadString.split(':');
+    const iv = CryptoJS.enc.Hex.parse(parts[0]);
+    const encryptedHexStr = CryptoJS.enc.Hex.parse(parts[1]);
+    const encryptedBase64Str = CryptoJS.enc.Base64.stringify(encryptedHexStr);
+    
+    // Note: CryptoJS.AES.decrypt expects Base64 or CipherParams
+    const decrypted = CryptoJS.AES.decrypt(encryptedBase64Str, CONFIG_ENCRYPTION_KEY, {
+      iv: iv,
+      mode: CryptoJS.mode.CBC,
+      padding: CryptoJS.pad.Pkcs7
+    });
+    return JSON.parse(decrypted.toString(CryptoJS.enc.Utf8));
+  } catch (e) {
+    console.error("Decryption failed", e);
+    return {};
+  }
+}
+
+async function openConfigModal() {
+  document.getElementById('config-modal').classList.remove('hidden');
+  document.getElementById('btn-save-cfg-text').textContent = '加载中...';
+  document.getElementById('btn-save-cfg').disabled = true;
+
+  try {
+    const resp = await apiFetch('/api/extension/settings');
+    if (resp.ok) {
+      const data = await resp.json();
+      const config = data.payload ? decryptConfig(data.payload) : {};
+      
+      // Populate fields
+      document.getElementById('cfg-panel-mode').value = config.panelMode || 'INJECT';
+      document.getElementById('cfg-vps-url').value = config.vpsUrl || '';
+      document.getElementById('cfg-vps-password').value = config.vpsPassword || '';
+      document.getElementById('cfg-custom-password').value = config.customPassword || '';
+      
+      document.getElementById('cfg-mail-provider').value = config.mailProvider || 'inbucket';
+      document.getElementById('cfg-email-generator').value = config.emailGenerator || 'RANDOM';
+      document.getElementById('cfg-registration-email').value = config.registrationEmail || '';
+
+      document.getElementById('cfg-autoRunSkipFailures').checked = !!config.autoRunSkipFailures;
+      document.getElementById('cfg-autoStep9SkipEnabled').checked = !!config.autoStep9SkipEnabled;
+      document.getElementById('cfg-autoRunDelayEnabled').checked = !!config.autoRunDelayEnabled;
+      
+      document.getElementById('cfg-autoRunDelayMinutes').value = config.autoRunDelayMinutes || 0;
+      document.getElementById('cfg-autoStepRandomDelayMin').value = config.autoStepRandomDelayMinSeconds || 2;
+      document.getElementById('cfg-autoStepRandomDelayMax').value = config.autoStepRandomDelayMaxSeconds || 5;
+    }
+  } catch (e) {
+    showToast('error', '无法加载配置');
+  }
+
+  document.getElementById('btn-save-cfg-text').textContent = '保存配置';
+  document.getElementById('btn-save-cfg').disabled = false;
+}
+
+function closeConfigModal() {
+  document.getElementById('config-modal').classList.add('hidden');
+}
+
+async function handleSaveConfig(e) {
+  e.preventDefault();
+  
+  const config = {
+    panelMode: document.getElementById('cfg-panel-mode').value,
+    vpsUrl: document.getElementById('cfg-vps-url').value,
+    vpsPassword: document.getElementById('cfg-vps-password').value,
+    customPassword: document.getElementById('cfg-custom-password').value,
+    
+    mailProvider: document.getElementById('cfg-mail-provider').value,
+    emailGenerator: document.getElementById('cfg-email-generator').value,
+    registrationEmail: document.getElementById('cfg-registration-email').value,
+
+    autoRunSkipFailures: document.getElementById('cfg-autoRunSkipFailures').checked,
+    autoStep9SkipEnabled: document.getElementById('cfg-autoStep9SkipEnabled').checked,
+    autoRunDelayEnabled: document.getElementById('cfg-autoRunDelayEnabled').checked,
+
+    autoRunDelayMinutes: parseInt(document.getElementById('cfg-autoRunDelayMinutes').value) || 0,
+    autoStepRandomDelayMinSeconds: parseInt(document.getElementById('cfg-autoStepRandomDelayMin').value) || 2,
+    autoStepRandomDelayMaxSeconds: parseInt(document.getElementById('cfg-autoStepRandomDelayMax').value) || 5,
+  };
+
+  const payload = encryptConfig(config);
+
+  const btn = document.getElementById('btn-save-cfg');
+  const text = document.getElementById('btn-save-cfg-text');
+  const spinner = document.getElementById('btn-save-cfg-spinner');
+  
+  btn.disabled = true;
+  text.textContent = '保存中...';
+  spinner.classList.remove('hidden');
+
+  try {
+    const resp = await apiFetch('/api/extension/settings', {
+      method: 'POST',
+      body: JSON.stringify({ payload })
+    });
+
+    if (resp.ok) {
+      showToast('success', '配置已保存');
+      closeConfigModal();
+    } else {
+      const err = await resp.json();
+      throw new Error(err.error || '保存失败');
+    }
+  } catch (err) {
+    showToast('error', err.message);
+  } finally {
+    btn.disabled = false;
+    text.textContent = '保存配置';
+    spinner.classList.add('hidden');
   }
 }
 

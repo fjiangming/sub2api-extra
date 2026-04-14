@@ -1,11 +1,43 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs').promises;
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3100;
 const SUB2API_BASE_URL = (process.env.SUB2API_BASE_URL || 'http://localhost:8080').replace(/\/+$/, '');
 
+const DATA_FILE = path.join(__dirname, 'data', 'extension_settings.json');
+const ENCRYPTION_KEY = Buffer.from((process.env.EXT_SECRET || 'sub2api_ext_settings_secret_key_1').padEnd(32, '0')).slice(0, 32);
+
 app.use(express.json());
+
+// Ensure data file exists
+(async function ensureDataFile() {
+  const dir = path.dirname(DATA_FILE);
+  try { await fs.mkdir(dir, { recursive: true }); } catch (e) {}
+  try { await fs.access(DATA_FILE); } catch (e) {
+    await fs.writeFile(DATA_FILE, '{}', 'utf8');
+  }
+})();
+
+function encryptData(text) {
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
+  let encrypted = cipher.update(text, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  return iv.toString('hex') + ':' + encrypted;
+}
+
+function decryptData(text) {
+  const textParts = text.split(':');
+  const iv = Buffer.from(textParts.shift(), 'hex');
+  const encryptedText = Buffer.from(textParts.join(':'), 'hex');
+  const decipher = crypto.createDecipheriv('aes-256-cbc', ENCRYPTION_KEY, iv);
+  let decrypted = decipher.update(encryptedText, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+  return decrypted;
+}
 
 // Allow iframe embedding and cross-origin access
 app.use((req, res, next) => {
@@ -65,6 +97,23 @@ app.get('/api/auth/me', async (req, res) => {
     res.status(result.status).json(result.data);
   } catch (err) {
     console.error('Auth/me proxy error:', err.message);
+    res.status(502).json({
+      error: `无法连接到 Sub2API 后端 (${SUB2API_BASE_URL})`,
+      detail: err.message
+    });
+  }
+});
+
+// ──────────────────────────────────────────────
+// API: Login (proxy to /auth/login)
+// ──────────────────────────────────────────────
+
+app.post('/api/v1/auth/login', async (req, res) => {
+  try {
+    const result = await sub2apiRequest('POST', '/api/v1/auth/login', null, req.body);
+    res.status(result.status).json(result.data);
+  } catch (err) {
+    console.error('Login proxy error:', err.message);
     res.status(502).json({
       error: `无法连接到 Sub2API 后端 (${SUB2API_BASE_URL})`,
       detail: err.message
@@ -251,6 +300,71 @@ app.get('/api/proxies', async (req, res) => {
   } catch (err) {
     console.error('List proxies error:', err.message);
     res.status(502).json({ error: 'Failed to connect to Sub2API' });
+  }
+});
+
+// ──────────────────────────────────────────────
+// API: Get/Set Extension Settings (Encrypted)
+// ──────────────────────────────────────────────
+
+app.get('/api/extension/settings', async (req, res) => {
+  try {
+    const token = extractToken(req);
+    if (!token) return res.status(401).json({ error: 'No token provided' });
+
+    // Verify token and get userId via sub2api auth endpoint
+    const authResult = await sub2apiRequest('GET', '/api/v1/auth/me', token);
+    if (authResult.status !== 200) {
+      return res.status(authResult.status).json(authResult.data);
+    }
+    const userId = authResult.data.id || authResult.data.data?.id;
+    if (!userId) return res.status(401).json({ error: 'Unable to parse user identity' });
+
+    const fileContent = await fs.readFile(DATA_FILE, 'utf8');
+    const allSettings = JSON.parse(fileContent);
+    const userSettings = allSettings[userId] || {};
+
+    const encrypted = encryptData(JSON.stringify(userSettings));
+    res.json({ payload: encrypted });
+  } catch (err) {
+    console.error('Get extension settings error:', err.message);
+    res.status(500).json({ error: 'Internal server error while fetching settings' });
+  }
+});
+
+app.post('/api/extension/settings', async (req, res) => {
+  try {
+    const token = extractToken(req);
+    if (!token) return res.status(401).json({ error: 'No token provided' });
+
+    // Verify token and get userId
+    const authResult = await sub2apiRequest('GET', '/api/v1/auth/me', token);
+    if (authResult.status !== 200) {
+      return res.status(authResult.status).json(authResult.data);
+    }
+    const userId = authResult.data.id || authResult.data.data?.id;
+    if (!userId) return res.status(401).json({ error: 'Unable to parse user identity' });
+
+    const { payload } = req.body;
+    if (!payload) return res.status(400).json({ error: 'Missing encrypted payload' });
+
+    let decryptedConfig;
+    try {
+      decryptedConfig = decryptData(payload);
+      JSON.parse(decryptedConfig); // Validate JSON format
+    } catch (e) {
+      return res.status(400).json({ error: 'Invalid payload encryption or format' });
+    }
+
+    const fileContent = await fs.readFile(DATA_FILE, 'utf8');
+    const allSettings = JSON.parse(fileContent);
+    allSettings[userId] = JSON.parse(decryptedConfig);
+
+    await fs.writeFile(DATA_FILE, JSON.stringify(allSettings, null, 2), 'utf8');
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Save extension settings error:', err.message);
+    res.status(500).json({ error: 'Internal server error while saving settings' });
   }
 });
 

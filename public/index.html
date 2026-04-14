@@ -7,6 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
 </head>
 <body>
   <div id="app">
@@ -37,6 +38,10 @@
             <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             <input id="search-input" type="text" placeholder="搜索账号..." />
           </div>
+          <button id="btn-config" class="btn btn-secondary" onclick="openConfigModal()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            自动化配置
+          </button>
           <button id="btn-add" class="btn btn-primary" onclick="openAddModal()">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             添加账号
@@ -196,6 +201,106 @@
             <button type="submit" class="btn btn-primary" id="btn-submit">
               <span id="btn-submit-text">确认添加</span>
               <div id="btn-submit-spinner" class="btn-spinner hidden"></div>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Extension Configuration Modal -->
+  <div id="config-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>自动化注册配置</h2>
+        <button class="modal-close" onclick="closeConfigModal()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="20" height="20"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <form id="config-form" onsubmit="handleSaveConfig(event)">
+          <!-- panel mode -->
+          <div class="form-group">
+            <label>面板来源模式</label>
+            <select id="cfg-panel-mode">
+              <option value="INJECT">打开目标站内置面板</option>
+              <option value="SIDEPANEL">使用独立侧边栏</option>
+            </select>
+          </div>
+
+          <!-- URL / pwd -->
+          <div class="form-group">
+            <label>CPA 服务地址</label>
+            <input id="cfg-vps-url" type="text" placeholder="https://..." />
+          </div>
+          <div class="form-group">
+            <label>管理密钥</label>
+            <input id="cfg-vps-password" type="password" placeholder="输入密钥" />
+          </div>
+          <div class="form-group">
+            <label>CODEX密码</label>
+            <input id="cfg-custom-password" type="text" placeholder="留空则随机生成" />
+          </div>
+
+          <!-- Email -->
+          <div class="form-group">
+            <label>邮箱服务</label>
+            <select id="cfg-mail-provider">
+              <option value="inbucket">Inbucket 聚合</option>
+              <option value="hotmail">Hotmail (别名)</option>
+              <option value="duckduckgo">DuckDuckGo</option>
+              <option value="custom">第三方生成</option>
+              <option value="manual">手动输入</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>邮箱生成规则</label>
+            <select id="cfg-email-generator">
+              <option value="UUID">UUID</option>
+              <option value="RANDOM">RANDOM (10位小写)</option>
+              <option value="ID">ID (32位小写)</option>
+              <option value="USERNAME">USERNAME</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>自定义域名 / 注册邮箱</label>
+            <input id="cfg-registration-email" type="text" placeholder="输入域名或邮箱" />
+          </div>
+
+          <!-- Checkboxes and timeouts -->
+          <div class="form-group">
+            <label style="display: flex; align-items: center; gap: 8px; font-weight: normal; font-size: 14px; cursor: pointer;">
+              <input type="checkbox" id="cfg-autoRunSkipFailures"> 开启注册兜底，失败后强制刷新
+            </label>
+          </div>
+          <div class="form-group">
+            <label style="display: flex; align-items: center; gap: 8px; font-weight: normal; font-size: 14px; cursor: pointer;">
+              <input type="checkbox" id="cfg-autoStep9SkipEnabled"> 跳步9：利用跳步9规则注册
+            </label>
+          </div>
+          <div class="form-group">
+            <label style="display: flex; align-items: center; gap: 8px; font-weight: normal; font-size: 14px; cursor: pointer;">
+              <input type="checkbox" id="cfg-autoRunDelayEnabled"> 失败后重试延迟开启
+            </label>
+            <div style="display: flex; align-items: center; gap: 8px; margin-top: 8px;">
+              <input type="number" id="cfg-autoRunDelayMinutes" style="width: 80px;" min="0" value="0">
+              <span>分钟后</span>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>步间随机延迟 (秒)</label>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <input type="number" id="cfg-autoStepRandomDelayMin" style="width: 80px;" min="0" value="2">
+              <span>到</span>
+              <input type="number" id="cfg-autoStepRandomDelayMax" style="width: 80px;" min="0" value="5">
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeConfigModal()">取消</button>
+            <button type="submit" class="btn btn-primary" id="btn-save-cfg">
+              <span id="btn-save-cfg-text">保存配置</span>
+              <div id="btn-save-cfg-spinner" class="btn-spinner hidden"></div>
             </button>
           </div>
         </form>
