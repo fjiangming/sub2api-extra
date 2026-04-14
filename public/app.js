@@ -508,7 +508,7 @@ function decryptConfig(payloadString) {
     const iv = CryptoJS.enc.Hex.parse(parts[0]);
     const encryptedHexStr = CryptoJS.enc.Hex.parse(parts[1]);
     const encryptedBase64Str = CryptoJS.enc.Base64.stringify(encryptedHexStr);
-    
+
     // Note: CryptoJS.AES.decrypt expects Base64 or CipherParams
     const decrypted = CryptoJS.AES.decrypt(encryptedBase64Str, CONFIG_ENCRYPTION_KEY, {
       iv: iv,
@@ -532,16 +532,17 @@ async function openConfigModal() {
     if (resp.ok) {
       const data = await resp.json();
       const config = data.payload ? decryptConfig(data.payload) : {};
+      console.log('[Config] 从服务端加载的配置:', JSON.stringify(config, null, 2));
 
-      // ── 来源与认证 ──
-      document.getElementById('cfg-panel-mode').value = config.panelMode || 'cpa';
-      document.getElementById('cfg-vps-url').value = config.vpsUrl || '';
-      document.getElementById('cfg-vps-password').value = config.vpsPassword || '';
-      document.getElementById('cfg-local-cpa-step9-mode').value = config.localCpaStep9Mode || 'submit';
-      document.getElementById('cfg-sub2api-url').value = config.sub2apiUrl || '';
-      document.getElementById('cfg-sub2api-email').value = config.sub2apiEmail || '';
-      document.getElementById('cfg-sub2api-password').value = config.sub2apiPassword || '';
-      document.getElementById('cfg-sub2api-group').value = config.sub2apiGroupName || '';
+      // ── SUB2API 连接 ──
+      const groupInput = document.getElementById('cfg-sub2api-group-name');
+      const defaultGroup = currentUser?.email ? String(currentUser.email) : 'codex';
+      groupInput.value = config.sub2apiGroupName || defaultGroup;
+      groupInput.readOnly = true;
+      groupInput.style.backgroundColor = 'var(--bg-secondary, #f5f5f5)';
+      groupInput.style.color = 'var(--text-secondary, #888)';
+      groupInput.style.cursor = 'not-allowed';
+      groupInput.title = '分组名已固定为当前用户邮箱，不可修改';
 
       // ── 密码 ──
       document.getElementById('cfg-custom-password').value = config.customPassword || '';
@@ -558,11 +559,10 @@ async function openConfigModal() {
       document.getElementById('cfg-skipStep9Enabled').checked = !!config.skipStep9Enabled;
       document.getElementById('cfg-autoRunDelayEnabled').checked = !!config.autoRunDelayEnabled;
       document.getElementById('cfg-autoRunDelayMinutes').value = config.autoRunDelayMinutes || 30;
-      document.getElementById('cfg-autoStepRandomDelayMin').value = config.autoStepRandomDelayMinSeconds ?? 12;
-      document.getElementById('cfg-autoStepRandomDelayMax').value = config.autoStepRandomDelayMaxSeconds ?? 18;
+      document.getElementById('cfg-autoStepRandomDelayMin').value = config.autoStepRandomDelayMinSeconds ?? 0;
+      document.getElementById('cfg-autoStepRandomDelayMax').value = config.autoStepRandomDelayMaxSeconds ?? 15;
 
       // Apply conditional visibility
-      onCfgPanelModeChange();
       onCfgMailProviderChange();
       onCfgEmailGeneratorChange();
     }
@@ -581,9 +581,7 @@ function closeConfigModal() {
 // ── Conditional visibility helpers ──
 
 function onCfgPanelModeChange() {
-  const useSub2Api = document.getElementById('cfg-panel-mode').value === 'sub2api';
-  document.getElementById('cfg-cpa-group').classList.toggle('hidden', useSub2Api);
-  document.getElementById('cfg-sub2api-group').classList.toggle('hidden', !useSub2Api);
+  // 来源已固定为 sub2api，此函数保留以兼容旧代码引用
 }
 
 function onCfgMailProviderChange() {
@@ -601,16 +599,24 @@ function onCfgEmailGeneratorChange() {
 async function handleSaveConfig(e) {
   e.preventDefault();
 
+  // 自动获取 Sub2API 地址（从服务端环境变量）
+  let autoSub2ApiUrl = '';
+  try {
+    const urlResp = await apiFetch('/api/sub2api-url');
+    if (urlResp.ok) {
+      const urlData = await urlResp.json();
+      autoSub2ApiUrl = urlData.url || '';
+    }
+  } catch (e) {
+    console.warn('Failed to auto-detect Sub2API URL:', e);
+  }
+
   const config = {
-    // 来源与认证
-    panelMode: document.getElementById('cfg-panel-mode').value,
-    vpsUrl: document.getElementById('cfg-vps-url').value.trim(),
-    vpsPassword: document.getElementById('cfg-vps-password').value,
-    localCpaStep9Mode: document.getElementById('cfg-local-cpa-step9-mode').value,
-    sub2apiUrl: document.getElementById('cfg-sub2api-url').value.trim(),
-    sub2apiEmail: document.getElementById('cfg-sub2api-email').value.trim(),
-    sub2apiPassword: document.getElementById('cfg-sub2api-password').value,
-    sub2apiGroupName: document.getElementById('cfg-sub2api-group').value.trim(),
+    // 来源固定为 sub2api
+    panelMode: 'sub2api',
+    // sub2apiUrl 从服务端自动获取；地址/账号/密码均自动处理
+    sub2apiUrl: autoSub2ApiUrl,
+    sub2apiGroupName: document.getElementById('cfg-sub2api-group-name').value.trim(),
 
     // 密码
     customPassword: document.getElementById('cfg-custom-password').value,
@@ -626,11 +632,12 @@ async function handleSaveConfig(e) {
     autoRunSkipFailures: document.getElementById('cfg-autoRunSkipFailures').checked,
     skipStep9Enabled: document.getElementById('cfg-skipStep9Enabled').checked,
     autoRunDelayEnabled: document.getElementById('cfg-autoRunDelayEnabled').checked,
-    autoRunDelayMinutes: parseInt(document.getElementById('cfg-autoRunDelayMinutes').value) || 30,
-    autoStepRandomDelayMinSeconds: parseInt(document.getElementById('cfg-autoStepRandomDelayMin').value) || 12,
-    autoStepRandomDelayMaxSeconds: parseInt(document.getElementById('cfg-autoStepRandomDelayMax').value) || 18,
+    autoRunDelayMinutes: (val => isNaN(val) ? 30 : val)(parseInt(document.getElementById('cfg-autoRunDelayMinutes').value)),
+    autoStepRandomDelayMinSeconds: (val => isNaN(val) ? 12 : val)(parseInt(document.getElementById('cfg-autoStepRandomDelayMin').value)),
+    autoStepRandomDelayMaxSeconds: (val => isNaN(val) ? 18 : val)(parseInt(document.getElementById('cfg-autoStepRandomDelayMax').value)),
   };
 
+  console.log('[Config] 保存前的完整配置:', JSON.stringify(config, null, 2));
   const payload = encryptConfig(config);
 
   const btn = document.getElementById('btn-save-cfg');
@@ -730,13 +737,13 @@ function formatTime(iso) {
   try {
     const d = new Date(iso);
     const pad = n => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   } catch { return iso; }
 }
 
 function escapeHtml(str) {
   if (!str) return '';
-  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 window.openConfigModal = openConfigModal;

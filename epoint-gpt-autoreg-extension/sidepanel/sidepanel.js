@@ -37,6 +37,11 @@ const btnAutoCancelSchedule = document.getElementById('btn-auto-cancel-schedule'
 const btnClearLog = document.getElementById('btn-clear-log');
 const btnLogout = document.getElementById('btn-logout');
 const selectPanelMode = null; // Removed: now managed by server config
+const btnExportSettings = null; // Removed: now managed by server config
+const btnImportSettings = null; // Removed: now managed by server config
+const btnConfigMenu = null; // Removed: now managed by server config
+const configMenu = null; // Removed: now managed by server config
+const inputImportSettingsFile = document.getElementById('input-import-settings-file');
 const rowVpsUrl = null; // Removed
 const inputVpsUrl = null; // Removed
 const rowVpsPassword = null; // Removed
@@ -1922,7 +1927,7 @@ localCpaStep9ModeButtons.forEach((button) => {
   });
 });
 
-btnSaveSettings.addEventListener('click', async () => {
+btnSaveSettings?.addEventListener('click', async () => {
   if (!settingsDirty) {
     showToast('配置已是最新', 'info', 1400);
     return;

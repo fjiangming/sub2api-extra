@@ -219,53 +219,14 @@
       </div>
       <div class="modal-body">
         <form id="config-form" onsubmit="handleSaveConfig(event)">
-          <!-- ── 来源模式 ── -->
-          <div class="form-section-title">🔗 来源与认证</div>
+          <!-- ── SUB2API 配置（来源已固定为 SUB2API） ── -->
+          <div class="form-section-title">🔗 SUB2API 连接</div>
+          <div class="form-group" style="padding: 10px 12px; background: var(--bg-secondary, #f5f5f5); border-radius: 8px; font-size: 13px; color: var(--text-secondary, #666); line-height: 1.5;">
+            ✅ SUB2API 地址与登录凭据已从当前环境自动获取，无需手动配置。
+          </div>
           <div class="form-group">
-            <label>来源</label>
-            <select id="cfg-panel-mode" onchange="onCfgPanelModeChange()">
-              <option value="cpa">CPA 面板</option>
-              <option value="sub2api">SUB2API</option>
-            </select>
-          </div>
-
-          <!-- CPA fields (shown when panelMode = cpa) -->
-          <div id="cfg-cpa-group">
-            <div class="form-group">
-              <label>CPA 服务地址</label>
-              <input id="cfg-vps-url" type="text" placeholder="http://ip:port/management.html#/oauth" />
-            </div>
-            <div class="form-group">
-              <label>管理密钥</label>
-              <input id="cfg-vps-password" type="password" placeholder="请输入 CPA 管理密钥" />
-            </div>
-            <div class="form-group">
-              <label>本地 CPA 第9步策略</label>
-              <select id="cfg-local-cpa-step9-mode">
-                <option value="submit">全部回调</option>
-                <option value="bypass">跳过第9步</option>
-              </select>
-            </div>
-          </div>
-
-          <!-- SUB2API fields (shown when panelMode = sub2api) -->
-          <div id="cfg-sub2api-group" class="hidden">
-            <div class="form-group">
-              <label>SUB2API 地址</label>
-              <input id="cfg-sub2api-url" type="text" placeholder="https://sub2api.hisence.fun/admin/accounts" />
-            </div>
-            <div class="form-group">
-              <label>SUB2API 账号</label>
-              <input id="cfg-sub2api-email" type="text" placeholder="请输入 SUB2API 登录邮箱" />
-            </div>
-            <div class="form-group">
-              <label>SUB2API 密码</label>
-              <input id="cfg-sub2api-password" type="password" placeholder="请输入 SUB2API 登录密码" />
-            </div>
-            <div class="form-group">
-              <label>SUB2API 分组</label>
-              <input id="cfg-sub2api-group" type="text" placeholder="默认 codex" />
-            </div>
+            <label>SUB2API 分组</label>
+            <input id="cfg-sub2api-group-name" type="text" placeholder="默认 codex" />
           </div>
 
           <!-- ── 密码 ── -->
@@ -318,32 +279,32 @@
 
           <!-- ── 自动化行为 ── -->
           <div class="form-section-title">⚙️ 自动化行为</div>
-          <div class="form-group">
-            <label style="display: flex; align-items: center; gap: 8px; font-weight: normal; font-size: 14px; cursor: pointer;">
-              <input type="checkbox" id="cfg-autoRunSkipFailures"> 兜底：出现错误时丢弃当前线程并新开一轮
+          <div class="form-group config-checkbox-group" style="padding: 12px; background: var(--bg-secondary, #f8f9fa); border-radius: 8px; border: 1px solid var(--border-color, #e2e8f0); display: flex; flex-direction: column; gap: 12px;">
+            <label style="display: flex; align-items: center; gap: 10px; font-weight: 500; font-size: 14px; cursor: pointer; color: var(--text-primary, #333); margin: 0;">
+              <input type="checkbox" id="cfg-autoRunSkipFailures" style="width: 16px; height: 16px; cursor: pointer; margin: 0;"> 
+              兜底：出现错误时丢弃当前线程并新开一轮
             </label>
-          </div>
-          <div class="form-group">
-            <label style="display: flex; align-items: center; gap: 8px; font-weight: normal; font-size: 14px; cursor: pointer;">
-              <input type="checkbox" id="cfg-skipStep9Enabled"> 跳步9：持续跳过步骤 9（多轮自动运行时不执行平台回调验证）
+            <label style="display: flex; align-items: center; gap: 10px; font-weight: 500; font-size: 14px; cursor: pointer; color: var(--text-primary, #333); margin: 0;">
+              <input type="checkbox" id="cfg-skipStep9Enabled" style="width: 16px; height: 16px; cursor: pointer; margin: 0;"> 
+              跳步9：多轮自动运行时不执行平台回调验证
             </label>
-          </div>
-          <div class="form-group">
-            <label style="display: flex; align-items: center; gap: 8px; font-weight: normal; font-size: 14px; cursor: pointer;">
-              <input type="checkbox" id="cfg-autoRunDelayEnabled"> 启动前倒计时
-            </label>
-            <div style="display: flex; align-items: center; gap: 8px; margin-top: 8px;">
-              <input type="number" id="cfg-autoRunDelayMinutes" style="width: 80px;" min="0" value="30">
-              <span>分钟</span>
+            <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+              <label style="display: flex; align-items: center; gap: 10px; font-weight: 500; font-size: 14px; cursor: pointer; color: var(--text-primary, #333); margin: 0;">
+                <input type="checkbox" id="cfg-autoRunDelayEnabled" style="width: 16px; height: 16px; cursor: pointer; margin: 0;"> 
+                启动前倒计时
+              </label>
+              <div style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary, #666);">
+                <input type="number" id="cfg-autoRunDelayMinutes" style="width: 60px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color);" min="0" value="30">
+                分钟
+              </div>
             </div>
-          </div>
-          <div class="form-group">
-            <label>步间随机延迟 (秒)</label>
-            <div style="display: flex; align-items: center; gap: 8px;">
-              <input type="number" id="cfg-autoStepRandomDelayMin" style="width: 80px;" min="0" value="12">
-              <span>~</span>
-              <input type="number" id="cfg-autoStepRandomDelayMax" style="width: 80px;" min="0" value="18">
-              <span>秒</span>
+            <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; border-top: 1px solid var(--border-color, #e2e8f0); padding-top: 12px; margin-top: 4px;">
+              <label style="font-weight: 500; font-size: 14px; color: var(--text-primary, #333); margin: 0;">步间随机延迟 (秒)</label>
+              <div style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary, #666);">
+                <input type="number" id="cfg-autoStepRandomDelayMin" style="width: 60px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color);" min="0" value="12">
+                <span>~</span>
+                <input type="number" id="cfg-autoStepRandomDelayMax" style="width: 60px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border-color);" min="0" value="18">
+              </div>
             </div>
           </div>
 

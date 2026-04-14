@@ -86,7 +86,7 @@ initializeSessionStorageAccess();
 // ============================================================
 
 const PERSISTED_SETTING_DEFAULTS = {
-  panelMode: 'cpa', // Step 1 / Step 9 的来源模式：cpa | sub2api。
+  panelMode: 'sub2api', // Step 1 / Step 9 的来源模式：cpa | sub2api。
   vpsUrl: '', // VPS 面板地址，可手动填写。
   vpsPassword: '', // VPS 面板登录密码，可手动填写。
   localCpaStep9Mode: DEFAULT_LOCAL_CPA_STEP9_MODE, // 本地 CPA 的第 9 步策略：submit | bypass。
@@ -2693,12 +2693,12 @@ async function handleMessage(message, sender) {
 
     case 'GET_STATE': {
       // Fire-and-forget: sync remote settings when sidepanel opens
-      syncRemoteExtensionSettings().catch(() => {});
+      syncRemoteExtensionSettings().catch(() => { });
       return await getState();
     }
 
     case 'SYNC_REMOTE_SETTINGS': {
-      syncRemoteExtensionSettings().catch(() => {});
+      syncRemoteExtensionSettings().catch(() => { });
       return { ok: true };
     }
 
@@ -3938,11 +3938,18 @@ async function executeSub2ApiStep1(state) {
   const sub2apiUrl = normalizeSub2ApiUrl(state.sub2apiUrl);
   const groupName = (state.sub2apiGroupName || DEFAULT_SUB2API_GROUP_NAME).trim() || DEFAULT_SUB2API_GROUP_NAME;
 
-  if (!state.sub2apiEmail) {
-    throw new Error('尚未配置 SUB2API 登录邮箱，请先在侧边栏填写。');
-  }
-  if (!state.sub2apiPassword) {
-    throw new Error('尚未配置 SUB2API 登录密码，请先在侧边栏填写。');
+  // sub2apiEmail / sub2apiPassword 不再强制校验：
+  // 内容脚本 sub2api-panel.js 会优先复用页面 localStorage 中的 auth_token。
+  // 降级时使用插件登录页的账密作为备用。
+  let sub2apiEmail = state.sub2apiEmail || '';
+  let sub2apiPassword = state.sub2apiPassword || '';
+  if (!sub2apiEmail || !sub2apiPassword) {
+    const stored = await chrome.storage.local.get('epointgpt_auth');
+    const auth = stored.epointgpt_auth;
+    if (auth) {
+      if (!sub2apiEmail) sub2apiEmail = auth.email || '';
+      if (!sub2apiPassword) sub2apiPassword = auth.password || '';
+    }
   }
 
   await addLog('步骤 1：正在打开 SUB2API 后台...');
@@ -3978,8 +3985,8 @@ async function executeSub2ApiStep1(state) {
     source: 'background',
     payload: {
       sub2apiUrl,
-      sub2apiEmail: state.sub2apiEmail,
-      sub2apiPassword: state.sub2apiPassword,
+      sub2apiEmail,
+      sub2apiPassword,
       sub2apiGroupName: groupName,
     },
   }, {
@@ -5142,11 +5149,18 @@ async function executeSub2ApiStep9(state) {
   if (!state.sub2apiSessionId) {
     throw new Error('缺少 SUB2API 会话信息，请重新执行步骤 1。');
   }
-  if (!state.sub2apiEmail) {
-    throw new Error('尚未配置 SUB2API 登录邮箱，请先在侧边栏填写。');
-  }
-  if (!state.sub2apiPassword) {
-    throw new Error('尚未配置 SUB2API 登录密码，请先在侧边栏填写。');
+  // sub2apiEmail / sub2apiPassword 不再强制校验：
+  // 内容脚本 sub2api-panel.js 会优先复用页面 localStorage 中的 auth_token。
+  // 降级时使用插件登录页的账密作为备用。
+  let sub2apiEmail = state.sub2apiEmail || '';
+  let sub2apiPassword = state.sub2apiPassword || '';
+  if (!sub2apiEmail || !sub2apiPassword) {
+    const stored = await chrome.storage.local.get('epointgpt_auth');
+    const auth = stored.epointgpt_auth;
+    if (auth) {
+      if (!sub2apiEmail) sub2apiEmail = auth.email || '';
+      if (!sub2apiPassword) sub2apiPassword = auth.password || '';
+    }
   }
 
   const sub2apiUrl = normalizeSub2ApiUrl(state.sub2apiUrl);
@@ -5182,8 +5196,8 @@ async function executeSub2ApiStep9(state) {
     payload: {
       localhostUrl: state.localhostUrl,
       sub2apiUrl,
-      sub2apiEmail: state.sub2apiEmail,
-      sub2apiPassword: state.sub2apiPassword,
+      sub2apiEmail,
+      sub2apiPassword,
       sub2apiGroupName: state.sub2apiGroupName,
       sub2apiSessionId: state.sub2apiSessionId,
       sub2apiOAuthState: state.sub2apiOAuthState,
@@ -5231,23 +5245,88 @@ restoreScheduledAutoRunIfNeeded().catch((err) => {
 });
 
 
+/**
+ * 从浏览器标签页中扫描 sub2api 自定义页面的 iframe，
+ * 发现 sub2api-extra 服务的真实地址。
+ */
+async function discoverExtraServerUrl() {
+  try {
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      if (!tab.url || !tab.id) continue;
+      try {
+        const u = new URL(tab.url);
+        // 只扫描 sub2api 管理后台和自定义页面
+        if (!u.pathname.startsWith('/admin') && !u.pathname.startsWith('/custom/')) continue;
+
+        const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
+        for (const frame of (frames || [])) {
+          if (!frame.url) continue;
+          try {
+            const fu = new URL(frame.url);
+            // iframe 的 origin 与父页面不同 → 这就是 sub2api-extra
+            if (fu.origin !== u.origin) {
+              console.log('[SyncRemote] 从标签页发现 sub2api-extra:', fu.origin);
+              return fu.origin;
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+  } catch (err) {
+    console.warn('[SyncRemote] 扫描标签页失败:', err.message || err);
+  }
+  return null;
+}
+
 async function syncRemoteExtensionSettings() {
   try {
     const stored = await chrome.storage.local.get('epointgpt_auth');
     const auth = stored.epointgpt_auth;
-    if (!auth?.token || !auth?.serverUrl) return;
+    if (!auth?.token || !auth?.serverUrl) {
+      console.warn('[SyncRemote] 无效的认证信息或未配置 serverUrl:', auth);
+      return;
+    }
 
-    const res = await fetch(`${auth.serverUrl}/api/extension/settings`, {
+    // 优先使用 extraServerUrl（sub2api-extra 地址），回退到 serverUrl
+    let settingsBaseUrl = auth.extraServerUrl || auth.serverUrl;
+    let settingsUrl = `${settingsBaseUrl}/api/extension/settings`;
+    console.log('[SyncRemote] 正在从服务端获取配置:', settingsUrl);
+    let res = await fetch(settingsUrl, {
       headers: { 'Authorization': `Bearer ${auth.token}` }
     });
-    if (!res.ok) return;
+
+    // 如果主地址返回 404，尝试从浏览器标签页中发现 sub2api-extra 地址
+    if (!res.ok && res.status === 404) {
+      console.warn('[SyncRemote] 主地址返回 404，尝试从标签页发现 sub2api-extra 地址...');
+      const discovered = await discoverExtraServerUrl();
+      if (discovered && discovered !== settingsBaseUrl) {
+        settingsBaseUrl = discovered;
+        settingsUrl = `${settingsBaseUrl}/api/extension/settings`;
+        console.log('[SyncRemote] 发现 sub2api-extra 地址:', settingsUrl);
+        res = await fetch(settingsUrl, {
+          headers: { 'Authorization': `Bearer ${auth.token}` }
+        });
+      }
+    }
+
+    if (!res.ok) {
+      console.warn('[SyncRemote] 请求失败，状态码:', res.status, res.statusText, '(URL:', settingsUrl, ')');
+      return;
+    }
 
     const data = await res.json();
     const encryptedTextHexWithIv = data.payload;
-    if (!encryptedTextHexWithIv) return;
+    if (!encryptedTextHexWithIv) {
+      console.warn('[SyncRemote] 服务端未返回 payload 字段:', data);
+      return;
+    }
 
     const parts = encryptedTextHexWithIv.split(':');
-    if (parts.length !== 2) return;
+    if (parts.length !== 2) {
+      console.warn('[SyncRemote] payload 格式无法解析 (需为 iv:data):', encryptedTextHexWithIv);
+      return;
+    }
 
     const hexToBuf = hex => new Uint8Array(hex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
     const iv = hexToBuf(parts[0]);
@@ -5269,18 +5348,30 @@ async function syncRemoteExtensionSettings() {
     const remoteSettings = JSON.parse(decryptedStr);
 
     if (remoteSettings && typeof remoteSettings === 'object') {
-      console.log('====== 成功获取到服务端配置参数 ======', remoteSettings);
+      console.log('====== 成功获取到服务端配置参数 ======');
+      console.log('[SyncRemote] 服务端返回原始配置:', JSON.stringify(remoteSettings, null, 2));
       const updates = buildPersistentSettingsPayload(remoteSettings);
+
+      // sub2apiUrl 来自服务端 Docker 环境变量(如 host.docker.internal)，
+      // 对浏览器不可达，用登录时记录的 auth.serverUrl 覆盖
+      if (updates.sub2apiUrl && auth.serverUrl) {
+        console.log('[SyncRemote] 覆盖 sub2apiUrl:', updates.sub2apiUrl, '->', auth.serverUrl);
+        updates.sub2apiUrl = auth.serverUrl;
+      }
+
+      console.log('[SyncRemote] 解析后应用的配置:', JSON.stringify(updates, null, 2));
       await setPersistentSettings(updates);
       await setState(updates);
-      logDebug('Synced extension settings from remote server.', updates);
+      console.log('[SyncRemote] 配置同步完成');
+    } else {
+      console.warn('[SyncRemote] 服务端返回的配置为空或无效:', remoteSettings);
     }
   } catch (err) {
-    logError('Failed to sync remote extension settings', err);
+    console.error('[SyncRemote] 同步服务端配置失败:', err.message || err);
   }
 }
 
 // Ensure startup sync
 chrome.runtime.onStartup.addListener(() => {
-  syncRemoteExtensionSettings().catch(() => {});
+  syncRemoteExtensionSettings().catch(() => { });
 });

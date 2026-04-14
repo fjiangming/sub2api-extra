@@ -127,15 +127,30 @@ function storeAuthSession(loginData) {
 }
 
 async function loginSub2Api(payload = {}) {
-  const email = (payload.sub2apiEmail || '').trim();
-  const password = payload.sub2apiPassword || '';
   const origin = getSub2ApiOrigin(payload);
 
+  // ── 优先复用页面已有的登录态 ──
+  // Sub2API 前端登录后会将 token 存储在 localStorage('auth_token') 中。
+  // 既然插件已注入到该页面，直接读取即可，无需用户手动配置账号密码。
+  const existingToken = localStorage.getItem('auth_token');
+  if (existingToken) {
+    log('步骤：检测到 SUB2API 已有登录态，跳过重新登录。');
+    return {
+      origin,
+      token: existingToken,
+      user: null,
+    };
+  }
+
+  // ── 降级路径：使用 payload 提供的账密重新登录 ──
+  const email = (payload.sub2apiEmail || '').trim();
+  const password = payload.sub2apiPassword || '';
+
   if (!email) {
-    throw new Error('缺少 SUB2API 登录邮箱，请先在侧边栏填写。');
+    throw new Error('页面中未检测到已有登录态，且未配置 SUB2API 登录邮箱。');
   }
   if (!password) {
-    throw new Error('缺少 SUB2API 登录密码，请先在侧边栏填写。');
+    throw new Error('页面中未检测到已有登录态，且未配置 SUB2API 登录密码。');
   }
 
   log('步骤：正在登录 SUB2API 后台...');
@@ -170,11 +185,27 @@ async function getGroupByName(origin, token, groupName) {
     return !item.platform || item.platform === 'openai';
   });
 
-  if (!group) {
-    throw new Error(`SUB2API 中未找到名为“${targetName}”的 openai 分组。`);
+  if (group) {
+    return group;
   }
 
-  return group;
+  // 分组不存在 → 自动创建
+  log('分组 "' + targetName + '" 不存在，正在自动创建...');
+  const created = await requestJson(origin, '/api/v1/admin/groups', {
+    method: 'POST',
+    token,
+    body: {
+      name: targetName,
+      platform: 'openai',
+    },
+  });
+
+  if (!created || !created.id) {
+    throw new Error('自动创建分组 "' + targetName + '" 失败。');
+  }
+
+  log('分组 "' + targetName + '" 已自动创建（ID: ' + created.id + '）。');
+  return created;
 }
 
 function buildDraftAccountName(groupName) {

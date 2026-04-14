@@ -342,6 +342,16 @@ app.get('/api/groups', async (req, res) => {
 });
 
 // ──────────────────────────────────────────────
+// API: Expose Sub2API base URL
+// Allows the frontend / extension to auto-discover the
+// actual Sub2API address without manual user configuration.
+// ──────────────────────────────────────────────
+
+app.get('/api/sub2api-url', (req, res) => {
+  res.json({ url: SUB2API_BASE_URL });
+});
+
+// ──────────────────────────────────────────────
 // API: Get proxies list (for account creation form)
 // ──────────────────────────────────────────────
 
@@ -376,7 +386,10 @@ app.get('/api/extension/settings', async (req, res) => {
     const allSettings = JSON.parse(fileContent);
     const userSettings = allSettings[userId] || {};
 
-    const encrypted = encryptData(JSON.stringify(userSettings));
+    const defaultSettings = { panelMode: 'sub2api' };
+    const mergedSettings = { ...defaultSettings, ...userSettings };
+
+    const encrypted = encryptData(JSON.stringify(mergedSettings));
     res.json({ payload: encrypted });
   } catch (err) {
     console.error('Get extension settings error:', err.message);

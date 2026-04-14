@@ -82,8 +82,6 @@
         <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
       </svg>
       <h1>EpointGPT公益注册站</h1>
-    </div>
-    <div class="header-btns">
       <button id="btn-theme" class="theme-toggle" title="切换主题">
         <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -102,12 +100,15 @@
           <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
         </svg>
       </button>
+    </div>
+    <div class="header-btns">
+      <span id="header-user-email" style="font-size: 12px; color: var(--text-muted); margin-right: 4px; user-select: text;"></span>
       <button id="btn-logout" class="btn btn-ghost btn-sm" style="color: var(--red); padding-inline: 8px;" type="button" title="退出登录">退出</button>
     </div>
   </header>
 
   <section id="data-section">
-    <div id="settings-card" class="data-card">
+    <div id="run-control-card" class="data-card" style="margin-bottom: 14px;">
       <div class="data-row">
         <span class="data-label">运行控制</span>
         <div class="data-inline" style="justify-content: space-between; width: 100%;">
@@ -131,6 +132,8 @@
           </button>
         </div>
       </div>
+    </div>
+    <div id="settings-card" class="data-card">
       <div class="data-row">
         <span class="data-label">注册邮箱</span>
         <div class="data-inline">
