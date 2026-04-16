@@ -200,25 +200,8 @@ async function getGroupByName(origin, token, groupName, proxyOrigin = '') {
     return group;
   }
 
-  // 分组不存在 → 自动创建
-  log('分组 "' + targetName + '" 不存在，正在自动创建...');
-  const createOrigin = proxyOrigin || origin;
-  const createPath = proxyOrigin ? '/api/groups' : '/api/v1/admin/groups';
-  const created = await requestJson(createOrigin, createPath, {
-    method: 'POST',
-    token,
-    body: {
-      name: targetName,
-      platform: 'openai',
-    },
-  });
-
-  if (!created || !created.id) {
-    throw new Error('自动创建分组 "' + targetName + '" 失败。');
-  }
-
-  log('分组 "' + targetName + '" 已自动创建（ID: ' + created.id + '）。');
-  return created;
+  // 分组不存在 → 提示用户先在配置页面保存以触发自动创建
+  throw new Error('分组 "' + targetName + '" 不存在，请先在自动化注册配置页面保存配置以自动创建分组。');
 }
 
 function buildDraftAccountName(groupName) {

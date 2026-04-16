@@ -642,11 +642,49 @@ app.post('/api/extension/settings', async (req, res) => {
       return res.status(400).json({ error: 'Invalid payload encryption or format' });
     }
 
+    const configObj = JSON.parse(decryptedConfig);
+
     const fileContent = await fs.readFile(DATA_FILE, 'utf8');
     const allSettings = JSON.parse(fileContent);
-    allSettings[userId] = JSON.parse(decryptedConfig);
+    allSettings[userId] = configObj;
 
     await fs.writeFile(DATA_FILE, JSON.stringify(allSettings, null, 2), 'utf8');
+
+    // Auto-create group if sub2apiGroupName is set and doesn't exist yet
+    const groupName = (configObj.sub2apiGroupName || '').trim();
+    if (groupName) {
+      try {
+        const adminToken = await getAdminToken();
+        const groupsResult = await sub2apiRequest('GET', '/api/v1/admin/groups/all', adminToken);
+        if (groupsResult.status === 200) {
+          const allGroups = Array.isArray(groupsResult.data)
+            ? groupsResult.data
+            : (groupsResult.data?.items || groupsResult.data?.data || []);
+          const normalized = groupName.toLowerCase();
+          const exists = allGroups.some(g => {
+            const gName = (g.name || '').trim().toLowerCase();
+            return gName === normalized && g.status === 'active';
+          });
+          if (!exists) {
+            console.log(`[Settings Save] Auto-creating group: ${groupName}`);
+            const createResult = await sub2apiRequest('POST', '/api/v1/admin/groups', adminToken, {
+              name: groupName,
+              description: `Auto-created for ${groupName}`,
+              platform: 'openai',
+              status: 'active',
+            });
+            if (createResult.status === 200 || createResult.status === 201) {
+              console.log(`[Settings Save] Group "${groupName}" created successfully (ID: ${createResult.data?.id})`);
+            } else {
+              console.warn(`[Settings Save] Auto-create group failed:`, createResult.status, createResult.data);
+            }
+          }
+        }
+      } catch (groupErr) {
+        console.warn('[Settings Save] Auto-create group error:', groupErr.message);
+      }
+    }
+
     res.json({ success: true });
   } catch (err) {
     console.error('Save extension settings error:', err.message);
