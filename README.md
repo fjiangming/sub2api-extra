@@ -5,14 +5,62 @@
 ## ✨ 核心特性
 
 - **完全解耦**：作为一个独立的微服务运行，不修改 Sub2API 的任何原始代码。
-- **无缝集成**：完美兼容 Sub2API 的“自定义菜单”功能，通过 iframe 嵌入。
+- **无缝集成**：完美兼容 Sub2API 的"自定义菜单"功能，通过 iframe 嵌入。
 - **UI 风格统一**：样式和主题完全参考 Sub2API，支持亮/暗色主题，跟随原平台自动切换。
 - **用户隔离**：
   - 添加账号时，账号名称会自动增加 `{username}-` 前缀。
   - 在 `notes` (备注) 字段隐式增加 `[added-by:{user_id}]` 标签。
   - 列表页面只会展示**当前登录用户**自己添加的账号。
+- **OAuth 授权支持**：普通用户可直接通过 OAuth 流程（生成授权链接 → 登录 → 回调换取凭据）添加账号，无需管理员手动操作。
 - **全平台支持**：支持 Anthropic, OpenAI, Gemini, Antigravity 等平台，涵盖 OAuth, API Key, Setup Token 等全量鉴权类型。
 - **零额外存储**：后端服务仅做 API 代理和过滤逻辑，真正的账号数据原封不动写入 Sub2API 数据库中（网关调度完全不受影响）。
+
+---
+
+## 📋 前置条件
+
+使用本模块前，请确保满足以下条件：
+
+### 必需条件
+
+| 条件 | 说明 |
+|------|------|
+| **Sub2API 已正常运行** | 本模块依赖 Sub2API 后端 API，请确保 Sub2API 可正常访问 |
+| **Sub2API 管理员账号** | OAuth 代理功能需要配置管理员邮箱和密码（见下方环境变量说明） |
+| **Docker 或 Node.js** | 选择其一作为运行环境 |
+
+### 环境变量
+
+| 变量名 | 必需 | 默认值 | 说明 |
+|--------|:----:|--------|------|
+| `SUB2API_BASE_URL` | ✅ | `http://localhost:8080` | Sub2API 后端地址（从容器内可达） |
+| `ADMIN_EMAIL` | ✅ | `admin@sub2api.local` | Sub2API **管理员**邮箱，用于 OAuth 代理 |
+| `ADMIN_PASSWORD` | ✅ | *(空)* | Sub2API **管理员**密码，用于 OAuth 代理 |
+| `PORT` | ❌ | `3100` | 本服务监听端口 |
+| `EXT_SECRET` | ❌ | *(内置默认)* | 扩展配置加密密钥 |
+
+#### 🔐 配置方式 (推荐)
+
+本项目提供了一个 `.env.example` 模板文件，你可以直接复制它来创建自己的配置文件。这种方式最安全，因为 `.env` 已经被加入 `.gitignore`，即使误操作也不会把真实凭据提交到公开仓库中。
+
+```bash
+cp .env.example .env
+```
+
+创建 `.env` 后，你需要使用文本编辑器去修改里面真实的账号与密码。后续运行 Docker 或 Node 服务时，程序将自动读取你在 `.env` 文件里写的配置。
+
+### ⚠️ 为什么需要管理员凭据？
+
+Sub2API 的 OAuth 相关接口（生成授权链接、交换授权码等）受管理员权限保护。为了让普通用户也能使用 OAuth 流程添加账号，本模块的后端会使用管理员身份代理这些请求。
+
+**安全性说明：**
+
+- 管理员凭据仅存放在**服务器端环境变量**中，不会出现在前端代码或浏览器中
+- 管理员 token 仅在 `server.js` 进程内存中缓存，**从未传输给浏览器**
+- 代理范围严格限定在 OAuth 流程相关的几个端点（生成链接、交换码），**不会**暴露账号 CRUD、系统设置等管理接口
+- 这是标准的 Backend-for-Frontend (BFF) 代理模式，与业界常规做法一致
+
+> 如果你只需要手动粘贴 Session Key / API Key 等方式添加账号，不使用 OAuth 授权流程，则**可以不配置** `ADMIN_EMAIL` 和 `ADMIN_PASSWORD`，其余功能不受影响。
 
 ---
 
@@ -26,15 +74,24 @@
 
 1. 进入项目目录：
    ```bash
-   cd e:\workspace\interestspace\sub2api-extra
+   cd sub2api-extra
    ```
 
-2. 配置文件：
-   打开项目中的 `docker-compose.yml` 文件，修改 `SUB2API_BASE_URL` 环境变量。它必须能够从 Docker 容器内部访问到 Sub2API 的后端服务。
+2. 创建 `.env` 文件（推荐）或直接修改 `docker-compose.yml`：
+   ```bash
+   # .env 文件内容
+   SUB2API_BASE_URL=http://host.docker.internal:8080
+   ADMIN_EMAIL=admin@sub2api.local
+   ADMIN_PASSWORD=你的管理员密码
+   ```
+
+   > 💡 也可以直接在 `docker-compose.yml` 的 `environment` 中修改，但推荐使用 `.env` 文件来管理敏感信息，并确保 `.env` 不被提交到 Git。
+
+3. 配置 Sub2API 地址：
    
    > ⚠️ **注意**：Docker 容器内的 `127.0.0.1` 指的是容器自身，而非宿主机。如果 Sub2API 部署在同一台机器上，需要通过 `host.docker.internal` 来访问宿主机端口。Linux 服务器必须搭配 `extra_hosts: ["host.docker.internal:host-gateway"]` 配置才能生效（Mac/Windows 的 Docker Desktop 默认已支持）。
 
-3. 启动服务：
+4. 启动服务：
    ```bash
    docker compose up -d --build
    ```
@@ -62,6 +119,9 @@
          - PORT=3100
          # 改为你的 Sub2API 后端地址（端口号改为你实际的 Sub2API 后端端口）
          - SUB2API_BASE_URL=http://host.docker.internal:9000
+         # Sub2API 管理员凭据（OAuth 授权流程必需）
+         - ADMIN_EMAIL=admin@sub2api.local
+         - ADMIN_PASSWORD=你的管理员密码
    ```
 2. 在该文件所在目录执行启动服务：
    ```bash
@@ -86,7 +146,7 @@
 
 1. 安装依赖：
    ```bash
-   cd e:\workspace\interestspace\sub2api-extra
+   cd sub2api-extra
    npm install
    ```
 
@@ -94,10 +154,15 @@
    ```bash
    # Windows (CMD)
    set SUB2API_BASE_URL=http://localhost:8080
+   set ADMIN_EMAIL=admin@sub2api.local
+   set ADMIN_PASSWORD=你的管理员密码
    node server.js
    
    # Linux / macOS
-   SUB2API_BASE_URL=http://localhost:8080 node server.js
+   SUB2API_BASE_URL=http://localhost:8080 \
+   ADMIN_EMAIL=admin@sub2api.local \
+   ADMIN_PASSWORD=你的管理员密码 \
+   node server.js
    ```
 
 ---
@@ -112,10 +177,10 @@
 4. 填写如下信息：
    - **标签 (Label)**: 账号管理 (或我的账号)
    - **URL**: `http://<部署sub2api-extra的IP或域名>:9870`  (请确保用户浏览器能访问这个URL)
-   - **可见性 (Visibility)**: 建议设为 `admin` (根据需求决定，但后端接口现阶段要求管理员权限)
+   - **可见性 (Visibility)**: 可设为 `all`（所有用户可见），本模块已内置用户隔离机制
 5. 保存设置。
 
-此时，左侧边栏就会出现一个“账号管理”菜单，点击即可无缝嵌入加载这个独立服务。
+此时，左侧边栏就会出现一个"账号管理"菜单，点击即可无缝嵌入加载这个独立服务。
 
 ---
 
@@ -123,7 +188,7 @@
 
 前端页面均为纯纯的原生 HTML/CSS/JS (Vanilla JS)，无须复杂的编译和构建，修改即生效：
 
-- `server.js`: 代理接口、身份校验和权限隔离逻辑。
+- `server.js`: 代理接口、身份校验、OAuth 代理和权限隔离逻辑。
 - `public/index.html`: 整个页面的 UI 骨架和弹窗。
 - `public/style.css`: 样式表（内含暗黑模式定义）。
-- `public/app.js`: 所有核心业务逻辑（API调用、列表渲染、按平台切换表单）。
+- `public/app.js`: 所有核心业务逻辑（API调用、列表渲染、OAuth流程、按平台切换表单）。

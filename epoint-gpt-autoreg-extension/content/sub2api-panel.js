@@ -6,6 +6,14 @@ const SUB2API_PANEL_LISTENER_SENTINEL = 'data-multipage-sub2api-panel-listener';
 const SUB2API_DEFAULT_GROUP_NAME = 'codex';
 const SUB2API_DEFAULT_REDIRECT_URI = 'http://localhost:1455/auth/callback';
 const SUB2API_DEFAULT_CONCURRENCY = 10;
+
+// sub2api-extra proxy base URL (same origin as the extension page, or configurable)
+function getProxyOrigin(payload = {}) {
+  // If the extension has a configured proxy URL, use it; otherwise derive from sub2apiUrl
+  if (payload.proxyUrl) return payload.proxyUrl.replace(/\/+$/, '');
+  // Fallback: use the sub2api origin directly (admin required)
+  return getSub2ApiOrigin(payload);
+}
 const SUB2API_DEFAULT_PRIORITY = 1;
 const SUB2API_DEFAULT_RATE_MULTIPLIER = 1;
 
@@ -170,9 +178,12 @@ async function loginSub2Api(payload = {}) {
   };
 }
 
-async function getGroupByName(origin, token, groupName) {
+async function getGroupByName(origin, token, groupName, proxyOrigin = '') {
   const targetName = (groupName || SUB2API_DEFAULT_GROUP_NAME).trim() || SUB2API_DEFAULT_GROUP_NAME;
-  const groups = await requestJson(origin, '/api/v1/admin/groups/all', {
+  // Use proxy if available, otherwise direct admin API
+  const apiOrigin = proxyOrigin || origin;
+  const apiPath = proxyOrigin ? '/api/groups' : '/api/v1/admin/groups/all';
+  const groups = await requestJson(apiOrigin, apiPath, {
     method: 'GET',
     token,
   });
@@ -191,7 +202,9 @@ async function getGroupByName(origin, token, groupName) {
 
   // 分组不存在 → 自动创建
   log('分组 "' + targetName + '" 不存在，正在自动创建...');
-  const created = await requestJson(origin, '/api/v1/admin/groups', {
+  const createOrigin = proxyOrigin || origin;
+  const createPath = proxyOrigin ? '/api/groups' : '/api/v1/admin/groups';
+  const created = await requestJson(createOrigin, createPath, {
     method: 'POST',
     token,
     body: {
@@ -323,13 +336,17 @@ async function step1_generateOpenAiAuthUrl(payload = {}) {
   const groupName = (payload.sub2apiGroupName || SUB2API_DEFAULT_GROUP_NAME).trim() || SUB2API_DEFAULT_GROUP_NAME;
 
   const { origin, token } = await loginSub2Api(payload);
-  const group = await getGroupByName(origin, token, groupName);
+  const proxyOrigin = getProxyOrigin(payload);
+  const group = await getGroupByName(origin, token, groupName, proxyOrigin);
   const draftName = buildDraftAccountName(group.name || groupName);
 
   log(`步骤 1：已登录 SUB2API，使用分组 ${group.name}（#${group.id}）。`);
   log(`步骤 1：正在向 SUB2API 生成 OpenAI Auth 链接，回调地址为 ${redirectUri}。`);
 
-  const authData = await requestJson(origin, '/api/v1/admin/openai/generate-auth-url', {
+  // Use proxy endpoint to bypass admin restriction
+  const apiOrigin = proxyOrigin || origin;
+  const apiPath = proxyOrigin ? '/api/oauth/openai/generate-auth-url' : '/api/v1/admin/openai/generate-auth-url';
+  const authData = await requestJson(apiOrigin, apiPath, {
     method: 'POST',
     token,
     body: {
@@ -379,8 +396,13 @@ async function step9_submitOpenAiCallback(payload = {}) {
     throw new Error('本次 localhost 回调中的 state 与步骤 1 生成的 state 不一致，请重新执行步骤 1。');
   }
 
+  const proxyOrigin = getProxyOrigin(payload);
+
   log('步骤 9：正在向 SUB2API 交换 OpenAI 授权码...');
-  const exchangeData = await requestJson(origin, '/api/v1/admin/openai/exchange-code', {
+  // Use proxy endpoint to bypass admin restriction
+  const exchangeOrigin = proxyOrigin || origin;
+  const exchangePath = proxyOrigin ? '/api/oauth/openai/exchange-code' : '/api/v1/admin/openai/exchange-code';
+  const exchangeData = await requestJson(exchangeOrigin, exchangePath, {
     method: 'POST',
     token,
     body: {
@@ -414,7 +436,10 @@ async function step9_submitOpenAiCallback(payload = {}) {
   }
 
   log(`步骤 9：授权码交换成功，正在创建 SUB2API 账号（名称：${accountName}）...`);
-  const createdAccount = await requestJson(origin, '/api/v1/admin/accounts', {
+  // Use proxy endpoint to bypass admin restriction
+  const createOrigin = proxyOrigin || origin;
+  const createPath = proxyOrigin ? '/api/accounts' : '/api/v1/admin/accounts';
+  const createdAccount = await requestJson(createOrigin, createPath, {
     method: 'POST',
     token,
     body: createPayload,

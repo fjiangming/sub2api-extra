@@ -14,6 +14,12 @@ let pagination = { page: 1, page_size: 20, total: 0, pages: 1 };
 let searchQuery = '';
 let searchTimer = null;
 
+// OAuth flow state
+let oauthSessionId = '';
+let oauthState = '';       // Antigravity / OpenAI / Gemini state param
+let oauthCredentials = null; // Credentials obtained via OAuth
+let oauthInputMethod = 'oauth-flow'; // 'oauth-flow' or 'manual-key'
+
 // ══════════════════════════════════════
 // Init — Parse URL params & authenticate
 // ══════════════════════════════════════
@@ -51,8 +57,6 @@ let searchTimer = null;
     currentUser = await resp.json();
 
     // Update UI
-    document.getElementById('user-badge').textContent = currentUser.username;
-
     document.getElementById('name-prefix').textContent = currentUser.username + '-';
 
     // Show main content
@@ -158,7 +162,7 @@ function renderAccounts() {
 
   tbody.innerHTML = accounts.map(acc => {
     // Clean up notes for display (remove ownership tag)
-    const displayNotes = (acc.notes || '').replace(/\[added-by:\d+\]\s*/g, '').trim();
+    const displayNotes = (acc.notes || '').trim();
 
     return `
       <tr>
@@ -225,14 +229,22 @@ function renderGroupsCheckboxes() {
     return;
   }
 
-  container.innerHTML = groups
-    .filter(g => g.status === 'active')
-    .map(g => `
-      <label>
-        <input type="checkbox" name="group_ids" value="${g.id}" />
-        <span>${escapeHtml(g.name)}</span>
-      </label>
-    `).join('');
+  const userEmail = currentUser?.email || '';
+
+  // Only show the group matching current user's email
+  const userGroups = groups.filter(g => g.status === 'active' && g.name === userEmail);
+
+  if (userGroups.length === 0) {
+    container.innerHTML = '<span class="loading-text">未找到与当前用户匹配的分组</span>';
+    return;
+  }
+
+  container.innerHTML = userGroups.map(g => `
+    <label style="cursor: default;">
+      <input type="checkbox" name="group_ids" value="${g.id}" checked onclick="return false" style="pointer-events: none;" />
+      <span>${escapeHtml(g.name)}</span>
+    </label>
+  `).join('');
 }
 
 // ══════════════════════════════════════
@@ -270,11 +282,27 @@ function onTypeChange() {
   // Hide all credential fields
   document.querySelectorAll('.cred-field').forEach(el => el.classList.add('hidden'));
 
-  // Show relevant ones
-  const credMap = getCredentialField(platform, type);
-  if (credMap) {
-    document.getElementById(credMap).classList.remove('hidden');
+  // Reset OAuth state on type change
+  resetOAuthState();
+
+  // Determine which field(s) to show
+  if (isOAuthType(type)) {
+    // Show the OAuth flow panel
+    document.getElementById('cred-oauth-flow').classList.remove('hidden');
+    // Also sync manual key panel content
+    updateManualKeyPanel(platform, type);
+    onOAuthMethodChange();
+  } else {
+    // Non-OAuth types: show direct credential field
+    const credMap = getCredentialField(platform, type);
+    if (credMap) {
+      document.getElementById(credMap).classList.remove('hidden');
+    }
   }
+}
+
+function isOAuthType(type) {
+  return type === 'oauth' || type === 'setup-token';
 }
 
 function getTypesForPlatform(platform) {
@@ -310,12 +338,25 @@ function getCredentialField(platform, type) {
   if (type === 'bedrock') return 'cred-bedrock';
   if (type === 'apikey') return 'cred-api-key';
 
-  // OAuth / setup-token
+  // OAuth / setup-token → use oauth flow panel (handled in onTypeChange)
+  // This fallback is for manual-key mode
   if (platform === 'anthropic' || platform === 'antigravity') return 'cred-session-key';
   if (platform === 'openai') return 'cred-refresh-token';
   if (platform === 'gemini') return 'cred-gemini-oauth';
 
   return null;
+}
+
+function getManualCredFieldId(platform) {
+  if (platform === 'anthropic' || platform === 'antigravity') return 'cred-session-key';
+  if (platform === 'openai') return 'cred-refresh-token';
+  if (platform === 'gemini') return 'cred-gemini-oauth';
+  return null;
+}
+
+function updateManualKeyPanel(platform, type) {
+  // This sets up which manual input will be shown when user switches to manual mode
+  // The actual visibility is controlled by onOAuthMethodChange()
 }
 
 function buildCredentials(platform, type) {
@@ -338,7 +379,12 @@ function buildCredentials(platform, type) {
     return { api_key: document.getElementById('form-api-key').value.trim() };
   }
 
-  // OAuth / setup-token
+  // OAuth / setup-token: check if we have OAuth-obtained credentials
+  if (isOAuthType(type) && oauthInputMethod === 'oauth-flow' && oauthCredentials) {
+    return oauthCredentials;
+  }
+
+  // Manual key mode fallback
   if (platform === 'anthropic' || platform === 'antigravity') {
     return { session_key: document.getElementById('form-session-key').value.trim() };
   }
@@ -432,7 +478,16 @@ function validateCredentials(platform, type, creds) {
     return true;
   }
 
-  // OAuth / setup-token
+  // OAuth / setup-token with OAuth flow
+  if (isOAuthType(type) && oauthInputMethod === 'oauth-flow') {
+    if (!oauthCredentials || Object.keys(oauthCredentials).length === 0) {
+      showToast('error', '请先完成 OAuth 授权流程获取凭据');
+      return false;
+    }
+    return true;
+  }
+
+  // Manual key mode
   if (platform === 'anthropic' || platform === 'antigravity') {
     if (!creds.session_key) { showToast('error', '请输入 Session Key'); return false; }
     return true;
@@ -586,12 +641,28 @@ function onCfgPanelModeChange() {
 
 function onCfgMailProviderChange() {
   const provider = document.getElementById('cfg-mail-provider').value;
+  
+  // Inbucket specific visibility
   document.getElementById('cfg-inbucket-group').classList.toggle('hidden', provider !== 'inbucket');
+  
+  // Email Generator dropdown visibility (only shown when not using providers that handle their own emails)
+  const useHotmail = provider === 'hotmail-api';
+  const use2925 = provider === '2925';
+  const useEmailGenerator = !useHotmail && !use2925;
+  document.getElementById('cfg-email-generator-group').classList.toggle('hidden', !useEmailGenerator);
+  
+  // Trigger generator change to update CF domain group visibility
+  onCfgEmailGeneratorChange();
 }
 
 function onCfgEmailGeneratorChange() {
+  const provider = document.getElementById('cfg-mail-provider').value;
+  const useEmailGenerator = provider !== 'hotmail-api' && provider !== '2925';
+  
   const generator = document.getElementById('cfg-email-generator').value;
-  document.getElementById('cfg-cf-group').classList.toggle('hidden', generator !== 'cloudflare');
+  const showCloudflareDomain = useEmailGenerator && generator === 'cloudflare';
+  
+  document.getElementById('cfg-cf-group').classList.toggle('hidden', !showCloudflareDomain);
 }
 
 // ── Save ──
@@ -746,6 +817,338 @@ function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// ══════════════════════════════════════
+// OAuth Authorization Flow
+// ══════════════════════════════════════
+
+function resetOAuthState() {
+  oauthSessionId = '';
+  oauthState = '';
+  oauthCredentials = null;
+  oauthInputMethod = 'oauth-flow';
+
+  // Reset UI
+  const authUrlInput = document.getElementById('oauth-auth-url');
+  const authCodeInput = document.getElementById('oauth-auth-code');
+  const urlArea = document.getElementById('oauth-url-area');
+  const urlDisplay = document.getElementById('oauth-url-display');
+  const errorEl = document.getElementById('oauth-error');
+  const successEl = document.getElementById('oauth-success');
+  const exchangeBtn = document.getElementById('btn-exchange-code');
+  const genBtn = document.getElementById('btn-gen-auth-url');
+
+  if (authUrlInput) authUrlInput.value = '';
+  if (authCodeInput) authCodeInput.value = '';
+  if (urlArea) urlArea.classList.remove('hidden');
+  if (urlDisplay) urlDisplay.classList.add('hidden');
+  if (errorEl) errorEl.classList.add('hidden');
+  if (successEl) successEl.classList.add('hidden');
+  if (exchangeBtn) exchangeBtn.disabled = true;
+  if (genBtn) {
+    genBtn.disabled = false;
+    document.getElementById('btn-gen-auth-url-text').textContent = '生成授权链接';
+  }
+
+  // Reset radio to oauth-flow
+  const radio = document.querySelector('input[name="oauth-input-method"][value="oauth-flow"]');
+  if (radio) radio.checked = true;
+}
+
+function onOAuthMethodChange() {
+  const selected = document.querySelector('input[name="oauth-input-method"]:checked');
+  oauthInputMethod = selected ? selected.value : 'oauth-flow';
+
+  const flowPanel = document.getElementById('oauth-flow-panel');
+  const manualPanel = document.getElementById('manual-key-panel');
+
+  // Hide manual credential fields first
+  ['cred-session-key', 'cred-refresh-token', 'cred-gemini-oauth'].forEach(id => {
+    document.getElementById(id).classList.add('hidden');
+  });
+
+  if (oauthInputMethod === 'oauth-flow') {
+    flowPanel.classList.remove('hidden');
+    manualPanel.classList.add('hidden');
+  } else {
+    flowPanel.classList.add('hidden');
+    manualPanel.classList.remove('hidden');
+    // Show the appropriate manual key field
+    const platform = document.getElementById('form-platform').value;
+    const manualFieldId = getManualCredFieldId(platform);
+    if (manualFieldId) {
+      document.getElementById(manualFieldId).classList.remove('hidden');
+    }
+  }
+}
+
+function getOAuthEndpoints(platform, type) {
+  if (platform === 'anthropic') {
+    if (type === 'setup-token') {
+      return {
+        generateUrl: '/api/oauth/accounts/generate-setup-token-url',
+        exchangeCode: '/api/oauth/accounts/exchange-setup-token-code',
+      };
+    }
+    return {
+      generateUrl: '/api/oauth/accounts/generate-auth-url',
+      exchangeCode: '/api/oauth/accounts/exchange-code',
+    };
+  }
+  if (platform === 'openai') {
+    return {
+      generateUrl: '/api/oauth/openai/generate-auth-url',
+      exchangeCode: '/api/oauth/openai/exchange-code',
+    };
+  }
+  if (platform === 'gemini') {
+    return {
+      generateUrl: '/api/oauth/gemini/auth-url',
+      exchangeCode: '/api/oauth/gemini/exchange-code',
+    };
+  }
+  if (platform === 'antigravity') {
+    return {
+      generateUrl: '/api/oauth/antigravity/auth-url',
+      exchangeCode: '/api/oauth/antigravity/exchange-code',
+    };
+  }
+  return null;
+}
+
+async function handleGenerateAuthUrl() {
+  const platform = document.getElementById('form-platform').value;
+  const type = document.getElementById('form-type').value;
+  const endpoints = getOAuthEndpoints(platform, type);
+  if (!endpoints) {
+    showToast('error', '当前平台不支持 OAuth 流程');
+    return;
+  }
+
+  const btn = document.getElementById('btn-gen-auth-url');
+  const btnText = document.getElementById('btn-gen-auth-url-text');
+  btn.disabled = true;
+  btnText.textContent = '生成中...';
+
+  // Hide previous results
+  document.getElementById('oauth-error').classList.add('hidden');
+  document.getElementById('oauth-success').classList.add('hidden');
+  oauthCredentials = null;
+
+  try {
+    const resp = await apiFetch(endpoints.generateUrl, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || err.error || err.message || `生成授权链接失败 (${resp.status})`);
+    }
+
+    const rawData = await resp.json();
+    // Sub2API wraps responses in { code, message, data: { ... } }
+    const data = rawData.data || rawData;
+    const authUrl = data.auth_url;
+    oauthSessionId = data.session_id || '';
+    oauthState = data.state || '';
+
+    if (!authUrl) {
+      throw new Error('未返回授权链接');
+    }
+
+    // Show the URL
+    document.getElementById('oauth-auth-url').value = authUrl;
+    document.getElementById('oauth-url-area').classList.add('hidden');
+    document.getElementById('oauth-url-display').classList.remove('hidden');
+
+    showToast('success', '授权链接已生成，请复制并在浏览器中打开');
+  } catch (err) {
+    showOAuthError(err.message);
+    showToast('error', err.message);
+  } finally {
+    btn.disabled = false;
+    btnText.textContent = '生成授权链接';
+  }
+}
+
+function copyOAuthUrl() {
+  const url = document.getElementById('oauth-auth-url').value;
+  if (!url) return;
+
+  navigator.clipboard.writeText(url).then(() => {
+    showToast('success', '授权链接已复制到剪贴板');
+  }).catch(() => {
+    // Fallback for older browsers
+    const input = document.getElementById('oauth-auth-url');
+    input.select();
+    document.execCommand('copy');
+    showToast('success', '授权链接已复制到剪贴板');
+  });
+}
+
+function onOAuthCodeInput() {
+  const textarea = document.getElementById('oauth-auth-code');
+  let value = textarea.value.trim();
+  const exchangeBtn = document.getElementById('btn-exchange-code');
+
+  // Auto-extract code from callback URL
+  if (value.includes('?') && value.includes('code=')) {
+    try {
+      const url = new URL(value);
+      const code = url.searchParams.get('code');
+      const stateParam = url.searchParams.get('state');
+      if (stateParam) {
+        oauthState = stateParam;
+      }
+      if (code && code !== value) {
+        textarea.value = code;
+        value = code;
+        showToast('info', '已自动从回调 URL 中提取授权码');
+      }
+    } catch {
+      // Try regex extraction
+      const match = value.match(/[?&]code=([^&]+)/);
+      const stateMatch = value.match(/[?&]state=([^&]+)/);
+      if (stateMatch && stateMatch[1]) {
+        oauthState = stateMatch[1];
+      }
+      if (match && match[1] && match[1] !== value) {
+        textarea.value = match[1];
+        value = match[1];
+        showToast('info', '已自动从回调 URL 中提取授权码');
+      }
+    }
+  }
+
+  exchangeBtn.disabled = !value;
+}
+
+async function handleExchangeCode() {
+  const platform = document.getElementById('form-platform').value;
+  const type = document.getElementById('form-type').value;
+  const code = document.getElementById('oauth-auth-code').value.trim();
+
+  if (!code) {
+    showToast('error', '请输入授权码');
+    return;
+  }
+
+  const endpoints = getOAuthEndpoints(platform, type);
+  if (!endpoints) {
+    showToast('error', '当前平台不支持 OAuth 流程');
+    return;
+  }
+
+  const btn = document.getElementById('btn-exchange-code');
+  const btnText = document.getElementById('btn-exchange-text');
+  btn.disabled = true;
+  btnText.textContent = '获取中...';
+
+  document.getElementById('oauth-error').classList.add('hidden');
+
+  try {
+    const body = {
+      session_id: oauthSessionId,
+      code: code,
+    };
+    if (oauthState) body.state = oauthState;
+
+    const resp = await apiFetch(endpoints.exchangeCode, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || err.error || err.message || `交换凭据失败 (${resp.status})`);
+    }
+
+    const rawTokenInfo = await resp.json();
+    // Sub2API wraps responses in { code, message, data: { ... } }
+    const tokenInfo = rawTokenInfo.data || rawTokenInfo;
+
+    // Build credentials based on platform
+    oauthCredentials = buildOAuthCredentials(platform, type, tokenInfo);
+
+    // Show success
+    const successDetail = buildOAuthSuccessDetail(platform, tokenInfo);
+    document.getElementById('oauth-success-detail').textContent = successDetail;
+    document.getElementById('oauth-success').classList.remove('hidden');
+
+    showToast('success', '凭据获取成功！可以直接提交添加账号。');
+  } catch (err) {
+    showOAuthError(err.message);
+    showToast('error', err.message);
+  } finally {
+    btn.disabled = false;
+    btnText.textContent = '获取凭据';
+  }
+}
+
+function buildOAuthCredentials(platform, type, tokenInfo) {
+  if (platform === 'anthropic') {
+    // Claude OAuth returns session_key
+    return {
+      session_key: tokenInfo.session_key || tokenInfo.sessionKey || tokenInfo.token || '',
+    };
+  }
+  if (platform === 'openai') {
+    return {
+      refresh_token: tokenInfo.refresh_token || '',
+      access_token: tokenInfo.access_token || '',
+    };
+  }
+  if (platform === 'gemini') {
+    const creds = {};
+    if (tokenInfo.access_token) creds.access_token = tokenInfo.access_token;
+    if (tokenInfo.refresh_token) creds.refresh_token = tokenInfo.refresh_token;
+    if (tokenInfo.oauth_type) creds.oauth_type = tokenInfo.oauth_type;
+    return creds;
+  }
+  if (platform === 'antigravity') {
+    const creds = {};
+    if (tokenInfo.access_token) creds.access_token = tokenInfo.access_token;
+    if (tokenInfo.refresh_token) creds.refresh_token = tokenInfo.refresh_token;
+    if (tokenInfo.token_type) creds.token_type = tokenInfo.token_type;
+    if (tokenInfo.expires_at) {
+      creds.expires_at = typeof tokenInfo.expires_at === 'number'
+        ? Math.floor(tokenInfo.expires_at).toString()
+        : String(tokenInfo.expires_at);
+    }
+    if (tokenInfo.project_id) creds.project_id = tokenInfo.project_id;
+    if (tokenInfo.email) creds.email = tokenInfo.email;
+    return creds;
+  }
+  // Fallback: return everything from tokenInfo
+  return { ...tokenInfo };
+}
+
+function buildOAuthSuccessDetail(platform, tokenInfo) {
+  const parts = [];
+  if (tokenInfo.email || tokenInfo.email_address) {
+    parts.push(`邮箱: ${tokenInfo.email || tokenInfo.email_address}`);
+  }
+  if (tokenInfo.org_uuid) {
+    parts.push(`Org: ${tokenInfo.org_uuid}`);
+  }
+  if (tokenInfo.account_uuid) {
+    parts.push(`Account: ${tokenInfo.account_uuid}`);
+  }
+  if (tokenInfo.project_id) {
+    parts.push(`Project: ${tokenInfo.project_id}`);
+  }
+  if (parts.length === 0) {
+    parts.push('凭据已就绪，请填写其他信息后提交');
+  }
+  return parts.join(' | ');
+}
+
+function showOAuthError(msg) {
+  const el = document.getElementById('oauth-error');
+  el.textContent = msg;
+  el.classList.remove('hidden');
+}
+
 window.openConfigModal = openConfigModal;
 window.closeConfigModal = closeConfigModal;
 window.handleSaveConfig = handleSaveConfig;
@@ -761,3 +1164,10 @@ window.onPlatformChange = onPlatformChange;
 window.onTypeChange = onTypeChange;
 window.deleteAccount = deleteAccount;
 window.goToPage = goToPage;
+
+// OAuth flow exposed functions
+window.onOAuthMethodChange = onOAuthMethodChange;
+window.handleGenerateAuthUrl = handleGenerateAuthUrl;
+window.copyOAuthUrl = copyOAuthUrl;
+window.onOAuthCodeInput = onOAuthCodeInput;
+window.handleExchangeCode = handleExchangeCode;

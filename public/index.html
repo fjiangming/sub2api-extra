@@ -31,7 +31,7 @@
       <div class="page-header">
         <div class="header-left">
           <h1>账号管理</h1>
-          <span id="user-badge" class="user-badge"></span>
+          <a href="README.html" target="_blank" class="btn btn-secondary" style="margin-left: 12px;">说明文档</a>
         </div>
         <div class="header-right">
           <div class="search-box">
@@ -89,7 +89,7 @@
 
   <!-- Add Account Modal -->
   <div id="add-modal" class="modal-overlay hidden">
-    <div class="modal">
+    <div class="modal modal-xl">
       <div class="modal-header">
         <h2>添加账号</h2>
         <button class="modal-close" onclick="closeAddModal()">
@@ -98,27 +98,29 @@
       </div>
       <div class="modal-body">
         <form id="add-form" onsubmit="handleAddAccount(event)">
-          <!-- Platform -->
-          <div class="form-group">
-            <label>平台 <span class="required">*</span></label>
-            <select id="form-platform" onchange="onPlatformChange()" required>
-              <option value="anthropic">Anthropic (Claude)</option>
-              <option value="openai">OpenAI (ChatGPT)</option>
-              <option value="gemini">Gemini (Google)</option>
-              <option value="antigravity">Antigravity</option>
-            </select>
-          </div>
+          <div class="form-row">
+            <!-- Platform -->
+            <div class="form-group">
+              <label>平台 <span class="required">*</span></label>
+              <select id="form-platform" onchange="onPlatformChange()" required>
+                <option value="anthropic">Anthropic (Claude)</option>
+                <option value="openai">OpenAI (ChatGPT)</option>
+                <option value="gemini">Gemini (Google)</option>
+                <option value="antigravity">Antigravity</option>
+              </select>
+            </div>
 
-          <!-- Type -->
-          <div class="form-group">
-            <label>类型 <span class="required">*</span></label>
-            <select id="form-type" onchange="onTypeChange()" required>
-              <option value="oauth">OAuth</option>
-              <option value="setup-token">Setup Token</option>
-              <option value="apikey">API Key</option>
-              <option value="upstream">Upstream</option>
-              <option value="bedrock">Bedrock</option>
-            </select>
+            <!-- Type -->
+            <div class="form-group">
+              <label>类型 <span class="required">*</span></label>
+              <select id="form-type" onchange="onTypeChange()" required>
+                <option value="oauth">OAuth</option>
+                <option value="setup-token">Setup Token</option>
+                <option value="apikey">API Key</option>
+                <option value="upstream">Upstream</option>
+                <option value="bedrock">Bedrock</option>
+              </select>
+            </div>
           </div>
 
           <!-- Name -->
@@ -131,25 +133,126 @@
             <small class="form-hint">名称将自动添加用户名前缀用于区分</small>
           </div>
 
-          <!-- Credentials: Session Key (Anthropic OAuth / Setup Token / Antigravity) -->
-          <div id="cred-session-key" class="form-group cred-field">
+          <!-- ════ OAuth Authorization Flow (shown for oauth / setup-token types) ════ -->
+          <div id="cred-oauth-flow" class="form-group cred-field">
+            <!-- Input method selector -->
+            <div class="oauth-method-selector">
+              <label class="oauth-method-label">认证方式</label>
+              <div class="oauth-method-options">
+                <label class="oauth-radio-label">
+                  <input type="radio" name="oauth-input-method" value="oauth-flow" checked onchange="onOAuthMethodChange()" />
+                  <span>OAuth 授权登录</span>
+                </label>
+                <label class="oauth-radio-label">
+                  <input type="radio" name="oauth-input-method" value="manual-key" onchange="onOAuthMethodChange()" />
+                  <span>手动粘贴凭据</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- ── OAuth Flow Panel ── -->
+            <div id="oauth-flow-panel" class="oauth-flow-panel">
+              <div class="oauth-flow-header">
+                <div class="oauth-flow-icon">🔗</div>
+                <div>
+                  <h4>OAuth 授权</h4>
+                  <p class="oauth-flow-desc">通过 OAuth 授权获取凭据，按以下步骤操作：</p>
+                </div>
+              </div>
+
+              <!-- Step 1: Generate Auth URL -->
+              <div class="oauth-step">
+                <div class="oauth-step-num">1</div>
+                <div class="oauth-step-content">
+                  <p class="oauth-step-title">生成授权链接</p>
+                  <div id="oauth-url-area">
+                    <button type="button" class="btn btn-primary btn-sm" id="btn-gen-auth-url" onclick="handleGenerateAuthUrl()">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                      <span id="btn-gen-auth-url-text">生成授权链接</span>
+                    </button>
+                  </div>
+                  <!-- Generated URL display -->
+                  <div id="oauth-url-display" class="oauth-url-display hidden">
+                    <div class="oauth-url-row">
+                      <input id="oauth-auth-url" type="text" readonly class="oauth-url-input" />
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="copyOAuthUrl()" title="复制链接">
+                        <svg id="oauth-copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                      </button>
+                    </div>
+                    <button type="button" class="oauth-regen-link" onclick="handleGenerateAuthUrl()">🔄 重新生成</button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Step 2: Open and authorize -->
+              <div class="oauth-step">
+                <div class="oauth-step-num">2</div>
+                <div class="oauth-step-content">
+                  <p class="oauth-step-title">打开链接并完成授权</p>
+                  <p class="oauth-step-desc">在新窗口中打开上面的链接，登录账号并完成授权。授权完成后会跳转到回调地址。</p>
+                  <div class="oauth-notice">
+                    <strong>💡 提示：</strong>复制完整的回调地址（包含 <code>code=</code> 参数）粘贴到下方，系统会自动提取授权码。
+                  </div>
+                </div>
+              </div>
+
+              <!-- Step 3: Enter code -->
+              <div class="oauth-step">
+                <div class="oauth-step-num">3</div>
+                <div class="oauth-step-content">
+                  <p class="oauth-step-title">输入授权码或回调 URL</p>
+                  <textarea id="oauth-auth-code" rows="3" class="oauth-code-input" placeholder="粘贴回调地址 (http://...?code=xxx) 或直接粘贴授权码..." oninput="onOAuthCodeInput()"></textarea>
+                  <p class="oauth-code-hint">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+                    支持直接粘贴完整回调 URL，会自动提取 code 参数
+                  </p>
+
+                  <!-- OAuth error display -->
+                  <div id="oauth-error" class="oauth-error hidden"></div>
+
+                  <!-- Exchange button -->
+                  <button type="button" class="btn btn-primary" id="btn-exchange-code" onclick="handleExchangeCode()" disabled style="margin-top: 8px;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/></svg>
+                    <span id="btn-exchange-text">获取凭据</span>
+                  </button>
+
+                  <!-- Success result -->
+                  <div id="oauth-success" class="oauth-success hidden">
+                    <div class="oauth-success-icon">✅</div>
+                    <div>
+                      <p class="oauth-success-title">凭据获取成功！</p>
+                      <p id="oauth-success-detail" class="oauth-success-detail"></p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ── Manual Key Panel (hidden by default) ── -->
+            <div id="manual-key-panel" class="hidden">
+              <!-- Will be populated dynamically based on platform -->
+            </div>
+          </div>
+
+          <!-- Credentials: Session Key (manual mode for Anthropic/Antigravity) -->
+          <div id="cred-session-key" class="form-group cred-field hidden">
             <label>Session Key <span class="required">*</span></label>
             <textarea id="form-session-key" rows="3" placeholder="粘贴 session key..."></textarea>
           </div>
 
-          <!-- Credentials: API Key (OpenAI / Gemini APIKey) -->
+          <!-- Credentials: API Key -->
           <div id="cred-api-key" class="form-group cred-field hidden">
             <label>API Key <span class="required">*</span></label>
             <input id="form-api-key" type="text" placeholder="sk-... 或 AIza..." />
           </div>
 
-          <!-- Credentials: Refresh Token (OpenAI OAuth) -->
+          <!-- Credentials: Refresh Token (OpenAI manual mode) -->
           <div id="cred-refresh-token" class="form-group cred-field hidden">
             <label>Refresh Token <span class="required">*</span></label>
             <textarea id="form-refresh-token" rows="3" placeholder="粘贴 refresh token..."></textarea>
           </div>
 
-          <!-- Credentials: Gemini OAuth -->
+          <!-- Credentials: Gemini OAuth (manual mode) -->
           <div id="cred-gemini-oauth" class="form-group cred-field hidden">
             <label>Access Token</label>
             <textarea id="form-gemini-access-token" rows="2" placeholder="粘贴 access token..."></textarea>
@@ -182,18 +285,20 @@
             <input id="form-bedrock-region" type="text" placeholder="us-east-1" value="us-east-1" />
           </div>
 
-          <!-- Groups -->
-          <div class="form-group">
-            <label>分组</label>
-            <div id="groups-container" class="checkbox-group">
-              <span class="loading-text">加载中...</span>
+          <div class="form-row">
+            <!-- Groups -->
+            <div class="form-group">
+              <label>分组</label>
+              <div id="groups-container" class="checkbox-group">
+                <span class="loading-text">加载中...</span>
+              </div>
             </div>
-          </div>
 
-          <!-- Notes -->
-          <div class="form-group">
-            <label>备注</label>
-            <input id="form-notes" type="text" placeholder="可选备注信息" />
+            <!-- Notes -->
+            <div class="form-group">
+              <label>备注</label>
+              <input id="form-notes" type="text" placeholder="可选备注信息" />
+            </div>
           </div>
 
           <div class="modal-footer">
@@ -249,7 +354,7 @@
               <option value="inbucket">Inbucket（自定义主机）</option>
             </select>
           </div>
-          <div class="form-group">
+          <div class="form-group" id="cfg-email-generator-group">
             <label>邮箱生成</label>
             <select id="cfg-email-generator" onchange="onCfgEmailGeneratorChange()">
               <option value="duck">DuckDuckGo</option>

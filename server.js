@@ -10,6 +10,13 @@ const SUB2API_BASE_URL = (process.env.SUB2API_BASE_URL || 'http://localhost:8080
 const DATA_FILE = path.join(__dirname, 'data', 'extension_settings.json');
 const ENCRYPTION_KEY = Buffer.from((process.env.EXT_SECRET || 'sub2api_ext_settings_secret_key_1').padEnd(32, '0')).slice(0, 32);
 
+// Admin credentials for proxying admin-only API calls (e.g. OAuth)
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || '';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
+
+// Cached admin token
+let adminTokenCache = { token: null, expiresAt: 0 };
+
 app.use(express.json());
 
 // Ensure data file exists
@@ -84,6 +91,51 @@ async function sub2apiRequest(method, apiPath, token, body) {
   return { status: resp.status, data };
 }
 
+/**
+ * Get a valid admin token for proxying admin-only API calls.
+ * Automatically logs in with ADMIN_EMAIL / ADMIN_PASSWORD and caches the token.
+ */
+async function getAdminToken() {
+  // Return cached token if still valid (with 60s safety margin)
+  if (adminTokenCache.token && adminTokenCache.expiresAt > Date.now() + 60_000) {
+    return adminTokenCache.token;
+  }
+
+  if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
+    throw new Error('ADMIN_EMAIL and ADMIN_PASSWORD environment variables are required for OAuth proxy');
+  }
+
+  const result = await sub2apiRequest('POST', '/api/v1/auth/login', null, {
+    email: ADMIN_EMAIL,
+    password: ADMIN_PASSWORD,
+  });
+
+  // Sub2API response: { code, message, data: { access_token, refresh_token, ... } }
+  const token = result.data?.data?.access_token || result.data?.access_token;
+
+  if (result.status !== 200 || !token) {
+    throw new Error(`Admin login failed: ${result.data.error || result.data.message || JSON.stringify(result.data)}`);
+  }
+
+  // Decode expiration from JWT
+  const payload = decodeJwtPayload(token);
+  const expiresAt = payload && payload.exp ? payload.exp * 1000 : Date.now() + 3600_000;
+
+  adminTokenCache = { token, expiresAt };
+  console.log('Admin token obtained / refreshed successfully');
+  return token;
+}
+
+/**
+ * Verify the incoming request has a valid user JWT.
+ * Returns the decoded payload, or null if invalid.
+ */
+function verifyUserToken(req) {
+  const token = extractToken(req);
+  if (!token) return null;
+  return decodeJwtPayload(token);
+}
+
 // ──────────────────────────────────────────────
 // API: Verify user identity
 // Decode JWT directly to avoid Sub2API admin-only
@@ -112,7 +164,7 @@ app.get('/api/auth/me', async (req, res) => {
     const jwtPayload = decodeJwtPayload(token);
     if (jwtPayload) {
       const user = {
-        id: jwtPayload.sub || jwtPayload.id || jwtPayload.user_id,
+        id: jwtPayload.user_id || jwtPayload.sub || jwtPayload.id,
         username: jwtPayload.username || jwtPayload.name || jwtPayload.email || 'user',
         email: jwtPayload.email || '',
         role: jwtPayload.role || 'user',
@@ -129,7 +181,7 @@ app.get('/api/auth/me', async (req, res) => {
     // If Sub2API returns 403 but JWT was valid, use JWT data
     if (result.status === 403 && jwtPayload) {
       return res.json({
-        id: jwtPayload.sub || jwtPayload.id || 'unknown',
+        id: jwtPayload.user_id || jwtPayload.sub || jwtPayload.id || 'unknown',
         username: jwtPayload.username || jwtPayload.name || jwtPayload.email || 'user',
         email: jwtPayload.email || '',
         role: jwtPayload.role || 'user',
@@ -145,7 +197,7 @@ app.get('/api/auth/me', async (req, res) => {
       const jwtPayload = decodeJwtPayload(token);
       if (jwtPayload) {
         return res.json({
-          id: jwtPayload.sub || jwtPayload.id || 'unknown',
+          id: jwtPayload.user_id || jwtPayload.sub || jwtPayload.id || 'unknown',
           username: jwtPayload.username || jwtPayload.name || jwtPayload.email || 'user',
           email: jwtPayload.email || '',
           role: jwtPayload.role || 'user',
@@ -177,7 +229,22 @@ app.post('/api/v1/auth/login', async (req, res) => {
 });
 
 // ──────────────────────────────────────────────
-// API: List accounts (filtered by user ownership)
+// Helper: Resolve user email to group ID
+// ──────────────────────────────────────────────
+
+async function resolveUserGroupId(userEmail, adminToken) {
+  if (!userEmail) return null;
+  const groupsResult = await sub2apiRequest('GET', '/api/v1/admin/groups/all', adminToken);
+  if (groupsResult.status !== 200) return null;
+  const allGroups = Array.isArray(groupsResult.data)
+    ? groupsResult.data
+    : (groupsResult.data?.items || groupsResult.data?.data || []);
+  const userGroup = allGroups.find(g => g.status === 'active' && g.name === userEmail);
+  return userGroup ? userGroup.id : null;
+}
+
+// ──────────────────────────────────────────────
+// API: List accounts (filtered by user group)
 // ──────────────────────────────────────────────
 
 app.get('/api/accounts', async (req, res) => {
@@ -185,74 +252,49 @@ app.get('/api/accounts', async (req, res) => {
     const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'No token provided' });
 
-    const userId = req.query.user_id;
-    if (!userId) return res.status(400).json({ error: 'user_id required' });
+    // Security: always extract user identity from JWT
+    const jwtPayload = decodeJwtPayload(token);
+    if (!jwtPayload) return res.status(401).json({ error: 'Invalid or expired token' });
+    const userId = jwtPayload.user_id || jwtPayload.sub || jwtPayload.id;
+    if (!userId) return res.status(401).json({ error: 'Unable to determine user identity from token' });
+    const userEmail = jwtPayload.email || '';
 
-    const ownerTag = `[added-by:${userId}]`;
     const searchQuery = req.query.search || '';
+    const page = parseInt(req.query.page) || 1;
+    const pageSize = parseInt(req.query.page_size) || 20;
 
-    // Fetch accounts from Sub2API (large page to get all for filtering)
-    // We'll paginate through if needed
-    let allMatchedAccounts = [];
-    let page = 1;
-    const pageSize = 200;
-    let totalPages = 1;
+    const adminToken = await getAdminToken();
 
-    do {
-      const queryParams = new URLSearchParams({
-        page: String(page),
-        page_size: String(pageSize),
-      });
-      if (searchQuery) queryParams.set('search', searchQuery);
-
-      const result = await sub2apiRequest(
-        'GET',
-        `/api/v1/admin/accounts?${queryParams.toString()}`,
-        token
-      );
-
-      if (result.status !== 200) {
-        return res.status(result.status).json(result.data);
-      }
-
-      const responseData = result.data;
-      // Sub2API wraps in { code, data } or returns directly
-      const items = responseData.items || responseData.data?.items || [];
-      const total = responseData.total || responseData.data?.total || 0;
-      const pages = responseData.pages || responseData.data?.pages || 1;
-      totalPages = pages;
-
-      // Filter by ownership tag in notes
-      const matched = items.filter(acc =>
-        acc.notes && acc.notes.includes(ownerTag)
-      );
-      allMatchedAccounts.push(...matched);
-      page++;
-    } while (page <= totalPages && page <= 10); // Safety limit: max 10 pages (2000 accounts)
-
-    // Apply client-side search if needed (Sub2API search may be broader)
-    let filtered = allMatchedAccounts;
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      filtered = allMatchedAccounts.filter(acc =>
-        (acc.name && acc.name.toLowerCase().includes(q)) ||
-        (acc.notes && acc.notes.toLowerCase().includes(q))
-      );
+    // Find the group matching the user's email
+    const userGroupId = await resolveUserGroupId(userEmail, adminToken);
+    if (!userGroupId) {
+      return res.json({ items: [], total: 0, page, page_size: pageSize, pages: 1 });
     }
 
-    // Client-side pagination
-    const clientPage = parseInt(req.query.page) || 1;
-    const clientPageSize = parseInt(req.query.page_size) || 20;
-    const start = (clientPage - 1) * clientPageSize;
-    const paged = filtered.slice(start, start + clientPageSize);
-
-    res.json({
-      items: paged,
-      total: filtered.length,
-      page: clientPage,
-      page_size: clientPageSize,
-      pages: Math.ceil(filtered.length / clientPageSize) || 1
+    // Fetch accounts filtered by group_id (server-side filtering + pagination)
+    const queryParams = new URLSearchParams({
+      page: String(page),
+      page_size: String(pageSize),
+      group_id: String(userGroupId),
     });
+    if (searchQuery) queryParams.set('search', searchQuery);
+
+    const result = await sub2apiRequest(
+      'GET',
+      `/api/v1/admin/accounts?${queryParams.toString()}`,
+      adminToken
+    );
+
+    if (result.status !== 200) {
+      return res.status(result.status).json(result.data);
+    }
+
+    const responseData = result.data;
+    const items = responseData.items || responseData.data?.items || [];
+    const total = responseData.total || responseData.data?.total || 0;
+    const pages = responseData.pages || responseData.data?.pages || 1;
+
+    res.json({ items, total, page, page_size: pageSize, pages });
   } catch (err) {
     console.error('List accounts error:', err.message);
     res.status(502).json({ error: 'Failed to connect to Sub2API' });
@@ -260,7 +302,7 @@ app.get('/api/accounts', async (req, res) => {
 });
 
 // ──────────────────────────────────────────────
-// API: Create account (inject ownership tag)
+// API: Create account
 // ──────────────────────────────────────────────
 
 app.post('/api/accounts', async (req, res) => {
@@ -268,20 +310,21 @@ app.post('/api/accounts', async (req, res) => {
     const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'No token provided' });
 
-    const { user_id, username, ...accountData } = req.body;
-    if (!user_id) return res.status(400).json({ error: 'user_id required' });
+    // Security: always extract identity from JWT, ignore frontend-provided values
+    const jwtPayload = decodeJwtPayload(token);
+    if (!jwtPayload) return res.status(401).json({ error: 'Invalid or expired token' });
+    const username = jwtPayload.name || jwtPayload.username || jwtPayload.email || '';
+
+    // Strip user_id/username from body, keep only account data
+    const { user_id: _uid, username: _uname, ...accountData } = req.body;
 
     // Prefix name with username
     const namePrefix = username ? `${username}-` : '';
     accountData.name = `${namePrefix}${accountData.name || 'unnamed'}`;
 
-    // Inject ownership tag into notes
-    const ownerTag = `[added-by:${user_id}]`;
-    accountData.notes = accountData.notes
-      ? `${ownerTag} ${accountData.notes}`
-      : ownerTag;
-
-    const result = await sub2apiRequest('POST', '/api/v1/admin/accounts', token, accountData);
+    // Use admin token to proxy account creation (admin-only endpoint)
+    const adminToken = await getAdminToken();
+    const result = await sub2apiRequest('POST', '/api/v1/admin/accounts', adminToken, accountData);
     res.status(result.status).json(result.data);
   } catch (err) {
     console.error('Create account error:', err.message);
@@ -290,7 +333,7 @@ app.post('/api/accounts', async (req, res) => {
 });
 
 // ──────────────────────────────────────────────
-// API: Delete account (verify ownership first)
+// API: Delete account (verify ownership via group)
 // ──────────────────────────────────────────────
 
 app.delete('/api/accounts/:id', async (req, res) => {
@@ -298,25 +341,34 @@ app.delete('/api/accounts/:id', async (req, res) => {
     const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'No token provided' });
 
-    const userId = req.query.user_id;
-    if (!userId) return res.status(400).json({ error: 'user_id required' });
+    // Security: extract identity from JWT
+    const jwtPayload = decodeJwtPayload(token);
+    if (!jwtPayload) return res.status(401).json({ error: 'Invalid or expired token' });
+    const userEmail = jwtPayload.email || '';
 
     const accountId = req.params.id;
-    const ownerTag = `[added-by:${userId}]`;
+    const adminToken = await getAdminToken();
 
-    // First verify ownership by fetching the account
-    const getResult = await sub2apiRequest('GET', `/api/v1/admin/accounts/${accountId}`, token);
+    // Resolve user's group
+    const userGroupId = await resolveUserGroupId(userEmail, adminToken);
+    if (!userGroupId) {
+      return res.status(403).json({ error: '未找到您的分组，无法执行删除' });
+    }
+
+    // Verify the account belongs to the user's group
+    const getResult = await sub2apiRequest('GET', `/api/v1/admin/accounts/${accountId}`, adminToken);
     if (getResult.status !== 200) {
       return res.status(getResult.status).json(getResult.data);
     }
 
     const account = getResult.data;
-    if (!account.notes || !account.notes.includes(ownerTag)) {
-      return res.status(403).json({ error: 'You can only delete accounts you added' });
+    const accountGroupIds = account.group_ids || (account.groups || []).map(g => g.id);
+    if (!accountGroupIds.includes(userGroupId)) {
+      return res.status(403).json({ error: '您只能删除自己分组下的账号' });
     }
 
     // Delete from Sub2API
-    const result = await sub2apiRequest('DELETE', `/api/v1/admin/accounts/${accountId}`, token);
+    const result = await sub2apiRequest('DELETE', `/api/v1/admin/accounts/${accountId}`, adminToken);
     res.status(result.status).json(result.data);
   } catch (err) {
     console.error('Delete account error:', err.message);
@@ -333,11 +385,142 @@ app.get('/api/groups', async (req, res) => {
     const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'No token provided' });
 
-    const result = await sub2apiRequest('GET', '/api/v1/admin/groups/all', token);
+    // Use admin token since /api/v1/admin/groups/all requires admin
+    const adminToken = await getAdminToken();
+    const result = await sub2apiRequest('GET', '/api/v1/admin/groups/all', adminToken);
     res.status(result.status).json(result.data);
   } catch (err) {
     console.error('List groups error:', err.message);
     res.status(502).json({ error: 'Failed to connect to Sub2API' });
+  }
+});
+
+app.post('/api/groups', async (req, res) => {
+  try {
+    const token = extractToken(req);
+    if (!token) return res.status(401).json({ error: 'No token provided' });
+
+    // Use admin token since creating groups requires admin
+    const adminToken = await getAdminToken();
+    const result = await sub2apiRequest('POST', '/api/v1/admin/groups', adminToken, req.body);
+    res.status(result.status).json(result.data);
+  } catch (err) {
+    console.error('Create group error:', err.message);
+    res.status(502).json({ error: 'Failed to connect to Sub2API' });
+  }
+});
+
+// ──────────────────────────────────────────────
+// API: OAuth proxy routes
+// Proxy OAuth endpoints so non-admin users can
+// use the OAuth authorization flow via this page.
+// ──────────────────────────────────────────────
+
+// Claude OAuth: generate-auth-url, generate-setup-token-url, exchange-code, exchange-setup-token-code, cookie-auth, setup-token-cookie-auth
+const claudeOAuthPaths = [
+  'generate-auth-url',
+  'generate-setup-token-url',
+  'exchange-code',
+  'exchange-setup-token-code',
+  'cookie-auth',
+  'setup-token-cookie-auth',
+];
+for (const p of claudeOAuthPaths) {
+  app.post(`/api/oauth/accounts/${p}`, async (req, res) => {
+    try {
+      const user = verifyUserToken(req);
+      if (!user) return res.status(401).json({ error: 'Not authenticated' });
+      const adminToken = await getAdminToken();
+      const result = await sub2apiRequest('POST', `/api/v1/admin/accounts/${p}`, adminToken, req.body);
+      res.status(result.status).json(result.data);
+    } catch (err) {
+      console.error(`OAuth accounts/${p} error:`, err.message);
+      res.status(502).json({ error: err.message || 'Failed to connect to Sub2API' });
+    }
+  });
+}
+
+// OpenAI OAuth: generate-auth-url, exchange-code, refresh-token
+const openaiOAuthPaths = ['generate-auth-url', 'exchange-code', 'refresh-token'];
+for (const p of openaiOAuthPaths) {
+  app.post(`/api/oauth/openai/${p}`, async (req, res) => {
+    try {
+      const user = verifyUserToken(req);
+      if (!user) return res.status(401).json({ error: 'Not authenticated' });
+      const adminToken = await getAdminToken();
+      const result = await sub2apiRequest('POST', `/api/v1/admin/openai/${p}`, adminToken, req.body);
+      res.status(result.status).json(result.data);
+    } catch (err) {
+      console.error(`OAuth openai/${p} error:`, err.message);
+      res.status(502).json({ error: err.message || 'Failed to connect to Sub2API' });
+    }
+  });
+}
+
+// Gemini OAuth: oauth/auth-url, oauth/exchange-code
+app.post('/api/oauth/gemini/auth-url', async (req, res) => {
+  try {
+    const user = verifyUserToken(req);
+    if (!user) return res.status(401).json({ error: 'Not authenticated' });
+    const adminToken = await getAdminToken();
+    const result = await sub2apiRequest('POST', '/api/v1/admin/gemini/oauth/auth-url', adminToken, req.body);
+    res.status(result.status).json(result.data);
+  } catch (err) {
+    console.error('OAuth gemini/auth-url error:', err.message);
+    res.status(502).json({ error: err.message || 'Failed to connect to Sub2API' });
+  }
+});
+
+app.post('/api/oauth/gemini/exchange-code', async (req, res) => {
+  try {
+    const user = verifyUserToken(req);
+    if (!user) return res.status(401).json({ error: 'Not authenticated' });
+    const adminToken = await getAdminToken();
+    const result = await sub2apiRequest('POST', '/api/v1/admin/gemini/oauth/exchange-code', adminToken, req.body);
+    res.status(result.status).json(result.data);
+  } catch (err) {
+    console.error('OAuth gemini/exchange-code error:', err.message);
+    res.status(502).json({ error: err.message || 'Failed to connect to Sub2API' });
+  }
+});
+
+// Antigravity OAuth: oauth/auth-url, oauth/exchange-code, oauth/refresh-token
+app.post('/api/oauth/antigravity/auth-url', async (req, res) => {
+  try {
+    const user = verifyUserToken(req);
+    if (!user) return res.status(401).json({ error: 'Not authenticated' });
+    const adminToken = await getAdminToken();
+    const result = await sub2apiRequest('POST', '/api/v1/admin/antigravity/oauth/auth-url', adminToken, req.body);
+    res.status(result.status).json(result.data);
+  } catch (err) {
+    console.error('OAuth antigravity/auth-url error:', err.message);
+    res.status(502).json({ error: err.message || 'Failed to connect to Sub2API' });
+  }
+});
+
+app.post('/api/oauth/antigravity/exchange-code', async (req, res) => {
+  try {
+    const user = verifyUserToken(req);
+    if (!user) return res.status(401).json({ error: 'Not authenticated' });
+    const adminToken = await getAdminToken();
+    const result = await sub2apiRequest('POST', '/api/v1/admin/antigravity/oauth/exchange-code', adminToken, req.body);
+    res.status(result.status).json(result.data);
+  } catch (err) {
+    console.error('OAuth antigravity/exchange-code error:', err.message);
+    res.status(502).json({ error: err.message || 'Failed to connect to Sub2API' });
+  }
+});
+
+app.post('/api/oauth/antigravity/refresh-token', async (req, res) => {
+  try {
+    const user = verifyUserToken(req);
+    if (!user) return res.status(401).json({ error: 'Not authenticated' });
+    const adminToken = await getAdminToken();
+    const result = await sub2apiRequest('POST', '/api/v1/admin/antigravity/oauth/refresh-token', adminToken, req.body);
+    res.status(result.status).json(result.data);
+  } catch (err) {
+    console.error('OAuth antigravity/refresh-token error:', err.message);
+    res.status(502).json({ error: err.message || 'Failed to connect to Sub2API' });
   }
 });
 

@@ -502,7 +502,6 @@ async function resetState() {
       'accounts',
       'tabRegistry',
       'sourceLastUrls',
-      'mail2925MainEmail',
     ]),
     getPersistedSettings(),
   ]);
@@ -516,7 +515,7 @@ async function resetState() {
     accounts: prev.accounts || [],
     tabRegistry: prev.tabRegistry || {},
     sourceLastUrls: prev.sourceLastUrls || {},
-    mail2925MainEmail: prev.mail2925MainEmail || '',
+    // mail2925MainEmail 不再保留，重置后从页面重新识别
   });
 }
 
@@ -3943,13 +3942,19 @@ async function executeSub2ApiStep1(state) {
   // 降级时使用插件登录页的账密作为备用。
   let sub2apiEmail = state.sub2apiEmail || '';
   let sub2apiPassword = state.sub2apiPassword || '';
-  if (!sub2apiEmail || !sub2apiPassword) {
+  let proxyUrl = '';
+  {
     const stored = await chrome.storage.local.get('epointgpt_auth');
     const auth = stored.epointgpt_auth;
     if (auth) {
       if (!sub2apiEmail) sub2apiEmail = auth.email || '';
       if (!sub2apiPassword) sub2apiPassword = auth.password || '';
+      // sub2api-extra proxy URL for bypassing admin-only endpoints
+      proxyUrl = auth.extraServerUrl || '';
     }
+  }
+  if (!proxyUrl) {
+    proxyUrl = (await discoverExtraServerUrl()) || '';
   }
 
   await addLog('步骤 1：正在打开 SUB2API 后台...');
@@ -3988,6 +3993,7 @@ async function executeSub2ApiStep1(state) {
       sub2apiEmail,
       sub2apiPassword,
       sub2apiGroupName: groupName,
+      proxyUrl,
     },
   }, {
     responseTimeoutMs: SUB2API_STEP1_RESPONSE_TIMEOUT_MS,
@@ -5154,13 +5160,18 @@ async function executeSub2ApiStep9(state) {
   // 降级时使用插件登录页的账密作为备用。
   let sub2apiEmail = state.sub2apiEmail || '';
   let sub2apiPassword = state.sub2apiPassword || '';
-  if (!sub2apiEmail || !sub2apiPassword) {
+  let proxyUrl = '';
+  {
     const stored = await chrome.storage.local.get('epointgpt_auth');
     const auth = stored.epointgpt_auth;
     if (auth) {
       if (!sub2apiEmail) sub2apiEmail = auth.email || '';
       if (!sub2apiPassword) sub2apiPassword = auth.password || '';
+      proxyUrl = auth.extraServerUrl || '';
     }
+  }
+  if (!proxyUrl) {
+    proxyUrl = (await discoverExtraServerUrl()) || '';
   }
 
   const sub2apiUrl = normalizeSub2ApiUrl(state.sub2apiUrl);
@@ -5203,6 +5214,7 @@ async function executeSub2ApiStep9(state) {
       sub2apiOAuthState: state.sub2apiOAuthState,
       sub2apiGroupId: state.sub2apiGroupId,
       sub2apiDraftName: state.sub2apiDraftName,
+      proxyUrl,
     },
   }, {
     responseTimeoutMs: SUB2API_STEP9_RESPONSE_TIMEOUT_MS,
