@@ -102,7 +102,6 @@ function apiFetch(url, options = {}) {
 async function loadAccounts() {
   try {
     const params = new URLSearchParams({
-      user_id: String(currentUser.id),
       page: String(pagination.page),
       page_size: String(pagination.page_size),
     });
@@ -524,7 +523,7 @@ async function deleteAccount(id, name) {
   if (!confirm(`确定要删除账号 "${name}" 吗？\n此操作将从 Sub2API 系统中彻底删除该账号。`)) return;
 
   try {
-    const resp = await apiFetch(`/api/accounts/${id}?user_id=${currentUser.id}`, {
+    const resp = await apiFetch(`/api/accounts/${id}`, {
       method: 'DELETE'
     });
 
@@ -749,6 +748,15 @@ function goToPage(page) {
   if (page < 1 || page > pagination.pages) return;
   pagination.page = page;
   loadAccounts();
+}
+
+function refreshAccounts() {
+  pagination.page = 1;
+  searchQuery = '';
+  const searchInput = document.getElementById('search-input');
+  if (searchInput) searchInput.value = '';
+  loadAccounts();
+  showToast('info', '列表已刷新');
 }
 
 // ══════════════════════════════════════
@@ -986,6 +994,12 @@ function copyOAuthUrl() {
   });
 }
 
+function handleOpenAuthUrl() {
+  const url = document.getElementById('oauth-auth-url').value;
+  if (!url) return;
+  window.open(url, '_blank');
+}
+
 function onOAuthCodeInput() {
   const textarea = document.getElementById('oauth-auth-code');
   let value = textarea.value.trim();
@@ -1169,5 +1183,6 @@ window.goToPage = goToPage;
 window.onOAuthMethodChange = onOAuthMethodChange;
 window.handleGenerateAuthUrl = handleGenerateAuthUrl;
 window.copyOAuthUrl = copyOAuthUrl;
+window.handleOpenAuthUrl = handleOpenAuthUrl;
 window.onOAuthCodeInput = onOAuthCodeInput;
 window.handleExchangeCode = handleExchangeCode;

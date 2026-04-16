@@ -52,6 +52,10 @@
       <!-- Stats -->
       <div class="stats-bar">
         <span id="stats-text">共 0 个账号</span>
+        <button class="btn btn-secondary btn-sm" onclick="refreshAccounts()" title="刷新列表">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          刷新
+        </button>
       </div>
 
       <!-- Table -->
@@ -80,10 +84,9 @@
             </tr>
           </tbody>
         </table>
+        <!-- Pagination (inside table container, right-aligned) -->
+        <div id="pagination" class="pagination hidden"></div>
       </div>
-
-      <!-- Pagination -->
-      <div id="pagination" class="pagination hidden"></div>
     </div>
   </div>
 
@@ -179,7 +182,10 @@
                         <svg id="oauth-copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                       </button>
                     </div>
-                    <button type="button" class="oauth-regen-link" onclick="handleGenerateAuthUrl()">🔄 重新生成</button>
+                    <div style="display: flex; gap: 12px; align-items: center; margin-top: 6px;">
+                      <button type="button" class="oauth-regen-link" style="margin-top: 0;" onclick="handleGenerateAuthUrl()">🔄 重新生成</button>
+                      <button type="button" class="oauth-regen-link" style="margin-top: 0;" onclick="handleOpenAuthUrl()">🌐 打开链接</button>
+                    </div>
                   </div>
                 </div>
               </div>
