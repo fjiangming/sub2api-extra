@@ -385,10 +385,50 @@ app.get('/api/groups', async (req, res) => {
     const token = extractToken(req);
     if (!token) return res.status(401).json({ error: 'No token provided' });
 
+    // Extract user email from JWT for auto-create check
+    const jwtPayload = decodeJwtPayload(token);
+    const userEmail = jwtPayload?.email || '';
+
     // Use admin token since /api/v1/admin/groups/all requires admin
     const adminToken = await getAdminToken();
     const result = await sub2apiRequest('GET', '/api/v1/admin/groups/all', adminToken);
-    res.status(result.status).json(result.data);
+    if (result.status !== 200) {
+      return res.status(result.status).json(result.data);
+    }
+
+    let allGroups = Array.isArray(result.data)
+      ? result.data
+      : (result.data?.items || result.data?.data || []);
+
+    // Auto-create group if user's email group doesn't exist
+    if (userEmail) {
+      const hasGroup = allGroups.some(g => g.status === 'active' && g.name === userEmail);
+      if (!hasGroup) {
+        console.log(`Auto-creating group for user: ${userEmail}`);
+        try {
+          const createResult = await sub2apiRequest('POST', '/api/v1/admin/groups', adminToken, {
+            name: userEmail,
+            description: `Auto-created for ${userEmail}`,
+            status: 'active',
+          });
+          if (createResult.status === 200 || createResult.status === 201) {
+            // Re-fetch to get the complete list including the new group
+            const refreshed = await sub2apiRequest('GET', '/api/v1/admin/groups/all', adminToken);
+            if (refreshed.status === 200) {
+              allGroups = Array.isArray(refreshed.data)
+                ? refreshed.data
+                : (refreshed.data?.items || refreshed.data?.data || []);
+            }
+          } else {
+            console.warn('Auto-create group failed:', createResult.status, createResult.data);
+          }
+        } catch (createErr) {
+          console.warn('Auto-create group error:', createErr.message);
+        }
+      }
+    }
+
+    res.json(allGroups);
   } catch (err) {
     console.error('List groups error:', err.message);
     res.status(502).json({ error: 'Failed to connect to Sub2API' });
