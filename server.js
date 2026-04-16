@@ -409,6 +409,7 @@ app.get('/api/groups', async (req, res) => {
           const createResult = await sub2apiRequest('POST', '/api/v1/admin/groups', adminToken, {
             name: userEmail,
             description: `Auto-created for ${userEmail}`,
+            platform: 'openai',
             status: 'active',
           });
           if (createResult.status === 200 || createResult.status === 201) {
