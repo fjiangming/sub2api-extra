@@ -100,33 +100,21 @@
         </button>
       </div>
       <div class="modal-body">
-        <form id="add-form" onsubmit="handleAddAccount(event)">
-          <div class="form-row">
-            <!-- Platform -->
-            <div class="form-group">
-              <label>平台 <span class="required">*</span></label>
-              <select id="form-platform" onchange="onPlatformChange()" required>
-                <option value="anthropic">Anthropic (Claude)</option>
-                <option value="openai">OpenAI (ChatGPT)</option>
-                <option value="gemini">Gemini (Google)</option>
-                <option value="antigravity">Antigravity</option>
-              </select>
-            </div>
-
-            <!-- Type -->
-            <div class="form-group">
-              <label>类型 <span class="required">*</span></label>
-              <select id="form-type" onchange="onTypeChange()" required>
-                <option value="oauth">OAuth</option>
-                <option value="setup-token">Setup Token</option>
-                <option value="apikey">API Key</option>
-                <option value="upstream">Upstream</option>
-                <option value="bedrock">Bedrock</option>
-              </select>
-            </div>
+        <!-- Step Indicator -->
+        <div id="step-indicator" class="step-indicator hidden">
+          <div class="step-item">
+            <div class="step-num active" id="step-num-1">1</div>
+            <span class="step-label">基本信息</span>
           </div>
+          <div class="step-line"></div>
+          <div class="step-item">
+            <div class="step-num" id="step-num-2">2</div>
+            <span class="step-label" id="step-label-2">凭据认证</span>
+          </div>
+        </div>
 
-          <!-- Name -->
+<form id="add-form" onsubmit="handleAddAccount(event)">
+          <!-- 1. Name -->
           <div class="form-group">
             <label>名称 <span class="required">*</span></label>
             <div class="input-with-prefix">
@@ -136,7 +124,47 @@
             <small class="form-hint">名称将自动添加用户名前缀用于区分</small>
           </div>
 
-          <!-- ════ OAuth Authorization Flow (shown for oauth / setup-token types) ════ -->
+          <!-- 2. Notes -->
+          <div class="form-group">
+            <label>备注</label>
+            <textarea id="form-notes" rows="3" placeholder="可选管理备忘"></textarea>
+          </div>
+
+          <!-- 3. Platform Selection -->
+          <div class="form-group">
+            <label>平台 <span class="required">*</span></label>
+            <div class="platform-segmented" id="platform-segmented">
+              <button type="button" class="platform-btn active" data-platform="anthropic" onclick="selectPlatform('anthropic')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>
+                Anthropic
+              </button>
+              <button type="button" class="platform-btn" data-platform="openai" onclick="selectPlatform('openai')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"/></svg>
+                OpenAI
+              </button>
+              <button type="button" class="platform-btn" data-platform="gemini" onclick="selectPlatform('gemini')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M12 2l1.5 6.5L20 10l-6.5 1.5L12 18l-1.5-6.5L4 10l6.5-1.5L12 2z"/></svg>
+                Gemini
+              </button>
+              <button type="button" class="platform-btn" data-platform="antigravity" onclick="selectPlatform('antigravity')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z"/></svg>
+                Antigravity
+              </button>
+            </div>
+          </div>
+
+          <input type="hidden" id="form-platform" value="anthropic" />
+          <input type="hidden" id="form-type" value="oauth" />
+
+          <!-- 4. Account Type Selection -->
+          <div class="form-group" id="type-selection-area">
+            <label>类型 <span class="required">*</span></label>
+            <div class="type-cards" id="type-cards">
+              <!-- Dynamically populated -->
+            </div>
+          </div>
+
+          <!-- 5. Credentials Area -->
           <div id="cred-oauth-flow" class="form-group cred-field">
             <!-- Input method selector -->
             <div class="oauth-method-selector">
@@ -153,7 +181,7 @@
               </div>
             </div>
 
-            <!-- ── OAuth Flow Panel ── -->
+            <!-- OAuth Flow Panel -->
             <div id="oauth-flow-panel" class="oauth-flow-panel">
               <div class="oauth-flow-header">
                 <div class="oauth-flow-icon">🔗</div>
@@ -213,7 +241,6 @@
                     支持直接粘贴完整回调 URL，会自动提取 code 参数
                   </p>
 
-                  <!-- OAuth error display -->
                   <div id="oauth-error" class="oauth-error hidden"></div>
 
                   <!-- Exchange button -->
@@ -234,9 +261,8 @@
               </div>
             </div>
 
-            <!-- ── Manual Key Panel (hidden by default) ── -->
+            <!-- Manual Key Panel -->
             <div id="manual-key-panel" class="hidden">
-              <!-- Will be populated dynamically based on platform -->
             </div>
           </div>
 
@@ -283,27 +309,540 @@
 
           <!-- Credentials: Bedrock -->
           <div id="cred-bedrock" class="form-group cred-field hidden">
-            <label>AWS Access Key ID <span class="required">*</span></label>
-            <input id="form-bedrock-access-key" type="text" placeholder="AKIA..." />
-            <label class="mt-2">AWS Secret Access Key <span class="required">*</span></label>
-            <input id="form-bedrock-secret-key" type="password" placeholder="secret key" />
-            <label class="mt-2">AWS Region</label>
-            <input id="form-bedrock-region" type="text" placeholder="us-east-1" value="us-east-1" />
+            <label class="mt-2">认证方式</label>
+            <select id="form-bedrock-auth-mode" onchange="onBedrockAuthModeChange()">
+              <option value="sigv4">AWS IAM (SigV4)</option>
+              <option value="apikey">API Key / Cross-Region Inference</option>
+            </select>
+            
+            <div id="bedrock-sigv4-area">
+              <label class="mt-2">AWS Access Key ID <span class="required">*</span></label>
+              <input id="form-bedrock-access-key" type="text" placeholder="AKIA..." />
+              <label class="mt-2">AWS Secret Access Key <span class="required">*</span></label>
+              <input id="form-bedrock-secret-key" type="password" placeholder="secret key" />
+              <label class="mt-2">AWS Session Token</label>
+              <input id="form-bedrock-session-token" type="text" placeholder="可选，用于临时凭证" />
+            </div>
+
+            <div id="bedrock-apikey-area" class="hidden">
+              <label class="mt-2">API Key <span class="required">*</span></label>
+              <input id="form-bedrock-api-key-only" type="text" placeholder="包含跨区域推理权限的 API Key" />
+            </div>
+
+            <label class="mt-2">AWS Region <span class="required">*</span></label>
+            <select id="form-bedrock-region">
+              <optgroup label="US">
+                <option value="us-east-1">US East (N. Virginia)</option>
+                <option value="us-east-2">US East (Ohio)</option>
+                <option value="us-west-1">US West (N. California)</option>
+                <option value="us-west-2">US West (Oregon)</option>
+              </optgroup>
+              <optgroup label="Europe">
+                <option value="eu-central-1">Europe (Frankfurt)</option>
+                <option value="eu-west-1">Europe (Ireland)</option>
+                <option value="eu-west-2">Europe (London)</option>
+                <option value="eu-west-3">Europe (Paris)</option>
+              </optgroup>
+              <optgroup label="Asia Pacific">
+                <option value="ap-south-1">Asia Pacific (Mumbai)</option>
+                <option value="ap-northeast-1">Asia Pacific (Tokyo)</option>
+                <option value="ap-northeast-2">Asia Pacific (Seoul)</option>
+                <option value="ap-northeast-3">Asia Pacific (Osaka)</option>
+                <option value="ap-southeast-1">Asia Pacific (Singapore)</option>
+                <option value="ap-southeast-2">Asia Pacific (Sydney)</option>
+              </optgroup>
+              <optgroup label="Canada">
+                <option value="ca-central-1">Canada (Central)</option>
+              </optgroup>
+              <optgroup label="South America">
+                <option value="sa-east-1">South America (São Paulo)</option>
+              </optgroup>
+            </select>
+            <div class="form-row mt-2">
+              <label class="checkbox-label" style="flex:1;">
+                <input type="checkbox" id="form-bedrock-force-use-global" />
+                <span>强制使用 Global 跨区域推理</span>
+              </label>
+            </div>
+            <small class="form-hint" style="margin-left:26px;">启用后模型 ID 使用 global. 前缀（如 global.anthropic.claude-...），请求可路由到全球任意支持的区域，获得更高可用性</small>
           </div>
 
-          <div class="form-row">
-            <!-- Groups -->
-            <div class="form-group">
-              <label>分组</label>
-              <div id="groups-container" class="checkbox-group">
-                <span class="loading-text">加载中...</span>
+          <!-- 6. Model Restrictions -->
+          <div id="model-restrictions" class="advanced-section">
+            <h3 style="font-size: 1.1rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.5rem; margin-bottom: 1rem;">模型限制（可选）</h3>
+            
+            <div style="display:flex; gap:8px; margin-bottom:12px;">
+              <button type="button" id="btn-mode-whitelist" class="rpm-strategy-btn active" style="flex:1;">模型白名单</button>
+              <button type="button" id="btn-mode-mapping" class="rpm-strategy-btn" style="flex:1;">模型映射</button>
+            </div>
+
+            <div id="whitelist-area">
+              <!-- Multi-select Dropdown -->
+              <div class="mws-container" style="position:relative; margin-bottom:12px;">
+                <div id="mws-trigger" class="mws-trigger">
+                  <div id="mws-selected-tags" class="mws-tags-grid">
+                    <!-- Selected model tags rendered by JS -->
+                  </div>
+                  <div class="mws-footer">
+                    <span id="mws-count" class="text-xs text-gray-400">已选择 0 个模型（支持所有模型）</span>
+                    <svg class="mws-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 9l-7 7-7-7"/></svg>
+                  </div>
+                </div>
+                <!-- Dropdown panel -->
+                <div id="mws-dropdown" class="mws-dropdown hidden">
+                  <div class="mws-search-wrap">
+                    <input type="text" id="mws-search" class="mws-search-input" placeholder="搜索模型..." />
+                  </div>
+                  <div id="mws-options" class="mws-options-list">
+                    <!-- Options rendered by JS -->
+                  </div>
+                </div>
+              </div>
+              <!-- Quick Actions -->
+              <div style="display:flex; gap:8px; margin-bottom:12px;">
+                <button type="button" id="mws-fill-related" class="mws-action-btn mws-action-blue">填入相关模型</button>
+                <button type="button" id="mws-clear-all" class="mws-action-btn mws-action-red">清除所有模型</button>
+              </div>
+              <!-- Custom Model Input -->
+              <div>
+                <label class="input-label text-xs">自定义模型名称</label>
+                <div style="display:flex; gap:8px;">
+                  <input type="text" id="mws-custom-input" placeholder="输入自定义模型名称" style="flex:1;" />
+                  <button type="button" id="mws-add-custom" class="btn btn-secondary">填入</button>
+                </div>
+              </div>
+              <input type="hidden" id="form-model-whitelist" value="" />
+            </div>
+
+            <div id="mapping-area" class="hidden">
+              <p class="text-xs text-gray-500 mb-2">将请求模型映射到实际模型。左边是请求的模型，右边是发送到 API 的实际模型。</p>
+              <div id="preset-mappings-area" style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px;">
+                <!-- Preset mapping buttons rendered by JS -->
+              </div>
+              <div id="mappings-container" style="display:flex; flex-direction:column; gap:8px;"></div>
+              <button type="button" id="btn-add-mapping" class="w-full btn btn-secondary" style="margin-top:8px; border-style:dashed;">+ 添加映射</button>
+            </div>
+          </div>
+
+          <!-- 7. Pool Mode -->
+          <div id="pool-policy" class="advanced-section">
+            <h3 style="font-size: 1.1rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.5rem; margin-bottom: 1rem;">池模式</h3>
+            <div class="mb-3 flex items-center justify-between">
+              <div>
+                <label class="input-label mb-0">池模式</label>
+                <p class="mt-1 text-xs text-gray-500">上游为账号池时启用，错误不标记本地账号状态</p>
+              </div>
+              <button type="button" id="toggle-pool-mode-btn" class="toggle-switch bg-gray-200" onclick="document.getElementById('form-pool-mode').checked=!document.getElementById('form-pool-mode').checked; document.getElementById('pool-retry-area').classList.toggle('hidden', !document.getElementById('form-pool-mode').checked); this.classList.toggle('bg-teal-500', document.getElementById('form-pool-mode').checked); this.classList.toggle('bg-gray-200', !document.getElementById('form-pool-mode').checked); this.querySelector('.toggle-nob').classList.toggle('translate-x-5', document.getElementById('form-pool-mode').checked); this.querySelector('.toggle-nob').classList.toggle('translate-x-0', !document.getElementById('form-pool-mode').checked);">
+                <span class="toggle-nob translate-x-0"></span>
+              </button>
+              <input type="checkbox" id="form-pool-mode" class="hidden" />
+            </div>
+            <div id="pool-mode-info" class="hidden" style="background:#eff6ff; border-radius:8px; padding:10px; margin-bottom:8px;">
+              <p class="text-xs" style="color:#1d4ed8;">ℹ️ 启用后，上游 429/403/401 错误将自动重试而不标记账号限流或错误，适用于上游指向另一个 sub2api 实例的场景。</p>
+            </div>
+            <div id="pool-retry-area" class="hidden form-group" style="padding-left:26px; margin-top:8px;">
+              <label>同账号重试次数</label>
+              <input id="form-pool-retry" type="number" value="3" max="10" />
+              <small class="form-hint">仅在池模式下生效。0 表示不原地重试；默认 3，最大 10。</small>
+            </div>
+          </div>
+
+                    <!-- 8. Custom Error Codes -->
+          <div id="custom-error-codes-section" class="advanced-section hidden">
+            <div class="mb-3 flex items-center justify-between">
+              <div>
+                <label class="input-label mb-0" style="font-size:1.1rem; border-bottom:none;">自定义错误码</label>
+                <p class="mt-1 text-xs text-gray-500">仅对选中的错误码停止调度</p>
+              </div>
+              <button type="button" id="toggle-custom-error-codes" class="toggle-switch bg-gray-200">
+                <span class="toggle-nob translate-x-0"></span>
+              </button>
+            </div>
+            <div id="custom-error-codes-area" class="hidden">
+              <div style="background:#fefce8; border-radius:8px; padding:10px; margin-bottom:10px;">
+                <p class="text-xs" style="color:#a16207;">⚠️ 仅选中的错误码会停止调度，其他错误将返回 500。</p>
+              </div>
+              <div class="error-codes-controls" style="display:flex; flex-direction:column; gap:12px;">
+                <div style="display:flex; flex-wrap:wrap; gap:6px;">
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="toggleErrorCode('400')">400 Bad Request</button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="toggleErrorCode('401')">401 Unauthorized</button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="toggleErrorCode('403')">403 Forbidden</button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="toggleErrorCode('429')">429 Too Many Requests</button>
+                </div>
+                <div style="display:flex; gap:8px;">
+                  <input type="number" id="custom-error-input" placeholder="输入错误码 (100-599)" class="flex-1" />
+                  <button type="button" class="btn btn-secondary" onclick="addCustomErrorCode()">添加</button>
+                </div>
+                <div id="selected-error-codes" style="display:flex; flex-wrap:wrap; gap:6px; min-height: 24px;">
+                </div>
+                <input type="hidden" id="form-custom-error-codes" value="[]" />
+              </div>
+            </div>
+          </div>
+
+          <!-- 11. Temp Unschedulable Rules -->
+          <div id="temp-unschedulable-rules" class="advanced-section">
+            <div class="mb-3 flex items-center justify-between">
+              <div>
+                <label class="input-label mb-0" style="font-size:1.1rem; border-bottom:none;">临时不可调度</label>
+                <p class="mt-1 text-xs text-gray-500">当错误码与关键词同时匹配时，账号会在指定时间内被临时禁用。</p>
+              </div>
+              <button type="button" id="toggle-temp-rules" class="toggle-switch bg-gray-200">
+                <span class="toggle-nob translate-x-0"></span>
+              </button>
+            </div>
+            
+            <div id="temp-rules-container-wrapper" class="hidden">
+              <div style="background:#eff6ff; border-radius:8px; padding:10px; margin-bottom:10px;">
+                <p class="text-xs" style="color:#1d4ed8;">⚠️ 启用自定义规则后，将覆盖系统内置的临时禁用策略。请确保规则合理，避免影响正常调度。</p>
+              </div>
+              <div class="temp-rules-presets" style="margin-bottom:8px; display:flex; gap:6px; flex-wrap:wrap;">
+                <button type="button" class="btn btn-secondary btn-sm" onclick="addTempRule(403, 30, ['Your account has been restricted'], '账号被限制 (30分钟)')">+ 403 账号被限制</button>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="addTempRule(429, 60, ['quota exceeded','rate limit'], '流控限制 (60分钟)')">+ 429 流控限制</button>
+              </div>
+              <div id="temp-rules-container" style="display:flex; flex-direction:column; gap:12px; margin-bottom:12px;"></div>
+              
+              <button type="button" class="w-full btn btn-secondary" style="border-style:dashed;" onclick="addTempRule()">+ 添加规则</button>
+              <input type="hidden" id="form-temp-rules" value="[]" />
+            </div>
+          </div>
+
+          <!-- Intercept Warmup -->
+          <div id="intercept-warmup-section" class="advanced-section hidden">
+            <div class="flex items-center justify-between">
+              <div>
+                <label class="input-label mb-0">拦截预热请求</label>
+                <p class="mt-1 text-xs text-gray-500">启用后，标题生成等预热请求将返回 mock 响应，不消耗上游 token</p>
+              </div>
+              <button type="button" id="toggle-intercept-warmup" class="toggle-switch bg-gray-200">
+                <span class="toggle-nob translate-x-0"></span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Quota Control Section -->
+          <div id="quota-control-section" class="advanced-section hidden space-y-4">
+            <div class="mb-3">
+              <h3 class="input-label mb-0 text-base font-semibold" style="font-size:1.1rem;">配额控制</h3>
+              <p class="mt-1 text-xs text-gray-500">配置费用窗口、会话限制、客户端亲和等调度控制。</p>
+            </div>
+
+            <!-- Window Cost Limit -->
+            <div class="quota-card">
+              <div class="mb-3 flex items-center justify-between">
+                <div>
+                  <label class="input-label mb-0">5h窗口费用控制</label>
+                  <p class="mt-1 text-xs text-gray-500">限制账号在5小时窗口内的费用使用</p>
+                </div>
+                <button type="button" id="toggle-window-cost" class="toggle-switch bg-gray-200">
+                  <span class="toggle-nob translate-x-0"></span>
+                </button>
+              </div>
+              <div id="window-cost-area" class="grid grid-cols-2 gap-4 hidden">
+                <div>
+                  <label class="input-label">费用阈值</label>
+                  <input type="number" id="v-window-cost-limit" min="0" step="1" placeholder="50" />
+                  <p class="input-hint">达到阈值后不参与新请求调度</p>
+                </div>
+                <div>
+                  <label class="input-label">粘性预留额度</label>
+                  <input type="number" id="v-window-cost-reserve" min="0" step="1" placeholder="10" />
+                  <p class="input-hint">为粘性会话预留的额外额度</p>
+                </div>
               </div>
             </div>
 
-            <!-- Notes -->
+            <!-- Session Limit -->
+            <div class="quota-card">
+              <div class="mb-3 flex items-center justify-between">
+                <div>
+                  <label class="input-label mb-0">会话数量控制</label>
+                  <p class="mt-1 text-xs text-gray-500">限制同时活跃的会话数量</p>
+                </div>
+                <button type="button" id="toggle-session-limit" class="toggle-switch bg-gray-200">
+                  <span class="toggle-nob translate-x-0"></span>
+                </button>
+              </div>
+              <div id="session-limit-area" class="grid grid-cols-2 gap-4 hidden">
+                <div>
+                  <label class="input-label">最大会话数</label>
+                  <input type="number" id="v-session-max" min="1" step="1" placeholder="3" />
+                  <p class="input-hint">同时活跃的最大会话数量</p>
+                </div>
+                <div>
+                  <label class="input-label">空闲超时</label>
+                  <input type="number" id="v-session-idle" min="1" step="1" placeholder="5" />
+                  <p class="input-hint">会话空闲超时后自动释放</p>
+                </div>
+              </div>
+            </div>
+
+            <!-- RPM Limit -->
+            <div class="quota-card">
+              <div class="mb-3 flex items-center justify-between">
+                <div>
+                  <label class="input-label mb-0">RPM 限制</label>
+                  <p class="mt-1 text-xs text-gray-500">限制每分钟请求数量，保护上游账号</p>
+                </div>
+                <button type="button" id="toggle-rpm-limit" class="toggle-switch bg-gray-200">
+                  <span class="toggle-nob translate-x-0"></span>
+                </button>
+              </div>
+              <div id="rpm-limit-area" class="space-y-4 hidden" style="margin-bottom:12px;">
+                <div>
+                  <label class="input-label">基础 RPM</label>
+                  <input type="number" id="v-rpm-base" min="1" max="1000" step="1" placeholder="15" />
+                  <p class="input-hint">每分钟最大请求数，0 或留空表示不限制</p>
+                </div>
+                <div>
+                  <label class="input-label">RPM 策略</label>
+                  <div class="flex gap-2">
+                    <button type="button" id="rpm-str-tiered" class="rpm-strategy-btn active" onclick="setRpmStrategy('tiered')">
+                      <div>三区模型</div>
+                      <div style="font-size:10px; opacity:0.7">绿区→黄区→仅粘性→阻塞，逐步限流</div>
+                    </button>
+                    <button type="button" id="rpm-str-sticky" class="rpm-strategy-btn" onclick="setRpmStrategy('sticky_exempt')">
+                      <div>粘性豁免</div>
+                      <div style="font-size:10px; opacity:0.7">超限后仅允许粘性会话</div>
+                    </button>
+                  </div>
+                  <input type="hidden" id="v-rpm-strategy" value="tiered" />
+                </div>
+                <div id="rpm-strategy-buffer-area">
+                  <label class="input-label">粘性缓冲区</label>
+                  <input type="number" id="v-rpm-buffer" min="1" step="1" placeholder="默认: base RPM 的 20%" />
+                  <p class="input-hint">超过 base RPM 后，粘性会话额外允许的请求数。为空则使用默认值（base RPM 的 20%，最小为 1）</p>
+                </div>
+              </div>
+              
+              <!-- User Msg Queue Mode always visible -->
+              <div class="mt-4 border-t border-gray-200 pt-4">
+                <label class="input-label">用户消息限速</label>
+                <p class="mt-1 text-xs text-gray-500 mb-2">对用户消息施加发送限制，避免触发上游 RPM 限制</p>
+                <div class="flex space-x-2">
+                  <button type="button" id="umq-off" class="umq-mode-btn active" onclick="setUmqMode('')">关闭</button>
+                  <button type="button" id="umq-throttle" class="umq-mode-btn bg-white" onclick="setUmqMode('throttle')">软性限速</button>
+                  <button type="button" id="umq-serialize" class="umq-mode-btn bg-white" onclick="setUmqMode('serialize')">串行队列</button>
+                </div>
+                <input type="hidden" id="v-user-msg-queue" value="" />
+              </div>
+            </div>
+
+            <!-- TLS Fingerprint -->
+            <div class="quota-card">
+              <div class="flex items-center justify-between">
+                <div>
+                  <label class="input-label mb-0">TLS 指纹模拟</label>
+                  <p class="mt-1 text-xs text-gray-500">模拟 Node.js/Claude Code 客户端的 TLS 指纹</p>
+                </div>
+                <button type="button" id="toggle-tls" class="toggle-switch bg-gray-200">
+                  <span class="toggle-nob translate-x-0"></span>
+                </button>
+              </div>
+              <div id="tls-area" class="mt-3 hidden">
+                <select id="v-tls-profile">
+                  <option value="">内置默认</option>
+                  <option value="-1">随机</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Session ID Masking -->
+            <div class="quota-card">
+              <div class="flex items-center justify-between">
+                <div>
+                  <label class="input-label mb-0">会话 ID 伪装</label>
+                  <p class="mt-1 text-xs text-gray-500">启用后将在 15 分钟内固定 metadata.user_id 中的 session ID，使上游认为请求来自同一会话</p>
+                </div>
+                <button type="button" id="toggle-session-mask" class="toggle-switch bg-gray-200">
+                  <span class="toggle-nob translate-x-0"></span>
+                </button>
+              </div>
+            </div>
+
+            <!-- Cache TTL Override -->
+            <div class="quota-card">
+              <div class="flex items-center justify-between">
+                <div>
+                  <label class="input-label mb-0">缓存 TTL 强制替换</label>
+                  <p class="mt-1 text-xs text-gray-500">将所有缓存创建 token 强制按指定的 TTL 类型（5分钟或1小时）计费</p>
+                </div>
+                <button type="button" id="toggle-cache-ttl" class="toggle-switch bg-gray-200">
+                  <span class="toggle-nob translate-x-0"></span>
+                </button>
+              </div>
+              <div id="cache-ttl-area" class="mt-3 hidden">
+                <label class="input-label text-xs">目标 TTL</label>
+                <select id="v-cache-target">
+                  <option value="5m">5m</option>
+                  <option value="1h">1h</option>
+                </select>
+                <p class="mt-1 text-xs text-gray-500">选择计费使用的 TTL 类型</p>
+              </div>
+            </div>
+
+            <!-- Custom Base URL Relay -->
+            <div class="quota-card">
+              <div class="flex items-center justify-between">
+                <div>
+                  <label class="input-label mb-0">自定义转发地址</label>
+                  <p class="mt-1 text-xs text-gray-500">启用后将请求转发到自定义中继服务，代理地址将作为 URL 参数传递给中继服务</p>
+                </div>
+                <button type="button" id="toggle-custom-url" class="toggle-switch bg-gray-200">
+                  <span class="toggle-nob translate-x-0"></span>
+                </button>
+              </div>
+              <div id="custom-url-area" class="mt-3 hidden">
+                <input type="text" id="v-custom-url" placeholder="如 https://relay.example.com" />
+              </div>
+            </div>
+          </div>
+
+
+<!-- 14. Proxy Selector -->
+          <div class="advanced-section">
+            <h3 style="font-size: 1.1rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.5rem; margin-bottom: 1rem;">代理</h3>
             <div class="form-group">
-              <label>备注</label>
-              <input id="form-notes" type="text" placeholder="可选备注信息" />
+              <select id="form-proxy-id">
+                <option value="">无代理</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- 15. Base Options (4-column grid) -->
+          <div class="advanced-section">
+            <h3 style="font-size: 1.1rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.5rem; margin-bottom: 1rem;">基础配置</h3>
+            <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:12px;">
+              <div class="form-group">
+                <label>并发数</label>
+                <input id="form-concurrency" type="number" value="10" min="0" step="1" />
+              </div>
+              <div class="form-group">
+                <label>负载因子</label>
+                <input id="form-load-factor" type="number" placeholder="留空默认 1" step="1" />
+              </div>
+              <div class="form-group">
+                <label>优先级</label>
+                <input id="form-priority" type="number" value="1" step="1" />
+              </div>
+              <div class="form-group">
+                <label>账号计费倍率</label>
+                <input id="form-rate-multiplier" type="number" value="1" step="0.1" />
+              </div>
+            </div>
+            <div style="display:flex; justify-content:space-between; color:#6b7280; font-size:12px; margin-top:4px;">
+              <span></span>
+              <span>提高负载因子可以提高对账号的调度频率</span>
+              <span>优先级越小的账号优先使用</span>
+              <span>0 表示不计费，仅影响账号计费</span>
+            </div>
+          </div>
+
+          <!-- 16. Expires At -->
+          <div class="advanced-section">
+            <h3 style="font-size: 1.1rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.5rem; margin-bottom: 1rem;">过期时间</h3>
+            <div class="form-group">
+              <input id="form-expires-at" type="datetime-local" />
+              <small class="form-hint">留空表示不过期</small>
+            </div>
+          </div>
+
+          <!-- 17. Platform Specific advanced toggles (Automated passthrough, WS mode, etc) -->
+          <div id="platform-options" class="advanced-section hidden">
+            <h3 style="font-size: 1.1rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.5rem; margin-bottom: 1rem;">平台高级功能</h3>
+            
+            <!-- OpenAI -->
+            <div id="openai-opts" class="hidden" style="display:flex; flex-direction:column; gap:16px;">
+              <!-- Passthrough -->
+              <div class="form-group mb-0">
+                <div class="form-row">
+                  <label class="checkbox-label" style="flex:1;">
+                    <input type="checkbox" id="form-openai-passthrough" />
+                    <span>OAuth / Auth 自动透传</span>
+                  </label>
+                </div>
+                <small class="form-hint" style="margin-left:26px;">开启后，该 OpenAI 账号将自动透传请求与响应，仅替换认证并保留计费/并发/审计及必要安全过滤。</small>
+              </div>
+
+              <!-- Codex CLI Only -->
+              <div class="form-group mb-0" id="openai-codex-opt">
+                <div class="form-row">
+                  <label class="checkbox-label" style="flex:1;">
+                    <input type="checkbox" id="form-codex-cli" />
+                    <span>仅 Codex 官方客户端</span>
+                  </label>
+                </div>
+                <small class="form-hint" style="margin-left:26px;">仅对 OpenAI OAuth 生效。开启后仅允许 Codex 官方客户端家族访问，关闭后完全绕过并保持原逻辑。</small>
+              </div>
+
+              <!-- WS Mode -->
+              <div class="form-group mb-0" id="openai-ws-opt">
+                <label style="font-weight:500; font-size:0.9rem; color:#374151; margin-bottom:4px; display:block;">WS mode</label>
+                <p class="text-xs text-gray-500" style="margin-bottom:4px;">仅对当前 OpenAI 账号生效</p>
+                <select id="form-ws-mode" style="width: 100%; border: 1px solid #d1d5db; border-radius: 6px; padding: 6px 8px; outline: none; font-size: 0.9rem; margin-bottom:4px;">
+                  <option value="off">关闭（off）</option>
+                  <option value="ctx_pool">上下文池（ctx_pool）</option>
+                  <option value="passthrough">透传（passthrough）</option>
+                  <option value="shared">共享（shared）</option>
+                  <option value="dedicated">独享（dedicated）</option>
+                </select>
+              </div>
+            </div>
+            
+            <!-- Anthropic -->
+            <div id="anthropic-opts" class="hidden">
+              <div class="form-group mb-0">
+                <div class="form-row">
+                  <label class="checkbox-label" style="flex:1;">
+                    <input type="checkbox" id="form-anthropic-passthrough" />
+                    <span>API Key 自动透传</span>
+                  </label>
+                </div>
+                <small class="form-hint" style="margin-left:26px;">仅对 Anthropic API Key 生效。开启后，messages/count_tokens 请求将透传上游并仅替换认证，保留计费/并发/审计及必要安全过滤。</small>
+              </div>
+            </div>
+            
+            <!-- Antigravity -->
+            <div id="antigravity-opts" class="hidden" style="display:flex; flex-direction:column; gap:16px;">
+              <div class="form-group mb-0">
+                <div class="form-row">
+                  <label class="checkbox-label" style="flex:1;">
+                    <input type="checkbox" id="form-mixed-scheduling" />
+                    <span>在 /v1/messages 中使用</span>
+                  </label>
+                </div>
+                <small class="form-hint" style="margin-left:26px; color:#d97706; font-weight:500;">
+                  ⚠️ 警告：启用后可参与 Anthropic/Gemini 分组的调度。注意：Antigravity 和 Anthropic 无法在同个上下文中使用，同时开启可能导致 400 报错。
+                </small>
+              </div>
+              <div class="form-group mb-0">
+                <div class="form-row">
+                  <label class="checkbox-label" style="flex:1;">
+                    <input type="checkbox" id="form-allow-overages" />
+                    <span>允许超量请求 (AI Credits)</span>
+                  </label>
+                </div>
+                <small class="form-hint" style="margin-left:26px;">仅在免费配额被明确判定为耗尽后才会使用 AI Credits。普通并发 429 限流不会切换到超量请求。</small>
+              </div>
+            </div>
+            
+            <!-- All -->
+            <div class="form-group" style="margin-top:12px; border-top:1px solid #e5e7eb; padding-top:12px;">
+              <label class="checkbox-label">
+                <input type="checkbox" id="form-auto-pause" checked />
+                <span>过期自动暂停调度</span>
+              </label>
+              <small class="form-hint" style="margin-left:26px;">启用后，账号过期将自动暂停调度</small>
+            </div>
+          </div>
+
+          <!-- 18. Groups -->
+          <div class="advanced-section">
+            <h3 style="font-size: 1.1rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.5rem; margin-bottom: 1rem;">分组分配</h3>
+            <div class="form-group">
+              <div id="groups-container" class="checkbox-group">
+                <span class="loading-text">加载中...</span>
+              </div>
             </div>
           </div>
 

@@ -10,6 +10,8 @@ let currentUser = null;   // { id, username, email, role }
 let authToken = null;
 let accounts = [];
 let groups = [];
+let proxies = [];
+let modelMappingsCount = 0;
 let pagination = { page: 1, page_size: 20, total: 0, pages: 1 };
 let searchQuery = '';
 let searchTimer = null;
@@ -63,7 +65,7 @@ let oauthInputMethod = 'oauth-flow'; // 'oauth-flow' or 'manual-key'
     hideLoading();
 
     // Load data
-    await Promise.all([loadAccounts(), loadGroups()]);
+    await Promise.all([loadAccounts(), loadGroups(), loadProxies()]);
 
     // Setup search
     document.getElementById('search-input').addEventListener('input', (e) => {
@@ -135,6 +137,34 @@ async function loadGroups() {
     renderGroupsCheckboxes();
   } catch (err) {
     console.error('Failed to load groups:', err);
+  }
+}
+
+async function loadProxies() {
+  try {
+    // Sub2API proxy API is at /admin/proxies/all, proxy passed via sub2api /api layer
+    const resp = await apiFetch('/api/admin/proxies/all');
+    if (!resp.ok) return;
+    
+    proxies = await resp.json();
+    renderProxyOptions();
+  } catch (err) {
+    console.error('Failed to load proxies:', err);
+  }
+}
+
+function renderProxyOptions() {
+  const sel = document.getElementById('form-proxy-id');
+  if (!sel) return;
+  const currentVal = sel.value;
+  let html = '<option value="">直连 (未分配代理)</option>';
+  proxies.forEach(p => {
+    const label = `${p.protocol || 'http'}://${p.host}:${p.port}`;
+    html += `<option value="${p.id}">${label}</option>`;
+  });
+  sel.innerHTML = html;
+  if (currentVal && proxies.some(p => String(p.id) === String(currentVal))) {
+    sel.value = currentVal;
   }
 }
 
@@ -222,7 +252,8 @@ function renderPagination() {
 }
 
 function renderGroupsCheckboxes() {
-  const container = document.getElementById('groups-container');
+  const container = document.getElementById('form-groups-container') || document.getElementById('groups-container');
+  if (!container) return;
   if (groups.length === 0) {
     container.innerHTML = '<span class="loading-text">暂无可用分组</span>';
     return;
@@ -253,25 +284,146 @@ function renderGroupsCheckboxes() {
 function openAddModal() {
   document.getElementById('add-modal').classList.remove('hidden');
   document.getElementById('add-form').reset();
-  onPlatformChange(); // Reset credential fields
+
+  // Reset advanced fields
+  document.getElementById('form-concurrency').value = '10';
+  document.getElementById('form-rate-multiplier').value = '1';
+  document.getElementById('form-priority').value = '1';
+  document.getElementById('form-pool-retry').value = '3';
+  // Reset model whitelist selector state
+  _mwsSelectedModels = [];
+  window.setModelMode('whitelist');
+  
+  const mappingsContainer = document.getElementById('mappings-container');
+  if (mappingsContainer) mappingsContainer.innerHTML = '';
+  modelMappingsCount = 0;
+
+  // Reset to default platform
+  document.getElementById('form-platform').value = 'anthropic';
+  document.getElementById('form-type').value = 'oauth';
+
+  // Initialize segmented control
+  selectPlatform('anthropic');
 }
 
 function closeAddModal() {
   document.getElementById('add-modal').classList.add('hidden');
 }
 
-// Platform / Type change → show relevant credential fields
+// ── Platform Segmented Control ──
+
+function selectPlatform(platform) {
+  // Update hidden input
+  document.getElementById('form-platform').value = platform;
+
+  // Update segmented control visual
+  document.querySelectorAll('.platform-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.platform === platform);
+  });
+
+  // Render type cards for the selected platform
+  renderTypeCards(platform);
+}
+
+// ── Type Card Rendering ──
+
+function renderTypeCards(platform) {
+  const container = document.getElementById('type-cards');
+  const types = getTypesForPlatform(platform);
+
+  // Card color mapping per platform
+  const platformColor = {
+    anthropic: 'card-orange',
+    openai: 'card-green',
+    gemini: 'card-blue',
+    antigravity: 'card-purple',
+  };
+
+  // Icon SVGs for each type
+  const typeIcons = {
+    oauth: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>',
+    'setup-token': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z"/></svg>',
+    apikey: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="18" height="18"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z"/></svg>',
+    upstream: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="18" height="18"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z"/></svg>',
+    bedrock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="18" height="18"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z"/></svg>',
+  };
+
+  // Description mapping
+  const typeDescs = {
+    oauth: {
+      anthropic: 'OAuth 授权登录获取 Session Key',
+      openai: 'OAuth 授权获取 Refresh Token',
+      gemini: 'Google OAuth 授权登录',
+      antigravity: 'OAuth 授权获取 Session Key',
+    },
+    'setup-token': { anthropic: '通过 Setup Token 授权' },
+    apikey: {
+      anthropic: 'API Console 生成的密钥',
+      openai: 'OpenAI API 密钥',
+      gemini: 'AI Studio API 密钥',
+      antigravity: 'Antigravity API 密钥',
+    },
+    upstream: {
+      anthropic: '中继到其他兼容服务',
+      openai: '中继到其他兼容服务',
+      gemini: '中继到其他兼容服务',
+      antigravity: '中继到其他兼容服务',
+    },
+    bedrock: { antigravity: 'AWS Bedrock 云服务凭据' },
+  };
+
+  const colorClass = platformColor[platform] || 'card-purple';
+
+  container.innerHTML = types.map((t, idx) => {
+    const icon = typeIcons[t.value] || typeIcons.apikey;
+    const desc = (typeDescs[t.value] || {})[platform] || t.label;
+    return `
+      <button type="button" class="type-card ${colorClass} ${idx === 0 ? 'active' : ''}" data-type="${t.value}" onclick="selectType('${t.value}')">
+        <div class="type-card-icon">${icon}</div>
+        <div class="type-card-info">
+          <span class="type-card-title">${t.label}</span>
+          <span class="type-card-desc">${desc}</span>
+        </div>
+      </button>
+    `;
+  }).join('');
+
+  // Auto-select the first type
+  if (types.length > 0) {
+    selectType(types[0].value);
+  }
+}
+
+// ── Type Selection ──
+
+function selectType(type) {
+  // Update hidden input
+  document.getElementById('form-type').value = type;
+
+  // Update card visuals
+  document.querySelectorAll('.type-card').forEach(card => {
+    card.classList.toggle('active', card.dataset.type === type);
+  });
+
+  // Update step indicator
+  const stepIndicator = document.getElementById('step-indicator');
+  if (isOAuthType(type)) {
+    stepIndicator.classList.remove('hidden');
+    document.getElementById('step-num-1').classList.add('active');
+    document.getElementById('step-num-2').classList.add('active');
+    document.getElementById('step-label-2').textContent = type === 'setup-token' ? 'Setup Token 授权' : 'OAuth 授权';
+  } else {
+    stepIndicator.classList.add('hidden');
+  }
+
+  // Trigger credential field visibility
+  onTypeChange();
+}
+
+// Platform / Type change → show relevant credential fields (internal)
 function onPlatformChange() {
   const platform = document.getElementById('form-platform').value;
-  const typeSelect = document.getElementById('form-type');
-
-  // Update available types based on platform
-  const typeOptions = getTypesForPlatform(platform);
-  typeSelect.innerHTML = typeOptions.map(t =>
-    `<option value="${t.value}">${t.label}</option>`
-  ).join('');
-
-  onTypeChange();
+  selectPlatform(platform);
 }
 
 function onTypeChange() {
@@ -298,6 +450,84 @@ function onTypeChange() {
       document.getElementById(credMap).classList.remove('hidden');
     }
   }
+
+  // Update Advanced Configuration Toggles
+  updateAdvancedToggles(platform, type);
+}
+
+function updateAdvancedToggles(platform, type) {
+  ['openai-opts', 'anthropic-opts', 'antigravity-opts', 'bedrock-presets'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.add('hidden');
+  });
+  
+  const optsContainer = document.getElementById('platform-options');
+  if (optsContainer) optsContainer.classList.remove('hidden');
+  
+  // Custom Error Codes
+  const errContainer = document.getElementById('custom-error-codes-section');
+  if (errContainer) errContainer.classList.remove('hidden');
+
+  // Intercept Warmup: only for anthropic / antigravity (matches reference)
+  const interceptContainer = document.getElementById('intercept-warmup-section');
+  if (interceptContainer) {
+    if (platform === 'anthropic' || platform === 'antigravity') {
+      interceptContainer.classList.remove('hidden');
+    } else {
+      interceptContainer.classList.add('hidden');
+    }
+  }
+
+  // Quota Control is ONLY for Anthropic OAuth
+  const qcContainer = document.getElementById('quota-control-section');
+  if (qcContainer) {
+    if (platform === 'anthropic' && isOAuthType(type)) {
+      qcContainer.classList.remove('hidden');
+    } else {
+      qcContainer.classList.add('hidden');
+    }
+  }
+  
+  if (platform === 'openai') {
+    document.getElementById('openai-opts').classList.remove('hidden');
+    const codexOpt = document.getElementById('openai-codex-opt');
+    if (codexOpt) {
+      codexOpt.style.display = isOAuthType(type) ? 'block' : 'none';
+    }
+  } else if (platform === 'anthropic') {
+    document.getElementById('anthropic-opts').classList.remove('hidden');
+  } else if (platform === 'antigravity') {
+    document.getElementById('antigravity-opts').classList.remove('hidden');
+  }
+
+  // Re-render model chips/preset mappings for the new platform
+  const wlArea = document.getElementById('whitelist-area');
+  if (wlArea && !wlArea.classList.contains('hidden')) {
+    // Auto-fill related models on platform change (matches sub2api behavior)
+    mwsAutoFillForPlatform();
+    renderModelChips();
+  } else {
+    renderPresetMappings();
+  }
+}
+
+// onModelModeChange is now handled by window.setModelMode
+
+function addModelMapping(fromModel = '', toModel = '') {
+  const container = document.getElementById('mappings-container');
+  const div = document.createElement('div');
+  div.style.display = 'flex';
+  div.style.gap = '8px';
+  div.style.alignItems = 'center';
+  
+  div.innerHTML = `
+    <input type="text" class="mapping-from" placeholder="前端请求的模型" value="${escapeHtml(fromModel)}" style="flex:1" />
+    <span style="color:#94a3b8">→</span>
+    <input type="text" class="mapping-to" placeholder="实际转发的模型" value="${escapeHtml(toModel)}" style="flex:1" />
+    <button type="button" class="btn btn-danger btn-sm js-del-mapping" style="padding:4px 8px;">删</button>
+  `;
+  div.querySelector('.js-del-mapping').addEventListener('click', () => div.remove());
+  container.appendChild(div);
 }
 
 function isOAuthType(type) {
@@ -359,51 +589,47 @@ function updateManualKeyPanel(platform, type) {
 }
 
 function buildCredentials(platform, type) {
-  if (type === 'upstream') {
-    const creds = { base_url: document.getElementById('form-upstream-url').value.trim() };
-    const key = document.getElementById('form-upstream-key').value.trim();
-    if (key) creds.api_key = key;
-    return creds;
+  if (platform === 'bedrock' || type === 'bedrock') {
+    const authMode = document.getElementById('form-bedrock-auth-mode').value;
+    if (authMode === 'sigv4') {
+      return {
+        access_key_id: document.getElementById('form-bedrock-access-key').value.trim(),
+        secret_access_key: document.getElementById('form-bedrock-secret-key').value.trim(),
+        session_token: document.getElementById('form-bedrock-session-token').value.trim() || undefined,
+        region: document.getElementById('form-bedrock-region').value.trim(),
+        force_global_endpoint: document.getElementById('form-bedrock-force-use-global').checked
+      };
+    } else {
+      return {
+        api_key: document.getElementById('form-bedrock-api-key-only').value.trim(),
+        region: document.getElementById('form-bedrock-region').value.trim(),
+        force_global_endpoint: document.getElementById('form-bedrock-force-use-global').checked
+      };
+    }
   }
 
-  if (type === 'bedrock') {
-    return {
-      aws_access_key_id: document.getElementById('form-bedrock-access-key').value.trim(),
-      aws_secret_access_key: document.getElementById('form-bedrock-secret-key').value.trim(),
-      aws_region: document.getElementById('form-bedrock-region').value.trim() || 'us-east-1',
-    };
-  }
-
-  if (type === 'apikey') {
-    return { api_key: document.getElementById('form-api-key').value.trim() };
-  }
-
-  // OAuth / setup-token: check if we have OAuth-obtained credentials
-  if (isOAuthType(type) && oauthInputMethod === 'oauth-flow' && oauthCredentials) {
+  // Anthropic / OpenAI / Gemini handle...
+  if (oauthInputMethod === 'oauth-flow' && isOAuthType(type)) {
     return oauthCredentials;
   }
-
-  // Manual key mode fallback
-  if (platform === 'anthropic' || platform === 'antigravity') {
-    return { session_key: document.getElementById('form-session-key').value.trim() };
+  const t = getManualCredFieldId(platform);
+  if (t === 'cred-session-key') return { session_key: document.getElementById('form-session-key').value.trim() };
+  if (t === 'cred-api-key') return { api_key: document.getElementById('form-api-key').value.trim() };
+  if (t === 'cred-refresh-token') return { refresh_token: document.getElementById('form-refresh-token').value.trim() };
+  if (t === 'cred-gemini-oauth') {
+    return {
+      access_token: document.getElementById('form-gemini-access-token').value.trim() || undefined,
+      refresh_token: document.getElementById('form-gemini-refresh-token').value.trim(),
+      oauth_type: document.getElementById('form-gemini-oauth-type').value || undefined
+    };
   }
-
-  if (platform === 'openai') {
-    return { refresh_token: document.getElementById('form-refresh-token').value.trim() };
+  if (t === 'cred-upstream') {
+    return {
+      base_url: document.getElementById('form-upstream-url').value.trim(),
+      api_key: document.getElementById('form-upstream-key').value.trim() || undefined
+    };
   }
-
-  if (platform === 'gemini') {
-    const creds = {};
-    const at = document.getElementById('form-gemini-access-token').value.trim();
-    const rt = document.getElementById('form-gemini-refresh-token').value.trim();
-    const ot = document.getElementById('form-gemini-oauth-type').value;
-    if (at) creds.access_token = at;
-    if (rt) creds.refresh_token = rt;
-    if (ot) creds.oauth_type = ot;
-    return creds;
-  }
-
-  return {};
+  return null;
 }
 
 async function handleAddAccount(e) {
@@ -424,6 +650,117 @@ async function handleAddAccount(e) {
   // Validate required credentials
   if (!validateCredentials(platform, type, credentials)) return;
 
+  // Build Extra Configurations
+  const extra = {};
+  
+  const poolMode = document.getElementById('form-pool-mode').checked;
+  const poolRetry = parseInt(document.getElementById('form-pool-retry').value);
+  if (poolMode) {
+    credentials.pool_mode = true;
+    credentials.pool_mode_retry_count = isNaN(poolRetry) ? 3 : poolRetry;
+  }
+  
+  // These are top-level fields on CreateAccountRequest, not part of extra
+  const concurrency = parseInt(document.getElementById('form-concurrency').value);
+  const priority = parseInt(document.getElementById('form-priority').value);
+  const rateMultiplier = parseFloat(document.getElementById('form-rate-multiplier').value);
+  const autoPause = document.getElementById('form-auto-pause').checked;
+  
+  const interceptWarmup = toggleStates['intercept-warmup'];
+  if (interceptWarmup) credentials.intercept_warmup_requests = true;
+
+  const expStr = document.getElementById('form-expires-at').value;
+  
+  // Custom Error Codes
+  try {
+    const errorCodesTags = JSON.parse(document.getElementById('form-custom-error-codes').value || '[]');
+    if (errorCodesTags.length > 0) {
+      credentials.custom_error_codes_enabled = true;
+      credentials.custom_error_codes = errorCodesTags;
+    }
+  } catch(e){}
+
+  // Temp unschedulable rules
+  try {
+    const tempRules = JSON.parse(document.getElementById('form-temp-rules').value || '[]');
+    if (tempRules.length > 0) {
+      credentials.temp_unschedulable_enabled = true;
+      credentials.temp_unschedulable_rules = tempRules.map(r => ({
+        status_code: parseInt(r.code),
+        duration: parseInt(r.duration),
+        keywords: r.keywords
+      }));
+    }
+  } catch(e){}
+
+  // Quota Control — flatten directly into extra (matching backend field names)
+  if (platform === 'anthropic' && isOAuthType(type)) {
+    applyQuotaControlToExtra(extra);
+  }
+  
+  if (platform === 'openai') {
+    if (document.getElementById('form-openai-passthrough').checked) extra.openai_passthrough = true;
+    const wsMode = document.getElementById('form-ws-mode').value;
+    if (wsMode !== 'off') {
+      if (isOAuthType(type)) {
+        extra.openai_oauth_responses_websockets_v2_mode = wsMode;
+        extra.openai_oauth_responses_websockets_v2_enabled = true;
+      } else {
+        extra.openai_apikey_responses_websockets_v2_mode = wsMode;
+        extra.openai_apikey_responses_websockets_v2_enabled = true;
+      }
+    }
+    if (isOAuthType(type) && document.getElementById('form-codex-cli')?.checked) {
+      extra.codex_cli_only = true;
+    }
+  } else if (platform === 'anthropic') {
+    if (document.getElementById('form-anthropic-passthrough').checked) extra.anthropic_passthrough = true;
+  } else if (platform === 'antigravity') {
+    if (document.getElementById('form-mixed-scheduling').checked) extra.mixed_scheduling = true;
+    if (document.getElementById('form-allow-overages').checked) extra.allow_overages = true;
+  }
+  
+  const totalQuota = parseFloat(document.getElementById('form-quota-total')?.value);
+  const dailyQuota = parseFloat(document.getElementById('form-quota-daily')?.value);
+  const weeklyQuota = parseFloat(document.getElementById('form-quota-weekly')?.value);
+  
+  if (!isNaN(totalQuota) || !isNaN(dailyQuota) || !isNaN(weeklyQuota)) {
+    if (!isNaN(totalQuota) && totalQuota > 0) extra.quota_limit = totalQuota;
+    if (!isNaN(dailyQuota) && dailyQuota > 0) {
+      extra.quota_daily_limit = dailyQuota;
+      extra.quota_daily_reset_mode = 'fixed';
+      extra.quota_daily_reset_hour = parseInt(document.getElementById('form-quota-daily-hr')?.value) || 0;
+    }
+    if (!isNaN(weeklyQuota) && weeklyQuota > 0) {
+      extra.quota_weekly_limit = weeklyQuota;
+      extra.quota_weekly_reset_mode = 'fixed';
+      extra.quota_weekly_reset_hour = parseInt(document.getElementById('form-quota-weekly-hr')?.value) || 0;
+      extra.quota_weekly_reset_day = parseInt(document.getElementById('form-quota-weekly-day')?.value) || 1;
+    }
+    if (!isNaN(dailyQuota) || !isNaN(weeklyQuota)) {
+      const tz = document.getElementById('form-quota-tz')?.value?.trim();
+      if (tz) extra.quota_reset_timezone = tz;
+    }
+  }
+  
+  // Model Restrictions
+  const whitelistArea = document.getElementById('whitelist-area');
+  const allowWhitelist = !whitelistArea.classList.contains('hidden');
+
+  if (allowWhitelist) {
+    if (_mwsSelectedModels && _mwsSelectedModels.length > 0) {
+      extra.model_whitelist = [..._mwsSelectedModels];
+    }
+  } else {
+    const mapping = {};
+    document.querySelectorAll('#mappings-container div').forEach(div => {
+      const from = div.querySelector('.mapping-from').value.trim();
+      const to = div.querySelector('.mapping-to').value.trim();
+      if (from && to) mapping[from] = to;
+    });
+    if (Object.keys(mapping).length > 0) credentials.model_mapping = mapping;
+  }
+  
   // Collect selected group IDs
   const groupCheckboxes = document.querySelectorAll('input[name="group_ids"]:checked');
   const groupIds = Array.from(groupCheckboxes).map(cb => parseInt(cb.value));
@@ -437,6 +774,18 @@ async function handleAddAccount(e) {
     credentials: credentials,
     notes: notes,
   };
+
+  // Top-level account fields (not in extra)
+  if (!isNaN(concurrency) && concurrency > 0) body.concurrency = concurrency;
+  if (!isNaN(priority)) body.priority = priority;
+  if (!isNaN(rateMultiplier) && rateMultiplier > 0) body.rate_multiplier = rateMultiplier;
+  if (!autoPause) body.auto_pause_on_expired = false;
+  if (expStr) body.expires_at = Math.floor(new Date(expStr).getTime() / 1000);
+  
+  const proxyId = document.getElementById('form-proxy-id').value;
+  if (proxyId) body.proxy_id = parseInt(proxyId);
+  
+  if (Object.keys(extra).length > 0) body.extra = extra;
   if (groupIds.length > 0) body.group_ids = groupIds;
 
   // Submit
@@ -461,6 +810,127 @@ async function handleAddAccount(e) {
     setSubmitting(false);
   }
 }
+
+
+// --- Specific logic for Quota Control Toggles ---
+let toggleStates = {
+  'window-cost': false,
+  'session-limit': false,
+  'rpm-limit': false,
+  'tls': false,
+  'session-mask': false,
+  'cache-ttl': false,
+  'custom-url': false,
+  'intercept-warmup': false,
+  'custom-error-codes': false,
+  'temp-rules': false
+};
+
+function initToggles() {
+  const toggleIds = Object.keys(toggleStates);
+  toggleIds.forEach(id => {
+    const el = document.getElementById('toggle-' + id);
+    if (!el) return;
+    el.addEventListener('click', () => {
+      toggleStates[id] = !toggleStates[id];
+      renderToggle(id);
+    });
+  });
+}
+
+function renderToggle(id) {
+  const el = document.getElementById('toggle-' + id);
+  if (!el) return;
+  const nob = el.querySelector('.toggle-nob');
+  const spanTargetId = id === 'temp-rules' ? 'temp-rules-container-wrapper' : id + '-area';
+  const targetArea = document.getElementById(spanTargetId);
+  
+  if (toggleStates[id]) {
+    el.classList.remove('bg-gray-200');
+    el.classList.add('bg-primary-600');
+    nob.classList.remove('translate-x-0');
+    nob.classList.add('translate-x-5');
+    if (targetArea) targetArea.classList.remove('hidden');
+  } else {
+    el.classList.add('bg-gray-200');
+    el.classList.remove('bg-primary-600');
+    nob.classList.add('translate-x-0');
+    nob.classList.remove('translate-x-5');
+    if (targetArea) targetArea.classList.add('hidden');
+  }
+}
+
+function setRpmStrategy(strategy) {
+  document.getElementById('v-rpm-strategy').value = strategy;
+  document.getElementById('rpm-str-tiered').classList.toggle('active', strategy === 'tiered');
+  document.getElementById('rpm-str-sticky').classList.toggle('active', strategy === 'sticky_exempt');
+  if (strategy === 'tiered') {
+    document.getElementById('rpm-strategy-buffer-area').classList.remove('hidden');
+  } else {
+    document.getElementById('rpm-strategy-buffer-area').classList.add('hidden');
+  }
+}
+
+function setUmqMode(mode) {
+  document.getElementById('v-user-msg-queue').value = mode;
+  ['off', 'throttle', 'serialize'].forEach(id => {
+    document.getElementById('umq-' + id).classList.remove('active');
+  });
+  const idMap = { '':'off', 'throttle':'throttle', 'serialize':'serialize' };
+  if (idMap[mode] !== undefined) document.getElementById('umq-' + idMap[mode]).classList.add('active');
+}
+
+// Add initToggles to initialization
+document.addEventListener('DOMContentLoaded', () => {
+  initToggles();
+
+  // Model mode tab buttons
+  const wlBtn = document.getElementById('btn-mode-whitelist');
+  const mpBtn = document.getElementById('btn-mode-mapping');
+  if (wlBtn) wlBtn.addEventListener('click', () => window.setModelMode('whitelist'));
+  if (mpBtn) mpBtn.addEventListener('click', () => window.setModelMode('mapping'));
+
+  // Add mapping button
+  const addMappingBtn = document.getElementById('btn-add-mapping');
+  if (addMappingBtn) addMappingBtn.addEventListener('click', () => addModelMapping());
+
+  // Model Whitelist Selector bindings
+  const mwsTrigger = document.getElementById('mws-trigger');
+  if (mwsTrigger) mwsTrigger.addEventListener('click', () => mwsToggleDropdown());
+
+  const mwsSearch = document.getElementById('mws-search');
+  if (mwsSearch) {
+    mwsSearch.addEventListener('click', (e) => e.stopPropagation());
+    mwsSearch.addEventListener('input', (e) => mwsRenderOptions(e.target.value));
+  }
+
+  const mwsFillBtn = document.getElementById('mws-fill-related');
+  if (mwsFillBtn) mwsFillBtn.addEventListener('click', () => mwsFillRelated());
+
+  const mwsClearBtn = document.getElementById('mws-clear-all');
+  if (mwsClearBtn) mwsClearBtn.addEventListener('click', () => mwsClearAll());
+
+  const mwsAddBtn = document.getElementById('mws-add-custom');
+  if (mwsAddBtn) mwsAddBtn.addEventListener('click', () => mwsAddCustom());
+
+  const mwsCustomInput = document.getElementById('mws-custom-input');
+  if (mwsCustomInput) mwsCustomInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); mwsAddCustom(); } });
+
+  // Close dropdown when clicking outside
+  document.addEventListener('click', (e) => {
+    const container = document.querySelector('.mws-container');
+    if (container && !container.contains(e.target) && _mwsDropdownOpen) {
+      _mwsDropdownOpen = false;
+      const dd = document.getElementById('mws-dropdown');
+      if (dd) dd.classList.add('hidden');
+    }
+  });
+
+  // Render initial model chips after a small delay (form-platform is set)
+  setTimeout(() => {
+    renderModelChips();
+  }, 100);
+});
 
 function validateCredentials(platform, type, creds) {
   if (type === 'upstream') {
@@ -943,9 +1413,14 @@ async function handleGenerateAuthUrl() {
   oauthCredentials = null;
 
   try {
+    const proxyIdEl = document.getElementById('form-proxy-id');
+    const proxyIdVal = proxyIdEl ? proxyIdEl.value : '';
+    const reqBody = {};
+    if (proxyIdVal) reqBody.proxy_id = parseInt(proxyIdVal);
+
     const resp = await apiFetch(endpoints.generateUrl, {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify(reqBody),
     });
 
     if (!resp.ok) {
@@ -1066,6 +1541,9 @@ async function handleExchangeCode() {
       code: code,
     };
     if (oauthState) body.state = oauthState;
+    const proxyIdEl = document.getElementById('form-proxy-id');
+    const proxyIdVal = proxyIdEl ? proxyIdEl.value : '';
+    if (proxyIdVal) body.proxy_id = parseInt(proxyIdVal);
 
     const resp = await apiFetch(endpoints.exchangeCode, {
       method: 'POST',
@@ -1107,10 +1585,19 @@ function buildOAuthCredentials(platform, type, tokenInfo) {
     };
   }
   if (platform === 'openai') {
-    return {
-      refresh_token: tokenInfo.refresh_token || '',
+    const creds = {
       access_token: tokenInfo.access_token || '',
+      expires_at: tokenInfo.expires_at,
     };
+    if (tokenInfo.refresh_token) creds.refresh_token = tokenInfo.refresh_token;
+    if (tokenInfo.id_token) creds.id_token = tokenInfo.id_token;
+    if (tokenInfo.email) creds.email = tokenInfo.email;
+    if (tokenInfo.chatgpt_account_id) creds.chatgpt_account_id = tokenInfo.chatgpt_account_id;
+    if (tokenInfo.chatgpt_user_id) creds.chatgpt_user_id = tokenInfo.chatgpt_user_id;
+    if (tokenInfo.organization_id) creds.organization_id = tokenInfo.organization_id;
+    if (tokenInfo.plan_type) creds.plan_type = tokenInfo.plan_type;
+    if (tokenInfo.client_id) creds.client_id = tokenInfo.client_id;
+    return creds;
   }
   if (platform === 'gemini') {
     const creds = {};
@@ -1176,6 +1663,8 @@ window.closeAddModal = closeAddModal;
 window.handleAddAccount = handleAddAccount;
 window.onPlatformChange = onPlatformChange;
 window.onTypeChange = onTypeChange;
+window.selectPlatform = selectPlatform;
+window.selectType = selectType;
 window.deleteAccount = deleteAccount;
 window.goToPage = goToPage;
 
@@ -1186,3 +1675,506 @@ window.copyOAuthUrl = copyOAuthUrl;
 window.handleOpenAuthUrl = handleOpenAuthUrl;
 window.onOAuthCodeInput = onOAuthCodeInput;
 window.handleExchangeCode = handleExchangeCode;
+
+// ══════════════════════════════════════
+// New UI Handlers for Advanced Modules
+// ══════════════════════════════════════
+
+
+// ══════════════════════════════════════
+// Platform Model Lists (synced from useModelWhitelist.ts)
+// ══════════════════════════════════════
+
+const PLATFORM_MODELS = {
+  anthropic: [
+    'claude-3-5-sonnet-20241022', 'claude-3-5-sonnet-20240620',
+    'claude-3-5-haiku-20241022',
+    'claude-3-opus-20240229', 'claude-3-sonnet-20240229', 'claude-3-haiku-20240307',
+    'claude-3-7-sonnet-20250219',
+    'claude-sonnet-4-20250514', 'claude-opus-4-20250514',
+    'claude-opus-4-1-20250805',
+    'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001',
+    'claude-opus-4-5-20251101',
+    'claude-opus-4-6',
+    'claude-sonnet-4-6',
+    'claude-2.1', 'claude-2.0', 'claude-instant-1.2'
+  ],
+  openai: [
+    'gpt-4o', 'gpt-4o-2024-08-06', 'gpt-4o-2024-11-20',
+    'gpt-4o-mini', 'gpt-4o-mini-2024-07-18',
+    'gpt-4.5-preview',
+    'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano',
+    'o1', 'o1-preview', 'o1-mini', 'o1-pro',
+    'o3', 'o3-mini', 'o3-pro',
+    'o4-mini',
+    'gpt-5', 'gpt-5-mini', 'gpt-5-nano',
+    'gpt-5.1', 'gpt-5.1-codex', 'gpt-5.1-codex-max',
+    'gpt-5.2', 'gpt-5.2-codex', 'gpt-5.2-pro',
+    'gpt-5.3-codex', 'gpt-5.3-codex-spark',
+    'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano',
+    'chatgpt-4o-latest'
+  ],
+  gemini: [
+    'gemini-3.1-flash-image',
+    'gemini-2.5-flash-image',
+    'gemini-2.0-flash',
+    'gemini-2.5-flash',
+    'gemini-2.5-pro',
+    'gemini-3-flash-preview',
+    'gemini-3-pro-preview'
+  ],
+  antigravity: [
+    'claude-opus-4-6', 'claude-opus-4-6-thinking',
+    'claude-opus-4-5-thinking',
+    'claude-sonnet-4-6', 'claude-sonnet-4-5', 'claude-sonnet-4-5-thinking',
+    'gemini-3.1-flash-image', 'gemini-2.5-flash-image',
+    'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.5-flash-thinking',
+    'gemini-2.5-pro',
+    'gemini-3-flash', 'gemini-3-pro-high', 'gemini-3-pro-low',
+    'gemini-3.1-pro-high', 'gemini-3.1-pro-low', 'gemini-3-pro-image',
+    'gpt-oss-120b-medium', 'tab_flash_lite_preview'
+  ]
+};
+
+const PRESET_MAPPINGS = {
+  anthropic: [
+    { label: 'Sonnet 4', from: 'claude-sonnet-4-20250514', to: 'claude-sonnet-4-20250514', color: 'chip-blue' },
+    { label: 'Sonnet 4.5', from: 'claude-sonnet-4-5-20250929', to: 'claude-sonnet-4-5-20250929', color: 'chip-indigo' },
+    { label: 'Sonnet 4.6', from: 'claude-sonnet-4-6', to: 'claude-sonnet-4-6', color: 'chip-indigo' },
+    { label: 'Opus 4.5', from: 'claude-opus-4-5-20251101', to: 'claude-opus-4-5-20251101', color: 'chip-purple' },
+    { label: 'Opus 4.6', from: 'claude-opus-4-6', to: 'claude-opus-4-6', color: 'chip-purple' },
+    { label: 'Haiku 3.5', from: 'claude-3-5-haiku-20241022', to: 'claude-3-5-haiku-20241022', color: 'chip-green' },
+    { label: 'Haiku 4.5', from: 'claude-haiku-4-5-20251001', to: 'claude-haiku-4-5-20251001', color: 'chip-teal' },
+    { label: 'Opus\u2192Sonnet', from: 'claude-opus-4-6', to: 'claude-sonnet-4-5-20250929', color: 'chip-amber' }
+  ],
+  openai: [
+    { label: 'GPT-4o', from: 'gpt-4o', to: 'gpt-4o', color: 'chip-green' },
+    { label: 'GPT-4o Mini', from: 'gpt-4o-mini', to: 'gpt-4o-mini', color: 'chip-blue' },
+    { label: 'GPT-4.1', from: 'gpt-4.1', to: 'gpt-4.1', color: 'chip-indigo' },
+    { label: 'o1', from: 'o1', to: 'o1', color: 'chip-purple' },
+    { label: 'o3', from: 'o3', to: 'o3', color: 'chip-teal' },
+    { label: 'GPT-5', from: 'gpt-5', to: 'gpt-5', color: 'chip-amber' },
+    { label: 'GPT-5.2', from: 'gpt-5.2', to: 'gpt-5.2', color: 'chip-pink' },
+    { label: 'GPT-5.4', from: 'gpt-5.4', to: 'gpt-5.4', color: 'chip-pink' },
+    { label: 'GPT-5.1 Codex', from: 'gpt-5.1-codex', to: 'gpt-5.1-codex', color: 'chip-cyan' },
+    { label: 'GPT-5.3 Codex Spark', from: 'gpt-5.3-codex-spark', to: 'gpt-5.3-codex-spark', color: 'chip-teal' }
+  ],
+  gemini: [
+    { label: 'Flash 2.0', from: 'gemini-2.0-flash', to: 'gemini-2.0-flash', color: 'chip-blue' },
+    { label: '2.5 Flash', from: 'gemini-2.5-flash', to: 'gemini-2.5-flash', color: 'chip-indigo' },
+    { label: '2.5 Image', from: 'gemini-2.5-flash-image', to: 'gemini-2.5-flash-image', color: 'chip-cyan' },
+    { label: '2.5 Pro', from: 'gemini-2.5-pro', to: 'gemini-2.5-pro', color: 'chip-purple' },
+    { label: '3.1 Image', from: 'gemini-3.1-flash-image', to: 'gemini-3.1-flash-image', color: 'chip-cyan' }
+  ],
+  antigravity: [
+    { label: 'Claude\u2192Sonnet', from: 'claude-*', to: 'claude-sonnet-4-5', color: 'chip-blue' },
+    { label: 'Sonnet\u2192Sonnet', from: 'claude-sonnet-*', to: 'claude-sonnet-4-5', color: 'chip-indigo' },
+    { label: 'Opus\u2192Opus', from: 'claude-opus-*', to: 'claude-opus-4-6-thinking', color: 'chip-purple' },
+    { label: 'Haiku\u2192Sonnet', from: 'claude-haiku-*', to: 'claude-sonnet-4-5', color: 'chip-teal' },
+    { label: 'Sonnet4\u21924.6', from: 'claude-sonnet-4-20250514', to: 'claude-sonnet-4-6', color: 'chip-cyan' },
+    { label: 'Sonnet4.5\u21924.6', from: 'claude-sonnet-4-5-20250929', to: 'claude-sonnet-4-6', color: 'chip-cyan' },
+    { label: 'Sonnet3.5\u21924.6', from: 'claude-3-5-sonnet-20241022', to: 'claude-sonnet-4-6', color: 'chip-teal' },
+    { label: 'Opus4.5\u21924.6', from: 'claude-opus-4-5-20251101', to: 'claude-opus-4-6-thinking', color: 'chip-pink' },
+    { label: 'Gemini 3\u2192Flash', from: 'gemini-3*', to: 'gemini-3-flash', color: 'chip-amber' },
+    { label: 'Gemini 2.5\u2192Flash', from: 'gemini-2.5*', to: 'gemini-2.5-flash', color: 'chip-amber' },
+    { label: 'Sonnet 4.6', from: 'claude-sonnet-4-6', to: 'claude-sonnet-4-6', color: 'chip-cyan' },
+    { label: 'Opus 4.6', from: 'claude-opus-4-6', to: 'claude-opus-4-6-thinking', color: 'chip-pink' }
+  ],
+  bedrock: [
+    { label: 'Opus 4.6', from: 'claude-opus-4-6', to: 'us.anthropic.claude-opus-4-6-v1', color: 'chip-pink' },
+    { label: 'Sonnet 4.6', from: 'claude-sonnet-4-6', to: 'us.anthropic.claude-sonnet-4-6', color: 'chip-cyan' },
+    { label: 'Opus 4.5', from: 'claude-opus-4-5-thinking', to: 'us.anthropic.claude-opus-4-5-20251101-v1:0', color: 'chip-pink' },
+    { label: 'Sonnet 4.5', from: 'claude-sonnet-4-5', to: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0', color: 'chip-cyan' },
+    { label: 'Haiku 4.5', from: 'claude-haiku-4-5', to: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', color: 'chip-green' }
+  ]
+};
+
+// Chip color assignment for whitelist mode
+const MODEL_CHIP_COLORS = [
+  'chip-blue', 'chip-purple', 'chip-green', 'chip-indigo',
+  'chip-cyan', 'chip-amber', 'chip-pink', 'chip-teal'
+];
+
+// ── Model Whitelist Selector (multi-select dropdown) ──
+let _mwsSelectedModels = [];
+let _mwsDropdownOpen = false;
+
+function mwsSyncHidden() {
+  document.getElementById('form-model-whitelist').value = _mwsSelectedModels.join(',');
+}
+
+function mwsRenderTags() {
+  const container = document.getElementById('mws-selected-tags');
+  const countEl = document.getElementById('mws-count');
+  if (!container) return;
+  container.innerHTML = '';
+  _mwsSelectedModels.forEach(model => {
+    const tag = document.createElement('span');
+    tag.className = 'mws-tag';
+    tag.innerHTML = '<span class="mws-tag-name">' + escapeHtml(model) + '</span><button type="button" class="mws-tag-close">&times;</button>';
+    tag.querySelector('.mws-tag-close').addEventListener('click', (e) => {
+      e.stopPropagation();
+      mwsRemoveModel(model);
+    });
+    container.appendChild(tag);
+  });
+  if (countEl) {
+    countEl.textContent = _mwsSelectedModels.length > 0
+      ? '已选择 ' + _mwsSelectedModels.length + ' 个模型'
+      : '已选择 0 个模型（支持所有模型）';
+  }
+  mwsSyncHidden();
+}
+
+function mwsRemoveModel(model) {
+  _mwsSelectedModels = _mwsSelectedModels.filter(m => m !== model);
+  mwsRenderTags();
+  mwsRenderOptions();
+}
+
+function mwsToggleModel(model) {
+  if (_mwsSelectedModels.includes(model)) {
+    _mwsSelectedModels = _mwsSelectedModels.filter(m => m !== model);
+  } else {
+    _mwsSelectedModels.push(model);
+  }
+  mwsRenderTags();
+  mwsRenderOptions();
+}
+
+function mwsRenderOptions(query) {
+  const platform = document.getElementById('form-platform').value;
+  const models = PLATFORM_MODELS[platform] || PLATFORM_MODELS['anthropic'];
+  const container = document.getElementById('mws-options');
+  if (!container) return;
+  container.innerHTML = '';
+
+  const q = (query || '').toLowerCase().trim();
+  const filtered = q ? models.filter(m => m.toLowerCase().includes(q)) : models;
+
+  if (filtered.length === 0) {
+    container.innerHTML = '<div class="mws-no-results">没有匹配的模型</div>';
+    return;
+  }
+
+  filtered.forEach(model => {
+    const isSelected = _mwsSelectedModels.includes(model);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'mws-option';
+    btn.innerHTML = '<span class="mws-check ' + (isSelected ? 'checked' : '') + '"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="3"><path d="M5 13l4 4L19 7"/></svg></span><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(model) + '</span>';
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      mwsToggleModel(model);
+    });
+    container.appendChild(btn);
+  });
+}
+
+function mwsToggleDropdown() {
+  _mwsDropdownOpen = !_mwsDropdownOpen;
+  const dd = document.getElementById('mws-dropdown');
+  if (!dd) return;
+  if (_mwsDropdownOpen) {
+    dd.classList.remove('hidden');
+    mwsRenderOptions();
+    const searchEl = document.getElementById('mws-search');
+    if (searchEl) {
+      searchEl.value = '';
+      setTimeout(() => searchEl.focus(), 50);
+    }
+  } else {
+    dd.classList.add('hidden');
+  }
+}
+
+// Auto-fill models for current platform (replaces existing selection)
+function mwsAutoFillForPlatform() {
+  const platform = document.getElementById('form-platform').value;
+  const models = PLATFORM_MODELS[platform] || PLATFORM_MODELS['anthropic'];
+  _mwsSelectedModels = [...models];
+  mwsRenderTags();
+  if (_mwsDropdownOpen) mwsRenderOptions();
+}
+
+function mwsFillRelated() {
+  const platform = document.getElementById('form-platform').value;
+  const models = PLATFORM_MODELS[platform] || PLATFORM_MODELS['anthropic'];
+  models.forEach(m => {
+    if (!_mwsSelectedModels.includes(m)) _mwsSelectedModels.push(m);
+  });
+  mwsRenderTags();
+  mwsRenderOptions();
+}
+
+function mwsClearAll() {
+  _mwsSelectedModels = [];
+  mwsRenderTags();
+  mwsRenderOptions();
+}
+
+function mwsAddCustom() {
+  const input = document.getElementById('mws-custom-input');
+  const val = (input.value || '').trim();
+  if (!val) return;
+  if (_mwsSelectedModels.includes(val)) return;
+  _mwsSelectedModels.push(val);
+  input.value = '';
+  mwsRenderTags();
+  mwsRenderOptions();
+}
+
+function renderModelChips() {
+  // Called on platform change / initial — auto-fill if empty
+  if (_mwsSelectedModels.length === 0) {
+    mwsAutoFillForPlatform();
+  } else {
+    mwsRenderTags();
+    if (_mwsDropdownOpen) mwsRenderOptions();
+  }
+}
+
+function renderPresetMappings() {
+  const platform = document.getElementById('form-platform').value;
+  const type = document.getElementById('form-type').value;
+  const container = document.getElementById('preset-mappings-area');
+  if (!container) return;
+  container.innerHTML = '';
+
+  const key = (platform === 'antigravity' && type === 'bedrock') ? 'bedrock' : platform;
+  const presets = PRESET_MAPPINGS[key] || PRESET_MAPPINGS['anthropic'];
+
+  presets.forEach(p => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'preset-mapping-chip ' + p.color;
+    btn.textContent = '+ ' + p.label;
+    btn.addEventListener('click', () => addModelMapping(p.from, p.to));
+    container.appendChild(btn);
+  });
+}
+
+window.setModelMode = function(mode) {
+  const wlBtn = document.getElementById('btn-mode-whitelist');
+  const mpBtn = document.getElementById('btn-mode-mapping');
+  const wlArea = document.getElementById('whitelist-area');
+  const mpArea = document.getElementById('mapping-area');
+  if (mode === 'whitelist') {
+    if(wlBtn) wlBtn.classList.add('active');
+    if(mpBtn) mpBtn.classList.remove('active');
+    wlArea.classList.remove('hidden');
+    mpArea.classList.add('hidden');
+    // Auto-fill related models on mode switch (matches sub2api: watch modelRestrictionMode)
+    mwsAutoFillForPlatform();
+    renderModelChips();
+  } else {
+    if(mpBtn) mpBtn.classList.add('active');
+    if(wlBtn) wlBtn.classList.remove('active');
+    mpArea.classList.remove('hidden');
+    wlArea.classList.add('hidden');
+    renderPresetMappings();
+  }
+};
+
+window.onBedrockAuthModeChange = function() {
+  const mode = document.getElementById('form-bedrock-auth-mode').value;
+  if (mode === 'sigv4') {
+    document.getElementById('bedrock-sigv4-area').classList.remove('hidden');
+    document.getElementById('bedrock-apikey-area').classList.add('hidden');
+  } else {
+    document.getElementById('bedrock-apikey-area').classList.remove('hidden');
+    document.getElementById('bedrock-sigv4-area').classList.add('hidden');
+  }
+};
+
+function renderErrorCodes() {
+  const c = document.getElementById('selected-error-codes');
+  const input = document.getElementById('form-custom-error-codes');
+  let codes = [];
+  try { codes = JSON.parse(input.value || '[]'); } catch(e){}
+  c.innerHTML = '';
+  codes.forEach(code => {
+    const el = document.createElement('span');
+    el.className = 'error-tag';
+    el.style = 'background:#e2e8f0; padding:2px 8px; border-radius:12px; font-size:12px; display:inline-flex; align-items:center; gap:4px;';
+    el.innerHTML = `${code} <button type="button" class="js-err-close" style="background:none; border:none; cursor:pointer; font-size:14px; line-height:1;">&times;</button>`;
+    el.querySelector('.js-err-close').addEventListener('click', () => toggleErrorCode('str_' + code));
+    c.appendChild(el);
+  });
+}
+
+window.toggleErrorCode = function(code) {
+  if (typeof code === 'string' && code.startsWith('str_')) code = code.substring(4);
+  const input = document.getElementById('form-custom-error-codes');
+  let codes = [];
+  try { codes = JSON.parse(input.value || '[]'); } catch(e){}
+  const intCode = parseInt(code);
+  if (isNaN(intCode)) return;
+  if (codes.includes(intCode)) {
+    codes = codes.filter(c => c !== intCode);
+  } else {
+    codes.push(intCode);
+  }
+  input.value = JSON.stringify(codes);
+  renderErrorCodes();
+};
+
+window.addCustomErrorCode = function() {
+  const inputEl = document.getElementById('custom-error-input');
+  const val = inputEl.value;
+  if(val) {
+    window.toggleErrorCode(val);
+    inputEl.value = '';
+  }
+};
+
+let _tempRules = [];
+window.addTempRule = function(code='', duration='', kw=[''], title='') {
+  const container = document.getElementById('temp-rules-container');
+  const id = Date.now().toString() + Math.floor(Math.random()*1000);
+  
+  const div = document.createElement('div');
+  div.className = 'temp-rule-card';
+  div.style = 'border:1px solid #e5e7eb; border-radius:6px; padding:10px; position:relative;';
+  div.innerHTML = `
+    <button type="button" class="btn btn-secondary btn-sm js-temp-del" style="position:absolute; right:10px; top:10px;">删除</button>
+    <div style="display:flex; gap:12px; margin-bottom:8px; padding-right:50px;">
+      <div style="flex:1;"><label>状态码</label><input type="number" class="tr-code" value="${code||''}" placeholder="400" /></div>
+      <div style="flex:1;"><label>不可用时长(分钟)</label><input type="number" class="tr-dur" value="${duration||''}" placeholder="30" /></div>
+    </div>
+    <div>
+      <label>错误关键字 (逗号分隔)</label>
+      <input type="text" class="tr-kw" value="${kw.join(',')}" placeholder="例如: your account has been restricted" />
+    </div>
+  `;
+  div.dataset.id = id;
+  div.querySelector('.js-temp-del').addEventListener('click', () => delTempRule(id));
+  div.querySelectorAll('input').forEach(inp => inp.addEventListener('change', syncTempRules));
+  container.appendChild(div);
+  syncTempRules();
+};
+
+window.delTempRule = function(id) {
+  const container = document.getElementById('temp-rules-container');
+  const child = Array.from(container.children).find(c => c.dataset.id === id);
+  if (child) container.removeChild(child);
+  syncTempRules();
+};
+
+window.syncTempRules = function() {
+  const container = document.getElementById('temp-rules-container');
+  const rules = Array.from(container.children).map(c => {
+    return {
+      code: c.querySelector('.tr-code').value,
+      duration: c.querySelector('.tr-dur').value,
+      keywords: c.querySelector('.tr-kw').value.split(',').map(s=>s.trim()).filter(Boolean)
+    };
+  }).filter(r => r.code && r.duration);
+  document.getElementById('form-temp-rules').value = JSON.stringify(rules);
+};
+
+window.toggleQC = function(type) {
+  const cb = document.getElementById('qc-'+type);
+  const group = document.getElementById('qcg-'+type);
+  if (group) {
+    if (cb.checked) group.classList.remove('hidden');
+    else group.classList.add('hidden');
+  }
+  syncQC();
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+    const qcSec = document.getElementById('quota-control-section');
+    if (qcSec) {
+        qcSec.addEventListener('change', syncQC);
+        qcSec.addEventListener('input', syncQC);
+    }
+});
+
+// syncQC is no longer used — quota control is now serialized directly by applyQuotaControlToExtra()
+function syncQC() {}
+
+/**
+ * Apply quota control fields directly into the extra object (flat structure).
+ * Backend reads: window_cost_limit, window_cost_sticky_reserve,
+ *   max_sessions, session_idle_timeout_minutes, base_rpm, rpm_strategy,
+ *   rpm_sticky_buffer, user_msg_queue_mode, enable_tls_fingerprint,
+ *   tls_fingerprint_profile_id, session_id_masking_enabled,
+ *   cache_ttl_override_enabled, cache_ttl_override_target,
+ *   custom_base_url_enabled, custom_base_url
+ */
+function applyQuotaControlToExtra(extra) {
+  // Window Cost
+  const wcToggle = document.getElementById('toggle-window-cost');
+  if (wcToggle && wcToggle.classList.contains('bg-primary-600')) {
+    const limit = parseFloat(document.getElementById('v-window-cost-limit')?.value);
+    if (!isNaN(limit) && limit > 0) {
+      extra.window_cost_limit = limit;
+      const reserve = parseFloat(document.getElementById('v-window-cost-reserve')?.value);
+      extra.window_cost_sticky_reserve = (!isNaN(reserve) && reserve > 0) ? reserve : 10;
+    }
+  }
+
+  // Session Limit
+  const slToggle = document.getElementById('toggle-session-limit');
+  if (slToggle && slToggle.classList.contains('bg-primary-600')) {
+    const maxSess = parseInt(document.getElementById('v-session-max')?.value);
+    if (!isNaN(maxSess) && maxSess > 0) {
+      extra.max_sessions = maxSess;
+      const idle = parseInt(document.getElementById('v-session-idle')?.value);
+      extra.session_idle_timeout_minutes = (!isNaN(idle) && idle > 0) ? idle : 5;
+    }
+  }
+
+  // RPM Limit
+  const rpmToggle = document.getElementById('toggle-rpm-limit');
+  if (rpmToggle && rpmToggle.classList.contains('bg-primary-600')) {
+    const DEFAULT_BASE_RPM = 15;
+    const baseRpm = parseInt(document.getElementById('v-rpm-base')?.value);
+    extra.base_rpm = (!isNaN(baseRpm) && baseRpm > 0) ? baseRpm : DEFAULT_BASE_RPM;
+    extra.rpm_strategy = document.getElementById('v-rpm-strategy')?.value || 'tiered';
+    const buffer = parseInt(document.getElementById('v-rpm-buffer')?.value);
+    if (!isNaN(buffer) && buffer > 0) {
+      extra.rpm_sticky_buffer = buffer;
+    }
+  }
+
+  // User Message Queue Mode (independent of RPM)
+  const umqMode = document.getElementById('v-user-msg-queue')?.value;
+  if (umqMode) {
+    extra.user_msg_queue_mode = umqMode;
+  }
+
+  // TLS Fingerprint
+  const tlsToggle = document.getElementById('toggle-tls');
+  if (tlsToggle && tlsToggle.classList.contains('bg-primary-600')) {
+    extra.enable_tls_fingerprint = true;
+    const profileId = document.getElementById('v-tls-profile')?.value;
+    if (profileId) {
+      extra.tls_fingerprint_profile_id = parseInt(profileId);
+    }
+  }
+
+  // Session ID Masking
+  const maskToggle = document.getElementById('toggle-session-mask');
+  if (maskToggle && maskToggle.classList.contains('bg-primary-600')) {
+    extra.session_id_masking_enabled = true;
+  }
+
+  // Cache TTL Override
+  const cacheTtlToggle = document.getElementById('toggle-cache-ttl');
+  if (cacheTtlToggle && cacheTtlToggle.classList.contains('bg-primary-600')) {
+    extra.cache_ttl_override_enabled = true;
+    extra.cache_ttl_override_target = document.getElementById('v-cache-target')?.value || '5m';
+  }
+
+  // Custom Base URL
+  const customUrlToggle = document.getElementById('toggle-custom-url');
+  if (customUrlToggle && customUrlToggle.classList.contains('bg-primary-600')) {
+    const url = document.getElementById('v-custom-url')?.value?.trim();
+    if (url) {
+      extra.custom_base_url_enabled = true;
+      extra.custom_base_url = url;
+    }
+  }
+}
