@@ -1,0 +1,12 @@
+{
+  "name": "sub2api-extra-protection",
+  "version": "1.0.0",
+  "private": true,
+  "description": "一键构建加密扩展包",
+  "scripts": {
+    "build": "node scripts/build-protected.js"
+  },
+  "devDependencies": {
+    "javascript-obfuscator": "^4.1.1"
+  }
+}
