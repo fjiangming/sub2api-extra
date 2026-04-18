@@ -1072,7 +1072,7 @@ async function openConfigModal() {
       document.getElementById('cfg-custom-password').value = config.customPassword || '';
 
       // ── 邮箱 ──
-      document.getElementById('cfg-mail-provider').value = config.mailProvider || '163';
+      document.getElementById('cfg-mail-provider').value = config.mailProvider || '2925';
       document.getElementById('cfg-email-generator').value = config.emailGenerator || 'duck';
       document.getElementById('cfg-inbucket-host').value = config.inbucketHost || '';
       document.getElementById('cfg-inbucket-mailbox').value = config.inbucketMailbox || '';

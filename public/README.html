@@ -124,10 +124,6 @@
             <strong>🛑 免责声明：</strong>本项目旨在建立新点公益站仅供内部使用，共同维护共同使用，用多久算多久，不提供任何稳定运行的承诺。
         </div>
 
-        <div class="alert-warning">
-            <strong>⚠️ 重要提示：</strong> 当前 Web 端的自动注册功能暂不可用（生态没有插件好bug搞不动了），请统一使用本浏览器插件（Extension）模式进行注册。
-        </div>
-
         <h2>🚀 批量注册</h2>
 
         <h3>📥 安装与获取</h3>
@@ -144,33 +140,26 @@
 
         <h3>✨ 最佳实践</h3>
         <ol>
-            <li>注册用户</li>
-            <li>插件版注册保持默认配置即可</li>
-            <li>开启梯子、打开插件后填写服务端地址 <span class="dyn-txt" data-b64="aHR0cHM6Ly9lcG9pbnRncHRhci5mam1vb28uY24v"></span>，登录后点击【同步配置】（怕影响当前浏览器办公开隐身窗口）</li>
-            <li>登录2925邮箱，打开收件箱</li>
-            <li>访问 <a class="dyn-link" data-b64="aHR0cHM6Ly9jcGEuZmptb29vLmNuL3VzZXItb2F1dGguaHRtbCMvb2F1dGg=" target="_blank"></a>，拿自己的key登录（web端登录后的右上角），一定要先手动访问到oauth页面，注意看地址。
-                <br />已有存量账号也先通过这个页面授权导入。
-            </li>
-            <li>启动！</li>
+            <li>自动化配置页面根据需求设置密码、选择邮箱服务等，保存配置</li>
+            <li>下载插件包并安装，打开插件后会自动登录，登录后点击【同步配置】将服务端配置同步到插件。</li>
+            <li>登录好对应的邮箱，开启梯子，启动！</li>
             <li>
                 使用方式：
                 <br>
-                <code class="dyn-txt" style="display:block; padding:10px; background:#f4f4f4; border-radius:4px; word-break:break-all;" data-b64="Y3VybCAtWCBQT1NUIGh0dHBzOi8vY3BhLmZqbW9vby5jbi92MS9yZXNwb25zZXMgLUggIkF1dGhvcml6YXRpb246IEJlYXJlciB4eHgiIC1IICJDb250ZW50LVR5cGU6IGFwcGxpY2F0aW9uL2pzb24iIC0tZGF0YS1yYXcgIntcIm1vZGVsXCI6XCJncHQtNS40XCIsXCJpbnB1dFwiOlt7XCJyb2xlXCI6XCJ1c2VyXCIsXCJjb250ZW50XCI6W3tcInR5cGVcIjpcImlucHV0X3RleHRcIixcInRleHRcIjpcIuWPquWbnuWkjU9LXCJ9XX1dLFwic3RyZWFtXCI6ZmFsc2V9Ig=="></code>
+                <code class="dyn-txt"
+                    style="display:block; padding:10px; background:#f4f4f4; border-radius:4px; word-break:break-all;"
+                    data-b64="Y3VybCAtWCBQT1NUIGh0dHBzOi8vZXBvaW50MmFwaS5mam1vb28uY24vdjEvcmVzcG9uc2VzIC1IICJBdXRob3JpemF0aW9uOiBCZWFyZXIgeHh4IiAtSCAiQ29udGVudC1UeXBlOiBhcHBsaWNhdGlvbi9qc29uIiAtLWRhdGEtcmF3ICJ7XCJtb2RlbFwiOlwiZ3B0LTUuNFwiLFwiaW5wdXRcIjpbe1wicm9sZVwiOlwidXNlclwiLFwiY29udGVudFwiOlt7XCJ0eXBlXCI6XCJpbnB1dF90ZXh0XCIsXCJ0ZXh0XCI6XCLlj6rlm57lpI1PS1wifV19XSxcInN0cmVhbVwiOmZhbHNlfSI="></code>
             </li>
         </ol>
 
-        <h3>📖 使用说明</h3>
+        <h3>📖 配置说明</h3>
 
-        <h4>1. 邮箱提供商</h4>
+        <h4>1. 邮箱服务</h4>
         <ol>
-            <li><strong>邮箱选项</strong>：默认选择 <strong>2925</strong> 即可（只测过这个）。</li>
-            <li><strong>账号密码</strong>：主邮箱地址和密码，就是你登录 2925 平台的账号密码。</li>
+            <li>默认选择2925即可（只测过这个）。</li>
         </ol>
 
-        <h4>2. CPA配置</h4>
-        <ol>
-            <li><strong>CPA地址和密钥</strong>：该配置默认我的中转站地址，初衷是一起管理一起用。若你自己部署了后端的平台，也可以配置为你自己的。</li>
-        </ol>
+
 
         <h3>❓ 可能遇到的问题 (FAQ)</h3>
 
@@ -191,15 +180,15 @@
     <script>
         document.addEventListener("DOMContentLoaded", function () {
             function decodeB64UTF8(str) {
-                return decodeURIComponent(atob(str).split('').map(function(c) {
+                return decodeURIComponent(atob(str).split('').map(function (c) {
                     return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
                 }).join(''));
             }
-            document.querySelectorAll('.dyn-txt').forEach(function(el) {
+            document.querySelectorAll('.dyn-txt').forEach(function (el) {
                 var b64 = el.getAttribute('data-b64');
                 if (b64) el.innerText = decodeB64UTF8(b64);
             });
-            document.querySelectorAll('.dyn-link').forEach(function(el) {
+            document.querySelectorAll('.dyn-link').forEach(function (el) {
                 var b64 = el.getAttribute('data-b64');
                 if (b64) {
                     var url = decodeB64UTF8(b64);
@@ -210,4 +199,5 @@
         });
     </script>
 </body>
+
 </html>
