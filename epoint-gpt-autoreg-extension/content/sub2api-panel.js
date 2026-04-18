@@ -303,8 +303,8 @@ async function getBackgroundState() {
 }
 
 function openAccountsPageSoon(origin) {
-  const accountsUrl = `${origin}/admin/accounts`;
-  if (location.href === accountsUrl || location.pathname.startsWith('/admin/accounts')) {
+  const accountsUrl = `${origin}/dashboard`;
+  if (location.href === accountsUrl || location.pathname.startsWith('/dashboard')) {
     return;
   }
   setTimeout(() => {

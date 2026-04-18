@@ -67,7 +67,7 @@ const HUMAN_STEP_DELAY_MAX = 2200;
 const STEP7_RESTART_MAX_ROUNDS = 8;
 const SUB2API_STEP1_RESPONSE_TIMEOUT_MS = 90000;
 const SUB2API_STEP9_RESPONSE_TIMEOUT_MS = 120000;
-const DEFAULT_SUB2API_URL = 'https://sub2api.hisence.fun/admin/accounts';
+const DEFAULT_SUB2API_URL = 'https://sub2api.hisence.fun/dashboard';
 const DEFAULT_SUB2API_GROUP_NAME = 'codex';
 const DEFAULT_SUB2API_REDIRECT_URI = 'http://localhost:1455/auth/callback';
 const AUTO_RUN_ALARM_NAME = 'scheduled-auto-run';
@@ -1206,7 +1206,7 @@ function normalizeSub2ApiUrl(rawUrl) {
   const withProtocol = /^https?:\/\//i.test(input) ? input : `https://${input}`;
   const parsed = new URL(withProtocol);
   if (!parsed.pathname || parsed.pathname === '/') {
-    parsed.pathname = '/admin/accounts';
+    parsed.pathname = '/dashboard';
   }
   parsed.hash = '';
   return parsed.toString();
@@ -1285,7 +1285,7 @@ function matchesSourceUrlFamily(source, candidateUrl, referenceUrl) {
       return Boolean(reference)
         && candidate.origin === reference.origin
         && (
-          candidate.pathname.startsWith('/admin/accounts')
+          candidate.pathname.startsWith('/dashboard')
           || candidate.pathname.startsWith('/login')
           || candidate.pathname === '/'
         );
