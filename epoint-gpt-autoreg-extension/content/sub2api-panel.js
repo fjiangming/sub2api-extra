@@ -136,13 +136,14 @@ function storeAuthSession(loginData) {
 
 async function loginSub2Api(payload = {}) {
   const origin = getSub2ApiOrigin(payload);
+  const cacheKey = 'sub2api_cached_auth_token';
 
-  // ── 优先复用页面已有的登录态 ──
-  // Sub2API 前端登录后会将 token 存储在 localStorage('auth_token') 中。
-  // 既然插件已注入到该页面，直接读取即可，无需用户手动配置账号密码。
+  // ── 1. 优先复用页面已有的登录态 ──
   const existingToken = localStorage.getItem('auth_token');
   if (existingToken) {
     log('步骤：检测到 SUB2API 已有登录态，跳过重新登录。');
+    // 同步缓存到 chrome.storage，防止 SPA 后续清除 localStorage 导致丢失
+    chrome.storage.local.set({ [cacheKey]: { token: existingToken, origin, ts: Date.now() } }).catch(() => {});
     return {
       origin,
       token: existingToken,
@@ -150,7 +151,24 @@ async function loginSub2Api(payload = {}) {
     };
   }
 
-  // ── 降级路径：使用 payload 提供的账密重新登录 ──
+  // ── 2. 降级：从 chrome.storage 恢复（SPA 可能已清除 localStorage） ──
+  try {
+    const stored = await chrome.storage.local.get(cacheKey);
+    const cached = stored[cacheKey];
+    // 缓存有效期 30 分钟，同源才复用
+    if (cached?.token && cached.origin === origin && (Date.now() - cached.ts) < 30 * 60 * 1000) {
+      log('步骤：从插件缓存恢复 SUB2API 登录态（localStorage 已被前端清除）。');
+      // 同步恢复到 localStorage，让后续 SPA 请求也能使用
+      localStorage.setItem('auth_token', cached.token);
+      return {
+        origin,
+        token: cached.token,
+        user: null,
+      };
+    }
+  } catch {}
+
+  // ── 3. 降级：使用 payload 提供的账密重新登录 ──
   const email = (payload.sub2apiEmail || '').trim();
   const password = payload.sub2apiPassword || '';
 
@@ -170,6 +188,9 @@ async function loginSub2Api(payload = {}) {
     },
   });
   storeAuthSession(loginData);
+
+  // 缓存到 chrome.storage
+  chrome.storage.local.set({ [cacheKey]: { token: loginData.access_token, origin, ts: Date.now() } }).catch(() => {});
 
   return {
     origin,
