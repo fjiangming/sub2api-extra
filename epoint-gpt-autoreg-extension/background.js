@@ -1480,10 +1480,8 @@ async function ensureContentScriptReadyOnTab(source, tabId, options = {}) {
       if (injectSource) {
         await chrome.scripting.executeScript({
           target: { tabId },
-          func: (injectedSource) => {
-            window.__MULTIPAGE_SOURCE = injectedSource;
-          },
-          args: [injectSource],
+          func: (src, key) => { window[key] = src; },
+          args: [injectSource, '__MULTIPAGE_SOURCE'],
         });
       }
 
@@ -1710,10 +1708,8 @@ async function reuseOrCreateTab(source, url, options = {}) {
         if (options.injectSource) {
           await chrome.scripting.executeScript({
             target: { tabId },
-            func: (injectedSource) => {
-              window.__MULTIPAGE_SOURCE = injectedSource;
-            },
-            args: [options.injectSource],
+            func: (src, key) => { window[key] = src; },
+            args: [options.injectSource, '__MULTIPAGE_SOURCE'],
           });
         }
         await chrome.scripting.executeScript({
@@ -1753,10 +1749,8 @@ async function reuseOrCreateTab(source, url, options = {}) {
       if (options.injectSource) {
         await chrome.scripting.executeScript({
           target: { tabId },
-          func: (injectedSource) => {
-            window.__MULTIPAGE_SOURCE = injectedSource;
-          },
-          args: [options.injectSource],
+          func: (src, key) => { window[key] = src; },
+          args: [options.injectSource, '__MULTIPAGE_SOURCE'],
         });
       }
       await chrome.scripting.executeScript({
@@ -1793,10 +1787,8 @@ async function reuseOrCreateTab(source, url, options = {}) {
     if (options.injectSource) {
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        func: (injectedSource) => {
-          window.__MULTIPAGE_SOURCE = injectedSource;
-        },
-        args: [options.injectSource],
+        func: (src, key) => { window[key] = src; },
+        args: [options.injectSource, '__MULTIPAGE_SOURCE'],
       });
     }
     await chrome.scripting.executeScript({
