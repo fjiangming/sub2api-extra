@@ -31,9 +31,10 @@ if (!window.__MULTIPAGE_UTILS_LISTENER_READY__) {
     }
 
     if (message.type === 'PING') {
+      // 优先使用实时的 __MULTIPAGE_SOURCE，避免 const SCRIPT_SOURCE 在重复注入时锁死为旧值
       sendResponse({
         ok: true,
-        source: SCRIPT_SOURCE,
+        source: window.__MULTIPAGE_SOURCE || SCRIPT_SOURCE,
       });
     }
   });
@@ -258,17 +259,18 @@ function log(message, level = 'info') {
  * Report that this content script is loaded and ready.
  */
 function reportReady() {
-  console.log(LOG_PREFIX, '内容脚本已就绪');
+  const currentSource = window.__MULTIPAGE_SOURCE || SCRIPT_SOURCE;
+  console.log(LOG_PREFIX, '内容脚本已就绪', `(source=${currentSource})`);
   const message = {
     type: 'CONTENT_SCRIPT_READY',
-    source: SCRIPT_SOURCE,
+    source: currentSource,
     step: null,
     payload: {},
     error: null,
   };
   Promise.resolve(chrome.runtime.sendMessage(message))
     .then((response) => {
-      console.log(LOG_PREFIX, 'CONTENT_SCRIPT_READY sent successfully', { response, url: location.href });
+      console.log(LOG_PREFIX, 'CONTENT_SCRIPT_READY sent successfully', { response, source: currentSource, url: location.href });
     })
     .catch((err) => {
       console.error(LOG_PREFIX, 'CONTENT_SCRIPT_READY send failed', err?.message || err, { url: location.href });
