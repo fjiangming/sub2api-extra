@@ -266,6 +266,7 @@
               await setStoredAuth({
                 token: newToken,
                 serverUrl: stored.serverUrl,
+                extraServerUrl: stored.extraServerUrl || null,
                 email: stored.email,
                 password: stored.password,
                 loginAt: Date.now(),
@@ -352,10 +353,21 @@
           throw new Error('Token 验证失败，请检查服务端地址是否正确');
         }
 
+        // 尝试从浏览器标签页发现 sub2api-extra 地址
+        let extraServerUrl = null;
+        try {
+          const detected = await detectSub2ApiTab();
+          if (detected?.extraOrigin) {
+            extraServerUrl = detected.extraOrigin;
+            console.log('[Auth] 📎 手动登录时发现 sub2api-extra 地址:', extraServerUrl);
+          }
+        } catch {}
+
         // 持久化登录态（含密码，供内容脚本降级登录时使用）
         await setStoredAuth({
           token,
           serverUrl,
+          extraServerUrl,
           email,
           password,
           loginAt: Date.now(),

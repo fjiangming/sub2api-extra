@@ -5354,9 +5354,13 @@ async function syncRemoteExtensionSettings() {
       headers: { 'Authorization': `Bearer ${auth.token}` }
     });
 
-    // 如果主地址返回 404，尝试从浏览器标签页中发现 sub2api-extra 地址
-    if (!res.ok && res.status === 404) {
-      console.warn('[SyncRemote] 主地址返回 404，尝试从标签页发现 sub2api-extra 地址...');
+    // 检测响应是否为 JSON（主 sub2api 的 SPA catch-all 会对未知路由返回 200+HTML）
+    const isJsonResponse = (r) => (r.headers.get('content-type') || '').includes('application/json');
+
+    // 如果主地址返回 404 或返回了非 JSON（SPA HTML），尝试从浏览器标签页中发现 sub2api-extra 地址
+    if ((!res.ok && res.status === 404) || (res.ok && !isJsonResponse(res))) {
+      const reason = res.ok ? '返回了非 JSON 响应（可能是 SPA HTML）' : '返回 404';
+      console.warn(`[SyncRemote] 主地址${reason}，尝试从标签页发现 sub2api-extra 地址...`);
       const discovered = await discoverExtraServerUrl();
       if (discovered && discovered !== settingsBaseUrl) {
         settingsBaseUrl = discovered;
@@ -5365,11 +5369,20 @@ async function syncRemoteExtensionSettings() {
         res = await fetch(settingsUrl, {
           headers: { 'Authorization': `Bearer ${auth.token}` }
         });
+      } else if (res.ok && !isJsonResponse(res)) {
+        // 无法发现 extra server 且响应不是 JSON，直接返回
+        console.warn('[SyncRemote] 未找到 sub2api-extra 服务，且主地址返回了非 JSON 响应，跳过同步');
+        return;
       }
     }
 
     if (!res.ok) {
       console.warn('[SyncRemote] 请求失败，状态码:', res.status, res.statusText, '(URL:', settingsUrl, ')');
+      return;
+    }
+
+    if (!isJsonResponse(res)) {
+      console.warn('[SyncRemote] 响应不是 JSON 格式，跳过同步 (Content-Type:', res.headers.get('content-type'), ')');
       return;
     }
 
