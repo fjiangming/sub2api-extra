@@ -119,7 +119,6 @@ async function loadAccounts() {
 
     renderAccounts();
     renderPagination();
-    document.getElementById('stats-text').textContent = `共 ${pagination.total} 个账号`;
   } catch (err) {
     console.error(err);
     showToast('error', err.message);
@@ -214,41 +213,93 @@ function renderAccounts() {
 function renderPagination() {
   const container = document.getElementById('pagination');
 
-  if (pagination.pages <= 1) {
+  if (pagination.total === 0) {
     container.classList.add('hidden');
     return;
   }
 
   container.classList.remove('hidden');
-  let html = '';
+
+  if (!pagination.pages || pagination.pages < 1) pagination.pages = 1;
+
+  const total = pagination.total;
+  const page = pagination.page;
+  const size = pagination.page_size;
+  const totalPages = pagination.pages;
+
+  const fromItem = total === 0 ? 0 : (page - 1) * size + 1;
+  const toItem = Math.min(page * size, total);
+
+  let html = `
+    <div class="pagination-info">
+      <span>显示 <span class="font-medium">${fromItem}</span> 到 <span class="font-medium">${toItem}</span> 共 <span class="font-medium">${total}</span> 条结果</span>
+      <div class="page-size-selector">
+        <span>每页显示:</span>
+        <select onchange="changePageSize(this)">
+          ${[10, 20, 50, 100].map(s => `<option value="${s}" ${s === size ? 'selected' : ''}>${s}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    
+    <div style="display:flex; gap:12px; align-items:center;">
+      <div class="pagination-jump">
+        <span>跳转到:</span>
+        <input type="number" min="1" max="${totalPages}" class="jump-input" id="jump-page-input" placeholder="页码" onkeypress="if(event.key === 'Enter') jumpToPage(this.value)">
+        <button class="btn btn-sm btn-secondary" onclick="jumpToPage(document.getElementById('jump-page-input').value)">Go</button>
+      </div>
+      <nav class="pagination-nav">
+  `;
 
   // Previous
-  html += `<button ${pagination.page <= 1 ? 'disabled' : ''} onclick="goToPage(${pagination.page - 1})">‹</button>`;
+  html += `<button class="nav-btn ${page <= 1 ? 'disabled' : ''}" ${page <= 1 ? 'disabled' : ''} onclick="goToPage(${page - 1})">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="15 18 9 12 15 6"></polyline></svg>
+  </button>`;
 
   // Page numbers
   const maxVisible = 5;
-  let start = Math.max(1, pagination.page - Math.floor(maxVisible / 2));
-  let end = Math.min(pagination.pages, start + maxVisible - 1);
+  let start = Math.max(1, page - Math.floor(maxVisible / 2));
+  let end = Math.min(totalPages, start + maxVisible - 1);
   if (end - start < maxVisible - 1) start = Math.max(1, end - maxVisible + 1);
 
   if (start > 1) {
-    html += `<button onclick="goToPage(1)">1</button>`;
-    if (start > 2) html += `<button disabled>…</button>`;
+    html += `<button class="nav-btn" onclick="goToPage(1)">1</button>`;
+    if (start > 2) html += `<button class="nav-btn disabled" disabled>…</button>`;
   }
 
   for (let i = start; i <= end; i++) {
-    html += `<button class="${i === pagination.page ? 'active' : ''}" onclick="goToPage(${i})">${i}</button>`;
+    html += `<button class="nav-btn ${i === page ? 'active' : ''}" onclick="goToPage(${i})">${i}</button>`;
   }
 
-  if (end < pagination.pages) {
-    if (end < pagination.pages - 1) html += `<button disabled>…</button>`;
-    html += `<button onclick="goToPage(${pagination.pages})">${pagination.pages}</button>`;
+  if (end < totalPages) {
+    if (end < totalPages - 1) html += `<button class="nav-btn disabled" disabled>…</button>`;
+    html += `<button class="nav-btn" onclick="goToPage(${totalPages})">${totalPages}</button>`;
   }
 
   // Next
-  html += `<button ${pagination.page >= pagination.pages ? 'disabled' : ''} onclick="goToPage(${pagination.page + 1})">›</button>`;
+  html += `<button class="nav-btn ${page >= totalPages ? 'disabled' : ''}" ${page >= totalPages ? 'disabled' : ''} onclick="goToPage(${page + 1})">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="9 18 15 12 9 6"></polyline></svg>
+  </button>`;
+
+  html += `</nav></div>`;
 
   container.innerHTML = html;
+}
+
+function changePageSize(select) {
+  const newSize = parseInt(select.value, 10);
+  if (!isNaN(newSize) && newSize > 0) {
+    pagination.page_size = newSize;
+    pagination.page = 1;
+    loadAccounts();
+  }
+}
+
+function jumpToPage(val) {
+  let p = parseInt(val, 10);
+  if (!isNaN(p)) {
+    p = Math.max(1, Math.min(p, pagination.pages));
+    goToPage(p);
+  }
 }
 
 function renderGroupsCheckboxes() {
