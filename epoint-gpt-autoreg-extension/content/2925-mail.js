@@ -360,6 +360,12 @@ async function handlePoll2925Mail(step, payload = {}) {
   } = payload;
   const excludedCodeSet = new Set((excludeCodes || []).filter(Boolean));
 
+  // 每次新的 POLL_EMAIL 调用时清空 seen2925Codes，
+  // 避免跨轮累积导致 OpenAI 重发的相同验证码被永久拦截。
+  // 跨轮去重由 background 传入的 excludeCodes 负责。
+  seen2925Codes.clear();
+  await persistSeen2925Codes();
+
   if (!targetEmail) {
     throw new Error('未找到当前子邮箱，请先执行 Step 3 生成 2925 子邮箱。');
   }
@@ -392,16 +398,16 @@ async function handlePoll2925Mail(step, payload = {}) {
         continue;
       }
       if (seen2925Codes.has(result.code)) {
-        log(`Step ${step}: Skipping already-seen 2925 code: ${result.code}`, 'info');
-      } else {
-        seen2925Codes.add(result.code);
-        await persistSeen2925Codes();
-        log(
-          `Step ${step}: Code found: ${result.code} (recipient: ${result.matchedEmail || 'unknown'})`,
-          'ok'
-        );
-        return { ok: true, ...result };
+        log(`Step ${step}: Reusing same 2925 code within poll: ${result.code}`, 'info');
       }
+      // 记录本次轮询内已见过的验证码（防止同一次 poll 内重复返回相同行）
+      seen2925Codes.add(result.code);
+      await persistSeen2925Codes();
+      log(
+        `Step ${step}: Code found: ${result.code} (recipient: ${result.matchedEmail || 'unknown'})`,
+        'ok'
+      );
+      return { ok: true, ...result };
     }
 
     if (attempt === FALLBACK_AFTER + 1) {
