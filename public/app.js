@@ -15,6 +15,8 @@ let modelMappingsCount = 0;
 let pagination = { page: 1, page_size: 20, total: 0, pages: 1 };
 let searchQuery = '';
 let searchTimer = null;
+let accountTodayStats = {};
+let accountUsageInfos = {};
 
 // OAuth flow state
 let oauthSessionId = '';
@@ -119,9 +121,53 @@ async function loadAccounts() {
 
     renderAccounts();
     renderPagination();
+    
+    // Fetch usage stats asynchronously
+    fetchUsageData();
   } catch (err) {
     console.error(err);
     showToast('error', err.message);
+  }
+}
+
+async function fetchUsageData() {
+  if (!accounts || accounts.length === 0) return;
+  const ids = accounts.map(a => a.id);
+  
+  // 1. Fetch batch today stats
+  try {
+    const resp = await apiFetch('/api/accounts/today-stats/batch', {
+      method: 'POST',
+      body: JSON.stringify({ account_ids: ids })
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      accountTodayStats = data.stats || {};
+    }
+  } catch (err) {
+    console.error('Failed to fetch today stats:', err);
+  }
+
+  // Re-render immediately with todayStats
+  renderAccounts();
+
+  // 2. Fetch detailed usage for oauth/gemini sequentially to avoid rate-limits
+  const oauthAccs = accounts.filter(a => a.type === 'oauth' || a.type === 'setup-token' || a.platform === 'gemini');
+  for (const acc of oauthAccs) {
+    try {
+      const resp = await apiFetch(`/api/accounts/${acc.id}/usage`);
+      if (resp.ok) {
+        accountUsageInfos[acc.id] = await resp.json();
+        // Update just the usage cell instead of full re-render
+        const tr = document.getElementById(`acc-row-${acc.id}`);
+        if (tr) {
+          const usageTd = tr.querySelector('.cell-usage');
+          if (usageTd) usageTd.innerHTML = renderUsageCell(acc);
+        }
+      }
+    } catch (e) {
+      console.error(`Failed to fetch usage for ${acc.id}:`, e);
+    }
   }
 }
 
@@ -171,13 +217,84 @@ function renderProxyOptions() {
 // Rendering
 // ══════════════════════════════════════
 
+function formatCompactNumber(num) {
+  if (num === null || num === undefined || isNaN(num)) return '0';
+  if (num >= 1e9) return (num / 1e9).toFixed(1) + 'B';
+  if (num >= 1e6) return (num / 1e6).toFixed(1) + 'M';
+  if (num >= 1e3) return (num / 1e3).toFixed(1) + 'k';
+  return num.toString();
+}
+
+function renderProgressBar(label, utilization, colorStr) {
+  if (!utilization) return '';
+  const percent = Math.min(100, Math.max(0, utilization * 100));
+  return `
+    <div style="margin-bottom: 3px;">
+      <div style="font-size: 9px; display: flex; justify-content: space-between; color: #666; margin-bottom: 1px;">
+        <span>${label}</span>
+        <span>${percent.toFixed(1)}%</span>
+      </div>
+      <div style="width: 100%; height: 4px; background: #e5e7eb; border-radius: 2px; overflow: hidden;">
+        <div style="width: ${percent}%; height: 100%; background: ${colorStr};"></div>
+      </div>
+    </div>
+  `;
+}
+
+function renderUsageCell(acc) {
+  let html = '';
+  const stats = accountTodayStats[String(acc.id)];
+  const usage = accountUsageInfos[acc.id];
+
+  if ((acc.type === 'oauth' || acc.type === 'setup-token') && acc.platform === 'anthropic') {
+    if (usage && usage.five_hour) {
+      html += renderProgressBar('5h', usage.five_hour.utilization, '#6366f1'); // indigo
+    }
+    if (usage && usage.seven_day) {
+      html += renderProgressBar('7d', usage.seven_day.utilization, '#10b981'); // emerald
+    }
+    if (usage && usage.seven_day_sonnet) {
+      html += renderProgressBar('7d S', usage.seven_day_sonnet.utilization, '#8b5cf6'); // purple
+    }
+    if (!usage) html += `<div style="font-size: 10px; color: #999;">加载中...</div>`;
+  } else if (acc.platform === 'gemini') {
+    // Show available Gemini bars
+    if (usage) {
+      if (usage.gemini_shared_daily) html += renderProgressBar('1d (S)', usage.gemini_shared_daily.utilization, '#6366f1');
+      if (usage.gemini_pro_daily) html += renderProgressBar('1d (P)', usage.gemini_pro_daily.utilization, '#6366f1');
+      if (usage.gemini_flash_daily) html += renderProgressBar('1d (F)', usage.gemini_flash_daily.utilization, '#10b981');
+    } else if (acc.type === 'oauth' || acc.type === 'setup-token') {
+      html += `<div style="font-size: 10px; color: #999;">加载中...</div>`;
+    }
+    
+    // Also show basic API Key stats if present
+    if (stats) {
+      html += `<div style="font-size: 10px; color: #666; margin-top:2px;">
+        今日: ${formatCompactNumber(stats.requests)} req
+      </div>`;
+    }
+  } else {
+    // Basic API Key / Bedrock
+    if (stats) {
+      html += `<div style="display:flex; gap: 4px; font-size: 9px; color: #666; flex-wrap: wrap;">
+        <span style="background: #f3f4f6; padding: 1px 4px; border-radius: 3px;">${formatCompactNumber(stats.requests)} req</span>
+        <span style="background: #f3f4f6; padding: 1px 4px; border-radius: 3px;">${formatCompactNumber(stats.tokens)}</span>
+        <span style="background: #f3f4f6; padding: 1px 4px; border-radius: 3px;">$${Number(stats.cost || 0).toFixed(4)}</span>
+      </div>`;
+    } else {
+      html += `<span style="font-size:10px;color:#999">-</span>`;
+    }
+  }
+  return html || '<span style="font-size:10px;color:#999">-</span>';
+}
+
 function renderAccounts() {
   const tbody = document.getElementById('accounts-tbody');
 
   if (accounts.length === 0) {
     tbody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="7">
+        <td colspan="8">
           <div class="empty-state">
             <div class="empty-icon">📋</div>
             <p>${searchQuery ? '没有找到匹配的账号' : '暂无账号'}</p>
@@ -193,11 +310,12 @@ function renderAccounts() {
     const displayNotes = (acc.notes || '').trim();
 
     return `
-      <tr>
+      <tr id="acc-row-${acc.id}">
         <td class="cell-name" title="${escapeHtml(acc.name)}">${escapeHtml(acc.name)}</td>
         <td><span class="badge badge-platform">${platformLabel(acc.platform)}</span></td>
         <td><span class="badge badge-type">${typeLabel(acc.type)}</span></td>
         <td>${statusBadge(acc.status)}</td>
+        <td class="cell-usage" style="width: 140px; vertical-align: middle;">${renderUsageCell(acc)}</td>
         <td class="cell-notes" title="${escapeHtml(displayNotes)}">${escapeHtml(displayNotes) || '-'}</td>
         <td class="cell-time">${formatTime(acc.created_at)}</td>
         <td>

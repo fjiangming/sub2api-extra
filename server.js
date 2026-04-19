@@ -377,6 +377,45 @@ app.delete('/api/accounts/:id', async (req, res) => {
 });
 
 // ──────────────────────────────────────────────
+// API: Get Batch Today Stats
+// ──────────────────────────────────────────────
+
+app.post('/api/accounts/today-stats/batch', async (req, res) => {
+  try {
+    const token = extractToken(req);
+    if (!token) return res.status(401).json({ error: 'No token provided' });
+    const adminToken = await getAdminToken();
+    const result = await sub2apiRequest('POST', '/api/v1/admin/accounts/today-stats/batch', adminToken, req.body);
+    res.status(result.status).json(result.data);
+  } catch (err) {
+    console.error('Batch today stats error:', err.message);
+    res.status(502).json({ error: 'Failed to connect to Sub2API' });
+  }
+});
+
+// ──────────────────────────────────────────────
+// API: Get Account Usage Info
+// ──────────────────────────────────────────────
+
+app.get('/api/accounts/:id/usage', async (req, res) => {
+  try {
+    const token = extractToken(req);
+    if (!token) return res.status(401).json({ error: 'No token provided' });
+    const accountId = req.params.id;
+    const source = req.query.source;
+    const adminToken = await getAdminToken();
+    
+    const query = source ? `?source=${encodeURIComponent(source)}` : '';
+    const result = await sub2apiRequest('GET', `/api/v1/admin/accounts/${accountId}/usage${query}`, adminToken);
+    res.status(result.status).json(result.data);
+  } catch (err) {
+    console.error('Get account usage error:', err.message);
+    res.status(502).json({ error: 'Failed to connect to Sub2API' });
+  }
+});
+
+
+// ──────────────────────────────────────────────
 // API: Get groups list (for account creation form)
 // ──────────────────────────────────────────────
 

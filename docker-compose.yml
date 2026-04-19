@@ -1,6 +1,9 @@
 services:
   account-manager:
-    build: .
+    build:
+      context: .
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
     container_name: sub2api-extra
     restart: unless-stopped
     ports:

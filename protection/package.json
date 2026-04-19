@@ -7,6 +7,7 @@
     "build": "node scripts/build-protected.js"
   },
   "devDependencies": {
+    "archiver": "^7.0.1",
     "javascript-obfuscator": "^4.1.1"
   }
 }

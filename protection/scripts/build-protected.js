@@ -8,7 +8,7 @@
  *   1. 清空 dist/extension-protected/
  *   2. 复制原始扩展 → dist/
  *   3. 深度混淆所有 JS 文件
- *   4. 输出可直接分发的加密扩展包
+ *   4. 打包为 ZIP → public/epoint-gpt-autoreg-extension.zip
  */
 
 const fs = require('fs');
@@ -20,6 +20,7 @@ const ROOT = path.resolve(__dirname, '../..');
 const PROTECTION_DIR = path.resolve(__dirname, '..');
 const SRC_EXT = path.join(ROOT, 'epoint-gpt-autoreg-extension');
 const DIST_DIR = path.join(PROTECTION_DIR, 'dist', 'extension-protected');
+const ZIP_OUTPUT = path.join(ROOT, 'public', 'epoint-gpt-autoreg-extension.zip');
 
 // ── 混淆配置 ──
 
@@ -97,22 +98,26 @@ async function main() {
   console.log('╚══════════════════════════════════════════╝\n');
 
   // 1. 清空
-  console.log('[1/3] 清空输出目录...');
+  console.log('[1/4] 清空输出目录...');
   if (fs.existsSync(DIST_DIR)) fs.rmSync(DIST_DIR, { recursive: true });
   fs.mkdirSync(DIST_DIR, { recursive: true });
 
   // 2. 复制
-  console.log('[2/3] 复制原始扩展...');
+  console.log('[2/4] 复制原始扩展...');
   copyDir(SRC_EXT, DIST_DIR, ['.git', 'node_modules', 'tests', 'package.json', '.gitignore', 'LICENSE']);
   console.log(`      ${countFiles(DIST_DIR)} 个文件`);
 
   // 3. 混淆
-  console.log('[3/3] 混淆 JS...');
+  console.log('[3/4] 混淆 JS...');
   await obfuscate();
+
+  // 4. 打包 ZIP
+  console.log('[4/4] 打包 ZIP...');
+  await createZip();
 
   const sec = ((Date.now() - startTime) / 1000).toFixed(1);
   console.log(`\n✅ 完成! ${sec}s`);
-  console.log(`   产出: ${DIST_DIR}\n`);
+  console.log(`   产出: ${ZIP_OUTPUT}\n`);
 }
 
 async function obfuscate() {
@@ -148,6 +153,30 @@ async function obfuscate() {
   }
 
   console.log(`      深度: ${deep}, 轻度: ${light}, 跳过: ${skip}`);
+}
+
+// ── ZIP 打包 ──
+
+async function createZip() {
+  const archiver = require('archiver');
+  const outputDir = path.dirname(ZIP_OUTPUT);
+  if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+
+  return new Promise((resolve, reject) => {
+    const output = fs.createWriteStream(ZIP_OUTPUT);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+
+    output.on('close', () => {
+      const sizeKB = (archive.pointer() / 1024).toFixed(1);
+      console.log(`      ${sizeKB} KB → ${ZIP_OUTPUT}`);
+      resolve();
+    });
+
+    archive.on('error', reject);
+    archive.pipe(output);
+    archive.directory(DIST_DIR, false);
+    archive.finalize();
+  });
 }
 
 // ── 工具 ──
