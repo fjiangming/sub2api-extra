@@ -231,8 +231,8 @@ async function waitForExactSuccessBadge(timeout = 30000) {
     throw new Error(`STEP9_OAUTH_RETRY::${finalText}`);
   }
   throw new Error(finalText
-    ? `CPA 面板状态不是“认证成功！”，当前为“${finalText}”。`
-    : 'CPA 面板长时间未出现“认证成功！”状态徽标。');
+    ? `中转站状态不是“认证成功！”，当前为“${finalText}”。`
+    : '中转站长时间未出现“认证成功！”状态徽标。');
 }
 
 function findManagementKeyInput() {
@@ -336,21 +336,21 @@ async function ensureOAuthManagementPage(vpsPassword, step = 1, timeout = 45000)
     const managementLoginButton = findManagementLoginButton();
     if (managementKeyInput && managementLoginButton) {
       if (!vpsPassword) {
-        throw new Error('CPA 面板需要管理密钥，请先在侧边栏填写 CPA Key（管理密钥）。');
+        throw new Error('中转站需要管理密钥，请先在侧边栏填写管理密钥。');
       }
 
       if ((managementKeyInput.value || '') !== vpsPassword) {
         await humanPause(350, 900);
         fillInput(managementKeyInput, vpsPassword);
         console.log(LOG_PREFIX, `[Step ${step}] filled management key after ${elapsed}ms`);
-        log(`步骤 ${step}：已填写 CPA 管理密钥。`);
+        log(`步骤 ${step}：已填写中转站管理密钥。`);
       }
 
       const rememberCheckbox = findRememberPasswordCheckbox();
       if (rememberCheckbox && !rememberCheckbox.checked) {
         simulateClick(rememberCheckbox);
         console.log(LOG_PREFIX, `[Step ${step}] toggled remember checkbox after ${elapsed}ms`);
-        log(`步骤 ${step}：已勾选 CPA 面板“记住密码”。`);
+        log(`步骤 ${step}：已勾选中转站“记住密码”。`);
         await sleep(300);
       }
 
@@ -361,7 +361,7 @@ async function ensureOAuthManagementPage(vpsPassword, step = 1, timeout = 45000)
         console.log(LOG_PREFIX, `[Step ${step}] clicked management login after ${elapsed}ms`, {
           buttonText: getInlineTextSnippet(getActionText(managementLoginButton), 80),
         });
-        log(`步骤 ${step}：已提交 CPA 管理登录。`);
+        log(`步骤 ${step}：已提交中转站管理登录。`);
       }
 
       await sleep(1500);
@@ -389,7 +389,7 @@ async function ensureOAuthManagementPage(vpsPassword, step = 1, timeout = 45000)
     snapshot: getVpsPanelSnapshot(),
   });
 
-  throw new Error('无法进入 CPA 的 OAuth 管理页面，请检查面板是否正常加载。URL: ' + location.href);
+  throw new Error('无法进入中转站的 OAuth 管理页面，请检查服务是否正常加载。URL: ' + location.href);
 }
 
 // ============================================================
@@ -404,7 +404,7 @@ async function step1_getOAuthLink(payload) {
     snapshot: getVpsPanelSnapshot(),
   });
 
-  log('步骤 1：正在等待 CPA 面板加载并进入 OAuth 页面...');
+  log('步骤 1：正在等待中转站加载并进入 OAuth 页面...');
 
   const { header, authUrlEl: existingAuthUrlEl } = await ensureOAuthManagementPage(vpsPassword, 1);
   let authUrlEl = existingAuthUrlEl;
@@ -442,11 +442,11 @@ async function step1_getOAuthLink(payload) {
     } catch {
       throw new Error(
         '点击 OAuth 登录按钮后未出现授权链接。' +
-        '请检查 CPA 面板服务是否正在运行。URL: ' + location.href
+        '请检查中转站服务是否正在运行。URL: ' + location.href
       );
     }
   } else {
-    log('步骤 1：CPA 面板上已显示授权链接。');
+    log('步骤 1：中转站上已显示授权链接。');
   }
 
   const oauthUrl = (authUrlEl.textContent || '').trim();
@@ -498,7 +498,7 @@ async function step9_vpsVerify(payload) {
     try {
       urlInput = await waitForElement('input[placeholder*="localhost"]', 5000);
     } catch {
-      throw new Error('在 CPA 面板中未找到回调地址输入框。URL: ' + location.href);
+      throw new Error('在中转站中未找到回调地址输入框。URL: ' + location.href);
     }
   }
 

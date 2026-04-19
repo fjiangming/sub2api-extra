@@ -1218,7 +1218,7 @@ function getPanelMode(state = {}) {
 
 function getPanelModeLabel(modeOrState) {
   const mode = typeof modeOrState === 'string' ? modeOrState : getPanelMode(modeOrState);
-  return mode === 'sub2api' ? 'SUB2API' : 'CPA';
+  return '中转站';
 }
 
 function isSignupPageHost(hostname = '') {
@@ -1962,8 +1962,8 @@ function getSourceLabel(source) {
   const labels = {
     'sidepanel': '侧边栏',
     'signup-page': '认证页',
-    'vps-panel': 'CPA 面板',
-    'sub2api-panel': 'SUB2API 后台',
+    'vps-panel': '中转站',
+    'sub2api-panel': '中转站',
     'mail-2925': '2925 邮箱',
     'qq-mail': 'QQ 邮箱',
     'mail-163': '163 邮箱',
@@ -3523,6 +3523,39 @@ function isStep8AddPhoneError(error) {
   return /手机号页面|add.?phone|phone.*page/i.test(message);
 }
 
+/**
+ * 步骤 5（注册信息填写）完成后，检测 signup-page 是否已自动跳转到
+ * OAuth 授权确认页。如果是，说明不需要再走步骤 6-7（重新登录）。
+ *
+ * @returns {{ skip: boolean, reason?: string }}
+ */
+async function trySkipToStep8AfterStep5() {
+  try {
+    const signupTabId = await getTabId('signup-page');
+    if (!signupTabId || !(await isTabAlive('signup-page'))) {
+      return { skip: false, reason: 'signup-page 标签页不存在或已关闭' };
+    }
+
+    // 给页面一点时间完成跳转
+    await sleepWithStop(2000);
+
+    const pageState = await getStep8PageState(signupTabId, 3000);
+
+    if (pageState?.consentReady) {
+      return { skip: true };
+    }
+
+    return {
+      skip: false,
+      reason: pageState?.addPhonePage
+        ? '页面在 add phone 阶段'
+        : `页面状态: consentPage=${pageState?.consentPage}, url=${pageState?.url || '未知'}`,
+    };
+  } catch (err) {
+    return { skip: false, reason: `检测异常: ${err.message}` };
+  }
+}
+
 async function runAutoSequenceFromStep(startStep, context = {}) {
   const { targetRun, totalRuns, attemptRuns, continued = false } = context;
   const maxStep9RestartAttempts = 5;
@@ -3565,6 +3598,27 @@ async function runAutoSequenceFromStep(startStep, context = {}) {
   while (step <= 9) {
     try {
       await executeStepAndWait(step, AUTO_STEP_DELAYS[step]);
+
+      // ★ 步骤 5 完成后，检查是否可以跳过步骤 6-7 直接进入步骤 8
+      if (step === 5) {
+        const skipResult = await trySkipToStep8AfterStep5();
+        if (skipResult.skip) {
+          await addLog(
+            '步骤 5 完成后页面已在 OAuth 授权页，跳过步骤 6-7 直接进入步骤 8。',
+            'ok'
+          );
+          await setStepStatus(6, 'skipped');
+          await setStepStatus(7, 'skipped');
+          step = 8;
+          continue;
+        } else {
+          await addLog(
+            `步骤 5 完成后未检测到 OAuth 授权页（${skipResult.reason}），将正常执行步骤 6-7。`,
+            'info'
+          );
+        }
+      }
+
       step += 1;
     } catch (err) {
       const latestState = await getState();
@@ -3597,7 +3651,7 @@ async function runAutoSequenceFromStep(startStep, context = {}) {
       if (shouldRetryStep9) {
         step9RestartAttempts += 1;
         await addLog(
-          `步骤 9：检测到 CPA 认证失败，正在回到步骤 6 重新开始授权流程（${step9RestartAttempts}/${maxStep9RestartAttempts}）...`,
+          `步骤 9：检测到中转站认证失败，正在回到步骤 6 重新开始授权流程（${step9RestartAttempts}/${maxStep9RestartAttempts}）...`,
           'warn'
         );
         await invalidateDownstreamAfterStepRestart(6, {
@@ -3881,9 +3935,9 @@ async function executeStep1(state) {
 
 async function executeCpaStep1(state) {
   if (!state.vpsUrl) {
-    throw new Error('尚未配置 CPA 地址，请先在侧边栏填写。');
+    throw new Error('尚未配置中转站地址，请先在侧边栏填写。');
   }
-  await addLog('步骤 1：正在打开 CPA 面板...');
+  await addLog('步骤 1：正在打开中转站...');
 
   const injectFiles = ['content/activation-utils.js', 'content/utils.js', 'content/vps-panel.js'];
 
@@ -3893,20 +3947,20 @@ async function executeCpaStep1(state) {
   const tabId = tab.id;
   await rememberSourceLastUrl('vps-panel', state.vpsUrl);
 
-  await addLog('步骤 1：CPA 面板已打开，正在等待页面进入目标地址...');
+  await addLog('步骤 1：中转站页面已打开，正在等待页面进入目标地址...');
   const matchedTab = await waitForTabUrlFamily('vps-panel', tabId, state.vpsUrl, {
     timeoutMs: 15000,
     retryDelayMs: 400,
   });
   if (!matchedTab) {
-    await addLog('步骤 1：CPA 页面尚未完全进入目标地址，继续尝试连接内容脚本...', 'warn');
+    await addLog('步骤 1：中转站页面尚未完全进入目标地址，继续尝试连接内容脚本...', 'warn');
   }
 
   await ensureContentScriptReadyOnTab('vps-panel', tabId, {
     inject: injectFiles,
     timeoutMs: 45000,
     retryDelayMs: 900,
-    logMessage: '步骤 1：CPA 面板仍在加载，正在重试连接内容脚本...',
+    logMessage: '步骤 1：中转站仍在加载，正在重试连接内容脚本...',
   });
 
   const result = await sendToContentScriptResilient('vps-panel', {
@@ -3949,7 +4003,7 @@ async function executeSub2ApiStep1(state) {
     proxyUrl = (await discoverExtraServerUrl()) || '';
   }
 
-  await addLog('步骤 1：正在打开 SUB2API 后台...');
+  await addLog('步骤 1：正在打开中转站...');
 
   const injectFiles = ['content/utils.js', 'content/sub2api-panel.js'];
 
@@ -3959,13 +4013,13 @@ async function executeSub2ApiStep1(state) {
   const tabId = tab.id;
   await rememberSourceLastUrl('sub2api-panel', sub2apiUrl);
 
-  await addLog('步骤 1：SUB2API 页面已打开，正在等待页面进入目标地址...');
+  await addLog('步骤 1：中转站页面已打开，正在等待页面进入目标地址...');
   const matchedTab = await waitForTabUrlFamily('sub2api-panel', tabId, sub2apiUrl, {
     timeoutMs: 15000,
     retryDelayMs: 400,
   });
   if (!matchedTab) {
-    await addLog('步骤 1：SUB2API 页面尚未稳定，继续尝试连接内容脚本...', 'warn');
+    await addLog('步骤 1：中转站页面尚未稳定，继续尝试连接内容脚本...', 'warn');
   }
 
   await ensureContentScriptReadyOnTab('sub2api-panel', tabId, {
@@ -5084,11 +5138,11 @@ async function executeCpaStep9(state) {
     throw new Error('缺少 localhost 回调地址，请先完成步骤 8。');
   }
   if (!state.vpsUrl) {
-    throw new Error('尚未填写 CPA 地址，请先在侧边栏输入。');
+    throw new Error('尚未填写中转站地址，请先在侧边栏输入。');
   }
 
   if (shouldBypassStep9ForLocalCpa(state)) {
-    await addLog('步骤 9：检测到本地 CPA，且当前策略为“跳过第9步”，本轮不再重复提交回调地址。', 'info');
+    await addLog('步骤 9：检测到本地中转站，且当前策略为“跳过第9步”，本轮不再重复提交回调地址。', 'info');
     await completeStepFromBackground(9, {
       localhostUrl: state.localhostUrl,
       verifiedStatus: 'local-auto',
@@ -5096,7 +5150,7 @@ async function executeCpaStep9(state) {
     return;
   }
 
-  await addLog('步骤 9：正在打开 CPA 面板...');
+  await addLog('步骤 9：正在打开中转站...');
 
   const injectFiles = ['content/activation-utils.js', 'content/utils.js', 'content/vps-panel.js'];
   let tabId = await getTabId('vps-panel');
@@ -5145,7 +5199,7 @@ async function executeSub2ApiStep9(state) {
     throw new Error('缺少 localhost 回调地址，请先完成步骤 8。');
   }
   if (!state.sub2apiSessionId) {
-    throw new Error('缺少 SUB2API 会话信息，请重新执行步骤 1。');
+    throw new Error('缺少中转站会话信息，请重新执行步骤 1。');
   }
   // sub2apiEmail / sub2apiPassword 不再强制校验：
   // 内容脚本 sub2api-panel.js 会优先复用页面 localStorage 中的 auth_token。
@@ -5169,7 +5223,7 @@ async function executeSub2ApiStep9(state) {
   const sub2apiUrl = normalizeSub2ApiUrl(state.sub2apiUrl);
   const injectFiles = ['content/utils.js', 'content/sub2api-panel.js'];
 
-  await addLog('步骤 9：正在打开 SUB2API 后台...');
+  await addLog('步骤 9：正在打开中转站...');
 
   let tabId = await getTabId('sub2api-panel');
   const alive = tabId && await isTabAlive('sub2api-panel');
@@ -5191,7 +5245,7 @@ async function executeSub2ApiStep9(state) {
     injectSource: 'sub2api-panel',
   });
 
-  await addLog('步骤 9：正在向 SUB2API 提交回调并创建账号...');
+  await addLog('步骤 9：正在向中转站提交回调并创建账号...');
   const result = await sendToContentScript('sub2api-panel', {
     type: 'EXECUTE_STEP',
     step: 9,

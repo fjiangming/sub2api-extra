@@ -58,7 +58,7 @@ function normalizeRedirectUri() {
     parsed.pathname = '/auth/callback';
   }
   if (parsed.pathname !== '/auth/callback') {
-    throw new Error('SUB2API 回调地址必须是 /auth/callback，例如 http://localhost:1455/auth/callback');
+    throw new Error('中转站回调地址必须是 /auth/callback，例如 http://localhost:1455/auth/callback');
   }
   return parsed.toString();
 }
@@ -116,7 +116,7 @@ async function requestJson(origin, path, options = {}) {
 
 function storeAuthSession(loginData) {
   if (!loginData?.access_token) {
-    throw new Error('SUB2API 登录返回缺少 access_token。');
+    throw new Error('中转站登录返回缺少 access_token。');
   }
 
   localStorage.setItem('auth_token', loginData.access_token);
@@ -141,7 +141,7 @@ async function loginSub2Api(payload = {}) {
   // ── 1. 优先复用页面已有的登录态 ──
   const existingToken = localStorage.getItem('auth_token');
   if (existingToken) {
-    log('步骤：检测到 SUB2API 已有登录态，跳过重新登录。');
+    log('步骤：检测到中转站已有登录态，跳过重新登录。');
     // 同步缓存到 chrome.storage，防止 SPA 后续清除 localStorage 导致丢失
     chrome.storage.local.set({ [cacheKey]: { token: existingToken, origin, ts: Date.now() } }).catch(() => {});
     return {
@@ -157,7 +157,7 @@ async function loginSub2Api(payload = {}) {
     const cached = stored[cacheKey];
     // 缓存有效期 30 分钟，同源才复用
     if (cached?.token && cached.origin === origin && (Date.now() - cached.ts) < 30 * 60 * 1000) {
-      log('步骤：从插件缓存恢复 SUB2API 登录态（localStorage 已被前端清除）。');
+      log('步骤：从插件缓存恢复中转站登录态（localStorage 已被前端清除）。');
       // 同步恢复到 localStorage，让后续 SPA 请求也能使用
       localStorage.setItem('auth_token', cached.token);
       return {
@@ -173,13 +173,13 @@ async function loginSub2Api(payload = {}) {
   const password = payload.sub2apiPassword || '';
 
   if (!email) {
-    throw new Error('页面中未检测到已有登录态，且未配置 SUB2API 登录邮箱。');
+    throw new Error('页面中未检测到已有登录态，且未配置中转站登录邮箱。');
   }
   if (!password) {
-    throw new Error('页面中未检测到已有登录态，且未配置 SUB2API 登录密码。');
+    throw new Error('页面中未检测到已有登录态，且未配置中转站登录密码。');
   }
 
-  log('步骤：正在登录 SUB2API 后台...');
+  log('步骤：正在登录中转站后台...');
   const loginData = await requestJson(origin, '/api/v1/auth/login', {
     method: 'POST',
     body: {
@@ -296,7 +296,7 @@ function buildOpenAiCredentials(exchangeData) {
   }
 
   if (!credentials.access_token) {
-    throw new Error('SUB2API 交换授权码后未返回 access_token。');
+    throw new Error('中转站交换授权码后未返回 access_token。');
   }
 
   return credentials;
@@ -344,8 +344,8 @@ async function step1_generateOpenAiAuthUrl(payload = {}) {
   const group = await getGroupByName(origin, token, groupName, proxyOrigin);
   const draftName = buildDraftAccountName(group.name || groupName);
 
-  log(`步骤 1：已登录 SUB2API，使用分组 ${group.name}（#${group.id}）。`);
-  log(`步骤 1：正在向 SUB2API 生成 OpenAI Auth 链接，回调地址为 ${redirectUri}。`);
+  log(`步骤 1：已登录中转站，使用分组 ${group.name}（#${group.id}）。`);
+  log(`步骤 1：正在向中转站生成 OpenAI Auth 链接，回调地址为 ${redirectUri}。`);
 
   // Use proxy endpoint to bypass admin restriction
   const apiOrigin = proxyOrigin || origin;
@@ -363,10 +363,10 @@ async function step1_generateOpenAiAuthUrl(payload = {}) {
   const oauthState = String(authData?.state || extractStateFromAuthUrl(oauthUrl)).trim();
 
   if (!oauthUrl || !sessionId) {
-    throw new Error('SUB2API 未返回完整的 auth_url / session_id。');
+    throw new Error('中转站未返回完整的 auth_url / session_id。');
   }
 
-  log(`步骤 1：已获取 SUB2API OAuth 链接：${oauthUrl.slice(0, 96)}...`, 'ok');
+  log(`步骤 1：已获取中转站 OAuth 链接：${oauthUrl.slice(0, 96)}...`, 'ok');
   reportComplete(1, {
     oauthUrl,
     sub2apiSessionId: sessionId,
@@ -394,7 +394,7 @@ async function step9_submitOpenAiCallback(payload = {}) {
     : await getGroupByName(origin, token, payload.sub2apiGroupName || backgroundState.sub2apiGroupName || SUB2API_DEFAULT_GROUP_NAME);
 
   if (!sessionId) {
-    throw new Error('缺少 SUB2API session_id，请重新执行步骤 1。');
+    throw new Error('缺少中转站 session_id，请重新执行步骤 1。');
   }
   if (expectedState && expectedState !== callback.state) {
     throw new Error('本次 localhost 回调中的 state 与步骤 1 生成的 state 不一致，请重新执行步骤 1。');
@@ -402,7 +402,7 @@ async function step9_submitOpenAiCallback(payload = {}) {
 
   const proxyOrigin = getProxyOrigin(payload);
 
-  log('步骤 9：正在向 SUB2API 交换 OpenAI 授权码...');
+  log('步骤 9：正在向中转站交换 OpenAI 授权码...');
   // Use proxy endpoint to bypass admin restriction
   const exchangeOrigin = proxyOrigin || origin;
   const exchangePath = proxyOrigin ? '/api/oauth/openai/exchange-code' : '/api/v1/admin/openai/exchange-code';
@@ -420,7 +420,7 @@ async function step9_submitOpenAiCallback(payload = {}) {
   const extra = buildOpenAiExtra(exchangeData);
   const groupId = Number(group.id);
   if (!Number.isFinite(groupId) || groupId <= 0) {
-    throw new Error('SUB2API 返回的目标分组 ID 无效。');
+    throw new Error('中转站返回的目标分组 ID 无效。');
   }
   const createPayload = {
     name: accountName,
@@ -439,7 +439,7 @@ async function step9_submitOpenAiCallback(payload = {}) {
     createPayload.extra = extra;
   }
 
-  log(`步骤 9：授权码交换成功，正在创建 SUB2API 账号（名称：${accountName}）...`);
+  log(`步骤 9：授权码交换成功，正在创建中转站账号（名称：${accountName}）...`);
   // Use proxy endpoint to bypass admin restriction
   const createOrigin = proxyOrigin || origin;
   const createPath = proxyOrigin ? '/api/accounts' : '/api/v1/admin/accounts';
@@ -449,7 +449,7 @@ async function step9_submitOpenAiCallback(payload = {}) {
     body: createPayload,
   });
 
-  const verifiedStatus = `SUB2API 已创建账号 #${createdAccount?.id || 'unknown'}`;
+  const verifiedStatus = `中转站已创建账号 #${createdAccount?.id || 'unknown'}`;
   log(`步骤 9：${verifiedStatus}`, 'ok');
   reportComplete(9, {
     localhostUrl: callback.url,

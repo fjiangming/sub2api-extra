@@ -1178,7 +1178,7 @@ function updatePanelModeUI() {
   // Only update the step 9 button label based on current mode.
   const step9Btn = document.querySelector('.step-btn[data-step="9"]');
   if (step9Btn) {
-    step9Btn.textContent = useSub2Api ? 'SUB2API 回调验证' : 'CPA 回调验证';
+    step9Btn.textContent = '中转站回调验证';
   }
 }
 

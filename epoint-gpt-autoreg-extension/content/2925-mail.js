@@ -60,7 +60,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return;
     }
 
-    reportError(message.step, err.message);
+    if (message.step != null) {
+      reportError(message.step, err.message);
+    }
     sendResponse({ error: err.message });
   });
 
