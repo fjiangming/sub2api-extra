@@ -163,12 +163,15 @@ app.get('/api/auth/me', async (req, res) => {
     // First try to decode JWT directly (works for all users)
     const jwtPayload = decodeJwtPayload(token);
     if (jwtPayload) {
+      console.log(`[DEBUG][Auth/me] JWT payload keys: ${Object.keys(jwtPayload).join(', ')}`);
+      console.log(`[DEBUG][Auth/me] user_id=${jwtPayload.user_id}, sub=${jwtPayload.sub}, id=${jwtPayload.id}, email=${jwtPayload.email}, name=${jwtPayload.name}, username=${jwtPayload.username}`);
       const user = {
         id: jwtPayload.user_id || jwtPayload.sub || jwtPayload.id,
         username: jwtPayload.username || jwtPayload.name || jwtPayload.email || 'user',
         email: jwtPayload.email || '',
         role: jwtPayload.role || 'user',
       };
+      console.log(`[DEBUG][Auth/me] Resolved user: id=${user.id}, username=${user.username}, email=${user.email}, role=${user.role}`);
       if (user.id) return res.json(user);
     }
 
@@ -233,13 +236,22 @@ app.post('/api/v1/auth/login', async (req, res) => {
 // ──────────────────────────────────────────────
 
 async function resolveUserGroupId(userEmail, adminToken) {
-  if (!userEmail) return null;
+  if (!userEmail) {
+    console.log(`[DEBUG][resolveGroup] userEmail is empty, returning null`);
+    return null;
+  }
   const groupsResult = await sub2apiRequest('GET', '/api/v1/admin/groups/all', adminToken);
-  if (groupsResult.status !== 200) return null;
+  if (groupsResult.status !== 200) {
+    console.log(`[DEBUG][resolveGroup] groups/all returned status ${groupsResult.status}`);
+    return null;
+  }
   const allGroups = Array.isArray(groupsResult.data)
     ? groupsResult.data
     : (groupsResult.data?.items || groupsResult.data?.data || []);
+  console.log(`[DEBUG][resolveGroup] Total groups: ${allGroups.length}, looking for email="${userEmail}"`);
+  console.log(`[DEBUG][resolveGroup] Active groups: ${allGroups.filter(g => g.status === 'active').map(g => `{id:${g.id}, name:"${g.name}"}`).join(', ')}`);
   const userGroup = allGroups.find(g => g.status === 'active' && g.name === userEmail);
+  console.log(`[DEBUG][resolveGroup] Match result: ${userGroup ? `id=${userGroup.id}, name="${userGroup.name}"` : 'NO MATCH'}`);
   return userGroup ? userGroup.id : null;
 }
 
@@ -267,6 +279,7 @@ app.get('/api/accounts', async (req, res) => {
 
     // Find the group matching the user's email
     const userGroupId = await resolveUserGroupId(userEmail, adminToken);
+    console.log(`[List Accounts] userId=${userId}, userEmail=${userEmail}, userGroupId=${userGroupId}`);
     if (!userGroupId) {
       return res.json({ items: [], total: 0, page, page_size: pageSize, pages: 1 });
     }
@@ -279,9 +292,12 @@ app.get('/api/accounts', async (req, res) => {
     });
     if (searchQuery) queryParams.set('search', searchQuery);
 
+    const finalUrl = `/api/v1/admin/accounts?${queryParams.toString()}`;
+    console.log(`[List Accounts] Fetching: ${finalUrl}`);
+
     const result = await sub2apiRequest(
       'GET',
-      `/api/v1/admin/accounts?${queryParams.toString()}`,
+      finalUrl,
       adminToken
     );
 
@@ -293,6 +309,7 @@ app.get('/api/accounts', async (req, res) => {
     const items = responseData.items || responseData.data?.items || [];
     const total = responseData.total || responseData.data?.total || 0;
     const pages = responseData.pages || responseData.data?.pages || 1;
+    console.log(`[List Accounts] Got ${items.length} items, total=${total}, pages=${pages}`);
 
     res.json({ items, total, page, page_size: pageSize, pages });
   } catch (err) {
