@@ -284,11 +284,11 @@ app.get('/api/accounts', async (req, res) => {
       return res.json({ items: [], total: 0, page, page_size: pageSize, pages: 1 });
     }
 
-    // Fetch accounts filtered by group_id (server-side filtering + pagination)
+    // Fetch accounts filtered by group (server-side filtering + pagination)
     const queryParams = new URLSearchParams({
       page: String(page),
       page_size: String(pageSize),
-      group_id: String(userGroupId),
+      group: String(userGroupId),
     });
     if (searchQuery) queryParams.set('search', searchQuery);
 
