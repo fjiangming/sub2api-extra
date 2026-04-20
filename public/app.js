@@ -151,11 +151,21 @@ async function fetchUsageData() {
   // Re-render immediately with todayStats
   renderAccounts();
 
-  // 2. Fetch detailed usage for oauth/gemini sequentially to avoid rate-limits
-  const oauthAccs = accounts.filter(a => a.type === 'oauth' || a.type === 'setup-token' || a.platform === 'gemini');
-  for (const acc of oauthAccs) {
+  // 2. Fetch detailed usage for accounts that need it
+  //    Original logic: anthropic oauth/setup-token, openai oauth, antigravity oauth, gemini (all types)
+  const usageAccs = accounts.filter(a => {
+    if (a.platform === 'anthropic' && (a.type === 'oauth' || a.type === 'setup-token')) return true;
+    if (a.platform === 'openai' && a.type === 'oauth') return true;
+    if (a.platform === 'antigravity' && a.type === 'oauth') return true;
+    if (a.platform === 'gemini') return true;
+    return false;
+  });
+  for (const acc of usageAccs) {
     try {
-      const resp = await apiFetch(`/api/accounts/${acc.id}/usage`);
+      // Original system passes source='passive' for anthropic oauth/setup-token
+      const isAnthropicOAuth = acc.platform === 'anthropic' && (acc.type === 'oauth' || acc.type === 'setup-token');
+      const sourceParam = isAnthropicOAuth ? '?source=passive' : '';
+      const resp = await apiFetch(`/api/accounts/${acc.id}/usage${sourceParam}`);
       if (resp.ok) {
         accountUsageInfos[acc.id] = await resp.json();
         // Update just the usage cell instead of full re-render
@@ -226,7 +236,7 @@ function formatCompactNumber(num) {
 }
 
 function renderProgressBar(label, utilization, colorStr) {
-  if (!utilization) return '';
+  if (utilization === null || utilization === undefined) return '';
   const percent = Math.min(100, Math.max(0, utilization * 100));
   return `
     <div style="margin-bottom: 3px;">
@@ -235,7 +245,7 @@ function renderProgressBar(label, utilization, colorStr) {
         <span>${percent.toFixed(1)}%</span>
       </div>
       <div style="width: 100%; height: 4px; background: #e5e7eb; border-radius: 2px; overflow: hidden;">
-        <div style="width: ${percent}%; height: 100%; background: ${colorStr};"></div>
+        <div style="width: ${percent}%; height: 100%; background: ${colorStr}; border-radius: 2px; transition: width 0.3s ease;"></div>
       </div>
     </div>
   `;
@@ -246,35 +256,119 @@ function renderUsageCell(acc) {
   const stats = accountTodayStats[String(acc.id)];
   const usage = accountUsageInfos[acc.id];
 
-  if ((acc.type === 'oauth' || acc.type === 'setup-token') && acc.platform === 'anthropic') {
-    if (usage && usage.five_hour) {
-      html += renderProgressBar('5h', usage.five_hour.utilization, '#6366f1'); // indigo
-    }
-    if (usage && usage.seven_day) {
-      html += renderProgressBar('7d', usage.seven_day.utilization, '#10b981'); // emerald
-    }
-    if (usage && usage.seven_day_sonnet) {
-      html += renderProgressBar('7d S', usage.seven_day_sonnet.utilization, '#8b5cf6'); // purple
-    }
-    if (!usage) html += `<div style="font-size: 10px; color: #999;">加载中...</div>`;
-  } else if (acc.platform === 'gemini') {
-    // Show available Gemini bars
+  // ── Branch 1: Anthropic OAuth / Setup-Token ──
+  // Original: shows 5h, 7d, 7d Sonnet progress bars from /usage API (passive source)
+  if (acc.platform === 'anthropic' && (acc.type === 'oauth' || acc.type === 'setup-token')) {
     if (usage) {
-      if (usage.gemini_shared_daily) html += renderProgressBar('1d (S)', usage.gemini_shared_daily.utilization, '#6366f1');
-      if (usage.gemini_pro_daily) html += renderProgressBar('1d (P)', usage.gemini_pro_daily.utilization, '#6366f1');
-      if (usage.gemini_flash_daily) html += renderProgressBar('1d (F)', usage.gemini_flash_daily.utilization, '#10b981');
-    } else if (acc.type === 'oauth' || acc.type === 'setup-token') {
-      html += `<div style="font-size: 10px; color: #999;">加载中...</div>`;
+      if (usage.error) {
+        html += `<div style="font-size:10px;color:#d97706;" title="${escapeHtml(usage.error)}">${escapeHtml(usage.error)}</div>`;
+      }
+      if (usage.five_hour) {
+        html += renderProgressBar('5h', usage.five_hour.utilization, '#6366f1');
+      }
+      if (usage.seven_day) {
+        html += renderProgressBar('7d', usage.seven_day.utilization, '#10b981');
+      }
+      if (usage.seven_day_sonnet) {
+        html += renderProgressBar('7d S', usage.seven_day_sonnet.utilization, '#8b5cf6');
+      }
+      if (!usage.five_hour && !usage.seven_day && !usage.seven_day_sonnet && !usage.error) {
+        html += `<span style="font-size:10px;color:#999">-</span>`;
+      }
+    } else {
+      html += `<div style="font-size:10px;color:#999;">加载中...</div>`;
     }
-    
-    // Also show basic API Key stats if present
-    if (stats) {
-      html += `<div style="font-size: 10px; color: #666; margin-top:2px;">
-        今日: ${formatCompactNumber(stats.requests)} req
-      </div>`;
+
+  // ── Branch 2: OpenAI OAuth ──
+  // Original: shows 5h, 7d progress bars from /usage API
+  } else if (acc.platform === 'openai' && acc.type === 'oauth') {
+    if (usage) {
+      if (usage.five_hour) {
+        html += renderProgressBar('5h', usage.five_hour.utilization, '#6366f1');
+      }
+      if (usage.seven_day) {
+        html += renderProgressBar('7d', usage.seven_day.utilization, '#10b981');
+      }
+      if (!usage.five_hour && !usage.seven_day) {
+        html += `<span style="font-size:10px;color:#999">-</span>`;
+      }
+    } else {
+      html += `<div style="font-size:10px;color:#999;">加载中...</div>`;
     }
+
+  // ── Branch 3: Antigravity OAuth ──
+  // Original: shows antigravity_quota model bars (gemini-3-pro, flash, image, claude)
+  } else if (acc.platform === 'antigravity' && acc.type === 'oauth') {
+    if (usage) {
+      if (usage.is_forbidden) {
+        const fType = usage.forbidden_type || 'forbidden';
+        const fLabel = fType === 'validation' ? '需要验证' : fType === 'violation' ? '违规封禁' : '已禁止';
+        const fColor = fType === 'validation' ? '#ca8a04' : '#dc2626';
+        html += `<span style="font-size:10px;color:${fColor};">${fLabel}</span>`;
+      } else if (usage.needs_reauth) {
+        html += `<span style="font-size:10px;color:#ea580c;">需要重新授权</span>`;
+      } else if (usage.error) {
+        html += `<span style="font-size:10px;color:#d97706;">${usage.error_code === 'rate_limited' ? '被限频' : '用量异常'}</span>`;
+      } else if (usage.antigravity_quota && Object.keys(usage.antigravity_quota).length > 0) {
+        const quota = usage.antigravity_quota;
+        // Gemini 3 Pro (max utilization across pro variants)
+        const proBars = getMaxUtilization(quota, ['gemini-3-pro-low', 'gemini-3-pro-high', 'gemini-3-pro-preview']);
+        if (proBars) html += renderProgressBar('G3 Pro', proBars.utilization, '#6366f1');
+        // Gemini 3 Flash
+        const flashBars = getMaxUtilization(quota, ['gemini-3-flash']);
+        if (flashBars) html += renderProgressBar('G3 Flash', flashBars.utilization, '#10b981');
+        // Gemini Image
+        const imgBars = getMaxUtilization(quota, ['gemini-2.5-flash-image', 'gemini-3.1-flash-image', 'gemini-3-pro-image']);
+        if (imgBars) html += renderProgressBar('Image', imgBars.utilization, '#8b5cf6');
+        // Claude
+        const claudeBars = getMaxUtilization(quota, ['claude-sonnet-4-5', 'claude-opus-4-5-thinking', 'claude-sonnet-4-6', 'claude-opus-4-6', 'claude-opus-4-6-thinking']);
+        if (claudeBars) html += renderProgressBar('Claude', claudeBars.utilization, '#f59e0b');
+      }
+      // AI Credits display
+      if (usage.ai_credits && Array.isArray(usage.ai_credits)) {
+        const total = usage.ai_credits.reduce((sum, c) => sum + (c.amount || 0), 0);
+        if (total > 0) {
+          html += `<div style="font-size:10px;color:#666;margin-top:2px;">💳 余额: ${total.toFixed(0)}</div>`;
+        }
+      }
+      if (!html) html = `<span style="font-size:10px;color:#999">-</span>`;
+    } else {
+      html += `<div style="font-size:10px;color:#999;">加载中...</div>`;
+    }
+
+  // ── Branch 4: Gemini (all types) ──
+  // Original: shows gemini_shared_daily / gemini_pro_daily / gemini_flash_daily bars
+  } else if (acc.platform === 'gemini') {
+    if (usage) {
+      let hasGeminiBars = false;
+      if (usage.gemini_shared_daily) {
+        html += renderProgressBar('1d', usage.gemini_shared_daily.utilization, '#6366f1');
+        hasGeminiBars = true;
+      }
+      if (!usage.gemini_shared_daily) {
+        // Per-model breakdown when not using shared pool
+        if (usage.gemini_pro_daily) {
+          html += renderProgressBar('pro', usage.gemini_pro_daily.utilization, '#6366f1');
+          hasGeminiBars = true;
+        }
+        if (usage.gemini_flash_daily) {
+          html += renderProgressBar('flash', usage.gemini_flash_daily.utilization, '#10b981');
+          hasGeminiBars = true;
+        }
+      }
+      if (hasGeminiBars) {
+        html += `<div style="font-size:8px;color:#999;margin-top:1px;font-style:italic;">* 模拟配额</div>`;
+      }
+      if (!hasGeminiBars) {
+        html += `<span style="font-size:10px;color:#999">无限制</span>`;
+      }
+    } else {
+      html += `<div style="font-size:10px;color:#999;">加载中...</div>`;
+    }
+
+  // ── Branch 5: Key / Bedrock / other non-OAuth ──
+  // Original: shows todayStats (requests, tokens, cost) + optional quota bars
   } else {
-    // Basic API Key / Bedrock
     if (stats) {
       html += `<div style="display:flex; gap: 4px; font-size: 9px; color: #666; flex-wrap: wrap;">
         <span style="background: #f3f4f6; padding: 1px 4px; border-radius: 3px;">${formatCompactNumber(stats.requests)} req</span>
@@ -286,6 +380,19 @@ function renderUsageCell(acc) {
     }
   }
   return html || '<span style="font-size:10px;color:#999">-</span>';
+}
+
+// Helper: get max utilization across multiple model keys in antigravity_quota
+function getMaxUtilization(quota, modelNames) {
+  let maxUtil = 0;
+  let found = false;
+  for (const model of modelNames) {
+    const q = quota[model];
+    if (!q) continue;
+    found = true;
+    if (q.utilization > maxUtil) maxUtil = q.utilization;
+  }
+  return found ? { utilization: maxUtil } : null;
 }
 
 function renderAccounts() {
