@@ -334,6 +334,32 @@ body {
   white-space: nowrap;
 }
 
+/* Checkbox column */
+
+.th-checkbox,
+.cell-checkbox {
+  width: 40px;
+  min-width: 40px;
+  max-width: 40px;
+  text-align: center;
+  padding-left: 12px !important;
+  padding-right: 4px !important;
+}
+
+.th-checkbox input[type="checkbox"],
+.cell-checkbox input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+/* Export button disabled state */
+#btn-export-cpa:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 /* Badges */
 
 .badge {

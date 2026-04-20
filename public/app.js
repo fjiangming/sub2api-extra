@@ -17,6 +17,7 @@ let searchQuery = '';
 let searchTimer = null;
 let accountTodayStats = {};
 let accountUsageInfos = {};
+let selectedAccountIds = new Set();  // 跨页保留勾选状态
 
 // OAuth flow state
 let oauthSessionId = '';
@@ -151,12 +152,11 @@ async function fetchUsageData() {
   // Re-render immediately with todayStats
   renderAccounts();
 
-  // 2. Fetch detailed usage for accounts that need it
-  //    Original logic: anthropic oauth/setup-token, openai oauth, antigravity oauth, gemini (all types)
+  // 2. Fetch detailed usage：通用判断哪些账号需要拉取 /usage
+  //    规则：OAuth / SetupToken 类型，或 Gemini 全类型
+  //    这样 Sub2API 未来新增平台（如 mistral oauth）会自动覆盖
   const usageAccs = accounts.filter(a => {
-    if (a.platform === 'anthropic' && (a.type === 'oauth' || a.type === 'setup-token')) return true;
-    if (a.platform === 'openai' && a.type === 'oauth') return true;
-    if (a.platform === 'antigravity' && a.type === 'oauth') return true;
+    if (a.type === 'oauth' || a.type === 'setup-token') return true;
     if (a.platform === 'gemini') return true;
     return false;
   });
@@ -257,47 +257,33 @@ function renderUsageCell(acc) {
   const usage = accountUsageInfos[acc.id];
 
   // ── Branch 1: Anthropic OAuth / Setup-Token ──
-  // Original: shows 5h, 7d, 7d Sonnet progress bars from /usage API (passive source)
   if (acc.platform === 'anthropic' && (acc.type === 'oauth' || acc.type === 'setup-token')) {
     if (usage) {
       if (usage.error) {
         html += `<div style="font-size:10px;color:#d97706;" title="${escapeHtml(usage.error)}">${escapeHtml(usage.error)}</div>`;
       }
-      if (usage.five_hour) {
-        html += renderProgressBar('5h', usage.five_hour.utilization, '#6366f1');
-      }
-      if (usage.seven_day) {
-        html += renderProgressBar('7d', usage.seven_day.utilization, '#10b981');
-      }
-      if (usage.seven_day_sonnet) {
-        html += renderProgressBar('7d S', usage.seven_day_sonnet.utilization, '#8b5cf6');
-      }
-      if (!usage.five_hour && !usage.seven_day && !usage.seven_day_sonnet && !usage.error) {
-        html += `<span style="font-size:10px;color:#999">-</span>`;
-      }
+      if (usage.five_hour) html += renderProgressBar('5h', usage.five_hour.utilization, '#6366f1');
+      if (usage.seven_day) html += renderProgressBar('7d', usage.seven_day.utilization, '#10b981');
+      if (usage.seven_day_sonnet) html += renderProgressBar('7d S', usage.seven_day_sonnet.utilization, '#8b5cf6');
+      // 通用：自动发现后端未来新增的窗口字段
+      html += renderAutoDiscoveredWindows(usage, ['five_hour', 'seven_day', 'seven_day_sonnet']);
+      if (!html.trim()) html += `<span style="font-size:10px;color:#999">-</span>`;
     } else {
       html += `<div style="font-size:10px;color:#999;">加载中...</div>`;
     }
 
   // ── Branch 2: OpenAI OAuth ──
-  // Original: shows 5h, 7d progress bars from /usage API
   } else if (acc.platform === 'openai' && acc.type === 'oauth') {
     if (usage) {
-      if (usage.five_hour) {
-        html += renderProgressBar('5h', usage.five_hour.utilization, '#6366f1');
-      }
-      if (usage.seven_day) {
-        html += renderProgressBar('7d', usage.seven_day.utilization, '#10b981');
-      }
-      if (!usage.five_hour && !usage.seven_day) {
-        html += `<span style="font-size:10px;color:#999">-</span>`;
-      }
+      if (usage.five_hour) html += renderProgressBar('5h', usage.five_hour.utilization, '#6366f1');
+      if (usage.seven_day) html += renderProgressBar('7d', usage.seven_day.utilization, '#10b981');
+      html += renderAutoDiscoveredWindows(usage, ['five_hour', 'seven_day']);
+      if (!html.trim()) html += `<span style="font-size:10px;color:#999">-</span>`;
     } else {
       html += `<div style="font-size:10px;color:#999;">加载中...</div>`;
     }
 
   // ── Branch 3: Antigravity OAuth ──
-  // Original: shows antigravity_quota model bars (gemini-3-pro, flash, image, claude)
   } else if (acc.platform === 'antigravity' && acc.type === 'oauth') {
     if (usage) {
       if (usage.is_forbidden) {
@@ -310,26 +296,12 @@ function renderUsageCell(acc) {
       } else if (usage.error) {
         html += `<span style="font-size:10px;color:#d97706;">${usage.error_code === 'rate_limited' ? '被限频' : '用量异常'}</span>`;
       } else if (usage.antigravity_quota && Object.keys(usage.antigravity_quota).length > 0) {
-        const quota = usage.antigravity_quota;
-        // Gemini 3 Pro (max utilization across pro variants)
-        const proBars = getMaxUtilization(quota, ['gemini-3-pro-low', 'gemini-3-pro-high', 'gemini-3-pro-preview']);
-        if (proBars) html += renderProgressBar('G3 Pro', proBars.utilization, '#6366f1');
-        // Gemini 3 Flash
-        const flashBars = getMaxUtilization(quota, ['gemini-3-flash']);
-        if (flashBars) html += renderProgressBar('G3 Flash', flashBars.utilization, '#10b981');
-        // Gemini Image
-        const imgBars = getMaxUtilization(quota, ['gemini-2.5-flash-image', 'gemini-3.1-flash-image', 'gemini-3-pro-image']);
-        if (imgBars) html += renderProgressBar('Image', imgBars.utilization, '#8b5cf6');
-        // Claude
-        const claudeBars = getMaxUtilization(quota, ['claude-sonnet-4-5', 'claude-opus-4-5-thinking', 'claude-sonnet-4-6', 'claude-opus-4-6', 'claude-opus-4-6-thinking']);
-        if (claudeBars) html += renderProgressBar('Claude', claudeBars.utilization, '#f59e0b');
+        // 通用渲染：自动遍历所有模型，无需硬编码模型名
+        html += renderAntigravityQuotaGeneric(usage.antigravity_quota);
       }
-      // AI Credits display
       if (usage.ai_credits && Array.isArray(usage.ai_credits)) {
         const total = usage.ai_credits.reduce((sum, c) => sum + (c.amount || 0), 0);
-        if (total > 0) {
-          html += `<div style="font-size:10px;color:#666;margin-top:2px;">💳 余额: ${total.toFixed(0)}</div>`;
-        }
+        if (total > 0) html += `<div style="font-size:10px;color:#666;margin-top:2px;">💳 余额: ${total.toFixed(0)}</div>`;
       }
       if (!html) html = `<span style="font-size:10px;color:#999">-</span>`;
     } else {
@@ -337,62 +309,110 @@ function renderUsageCell(acc) {
     }
 
   // ── Branch 4: Gemini (all types) ──
-  // Original: shows gemini_shared_daily / gemini_pro_daily / gemini_flash_daily bars
   } else if (acc.platform === 'gemini') {
     if (usage) {
       let hasGeminiBars = false;
-      if (usage.gemini_shared_daily) {
-        html += renderProgressBar('1d', usage.gemini_shared_daily.utilization, '#6366f1');
+      // 通用：自动发现所有 gemini_* 窗口字段
+      const geminiKeys = Object.keys(usage).filter(k => k.startsWith('gemini_') && typeof usage[k] === 'object' && usage[k] !== null && 'utilization' in usage[k]);
+      const sharedKeys = geminiKeys.filter(k => k.includes('shared'));
+      const modelKeys = geminiKeys.filter(k => !k.includes('shared'));
+      const keysToRender = sharedKeys.length > 0 ? sharedKeys : modelKeys;
+      for (const key of keysToRender) {
+        const label = key.replace('gemini_', '').replace('_daily', '/d').replace('_minute', '/m').replace('_', ' ');
+        const color = key.includes('flash') ? '#10b981' : '#6366f1';
+        html += renderProgressBar(label, usage[key].utilization, color);
         hasGeminiBars = true;
       }
-      if (!usage.gemini_shared_daily) {
-        // Per-model breakdown when not using shared pool
-        if (usage.gemini_pro_daily) {
-          html += renderProgressBar('pro', usage.gemini_pro_daily.utilization, '#6366f1');
-          hasGeminiBars = true;
-        }
-        if (usage.gemini_flash_daily) {
-          html += renderProgressBar('flash', usage.gemini_flash_daily.utilization, '#10b981');
-          hasGeminiBars = true;
-        }
-      }
-      if (hasGeminiBars) {
-        html += `<div style="font-size:8px;color:#999;margin-top:1px;font-style:italic;">* 模拟配额</div>`;
-      }
-      if (!hasGeminiBars) {
-        html += `<span style="font-size:10px;color:#999">无限制</span>`;
-      }
+      if (hasGeminiBars) html += `<div style="font-size:8px;color:#999;margin-top:1px;font-style:italic;">* 模拟配额</div>`;
+      if (!hasGeminiBars) html += `<span style="font-size:10px;color:#999">无限制</span>`;
     } else {
       html += `<div style="font-size:10px;color:#999;">加载中...</div>`;
     }
 
-  // ── Branch 5: Key / Bedrock / other non-OAuth ──
-  // Original: shows todayStats (requests, tokens, cost) + optional quota bars
+  // ── Branch 5: 通用兜底（含未来新增平台的 OAuth 账号） ──
   } else {
-    if (stats) {
+    if (usage) {
+      html += renderAutoDiscoveredWindows(usage, []);
+    }
+    if (!html.trim() && stats) {
       html += `<div style="display:flex; gap: 4px; font-size: 9px; color: #666; flex-wrap: wrap;">
         <span style="background: #f3f4f6; padding: 1px 4px; border-radius: 3px;">${formatCompactNumber(stats.requests)} req</span>
         <span style="background: #f3f4f6; padding: 1px 4px; border-radius: 3px;">${formatCompactNumber(stats.tokens)}</span>
         <span style="background: #f3f4f6; padding: 1px 4px; border-radius: 3px;">$${Number(stats.cost || 0).toFixed(4)}</span>
       </div>`;
-    } else {
-      html += `<span style="font-size:10px;color:#999">-</span>`;
     }
+    if (!html.trim()) html += `<span style="font-size:10px;color:#999">-</span>`;
   }
   return html || '<span style="font-size:10px;color:#999">-</span>';
 }
 
-// Helper: get max utilization across multiple model keys in antigravity_quota
-function getMaxUtilization(quota, modelNames) {
-  let maxUtil = 0;
-  let found = false;
-  for (const model of modelNames) {
-    const q = quota[model];
-    if (!q) continue;
-    found = true;
-    if (q.utilization > maxUtil) maxUtil = q.utilization;
+// ── 通用工具函数（减少未来维护成本） ──
+
+// 已知的非窗口字段，自动发现时跳过
+const USAGE_META_KEYS = new Set([
+  'error', 'error_code', 'source', 'is_forbidden', 'forbidden_type',
+  'needs_reauth', 'validation_url', 'antigravity_quota', 'ai_credits'
+]);
+
+/**
+ * 自动发现 usage 响应中所有带 utilization 的窗口对象并渲染。
+ * 这样 Sub2API 未来新增任何窗口类型（如 one_hour, thirty_day 等）都会自动展示。
+ */
+function renderAutoDiscoveredWindows(usage, excludeKeys) {
+  let html = '';
+  const excluded = new Set([...excludeKeys, ...USAGE_META_KEYS]);
+  const colors = ['#6366f1', '#10b981', '#8b5cf6', '#f59e0b', '#ec4899', '#14b8a6'];
+  let colorIdx = 0;
+  for (const [key, val] of Object.entries(usage)) {
+    if (excluded.has(key)) continue;
+    if (key.startsWith('gemini_')) continue; // gemini 字段由 Branch 4 处理
+    if (val && typeof val === 'object' && 'utilization' in val) {
+      const label = key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+        .replace('Five Hour', '5h').replace('Seven Day', '7d')
+        .replace('Thirty Day', '30d').replace('One Hour', '1h');
+      html += renderProgressBar(label, val.utilization, colors[colorIdx % colors.length]);
+      colorIdx++;
+    }
   }
-  return found ? { utilization: maxUtil } : null;
+  return html;
+}
+
+/**
+ * 通用渲染 antigravity_quota：自动按模型族分组，无需硬编码模型名。
+ * Sub2API 新增模型会自动出现。
+ */
+function renderAntigravityQuotaGeneric(quota) {
+  let html = '';
+  const groups = {};
+  for (const [model, data] of Object.entries(quota)) {
+    if (!data || typeof data !== 'object' || !('utilization' in data)) continue;
+    const label = modelToLabel(model);
+    if (!groups[label]) groups[label] = { maxUtil: 0 };
+    if (data.utilization > groups[label].maxUtil) groups[label].maxUtil = data.utilization;
+  }
+  const colors = ['#6366f1', '#10b981', '#8b5cf6', '#f59e0b', '#ec4899', '#14b8a6'];
+  let i = 0;
+  for (const [label, info] of Object.entries(groups)) {
+    html += renderProgressBar(label, info.maxUtil, colors[i % colors.length]);
+    i++;
+  }
+  return html;
+}
+
+/**
+ * 将模型全名转为简短显示标签。已知前缀友好命名，未知模型自动截断。
+ */
+function modelToLabel(model) {
+  if (model.match(/^gemini-3-pro/)) return 'G3 Pro';
+  if (model.match(/^gemini-3-flash/)) return 'G3 Flash';
+  if (model.match(/^gemini-.*image/)) return 'Image';
+  if (model.match(/^gemini-2/)) return 'G2';
+  if (model.match(/^claude-opus/)) return 'Claude Opus';
+  if (model.match(/^claude-sonnet/)) return 'Claude Sonnet';
+  if (model.match(/^claude/)) return 'Claude';
+  // 兜底：取前两段
+  const parts = model.split('-');
+  return parts.slice(0, 2).map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
 }
 
 function renderAccounts() {
@@ -401,7 +421,7 @@ function renderAccounts() {
   if (accounts.length === 0) {
     tbody.innerHTML = `
       <tr class="empty-row">
-        <td colspan="8">
+        <td colspan="9">
           <div class="empty-state">
             <div class="empty-icon">📋</div>
             <p>${searchQuery ? '没有找到匹配的账号' : '暂无账号'}</p>
@@ -409,15 +429,19 @@ function renderAccounts() {
           </div>
         </td>
       </tr>`;
+    updateSelectAllCheckbox();
+    updateExportButton();
     return;
   }
 
   tbody.innerHTML = accounts.map(acc => {
     // Clean up notes for display (remove ownership tag)
     const displayNotes = (acc.notes || '').trim();
+    const isChecked = selectedAccountIds.has(acc.id) ? 'checked' : '';
 
     return `
       <tr id="acc-row-${acc.id}">
+        <td class="cell-checkbox"><input type="checkbox" class="row-checkbox" data-id="${acc.id}" ${isChecked} onchange="toggleSelectAccount(${acc.id}, this.checked)" /></td>
         <td class="cell-name" title="${escapeHtml(acc.name)}">${escapeHtml(acc.name)}</td>
         <td><span class="badge badge-platform">${platformLabel(acc.platform)}</span></td>
         <td><span class="badge badge-type">${typeLabel(acc.type)}</span></td>
@@ -433,6 +457,9 @@ function renderAccounts() {
         </td>
       </tr>`;
   }).join('');
+
+  updateSelectAllCheckbox();
+  updateExportButton();
 }
 
 function renderPagination() {
@@ -1487,6 +1514,133 @@ async function handleSaveConfig(e) {
 }
 
 // ══════════════════════════════════════
+// Account Selection & CPA Export
+// ══════════════════════════════════════
+
+function toggleSelectAccount(id, checked) {
+  if (checked) {
+    selectedAccountIds.add(id);
+  } else {
+    selectedAccountIds.delete(id);
+  }
+  updateSelectAllCheckbox();
+  updateExportButton();
+}
+
+function toggleSelectAll(checked) {
+  // 只影响当前页的账号
+  accounts.forEach(acc => {
+    if (checked) {
+      selectedAccountIds.add(acc.id);
+    } else {
+      selectedAccountIds.delete(acc.id);
+    }
+  });
+  // 更新所有行内的 checkbox
+  document.querySelectorAll('.row-checkbox').forEach(cb => {
+    cb.checked = checked;
+  });
+  updateExportButton();
+}
+
+function updateSelectAllCheckbox() {
+  const selectAllCb = document.getElementById('select-all-checkbox');
+  if (!selectAllCb) return;
+  if (accounts.length === 0) {
+    selectAllCb.checked = false;
+    selectAllCb.indeterminate = false;
+    return;
+  }
+  const allChecked = accounts.every(acc => selectedAccountIds.has(acc.id));
+  const someChecked = accounts.some(acc => selectedAccountIds.has(acc.id));
+  selectAllCb.checked = allChecked;
+  selectAllCb.indeterminate = someChecked && !allChecked;
+}
+
+function updateExportButton() {
+  const btnText = document.getElementById('export-btn-text');
+  if (!btnText) return;
+  const count = selectedAccountIds.size;
+  btnText.textContent = count > 0 ? `导出 CPA (${count})` : '导出 CPA';
+}
+
+async function exportSelectedToCPA() {
+  const ids = Array.from(selectedAccountIds);
+  if (ids.length === 0) {
+    showToast('warning', '请先勾选需要导出的账号');
+    return;
+  }
+
+  const btn = document.getElementById('btn-export-cpa');
+  const btnText = document.getElementById('export-btn-text');
+  btn.disabled = true;
+  btnText.textContent = '导出中...';
+
+  try {
+    // 批量获取账号详情（含凭据）
+    const resp = await apiFetch('/api/accounts/export', {
+      method: 'POST',
+      body: JSON.stringify({ account_ids: ids })
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(err.error || err.message || '获取账号详情失败');
+    }
+
+    const data = await resp.json();
+    const exportAccounts = data.accounts || [];
+
+    if (exportAccounts.length === 0) {
+      showToast('warning', '未获取到可导出的账号数据');
+      return;
+    }
+
+    // 构建 CPA 格式的 JSON 导出
+    const cpaPayload = buildCPAPayload(exportAccounts);
+
+    // 下载文件
+    const blob = new Blob([JSON.stringify(cpaPayload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `sub2api_accounts_import.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    showToast('success', `已导出 ${exportAccounts.length} 个账号`);
+  } catch (err) {
+    console.error('Export CPA error:', err);
+    showToast('error', err.message);
+  } finally {
+    btn.disabled = false;
+    updateExportButton();
+  }
+}
+
+function buildCPAPayload(exportAccounts) {
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const accountsArr = exportAccounts.map(acc => ({
+    name: acc.name || '',
+    platform: acc.platform || 'openai',
+    type: acc.type || 'oauth',
+    credentials: acc.credentials || {},
+    concurrency: acc.concurrency ?? 3,
+    priority: acc.priority ?? 50,
+  }));
+
+  return {
+    type: 'sub2api-data',
+    version: 1,
+    exported_at: now,
+    proxies: [],
+    accounts: accountsArr,
+  };
+}
+
+// ══════════════════════════════════════
 // Pagination
 // ══════════════════════════════════════
 
@@ -1943,6 +2097,9 @@ window.selectPlatform = selectPlatform;
 window.selectType = selectType;
 window.deleteAccount = deleteAccount;
 window.goToPage = goToPage;
+window.toggleSelectAccount = toggleSelectAccount;
+window.toggleSelectAll = toggleSelectAll;
+window.exportSelectedToCPA = exportSelectedToCPA;
 
 // OAuth flow exposed functions
 window.onOAuthMethodChange = onOAuthMethodChange;

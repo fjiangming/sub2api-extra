@@ -377,6 +377,65 @@ app.delete('/api/accounts/:id', async (req, res) => {
 });
 
 // ──────────────────────────────────────────────
+// API: Export accounts (batch fetch with credentials for CPA format)
+// ──────────────────────────────────────────────
+
+app.post('/api/accounts/export', async (req, res) => {
+  try {
+    const token = extractToken(req);
+    if (!token) return res.status(401).json({ error: 'No token provided' });
+
+    // Security: extract identity from JWT
+    const jwtPayload = decodeJwtPayload(token);
+    if (!jwtPayload) return res.status(401).json({ error: 'Invalid or expired token' });
+    const userEmail = jwtPayload.email || '';
+
+    const { account_ids } = req.body;
+    if (!Array.isArray(account_ids) || account_ids.length === 0) {
+      return res.status(400).json({ error: 'account_ids is required and must be a non-empty array' });
+    }
+
+    const adminToken = await getAdminToken();
+
+    // Resolve user's group for ownership verification
+    const userGroupId = await resolveUserGroupId(userEmail, adminToken);
+    if (!userGroupId) {
+      return res.status(403).json({ error: '未找到您的分组，无法导出' });
+    }
+
+    // Fetch each account detail and verify ownership
+    const exportAccounts = [];
+    for (const id of account_ids) {
+      try {
+        const getResult = await sub2apiRequest('GET', `/api/v1/admin/accounts/${id}`, adminToken);
+        if (getResult.status !== 200) continue;
+
+        const account = getResult.data;
+        const accountGroupIds = account.group_ids || (account.groups || []).map(g => g.id);
+        // Only export accounts belonging to the user's group
+        if (!accountGroupIds.includes(userGroupId)) continue;
+
+        exportAccounts.push({
+          name: account.name || '',
+          platform: account.platform || '',
+          type: account.type || '',
+          credentials: account.credentials || {},
+          concurrency: account.concurrency ?? 3,
+          priority: account.priority ?? 50,
+        });
+      } catch (e) {
+        console.error(`Export: failed to fetch account ${id}:`, e.message);
+      }
+    }
+
+    res.json({ accounts: exportAccounts, total: exportAccounts.length });
+  } catch (err) {
+    console.error('Export accounts error:', err.message);
+    res.status(502).json({ error: 'Failed to connect to Sub2API' });
+  }
+});
+
+// ──────────────────────────────────────────────
 // API: Get Batch Today Stats
 // ──────────────────────────────────────────────
 
