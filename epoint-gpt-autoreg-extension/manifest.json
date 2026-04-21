@@ -3,6 +3,7 @@
   "name": "EpointGPT公益注册站",
   "version": "1.0.0",
   "description": "搭配 EpointGPT 公益注册站服务端使用的自动化批量注册插件",
+  "changelog": "v1.0.0\n- 初始版本发布\n- 支持 OpenAI 账号自动注册流程\n- 支持多种邮箱验证方式",
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },

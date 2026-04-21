@@ -791,6 +791,29 @@ app.post('/api/extension/settings', async (req, res) => {
 });
 
 // ──────────────────────────────────────────────
+// API: Extension Version Check (with changelog)
+// ──────────────────────────────────────────────
+
+const EXTENSION_MANIFEST_PATH = path.join(__dirname, 'epoint-gpt-autoreg-extension', 'manifest.json');
+
+app.get('/api/extension/version', async (req, res) => {
+  try {
+    const manifestContent = await fs.readFile(EXTENSION_MANIFEST_PATH, 'utf8');
+    const manifest = JSON.parse(manifestContent);
+
+    res.json({
+      version: manifest.version || '0.0.0',
+      downloadUrl: '/epoint-gpt-autoreg-extension.zip',
+      name: manifest.name || '',
+      changelog: manifest.changelog || '',
+    });
+  } catch (err) {
+    console.error('Extension version check error:', err.message);
+    res.status(500).json({ error: 'Failed to read extension version' });
+  }
+});
+
+// ──────────────────────────────────────────────
 // Fallback: Serve SPA
 // ──────────────────────────────────────────────
 

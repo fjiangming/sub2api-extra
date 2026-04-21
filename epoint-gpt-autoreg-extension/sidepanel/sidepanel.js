@@ -189,6 +189,54 @@ const LOG_LEVEL_LABELS = {
   error: '错误',
 };
 
+// ============================================================
+// Extension Update Notification
+// ============================================================
+
+const updateBanner = document.getElementById('update-banner');
+const updateBannerText = document.getElementById('update-banner-text');
+const btnDownloadUpdate = document.getElementById('btn-download-update');
+const btnDismissUpdate = document.getElementById('btn-dismiss-update');
+const btnToggleChangelog = document.getElementById('btn-toggle-changelog');
+const updateChangelog = document.getElementById('update-changelog');
+const updateChangelogText = document.getElementById('update-changelog-text');
+let changelogExpanded = false;
+
+function showUpdateBanner(updateInfo) {
+  if (!updateBanner || !updateInfo) return;
+  updateBannerText.textContent =
+    `发现新版本 v${updateInfo.latestVersion}（当前 v${updateInfo.currentVersion}）`;
+  btnDownloadUpdate.onclick = () => {
+    chrome.tabs.create({ url: updateInfo.downloadUrl });
+  };
+
+  // Changelog 展示
+  if (updateInfo.changelog && btnToggleChangelog && updateChangelogText) {
+    updateChangelogText.textContent = updateInfo.changelog;
+    btnToggleChangelog.style.display = '';
+    btnToggleChangelog.onclick = () => {
+      changelogExpanded = !changelogExpanded;
+      updateChangelog.style.display = changelogExpanded ? '' : 'none';
+      btnToggleChangelog.textContent = changelogExpanded ? '收起日志' : '更新日志';
+    };
+    // 默认收起
+    changelogExpanded = false;
+    updateChangelog.style.display = 'none';
+  } else if (btnToggleChangelog) {
+    btnToggleChangelog.style.display = 'none';
+  }
+
+  updateBanner.style.display = '';
+}
+
+function hideUpdateBanner() {
+  if (updateBanner) updateBanner.style.display = 'none';
+}
+
+if (btnDismissUpdate) {
+  btnDismissUpdate.addEventListener('click', hideUpdateBanner);
+}
+
 function showToast(message, type = 'error', duration = 4000) {
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
@@ -828,6 +876,11 @@ async function restoreState() {
 
     updateStatusDisplay(latestState);
     updateProgressCounter();
+
+    // 恢复更新通知状态
+    if (state.extensionUpdateAvailable) {
+      showUpdateBanner(state.extensionUpdateAvailable);
+    }
   } catch (err) {
     console.error('Failed to restore state:', err);
   }
@@ -2189,6 +2242,11 @@ chrome.runtime.onMessage.addListener((message) => {
       updateProgressCounter();
       updateButtonStates();
       renderHotmailAccounts();
+      break;
+    }
+
+    case 'EXTENSION_UPDATE_AVAILABLE': {
+      showUpdateBanner(message.payload);
       break;
     }
 

@@ -2702,6 +2702,11 @@ async function handleMessage(message, sender) {
       return { ok: true };
     }
 
+    case 'CHECK_EXTENSION_UPDATE': {
+      checkExtensionUpdate().catch(() => { });
+      return { ok: true };
+    }
+
     case 'RESET': {
       clearStopRequest();
       await clearScheduledAutoRunAlarm();
@@ -5445,6 +5450,8 @@ async function syncRemoteExtensionSettings() {
       await setPersistentSettings(updates);
       await setState(updates);
       console.log('[SyncRemote] 配置同步完成');
+      // 同步成功后检查插件版本更新
+      checkExtensionUpdate().catch(() => {});
     } else {
       console.warn('[SyncRemote] 服务端返回的配置为空或无效:', remoteSettings);
     }
@@ -5457,3 +5464,67 @@ async function syncRemoteExtensionSettings() {
 chrome.runtime.onStartup.addListener(() => {
   syncRemoteExtensionSettings().catch(() => { });
 });
+
+// ============================================================
+// Extension Auto-Update Check
+// ============================================================
+
+/**
+ * 语义化版本比较：remoteVersion 是否比 localVersion 更新
+ */
+function isNewerVersion(remote, local) {
+  const parse = (v) => String(v || '0').split('.').map(Number);
+  const r = parse(remote);
+  const l = parse(local);
+  for (let i = 0; i < Math.max(r.length, l.length); i++) {
+    const rv = r[i] || 0;
+    const lv = l[i] || 0;
+    if (rv > lv) return true;
+    if (rv < lv) return false;
+  }
+  return false;
+}
+
+async function checkExtensionUpdate() {
+  try {
+    const stored = await chrome.storage.local.get('epointgpt_auth');
+    const auth = stored.epointgpt_auth;
+    if (!auth?.serverUrl) return;
+
+    const baseUrl = (auth.extraServerUrl || auth.serverUrl).replace(/\/+$/, '');
+    const res = await fetch(`${baseUrl}/api/extension/version`);
+    if (!res.ok) return;
+
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) return;
+
+    const data = await res.json();
+    const remoteVersion = data.version;
+    const localVersion = chrome.runtime.getManifest().version;
+
+    if (!remoteVersion || !isNewerVersion(remoteVersion, localVersion)) {
+      // 无更新，清除之前的更新状态
+      await setState({ extensionUpdateAvailable: null });
+      return;
+    }
+
+    const updateInfo = {
+      currentVersion: localVersion,
+      latestVersion: remoteVersion,
+      downloadUrl: `${baseUrl}${data.downloadUrl || '/epoint-gpt-autoreg-extension.zip'}`,
+      changelog: data.changelog || '',
+    };
+
+    await setState({ extensionUpdateAvailable: updateInfo });
+
+    // 广播通知侧边栏
+    chrome.runtime.sendMessage({
+      type: 'EXTENSION_UPDATE_AVAILABLE',
+      payload: updateInfo,
+    }).catch(() => {});
+
+    console.log(`[UpdateCheck] 发现新版本: ${localVersion} → ${remoteVersion}`);
+  } catch (err) {
+    console.warn('[UpdateCheck] 版本检查失败:', err.message);
+  }
+}

@@ -141,6 +141,7 @@ function extractRowSenderDetail(row) {
 
 function collectRowSnapshots() {
   return getInboxRowElements().map((row) => ({
+    element: row,
     preview: getElementText(row.querySelector('.mail-content-text')),
     rawText: getRawTextContent(row),
     sender: extractRowSender(row),
@@ -284,11 +285,135 @@ async function refreshInbox() {
 function collectMessagesForTarget(targetEmail) {
   return collectRowSnapshots()
     .slice(0, 10)
-    .map((snapshot) => build2925MessageFromRowSnapshot(snapshot, {
-      referenceDate: new Date(),
-      targetEmail,
-    }))
+    .map((snapshot) => {
+      const message = build2925MessageFromRowSnapshot(snapshot, {
+        referenceDate: new Date(),
+        targetEmail,
+      });
+      message._rowElement = snapshot.element;
+      return message;
+    })
     .filter((message) => message.matchedEmail || extractVerificationCode(message.combinedText));
+}
+
+// ── Deep scan: open email detail to extract verification code ──
+
+function getEmailDetailBodyText() {
+  // 2925 邮件详情页的正文容器选择器（按优先级排列）
+  // OpenAI 验证邮件 HTML 根元素为 <table id="bodyTable">，正文在 <table class="main"> 中
+  const selectors = [
+    '#bodyTable',
+    'table.main',
+    '.readMailMainCont',
+    '.mail-detail-body',
+    '.mail-body',
+    '.mail-detail',
+    '.detail-body',
+    '.mail-content-body',
+    '[class*="readMail"]',
+    '[class*="mail-detail"]',
+    '[class*="mail-body"]',
+    '[class*="detail-content"]',
+  ];
+
+  // 优先搜索 iframe 中的正文（2925 邮件正文通常渲染在 iframe 内）
+  for (const iframe of document.querySelectorAll('iframe')) {
+    try {
+      const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+      if (!iframeDoc) continue;
+
+      // 先在 iframe 内尝试精准选择器
+      for (const selector of selectors) {
+        const el = iframeDoc.querySelector(selector);
+        if (el) {
+          const text = normalizeText(el.innerText || el.textContent || '');
+          if (text && extractVerificationCode(text)) {
+            return text;
+          }
+        }
+      }
+
+      // iframe 整体文本兜底
+      const fullText = normalizeText(iframeDoc.body?.innerText || iframeDoc.body?.textContent || '');
+      if (fullText && extractVerificationCode(fullText)) {
+        return fullText;
+      }
+    } catch (_err) {
+      // 跨域 iframe，跳过
+    }
+  }
+
+  // 在主文档中搜索正文容器
+  for (const selector of selectors) {
+    for (const el of document.querySelectorAll(selector)) {
+      if (!isVisible(el)) continue;
+      const text = getElementText(el);
+      if (text && extractVerificationCode(text)) {
+        return text;
+      }
+    }
+  }
+
+  // 兜底：整个页面文本
+  return normalizeText(document.body?.innerText || '');
+}
+
+async function tryOpenEmailAndExtractCode(rowElement) {
+  simulateClick(rowElement);
+  await sleep(2000);
+
+  // 重试提取，等待详情页内容完整加载
+  for (let i = 0; i < 6; i++) {
+    throwIfStopped();
+    const detailText = getEmailDetailBodyText();
+    const code = extractVerificationCode(detailText);
+    if (code) {
+      // 提取到验证码后返回收件箱列表
+      await ensureMailListPage();
+      return code;
+    }
+    await sleep(500);
+  }
+
+  // 未找到验证码，也要返回收件箱列表
+  await ensureMailListPage();
+  return null;
+}
+
+async function deepScanForVerificationCode(targetEmail, options = {}) {
+  const { senderFilters = [], subjectFilters = [], excludeCodes = new Set() } = options;
+  const messages = collectMessagesForTarget(targetEmail);
+
+  // 找出匹配目标邮箱但列表视图中无法提取验证码的行
+  const candidateRows = [];
+  for (const message of messages) {
+    if (targetEmail && message.matchedEmail !== targetEmail) continue;
+    if (extractVerificationCode(`${message.subject || ''} ${message.combinedText}`)) continue;
+    if (!message._rowElement) continue;
+    candidateRows.push(message);
+  }
+
+  if (candidateRows.length === 0) return null;
+
+  log(`Deep scan: 发现 ${candidateRows.length} 封匹配但列表中无验证码的邮件，尝试打开详情读取`, 'info');
+
+  // 限制最多打开前 3 封，避免耗时过长
+  for (const message of candidateRows.slice(0, 3)) {
+    throwIfStopped();
+    const code = await tryOpenEmailAndExtractCode(message._rowElement);
+    if (code && !excludeCodes.has(code)) {
+      log(`Deep scan: 从邮件详情中提取到验证码 ${code}`, 'ok');
+      return {
+        code,
+        emailTimestamp: message.emailTimestamp,
+        matchedEmail: message.matchedEmail,
+        messageId: message.messageId,
+        subject: message.subject,
+      };
+    }
+  }
+
+  return null;
 }
 
 async function findMatching2925VerificationResult({
@@ -392,7 +517,19 @@ async function handlePoll2925Mail(step, payload = {}) {
       targetEmail,
       timeoutMs: 2500,
     });
-    const result = attemptResult || null;
+    let result = attemptResult || null;
+
+    // 列表视图无法提取验证码时，尝试打开邮件详情页深入读取
+    if (!result?.code) {
+      const deepResult = await deepScanForVerificationCode(targetEmail, {
+        senderFilters,
+        subjectFilters,
+        excludeCodes: excludedCodeSet,
+      });
+      if (deepResult?.code) {
+        result = deepResult;
+      }
+    }
 
     if (result?.code) {
       if (excludedCodeSet.has(result.code)) {

@@ -1618,6 +1618,99 @@ header {
 }
 .toast-close:hover { opacity: 1; transform: scale(1.1); }
 
+/* ============================================================
+   Extension Update Banner
+   ============================================================ */
+
+.update-banner {
+  padding: 10px 12px;
+  background: var(--blue-soft);
+  border: 1px solid var(--blue);
+  border-radius: var(--radius-sm);
+  margin-bottom: 14px;
+  font-size: 12px;
+  color: var(--text-primary);
+  animation: updateBannerIn 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.update-banner-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-banner-content {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.update-banner-content svg {
+  flex-shrink: 0;
+  color: var(--blue);
+}
+
+#update-banner-text {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.update-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.update-banner-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 16px;
+  padding: 0 2px;
+  line-height: 1;
+  transition: color var(--transition);
+}
+.update-banner-close:hover {
+  color: var(--text-primary);
+}
+
+.update-changelog {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(59, 130, 246, 0.2);
+}
+
+.update-changelog-text {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius-sm) - 2px);
+  font-family: 'Inter', sans-serif;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+@keyframes updateBannerIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+body.auth-pending #update-banner {
+  display: none !important;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
