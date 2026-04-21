@@ -1,0 +1,12 @@
+{
+  "targets": {
+    "release": {
+      "outFile": "build/core.wasm",
+      "optimize": true,
+      "shrinkLevel": 2,
+      "noAssert": true,
+      "runtime": "stub",
+      "exportRuntime": false
+    }
+  }
+}

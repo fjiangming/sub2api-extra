@@ -7,12 +7,14 @@
  * 流程:
  *   1. 清空 dist/extension-protected/
  *   2. 复制原始扩展 → dist/
- *   3. 深度混淆所有 JS 文件
- *   4. 打包为 ZIP → public/epoint-gpt-autoreg-extension.zip
+ *   3. 编译 WASM 模块 → core.wasm 并复制到 dist/
+ *   4. 深度混淆所有 JS 文件
+ *   5. 打包为 ZIP → public/epoint-gpt-autoreg-extension.zip
  */
 
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 
 // ── 路径 ──
 
@@ -74,6 +76,7 @@ const PRESET_LIGHT = {
 // 需要深度混淆的文件
 const DEEP_FILES = [
   'background.js',
+  'wasm-bridge.js',
   'hotmail-utils.js',
   'content/signup-page.js',
   'content/sub2api-panel.js',
@@ -98,26 +101,59 @@ async function main() {
   console.log('╚══════════════════════════════════════════╝\n');
 
   // 1. 清空
-  console.log('[1/4] 清空输出目录...');
+  console.log('[1/5] 清空输出目录...');
   if (fs.existsSync(DIST_DIR)) fs.rmSync(DIST_DIR, { recursive: true });
   fs.mkdirSync(DIST_DIR, { recursive: true });
 
   // 2. 复制
-  console.log('[2/4] 复制原始扩展...');
+  console.log('[2/5] 复制原始扩展...');
   copyDir(SRC_EXT, DIST_DIR, ['.git', 'node_modules', 'tests', 'package.json', '.gitignore', 'LICENSE']);
   console.log(`      ${countFiles(DIST_DIR)} 个文件`);
 
-  // 3. 混淆
-  console.log('[3/4] 混淆 JS...');
+  // 3. 编译 WASM
+  console.log('[3/5] 编译 WASM...');
+  compileWasm();
+
+  // 4. 混淆
+  console.log('[4/5] 混淆 JS...');
   await obfuscate();
 
-  // 4. 打包 ZIP
-  console.log('[4/4] 打包 ZIP...');
+  // 5. 打包 ZIP
+  console.log('[5/5] 打包 ZIP...');
   await createZip();
 
   const sec = ((Date.now() - startTime) / 1000).toFixed(1);
   console.log(`\n✅ 完成! ${sec}s`);
   console.log(`   产出: ${ZIP_OUTPUT}\n`);
+}
+
+function compileWasm() {
+  const wasmSrcDir = path.join(PROTECTION_DIR, 'wasm-src');
+  if (!fs.existsSync(path.join(wasmSrcDir, 'package.json'))) {
+    console.warn('      ⚠ wasm-src 目录不存在，跳过 WASM 编译');
+    return;
+  }
+
+  try {
+    console.log('      安装 AssemblyScript 依赖...');
+    execSync('npm install --ignore-scripts', { cwd: wasmSrcDir, stdio: 'pipe' });
+
+    console.log('      编译 core.wasm...');
+    execSync('npm run build', { cwd: wasmSrcDir, stdio: 'pipe' });
+
+    const wasmFile = path.join(wasmSrcDir, 'build', 'core.wasm');
+    if (!fs.existsSync(wasmFile)) {
+      console.warn('      ⚠ WASM 编译产物不存在，扩展将使用 JS 回退');
+      return;
+    }
+
+    fs.copyFileSync(wasmFile, path.join(DIST_DIR, 'core.wasm'));
+    const sizeKB = (fs.statSync(wasmFile).size / 1024).toFixed(1);
+    console.log(`      core.wasm ${sizeKB} KB`);
+  } catch (err) {
+    console.warn(`      ⚠ WASM 编译失败: ${err.message || err}`);
+    console.warn('      扩展将使用 JS 回退');
+  }
 }
 
 async function obfuscate() {

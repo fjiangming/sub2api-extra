@@ -3,6 +3,9 @@
   "name": "EpointGPT公益注册站",
   "version": "1.0.0",
   "description": "搭配 EpointGPT 公益注册站服务端使用的自动化批量注册插件",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
   "permissions": [
     "sidePanel",
     "alarms",

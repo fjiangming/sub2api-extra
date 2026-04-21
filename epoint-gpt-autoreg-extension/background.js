@@ -1,6 +1,6 @@
 // background.js — Service Worker: orchestration, state, tab management, message routing
 
-importScripts('data/names.js', 'hotmail-utils.js', 'content/activation-utils.js', 'shared/mail-2925.js', 'shared/oauth-step-helpers.js', 'shared/verification-timing.js', 'shared/step3-flow.js', 'shared/verification-mail-return.js', 'shared/step9-bypass.js');
+importScripts('wasm-bridge.js', 'data/names.js', 'hotmail-utils.js', 'content/activation-utils.js', 'shared/mail-2925.js', 'shared/oauth-step-helpers.js', 'shared/verification-timing.js', 'shared/step3-flow.js', 'shared/verification-mail-return.js', 'shared/step9-bypass.js');
 
 const {
   buildHotmailGraphMessagesUrl,
@@ -80,6 +80,7 @@ const AUTO_STEP_RANDOM_DELAY_DEFAULT_MAX_SECONDS = 18;
 const DEFAULT_LOCAL_CPA_STEP9_MODE = 'submit';
 
 initializeSessionStorageAccess();
+WasmBridge.init();
 
 // ============================================================
 // 状态管理（chrome.storage.session + chrome.storage.local）
@@ -154,6 +155,8 @@ const DEFAULT_STATE = {
 };
 
 function normalizeAutoRunDelayMinutes(value) {
+  const wasmResult = WasmBridge.normalizeAutoRunDelayMinutes(Number(value), PERSISTED_SETTING_DEFAULTS.autoRunDelayMinutes);
+  if (wasmResult !== null) return wasmResult;
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
     return PERSISTED_SETTING_DEFAULTS.autoRunDelayMinutes;
@@ -191,11 +194,13 @@ function normalizeAutoStepRandomDelayRange(settings = {}) {
 }
 
 function normalizeRunCount(value) {
+  const wasmResult = WasmBridge.normalizeRunCount(Number(value));
+  if (wasmResult !== null) return wasmResult;
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
     return 1;
   }
-  return Math.min(50, Math.max(1, Math.floor(numeric)));
+  return Math.max(1, Math.floor(numeric));
 }
 
 function normalizeScheduledAutoRunPlan(plan) {
@@ -523,6 +528,8 @@ async function resetState() {
  * Generate a random password: 14 chars, mix of uppercase, lowercase, digits, symbols.
  */
 function generatePassword() {
+  const wasmResult = WasmBridge.generatePassword();
+  if (wasmResult !== null) return wasmResult;
   const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
   const lower = 'abcdefghjkmnpqrstuvwxyz';
   const digits = '23456789';
@@ -2543,6 +2550,8 @@ async function humanStepDelay(min = HUMAN_STEP_DELAY_MIN, max = HUMAN_STEP_DELAY
 }
 
 function getAutoStepRandomDelayMs(min, max) {
+  const wasmResult = WasmBridge.getAutoStepRandomDelayMs(Number(min) || 0, Number(max) || 0);
+  if (wasmResult !== null) return wasmResult;
   const normalizedMin = Math.max(0, Math.floor(Number(min) || 0));
   const normalizedMax = Math.max(normalizedMin, Math.floor(Number(max) || normalizedMin));
   return Math.floor(Math.random() * (normalizedMax - normalizedMin + 1)) + normalizedMin;
@@ -3243,6 +3252,8 @@ function getEmailGeneratorLabel(generator) {
 }
 
 function generateCloudflareAliasLocalPart() {
+  const wasmResult = WasmBridge.generateCloudflareAlias();
+  if (wasmResult !== null) return wasmResult;
   const letters = 'abcdefghijklmnopqrstuvwxyz';
   const digits = '0123456789';
   const chars = [];
