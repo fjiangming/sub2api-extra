@@ -2,10 +2,11 @@
  * Sub2API Group Filter Patch (方案 B)
  *
  * 通过 Nginx sub_filter 注入到 Sub2API 前端页面，
- * 拦截 /api/v1/groups/available 的 fetch 响应，
+ * 拦截 /api/v1/groups/available 的响应，
  * 对 platform 为 "openai" 的分组进行过滤：
  *   - 仅保留 name 等于当前登录用户邮箱的分组
  *
+ * 同时拦截 fetch 和 XMLHttpRequest (axios)。
  * 完全独立于 Sub2API 源码，零侵入。
  */
 (function () {
@@ -15,16 +16,18 @@
   if (window.__GROUP_FILTER_PATCHED__) return;
   window.__GROUP_FILTER_PATCHED__ = true;
 
+  var TARGET_PATH = '/api/v1/groups/available';
+
   /**
    * 从 localStorage 读取当前登录用户的邮箱
    */
   function getCurrentUserEmail() {
     try {
-      const raw = localStorage.getItem('auth_user');
+      var raw = localStorage.getItem('auth_user');
       if (!raw) return null;
-      const user = JSON.parse(raw);
+      var user = JSON.parse(raw);
       return user.email || null;
-    } catch {
+    } catch (e) {
       return null;
     }
   }
@@ -42,7 +45,82 @@
     });
   }
 
-  // ── Monkey-patch window.fetch ──
+  /**
+   * 尝试过滤 JSON 响应体（兼容 { code, data: [...] } 和直接数组两种格式）
+   * 返回过滤后的 JSON 字符串，如果无需处理则返回 null
+   */
+  function filterResponseBody(bodyText) {
+    try {
+      var json = JSON.parse(bodyText);
+      var userEmail = getCurrentUserEmail();
+      if (!userEmail) return null;
+
+      var modified = false;
+
+      // Sub2API 标准响应格式: { code, message, data: [...] }
+      if (json && json.data && Array.isArray(json.data)) {
+        var filtered = filterGroups(json.data, userEmail);
+        if (filtered.length !== json.data.length) {
+          json.data = filtered;
+          modified = true;
+        }
+      }
+      // 兼容直接返回数组
+      else if (Array.isArray(json)) {
+        var filtered2 = filterGroups(json, userEmail);
+        if (filtered2.length !== json.length) {
+          json = filtered2;
+          modified = true;
+        }
+      }
+
+      return modified ? JSON.stringify(json) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // ── 1. Monkey-patch XMLHttpRequest (axios 使用) ──
+
+  var XHROpen = XMLHttpRequest.prototype.open;
+  var XHRSend = XMLHttpRequest.prototype.send;
+
+  XMLHttpRequest.prototype.open = function () {
+    // 记录请求 URL
+    this._groupFilterUrl = arguments[1] || '';
+    return XHROpen.apply(this, arguments);
+  };
+
+  XMLHttpRequest.prototype.send = function () {
+    var xhr = this;
+    var url = xhr._groupFilterUrl || '';
+
+    if (url.indexOf(TARGET_PATH) !== -1) {
+      // 拦截 onreadystatechange
+      var originalOnReady = xhr.onreadystatechange;
+      var patched = false;
+
+      xhr.addEventListener('readystatechange', function () {
+        if (xhr.readyState === 4 && !patched) {
+          patched = true;
+          try {
+            var filtered = filterResponseBody(xhr.responseText);
+            if (filtered !== null) {
+              // 重写 response 和 responseText
+              Object.defineProperty(xhr, 'responseText', { get: function () { return filtered; } });
+              Object.defineProperty(xhr, 'response', { get: function () { return filtered; } });
+            }
+          } catch (e) {
+            // 静默失败
+          }
+        }
+      });
+    }
+
+    return XHRSend.apply(this, arguments);
+  };
+
+  // ── 2. Monkey-patch fetch (以防未来使用) ──
 
   var originalFetch = window.fetch;
 
@@ -50,39 +128,23 @@
     var args = arguments;
     var url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
 
-    // 仅拦截分组可用列表接口
-    if (url.indexOf('/api/v1/groups/available') === -1) {
+    if (url.indexOf(TARGET_PATH) === -1) {
       return originalFetch.apply(this, args);
     }
 
     return originalFetch.apply(this, args).then(function (response) {
-      // 只处理成功响应
       if (!response.ok) return response;
 
-      // 克隆响应以读取 body
       return response.clone().text().then(function (bodyText) {
-        try {
-          var json = JSON.parse(bodyText);
-          var userEmail = getCurrentUserEmail();
-
-          // Sub2API 标准响应格式: { code, message, data: [...] }
-          if (json && json.data && Array.isArray(json.data)) {
-            json.data = filterGroups(json.data, userEmail);
-          }
-          // 兼容直接返回数组的情况
-          else if (Array.isArray(json)) {
-            json = filterGroups(json, userEmail);
-          }
-
-          return new Response(JSON.stringify(json), {
+        var filtered = filterResponseBody(bodyText);
+        if (filtered !== null) {
+          return new Response(filtered, {
             status: response.status,
             statusText: response.statusText,
             headers: response.headers,
           });
-        } catch {
-          // JSON 解析失败，返回原始响应
-          return response;
         }
+        return response;
       });
     });
   };
