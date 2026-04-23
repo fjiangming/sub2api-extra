@@ -3147,6 +3147,35 @@ async function requestStop(options = {}) {
 }
 
 // ============================================================
+// IP Detection (用于自动运行日志中记录当前出口IP)
+// ============================================================
+
+const IP_DETECT_TIMEOUT_MS = 5000;
+const IP_DETECT_ENDPOINTS = [
+  { url: 'https://api.ipify.org?format=json', extract: (json) => json.ip },
+  { url: 'https://ipinfo.io/json', extract: (json) => json.ip },
+  { url: 'https://api.ip.sb/jsonip', extract: (json) => json.ip },
+];
+
+async function detectCurrentIp() {
+  for (const endpoint of IP_DETECT_ENDPOINTS) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), IP_DETECT_TIMEOUT_MS);
+      const response = await fetch(endpoint.url, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (!response.ok) continue;
+      const json = await response.json();
+      const ip = endpoint.extract(json);
+      if (ip && typeof ip === 'string') return ip.trim();
+    } catch {
+      // 当前端点失败，尝试下一个
+    }
+  }
+  throw new Error('所有 IP 检测接口均不可用');
+}
+
+// ============================================================
 // Step Execution
 // ============================================================
 
@@ -3789,6 +3818,14 @@ async function autoRunLoop(totalRuns, options = {}) {
         totalRuns,
         attemptRun: attemptRuns,
       });
+
+      // 每轮开始前检测并记录当前出口IP
+      try {
+        const currentIp = await detectCurrentIp();
+        await addLog(`第 ${targetRun}/${totalRuns} 轮（第 ${attemptRuns} 次尝试）当前出口 IP：${currentIp}`, 'info');
+      } catch (ipErr) {
+        await addLog(`第 ${targetRun}/${totalRuns} 轮（第 ${attemptRuns} 次尝试）IP 检测失败：${ipErr.message}`, 'warn');
+      }
 
       await runAutoSequenceFromStep(startStep, {
         targetRun,
