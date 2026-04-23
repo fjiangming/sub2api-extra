@@ -361,9 +361,9 @@ app.delete('/api/accounts/:id', async (req, res) => {
       return res.status(getResult.status).json(getResult.data);
     }
 
-    const account = getResult.data;
-    const accountGroupIds = account.group_ids || (account.groups || []).map(g => g.id);
-    if (!accountGroupIds.includes(userGroupId)) {
+    const account = getResult.data?.data || getResult.data;
+    const accountGroupIds = (account.group_ids || (account.groups || []).map(g => g.id)).map(String);
+    if (!accountGroupIds.includes(String(userGroupId))) {
       return res.status(403).json({ error: '您只能删除自己分组下的账号' });
     }
 
@@ -410,10 +410,10 @@ app.post('/api/accounts/export', async (req, res) => {
         const getResult = await sub2apiRequest('GET', `/api/v1/admin/accounts/${id}`, adminToken);
         if (getResult.status !== 200) continue;
 
-        const account = getResult.data;
-        const accountGroupIds = account.group_ids || (account.groups || []).map(g => g.id);
+        const account = getResult.data?.data || getResult.data;
+        const accountGroupIds = (account.group_ids || (account.groups || []).map(g => g.id)).map(String);
         // Only export accounts belonging to the user's group
-        if (!accountGroupIds.includes(userGroupId)) continue;
+        if (!accountGroupIds.includes(String(userGroupId))) continue;
 
         exportAccounts.push({
           name: account.name || '',
