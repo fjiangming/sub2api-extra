@@ -1597,12 +1597,12 @@ async function exportSelectedToCPA() {
     }
 
     if (exportAccounts.length === 1) {
-      // 单个账号：直接导出 JSON，以账号名称命名
+      // 单个账号：直接导出 JSON，以 codex- 前缀命名
       const acc = exportAccounts[0];
       const cpaPayload = buildSingleCPAPayload(acc);
-      const fileName = sanitizeFileName(acc.name || 'unnamed') + '.json';
+      const fileName = buildCodexFileName(acc.name) + '.json';
 
-      const blob = new Blob([JSON.stringify(cpaPayload, null, 2)], { type: 'application/json' });
+      const blob = new Blob([JSON.stringify(cpaPayload)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -1618,7 +1618,7 @@ async function exportSelectedToCPA() {
 
       exportAccounts.forEach(acc => {
         const cpaPayload = buildSingleCPAPayload(acc);
-        let baseName = sanitizeFileName(acc.name || 'unnamed');
+        let baseName = buildCodexFileName(acc.name);
 
         // 处理重名：追加序号
         if (usedNames[baseName] !== undefined) {
@@ -1628,7 +1628,7 @@ async function exportSelectedToCPA() {
           usedNames[baseName] = 0;
         }
 
-        zip.file(`${baseName}.json`, JSON.stringify(cpaPayload, null, 2));
+        zip.file(`${baseName}.json`, JSON.stringify(cpaPayload));
       });
 
       const zipBlob = await zip.generateAsync({ type: 'blob' });
@@ -1653,46 +1653,66 @@ async function exportSelectedToCPA() {
 }
 
 function sanitizeFileName(name) {
-  // 移除文件名中的非法字符，保留中文、字母、数字、连字符、下划线、点
+  // 移除文件名中的非法字符，保留中文、字母、数字、连字符、下划线、点、@
   return name.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
 }
 
+/**
+ * 从账号名生成 codex 导出文件名
+ * 规则：从第一个 - 分割，取后半部分，加 codex- 前缀
+ * 例：admin@qq.com-taotaoweiwei0ah53i@2925.com → codex-taotaoweiwei0ah53i@2925.com
+ */
+function buildCodexFileName(accountName) {
+  const name = accountName || 'unnamed';
+  const dashIndex = name.indexOf('-');
+  const suffix = dashIndex >= 0 ? name.substring(dashIndex + 1) : name;
+  return 'codex-' + sanitizeFileName(suffix);
+}
+
+/**
+ * 构建单个账号的 codex 格式 JSON
+ * 输出扁平结构：access_token, account_id, disabled, email, expired, id_token, last_refresh, refresh_token, type
+ */
 function buildSingleCPAPayload(acc) {
-  const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const creds = acc.credentials || {};
+  const now = new Date();
+
+  // expires_at 转为带时区的 ISO 格式
+  let expiredStr = '';
+  if (creds.expires_at) {
+    const expDate = new Date(creds.expires_at * 1000);
+    expiredStr = formatDateWithTimezone(expDate);
+  }
+
   return {
-    type: 'sub2api-data',
-    version: 1,
-    exported_at: now,
-    proxies: [],
-    accounts: [{
-      name: acc.name || '',
-      platform: acc.platform || 'openai',
-      type: 'codex',
-      credentials: acc.credentials || {},
-      concurrency: acc.concurrency ?? 3,
-      priority: acc.priority ?? 50,
-    }],
+    access_token: creds.access_token || '',
+    account_id: creds.chatgpt_account_id || '',
+    disabled: false,
+    email: creds.email || '',
+    expired: expiredStr,
+    id_token: creds.id_token || '',
+    last_refresh: formatDateWithTimezone(now),
+    refresh_token: creds.refresh_token || '',
+    type: 'codex',
   };
 }
 
-function buildCPAPayload(exportAccounts) {
-  const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-  const accountsArr = exportAccounts.map(acc => ({
-    name: acc.name || '',
-    platform: acc.platform || 'openai',
-    type: 'codex',
-    credentials: acc.credentials || {},
-    concurrency: acc.concurrency ?? 3,
-    priority: acc.priority ?? 50,
-  }));
+/**
+ * 格式化日期为带时区偏移的 ISO 格式，如 2026-05-02T00:52:50+08:00
+ */
+function formatDateWithTimezone(date) {
+  const pad = (n, len = 2) => String(n).padStart(len, '0');
+  const offset = -date.getTimezoneOffset();
+  const sign = offset >= 0 ? '+' : '-';
+  const absOffset = Math.abs(offset);
+  const offsetHours = pad(Math.floor(absOffset / 60));
+  const offsetMinutes = pad(absOffset % 60);
 
-  return {
-    type: 'sub2api-data',
-    version: 1,
-    exported_at: now,
-    proxies: [],
-    accounts: accountsArr,
-  };
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}${sign}${offsetHours}:${offsetMinutes}`;
+}
+
+function buildCPAPayload(exportAccounts) {
+  return exportAccounts.map(acc => buildSingleCPAPayload(acc));
 }
 
 // ══════════════════════════════════════
