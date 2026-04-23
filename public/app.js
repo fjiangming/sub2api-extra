@@ -1625,7 +1625,7 @@ function buildCPAPayload(exportAccounts) {
   const accountsArr = exportAccounts.map(acc => ({
     name: acc.name || '',
     platform: acc.platform || 'openai',
-    type: acc.type || 'oauth',
+    type: 'codex',
     credentials: acc.credentials || {},
     concurrency: acc.concurrency ?? 3,
     priority: acc.priority ?? 50,
