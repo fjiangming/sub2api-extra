@@ -1596,19 +1596,51 @@ async function exportSelectedToCPA() {
       return;
     }
 
-    // 构建 CPA 格式的 JSON 导出
-    const cpaPayload = buildCPAPayload(exportAccounts);
+    if (exportAccounts.length === 1) {
+      // 单个账号：直接导出 JSON，以账号名称命名
+      const acc = exportAccounts[0];
+      const cpaPayload = buildSingleCPAPayload(acc);
+      const fileName = sanitizeFileName(acc.name || 'unnamed') + '.json';
 
-    // 下载文件
-    const blob = new Blob([JSON.stringify(cpaPayload, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `sub2api_accounts_import.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+      const blob = new Blob([JSON.stringify(cpaPayload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } else {
+      // 多个账号：打成 ZIP 包导出
+      const zip = new JSZip();
+      const usedNames = {};
+
+      exportAccounts.forEach(acc => {
+        const cpaPayload = buildSingleCPAPayload(acc);
+        let baseName = sanitizeFileName(acc.name || 'unnamed');
+
+        // 处理重名：追加序号
+        if (usedNames[baseName] !== undefined) {
+          usedNames[baseName]++;
+          baseName = `${baseName}_${usedNames[baseName]}`;
+        } else {
+          usedNames[baseName] = 0;
+        }
+
+        zip.file(`${baseName}.json`, JSON.stringify(cpaPayload, null, 2));
+      });
+
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'sub2api_accounts_export.zip';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
 
     showToast('success', `已导出 ${exportAccounts.length} 个账号`);
   } catch (err) {
@@ -1618,6 +1650,29 @@ async function exportSelectedToCPA() {
     btn.disabled = false;
     updateExportButton();
   }
+}
+
+function sanitizeFileName(name) {
+  // 移除文件名中的非法字符，保留中文、字母、数字、连字符、下划线、点
+  return name.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+}
+
+function buildSingleCPAPayload(acc) {
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  return {
+    type: 'sub2api-data',
+    version: 1,
+    exported_at: now,
+    proxies: [],
+    accounts: [{
+      name: acc.name || '',
+      platform: acc.platform || 'openai',
+      type: 'codex',
+      credentials: acc.credentials || {},
+      concurrency: acc.concurrency ?? 3,
+      priority: acc.priority ?? 50,
+    }],
+  };
 }
 
 function buildCPAPayload(exportAccounts) {
