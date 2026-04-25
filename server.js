@@ -155,6 +155,19 @@ function decodeJwtPayload(token) {
   }
 }
 
+/**
+ * 判断 JWT payload 对应的用户是否为系统管理员。
+ * 优先检查 role 字段，回退到 id === 1。
+ */
+function isAdminUser(jwtPayload) {
+  if (!jwtPayload) return false;
+  if (jwtPayload.role === 'admin' || jwtPayload.role === 'root') return true;
+  const userId = jwtPayload.user_id || jwtPayload.sub || jwtPayload.id;
+  // eslint-disable-next-line eqeqeq
+  if (userId == 1) return true;
+  return false;
+}
+
 app.get('/api/auth/me', async (req, res) => {
   try {
     const token = extractToken(req);
@@ -258,6 +271,7 @@ app.get('/api/accounts', async (req, res) => {
     const userId = jwtPayload.user_id || jwtPayload.sub || jwtPayload.id;
     if (!userId) return res.status(401).json({ error: 'Unable to determine user identity from token' });
     const userEmail = jwtPayload.email || '';
+    const admin = isAdminUser(jwtPayload);
 
     const searchQuery = req.query.search || '';
     const page = parseInt(req.query.page) || 1;
@@ -265,19 +279,21 @@ app.get('/api/accounts', async (req, res) => {
 
     const adminToken = await getAdminToken();
 
-    // Find the group matching the user's email
-    const userGroupId = await resolveUserGroupId(userEmail, adminToken);
-    if (!userGroupId) {
-      return res.json({ items: [], total: 0, page, page_size: pageSize, pages: 1 });
-    }
-
-    // Fetch accounts filtered by group (server-side filtering + pagination)
+    // Build query params
     const queryParams = new URLSearchParams({
       page: String(page),
       page_size: String(pageSize),
-      group: String(userGroupId),
     });
     if (searchQuery) queryParams.set('search', searchQuery);
+
+    // Non-admin: filter by user's own group
+    if (!admin) {
+      const userGroupId = await resolveUserGroupId(userEmail, adminToken);
+      if (!userGroupId) {
+        return res.json({ items: [], total: 0, page, page_size: pageSize, pages: 1 });
+      }
+      queryParams.set('group', String(userGroupId));
+    }
 
     const result = await sub2apiRequest(
       'GET',
@@ -345,26 +361,28 @@ app.delete('/api/accounts/:id', async (req, res) => {
     const jwtPayload = decodeJwtPayload(token);
     if (!jwtPayload) return res.status(401).json({ error: 'Invalid or expired token' });
     const userEmail = jwtPayload.email || '';
+    const admin = isAdminUser(jwtPayload);
 
     const accountId = req.params.id;
     const adminToken = await getAdminToken();
 
-    // Resolve user's group
-    const userGroupId = await resolveUserGroupId(userEmail, adminToken);
-    if (!userGroupId) {
-      return res.status(403).json({ error: '未找到您的分组，无法执行删除' });
-    }
+    // Non-admin: verify the account belongs to the user's group
+    if (!admin) {
+      const userGroupId = await resolveUserGroupId(userEmail, adminToken);
+      if (!userGroupId) {
+        return res.status(403).json({ error: '未找到您的分组，无法执行删除' });
+      }
 
-    // Verify the account belongs to the user's group
-    const getResult = await sub2apiRequest('GET', `/api/v1/admin/accounts/${accountId}`, adminToken);
-    if (getResult.status !== 200) {
-      return res.status(getResult.status).json(getResult.data);
-    }
+      const getResult = await sub2apiRequest('GET', `/api/v1/admin/accounts/${accountId}`, adminToken);
+      if (getResult.status !== 200) {
+        return res.status(getResult.status).json(getResult.data);
+      }
 
-    const account = getResult.data?.data || getResult.data;
-    const accountGroupIds = (account.group_ids || (account.groups || []).map(g => g.id)).map(String);
-    if (!accountGroupIds.includes(String(userGroupId))) {
-      return res.status(403).json({ error: '您只能删除自己分组下的账号' });
+      const account = getResult.data?.data || getResult.data;
+      const accountGroupIds = (account.group_ids || (account.groups || []).map(g => g.id)).map(String);
+      if (!accountGroupIds.includes(String(userGroupId))) {
+        return res.status(403).json({ error: '您只能删除自己分组下的账号' });
+      }
     }
 
     // Delete from Sub2API
@@ -389,6 +407,7 @@ app.post('/api/accounts/export', async (req, res) => {
     const jwtPayload = decodeJwtPayload(token);
     if (!jwtPayload) return res.status(401).json({ error: 'Invalid or expired token' });
     const userEmail = jwtPayload.email || '';
+    const admin = isAdminUser(jwtPayload);
 
     const { account_ids } = req.body;
     if (!Array.isArray(account_ids) || account_ids.length === 0) {
@@ -397,10 +416,13 @@ app.post('/api/accounts/export', async (req, res) => {
 
     const adminToken = await getAdminToken();
 
-    // Resolve user's group for ownership verification
-    const userGroupId = await resolveUserGroupId(userEmail, adminToken);
-    if (!userGroupId) {
-      return res.status(403).json({ error: '未找到您的分组，无法导出' });
+    // Non-admin: resolve user's group for ownership verification
+    let userGroupId = null;
+    if (!admin) {
+      userGroupId = await resolveUserGroupId(userEmail, adminToken);
+      if (!userGroupId) {
+        return res.status(403).json({ error: '未找到您的分组，无法导出' });
+      }
     }
 
     // Fetch each account detail and verify ownership
@@ -411,9 +433,11 @@ app.post('/api/accounts/export', async (req, res) => {
         if (getResult.status !== 200) continue;
 
         const account = getResult.data?.data || getResult.data;
-        const accountGroupIds = (account.group_ids || (account.groups || []).map(g => g.id)).map(String);
-        // Only export accounts belonging to the user's group
-        if (!accountGroupIds.includes(String(userGroupId))) continue;
+        // Non-admin: only export accounts belonging to the user's group
+        if (!admin) {
+          const accountGroupIds = (account.group_ids || (account.groups || []).map(g => g.id)).map(String);
+          if (!accountGroupIds.includes(String(userGroupId))) continue;
+        }
 
         exportAccounts.push({
           name: account.name || '',

@@ -33,10 +33,29 @@
   }
 
   /**
+   * 判断当前用户是否为系统管理员
+   * 优先检查 role 字段，回退到 id === 1
+   */
+  function isAdmin() {
+    try {
+      var raw = localStorage.getItem('auth_user');
+      if (!raw) return false;
+      var user = JSON.parse(raw);
+      if (user.role === 'admin' || user.role === 'root') return true;
+      if (user.id === 1 || user.id === '1') return true;
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
    * 过滤分组列表：openai 平台只保留与用户邮箱同名的分组
+   * 系统管理员不受此限制
    */
   function filterGroups(groups, userEmail) {
     if (!Array.isArray(groups) || !userEmail) return groups;
+    if (isAdmin()) return groups;
     return groups.filter(function (g) {
       if (g.platform === 'openai') {
         return g.name === userEmail;
