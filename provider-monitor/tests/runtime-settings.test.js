@@ -31,6 +31,17 @@ test('the local server binds to loopback by default and supports a container ove
   assert.equal(loadConfig({ ...baseEnv, PROVIDER_MONITOR_BIND_HOST: '0.0.0.0' }).bindHost, '0.0.0.0');
 });
 
+test('the server listens on port 9871 by default and supports an environment override', () => {
+  const baseEnv = {
+    PROVIDER_MONITOR_SECRET: 'port-default-secret-0123456789abcdef',
+    PROVIDER_MONITOR_AUTH_MODE: 'local',
+    PROVIDER_MONITOR_LOCAL_ADMIN_PASSWORD: 'test-password'
+  };
+
+  assert.equal(loadConfig(baseEnv).port, 9871);
+  assert.equal(loadConfig({ ...baseEnv, PORT: '4321' }).port, 4321);
+});
+
 test('an empty private host list remains empty at runtime', (t) => {
   const context = createTestContext({ PROVIDER_MONITOR_ALLOWED_HOSTS: '' });
   t.after(() => context.cleanup());

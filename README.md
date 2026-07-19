@@ -93,7 +93,7 @@ services:
     container_name: ${PROVIDER_MONITOR_CONTAINER_NAME:-sub2api-provider-monitor}
     restart: ${PROVIDER_MONITOR_RESTART_POLICY:-unless-stopped}
     ports:
-      - "127.0.0.1:${PROVIDER_MONITOR_PORT:-9871}:${PORT:-3200}"
+      - "127.0.0.1:${PROVIDER_MONITOR_PORT:-9871}:${PORT:-9871}"
     environment:
       PROVIDER_MONITOR_BIND_HOST: "0.0.0.0"
     extra_hosts:
@@ -104,7 +104,7 @@ services:
     volumes:
       - provider-monitor-data:/app/data
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:${PORT:-3200}/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:${PORT:-9871}/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -155,7 +155,7 @@ PROVIDER_MONITOR_DATA_VOLUME=sub2api-extra_provider-monitor-data
 
 # 运行参数
 NODE_ENV=production
-PORT=9872
+PORT=9871
 PROVIDER_MONITOR_BIND_HOST=127.0.0.1
 
 # 数据存储（容器内路径）

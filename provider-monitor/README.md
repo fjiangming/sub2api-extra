@@ -87,7 +87,7 @@ PROVIDER_MONITOR_PORT=9871
 
 # === 基础运行参数 ===
 NODE_ENV=production
-PORT=3200
+PORT=9871
 PROVIDER_MONITOR_BIND_HOST=127.0.0.1
 
 # === 加密密钥（必填，至少 32 字符） ===
@@ -227,7 +227,7 @@ Dockerfile 采用多阶段构建：第一阶段安装编译依赖并执行 `npm 
 | `PROVIDER_MONITOR_RESTART_POLICY` | `unless-stopped` | 重启策略 |
 | `PROVIDER_MONITOR_PORT` | `9871` | 宿主机映射端口 |
 | `PROVIDER_MONITOR_DATA_VOLUME` | `sub2api-extra_provider-monitor-data` | 数据卷名称 |
-| `PORT` | `3200` | 容器内监听端口 |
+| `PORT` | `9871` | 容器内监听端口 |
 | `PROVIDER_MONITOR_BIND_HOST` | `127.0.0.1` | 本地运行监听地址；容器内由 Compose 覆盖 |
 | `NPM_REGISTRY` | `https://registry.npmmirror.com/` | 构建时 NPM 镜像源 |
 

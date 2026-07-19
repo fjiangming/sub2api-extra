@@ -23,6 +23,6 @@ COPY public ./public
 RUN mkdir -p /app/data && chown -R node:node /app
 
 USER node
-EXPOSE 3200
+EXPOSE 9871
 
 CMD ["node", "src/server.js"]
