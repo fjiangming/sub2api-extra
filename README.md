@@ -1,73 +1,198 @@
 # Sub2API Extra
 
-Sub2API 的可插拔扩展服务集合。每个功能作为独立模块存在于自己的目录中，通过根目录的 `docker-compose.yml` 统一编排，按需启用。
+Sub2API 的可插拔扩展服务集合。每个功能作为独立模块运行，通过 Docker Compose 统一编排，按需启用。
 
 ## 📦 功能模块
 
-| 模块 | 目录 | 预构建镜像标签 | 默认端口 |
-|------|------|--------------|:--------:|
-| **账号管理** | `account-manager/` | `ghcr.io/fjiangming/sub2api-extra:latest` | `9870` |
-| **供应商监控** | `provider-monitor/` | `ghcr.io/fjiangming/sub2api-extra:provider-monitor-latest` | `9871` |
+| 模块 | 预构建镜像 | 默认端口 | 文档 |
+|------|-----------|:--------:|------|
+| **账号管理** | `ghcr.io/fjiangming/sub2api-extra:latest` | `9870` | [README](account-manager/README.md) |
+| **供应商监控** | `ghcr.io/fjiangming/sub2api-extra:provider-monitor-latest` | `9871` | [README](provider-monitor/README.md) |
 
 > 💡 后续新增的功能模块会持续补充到此表中。
+
+镜像支持 `linux/amd64` 与 `linux/arm64`，托管在 GitHub Container Registry（公开包），部署机器可匿名拉取。
 
 ---
 
 ## 🚀 快速开始
 
-### 1. 克隆项目
+> **前置要求**：Docker Compose **≥ 2.20.0**（模块化编排使用了 `include` 指令）。
+
+### 1. 创建部署目录
+
+在服务器上创建以下最小目录结构（只需要配置文件，不需要源码）：
+
+```
+sub2api-extra/
+├── docker-compose.yml
+├── compose.services.env
+├── account-manager/
+│   ├── compose.yaml
+│   └── .env
+└── provider-monitor/
+    ├── compose.yaml
+    └── .env
+```
 
 ```bash
-git clone https://github.com/fjiangming/sub2api-extra.git
+mkdir -p sub2api-extra/account-manager sub2api-extra/provider-monitor
 cd sub2api-extra
 ```
 
-### 2. 配置环境变量
+### 2. 编写编排文件
 
-每个模块只读取自己目录中的配置：
+#### `docker-compose.yml`（根目录入口）
 
-- `account-manager/.env`：账号管理的镜像、端口、Sub2API 地址和管理员凭据。
-- `provider-monitor/.env`：供应商监控的镜像、端口、存储、认证和全部启动参数。
+```yaml
+name: sub2api-extra
 
-首次部署先从模块模板创建实际配置：
-
-```bash
-cp account-manager/.env.example account-manager/.env
-cp provider-monitor/.env.example provider-monitor/.env
+include:
+  - ./account-manager/compose.yaml
+  - ./provider-monitor/compose.yaml
 ```
 
-`.env` 含敏感信息并已被 Git 忽略；`.env.example` 只包含安全默认值和占位符，会提交到 Git。现有部署继续编辑各自 `.env` 即可。
-
-根目录的 `compose.services.env` 控制需要部署的服务，服务名使用逗号分隔：
+#### `compose.services.env`（选择要启用的服务）
 
 ```dotenv
-# 只部署供应商监控
-COMPOSE_PROFILES=provider-monitor
-
-# 同时部署两个服务
-# COMPOSE_PROFILES=account-manager,provider-monitor
+# 逗号分隔的服务名；不需要的模块注释掉或去掉即可
+COMPOSE_PROFILES=account-manager,provider-monitor
 ```
 
-查看当前配置实际启用的服务：
+> 只部署其中一个模块时，保留对应名称即可，例如 `COMPOSE_PROFILES=provider-monitor`。
 
-```bash
-docker compose --env-file compose.services.env config --services
+#### `account-manager/compose.yaml`
+
+```yaml
+services:
+  account-manager:
+    profiles: [account-manager]
+    image: ${ACCOUNT_MANAGER_IMAGE:-ghcr.io/fjiangming/sub2api-extra:latest}
+    container_name: ${ACCOUNT_MANAGER_CONTAINER_NAME:-sub2api-account-manager}
+    restart: ${ACCOUNT_MANAGER_RESTART_POLICY:-unless-stopped}
+    ports:
+      - "127.0.0.1:${ACCOUNT_MANAGER_PORT:-9870}:${PORT:-3100}"
+    environment:
+      ACCOUNT_MANAGER_BIND_HOST: "0.0.0.0"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: ./.env
+        required: true
+    volumes:
+      - ${ACCOUNT_MANAGER_DATA_PATH:-./data}:/app/data
 ```
 
-模块化编排使用 Compose `include`，需要 Docker Compose `2.20.0` 或更高版本。
+#### `provider-monitor/compose.yaml`
 
-### 3. 从预构建镜像启动服务（推荐）
+```yaml
+services:
+  provider-monitor:
+    profiles: [provider-monitor]
+    image: ${PROVIDER_MONITOR_IMAGE:-ghcr.io/fjiangming/sub2api-extra:provider-monitor-latest}
+    container_name: ${PROVIDER_MONITOR_CONTAINER_NAME:-sub2api-provider-monitor}
+    restart: ${PROVIDER_MONITOR_RESTART_POLICY:-unless-stopped}
+    ports:
+      - "127.0.0.1:${PROVIDER_MONITOR_PORT:-9871}:${PORT:-3200}"
+    environment:
+      PROVIDER_MONITOR_BIND_HOST: "0.0.0.0"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: ./.env
+        required: true
+    volumes:
+      - provider-monitor-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:${PORT:-3200}/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  provider-monitor-data:
+    name: ${PROVIDER_MONITOR_DATA_VOLUME:-sub2api-extra_provider-monitor-data}
+```
+
+### 3. 配置模块环境变量
+
+每个模块只读取自己目录中的 `.env`，不同模块的配置互不影响。
+
+#### `account-manager/.env`
+
+```dotenv
+# Compose 部署参数
+ACCOUNT_MANAGER_IMAGE=ghcr.io/fjiangming/sub2api-extra:latest
+ACCOUNT_MANAGER_CONTAINER_NAME=sub2api-account-manager
+ACCOUNT_MANAGER_RESTART_POLICY=unless-stopped
+ACCOUNT_MANAGER_DATA_PATH=./data
+ACCOUNT_MANAGER_PORT=9870
+
+# 运行参数
+NODE_ENV=production
+PORT=3100
+ACCOUNT_MANAGER_BIND_HOST=127.0.0.1
+
+# 扩展接口密钥（正式部署建议设置独立随机值）
+EXT_SECRET=
+
+# 基座 Sub2API 地址与管理员账号
+SUB2API_BASE_URL=http://host.docker.internal:8080
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=替换为你的管理员密码
+```
+
+#### `provider-monitor/.env`
+
+```dotenv
+# Compose 部署参数
+PROVIDER_MONITOR_IMAGE=ghcr.io/fjiangming/sub2api-extra:provider-monitor-latest
+PROVIDER_MONITOR_CONTAINER_NAME=sub2api-provider-monitor
+PROVIDER_MONITOR_RESTART_POLICY=unless-stopped
+PROVIDER_MONITOR_PORT=9871
+PROVIDER_MONITOR_DATA_VOLUME=sub2api-extra_provider-monitor-data
+
+# 运行参数
+NODE_ENV=production
+PORT=9872
+PROVIDER_MONITOR_BIND_HOST=127.0.0.1
+
+# 数据存储（容器内路径）
+PROVIDER_MONITOR_DATA_DIR=./data
+PROVIDER_MONITOR_DATABASE=./data/provider-monitor.db
+
+# 必填：加密密钥，至少 32 个字符，部署后不可更改
+PROVIDER_MONITOR_SECRET=替换为至少32个字符的随机字符串
+
+# 登录方式：local（本地账号）或 sub2api（基座管理员账号）
+PROVIDER_MONITOR_AUTH_MODE=local
+PROVIDER_MONITOR_LOCAL_ADMIN_USER=admin
+PROVIDER_MONITOR_LOCAL_ADMIN_PASSWORD=替换为你的本地管理员密码
+
+# 基座 Sub2API
+SUB2API_BASE_URL=http://host.docker.internal:8080
+SUB2API_PUBLIC_URL=http://你的服务器地址:8080
+```
+
+> 完整参数说明请参阅各模块的 `.env.example` 或模块 README。
+
+### 4. 拉取镜像并启动
 
 ```bash
 docker compose --env-file compose.services.env pull
 docker compose --env-file compose.services.env up -d --no-build --remove-orphans
 ```
 
-Compose 只会拉取并启动 `compose.services.env` 中配置的服务。修改服务列表后重新执行上述命令即可；`--remove-orphans` 会移除先前启动但本次未选择的服务容器，不会删除其绑定目录或命名卷。镜像支持 `linux/amd64` 与 `linux/arm64`。
+查看当前启用的服务：
 
-账号管理的扩展设置持久化在 `account-manager/data/`，镜像升级和容器重建不会删除该目录。
+```bash
+docker compose --env-file compose.services.env config --services
+```
 
-### 4. 停止服务
+> ⚠️ Docker 容器内的 `127.0.0.1` 指向容器自身。如果 Sub2API 在宿主机上运行，请将地址配置为 `host.docker.internal`（已通过 `extra_hosts` 预配置）。
+
+### 5. 停止服务
 
 ```bash
 docker compose --env-file compose.services.env down
@@ -75,145 +200,7 @@ docker compose --env-file compose.services.env down
 
 ---
 
-## ⚙️ 模块配置
-
-| 模块 | 参数文件 | Compose 定义 | 参数说明 |
-|------|----------|--------------|----------|
-| 账号管理 | `account-manager/.env` | `account-manager/compose.yaml` | [账号管理 README](account-manager/README.md) |
-| 供应商监控 | `provider-monitor/.env` | `provider-monitor/compose.yaml` | [供应商监控 README](provider-monitor/README.md) |
-
-根目录的 `docker-compose.yml` 仅使用 Compose `include` 聚合模块，`compose.services.env` 选择启用的服务。模块 `.env` 同时用于 Compose 插值、容器运行和本地 `npm start`，修改后需重建容器或重启本地进程。
-
-```bash
-# 只启动 Provider Monitor
-printf 'COMPOSE_PROFILES=provider-monitor\n' > compose.services.env
-docker compose --env-file compose.services.env up -d
-
-# 同时启动
-printf 'COMPOSE_PROFILES=account-manager,provider-monitor\n' > compose.services.env
-docker compose --env-file compose.services.env up -d
-```
-
-> ⚠️ Docker 容器内的 `127.0.0.1` 指向容器自身，如果 Sub2API 在宿主机上运行，请使用 `host.docker.internal`。Linux 服务器需在 `docker-compose.yml` 中配合 `extra_hosts` 使用（已预配置）。
-
----
-
-## 📁 项目结构
-
-```
-sub2api-extra/
-├── docker-compose.yml        # 仅聚合各模块 Compose 定义
-├── compose.services.env      # 根 Compose 需要启用的服务列表
-├── README.md                 # 本文件
-│
-├── account-manager/          # 功能模块：账号管理
-│   ├── .env                  # 模块参数（不提交到 Git）
-│   ├── .env.example          # 可提交的配置模板
-│   ├── compose.yaml          # 模块 Compose 定义
-│   ├── Dockerfile
-│   ├── server.js
-│   ├── package.json
-│   ├── data/                 # 扩展设置数据（不提交到 Git）
-│   ├── public/               # 前端页面
-│   ├── protection/           # 扩展混淆打包工具
-│   ├── epoint-gpt-autoreg-extension/  # 浏览器扩展源码
-│   ├── scripts/              # 辅助脚本
-│   └── README.md             # 模块详细文档
-├── provider-monitor/         # 功能模块：供应商监控与基座倍率对照
-│   ├── .env                  # 模块参数（不提交到 Git）
-│   ├── .env.example          # 可提交的配置模板
-│   ├── compose.yaml          # 模块 Compose 定义
-│   ├── Dockerfile
-│   ├── src/
-│   ├── public/
-│   ├── data/                 # 本地运行数据（不提交到 Git）
-│   └── README.md
-```
-
----
-
-## 🧩 新增功能模块指南
-
-想要添加新的扩展功能？按以下步骤操作：
-
-### 1. 创建模块目录
-
-```bash
-mkdir my-new-feature
-```
-
-### 2. 编写模块代码和 Dockerfile
-
-在模块目录中编写你的服务代码，并创建独立的 `Dockerfile`。
-
-### 3. 创建模块 `.env`
-
-把镜像、端口、构建参数和运行时参数集中写入 `my-new-feature/.env`，不要放入根目录或其他模块。
-
-### 4. 创建模块 `compose.yaml`
-
-```yaml
-services:
-  my-new-feature:
-    profiles: [my-new-feature]          # ← 声明 profile 名
-    build:
-      context: .
-    container_name: sub2api-my-new-feature
-    restart: unless-stopped
-    ports:
-      - "${MY_NEW_FEATURE_PORT:-9871}:3000"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      - SUB2API_BASE_URL=${SUB2API_BASE_URL:-http://host.docker.internal:8080}
-    env_file: ./.env
-    volumes:
-      - ./data:/app/data
-```
-
-### 5. 在根 Compose 中注册
-
-```yaml
-include:
-  - ./account-manager/compose.yaml
-  - ./provider-monitor/compose.yaml
-  - ./my-new-feature/compose.yaml
-```
-
-### 6. 启动模块
-
-```bash
-docker compose up -d my-new-feature
-```
-
----
-
-## 🐳 Docker 镜像自动构建
-
-仓库中的 [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml) 会构建两个模块并发布到同一个公开 GHCR 包：
-
-- 推送到 `main` 或 `master`：构建并推送分支标签和提交 SHA 标签；默认分支（当前为 `main`）同时更新 `latest`、`provider-monitor-latest`。
-- 推送 `v*.*.*` 标签：额外生成账号管理的版本标签（如 `1.2.3`）和供应商监控标签（如 `provider-monitor-1.2.3`）。
-- Pull Request：只执行双架构构建校验，不推送镜像。
-- Actions 页面可通过 `workflow_dispatch` 手动触发。
-
-工作流使用仓库自带的 `GITHUB_TOKEN`，并声明 `packages: write`，不需要额外配置 GHCR 密钥。现有 `sub2api-extra` GHCR 包为公开包，因此部署机器可以匿名拉取；若 fork 到其他账号，请确认新包已设为 Public，或先执行 `docker login ghcr.io`。
-
-> 只有推送到上述分支或版本标签后才会发布镜像。功能分支上的普通 push 不会发布；合并到 `main` 后会自动构建。
-
----
-
-## 🔄 部署与更新
-
-### 从源码构建
-
-```bash
-git pull
-docker compose --env-file compose.services.env build --pull
-docker compose --env-file compose.services.env up -d --no-build --pull never
-```
-
-### 使用预构建镜像
+## 🔄 更新镜像
 
 ```bash
 docker compose --env-file compose.services.env pull
@@ -221,11 +208,13 @@ docker compose --env-file compose.services.env up -d --no-build --pull never --r
 docker image prune -f  # (可选) 清理旧镜像
 ```
 
-`docker compose pull` 只更新本地镜像，不会自动替换正在运行的容器；后续的 `docker compose up -d` 会在镜像变化时重建容器，并保留绑定目录和命名卷中的数据。
+`docker compose pull` 只更新本地镜像，不会自动替换正在运行的容器；后续的 `up -d` 会在镜像变化时重建容器，并保留绑定目录和命名卷中的数据。
 
-如需固定版本而不是跟随 `latest`，分别修改模块 `.env`：
+### 固定版本
 
-```bash
+如需固定版本而不是跟随 `latest`，修改对应模块 `.env` 中的镜像地址：
+
+```dotenv
 # account-manager/.env
 ACCOUNT_MANAGER_IMAGE=ghcr.io/fjiangming/sub2api-extra:1.2.3
 
@@ -235,9 +224,83 @@ PROVIDER_MONITOR_IMAGE=ghcr.io/fjiangming/sub2api-extra:provider-monitor-1.2.3
 
 ---
 
-## 📖 各模块详细文档
+## ⚙️ 模块配置参考
 
-每个功能模块在自己的目录中包含独立的 `README.md`，详细说明功能特性、API 接口、集成方式等：
+| 模块 | 参数文件 | 详细文档 |
+|------|----------|----------|
+| 账号管理 | `account-manager/.env` | [账号管理 README](account-manager/README.md) |
+| 供应商监控 | `provider-monitor/.env` | [供应商监控 README](provider-monitor/README.md) |
+
+修改 `.env` 后需重建容器：
+
+```bash
+docker compose --env-file compose.services.env up -d --no-build --remove-orphans
+```
+
+---
+
+## 🐳 Docker 镜像自动构建
+
+仓库中的 [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml) 会构建两个模块并发布到同一个公开 GHCR 包：
+
+- 推送到 `main` 或 `master`：构建并推送分支标签和提交 SHA 标签；默认分支同时更新 `latest`、`provider-monitor-latest`。
+- 推送 `v*.*.*` 标签：额外生成账号管理的版本标签（如 `1.2.3`）和供应商监控标签（如 `provider-monitor-1.2.3`）。
+- Pull Request：只执行双架构构建校验，不推送镜像。
+- Actions 页面可通过 `workflow_dispatch` 手动触发。
+
+> 只有推送到上述分支或版本标签后才会发布镜像。功能分支上的普通 push 不会发布；合并到 `main` 后会自动构建。
+
+---
+
+## 🧩 新增功能模块指南
+
+想要添加新的扩展功能？按以下步骤操作：
+
+### 1. 创建模块目录和 Compose 定义
+
+```bash
+mkdir my-new-feature
+```
+
+在目录中创建 `.env` 和 `compose.yaml`，遵循与现有模块一致的结构：
+
+```yaml
+# my-new-feature/compose.yaml
+services:
+  my-new-feature:
+    profiles: [my-new-feature]          # ← 声明 profile 名
+    image: ${MY_NEW_FEATURE_IMAGE:-ghcr.io/your-org/your-image:latest}
+    container_name: sub2api-my-new-feature
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MY_NEW_FEATURE_PORT:-9872}:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file: ./.env
+    volumes:
+      - ./data:/app/data
+```
+
+### 2. 在根 Compose 中注册
+
+```yaml
+include:
+  - ./account-manager/compose.yaml
+  - ./provider-monitor/compose.yaml
+  - ./my-new-feature/compose.yaml
+```
+
+### 3. 启用并启动
+
+在 `compose.services.env` 中添加模块名后拉取并启动：
+
+```dotenv
+COMPOSE_PROFILES=account-manager,provider-monitor,my-new-feature
+```
+
+---
+
+## 📖 各模块详细文档
 
 - [账号管理模块](account-manager/README.md) — 独立账号管理页面，OAuth 授权代理，用户隔离
 - [供应商监控模块](provider-monitor/README.md) — 供应商资产、基座渠道倍率对照、告警与自动化

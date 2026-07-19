@@ -9,7 +9,9 @@ services:
     container_name: ${PROVIDER_MONITOR_CONTAINER_NAME:-sub2api-provider-monitor}
     restart: ${PROVIDER_MONITOR_RESTART_POLICY:-unless-stopped}
     ports:
-      - "${PROVIDER_MONITOR_PORT:-9871}:${PORT:-3200}"
+      - "127.0.0.1:${PROVIDER_MONITOR_PORT:-9871}:${PORT:-3200}"
+    environment:
+      PROVIDER_MONITOR_BIND_HOST: "0.0.0.0"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:

@@ -88,6 +88,7 @@ PROVIDER_MONITOR_PORT=9871
 # === 基础运行参数 ===
 NODE_ENV=production
 PORT=3200
+PROVIDER_MONITOR_BIND_HOST=127.0.0.1
 
 # === 加密密钥（必填，至少 32 字符） ===
 PROVIDER_MONITOR_SECRET=<粘贴上一步生成的随机值>
@@ -227,9 +228,10 @@ Dockerfile 采用多阶段构建：第一阶段安装编译依赖并执行 `npm 
 | `PROVIDER_MONITOR_PORT` | `9871` | 宿主机映射端口 |
 | `PROVIDER_MONITOR_DATA_VOLUME` | `sub2api-extra_provider-monitor-data` | 数据卷名称 |
 | `PORT` | `3200` | 容器内监听端口 |
+| `PROVIDER_MONITOR_BIND_HOST` | `127.0.0.1` | 本地运行监听地址；容器内由 Compose 覆盖 |
 | `NPM_REGISTRY` | `https://registry.npmmirror.com/` | 构建时 NPM 镜像源 |
 
-容器自动添加 `host.docker.internal:host-gateway` 映射，以便访问宿主机上的 Sub2API。数据目录挂载为 Docker 命名卷，容器重建不会丢失数据。
+Compose 只把业务端口发布到宿主机回环地址，外部访问需要经过本机反向代理。容器自动添加 `host.docker.internal:host-gateway` 映射，以便访问宿主机上的 Sub2API。数据目录挂载为 Docker 命名卷，容器重建不会丢失数据。
 
 容器内置健康检查：每 30 秒调用 `/healthz`，启动等待 15 秒，连续 3 次失败标记为不健康。
 
@@ -278,7 +280,7 @@ npm ci
 npm start
 ```
 
-`npm start` 自动读取同级 `.env`。实际监听端口由其中的 `PORT` 决定。
+`npm start` 自动读取同级 `.env`。实际监听端口由其中的 `PORT` 决定，默认仅监听 `127.0.0.1`。
 
 本地认证模式首次使用环境变量中的管理员密码。之后可在"设置与备份 -> 管理员安全"中修改密码；新密码只以 scrypt 哈希保存在 SQLite 中，并优先于环境变量中的初始密码。修改成功后，除当前浏览器外的其他管理员会话会立即失效。
 
@@ -290,7 +292,7 @@ npm start
 
 所有启动默认值都集中列在 `provider-monitor/.env`。自动化总开关、浏览器 Origin、私网访问、主机白名单、会话时长、请求限制、默认刷新、数据陈旧阈值、Key 检测并发和数据保留周期也可通过"设置与备份 -> 系统参数"修改；网页保存值持久化在 SQLite `settings` 表中，并在运行时优先于 `.env` 默认值。
 
-端口、认证模式、基座 Sub2API 地址、加密密钥、任务队列并发、时区和 Metrics 初始化仍属于启动参数，修改后需要重启服务。
+监听地址、端口、认证模式、基座 Sub2API 地址、加密密钥、任务队列并发、时区和 Metrics 初始化仍属于启动参数，修改后需要重启服务。
 
 ### 运行时参数一览
 

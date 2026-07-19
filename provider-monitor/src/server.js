@@ -1164,8 +1164,8 @@ function createApplication(options = {}) {
 function startServer() {
   const app = createApplication({ startBackground: true });
   const config = app.locals.services.config;
-  const server = app.listen(config.port, '0.0.0.0', () => {
-    console.log(`Provider Monitor listening on http://0.0.0.0:${config.port}`);
+  const server = app.listen(config.port, config.bindHost, () => {
+    console.log(`Provider Monitor listening on http://${config.bindHost}:${config.port}`);
   });
   const shutdown = async () => {
     server.close(async () => {

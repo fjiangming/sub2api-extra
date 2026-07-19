@@ -42,6 +42,7 @@ function loadConfig(env = process.env) {
   const config = {
     env: env.NODE_ENV || 'development',
     port: parseInteger(env.PORT, 3200, 1, 65535),
+    bindHost: String(env.PROVIDER_MONITOR_BIND_HOST || '127.0.0.1').trim() || '127.0.0.1',
     projectRoot,
     dataDir,
     databasePath: env.PROVIDER_MONITOR_DATABASE

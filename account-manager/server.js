@@ -5,6 +5,7 @@ const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3100;
+const BIND_HOST = process.env.ACCOUNT_MANAGER_BIND_HOST || '127.0.0.1';
 const SUB2API_BASE_URL = (process.env.SUB2API_BASE_URL || 'http://localhost:8080').replace(/\/+$/, '');
 
 const DATA_FILE = path.join(__dirname, 'data', 'extension_settings.json');
@@ -845,7 +846,7 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Sub2API Extra running on port ${PORT}`);
+app.listen(PORT, BIND_HOST, () => {
+  console.log(`Sub2API Extra listening on http://${BIND_HOST}:${PORT}`);
   console.log(`Sub2API backend: ${SUB2API_BASE_URL}`);
 });

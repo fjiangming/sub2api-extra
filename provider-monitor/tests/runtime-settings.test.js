@@ -20,6 +20,17 @@ test('relative data paths resolve from the provider-monitor project directory', 
   assert.equal(config.databasePath, path.join(projectRoot, 'runtime-data', 'runtime.db'));
 });
 
+test('the local server binds to loopback by default and supports a container override', () => {
+  const baseEnv = {
+    PROVIDER_MONITOR_SECRET: 'bind-host-secret-0123456789abcdefghi',
+    PROVIDER_MONITOR_AUTH_MODE: 'local',
+    PROVIDER_MONITOR_LOCAL_ADMIN_PASSWORD: 'test-password'
+  };
+
+  assert.equal(loadConfig(baseEnv).bindHost, '127.0.0.1');
+  assert.equal(loadConfig({ ...baseEnv, PROVIDER_MONITOR_BIND_HOST: '0.0.0.0' }).bindHost, '0.0.0.0');
+});
+
 test('an empty private host list remains empty at runtime', (t) => {
   const context = createTestContext({ PROVIDER_MONITOR_ALLOWED_HOSTS: '' });
   t.after(() => context.cleanup());

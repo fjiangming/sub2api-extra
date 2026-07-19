@@ -9,7 +9,9 @@ services:
     container_name: ${ACCOUNT_MANAGER_CONTAINER_NAME:-sub2api-account-manager}
     restart: ${ACCOUNT_MANAGER_RESTART_POLICY:-unless-stopped}
     ports:
-      - "${ACCOUNT_MANAGER_PORT:-9870}:${PORT:-3100}"
+      - "127.0.0.1:${ACCOUNT_MANAGER_PORT:-9870}:${PORT:-3100}"
+    environment:
+      ACCOUNT_MANAGER_BIND_HOST: "0.0.0.0"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
