@@ -1,22 +1,7 @@
-services:
-  account-manager:
-    build:
-      context: .
-      args:
-        NPM_REGISTRY: ${NPM_REGISTRY:-}
-    container_name: sub2api-extra
-    restart: unless-stopped
-    ports:
-      - "9870:3100"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      - PORT=3100
-      # 改为你的 Sub2API 后端地址
-      # Linux 服务器请使用 host.docker.internal（需搭配上方 extra_hosts 配置）
-      - SUB2API_BASE_URL=${SUB2API_BASE_URL:-http://host.docker.internal:8080}
-      # Sub2API 管理员账号（用于代理 OAuth 等需要管理员权限的接口）
-      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@qq.com}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
-    volumes:
-      - ./data:/app/data
+name: sub2api-extra
+
+# Select active services through COMPOSE_PROFILES in compose.services.env:
+# docker compose --env-file compose.services.env <command>
+include:
+  - ./account-manager/compose.yaml
+  - ./provider-monitor/compose.yaml

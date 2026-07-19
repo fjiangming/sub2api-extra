@@ -1,0 +1,10 @@
+node_modules
+data
+tests
+grafana
+coverage
+.git
+.gitignore
+.env*
+*.log
+README.md

@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EpointGPT公益注册站</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+
+<body class="auth-pending">
+  <!-- ═══ Login Screen ═══ -->
+  <section id="login-screen" class="login-screen">
+    <div class="login-card">
+      <div class="login-header-block">
+        <div class="login-logo">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+          </svg>
+        </div>
+        <h2 class="login-title">EpointGPT公益注册站</h2>
+        <p class="login-subtitle">请登录以继续使用</p>
+      </div>
+      <form id="login-form" class="login-form" autocomplete="on">
+        <div class="login-field">
+          <label for="login-server-url" class="login-label">服务端地址</label>
+          <input type="url" id="login-server-url" class="login-input" placeholder="https://your-server.com" required
+            autocomplete="url" />
+        </div>
+        <div class="login-field">
+          <label for="login-email" class="login-label">邮箱</label>
+          <input type="email" id="login-email" class="login-input" placeholder="you@example.com" required
+            autocomplete="email" />
+        </div>
+        <div class="login-field">
+          <label for="login-password" class="login-label">密码</label>
+          <div class="login-password-wrap">
+            <input type="password" id="login-password" class="login-input login-input-pwd" placeholder="请输入密码"
+              required autocomplete="current-password" />
+            <button type="button" id="btn-login-toggle-pwd" class="login-eye-btn" aria-label="显示密码"></button>
+          </div>
+        </div>
+        <div id="login-error" class="login-error" style="display:none;"></div>
+        <button type="submit" id="btn-login" class="btn btn-primary login-submit-btn">
+          <span id="btn-login-text">登 录</span>
+        </button>
+      </form>
+      <div class="login-footer">
+        <span class="login-footer-text">中转站统一认证</span>
+        <button id="btn-login-theme" class="theme-toggle login-theme-btn" title="切换主题" type="button">
+          <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+          </svg>
+          <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="5" />
+            <line x1="12" y1="1" x2="12" y2="3" />
+            <line x1="12" y1="21" x2="12" y2="23" />
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+            <line x1="1" y1="12" x2="3" y2="12" />
+            <line x1="21" y1="12" x2="23" y2="12" />
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <header>
+    <div class="header-left">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round">
+        <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
+      </svg>
+      <h1>EpointGPT公益注册站</h1>
+      <button id="btn-theme" class="theme-toggle" title="切换主题">
+        <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+        </svg>
+        <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="5" />
+          <line x1="12" y1="1" x2="12" y2="3" />
+          <line x1="12" y1="21" x2="12" y2="23" />
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+          <line x1="1" y1="12" x2="3" y2="12" />
+          <line x1="21" y1="12" x2="23" y2="12" />
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+        </svg>
+      </button>
+    </div>
+    <div class="header-btns">
+      <span id="header-user-email" style="font-size: 12px; color: var(--text-muted); margin-right: 4px; user-select: text;"></span>
+      <button id="btn-logout" class="btn btn-ghost btn-sm" style="color: var(--red); padding-inline: 8px;" type="button" title="退出登录">退出</button>
+    </div>
+  </header>
+
+  <!-- ═══ Extension Update Banner ═══ -->
+  <div id="update-banner" class="update-banner" style="display:none;">
+    <div class="update-banner-row">
+      <div class="update-banner-content">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+        <span id="update-banner-text">发现新版本</span>
+      </div>
+      <div class="update-banner-actions">
+        <button id="btn-toggle-changelog" class="btn btn-ghost btn-xs" type="button" style="display:none;">更新日志</button>
+        <button id="btn-download-update" class="btn btn-primary btn-xs" type="button">下载更新</button>
+        <button id="btn-dismiss-update" class="update-banner-close" type="button" aria-label="关闭">&times;</button>
+      </div>
+    </div>
+    <div id="update-changelog" class="update-changelog" style="display:none;">
+      <pre id="update-changelog-text" class="update-changelog-text"></pre>
+    </div>
+  </div>
+
+  <section id="data-section">
+    <div id="run-control-card" class="data-card" style="margin-bottom: 14px;">
+      <div class="data-row">
+        <span class="data-label">运行控制</span>
+        <div class="data-inline" style="justify-content: space-between; width: 100%;">
+          <div class="run-group" style="flex: 1;">
+            <input type="number" id="input-run-count" class="run-count-input" value="1" min="1" title="运行次数" style="flex: 1; width: auto; text-align: center;" />
+            <button id="btn-auto-run" class="btn btn-success" title="自动执行全部步骤">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <polygon points="5 3 19 12 5 21 5 3" />
+              </svg>
+              自动
+            </button>
+            <button id="btn-stop" class="btn btn-danger" title="停止当前流程" disabled>停止</button>
+          </div>
+          <button id="btn-reset" class="btn btn-ghost" title="重置全部步骤">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="1 4 1 10 7 10" />
+              <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+            </svg>
+            重置
+          </button>
+        </div>
+      </div>
+    </div>
+    <div id="settings-card" class="data-card">
+      <div class="data-row">
+        <span class="data-label">注册邮箱</span>
+        <div class="data-inline">
+          <input type="text" id="input-email" class="data-input" placeholder="自动生成或手动粘贴邮箱" />
+          <button id="btn-fetch-email" class="btn btn-outline btn-sm" type="button">获取</button>
+        </div>
+      </div>
+      <div class="data-row">
+        <span class="data-label">注册模式</span>
+        <label class="data-check register-only-check">
+          <input type="checkbox" id="input-register-only-mode" />
+          <span class="data-check-copy">
+            <span class="data-check-title">仅注册</span>
+            <span class="data-check-hint">勾选后步骤 5 完成即结束，步骤 6-9 自动跳过</span>
+          </span>
+        </label>
+      </div>
+      <div class="data-row">
+        <span class="data-label">OAuth</span>
+        <span id="display-oauth-url" class="data-value mono truncate">等待中...</span>
+      </div>
+      <div class="data-row">
+        <span class="data-label">回调</span>
+        <div class="data-inline data-value-actions">
+          <span id="display-localhost-url" class="data-value data-value-fill mono truncate">等待中...</span>
+        </div>
+      </div>
+    </div>
+    <div id="registered-accounts-card" class="data-card registered-accounts-card">
+      <div class="section-mini-header">
+        <div class="section-mini-copy">
+          <span class="section-label">注册账号</span>
+          <span id="registered-accounts-count" class="section-hint">暂无账号</span>
+        </div>
+        <div class="section-mini-actions">
+          <button id="btn-export-registered-accounts" class="btn btn-outline btn-xs" type="button" disabled>导出 TXT</button>
+        </div>
+      </div>
+      <div id="registered-accounts-list" class="registered-accounts-list"></div>
+    </div>
+    <div id="hotmail-section" class="data-card hotmail-card" style="display:none;">
+      <div class="section-mini-header">
+        <div class="section-mini-copy">
+          <span class="section-label">Hotmail 账号池</span>
+          <span class="section-hint">每轮自动分配一个可用账号</span>
+        </div>
+        <div class="section-mini-actions">
+          <button id="btn-clear-used-hotmail-accounts" class="btn btn-ghost btn-xs" type="button">清空已用</button>
+          <button id="btn-delete-all-hotmail-accounts" class="btn btn-ghost btn-xs" type="button">全部删除</button>
+          <button id="btn-toggle-hotmail-list" class="btn btn-ghost btn-xs" type="button" aria-expanded="false">展开列表</button>
+        </div>
+      </div>
+      <div class="data-row">
+        <span class="data-label">邮箱</span>
+        <input type="text" id="input-hotmail-email" class="data-input" placeholder="name@hotmail.com" />
+      </div>
+      <div class="data-row">
+        <span class="data-label">客户端 ID</span>
+        <input type="text" id="input-hotmail-client-id" class="data-input mono" placeholder="微软应用客户端 ID" />
+      </div>
+      <div class="data-row">
+        <span class="data-label">邮箱密码</span>
+        <input type="password" id="input-hotmail-password" class="data-input" placeholder="可选，仅用于记录" />
+      </div>
+      <div class="data-row">
+        <span class="data-label">刷新令牌</span>
+        <input type="password" id="input-hotmail-refresh-token" class="data-input mono" placeholder="必填，粘贴刷新令牌（refresh token）" />
+      </div>
+      <div class="data-row hotmail-actions-row">
+        <span class="data-label"></span>
+        <button id="btn-add-hotmail-account" class="btn btn-primary btn-sm" type="button">添加账号</button>
+      </div>
+      <div class="data-row hotmail-import-row">
+        <span class="data-label">批量导入</span>
+        <div class="hotmail-import-box">
+          <textarea id="input-hotmail-import" class="data-textarea mono" placeholder="账号----密码----客户端ID----刷新令牌&#10;name@hotmail.com----password----client-id----refresh-token"></textarea>
+          <button id="btn-import-hotmail-accounts" class="btn btn-outline btn-sm" type="button">导入</button>
+        </div>
+      </div>
+      <div id="hotmail-list-shell" class="hotmail-list-shell is-collapsed">
+        <div id="hotmail-accounts-list" class="hotmail-accounts-list"></div>
+      </div>
+    </div>
+    <div id="status-bar" class="status-bar">
+      <div class="status-dot"></div>
+      <span id="display-status">就绪</span>
+    </div>
+    <div id="auto-continue-bar" class="auto-continue-bar" style="display:none;">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10" />
+        <line x1="12" y1="8" x2="12" y2="12" />
+        <line x1="12" y1="16" x2="12.01" y2="16" />
+      </svg>
+      <span class="auto-hint">先自动获取邮箱，或手动粘贴邮箱后再继续</span>
+      <button id="btn-auto-continue" class="btn btn-primary btn-sm">继续</button>
+    </div>
+    <div id="auto-schedule-bar" class="auto-schedule-bar" style="display:none;">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10" />
+        <polyline points="12 6 12 12 16 14" />
+      </svg>
+      <div class="auto-schedule-copy">
+        <span id="auto-schedule-title" class="auto-schedule-title">已计划自动运行</span>
+        <span id="auto-schedule-meta" class="auto-schedule-meta">等待倒计时开始...</span>
+      </div>
+      <div class="auto-schedule-actions">
+        <button id="btn-auto-run-now" class="btn btn-primary btn-sm" type="button">立即开始</button>
+        <button id="btn-auto-cancel-schedule" class="btn btn-outline btn-sm" type="button">取消</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="steps-section">
+    <div class="steps-header">
+      <span class="section-label">流程</span>
+      <span id="steps-progress" class="steps-progress">0 / 9</span>
+    </div>
+    <div class="steps-list">
+      <div class="step-row" data-step="1">
+        <div class="step-indicator" data-step="1"><span class="step-num">1</span></div>
+        <button class="step-btn" data-step="1">获取 OAuth 链接</button>
+        <span class="step-status" data-step="1"></span>
+      </div>
+      <div class="step-row" data-step="2">
+        <div class="step-indicator" data-step="2"><span class="step-num">2</span></div>
+        <button class="step-btn" data-step="2">打开注册页</button>
+        <span class="step-status" data-step="2"></span>
+      </div>
+      <div class="step-row" data-step="3">
+        <div class="step-indicator" data-step="3"><span class="step-num">3</span></div>
+        <button class="step-btn" data-step="3">填写邮箱和密码</button>
+        <span class="step-status" data-step="3"></span>
+      </div>
+      <div class="step-row" data-step="4">
+        <div class="step-indicator" data-step="4"><span class="step-num">4</span></div>
+        <button class="step-btn" data-step="4">获取注册验证码</button>
+        <span class="step-status" data-step="4"></span>
+      </div>
+      <div class="step-row" data-step="5">
+        <div class="step-indicator" data-step="5"><span class="step-num">5</span></div>
+        <button class="step-btn" data-step="5">填写姓名和生日</button>
+        <span class="step-status" data-step="5"></span>
+      </div>
+      <div class="step-row" data-step="6">
+        <div class="step-indicator" data-step="6"><span class="step-num">6</span></div>
+        <button class="step-btn" data-step="6">刷新 OAuth 并登录</button>
+        <span class="step-status" data-step="6"></span>
+      </div>
+      <div class="step-row" data-step="7">
+        <div class="step-indicator" data-step="7"><span class="step-num">7</span></div>
+        <button class="step-btn" data-step="7">获取登录验证码</button>
+        <span class="step-status" data-step="7"></span>
+      </div>
+      <div class="step-row" data-step="8">
+        <div class="step-indicator" data-step="8"><span class="step-num">8</span></div>
+        <button class="step-btn" data-step="8">自动确认 OAuth</button>
+        <span class="step-status" data-step="8"></span>
+      </div>
+      <div class="step-row" data-step="9">
+        <div class="step-indicator" data-step="9"><span class="step-num">9</span></div>
+        <button class="step-btn" data-step="9">平台回调验证</button>
+        <span class="step-status" data-step="9"></span>
+      </div>
+    </div>
+  </section>
+
+  <section id="log-section">
+    <div class="log-header">
+      <span class="section-label">日志</span>
+      <button id="btn-clear-log" class="btn btn-ghost btn-xs" title="清空日志">清空</button>
+    </div>
+    <div id="log-area"></div>
+  </section>
+
+  <div id="auto-start-modal" class="modal-overlay" hidden>
+    <div class="modal-card">
+      <div class="modal-header">
+        <span class="modal-title">启动自动</span>
+        <button id="btn-auto-start-close" class="modal-close" type="button" aria-label="关闭">×</button>
+      </div>
+      <p id="auto-start-message" class="modal-message">检测到已有流程进度，选择继续当前还是重新开始。</p>
+      <div class="modal-actions">
+        <button id="btn-auto-start-cancel" class="btn btn-ghost btn-sm" type="button">取消</button>
+        <button id="btn-auto-start-restart" class="btn btn-outline btn-sm" type="button">重新开始</button>
+        <button id="btn-auto-start-continue" class="btn btn-primary btn-sm" type="button">继续当前</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-container"></div>
+  <input id="input-import-settings-file" type="file" accept=".json,application/json" hidden />
+  <script src="../hotmail-utils.js"></script>
+  <script src="login.js"></script>
+  <script src="sidepanel.js"></script>
+</body>
+
+</html>

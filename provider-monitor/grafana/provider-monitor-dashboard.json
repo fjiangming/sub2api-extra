@@ -1,0 +1,70 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Active alerts",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [{ "expr": "provider_monitor_active_alerts", "refId": "A" }]
+    },
+    {
+      "type": "stat",
+      "title": "Failing providers",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [{ "expr": "provider_monitor_providers{state=\"failing\"}", "refId": "A" }]
+    },
+    {
+      "type": "stat",
+      "title": "Enabled providers",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [{ "expr": "provider_monitor_providers{state=\"enabled\"}", "refId": "A" }]
+    },
+    {
+      "type": "stat",
+      "title": "Sync success rate (1h)",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+      "targets": [{ "expr": "sum(rate(provider_monitor_sync_total{status=~\"succeeded|partial\"}[1h])) / clamp_min(sum(rate(provider_monitor_sync_total[1h])), 0.000001)", "refId": "A" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Account balances",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [{ "expr": "provider_monitor_account_balance", "legendFormat": "{{provider}} {{currency}}", "refId": "A" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Forecast runway",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "fieldConfig": { "defaults": { "unit": "d" }, "overrides": [] },
+      "targets": [{ "expr": "provider_monitor_forecast_runway_days", "legendFormat": "{{provider_id}} {{currency}}", "refId": "A" }]
+    },
+    {
+      "type": "timeseries",
+      "title": "Key and Team remaining budgets",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        { "expr": "provider_monitor_key_remaining_quota", "legendFormat": "key {{key_id}}", "refId": "A" },
+        { "expr": "provider_monitor_team_remaining_budget", "legendFormat": "team {{team_id}}", "refId": "B" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Sync duration p95",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [{ "expr": "histogram_quantile(0.95, sum by (le, adapter) (rate(provider_monitor_sync_duration_seconds_bucket[5m])))", "legendFormat": "{{adapter}}", "refId": "A" }]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["sub2api", "provider-monitor"],
+  "templating": { "list": [] },
+  "time": { "from": "now-24h", "to": "now" },
+  "timezone": "browser",
+  "title": "Sub2API Provider Monitor",
+  "uid": "sub2api-provider-monitor",
+  "version": 1
+}

@@ -34,8 +34,11 @@ coverage/
 .DS_Store
 Thumbs.db
 
-# Data directory
-data/
+# Runtime data directory at the top level of each feature module
+/*/data/
 
 # Archives
 *.zip
+
+# Generated import payloads may contain account credentials
+**/scripts/*import_payload*.json

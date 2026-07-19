@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Provider Monitor</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <section class="login-screen" id="login-screen" hidden>
+    <form class="login-panel" id="login-form">
+      <div class="brand-mark" aria-hidden="true"><i data-lucide="radar"></i></div>
+      <div>
+        <h1>Provider Monitor</h1>
+        <p id="login-hint">供应商资产与余额监控</p>
+      </div>
+      <label>
+        <span>管理员账号或邮箱</span>
+        <input name="identity" autocomplete="username" required autofocus>
+      </label>
+      <label>
+        <span>密码</span>
+        <input name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <button class="button primary" type="submit"><i data-lucide="log-in"></i><span>登录</span></button>
+      <a class="button" id="sub2api-login-link" hidden><i data-lucide="external-link"></i><span>返回 Sub2API</span></a>
+      <p class="form-error" id="login-error" role="alert"></p>
+    </form>
+  </section>
+
+  <div class="app-shell" id="app-shell" hidden>
+    <header class="module-header">
+      <div class="brand">
+        <span class="brand-mark"><i data-lucide="radar"></i></span>
+        <span><strong>Provider Monitor</strong><small>资产控制台</small></span>
+      </div>
+      <nav class="module-tabs" aria-label="模块导航" role="tablist">
+        <button class="module-tab active" data-view="overview" role="tab" aria-selected="true" aria-controls="main-content" tabindex="0"><i data-lucide="layout-dashboard"></i><span>总览</span></button>
+        <button class="module-tab" data-view="providers" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="server-cog"></i><span>供应商</span></button>
+        <button class="module-tab" data-view="assets" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="key-round"></i><span>密钥与分组</span></button>
+        <button class="module-tab" data-view="usage" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="activity"></i><span>使用量</span></button>
+        <button class="module-tab" data-view="trends" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="chart-no-axes-combined"></i><span>趋势</span></button>
+        <button class="module-tab" data-view="costs" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="badge-dollar-sign"></i><span>价格比较</span></button>
+        <button class="module-tab" data-view="risks" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="shield-alert"></i><span>健康与漂移</span></button>
+        <button class="module-tab" data-view="alerts" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="bell-ring"></i><span>告警</span></button>
+        <button class="module-tab" data-view="integrations" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="waypoints"></i><span>Sub2API 联动</span></button>
+        <button class="module-tab" data-view="automation" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="workflow"></i><span>自动化</span></button>
+        <button class="module-tab" data-view="activity" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="scroll-text"></i><span>运行记录</span></button>
+        <button class="module-tab" data-view="settings" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="settings"></i><span>设置与备份</span></button>
+      </nav>
+      <div class="header-account">
+        <span class="user-chip"><i data-lucide="circle-user-round"></i><span id="user-name">管理员</span></span>
+        <button class="icon-button" id="logout-button" title="退出登录" aria-label="退出登录"><i data-lucide="log-out"></i></button>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div><h1 id="view-title">资产总览</h1><p id="view-subtitle">供应商余额、状态与风险</p></div>
+        <div class="topbar-actions" id="topbar-actions"></div>
+      </header>
+      <main id="main-content" role="tabpanel" tabindex="-1"></main>
+    </div>
+  </div>
+
+  <dialog id="provider-dialog" class="dialog wide-dialog">
+    <form method="dialog" id="provider-form">
+      <header class="dialog-header"><div><h2 id="provider-dialog-title">添加供应商</h2><p>连接信息与凭据将分开加密存储</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <input type="hidden" name="id">
+      <div class="form-grid">
+        <label><span>名称</span><input name="name" maxlength="120" required></label>
+        <label><span>适配器</span><select name="adapterType" required></select></label>
+        <label class="span-2 provider-url-field"><span>基础地址</span><input name="baseUrl" type="url" placeholder="https://api.example.com" required><small id="provider-detection-status" class="provider-detection-status" aria-live="polite"></small></label>
+        <label><span>认证模式</span><select name="authMode"><option value="api_key">API Key</option><option value="system_token">系统令牌</option><option value="management_key">管理密钥</option><option value="account">账号登录</option><option value="bearer">Bearer Token</option></select></label>
+        <label><span>远端用户 ID</span><input name="remoteUserId"></label>
+        <label><span>刷新间隔（分钟）</span><input name="refreshIntervalMinutes" type="number" min="1" max="1440" value="15"></label>
+        <label><span>余额预警值</span><input name="warningThreshold" type="number" min="0" step="0.01"></label>
+        <label><span>币种</span><input name="thresholdCurrency" value="USD" maxlength="12"></label>
+        <label><span>账户去重键</span><input name="accountDedupeKey" maxlength="200"></label>
+        <label class="toggle-field"><input name="enabled" type="checkbox" checked><span>启用定时检查</span></label>
+      </div>
+      <fieldset><legend>凭据</legend><div class="form-grid" id="credential-fields"></div></fieldset>
+      <details><summary>高级配置</summary><div class="form-grid advanced-grid"><label class="span-2"><span>适配器配置（JSON）</span><textarea name="typeConfig" rows="5">{}</textarea></label><label><span>标签（逗号分隔）</span><input name="tags"></label><label><span>备注</span><input name="note"></label></div></details>
+      <p class="form-error" id="provider-form-error" role="alert"></p>
+      <footer class="dialog-actions"><button class="button" type="button" data-action="detect-provider" title="重新识别供应商类型"><i data-lucide="scan-search"></i><span>重新识别</span></button><button class="button" type="button" data-action="validate-provider" title="验证连接"><i data-lucide="shield-check"></i><span>验证连接</span></button><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存</span></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="backup-target-dialog" class="dialog">
+    <form method="dialog" id="backup-target-form">
+      <header class="dialog-header"><div><h2>备份目标</h2><p>远端凭据独立加密保存</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <input type="hidden" name="id">
+      <div class="form-grid">
+        <label><span>名称</span><input name="name" maxlength="120" required></label>
+        <label><span>类型</span><select name="type"><option value="local">本地目录</option><option value="webdav">WebDAV</option><option value="s3">S3 兼容</option></select></label>
+        <label class="span-2"><span>配置（JSON）</span><textarea name="config" rows="7">{}</textarea></label>
+        <label class="span-2"><span>凭据（JSON）</span><textarea name="credentials" rows="5">{}</textarea></label>
+        <label class="toggle-field"><input name="enabled" type="checkbox" checked><span>启用定时备份</span></label>
+      </div>
+      <p class="form-error" id="backup-target-form-error" role="alert"></p>
+      <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存</span></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="alert-rule-dialog" class="dialog">
+    <form method="dialog" id="alert-rule-form">
+      <header class="dialog-header"><div><h2>告警规则</h2><p>按快照连续匹配并在恢复时自动关闭</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <input type="hidden" name="id">
+      <div class="form-grid">
+        <label class="span-2"><span>名称</span><input name="name" required></label>
+        <label><span>类型</span><select name="ruleType"><option value="low_balance">低余额 / 低额度</option><option value="runway_below">可用天数</option><option value="stale_data">数据陈旧</option><option value="sync_failed">同步失败</option><option value="key_expiry">密钥到期</option><option value="key_disabled">密钥停用</option><option value="rate_mismatch">Sub2API 倍率偏差</option><option value="asset_drift">资产漂移</option><option value="contract_changed">接口契约变化</option><option value="anomaly">用量或余额异常</option><option value="credential_expiry">凭据久未轮换</option><option value="automation_failed">自动化失败</option></select></label>
+        <label><span>供应商</span><select name="connectionId"><option value="">全部</option></select></label>
+        <label><span>余额范围</span><select name="scope"><option value="account">账户</option><option value="key">Key</option><option value="team">Team Budget</option></select></label>
+        <label><span id="alert-threshold-label">阈值</span><input name="threshold" type="number" step="0.01"></label>
+        <label><span>币种</span><input name="currency" value="USD"></label>
+        <label><span>连续次数</span><input name="consecutiveMatches" type="number" min="1" value="1"></label>
+        <label><span>冷却（分钟）</span><input name="cooldownMinutes" type="number" min="1" value="60"></label>
+        <label class="toggle-field"><input name="enabled" type="checkbox" checked><span>启用</span></label>
+      </div>
+      <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存</span></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="notification-dialog" class="dialog">
+    <form method="dialog" id="notification-form">
+      <header class="dialog-header"><div><h2>通知通道</h2><p>敏感字段会加密保存</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <input type="hidden" name="id">
+      <div class="form-grid">
+        <label><span>名称</span><input name="name" required></label>
+        <label><span>类型</span><select name="type"><option value="webhook">Webhook</option><option value="telegram">Telegram</option><option value="gotify">Gotify</option><option value="bark">Bark</option><option value="email">Email</option><option value="wecom">企业微信</option><option value="dingtalk">钉钉</option><option value="feishu">飞书</option></select></label>
+        <label class="span-2"><span>配置（JSON）</span><textarea name="config" rows="6">{}</textarea></label>
+        <label class="span-2"><span>凭据（JSON）</span><textarea name="credentials" rows="5">{}</textarea></label>
+        <label class="toggle-field"><input name="enabled" type="checkbox" checked><span>启用</span></label>
+      </div>
+      <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存</span></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="automation-dialog" class="dialog">
+    <form method="dialog" id="automation-form">
+      <header class="dialog-header"><div><h2>自动化规则</h2><p>关闭演练模式前需启用服务端全局写入开关</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <input type="hidden" name="id">
+      <div class="form-grid">
+        <label class="span-2"><span>名称</span><input name="name" required></label>
+        <label><span>触发条件</span><select name="triggerType"><option value="low_balance">余额低于阈值</option><option value="balance_recovered">余额恢复</option><option value="key_failed">Key 健康失败</option><option value="anomaly_detected">检测到异常</option><option value="contract_changed">接口契约变化</option></select></label>
+        <label><span>供应商</span><select name="connectionId"><option value="">全部</option></select></label>
+        <label><span>阈值</span><input name="threshold" type="number" min="0" step="0.01"></label>
+        <label><span>币种</span><input name="currency" value="USD" required></label>
+        <label class="span-2"><span>Sub2API 渠道 ID（逗号分隔）</span><input name="channelIds" placeholder="1, 2, 3" required></label>
+        <label class="span-2"><span>动作</span><select name="action"><option value="disable_sub2api_channel">停用渠道</option><option value="enable_sub2api_channel">启用渠道</option><option value="switch_to_backup">切换备用映射</option><option value="trigger_recharge_webhook">触发充值工单 Webhook</option><option value="remind_credential_rotation">生成凭据轮换提醒</option><option value="create_route_recommendation">生成路由建议</option></select></label>
+        <label><span>连续命中</span><input name="consecutiveMatches" type="number" min="1" value="2"></label>
+        <label><span>冷却（分钟）</span><input name="cooldownMinutes" type="number" min="1" value="60"></label>
+        <label><span>每日动作上限</span><input name="dailyMaximumActions" type="number" min="1" value="10"></label>
+        <label><span>Contract 暂停（小时）</span><input name="contractPauseHours" type="number" min="1" value="24"></label>
+        <label class="span-2"><span>充值 Webhook（仅对应动作使用）</span><input name="webhookUrl" type="url"></label>
+        <label class="toggle-field"><input name="enabled" type="checkbox"><span>启用规则</span></label>
+        <label class="toggle-field"><input name="dryRun" type="checkbox" checked><span>演练模式</span></label>
+      </div>
+      <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存</span></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="mapping-dialog" class="dialog">
+    <form method="dialog" id="mapping-form">
+      <header class="dialog-header"><div><h2>Sub2API 渠道映射</h2><p>关联供应商资产、渠道和可选 Channel Monitor</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <input type="hidden" name="id">
+      <div class="form-grid">
+        <label><span>供应商</span><select name="connectionId" required></select></label>
+        <label><span>远端 Key</span><select name="keyId"><option value="">账户级</option></select></label>
+        <label><span>基座渠道</span><select name="channelId" required></select></label>
+        <label><span>角色</span><select name="role"><option value="primary">主供应商</option><option value="backup">备用供应商</option></select></label>
+        <label><span>账号 ID</span><input name="accountId" type="number" min="1"></label>
+        <label><span>基座分组</span><select name="groupId"><option value="">自动匹配</option></select></label>
+        <label><span>供应商上游分组</span><select name="upstreamGroupRef"><option value="">按 Key / 名称自动匹配</option></select></label>
+        <label><span>倍率容差（%）</span><input name="rateTolerancePercent" type="number" min="0" step="0.1" value="5"></label>
+        <label class="span-2"><span>模型（逗号分隔）</span><input name="models"></label>
+        <label><span>Channel Monitor</span><select name="channelMonitorId"><option value="">不关联</option></select></label>
+        <label class="toggle-field"><input name="autoReconcile" type="checkbox"><span>每日自动对账</span></label>
+        <label class="toggle-field"><input name="enabled" type="checkbox" checked><span>启用映射</span></label>
+      </div>
+      <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存</span></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="auto-mapping-dialog" class="dialog wide-dialog">
+    <form method="dialog" id="auto-mapping-form">
+      <header class="dialog-header"><div><h2>自动映射预览</h2><p>确认账号名称匹配、已有关系和冲突结果</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <div id="auto-mapping-preview" class="auto-mapping-preview" aria-live="polite"></div>
+      <p class="form-error" id="auto-mapping-error" role="alert"></p>
+      <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit" disabled><i data-lucide="wand-sparkles"></i><span>应用映射</span></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="credential-dialog" class="dialog">
+    <form method="dialog" id="credential-form">
+      <header class="dialog-header"><div><h2>轮换供应商凭据</h2><p>新凭据远端验证成功后才会原子替换</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <input type="hidden" name="providerId">
+      <div class="form-grid" id="rotation-credential-fields"></div>
+      <div class="form-grid advanced-grid"><label><span>回滚副本保留天数</span><input name="retentionDays" type="number" min="1" max="30" value="7"></label><label><span>轮换原因</span><input name="reason" maxlength="200"></label></div>
+      <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="rotate-cw"></i><span>验证并轮换</span></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="reauth-dialog" class="dialog">
+    <form method="dialog" id="reauth-form">
+      <header class="dialog-header"><div><h2>重新验证管理员身份</h2><p>敏感操作授权有效期为 5 分钟</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <div class="form-grid"><label class="span-2"><span>账号或邮箱</span><input name="identity" autocomplete="username" required></label><label class="span-2"><span>密码</span><input name="password" type="password" autocomplete="current-password" required></label></div>
+      <p class="form-error" id="reauth-error" role="alert"></p>
+      <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="shield-check"></i><span>验证</span></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="password-dialog" class="dialog">
+    <form method="dialog" id="password-form">
+      <header class="dialog-header"><div><h2>修改管理员密码</h2><p>修改后，其他已登录会话将立即失效</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <div class="form-grid"><label class="span-2"><span>当前密码</span><input name="currentPassword" type="password" maxlength="1024" autocomplete="current-password" required></label><label><span>新密码</span><input name="newPassword" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label><label><span>确认新密码</span><input name="confirmation" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label></div>
+      <p class="form-error" id="password-error" role="alert"></p>
+      <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="key-round"></i><span>修改密码</span></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="import-dialog" class="dialog wide-dialog">
+    <form method="dialog" id="import-form">
+      <header class="dialog-header"><div><h2>批量导入供应商</h2><p>应用前先解析并显示新增、更新和缺失凭据</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <div class="form-grid"><label><span>格式</span><select name="format"><option value="provider-monitor">Provider Monitor JSON</option><option value="csv">CSV</option><option value="env">环境变量模板</option><option value="all-api-hub">All API Hub JSON</option><option value="legacy-config">旧版 config.json</option></select></label><label class="span-2"><span>内容</span><textarea name="content" rows="12" required></textarea></label></div>
+      <div class="panel-body" id="import-preview"></div>
+      <footer class="dialog-actions"><button class="button" type="button" data-action="preview-import"><i data-lucide="scan-search"></i><span>预览差异</span></button><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit" disabled><i data-lucide="file-input"></i><span>应用导入</span></button></footer>
+    </form>
+  </dialog>
+
+  <dialog id="disaster-dialog" class="dialog">
+    <form method="dialog" id="disaster-form">
+      <header class="dialog-header"><div><h2>生成加密灾备包</h2><p>包内凭据使用独立密码二次加密</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <div class="form-grid"><label class="span-2"><span>加密密码</span><input name="password" type="password" minlength="12" autocomplete="new-password" required></label><label class="span-2"><span>确认密码</span><input name="confirmation" type="password" minlength="12" autocomplete="new-password" required></label></div>
+      <p class="form-error" id="disaster-error" role="alert"></p>
+      <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="lock-keyhole"></i><span>生成</span></button></footer>
+    </form>
+  </dialog>
+
+  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+  <script src="/vendor/lucide/lucide.min.js"></script>
+  <script src="/vendor/echarts/echarts.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

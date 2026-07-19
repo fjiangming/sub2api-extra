@@ -1,0 +1,29 @@
+services:
+  provider-monitor:
+    profiles: [provider-monitor]
+    image: ${PROVIDER_MONITOR_IMAGE:-ghcr.io/fjiangming/sub2api-extra:provider-monitor-latest}
+    build:
+      context: .
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
+    container_name: ${PROVIDER_MONITOR_CONTAINER_NAME:-sub2api-provider-monitor}
+    restart: ${PROVIDER_MONITOR_RESTART_POLICY:-unless-stopped}
+    ports:
+      - "${PROVIDER_MONITOR_PORT:-9871}:${PORT:-3200}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: ./.env
+        required: true
+    volumes:
+      - provider-monitor-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:${PORT:-3200}/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  provider-monitor-data:
+    name: ${PROVIDER_MONITOR_DATA_VOLUME:-sub2api-extra_provider-monitor-data}
