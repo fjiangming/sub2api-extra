@@ -360,8 +360,20 @@ function createApplication(options = {}) {
       enqueueSub2ApiRefresh();
       const location = `${cleanPath}${search.size ? `?${search}` : ''}#pm_session=${encodeURIComponent(session.sessionToken)}`;
       return res.redirect(303, location);
-    } catch {
-      search.set('sso_error', '1');
+    } catch (error) {
+      const exposedCode = ['AUTH_FAILED', 'ADMIN_REQUIRED', 'AUTH_UPSTREAM_TIMEOUT'].includes(error?.code)
+        ? error.code
+        : 'AUTH_FAILED';
+      search.set('sso_error', exposedCode);
+      if (config.env !== 'test') {
+        console.warn(JSON.stringify({
+          level: 'warn',
+          requestId: req.id,
+          message: 'Sub2API SSO exchange failed',
+          code: exposedCode,
+          remoteStatus: error?.details?.remoteStatus || null
+        }));
+      }
       return res.redirect(303, `${cleanPath}?${search}`);
     }
   }));

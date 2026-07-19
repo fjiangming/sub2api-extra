@@ -184,6 +184,15 @@ function showLogin(message = '') {
   icons();
 }
 
+function ssoErrorMessage(code) {
+  const messages = {
+    AUTH_FAILED: 'Sub2API 登录状态无效或已过期，请返回 Sub2API 重新登录后再打开。',
+    ADMIN_REQUIRED: '当前 Sub2API 账号不是管理员，无法访问 Provider Monitor。',
+    AUTH_UPSTREAM_TIMEOUT: 'Provider Monitor 暂时无法连接 Sub2API，请稍后重试。'
+  };
+  return messages[code] || 'Sub2API 单点登录失败，请重新从自定义菜单打开。';
+}
+
 function showApp(session) {
   if (session.sessionToken) {
     state.sessionToken = session.sessionToken;
@@ -1539,6 +1548,7 @@ window.addEventListener('resize', () => state.chart?.resize());
 
   const query = new URLSearchParams(window.location.search);
   const theme = query.get('theme');
+  const ssoError = query.get('sso_error');
   if (theme === 'dark') document.documentElement.dataset.theme = 'dark';
   const upstreamToken = query.get('token') || query.get('access_token');
   if (upstreamToken) {
@@ -1557,6 +1567,13 @@ window.addEventListener('resize', () => state.chart?.resize());
         $('#sub2api-login-link').hidden = false;
       }
     }
+    if (ssoError) {
+      state.sessionToken = '';
+      state.csrfToken = '';
+      browserSession.removeItem('provider-monitor.session');
+      showLogin(ssoErrorMessage(ssoError));
+      return;
+    }
     if (upstreamToken) {
       const session = await api('/api/auth/sso', {
         method: 'POST',
@@ -1571,7 +1588,8 @@ window.addEventListener('resize', () => state.chart?.resize());
     await navigate('overview');
   } catch (error) {
     state.sessionToken = '';
+    state.csrfToken = '';
     browserSession.removeItem('provider-monitor.session');
-    showLogin(query.get('sso_error') ? 'Sub2API 单点登录失败，请重新从自定义菜单打开。' : '');
+    showLogin(ssoError ? ssoErrorMessage(ssoError) : '');
   }
 })();

@@ -235,9 +235,15 @@ test('Sub2API custom-menu token is exchanged for a local session without a secon
   });
   assert.equal(nonAdmin.status, 403);
 
+  const nonAdminEntry = await originalFetch(`${base}/?token=${encodeURIComponent(userToken)}`, {
+    redirect: 'manual'
+  });
+  assert.equal(nonAdminEntry.status, 303);
+  assert.equal(new URL(nonAdminEntry.headers.get('location'), base).searchParams.get('sso_error'), 'ADMIN_REQUIRED');
+
   const expired = await originalFetch(`${base}/?token=expired-token`, { redirect: 'manual' });
   assert.equal(expired.status, 303);
-  assert.match(expired.headers.get('location'), /sso_error=1/);
+  assert.equal(new URL(expired.headers.get('location'), base).searchParams.get('sso_error'), 'AUTH_FAILED');
 
   const index = await originalFetch(base);
   assert.equal(index.headers.get('x-frame-options'), null);

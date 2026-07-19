@@ -86,6 +86,18 @@ test('a local AUTH_REQUIRED response still clears the expired session', async ()
   assert.deepEqual(removedSessionKeys, ['provider-monitor.session']);
 });
 
+test('embedded SSO failures are actionable and do not request autofocus', () => {
+  const { context, source } = createBrowserContext();
+  const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+
+  assert.match(vm.runInContext("ssoErrorMessage('AUTH_FAILED')", context), /重新登录/);
+  assert.match(vm.runInContext("ssoErrorMessage('ADMIN_REQUIRED')", context), /不是管理员/);
+  assert.match(vm.runInContext("ssoErrorMessage('AUTH_UPSTREAM_TIMEOUT')", context), /无法连接/);
+  assert.match(vm.runInContext("ssoErrorMessage('UNKNOWN')", context), /单点登录失败/);
+  assert.match(source, /if \(ssoError\) \{[\s\S]*?removeItem\('provider-monitor\.session'\);[\s\S]*?return;/);
+  assert.doesNotMatch(index, /\sautofocus(?:\s|>)/i);
+});
+
 test('effective rates use at most three decimal places without trailing zeroes', () => {
   const { context, source } = createBrowserContext();
 
