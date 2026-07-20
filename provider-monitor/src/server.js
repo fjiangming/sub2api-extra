@@ -109,6 +109,9 @@ const mappingSchema = z.object({
 const autoMappingSchema = z.object({
   mode: z.enum(['preview', 'apply'])
 });
+const sub2apiStepUpSchema = z.object({
+  code: z.string().trim().regex(/^\d{6}$/)
+});
 
 const credentialRotationSchema = z.object({
   credentials: z.record(z.string(), z.any()),
@@ -327,6 +330,7 @@ function createApplication(options = {}) {
 
   const loginLimiter = rateLimit({ windowMs: 15 * 60000, limit: 20, standardHeaders: true, legacyHeaders: false });
   const passwordChangeLimiter = rateLimit({ windowMs: 15 * 60000, limit: 10, standardHeaders: true, legacyHeaders: false });
+  const sub2apiStepUpLimiter = rateLimit({ windowMs: 15 * 60000, limit: 10, standardHeaders: true, legacyHeaders: false });
   const enqueueSub2ApiRefresh = () => {
     if (mappings.list().some((mapping) => mapping.enabled)) {
       queue.enqueue('sub2api_mapping_sync', { priority: 5 });
@@ -927,9 +931,18 @@ function createApplication(options = {}) {
   api.get('/sub2api/comparisons', asyncRoute(async (req, res) => res.json(await mappings.comparisons({
     connectionId: req.query.connectionId || null
   }))));
+  api.post('/sub2api/step-up', sub2apiStepUpLimiter, asyncRoute(async (req, res) => {
+    const input = validate(sub2apiStepUpSchema, req.body || {});
+    const result = await sub2api.verifyStepUp(req.auth?.upstreamTokens?.accessToken, input.code);
+    audit(db, req, 'sub2api.step_up.verify', 'sub2api', null, { expiresIn: result.expiresIn });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(result);
+  }));
   api.post('/sub2api/auto-mappings', asyncRoute(async (req, res) => {
     const input = validate(autoMappingSchema, req.body || {});
-    const result = await mappings.autoMappings(input);
+    const result = await mappings.autoMappings(input, {
+      accessToken: req.auth?.upstreamTokens?.accessToken || null
+    });
     if (input.mode === 'apply') {
       await alerts.evaluateAll();
       audit(db, req, 'sub2api.auto_mappings.apply', 'sub2api', null, { summary: result.summary });

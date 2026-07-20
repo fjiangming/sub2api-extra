@@ -51,7 +51,7 @@ function sub2apiFixture({ channels, groups, accounts, apiKeys, exportError = nul
         return Object.fromEntries(groups.map((group) => [group.id, group.rate_multiplier]));
       }
       if (endpoint === '/api/v1/admin/accounts/data') {
-        onExport?.(options.query);
+        onExport?.(options.query, options);
         if (exportError) throw exportError;
         if (exportPayload) return exportPayload;
         const ids = String(options.query?.ids || '').split(',').filter(Boolean).map(Number);
@@ -301,6 +301,22 @@ test('auto-mapping reports key fingerprint collisions and performs no write when
   );
   assert.equal(context.db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count, 0);
 
+  const stepUpService = new MappingService({
+    db: context.db, config: context.config,
+    sub2api: sub2apiFixture({
+      channels, groups, accounts, apiKeys: {},
+      exportError: new AppError('SUB2API_REQUEST_FAILED', 'Step-up required', {
+        status: 403,
+        details: { remoteCode: 'STEP_UP_REQUIRED', remoteStatus: 403 }
+      })
+    })
+  });
+  await assert.rejects(
+    () => stepUpService.autoMappings({ mode: 'preview' }, { accessToken: 'current-sso-token' }),
+    (error) => error.code === 'SUB2API_STEP_UP_REQUIRED' &&
+      error.details?.remoteCode === 'STEP_UP_REQUIRED'
+  );
+
   const unsupportedService = new MappingService({
     db: context.db, config: context.config,
     sub2api: sub2apiFixture({
@@ -383,14 +399,15 @@ test('auto-mapping exports only name-matched accounts and distinguishes key outc
         704: 'sk-not-synced-anywhere-00000000',
         705: brokenGroupValue
       },
-      onExport: (query) => exports.push(query)
+      onExport: (query, options) => exports.push({ query, accessToken: options.accessToken })
     })
   });
 
-  const preview = await mappings.autoMappings({ mode: 'preview' });
+  const preview = await mappings.autoMappings({ mode: 'preview' }, { accessToken: 'current-sso-token' });
   assert.equal(exports.length, 1);
-  assert.equal(exports[0].include_proxies, false);
-  assert.deepEqual(new Set(String(exports[0].ids).split(',').map(Number)), new Set([701, 703, 704, 705]));
+  assert.equal(exports[0].query.include_proxies, false);
+  assert.equal(exports[0].accessToken, 'current-sso-token');
+  assert.deepEqual(new Set(String(exports[0].query.ids).split(',').map(Number)), new Set([701, 703, 704, 705]));
   assert.equal(preview.summary.pendingCreate, 1);
   assert.equal(preview.summary.missingApiKey, 1);
   assert.equal(preview.summary.missingRemoteKey, 1);
@@ -398,7 +415,7 @@ test('auto-mapping exports only name-matched accounts and distinguishes key outc
   assert.equal(preview.items.find((item) => item.accountId === 701).keyId, sharedKeyId);
   assert.equal(preview.items.some((item) => item.accountId === 702), false);
 
-  const applied = await mappings.autoMappings({ mode: 'apply' });
+  const applied = await mappings.autoMappings({ mode: 'apply' }, { accessToken: 'current-sso-token' });
   assert.equal(applied.summary.created, 1);
   assert.deepEqual(
     context.db.prepare('SELECT account_id FROM sub2api_mappings ORDER BY account_id').all().map((row) => row.account_id),

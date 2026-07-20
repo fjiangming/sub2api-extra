@@ -177,8 +177,10 @@ test('integration groups render a collapsed outer winner and mark exactly one hi
 
 test('auto-mapping UI uses preview then apply and provides actionable export authentication errors', () => {
   const { context, source } = createBrowserContext();
-  assert.match(source, /body: \{ mode: 'preview' \}/);
-  assert.match(source, /body: \{ mode: 'apply' \}/);
+  assert.match(source, /requestAutoMappings\('preview'\)/);
+  assert.match(source, /requestAutoMappings\('apply'\)/);
+  assert.match(source, /api\/sub2api\/step-up/);
+  assert.match(source, /sub2api-step-up-dialog/);
   assert.match(source, /data-action="auto-map" title="自动映射" aria-label="自动映射"/);
   assert.match(source, /comparisonData\.unassignedItems/);
   assert.match(source, /\[item\.keyName, item\.maskedKey\]/);
@@ -191,6 +193,16 @@ test('auto-mapping UI uses preview then apply and provides actionable export aut
     "autoMappingErrorMessage({ code: 'SUB2API_KEY_EXPORT_UNSUPPORTED', message: 'missing' })",
     context
   );
+  const required = vm.runInContext(
+    "autoMappingErrorMessage({ code: 'SUB2API_STEP_UP_REQUIRED', message: 'required' })",
+    context
+  );
+  const invalidCode = vm.runInContext(
+    "sub2apiStepUpErrorMessage({ code: 'SUB2API_TOTP_INVALID_CODE', message: 'invalid' })",
+    context
+  );
   assert.match(forbidden, /TOTP/);
   assert.match(unsupported, /不支持/);
+  assert.match(required, /二次验证/);
+  assert.match(invalidCode, /无效或已过期/);
 });

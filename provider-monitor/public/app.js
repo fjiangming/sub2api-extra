@@ -38,7 +38,9 @@ const state = {
   importPreview: null,
   backupTargets: [],
   reauthResolve: null,
-  reauthReject: null
+  reauthReject: null,
+  sub2apiStepUpResolve: null,
+  sub2apiStepUpReject: null
 };
 
 const ADAPTERS = [
@@ -571,10 +573,46 @@ const AUTO_MAPPING_REASON_LABELS = {
 };
 
 function autoMappingErrorMessage(error) {
-  if (error.code === 'SUB2API_KEY_EXPORT_FORBIDDEN') return 'Sub2API 拒绝读取账号 Key。请使用同一管理员 SSO 会话完成近期 TOTP 二次验证后重试；管理员 API Key 无法绕过该限制。';
+  if (error.code === 'SUB2API_STEP_UP_REQUIRED') return '当前 Sub2API SSO 会话尚未获得账号 Key 读取授权，请重新完成 TOTP 二次验证。';
+  if (error.code === 'SUB2API_TOTP_NOT_ENABLED') return '当前 Sub2API 管理员未启用 TOTP，请先在 Sub2API 安全设置中启用。';
+  if (error.code === 'SUB2API_SSO_REQUIRED') return '账号 Key 只能由 Sub2API 管理员 SSO 会话读取，请从 Sub2API 自定义菜单重新打开本页面。';
+  if (error.code === 'SUB2API_STEP_UP_UNAVAILABLE') return 'Sub2API 二次验证服务暂时不可用，请稍后重试。';
+  if (error.code === 'SUB2API_KEY_EXPORT_FORBIDDEN') return 'Sub2API 拒绝读取账号 Key，请检查当前管理员的 TOTP 与敏感操作授权设置。';
   if (error.code === 'SUB2API_KEY_EXPORT_UNSUPPORTED') return '当前 Sub2API 版本不支持管理员账号数据导出，无法安全读取用于匹配的 API Key。';
   if (error.code === 'SCHEMA_MISMATCH') return 'Sub2API 返回的账号导出结构与预期不一致，未创建任何映射。';
   return error.message;
+}
+
+function sub2apiStepUpErrorMessage(error) {
+  if (error.code === 'SUB2API_TOTP_INVALID_CODE') return 'TOTP 验证码无效或已过期。';
+  if (error.code === 'SUB2API_TOTP_RATE_LIMITED') return 'TOTP 验证失败次数过多，请稍后重试。';
+  return autoMappingErrorMessage(error);
+}
+
+function ensureSub2ApiStepUp() {
+  if (state.authentication?.mode !== 'sub2api') {
+    return Promise.reject(new Error('当前登录方式不是 Sub2API SSO，无法完成二次验证。'));
+  }
+  const dialog = $('#sub2api-step-up-dialog');
+  const form = $('#sub2api-step-up-form');
+  form.reset();
+  $('#sub2api-step-up-error').textContent = '';
+  dialog.showModal();
+  icons();
+  return new Promise((resolve, reject) => {
+    state.sub2apiStepUpResolve = resolve;
+    state.sub2apiStepUpReject = reject;
+  });
+}
+
+async function requestAutoMappings(mode, allowStepUp = true) {
+  try {
+    return await api('/api/sub2api/auto-mappings', { method: 'POST', body: { mode } });
+  } catch (error) {
+    if (!allowStepUp || error.code !== 'SUB2API_STEP_UP_REQUIRED') throw error;
+    await ensureSub2ApiStepUp();
+    return requestAutoMappings(mode, false);
+  }
 }
 
 function paintAutoMappingPreview(result) {
@@ -608,11 +646,11 @@ async function openAutoMappingPreview() {
   dialog.showModal();
   icons();
   try {
-    state.autoMappingPreview = await api('/api/sub2api/auto-mappings', { method: 'POST', body: { mode: 'preview' } });
+    state.autoMappingPreview = await requestAutoMappings('preview');
     paintAutoMappingPreview(state.autoMappingPreview);
   } catch (error) {
     const message = autoMappingErrorMessage(error);
-    $('#auto-mapping-error').textContent = message;
+    $('#auto-mapping-error').textContent = '';
     $('#auto-mapping-preview').innerHTML = emptyState('shield-alert', '无法生成预览', message);
     icons();
   }
@@ -1401,7 +1439,7 @@ $('#auto-mapping-form').addEventListener('submit', async (event) => {
   button.disabled = true;
   $('#auto-mapping-error').textContent = '';
   try {
-    const result = await api('/api/sub2api/auto-mappings', { method: 'POST', body: { mode: 'apply' } });
+    const result = await requestAutoMappings('apply');
     $('#auto-mapping-dialog').close('applied');
     state.autoMappingPreview = null;
     toast(`自动映射完成：新增 ${result.summary.created} 条，已有 ${result.summary.existing} 条，跳过 ${result.summary.skipped} 条`);
@@ -1475,6 +1513,39 @@ $('#reauth-dialog').addEventListener('close', () => {
   if (state.reauthReject) {
     const reject = state.reauthReject; state.reauthResolve = null; state.reauthReject = null;
     reject(new Error('已取消敏感操作'));
+  }
+});
+
+$('#sub2api-step-up-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const submit = $('button[type="submit"]', form);
+  submit.disabled = true;
+  $('#sub2api-step-up-error').textContent = '';
+  try {
+    await api('/api/sub2api/step-up', {
+      method: 'POST',
+      body: { code: form.elements.code.value.trim() }
+    });
+    const resolve = state.sub2apiStepUpResolve;
+    state.sub2apiStepUpResolve = null;
+    state.sub2apiStepUpReject = null;
+    $('#sub2api-step-up-dialog').close('verified');
+    resolve?.();
+  } catch (error) {
+    $('#sub2api-step-up-error').textContent = sub2apiStepUpErrorMessage(error);
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+$('#sub2api-step-up-dialog').addEventListener('close', () => {
+  $('#sub2api-step-up-form').reset();
+  if (state.sub2apiStepUpReject) {
+    const reject = state.sub2apiStepUpReject;
+    state.sub2apiStepUpResolve = null;
+    state.sub2apiStepUpReject = null;
+    reject(new Error('已取消 Sub2API 二次验证'));
   }
 });
 

@@ -420,11 +420,11 @@ class MappingService {
     return this.comparisons({ connectionId, catalog: baseCatalog });
   }
 
-  async autoMappings({ mode = 'preview' } = {}) {
+  async autoMappings({ mode = 'preview' } = {}, { accessToken = null } = {}) {
     if (!['preview', 'apply'].includes(mode)) {
       throw new AppError('VALIDATION_ERROR', 'Auto-mapping mode must be preview or apply', { status: 400 });
     }
-    const discovery = await this.#discoverAutoMappings();
+    const discovery = await this.#discoverAutoMappings({ accessToken });
     if (mode === 'preview') {
       return {
         mode,
@@ -481,10 +481,10 @@ class MappingService {
     };
   }
 
-  async #discoverAutoMappings() {
+  async #discoverAutoMappings({ accessToken = null } = {}) {
     const [catalog, accountsResult] = await Promise.all([
-      this.#baseCatalog({ force: true }),
-      this.sub2api.listAll('/api/v1/admin/accounts', {}, { maxItems: 50000 })
+      this.#baseCatalog({ force: true, accessToken }),
+      this.sub2api.listAll('/api/v1/admin/accounts', {}, { maxItems: 50000, accessToken })
     ]);
     const accounts = accountsResult.items.map(normalizeBaseAccount).filter((account) => account.id != null);
     if (accounts.length !== accountsResult.items.length) {
@@ -620,7 +620,10 @@ class MappingService {
       }
     }
 
-    const fingerprints = await this.#accountKeyFingerprints([...accountsNeedingKeys.values()]);
+    const fingerprints = await this.#accountKeyFingerprints(
+      [...accountsNeedingKeys.values()],
+      { accessToken }
+    );
     const existing = new Map(this.list().map((mapping) => [mappingIdentity(mapping), mapping]));
     for (const entry of work) {
       const { provider, channel, accountMatch, baseGroup, account } = entry;
@@ -703,16 +706,47 @@ class MappingService {
     return { catalog, items };
   }
 
-  async #accountKeyFingerprints(accounts) {
+  async #accountKeyFingerprints(accounts, { accessToken = null } = {}) {
     const fingerprints = new Map();
     for (let offset = 0; offset < accounts.length; offset += 50) {
       const batch = accounts.slice(offset, offset + 50);
       let payload;
       try {
         payload = await this.sub2api.data('/api/v1/admin/accounts/data', {
-          query: { ids: batch.map((account) => account.id).join(','), include_proxies: false }
+          query: { ids: batch.map((account) => account.id).join(','), include_proxies: false },
+          ...(accessToken ? { accessToken } : {})
         });
       } catch (error) {
+        const remoteCode = String(error?.details?.remoteCode || '');
+        const remoteStatus = Number(error?.details?.remoteStatus || error?.status) || null;
+        if (remoteCode === 'STEP_UP_REQUIRED') {
+          throw new AppError(
+            'SUB2API_STEP_UP_REQUIRED',
+            'Sub2API requires recent TOTP verification for the current administrator SSO session',
+            { status: 403, details: { remoteCode, remoteStatus: remoteStatus || 403 } }
+          );
+        }
+        if (['STEP_UP_TOTP_NOT_ENABLED', 'TOTP_NOT_SETUP'].includes(remoteCode)) {
+          throw new AppError(
+            'SUB2API_TOTP_NOT_ENABLED',
+            'TOTP must be enabled for the current Sub2API administrator before account keys can be read',
+            { status: 409, details: { remoteCode, remoteStatus: remoteStatus || 403 } }
+          );
+        }
+        if (remoteCode === 'STEP_UP_ADMIN_API_KEY_FORBIDDEN') {
+          throw new AppError(
+            'SUB2API_SSO_REQUIRED',
+            'A Sub2API administrator SSO session is required to read account keys',
+            { status: 409, details: { remoteCode, remoteStatus: remoteStatus || 403 } }
+          );
+        }
+        if (remoteCode === 'STEP_UP_UNAVAILABLE') {
+          throw new AppError(
+            'SUB2API_STEP_UP_UNAVAILABLE',
+            'Sub2API step-up verification is temporarily unavailable',
+            { status: 503, retryable: true, details: { remoteCode, remoteStatus: remoteStatus || 503 } }
+          );
+        }
         if (Number(error?.status) === 403) {
           throw new AppError(
             'SUB2API_KEY_EXPORT_FORBIDDEN',
@@ -836,14 +870,20 @@ class MappingService {
     };
   }
 
-  async #baseCatalog({ force = false } = {}) {
+  async #baseCatalog({ force = false, accessToken = null } = {}) {
     if (!force && this.baseCatalogCache?.expiresAt > Date.now()) return this.baseCatalogCache.value;
     if (!force && this.baseCatalogRequest) return this.baseCatalogRequest;
     const request = (async () => {
-      const channelsResult = await this.sub2api.listAll('/api/v1/admin/channels', {}, { maxItems: 5000 });
+      const channelsResult = await this.sub2api.listAll('/api/v1/admin/channels', {}, {
+        maxItems: 5000,
+        accessToken
+      });
       let groups;
       try {
-        const all = await this.sub2api.data('/api/v1/admin/groups/all', { query: { include_inactive: true } });
+        const all = await this.sub2api.data('/api/v1/admin/groups/all', {
+          query: { include_inactive: true },
+          ...(accessToken ? { accessToken } : {})
+        });
         groups = Array.isArray(all) ? all : all?.items || all?.groups;
         if (!Array.isArray(groups)) {
           throw new AppError('SCHEMA_MISMATCH', 'Sub2API group response did not contain an array', {
@@ -853,11 +893,17 @@ class MappingService {
         }
       } catch (error) {
         if (error?.code === 'SCHEMA_MISMATCH') throw error;
-        groups = (await this.sub2api.listAll('/api/v1/admin/groups', { include_inactive: true }, { maxItems: 5000 })).items;
+        groups = (await this.sub2api.listAll(
+          '/api/v1/admin/groups',
+          { include_inactive: true },
+          { maxItems: 5000, accessToken }
+        )).items;
       }
       let rates = {};
       try {
-        rates = groupRateMap(await this.sub2api.data('/api/v1/groups/rates'));
+        rates = groupRateMap(await this.sub2api.data('/api/v1/groups/rates', {
+          ...(accessToken ? { accessToken } : {})
+        }));
       } catch {}
       const capturedAt = nowIso();
       const channels = channelsResult.items.map(normalizeBaseChannel).filter((item) => item.id != null);

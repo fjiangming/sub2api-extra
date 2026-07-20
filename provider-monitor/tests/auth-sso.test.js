@@ -72,6 +72,69 @@ test('an invalid configured token falls back to administrator credentials', asyn
   assert.deepEqual(client.authenticationStatus(), { available: true, source: 'configured_credentials' });
 });
 
+test('step-up protected requests use the explicit SSO token and preserve upstream error codes', async (t) => {
+  const originalFetch = global.fetch;
+  const requests = [];
+  global.fetch = async (input, options = {}) => {
+    const url = new URL(input);
+    requests.push({
+      path: url.pathname,
+      authorization: options.headers.Authorization,
+      body: options.body
+    });
+    if (url.pathname === '/api/v1/admin/accounts/data') {
+      return new Response(JSON.stringify({
+        code: 'STEP_UP_REQUIRED',
+        message: 'This operation requires recent two-factor verification'
+      }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url.pathname === '/api/v1/user/totp/step-up') {
+      if (JSON.parse(options.body).code === '000000') {
+        return new Response(JSON.stringify({
+          code: 400,
+          message: 'invalid totp code',
+          reason: 'TOTP_INVALID_CODE'
+        }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        code: 0,
+        data: { verified: true, expires_in: 900 }
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    throw new Error(`Unexpected request: ${url.pathname}`);
+  };
+  t.after(() => { global.fetch = originalFetch; });
+
+  const client = new Sub2ApiAdminClient({
+    sub2apiBaseUrl: 'https://sub2api.example',
+    sub2apiAdminToken: '',
+    adminEmail: '',
+    adminPassword: '',
+    queryTimeoutMs: 1000,
+    maxResponseBytes: 1024
+  });
+  client.setRuntimeToken('another-session-token', Date.now() + 60000);
+
+  await assert.rejects(
+    () => client.data('/api/v1/admin/accounts/data', { accessToken: 'current-session-token' }),
+    (error) => error.code === 'SUB2API_REQUEST_FAILED' &&
+      error.details?.remoteCode === 'STEP_UP_REQUIRED'
+  );
+  const result = await client.verifyStepUp('current-session-token', '123456');
+  await assert.rejects(
+    () => client.verifyStepUp('current-session-token', '000000'),
+    (error) => error.code === 'SUB2API_TOTP_INVALID_CODE' &&
+      error.details?.remoteCode === 'TOTP_INVALID_CODE'
+  );
+
+  assert.deepEqual(result, { verified: true, expiresIn: 900 });
+  assert.equal(requests.length, 3);
+  assert.ok(requests.every((request) => request.authorization === 'Bearer current-session-token'));
+  assert.deepEqual(JSON.parse(requests[1].body), { code: '123456' });
+  assert.deepEqual(JSON.parse(requests[2].body), { code: '000000' });
+  assert.equal(await client.adminToken(), 'another-session-token');
+});
+
 test('Sub2API paginated reads reject malformed collection responses', async (t) => {
   const originalFetch = global.fetch;
   global.fetch = async () => new Response(JSON.stringify({ code: 0, data: { unexpected: [] } }), {
@@ -152,6 +215,13 @@ test('Sub2API custom-menu token is exchanged for a local session without a secon
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
       assert.equal(suppliedToken, token);
+      if (url.pathname === '/api/v1/user/totp/step-up') {
+        assert.deepEqual(JSON.parse(options.body), { code: '654321' });
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { verified: true, expires_in: 900 }
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
       if (url.pathname === '/api/v1/admin/channels') {
         return new Response(JSON.stringify({
           code: 0,
@@ -207,6 +277,22 @@ test('Sub2API custom-menu token is exchanged for a local session without a secon
   assert.equal(session.user.name, 'operator');
   assert.equal(session.authentication.source, 'sso');
   assert.equal(app.locals.services.sub2api.authenticationStatus().source, 'sso_session');
+
+  const stepUpResponse = await originalFetch(`${base}/api/sub2api/step-up`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Session ${sessionToken}`,
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': session.csrfToken
+    },
+    body: JSON.stringify({ code: '654321' })
+  });
+  assert.equal(stepUpResponse.status, 200);
+  assert.deepEqual(await stepUpResponse.json(), { verified: true, expiresIn: 900 });
+  const stepUpAudit = context.db.prepare(`
+    SELECT details_json FROM audit_logs WHERE action = 'sub2api.step_up.verify'
+  `).get();
+  assert.deepEqual(JSON.parse(stepUpAudit.details_json), { expiresIn: 900 });
 
   const channelsResponse = await originalFetch(`${base}/api/sub2api/channels`, {
     headers: { Authorization: `Session ${sessionToken}` }

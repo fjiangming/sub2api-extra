@@ -1,5 +1,19 @@
 const { AppError } = require('../errors');
 
+function remoteErrorCode(payload) {
+  const candidates = [payload?.reason, payload?.error?.code, payload?.code];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const value = candidate.trim();
+    if (value && !/^\d+$/.test(value)) return value;
+  }
+  return null;
+}
+
+function remoteErrorMessage(payload, fallback) {
+  return payload?.message || payload?.error?.message || fallback;
+}
+
 function tokenExpiration(token, fallbackMs = 15 * 60000) {
   try {
     const parts = String(token || '').split('.');
@@ -14,13 +28,15 @@ function tokenExpiration(token, fallbackMs = 15 * 60000) {
 
 function unwrapSub2Api(payload) {
   if (payload?.code != null && Number(payload.code) !== 0 && Number(payload.code) !== 200) {
-    throw new AppError('SUB2API_REQUEST_FAILED', payload.message || 'Sub2API rejected the request', {
-      status: Number(payload.code) === 401 ? 401 : 502
+    throw new AppError('SUB2API_REQUEST_FAILED', remoteErrorMessage(payload, 'Sub2API rejected the request'), {
+      status: Number(payload.code) === 401 ? 401 : 502,
+      details: { remoteCode: remoteErrorCode(payload) }
     });
   }
   if (payload?.success === false) {
-    throw new AppError('SUB2API_REQUEST_FAILED', payload.message || 'Sub2API rejected the request', {
-      status: 502
+    throw new AppError('SUB2API_REQUEST_FAILED', remoteErrorMessage(payload, 'Sub2API rejected the request'), {
+      status: 502,
+      details: { remoteCode: remoteErrorCode(payload) }
     });
   }
   return Object.prototype.hasOwnProperty.call(payload || {}, 'data') ? payload.data : payload;
@@ -109,7 +125,10 @@ class Sub2ApiAdminClient {
       if (value != null && value !== '') url.searchParams.set(key, String(value));
     }
     const authenticated = options.authenticated !== false;
-    const token = authenticated ? await this.adminToken(Boolean(options.forceTokenRefresh)) : null;
+    const explicitAccessToken = String(options.accessToken || '').trim() || null;
+    const token = authenticated
+      ? explicitAccessToken || await this.adminToken(Boolean(options.forceTokenRefresh))
+      : null;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), options.timeoutMs || this.config.queryTimeoutMs);
     try {
@@ -138,16 +157,19 @@ class Sub2ApiAdminClient {
         if (response.status === 401 && token && token === this.config.sub2apiAdminToken) {
           this.configuredTokenRejected = true;
         }
-        if (response.status === 401 && authenticated && !options.forceTokenRefresh) {
+        if (response.status === 401 && authenticated && !explicitAccessToken && !options.forceTokenRefresh) {
           this.cachedToken = null;
           if (this.config.adminEmail && this.config.adminPassword) {
             return this.request(endpoint, { ...options, forceTokenRefresh: true });
           }
         }
-        throw new AppError('SUB2API_REQUEST_FAILED', payload?.message || `Sub2API returned HTTP ${response.status}`, {
+        throw new AppError('SUB2API_REQUEST_FAILED', remoteErrorMessage(payload, `Sub2API returned HTTP ${response.status}`), {
           status: response.status >= 500 ? 502 : response.status,
           retryable: response.status === 429 || response.status >= 500,
-          details: { remoteStatus: response.status }
+          details: {
+            remoteStatus: response.status,
+            remoteCode: remoteErrorCode(payload)
+          }
         });
       }
       return payload;
@@ -168,6 +190,72 @@ class Sub2ApiAdminClient {
     return unwrapSub2Api(await this.request(endpoint, options));
   }
 
+  async verifyStepUp(accessToken, code) {
+    const token = String(accessToken || '').trim();
+    if (!token) {
+      throw new AppError(
+        'SUB2API_SSO_REQUIRED',
+        'A Sub2API administrator SSO session is required for TOTP verification',
+        { status: 409 }
+      );
+    }
+    try {
+      const result = await this.data('/api/v1/user/totp/step-up', {
+        method: 'POST',
+        body: { code },
+        accessToken: token
+      });
+      if (result?.verified !== true) {
+        throw new AppError('SCHEMA_MISMATCH', 'Sub2API returned an invalid step-up response', {
+          status: 502
+        });
+      }
+      return {
+        verified: true,
+        expiresIn: Number(result.expires_in) || 0
+      };
+    } catch (error) {
+      const remoteCode = String(error?.details?.remoteCode || '');
+      const details = {
+        remoteCode: remoteCode || null,
+        remoteStatus: Number(error?.details?.remoteStatus || error?.status) || null
+      };
+      if (remoteCode === 'TOTP_INVALID_CODE') {
+        throw new AppError('SUB2API_TOTP_INVALID_CODE', 'The TOTP code is invalid or expired', {
+          status: 400,
+          details
+        });
+      }
+      if (remoteCode === 'TOTP_TOO_MANY_ATTEMPTS') {
+        throw new AppError('SUB2API_TOTP_RATE_LIMITED', 'Too many TOTP attempts; try again later', {
+          status: 429,
+          retryable: true,
+          details
+        });
+      }
+      if (['TOTP_NOT_SETUP', 'STEP_UP_TOTP_NOT_ENABLED'].includes(remoteCode)) {
+        throw new AppError('SUB2API_TOTP_NOT_ENABLED', 'TOTP is not enabled for this Sub2API administrator', {
+          status: 409,
+          details
+        });
+      }
+      if (remoteCode === 'STEP_UP_UNAVAILABLE') {
+        throw new AppError('SUB2API_STEP_UP_UNAVAILABLE', 'Sub2API step-up verification is temporarily unavailable', {
+          status: 503,
+          retryable: true,
+          details
+        });
+      }
+      if (Number(error?.status) === 401) {
+        throw new AppError('SUB2API_SSO_REQUIRED', 'The Sub2API administrator SSO session is no longer valid', {
+          status: 401,
+          details
+        });
+      }
+      throw error;
+    }
+  }
+
   async listAll(endpoint, query = {}, options = {}) {
     const pageSize = Math.min(100, Math.max(1, Number(options.pageSize) || 100));
     const maxItems = Math.min(50000, Math.max(pageSize, Number(options.maxItems) || 10000));
@@ -177,7 +265,8 @@ class Sub2ApiAdminClient {
     let pages = null;
     while (items.length < maxItems) {
       const data = await this.data(endpoint, {
-        query: { ...query, page, page_size: pageSize }
+        query: { ...query, page, page_size: pageSize },
+        ...(options.accessToken ? { accessToken: options.accessToken } : {})
       });
       if (!Array.isArray(data) && !Array.isArray(data?.items)) {
         throw new AppError('SCHEMA_MISMATCH', 'Sub2API list response did not contain an items array', {
