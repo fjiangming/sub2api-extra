@@ -42,3 +42,6 @@ Thumbs.db
 
 # Generated import payloads may contain account credentials
 **/scripts/*import_payload*.json
+
+# Browser captures may contain cookies and authorization tokens
+*.har

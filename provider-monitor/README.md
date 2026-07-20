@@ -253,6 +253,8 @@ PROVIDER_MONITOR_AUTH_MODE=sub2api
 
 在 Sub2API 管理后台的"设置 -> 自定义菜单"中添加 Provider Monitor 地址，例如 `https://provider-monitor.example.com`，并把可见性限制为管理员。Sub2API 自定义菜单附带的管理员 Token 会被远端 `/api/v1/auth/me` 校验，然后换成本模块自己的短期会话；不会要求再次输入密码，也不会把上游 Token 写入数据库。
 
+Sub2API 的"系统设置 -> 安全设置 -> 会话绑定"会把访问 Token 绑定到登录浏览器的 IP 和 User-Agent，因此无法由独立部署的 Provider Monitor 服务端验证。使用自定义菜单 SSO 时必须关闭会话绑定，然后退出并重新登录 Sub2API 以建立新会话。如果必须保留会话绑定，请将 `PROVIDER_MONITOR_AUTH_MODE` 改为 `local`，使用 Provider Monitor 独立管理员登录。
+
 HTTPS iframe 会同时设置普通 Cookie 和分区 Cookie，并在 URL Fragment 中返回一个本模块的临时会话令牌作为第三方 Cookie 受限时的兜底。原始 Sub2API Token 在首次请求后立即从地址栏移除。
 
 如果 `SUB2API_BASE_URL` 使用 `host.docker.internal` 或内网域名，必须单独配置浏览器可访问的 `SUB2API_PUBLIC_URL`。需要允许其他前端来源时，在"设置与备份 -> 系统参数"中维护准确的浏览器 Origin。

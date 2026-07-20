@@ -188,7 +188,8 @@ function ssoErrorMessage(code) {
   const messages = {
     AUTH_FAILED: 'Sub2API 登录状态无效或已过期，请返回 Sub2API 重新登录后再打开。',
     ADMIN_REQUIRED: '当前 Sub2API 账号不是管理员，无法访问 Provider Monitor。',
-    AUTH_UPSTREAM_TIMEOUT: 'Provider Monitor 暂时无法连接 Sub2API，请稍后重试。'
+    AUTH_UPSTREAM_TIMEOUT: 'Provider Monitor 暂时无法连接 Sub2API，请稍后重试。',
+    SUB2API_SESSION_BINDING_INCOMPATIBLE: 'Sub2API 已开启会话绑定，无法由 Provider Monitor 验证登录状态。请在 Sub2API 系统设置的安全设置中关闭会话绑定，退出并重新登录后再打开。'
   };
   return messages[code] || 'Sub2API 单点登录失败，请重新从自定义菜单打开。';
 }

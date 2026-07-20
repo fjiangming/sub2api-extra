@@ -93,6 +93,7 @@ test('embedded SSO failures are actionable and do not request autofocus', () => 
   assert.match(vm.runInContext("ssoErrorMessage('AUTH_FAILED')", context), /重新登录/);
   assert.match(vm.runInContext("ssoErrorMessage('ADMIN_REQUIRED')", context), /不是管理员/);
   assert.match(vm.runInContext("ssoErrorMessage('AUTH_UPSTREAM_TIMEOUT')", context), /无法连接/);
+  assert.match(vm.runInContext("ssoErrorMessage('SUB2API_SESSION_BINDING_INCOMPATIBLE')", context), /关闭会话绑定/);
   assert.match(vm.runInContext("ssoErrorMessage('UNKNOWN')", context), /单点登录失败/);
   assert.match(source, /if \(ssoError\) \{[\s\S]*?removeItem\('provider-monitor\.session'\);[\s\S]*?return;/);
   assert.doesNotMatch(index, /\sautofocus(?:\s|>)/i);

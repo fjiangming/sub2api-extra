@@ -116,11 +116,24 @@ test('Sub2API custom-menu token is exchanged for a local session without a secon
     role: 'user',
     exp: Math.floor(Date.now() / 1000) + 3600
   });
+  const boundToken = accessToken({
+    sub: 7,
+    username: 'operator',
+    role: 'admin',
+    bnd: 'browser-network-fingerprint',
+    exp: Math.floor(Date.now() / 1000) + 3600
+  });
   global.fetch = async (input, options = {}) => {
     const url = new URL(input);
     if (url.hostname === 'sub2api.internal.example') {
       const suppliedToken = String(options.headers.Authorization || '').replace(/^Bearer /, '');
       if (url.pathname === '/api/v1/auth/me') {
+        if (suppliedToken === boundToken) {
+          return new Response(JSON.stringify({
+            code: 'SESSION_BINDING_MISMATCH',
+            message: 'Session network fingerprint changed, please login again'
+          }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+        }
         if (suppliedToken === userToken) {
           return new Response(JSON.stringify({
             code: 0,
@@ -240,6 +253,22 @@ test('Sub2API custom-menu token is exchanged for a local session without a secon
   });
   assert.equal(nonAdminEntry.status, 303);
   assert.equal(new URL(nonAdminEntry.headers.get('location'), base).searchParams.get('sso_error'), 'ADMIN_REQUIRED');
+
+  const boundSession = await originalFetch(`${base}/api/auth/sso`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${boundToken}` }
+  });
+  assert.equal(boundSession.status, 409);
+  assert.equal((await boundSession.json()).error.code, 'SUB2API_SESSION_BINDING_INCOMPATIBLE');
+
+  const boundEntry = await originalFetch(`${base}/?token=${encodeURIComponent(boundToken)}`, {
+    redirect: 'manual'
+  });
+  assert.equal(boundEntry.status, 303);
+  assert.equal(
+    new URL(boundEntry.headers.get('location'), base).searchParams.get('sso_error'),
+    'SUB2API_SESSION_BINDING_INCOMPATIBLE'
+  );
 
   const expired = await originalFetch(`${base}/?token=expired-token`, { redirect: 'manual' });
   assert.equal(expired.status, 303);

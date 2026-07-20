@@ -361,7 +361,12 @@ function createApplication(options = {}) {
       const location = `${cleanPath}${search.size ? `?${search}` : ''}#pm_session=${encodeURIComponent(session.sessionToken)}`;
       return res.redirect(303, location);
     } catch (error) {
-      const exposedCode = ['AUTH_FAILED', 'ADMIN_REQUIRED', 'AUTH_UPSTREAM_TIMEOUT'].includes(error?.code)
+      const exposedCode = [
+        'AUTH_FAILED',
+        'ADMIN_REQUIRED',
+        'AUTH_UPSTREAM_TIMEOUT',
+        'SUB2API_SESSION_BINDING_INCOMPATIBLE'
+      ].includes(error?.code)
         ? error.code
         : 'AUTH_FAILED';
       search.set('sso_error', exposedCode);

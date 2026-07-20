@@ -2,6 +2,21 @@ const crypto = require('crypto');
 const { AppError } = require('./errors');
 const { createScryptPasswordHash, verifyScryptPassword } = require('./security/encryption');
 
+function authFailure(payload, remoteStatus = 401) {
+  const remoteCode = String(payload?.code || payload?.error?.code || '');
+  if (remoteCode === 'SESSION_BINDING_MISMATCH') {
+    return new AppError(
+      'SUB2API_SESSION_BINDING_INCOMPATIBLE',
+      'Sub2API session binding must be disabled before cross-service SSO tokens can be validated',
+      { status: 409, details: { remoteCode, remoteStatus } }
+    );
+  }
+  return new AppError('AUTH_FAILED', payload?.message || payload?.error?.message || 'Authentication failed', {
+    status: remoteStatus === 403 ? 403 : 401,
+    details: { remoteCode: remoteCode || null, remoteStatus }
+  });
+}
+
 function parseCookies(header) {
   const result = {};
   for (const part of String(header || '').split(';')) {
@@ -21,10 +36,10 @@ function parseCookies(header) {
 
 function unwrap(payload) {
   if (payload?.code != null && ![0, 200].includes(Number(payload.code))) {
-    throw new AppError('AUTH_FAILED', payload.message || 'Authentication failed', { status: 401 });
+    throw authFailure(payload);
   }
   if (payload?.success === false) {
-    throw new AppError('AUTH_FAILED', payload.message || 'Authentication failed', { status: 401 });
+    throw authFailure(payload);
   }
   return Object.prototype.hasOwnProperty.call(payload || {}, 'data') ? payload.data : payload;
 }
@@ -446,10 +461,7 @@ class AuthService {
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new AppError('AUTH_FAILED', payload?.message || `Sub2API returned HTTP ${response.status}`, {
-          status: response.status === 403 ? 403 : 401,
-          details: { remoteStatus: response.status }
-        });
+        throw authFailure(payload || { message: `Sub2API returned HTTP ${response.status}` }, response.status);
       }
       return payload;
     } catch (error) {
