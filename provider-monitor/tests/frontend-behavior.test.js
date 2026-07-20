@@ -96,6 +96,7 @@ test('embedded SSO failures are actionable and do not request autofocus', () => 
   assert.match(vm.runInContext("ssoErrorMessage('UNKNOWN')", context), /单点登录失败/);
   assert.match(source, /if \(ssoError\) \{[\s\S]*?removeItem\('provider-monitor\.session'\);[\s\S]*?return;/);
   assert.doesNotMatch(index, /\sautofocus(?:\s|>)/i);
+  assert.match(index, /id="sub2api-login-link" target="_top"/);
 });
 
 test('effective rates use at most three decimal places without trailing zeroes', () => {
