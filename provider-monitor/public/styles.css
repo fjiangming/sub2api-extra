@@ -220,6 +220,8 @@ label > span, legend { display: block; color: #4f5953; font-size: 12px; font-wei
 
 .dialog { width: min(640px, calc(100vw - 28px)); max-height: calc(100vh - 36px); border: 1px solid var(--line-strong); border-radius: 8px; padding: 0; box-shadow: var(--shadow); color: var(--text); }
 .wide-dialog { width: min(820px, calc(100vw - 28px)); }
+#auto-mapping-dialog { width: min(1120px, calc(100vw - 20px)); height: min(780px, calc(100vh - 40px)); }
+#auto-mapping-dialog form { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto auto; }
 .dialog::backdrop { background: rgba(23, 29, 26, .48); backdrop-filter: blur(2px); }
 .dialog form { padding: 0; }
 .dialog-header { min-height: 70px; padding: 15px 18px; display: flex; align-items: center; border-bottom: 1px solid var(--line); }
@@ -239,6 +241,9 @@ details summary { padding: 13px 18px; cursor: pointer; font-weight: 650; font-si
 .auto-mapping-preview .empty { min-height: 194px; }
 .auto-mapping-table { max-height: calc(100vh - 340px); }
 .auto-mapping-table table { min-width: 760px; }
+#auto-mapping-dialog .auto-mapping-preview { min-height: 0; max-height: none; display: flex; flex-direction: column; }
+#auto-mapping-dialog .auto-mapping-preview .empty, #auto-mapping-dialog .auto-mapping-table { flex: 1; min-height: 0; }
+#auto-mapping-dialog .auto-mapping-table { max-height: none; }
 .dialog-actions { min-height: 62px; display: flex; gap: 8px; align-items: center; padding: 12px 18px; border-top: 1px solid var(--line); background: #fafbfa; }
 .action-spacer { flex: 1; }
 .toast-region { position: fixed; right: 20px; bottom: 20px; z-index: 100; display: grid; gap: 8px; width: min(360px, calc(100vw - 32px)); }

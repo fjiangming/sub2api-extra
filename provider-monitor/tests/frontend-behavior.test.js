@@ -176,6 +176,7 @@ test('integration groups render a collapsed outer winner and mark exactly one hi
 
 test('auto-mapping UI uses preview then apply and provides actionable export authentication errors', () => {
   const { context, source } = createBrowserContext();
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
   assert.match(source, /requestAutoMappings\('preview'\)/);
   assert.match(source, /requestAutoMappings\('apply'\)/);
   assert.match(source, /api\/sub2api\/step-up/);
@@ -185,6 +186,8 @@ test('auto-mapping UI uses preview then apply and provides actionable export aut
   assert.match(source, /\[item\.keyName, item\.maskedKey\]/);
   assert.doesNotMatch(source, /form\.elements\.channelId\b/);
   assert.doesNotMatch(source, /<th>Sub2API 渠道<\/th>/);
+  assert.match(styles, /#auto-mapping-dialog \{ width: min\(1120px,[^}]+height: min\(780px,/);
+  assert.match(styles, /#auto-mapping-dialog form \{[^}]+grid-template-rows: auto minmax\(0, 1fr\) auto auto;/);
 
   const forbidden = vm.runInContext(
     "autoMappingErrorMessage({ code: 'SUB2API_KEY_EXPORT_FORBIDDEN', message: 'forbidden' })",
