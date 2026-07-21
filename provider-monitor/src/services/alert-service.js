@@ -130,12 +130,11 @@ class AlertService {
     const config = parseJson(rule.config_json, {});
     const thresholdRatio = rule.threshold == null ? null : Math.max(0, Number(rule.threshold) / 100);
     const states = this.db.prepare(`
-      SELECT s.*, m.channel_id FROM sub2api_mapping_states s
+      SELECT s.*, m.group_id FROM sub2api_mapping_states s
       JOIN sub2api_mappings m ON m.id = s.mapping_id
       WHERE m.connection_id = ? AND m.enabled = 1 AND s.status != 'mapping_disabled'
       ORDER BY CASE s.status
-        WHEN 'missing_channel' THEN 0 WHEN 'missing_base_group' THEN 1
-        WHEN 'group_not_in_channel' THEN 2 WHEN 'rate_mismatch' THEN 3 ELSE 4 END,
+        WHEN 'missing_base_group' THEN 0 WHEN 'rate_mismatch' THEN 1 ELSE 2 END,
         ABS(COALESCE(s.difference_ratio, 0)) DESC
     `).all(provider.id);
     const evaluations = states.map((state) => {
@@ -150,14 +149,14 @@ class AlertService {
         matched,
         subjectType: 'mapping',
         subjectId: state.mapping_id,
-        severity: config.severity || (['missing_channel', 'missing_base_group'].includes(state.status) ? 'error' : 'warning'),
+        severity: config.severity || (state.status === 'missing_base_group' ? 'error' : 'warning'),
         message: matched
-          ? `${provider.name} mapped channel ${state.channel_name || state.channel_id} has rate status ${alertStatus}${differencePercent == null ? '' : ` (${differencePercent.toFixed(2)}%)`}.`
+          ? `${provider.name} mapped group ${state.base_group_name || state.group_id} has rate status ${alertStatus}${differencePercent == null ? '' : ` (${differencePercent.toFixed(2)}%)`}.`
           : '',
         details: matched ? {
           mappingId: state.mapping_id,
-          channelId: state.channel_id,
-          channelName: state.channel_name,
+          groupId: state.group_id,
+          groupName: state.base_group_name,
           status: alertStatus,
           comparisonStatus: state.status,
           providerGroup: state.provider_group_name,

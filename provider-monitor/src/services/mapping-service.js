@@ -105,7 +105,6 @@ function mappingIdentity(mapping) {
   return [
     mapping.connection_id ?? mapping.connectionId,
     mapping.key_id ?? mapping.keyId ?? '',
-    Number(mapping.channel_id ?? mapping.channelId),
     Number(mapping.account_id ?? mapping.accountId ?? 0),
     Number(mapping.group_id ?? mapping.groupId ?? 0)
   ].join('|');
@@ -120,8 +119,6 @@ function highestMapping(items) {
     .sort((left, right) => {
       const rateDifference = Number(right.comparison.providerRate) - Number(left.comparison.providerRate);
       if (rateDifference !== 0) return rateDifference;
-      const channelDifference = Number(left.channel_id) - Number(right.channel_id);
-      if (channelDifference !== 0) return channelDifference;
       const providerDifference = String(left.provider_name || '').localeCompare(String(right.provider_name || ''), undefined, { sensitivity: 'base' });
       if (providerDifference !== 0) return providerDifference;
       const keyDifference = String(left.key_id || '').localeCompare(String(right.key_id || ''));
@@ -150,9 +147,6 @@ function groupComparisons(items, catalog) {
       effectiveRate: group.effectiveRate,
       baseRate: group.effectiveRate ?? group.defaultRate,
       platform: group.platform,
-      channels: catalog.channels
-        .filter((channel) => channel.groupIds.includes(Number(group.id)))
-        .map((channel) => ({ id: channel.id, name: channel.name, status: channel.status })),
       mappingCount: decorated.length,
       highest: winner ? decorated.find((item) => item.id === winner.id) : null,
       items: decorated
@@ -170,7 +164,7 @@ function autoMappingSummary(items) {
   const summary = {
     total: items.length,
     providers: new Set(items.map((item) => item.providerId).filter(Boolean)).size,
-    channels: new Set(items.map((item) => item.channelId).filter((value) => value != null)).size,
+    accounts: new Set(items.map((item) => item.accountId).filter((value) => value != null)).size,
     groups: new Set(items.map((item) => item.groupId).filter((value) => value != null)).size
   };
   for (const status of AUTO_MAPPING_STATUSES) {
@@ -189,7 +183,7 @@ function comparisonSummary(items) {
     if (!status) summary.unchecked += 1;
     else if (status === 'aligned') summary.aligned += 1;
     else if (status === 'mapping_disabled') summary.disabled += 1;
-    else if (['missing_channel', 'missing_base_group'].includes(status)) summary.error += 1;
+    else if (status === 'missing_base_group') summary.error += 1;
     else summary.warning += 1;
   }
   return summary;
@@ -204,11 +198,10 @@ class MappingService {
     this.baseCatalogRequest = null;
   }
 
-  list({ connectionId, channelId } = {}) {
+  list({ connectionId } = {}) {
     const clauses = [];
     const params = [];
     if (connectionId) { clauses.push('m.connection_id = ?'); params.push(connectionId); }
-    if (channelId != null) { clauses.push('m.channel_id = ?'); params.push(Number(channelId)); }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     return this.db.prepare(`
       SELECT m.*, p.name AS provider_name, k.name AS key_name, k.masked_key,
@@ -216,7 +209,6 @@ class MappingService {
         r.difference_ratio, r.health_score, r.completed_at AS reconciled_at,
         s.status AS comparison_status, s.provider_group_ref AS comparison_provider_group_ref,
         s.provider_group_name AS comparison_provider_group_name, s.provider_rate AS comparison_provider_rate,
-        s.channel_name AS comparison_channel_name, s.channel_status AS comparison_channel_status,
         s.base_group_id AS comparison_base_group_id, s.base_group_name AS comparison_base_group_name,
         s.base_group_rate AS comparison_base_group_rate, s.difference_ratio AS comparison_difference_ratio,
         s.tolerance_ratio AS comparison_tolerance_ratio, s.details_json AS comparison_details_json,
@@ -230,15 +222,13 @@ class MappingService {
         WHERE latest.mapping_id = m.id ORDER BY latest.created_at DESC LIMIT 1
       )
       ${where}
-      ORDER BY m.channel_id, CASE m.role WHEN 'primary' THEN 0 ELSE 1 END, p.name
+      ORDER BY m.group_id, CASE m.role WHEN 'primary' THEN 0 ELSE 1 END, p.name
     `).all(...params).map((row) => {
       const comparison = row.comparison_status ? {
         status: row.comparison_status,
         providerGroupRef: row.comparison_provider_group_ref,
         providerGroupName: row.comparison_provider_group_name,
         providerRate: row.comparison_provider_rate,
-        channelName: row.comparison_channel_name,
-        channelStatus: row.comparison_channel_status,
         baseGroupId: row.comparison_base_group_id,
         baseGroupName: row.comparison_base_group_name,
         baseGroupRate: row.comparison_base_group_rate,
@@ -272,9 +262,12 @@ class MappingService {
     if (id && !existing) throw new AppError('MAPPING_NOT_FOUND', 'Sub2API mapping was not found', { status: 404 });
     const connectionId = input.connectionId ?? existing?.connection_id;
     const keyId = input.keyId === undefined ? existing?.key_id : input.keyId || null;
-    const channelId = input.channelId ?? existing?.channel_id;
+    const groupId = finite(input.groupId === undefined ? existing?.group_id : input.groupId);
     const provider = this.db.prepare('SELECT id FROM provider_connections WHERE id = ?').get(connectionId);
     if (!provider) throw new AppError('PROVIDER_NOT_FOUND', 'Provider connection was not found', { status: 404 });
+    if (groupId == null || groupId <= 0) {
+      throw new AppError('VALIDATION_ERROR', 'A Sub2API group is required for each mapping', { status: 400 });
+    }
     if (keyId) {
       const key = this.db.prepare('SELECT id FROM remote_keys WHERE id = ? AND connection_id = ?').get(keyId, connectionId);
       if (!key) throw new AppError('KEY_NOT_FOUND', 'Mapped key does not belong to the selected provider', { status: 400 });
@@ -284,13 +277,13 @@ class MappingService {
     try {
       if (existing) {
         this.db.prepare(`
-          UPDATE sub2api_mappings SET connection_id = ?, key_id = ?, channel_id = ?,
+          UPDATE sub2api_mappings SET connection_id = ?, key_id = ?, channel_id = NULL,
             account_id = ?, group_id = ?, role = ?, enabled = ?, models_json = ?,
             config_json = ?, updated_at = ? WHERE id = ?
         `).run(
-          connectionId, keyId, Number(channelId),
+          connectionId, keyId,
           input.accountId === undefined ? existing.account_id : input.accountId ?? null,
-          input.groupId === undefined ? existing.group_id : input.groupId ?? null,
+          groupId,
           input.role ?? existing.role,
           input.enabled == null ? existing.enabled : input.enabled ? 1 : 0,
           stringifyJson(input.models ?? parseJson(existing.models_json, [])),
@@ -300,18 +293,18 @@ class MappingService {
       } else {
         this.db.prepare(`
           INSERT INTO sub2api_mappings(
-            id, connection_id, key_id, channel_id, account_id, group_id, role,
+            id, connection_id, key_id, account_id, group_id, role,
             enabled, models_json, config_json, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
-          mappingId, connectionId, keyId, Number(channelId), input.accountId ?? null,
-          input.groupId ?? null, input.role || 'primary', input.enabled === false ? 0 : 1,
+          mappingId, connectionId, keyId, input.accountId ?? null,
+          groupId, input.role || 'primary', input.enabled === false ? 0 : 1,
           stringifyJson(input.models || []), stringifyJson(input.config || {}), now, now
         );
       }
     } catch (error) {
       if (String(error.code || '').startsWith('SQLITE_CONSTRAINT')) {
-        throw new AppError('MAPPING_DUPLICATE', 'This provider, key and channel mapping already exists', { status: 409 });
+        throw new AppError('MAPPING_DUPLICATE', 'This provider, key, account and group mapping already exists', { status: 409 });
       }
       throw error;
     }
@@ -328,20 +321,33 @@ class MappingService {
     if (selected.role !== 'backup') {
       throw new AppError('BACKUP_MAPPING_REQUIRED', 'Only a backup mapping can be activated', { status: 409 });
     }
+    if (selected.group_id == null) {
+      throw new AppError('MAPPING_GROUP_REQUIRED', 'The backup mapping does not have a Sub2API group', { status: 409 });
+    }
     this.db.transaction(() => {
-      this.db.prepare(`UPDATE sub2api_mappings SET enabled = 0, updated_at = ? WHERE channel_id = ?`).run(nowIso(), selected.channel_id);
+      this.db.prepare(`UPDATE sub2api_mappings SET enabled = 0, updated_at = ? WHERE group_id = ?`).run(nowIso(), selected.group_id);
       this.db.prepare(`
         UPDATE sub2api_mappings SET role = 'backup', updated_at = ?
-        WHERE channel_id = ? AND role = 'primary' AND id != ?
-      `).run(nowIso(), selected.channel_id, id);
+        WHERE group_id = ? AND role = 'primary' AND id != ?
+      `).run(nowIso(), selected.group_id, id);
       this.db.prepare(`UPDATE sub2api_mappings SET enabled = 1, role = 'primary', updated_at = ? WHERE id = ?`).run(nowIso(), id);
     })();
     return this.get(id);
   }
 
   async channels(options = {}) {
-    const catalog = await this.#baseCatalog(options);
-    return { items: catalog.channels, total: catalog.channels.length, capturedAt: catalog.capturedAt };
+    const result = await this.sub2api.listAll('/api/v1/admin/channels', {}, {
+      maxItems: 5000,
+      accessToken: options.accessToken || null
+    });
+    const items = result.items.map(normalizeBaseChannel).filter((item) => item.id != null);
+    if (items.length !== result.items.length) {
+      throw new AppError('SCHEMA_MISMATCH', 'Sub2API channel catalog contained an item without an ID', {
+        status: 502,
+        details: { endpoint: '/api/v1/admin/channels' }
+      });
+    }
+    return { items, total: items.length, capturedAt: nowIso() };
   }
 
   async groups(options = {}) {
@@ -389,16 +395,16 @@ class MappingService {
     const upsert = this.db.prepare(`
       INSERT INTO sub2api_mapping_states(
         mapping_id, status, provider_group_ref, provider_group_name, provider_rate,
-        channel_name, channel_status, base_group_id, base_group_name, base_group_rate,
+        base_group_id, base_group_name, base_group_rate,
         difference_ratio, tolerance_ratio, details_json, checked_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(mapping_id) DO UPDATE SET
         status = excluded.status,
         provider_group_ref = excluded.provider_group_ref,
         provider_group_name = excluded.provider_group_name,
         provider_rate = excluded.provider_rate,
-        channel_name = excluded.channel_name,
-        channel_status = excluded.channel_status,
+        channel_name = NULL,
+        channel_status = NULL,
         base_group_id = excluded.base_group_id,
         base_group_name = excluded.base_group_name,
         base_group_rate = excluded.base_group_rate,
@@ -411,8 +417,8 @@ class MappingService {
       for (const state of states) {
         upsert.run(
           state.mappingId, state.status, state.providerGroupRef, state.providerGroupName,
-          state.providerRate, state.channelName, state.channelStatus, state.baseGroupId,
-          state.baseGroupName, state.baseGroupRate, state.differenceRatio,
+          state.providerRate, state.baseGroupId, state.baseGroupName,
+          state.baseGroupRate, state.differenceRatio,
           state.toleranceRatio, stringifyJson(state.details), state.checkedAt
         );
       }
@@ -436,14 +442,13 @@ class MappingService {
     const createdAt = nowIso();
     const insert = this.db.prepare(`
       INSERT OR IGNORE INTO sub2api_mappings(
-        id, connection_id, key_id, channel_id, account_id, group_id, role,
+        id, connection_id, key_id, account_id, group_id, role,
         enabled, models_json, config_json, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'primary', 1, '[]', ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, 'primary', 1, '[]', ?, ?, ?)
     `);
     const findExisting = this.db.prepare(`
       SELECT id FROM sub2api_mappings
-      WHERE connection_id = ? AND key_id = ? AND channel_id = ?
-        AND account_id = ? AND group_id = ?
+      WHERE connection_id = ? AND key_id = ? AND account_id = ? AND group_id = ?
     `);
     this.db.transaction(() => {
       for (const item of discovery.items) {
@@ -457,8 +462,8 @@ class MappingService {
           }
         };
         const result = insert.run(
-          mappingId, item.providerId, item.keyId, item.channelId,
-          item.accountId, item.groupId, stringifyJson(config), createdAt, createdAt
+          mappingId, item.providerId, item.keyId, item.accountId,
+          item.groupId, stringifyJson(config), createdAt, createdAt
         );
         if (result.changes) {
           item.status = 'created';
@@ -466,7 +471,7 @@ class MappingService {
         } else {
           item.status = 'existing';
           item.mappingId = findExisting.get(
-            item.providerId, item.keyId, item.channelId, item.accountId, item.groupId
+            item.providerId, item.keyId, item.accountId, item.groupId
           )?.id || null;
         }
       }
@@ -508,7 +513,7 @@ class MappingService {
     const providerAssets = new Map();
     const workIdentities = new Set();
     const enqueueWork = (entry) => {
-      const identity = [entry.provider.id, entry.channel.id, entry.baseGroup.id, entry.account.id].join('|');
+      const identity = [entry.provider.id, entry.baseGroup.id, entry.account.id].join('|');
       if (workIdentities.has(identity)) return;
       workIdentities.add(identity);
       work.push(entry);
@@ -583,39 +588,7 @@ class MappingService {
             });
             continue;
           }
-          const groupChannels = catalog.channels.filter((channel) =>
-            channel.groupIds.includes(Number(groupId))
-          );
-          if (groupChannels.length === 0) {
-            items.push({
-              status: 'unmatched',
-              reason: 'group_has_no_channel',
-              providerId: provider.id,
-              providerName: provider.name,
-              accountId: account.id,
-              accountName: account.name,
-              accountMatch: accountMatch.matchType,
-              groupId: baseGroup.id,
-              groupName: baseGroup.name
-            });
-            continue;
-          }
-          if (groupChannels.length > 1) {
-            items.push({
-              status: 'conflict',
-              reason: 'multiple_channels_for_group',
-              providerId: provider.id,
-              providerName: provider.name,
-              accountId: account.id,
-              accountName: account.name,
-              accountMatch: accountMatch.matchType,
-              groupId: baseGroup.id,
-              groupName: baseGroup.name,
-              channelCandidates: groupChannels.map((channel) => ({ id: channel.id, name: channel.name }))
-            });
-            continue;
-          }
-          enqueueWork({ provider, channel: groupChannels[0], accountMatch: accountMatch.matchType, baseGroup, account });
+          enqueueWork({ provider, accountMatch: accountMatch.matchType, baseGroup, account });
         }
       }
     }
@@ -626,12 +599,10 @@ class MappingService {
     );
     const existing = new Map(this.list().map((mapping) => [mappingIdentity(mapping), mapping]));
     for (const entry of work) {
-      const { provider, channel, accountMatch, baseGroup, account } = entry;
+      const { provider, accountMatch, baseGroup, account } = entry;
       const baseItem = {
         providerId: provider.id,
         providerName: provider.name,
-        channelId: channel.id,
-        channelName: channel.name,
         accountMatch,
         groupId: baseGroup.id,
         groupName: baseGroup.name,
@@ -691,7 +662,6 @@ class MappingService {
       const identity = mappingIdentity({
         connectionId: provider.id,
         keyId: key.id,
-        channelId: channel.id,
         accountId: account.id,
         groupId: baseGroup.id
       });
@@ -787,7 +757,6 @@ class MappingService {
 
   #compareMapping(mapping, catalog) {
     const config = mapping.config || {};
-    const channel = catalog.channels.find((item) => Number(item.id) === Number(mapping.channel_id));
     const providerGroups = this.db.prepare(`
       SELECT id, remote_id, name, ratio, status, metadata_json
       FROM remote_groups WHERE connection_id = ? AND status != 'missing'
@@ -803,26 +772,12 @@ class MappingService {
       ? providerGroups.find((group) => [group.id, group.remote_id, group.name].some((value) => String(value) === String(providerRef)))
       : null;
 
-    let baseGroupId = finite(mapping.group_id);
-    let inferredBaseGroup = false;
-    if (baseGroupId == null && channel?.groupIds.length === 1) {
-      baseGroupId = channel.groupIds[0];
-      inferredBaseGroup = true;
-    }
-    let baseGroup = baseGroupId == null ? null : catalog.groups.find((group) => Number(group.id) === Number(baseGroupId));
+    const baseGroupId = finite(mapping.group_id);
+    const baseGroup = baseGroupId == null ? null : catalog.groups.find((group) => Number(group.id) === Number(baseGroupId));
     if (!providerGroup && !providerRefSpecified && baseGroup) {
       providerGroup = providerGroups.find((group) => group.name.toLowerCase() === baseGroup.name.toLowerCase()) || null;
     }
     if (!providerGroup && !providerRefSpecified && providerGroups.length === 1) providerGroup = providerGroups[0];
-    if (!baseGroup && baseGroupId == null && channel) {
-      const matched = catalog.groups.find((group) => channel.groupIds.includes(group.id) &&
-        providerGroup?.name.toLowerCase() === group.name.toLowerCase());
-      if (matched) {
-        baseGroup = matched;
-        baseGroupId = matched.id;
-        inferredBaseGroup = true;
-      }
-    }
 
     const storedTolerance = parseJson(this.db.prepare(`SELECT value_json FROM settings WHERE key = 'sub2apiRateToleranceRatio'`).get()?.value_json, 0.05);
     const toleranceRatio = Math.max(0, finite(config.rateToleranceRatio) ?? finite(storedTolerance) ?? 0.05);
@@ -833,11 +788,8 @@ class MappingService {
       : null;
     let status = 'aligned';
     if (!mapping.enabled) status = 'mapping_disabled';
-    else if (!channel) status = 'missing_channel';
-    else if (['disabled', 'inactive'].includes(channel.status.toLowerCase())) status = 'channel_disabled';
     else if (baseGroupId == null) status = 'base_group_unselected';
     else if (!baseGroup) status = 'missing_base_group';
-    else if (channel.groupIdsKnown && !channel.groupIds.includes(baseGroup.id)) status = 'group_not_in_channel';
     else if (!providerGroup) status = 'missing_provider_group';
     else if (providerRate == null || baseGroupRate == null) status = 'missing_rate';
     else if (providerRate <= 0) status = 'invalid_provider_rate';
@@ -849,8 +801,6 @@ class MappingService {
       providerGroupRef: providerGroup?.remote_id || providerRef || null,
       providerGroupName: providerGroup?.name || null,
       providerRate,
-      channelName: channel?.name || null,
-      channelStatus: channel?.status || null,
       baseGroupId,
       baseGroupName: baseGroup?.name || null,
       baseGroupRate,
@@ -858,9 +808,6 @@ class MappingService {
       toleranceRatio,
       checkedAt: catalog.capturedAt,
       details: {
-        channelGroupIds: channel?.groupIds || [],
-        channelGroupIdsKnown: channel?.groupIdsKnown ?? false,
-        inferredBaseGroup,
         explicitProviderGroup: Boolean(explicitProviderRef),
         baseGroupDefaultRate: baseGroup?.defaultRate ?? null,
         baseGroupEffectiveRate: baseGroup?.effectiveRate ?? null,
@@ -874,10 +821,6 @@ class MappingService {
     if (!force && this.baseCatalogCache?.expiresAt > Date.now()) return this.baseCatalogCache.value;
     if (!force && this.baseCatalogRequest) return this.baseCatalogRequest;
     const request = (async () => {
-      const channelsResult = await this.sub2api.listAll('/api/v1/admin/channels', {}, {
-        maxItems: 5000,
-        accessToken
-      });
       let groups;
       try {
         const all = await this.sub2api.data('/api/v1/admin/groups/all', {
@@ -906,20 +849,14 @@ class MappingService {
         }));
       } catch {}
       const capturedAt = nowIso();
-      const channels = channelsResult.items.map(normalizeBaseChannel).filter((item) => item.id != null);
       const normalizedGroups = groups.map((group) => normalizeBaseGroup(group, rates)).filter((item) => item.id != null);
-      if (channels.length !== channelsResult.items.length || normalizedGroups.length !== groups.length) {
-        throw new AppError('SCHEMA_MISMATCH', 'Sub2API catalog contained an item without an ID', {
+      if (normalizedGroups.length !== groups.length) {
+        throw new AppError('SCHEMA_MISMATCH', 'Sub2API group catalog contained an item without an ID', {
           status: 502,
-          details: {
-            endpoint: channels.length !== channelsResult.items.length
-              ? '/api/v1/admin/channels'
-              : '/api/v1/admin/groups/all'
-          }
+          details: { endpoint: '/api/v1/admin/groups/all' }
         });
       }
       const value = {
-        channels,
         groups: normalizedGroups,
         capturedAt
       };
@@ -970,8 +907,12 @@ class MappingService {
     const endMs = Date.parse(periodEnd);
     const matching = result.items.filter((row) => {
       const created = Date.parse(row.created_at);
-      return Number(row.channel_id) === Number(mapping.channel_id) &&
-        (!Number.isFinite(created) || (created >= startMs && created <= endMs));
+      const inPeriod = !Number.isFinite(created) || (created >= startMs && created <= endMs);
+      const accountMatches = mapping.account_id == null || row.account_id == null ||
+        Number(row.account_id) === Number(mapping.account_id);
+      const groupMatches = mapping.group_id == null || row.group_id == null ||
+        Number(row.group_id) === Number(mapping.group_id);
+      return inPeriod && accountMatches && groupMatches;
     });
     return {
       records: matching.length,
@@ -1079,7 +1020,7 @@ class MappingService {
 
   getReconciliation(id) {
     const row = this.db.prepare(`
-      SELECT r.*, m.connection_id, m.channel_id, p.name AS provider_name
+      SELECT r.*, m.connection_id, m.group_id, p.name AS provider_name
       FROM reconciliation_runs r JOIN sub2api_mappings m ON m.id = r.mapping_id
       JOIN provider_connections p ON p.id = m.connection_id WHERE r.id = ?
     `).get(id);

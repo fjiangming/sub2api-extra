@@ -51,7 +51,7 @@ test('analysis records inventory drift and detects balance anomalies', () => {
   }
 });
 
-test('mapping reconciliation filters Sub2API usage by channel and combines monitor health', async () => {
+test('mapping reconciliation aggregates Sub2API group usage across channels and combines monitor health', async () => {
   const context = createTestContext();
   try {
     const { provider } = createProvider(context);
@@ -67,23 +67,24 @@ test('mapping reconciliation filters Sub2API usage by channel and combines monit
         if (endpoint.includes('channel-monitors')) return { items: [{ id: 8, primary_status: 'healthy', availability_7d: 99 }], total: 1 };
         return {
           items: [
-            { channel_id: 11, actual_cost: 6, total_cost: 4, account_rate_multiplier: 1, input_tokens: 10, output_tokens: 5, created_at: end.toISOString() },
-            { channel_id: 12, actual_cost: 100, total_cost: 100, created_at: end.toISOString() }
-          ], total: 2, truncated: false
+            { channel_id: 11, account_id: 70, group_id: 7, actual_cost: 6, total_cost: 4, account_rate_multiplier: 1, input_tokens: 10, output_tokens: 5, created_at: end.toISOString() },
+            { channel_id: 12, account_id: 70, group_id: 7, actual_cost: 2, total_cost: 1, account_rate_multiplier: 1, input_tokens: 4, output_tokens: 2, created_at: end.toISOString() },
+            { channel_id: 11, account_id: 70, group_id: 8, actual_cost: 100, total_cost: 100, created_at: end.toISOString() }
+          ], total: 3, truncated: false
         };
       }
     };
     const mappings = new MappingService({ db: context.db, config: context.config, sub2api });
-    const mapping = mappings.save({ connectionId: provider.id, channelId: 11, config: { channelMonitorId: 8 } });
+    const mapping = mappings.save({ connectionId: provider.id, accountId: 70, groupId: 7, config: { channelMonitorId: 8 } });
     const result = await mappings.reconcile(mapping.id, { periodStart: start.toISOString(), periodEnd: end.toISOString() });
     assert.equal(result.status, 'succeeded');
     assert.equal(result.upstream_balance_delta, 10);
-    assert.equal(result.sub2api_cost, 6);
-    assert.equal(result.expected_cost, 4);
-    assert.equal(result.difference_amount, 6);
-    assert.equal(result.details.sub2api.records, 1);
+    assert.equal(result.sub2api_cost, 8);
+    assert.equal(result.expected_cost, 5);
+    assert.equal(result.difference_amount, 5);
+    assert.equal(result.details.sub2api.records, 2);
     assert.equal(result.health_score, 100);
-    assert.throws(() => mappings.save({ connectionId: provider.id, channelId: 11 }), /already exists/);
+    assert.throws(() => mappings.save({ connectionId: provider.id, accountId: 70, groupId: 7 }), /already exists/);
   } finally {
     context.cleanup();
   }
@@ -95,8 +96,8 @@ test('manual backup activation swaps roles and can switch back to the original p
     const first = createProvider(context, { name: 'Primary', accountDedupeKey: 'primary' }).provider;
     const second = createProvider(context, { name: 'Backup', baseUrl: 'https://backup.example', accountDedupeKey: 'backup' }).provider;
     const mappings = new MappingService({ db: context.db, config: context.config, sub2api: {} });
-    const primary = mappings.save({ connectionId: first.id, channelId: 21, role: 'primary', enabled: true });
-    const backup = mappings.save({ connectionId: second.id, channelId: 21, role: 'backup', enabled: false });
+    const primary = mappings.save({ connectionId: first.id, groupId: 21, role: 'primary', enabled: true });
+    const backup = mappings.save({ connectionId: second.id, groupId: 21, role: 'backup', enabled: false });
     mappings.activateBackup(backup.id);
     assert.equal(mappings.get(backup.id).role, 'primary');
     assert.equal(mappings.get(backup.id).enabled, true);

@@ -109,8 +109,8 @@ tbody tr:hover { background: #fafbfa; }
 .mono { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; }
 .badge { display: inline-flex; align-items: center; min-height: 23px; padding: 0 7px; border-radius: 4px; background: var(--surface-muted); color: #4f5a53; font-size: 11px; font-weight: 700; white-space: nowrap; }
 .badge.healthy, .badge.active, .badge.enabled, .badge.succeeded, .badge.aligned, .badge.created, .badge.highest { color: #0f6b53; background: var(--accent-soft); }
-.badge.warning, .badge.partial, .badge.pending, .badge.pending_create, .badge.running, .badge.dry_run, .badge.rate_mismatch, .badge.group_not_in_channel, .badge.base_group_unselected, .badge.missing_provider_group, .badge.missing_rate, .badge.invalid_provider_rate, .badge.channel_disabled, .badge.unmatched, .badge.missing_api_key, .badge.missing_remote_key { color: #95530d; background: var(--warning-soft); }
-.badge.error, .badge.failed, .badge.disabled, .badge.inactive, .badge.expired, .badge.exhausted, .badge.missing_channel, .badge.missing_base_group, .badge.conflict { color: #9e3731; background: var(--danger-soft); }
+.badge.warning, .badge.partial, .badge.pending, .badge.pending_create, .badge.running, .badge.dry_run, .badge.rate_mismatch, .badge.base_group_unselected, .badge.missing_provider_group, .badge.missing_rate, .badge.invalid_provider_rate, .badge.unmatched, .badge.missing_api_key, .badge.missing_remote_key { color: #95530d; background: var(--warning-soft); }
+.badge.error, .badge.failed, .badge.disabled, .badge.inactive, .badge.expired, .badge.exhausted, .badge.missing_base_group, .badge.conflict { color: #9e3731; background: var(--danger-soft); }
 .badge.stale, .badge.unknown, .badge.missing, .badge.resolved, .badge.acknowledged, .badge.mapping_disabled, .badge.existing, .badge.info { color: #536b82; background: var(--info-soft); }
 .status-line { display: flex; align-items: center; gap: 8px; }
 .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #8b9690; }
@@ -238,7 +238,7 @@ details summary { padding: 13px 18px; cursor: pointer; font-weight: 650; font-si
 .auto-mapping-preview .status-summary { position: sticky; top: -18px; z-index: 2; margin: -18px -18px 14px; padding: 14px 18px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .auto-mapping-preview .empty { min-height: 194px; }
 .auto-mapping-table { max-height: calc(100vh - 340px); }
-.auto-mapping-table table { min-width: 920px; }
+.auto-mapping-table table { min-width: 760px; }
 .dialog-actions { min-height: 62px; display: flex; gap: 8px; align-items: center; padding: 12px 18px; border-top: 1px solid var(--line); background: #fafbfa; }
 .action-spacer { flex: 1; }
 .toast-region { position: fixed; right: 20px; bottom: 20px; z-index: 100; display: grid; gap: 8px; width: min(360px, calc(100vw - 32px)); }

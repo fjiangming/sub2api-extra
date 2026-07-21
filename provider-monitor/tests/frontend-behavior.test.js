@@ -127,32 +127,31 @@ test('integration groups render a collapsed outer winner and mark exactly one hi
     status: 'inactive',
     baseRate: 1.1,
     mappingCount: 2,
-    channels: [{ id: 11, name: 'Supplier route' }],
     highest: {
-      id: 'high', channel_id: 11, account_id: 501, provider_name: 'Supplier A',
+      id: 'high', account_id: 501, provider_name: 'Supplier A',
       key_name: 'High key', masked_key: 'sk-h...7890',
       comparison: {
         providerGroupName: 'Premium', providerRate: 1.5, baseGroupRate: 1.1,
-        status: 'rate_mismatch', channelName: 'Supplier route', channelStatus: 'active',
+        status: 'rate_mismatch',
         differenceRatio: -0.2667, details: { providerGroupStatus: 'inactive' }
       }
     },
     items: [
       {
-        id: 'high', channel_id: 11, account_id: 501, provider_name: 'Supplier A',
+        id: 'high', account_id: 501, provider_name: 'Supplier A',
         key_name: 'High key', masked_key: 'sk-h...7890', isHighestRate: true,
         comparison: {
           providerGroupName: 'Premium', providerRate: 1.5, baseGroupRate: 1.1,
-          status: 'rate_mismatch', channelName: 'Supplier route', channelStatus: 'active',
+          status: 'rate_mismatch',
           differenceRatio: -0.2667, details: { providerGroupStatus: 'inactive' }
         }
       },
       {
-        id: 'low', channel_id: 11, account_id: 502, provider_name: 'Supplier A',
+        id: 'low', account_id: 502, provider_name: 'Supplier A',
         key_name: 'Low key', masked_key: 'sk-l...4321', isHighestRate: false,
         comparison: {
           providerGroupName: 'Economy', providerRate: 0.8, baseGroupRate: 1.1,
-          status: 'rate_mismatch', channelName: 'Supplier route', channelStatus: 'active',
+          status: 'rate_mismatch',
           differenceRatio: 0.375, details: { providerGroupStatus: 'active' }
         }
       }
@@ -184,6 +183,8 @@ test('auto-mapping UI uses preview then apply and provides actionable export aut
   assert.match(source, /data-action="auto-map" title="自动映射" aria-label="自动映射"/);
   assert.match(source, /comparisonData\.unassignedItems/);
   assert.match(source, /\[item\.keyName, item\.maskedKey\]/);
+  assert.doesNotMatch(source, /form\.elements\.channelId\b/);
+  assert.doesNotMatch(source, /<th>Sub2API 渠道<\/th>/);
 
   const forbidden = vm.runInContext(
     "autoMappingErrorMessage({ code: 'SUB2API_KEY_EXPORT_FORBIDDEN', message: 'forbidden' })",

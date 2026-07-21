@@ -10,7 +10,7 @@ Provider Monitor 是 Sub2API Extra 的供应商资产、余额、密钥分组和
 | **余额与密钥** | 账户余额、多币种余额、密钥额度、到期时间和路由分组 |
 | **趋势分析** | SQLite 历史快照、小时/日降采样、余额趋势、日均消耗与可用天数预测 |
 | **异常检测** | 余额/用量异常、Key 健康、资产与分组漂移、价格目录和模型推荐 |
-| **签到与对账** | 自动签到、Sub2API 渠道映射、用量对账和 Channel Monitor 健康联动 |
+| **签到与对账** | 自动签到、Sub2API 分组映射、用量对账和 Channel Monitor 健康联动 |
 | **倍率对照** | 基座 Sub2API 渠道/分组目录、供应商上游分组倍率对照和偏差预警 |
 | **告警** | 低余额、同步失败、数据陈旧、密钥到期、异常与自动化失败告警 |
 | **通知** | Webhook、Telegram、Gotify、Bark、邮件、企业微信、钉钉和飞书 |
@@ -261,16 +261,16 @@ HTTPS iframe 会同时设置普通 Cookie 和分区 Cookie，并在 URL Fragment
 
 ---
 
-## 渠道与倍率对照
+## 分组与倍率对照
 
 1. 先同步供应商，使上游 Key、分组和倍率进入本地资产库。
-2. 在"Sub2API 联动"中添加映射，选择基座渠道、基座分组、供应商、Key 和上游分组。
+2. 在"Sub2API 联动"中添加映射，选择基座分组、供应商、Key 和上游分组。
 3. Provider Monitor 比较基座分组有效倍率与供应商上游分组倍率，并按全局或映射级容差标记结果。
-4. 可创建"Sub2API 倍率偏差"告警规则。每条渠道映射独立触发和恢复，系统每 5 分钟刷新一次，也可在页面手动刷新。
+4. 可创建"Sub2API 倍率偏差"告警规则。每条分组映射独立触发和恢复，系统每 5 分钟刷新一次，也可在页面手动刷新。
 
-自动映射优先查找名称中包含供应商名的 Sub2API API Key 账号，按账号分组反推出渠道，再使用脱敏 Key 指纹确认上游 Key；没有匹配账号时兼容使用供应商名匹配渠道。读取账号 Key 需要 Sub2API 管理员 SSO 会话；当 Sub2API 开启敏感操作二次验证时，Provider Monitor 会弹出 TOTP 验证框，使用当前 SSO 会话取得 15 分钟的 step-up 授权后自动重试。登录时完成的 TOTP 与敏感操作 step-up 是两项独立授权，管理员 API Key 不能代替该流程。
+自动映射查找名称中包含供应商名的 Sub2API API Key 账号，直接为账号关联的每个 Sub2API 分组匹配供应商 Key，不要求分组与渠道建立关系。系统使用脱敏 Key 指纹确认上游 Key。读取账号 Key 需要 Sub2API 管理员 SSO 会话；当 Sub2API 开启敏感操作二次验证时，Provider Monitor 会弹出 TOTP 验证框，使用当前 SSO 会话取得 15 分钟的 step-up 授权后自动重试。登录时完成的 TOTP 与敏感操作 step-up 是两项独立授权，管理员 API Key 不能代替该流程。
 
-检查状态会区分倍率偏差、渠道缺失、基座分组缺失、分组已脱离渠道、供应商分组缺失、倍率缺失和供应商倍率无效。基座渠道只包含一个分组时会自动推断，但仍会在页面标记为自动匹配。
+检查状态会区分倍率偏差、基座分组缺失、供应商分组缺失、倍率缺失和供应商倍率无效。
 
 ---
 
@@ -422,7 +422,7 @@ provider-monitor/
 │       ├── notification-service.js  # 多渠道通知下发
 │       ├── automation-service.js    # Sub2API 渠道自动化
 │       ├── analysis-service.js # 趋势分析与异常检测
-│       ├── mapping-service.js  # Sub2API 渠道映射与倍率比较
+│       ├── mapping-service.js  # Sub2API 分组映射与倍率比较
 │       ├── key-health-service.js    # Key 健康检测
 │       ├── catalog-service.js  # 价格目录同步
 │       ├── checkin-service.js  # 供应商自动签到

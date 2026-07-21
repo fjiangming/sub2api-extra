@@ -163,15 +163,14 @@
 
   <dialog id="mapping-dialog" class="dialog">
     <form method="dialog" id="mapping-form">
-      <header class="dialog-header"><div><h2>Sub2API 渠道映射</h2><p>关联供应商资产、渠道和可选 Channel Monitor</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <header class="dialog-header"><div><h2>Sub2API 分组映射</h2><p>关联供应商资产、分组和可选 Channel Monitor</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
       <input type="hidden" name="id">
       <div class="form-grid">
         <label><span>供应商</span><select name="connectionId" required></select></label>
         <label><span>远端 Key</span><select name="keyId"><option value="">账户级</option></select></label>
-        <label><span>基座渠道</span><select name="channelId" required></select></label>
+        <label><span>基座分组</span><select name="groupId" required></select></label>
         <label><span>角色</span><select name="role"><option value="primary">主供应商</option><option value="backup">备用供应商</option></select></label>
         <label><span>账号 ID</span><input name="accountId" type="number" min="1"></label>
-        <label><span>基座分组</span><select name="groupId"><option value="">自动匹配</option></select></label>
         <label><span>供应商上游分组</span><select name="upstreamGroupRef"><option value="">按 Key / 名称自动匹配</option></select></label>
         <label><span>倍率容差（%）</span><input name="rateTolerancePercent" type="number" min="0" step="0.1" value="5"></label>
         <label class="span-2"><span>模型（逗号分隔）</span><input name="models"></label>

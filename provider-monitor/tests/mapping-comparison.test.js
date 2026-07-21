@@ -30,14 +30,10 @@ test('mapping comparison persists Sub2API group-rate drift and drives alert reco
   `).run(groupId, provider.id, 'supplier-low-cost', 'Supplier Low Cost', 0.8, now, now);
 
   let baseRate = 1.2;
-  let baseChannels = [{ id: 11, name: 'OpenAI Main', status: 'active', group_ids: [7] }];
   let baseGroups = [{ id: 7, name: 'Retail', status: 'active', rate_multiplier: baseRate }];
   const sub2api = {
     authenticationStatus: () => ({ available: true, source: 'test' }),
     async listAll(endpoint) {
-      if (endpoint === '/api/v1/admin/channels') {
-        return { items: baseChannels };
-      }
       if (endpoint === '/api/v1/admin/channel-monitors') {
         const error = new Error('Not supported');
         error.status = 404;
@@ -57,8 +53,7 @@ test('mapping comparison persists Sub2API group-rate drift and drives alert reco
   assert.deepEqual((await mappings.channelMonitors()).items, []);
   const mapping = mappings.save({
     connectionId: provider.id,
-    channelId: 11,
-    groupId: null,
+    groupId: 7,
     enabled: true,
     config: { upstreamGroupRef: 'supplier-low-cost', rateToleranceRatio: 0.05 }
   });
@@ -69,7 +64,7 @@ test('mapping comparison persists Sub2API group-rate drift and drives alert reco
   assert.equal(comparison.items[0].comparison.providerRate, 0.8);
   assert.equal(comparison.items[0].comparison.baseGroupRate, 1.2);
   assert.equal(comparison.items[0].comparison.baseGroupId, 7);
-  assert.equal(comparison.items[0].comparison.details.inferredBaseGroup, true);
+  assert.equal('inferredBaseGroup' in comparison.items[0].comparison.details, false);
   assert.ok(Math.abs(comparison.items[0].comparison.differenceRatio - 0.5) < 1e-9);
 
   mappings.save({
@@ -114,26 +109,9 @@ test('mapping comparison persists Sub2API group-rate drift and drives alert reco
   assert.equal(comparison.summary.warning, 1);
   context.db.prepare('UPDATE remote_groups SET ratio = 0.8 WHERE id = ?').run(groupId);
 
-  mappings.save({ groupId: 7 }, mapping.id);
-  baseChannels = [{ id: 11, name: 'OpenAI Main', status: 'active' }];
-  comparison = await mappings.refreshComparisons({ force: true });
-  assert.equal(comparison.items[0].comparison.status, 'aligned');
-  assert.equal(comparison.items[0].comparison.details.channelGroupIdsKnown, false);
-
-  baseChannels = [{ id: 11, name: 'OpenAI Main', status: 'active', group_ids: [8] }];
-  comparison = await mappings.refreshComparisons({ force: true });
-  assert.equal(comparison.items[0].comparison.status, 'group_not_in_channel');
-  assert.equal(comparison.summary.warning, 1);
-
-  baseChannels = [{ id: 11, name: 'OpenAI Main', status: 'active', group_ids: [7] }];
   baseGroups = [];
   comparison = await mappings.refreshComparisons({ force: true });
   assert.equal(comparison.items[0].comparison.status, 'missing_base_group');
-  assert.equal(comparison.summary.error, 1);
-
-  baseChannels = [];
-  comparison = await mappings.refreshComparisons({ force: true });
-  assert.equal(comparison.items[0].comparison.status, 'missing_channel');
   assert.equal(comparison.summary.error, 1);
 });
 
@@ -153,20 +131,20 @@ test('rate alerts are tracked and recovered independently for every mapping', as
   const mappingIds = [crypto.randomUUID(), crypto.randomUUID()];
   const insertMapping = context.db.prepare(`
     INSERT INTO sub2api_mappings(
-      id, connection_id, channel_id, group_id, role, enabled,
+      id, connection_id, account_id, group_id, role, enabled,
       models_json, config_json, created_at, updated_at
     ) VALUES (?, ?, ?, 7, 'primary', 1, '[]', '{}', ?, ?)
   `);
   const insertState = context.db.prepare(`
     INSERT INTO sub2api_mapping_states(
-      mapping_id, status, provider_group_name, provider_rate, channel_name,
-      channel_status, base_group_id, base_group_name, base_group_rate,
+      mapping_id, status, provider_group_name, provider_rate,
+      base_group_id, base_group_name, base_group_rate,
       difference_ratio, tolerance_ratio, details_json, checked_at
-    ) VALUES (?, 'rate_mismatch', 'Supplier', 0.8, ?, 'active', 7, 'Retail', 1.2, 0.5, 0.05, '{}', ?)
+    ) VALUES (?, 'rate_mismatch', 'Supplier', 0.8, 7, 'Retail', 1.2, 0.5, 0.05, '{}', ?)
   `);
   mappingIds.forEach((mappingId, index) => {
     insertMapping.run(mappingId, provider.id, 101 + index, now, now);
-    insertState.run(mappingId, `Channel ${index + 1}`, now);
+    insertState.run(mappingId, now);
   });
 
   const delivered = [];
@@ -177,7 +155,7 @@ test('rate alerts are tracked and recovered independently for every mapping', as
     notifications: { dispatch: async (event) => delivered.push(event) }
   });
   const rule = alerts.saveRule({
-    name: 'Every mapped channel',
+    name: 'Every mapped group account',
     ruleType: 'rate_mismatch',
     connectionId: provider.id,
     enabled: true,

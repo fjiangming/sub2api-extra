@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -451,7 +451,7 @@ CREATE TABLE IF NOT EXISTS sub2api_mappings (
   id TEXT PRIMARY KEY,
   connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
   key_id TEXT REFERENCES remote_keys(id) ON DELETE SET NULL,
-  channel_id INTEGER NOT NULL,
+  channel_id INTEGER,
   account_id INTEGER,
   group_id INTEGER,
   role TEXT NOT NULL DEFAULT 'primary',
@@ -461,16 +461,6 @@ CREATE TABLE IF NOT EXISTS sub2api_mappings (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-
-DROP INDEX IF EXISTS sub2api_mapping_account_identity;
-CREATE UNIQUE INDEX IF NOT EXISTS sub2api_mapping_identity
-  ON sub2api_mappings(
-    connection_id,
-    COALESCE(key_id, ''),
-    channel_id,
-    COALESCE(account_id, 0),
-    COALESCE(group_id, 0)
-  );
 
 CREATE TABLE IF NOT EXISTS sub2api_mapping_states (
   mapping_id TEXT PRIMARY KEY REFERENCES sub2api_mappings(id) ON DELETE CASCADE,
@@ -567,23 +557,47 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function migrateSub2ApiMappingsV8(db) {
-  const table = db.prepare(`
-    SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_mappings'
+function migrateSub2ApiMappingsV9(db) {
+  const channelColumn = db.prepare('PRAGMA table_info(sub2api_mappings)').all()
+    .find((column) => column.name === 'channel_id');
+  const identityIndex = db.prepare(`
+    SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'sub2api_mapping_identity'
   `).get();
-  if (!/UNIQUE\s*\(\s*connection_id\s*,\s*key_id\s*,\s*channel_id\s*\)/i.test(table?.sql || '')) {
-    return;
-  }
+  const currentIdentity = /COALESCE\s*\(\s*account_id\s*,\s*0\s*\)[\s\S]*group_id[\s\S]*WHERE\s+group_id\s+IS\s+NOT\s+NULL/i
+    .test(identityIndex?.sql || '');
+  if (channelColumn?.notnull === 0 && currentIdentity) return;
 
   try {
     db.exec('BEGIN IMMEDIATE');
     db.exec(`
-      DROP TABLE IF EXISTS sub2api_mappings_v8;
-      CREATE TABLE sub2api_mappings_v8 (
+      DROP TABLE IF EXISTS temp.sub2api_mapping_v9_redirect;
+      CREATE TEMP TABLE sub2api_mapping_v9_redirect AS
+      SELECT id AS old_id,
+        CASE WHEN group_id IS NULL THEN id ELSE FIRST_VALUE(id) OVER (
+          PARTITION BY connection_id, COALESCE(key_id, ''), COALESCE(account_id, 0), group_id
+          ORDER BY CASE role WHEN 'primary' THEN 0 ELSE 1 END, enabled DESC, created_at, id
+        ) END AS keep_id
+      FROM sub2api_mappings;
+
+      DELETE FROM sub2api_mapping_states
+      WHERE mapping_id IN (
+        SELECT old_id FROM sub2api_mapping_v9_redirect WHERE old_id != keep_id
+      );
+      UPDATE reconciliation_runs
+      SET mapping_id = (
+        SELECT keep_id FROM sub2api_mapping_v9_redirect
+        WHERE old_id = reconciliation_runs.mapping_id
+      )
+      WHERE mapping_id IN (
+        SELECT old_id FROM sub2api_mapping_v9_redirect WHERE old_id != keep_id
+      );
+
+      DROP TABLE IF EXISTS sub2api_mappings_v9;
+      CREATE TABLE sub2api_mappings_v9 (
         id TEXT PRIMARY KEY,
         connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
         key_id TEXT REFERENCES remote_keys(id) ON DELETE SET NULL,
-        channel_id INTEGER NOT NULL,
+        channel_id INTEGER,
         account_id INTEGER,
         group_id INTEGER,
         role TEXT NOT NULL DEFAULT 'primary',
@@ -593,24 +607,30 @@ function migrateSub2ApiMappingsV8(db) {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
-      INSERT INTO sub2api_mappings_v8(
+      INSERT INTO sub2api_mappings_v9(
         id, connection_id, key_id, channel_id, account_id, group_id, role,
         enabled, models_json, config_json, created_at, updated_at
       )
       SELECT
-        id, connection_id, key_id, channel_id, account_id, group_id, role,
-        enabled, models_json, config_json, created_at, updated_at
-      FROM sub2api_mappings;
+        mapping.id, mapping.connection_id, mapping.key_id, mapping.channel_id,
+        mapping.account_id, mapping.group_id, mapping.role, mapping.enabled,
+        mapping.models_json, mapping.config_json, mapping.created_at, mapping.updated_at
+      FROM sub2api_mappings mapping
+      JOIN sub2api_mapping_v9_redirect redirect
+        ON redirect.old_id = mapping.id AND redirect.keep_id = mapping.id;
       DROP TABLE sub2api_mappings;
-      ALTER TABLE sub2api_mappings_v8 RENAME TO sub2api_mappings;
+      ALTER TABLE sub2api_mappings_v9 RENAME TO sub2api_mappings;
+      DROP INDEX IF EXISTS sub2api_mapping_account_identity;
+      DROP INDEX IF EXISTS sub2api_mapping_identity;
       CREATE UNIQUE INDEX sub2api_mapping_identity
         ON sub2api_mappings(
           connection_id,
           COALESCE(key_id, ''),
-          channel_id,
           COALESCE(account_id, 0),
-          COALESCE(group_id, 0)
-        );
+          group_id
+        )
+        WHERE group_id IS NOT NULL;
+      DROP TABLE sub2api_mapping_v9_redirect;
     `);
     db.exec('COMMIT');
   } catch (error) {
@@ -627,7 +647,7 @@ function createDatabase(databasePath) {
   db.pragma('foreign_keys = OFF');
   try {
     db.exec(SCHEMA);
-    migrateSub2ApiMappingsV8(db);
+    migrateSub2ApiMappingsV9(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

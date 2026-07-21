@@ -27,7 +27,6 @@ const state = {
   assetSearch: '',
   assetStatus: '',
   mappings: [],
-  sub2apiChannels: [],
   sub2apiGroups: [],
   sub2apiMonitors: [],
   sub2apiStatus: null,
@@ -58,7 +57,7 @@ const VIEW_META = {
   costs: ['价格比较', '模型价格、分组倍率与供应商推荐'],
   risks: ['健康与漂移', 'Key 检测、资产变化与异常识别'],
   alerts: ['告警中心', '规则、事件与通知通道'],
-  integrations: ['Sub2API 联动', '渠道映射、签到、对账与健康联动'],
+  integrations: ['Sub2API 联动', '分组映射、签到、对账与健康联动'],
   automation: ['自动化', '低余额联动与可回滚操作'],
   activity: ['运行记录', '检查、任务与审计日志'],
   settings: ['设置与备份', '运行参数、凭据生命周期与数据迁移']
@@ -250,7 +249,7 @@ function formatMoney(value, currency = 'USD') {
 }
 
 function badge(status, label = null) {
-  const text = label || ({ healthy: '正常', warning: '预警', stale: '陈旧', unknown: '未知', active: '活动', inactive: '停用', enabled: '启用', disabled: '停用', missing: '缺失', succeeded: '成功', partial: '部分成功', failed: '失败', pending: '等待', pending_create: '待新增', running: '执行中', dry_run: '演练', resolved: '已恢复', acknowledged: '已确认', expired: '已到期', exhausted: '已耗尽', passed: '通过', info: '信息', already_checked: '今日已签', unsupported: '不支持', manual_action_required: '需人工处理', created: '已创建', existing: '已存在', unmatched: '未匹配', conflict: '冲突', missing_api_key: '缺少 API Key', missing_remote_key: '远端 Key 未找到', updated: '已更新', aligned: '倍率一致', rate_mismatch: '倍率偏差', missing_channel: '渠道缺失', missing_base_group: '基座分组缺失', group_not_in_channel: '分组已脱离渠道', base_group_unselected: '未选基座分组', missing_provider_group: '供应商分组缺失', missing_rate: '倍率缺失', invalid_provider_rate: '供应商倍率无效', channel_disabled: '渠道已停用', mapping_disabled: '映射已停用' }[status] || status || '未知');
+  const text = label || ({ healthy: '正常', warning: '预警', stale: '陈旧', unknown: '未知', active: '活动', inactive: '停用', enabled: '启用', disabled: '停用', missing: '缺失', succeeded: '成功', partial: '部分成功', failed: '失败', pending: '等待', pending_create: '待新增', running: '执行中', dry_run: '演练', resolved: '已恢复', acknowledged: '已确认', expired: '已到期', exhausted: '已耗尽', passed: '通过', info: '信息', already_checked: '今日已签', unsupported: '不支持', manual_action_required: '需人工处理', created: '已创建', existing: '已存在', unmatched: '未匹配', conflict: '冲突', missing_api_key: '缺少 API Key', missing_remote_key: '远端 Key 未找到', updated: '已更新', aligned: '倍率一致', rate_mismatch: '倍率偏差', missing_base_group: '基座分组缺失', base_group_unselected: '未选基座分组', missing_provider_group: '供应商分组缺失', missing_rate: '倍率缺失', invalid_provider_rate: '供应商倍率无效', mapping_disabled: '映射已停用' }[status] || status || '未知');
   return `<span class="badge ${escapeHtml(status || 'unknown')}">${escapeHtml(text)}</span>`;
 }
 
@@ -518,12 +517,10 @@ function integrationMappingActions(item) {
 
 function integrationDetailRow(item, groupKey, expanded) {
   const comparison = item.comparison || {};
-  const channelState = comparison.channelStatus && !['active', 'enabled'].includes(comparison.channelStatus.toLowerCase())
-    ? ` ${badge(comparison.channelStatus)}` : '';
   const providerGroupState = comparison.details?.providerGroupStatus && !['active', 'enabled'].includes(comparison.details.providerGroupStatus.toLowerCase())
     ? ` ${badge(comparison.details.providerGroupStatus)}` : '';
   return `<tr class="integration-detail-row${item.isHighestRate ? ' highest-rate-row' : ''}" data-integration-parent="${escapeHtml(groupKey)}" ${expanded ? '' : 'hidden'}>
-    <td class="primary-cell integration-indent"><strong>${escapeHtml(comparison.channelName || `渠道 ${item.channel_id}`)}${channelState}</strong><small>#${item.channel_id} · 账号 #${item.account_id || '-'} · ${item.role === 'primary' ? '主' : '备'}</small></td>
+    <td class="primary-cell integration-indent"><strong>${item.account_id ? `账号 #${item.account_id}` : '账户级映射'}</strong><small>${item.role === 'primary' ? '主映射' : '备用映射'}</small></td>
     <td class="numeric">${integrationRate(comparison.baseGroupRate)}</td>
     <td class="primary-cell"><strong>${escapeHtml(item.provider_name)}</strong><small>${escapeHtml(item.key_name || '账户级')} · ${escapeHtml(item.masked_key || '-')}</small></td>
     <td class="primary-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${item.isHighestRate ? ` ${badge('highest', '最高')}` : ''}</strong><small>${integrationRate(comparison.providerRate)}</small></td>
@@ -543,12 +540,11 @@ function integrationGroupRows(group) {
     ? ` ${badge(group.status)}` : '';
   const providerGroupState = comparison.details?.providerGroupStatus && !['active', 'enabled'].includes(comparison.details.providerGroupStatus.toLowerCase())
     ? ` ${badge(comparison.details.providerGroupStatus)}` : '';
-  const channels = (group.channels || []).map((channel) => channel.name).join('、') || '未关联渠道';
   const detailRows = (group.items || []).map((item) => integrationDetailRow(item, groupKey, expanded)).join('');
   return `<tr class="integration-group-row" data-integration-group="${escapeHtml(groupKey)}">
-    <td class="primary-cell"><strong>${escapeHtml(group.groupName)}${baseGroupState}</strong><small>${escapeHtml(channels)}</small></td>
+    <td class="primary-cell"><strong>${escapeHtml(group.groupName)}${baseGroupState}</strong><small>#${escapeHtml(group.groupId)}${group.platform ? ` · ${escapeHtml(group.platform)}` : ''}</small></td>
     <td class="numeric"><strong>${integrationRate(group.baseRate)}</strong></td>
-    <td class="primary-cell"><strong>${escapeHtml(highest?.provider_name || '-')}</strong><small>${highest ? `${escapeHtml(comparison.channelName || `渠道 ${highest.channel_id}`)} · ${escapeHtml(highest.key_name || '账户级')} · ${escapeHtml(highest.masked_key || '-')}` : '暂无有效倍率映射'}</small></td>
+    <td class="primary-cell"><strong>${escapeHtml(highest?.provider_name || '-')}</strong><small>${highest ? `${escapeHtml(highest.key_name || '账户级')} · ${escapeHtml(highest.masked_key || '-')}` : '暂无有效倍率映射'}</small></td>
     <td class="primary-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${highest ? ` ${badge('highest', '最高')}` : ''}</strong><small>${integrationRate(comparison.providerRate)}</small></td>
     <td class="numeric comparison-delta ${comparison.status === 'rate_mismatch' ? 'warning' : ''}">${integrationDelta(comparison)}</td>
     <td>${highest ? badge(comparison.status || 'unknown') : badge('unknown', '无映射')}</td>
@@ -562,8 +558,6 @@ const AUTO_MAPPING_REASON_LABELS = {
   matched_account_has_no_api_key: '匹配账号未配置 API Key',
   account_has_no_groups: '账号未关联 Sub2API 分组',
   account_group_not_found: '账号引用的分组不存在',
-  group_has_no_channel: '账号分组未关联 Sub2API 渠道',
-  multiple_channels_for_group: '账号分组关联了多个 Sub2API 渠道',
   account_api_key_missing: '账号导出中未返回 API Key',
   api_key_not_found_in_provider: '供应商资产中未找到对应 Key',
   remote_key_fingerprint_collision: '多个远端 Key 的脱敏指纹相同',
@@ -618,20 +612,18 @@ async function requestAutoMappings(mode, allowStepUp = true) {
 function paintAutoMappingPreview(result) {
   const summary = result.summary;
   const rows = result.items.map((item) => {
-    const channelCandidates = item.channelCandidates?.map((candidate) => candidate.name).join('、');
     const keyCandidates = item.keyCandidates?.map((candidate) => candidate.name).join('、');
     const reason = AUTO_MAPPING_REASON_LABELS[item.reason] || item.reason || '';
     const keyLabel = [item.keyName, item.maskedKey].filter(Boolean).join(' · ') || '-';
     return `<tr>
       <td>${badge(item.status)}</td>
       <td class="primary-cell"><strong>${escapeHtml(item.providerName || '-')}</strong><small>${escapeHtml(reason)}</small></td>
-      <td class="primary-cell"><strong>${escapeHtml(item.channelName || '-')}</strong><small>${escapeHtml(channelCandidates || (item.channelId ? `#${item.channelId}` : '-'))}</small></td>
       <td class="primary-cell"><strong>${escapeHtml(item.groupName || '-')}</strong><small>${item.groupId ? `#${item.groupId}` : '-'}</small></td>
       <td class="primary-cell"><strong>${escapeHtml(item.accountName || '-')}</strong><small>${escapeHtml(keyCandidates || keyLabel)}</small></td>
       <td class="primary-cell"><strong>${escapeHtml(item.providerGroupName || item.providerGroupRef || '-')}</strong><small>${integrationRate(item.providerRate)}</small></td>
     </tr>`;
   }).join('');
-  $('#auto-mapping-preview').innerHTML = `<div class="status-summary"><span>${badge('pending_create', `待新增 ${summary.pendingCreate}`)}</span><span>${badge('existing', `已存在 ${summary.existing}`)}</span><span>${badge(summary.conflict ? 'conflict' : 'healthy', `冲突 ${summary.conflict}`)}</span><span>${badge(summary.skipped ? 'warning' : 'healthy', `跳过 ${summary.skipped}`)}</span></div>${rows ? `<div class="table-wrap auto-mapping-table"><table><thead><tr><th>结果</th><th>供应商</th><th>Sub2API 渠道</th><th>Sub2API 分组</th><th>账号 / Key</th><th>供应商分组 / 倍率</th></tr></thead><tbody>${rows}</tbody></table></div>` : emptyState('waypoints', '没有可映射项', '请确认供应商资产已同步且 Sub2API 账号名称可匹配')}`;
+  $('#auto-mapping-preview').innerHTML = `<div class="status-summary"><span>${badge('pending_create', `待新增 ${summary.pendingCreate}`)}</span><span>${badge('existing', `已存在 ${summary.existing}`)}</span><span>${badge(summary.conflict ? 'conflict' : 'healthy', `冲突 ${summary.conflict}`)}</span><span>${badge(summary.skipped ? 'warning' : 'healthy', `跳过 ${summary.skipped}`)}</span></div>${rows ? `<div class="table-wrap auto-mapping-table"><table><thead><tr><th>结果</th><th>供应商</th><th>Sub2API 分组</th><th>账号 / Key</th><th>供应商分组 / 倍率</th></tr></thead><tbody>${rows}</tbody></table></div>` : emptyState('waypoints', '没有可映射项', '请确认供应商资产已同步且 Sub2API 账号名称可匹配')}`;
   $('button[type="submit"]', $('#auto-mapping-form')).disabled = summary.pendingCreate === 0;
   icons();
 }
@@ -676,7 +668,7 @@ async function renderIntegrations() {
   const summary = comparisonData.summary;
   const status = comparisonData.status;
   const authLabel = status.authentication?.available ? `凭据：${status.authentication.source}` : '缺少可用管理员凭据';
-  $('#main-content').innerHTML = `<section class="base-instance-bar"><div><span class="status-dot ${status.authentication?.available ? 'healthy' : 'warning'}"></span><strong>${escapeHtml(status.publicUrl || status.baseUrl || '未配置基座 Sub2API')}</strong><small>${escapeHtml(authLabel)} · 最近检查 ${escapeHtml(timeAgo(status.lastCheckedAt))}</small></div><div class="status-summary"><span>${badge('aligned', `一致 ${summary.aligned}`)}</span><span>${badge('warning', `预警 ${summary.warning}`)}</span><span>${badge('failed', `错误 ${summary.error}`)}</span><span>${badge('unknown', `待检查 ${summary.unchecked}`)}</span></div></section><section class="section"><div class="section-header"><h2>分组与倍率对照</h2><p>${state.integrationGroups.length} 个 Sub2API 分组</p></div><div class="table-wrap integration-table">${mappingRows ? `<table><thead><tr><th>Sub2API 分组 / 渠道</th><th class="numeric">基座倍率</th><th>最高倍率供应商 / Key</th><th>供应商分组 / 倍率</th><th class="numeric">倍率差</th><th>检查</th><th>映射 / 对账</th><th></th></tr></thead><tbody>${mappingRows}</tbody></table>` : emptyState('waypoints', '暂无 Sub2API 分组', '刷新基座后显示分组与映射关系')}</div></section><section class="section"><div class="section-header"><h2>对账记录</h2></div><div class="table-wrap">${reconciliationRows ? `<table><thead><tr><th>供应商</th><th>结果</th><th>期间</th><th class="numeric">余额减少</th><th class="numeric">预期成本</th><th class="numeric">差异</th><th class="numeric">健康分</th></tr></thead><tbody>${reconciliationRows}</tbody></table>` : emptyState('calculator', '暂无对账记录', '映射创建后可执行对账')}</div></section><section class="section split-layout"><div><div class="section-header"><h2>签到记录</h2></div><div class="table-wrap">${checkinRows ? `<table><thead><tr><th>供应商</th><th>状态</th><th class="numeric">奖励</th><th class="numeric">签到前</th><th class="numeric">签到后</th><th>时间</th></tr></thead><tbody>${checkinRows}</tbody></table>` : emptyState('calendar-check', '暂无签到记录', '支持的供应商可手动或定时签到')}</div></div><div><div class="section-header"><h2>手动签到</h2></div><div class="table-wrap"><table><thead><tr><th>供应商</th><th>能力</th><th></th></tr></thead><tbody>${providerCheckins}</tbody></table></div></div></section>`;
+  $('#main-content').innerHTML = `<section class="base-instance-bar"><div><span class="status-dot ${status.authentication?.available ? 'healthy' : 'warning'}"></span><strong>${escapeHtml(status.publicUrl || status.baseUrl || '未配置基座 Sub2API')}</strong><small>${escapeHtml(authLabel)} · 最近检查 ${escapeHtml(timeAgo(status.lastCheckedAt))}</small></div><div class="status-summary"><span>${badge('aligned', `一致 ${summary.aligned}`)}</span><span>${badge('warning', `预警 ${summary.warning}`)}</span><span>${badge('failed', `错误 ${summary.error}`)}</span><span>${badge('unknown', `待检查 ${summary.unchecked}`)}</span></div></section><section class="section"><div class="section-header"><h2>分组与倍率对照</h2><p>${state.integrationGroups.length} 个 Sub2API 分组</p></div><div class="table-wrap integration-table">${mappingRows ? `<table><thead><tr><th>Sub2API 分组</th><th class="numeric">基座倍率</th><th>最高倍率供应商 / Key</th><th>供应商分组 / 倍率</th><th class="numeric">倍率差</th><th>检查</th><th>映射 / 对账</th><th></th></tr></thead><tbody>${mappingRows}</tbody></table>` : emptyState('waypoints', '暂无 Sub2API 分组', '刷新基座后显示分组与映射关系')}</div></section><section class="section"><div class="section-header"><h2>对账记录</h2></div><div class="table-wrap">${reconciliationRows ? `<table><thead><tr><th>供应商</th><th>结果</th><th>期间</th><th class="numeric">余额减少</th><th class="numeric">预期成本</th><th class="numeric">差异</th><th class="numeric">健康分</th></tr></thead><tbody>${reconciliationRows}</tbody></table>` : emptyState('calculator', '暂无对账记录', '映射创建后可执行对账')}</div></section><section class="section split-layout"><div><div class="section-header"><h2>签到记录</h2></div><div class="table-wrap">${checkinRows ? `<table><thead><tr><th>供应商</th><th>状态</th><th class="numeric">奖励</th><th class="numeric">签到前</th><th class="numeric">签到后</th><th>时间</th></tr></thead><tbody>${checkinRows}</tbody></table>` : emptyState('calendar-check', '暂无签到记录', '支持的供应商可手动或定时签到')}</div></div><div><div class="section-header"><h2>手动签到</h2></div><div class="table-wrap"><table><thead><tr><th>供应商</th><th>能力</th><th></th></tr></thead><tbody>${providerCheckins}</tbody></table></div></div></section>`;
 }
 
 async function renderSettings() {
@@ -1112,25 +1104,20 @@ function updateMappingProviderGroupOptions(selected = '') {
 
 function updateMappingBaseGroupOptions(selected = '') {
   const form = $('#mapping-form');
-  const channel = state.sub2apiChannels.find((item) => Number(item.id) === Number(form.elements.channelId.value));
-  const channelGroupIds = channel?.groupIds || [];
-  const groups = channelGroupIds.length
-    ? state.sub2apiGroups.filter((group) => channelGroupIds.includes(Number(group.id)))
-    : state.sub2apiGroups;
+  const groups = state.sub2apiGroups;
   const selectedExists = groups.some((group) => Number(group.id) === Number(selected));
   const missingOption = selected && !selectedExists ? `<option value="${escapeHtml(selected)}">分组 #${escapeHtml(selected)}（当前不可用）</option>` : '';
-  form.elements.groupId.innerHTML = `<option value="">自动匹配${channelGroupIds.length === 1 ? `（${escapeHtml(groups[0]?.name || channelGroupIds[0])}）` : ''}</option>${missingOption}${groups.map((group) => `<option value="${group.id}">${escapeHtml(group.name)} · ${formatEffectiveRate(group.effectiveRate)}</option>`).join('')}`;
+  form.elements.groupId.innerHTML = `<option value="">选择分组</option>${missingOption}${groups.map((group) => `<option value="${group.id}">${escapeHtml(group.name)} · ${formatEffectiveRate(group.effectiveRate)}</option>`).join('')}`;
   form.elements.groupId.value = selected || '';
 }
 
 async function openMappingDialog(mapping = null) {
-  const [keys, groups, channels, baseGroups, monitors, settings] = await Promise.all([
-    api('/api/keys'), api('/api/groups'), api('/api/sub2api/channels'),
-    api('/api/sub2api/groups'), api('/api/sub2api/channel-monitors'), api('/api/settings')
+  const [keys, groups, baseGroups, monitors, settings] = await Promise.all([
+    api('/api/keys'), api('/api/groups'), api('/api/sub2api/groups'),
+    api('/api/sub2api/channel-monitors'), api('/api/settings')
   ]);
   state.keys = keys.items;
   state.groups = groups.items;
-  state.sub2apiChannels = channels.items;
   state.sub2apiGroups = baseGroups.items;
   state.sub2apiMonitors = monitors.items || [];
   state.settings = settings;
@@ -1141,9 +1128,6 @@ async function openMappingDialog(mapping = null) {
   form.elements.connectionId.value = mapping?.connection_id || state.providers[0]?.id || '';
   updateMappingKeyOptions(mapping?.key_id || '');
   updateMappingProviderGroupOptions(mapping?.config?.upstreamGroupRef || '');
-  const channelExists = state.sub2apiChannels.some((channel) => Number(channel.id) === Number(mapping?.channel_id));
-  form.elements.channelId.innerHTML = `${mapping?.channel_id && !channelExists ? `<option value="${mapping.channel_id}">渠道 #${mapping.channel_id}（当前不可用）</option>` : ''}${state.sub2apiChannels.map((channel) => `<option value="${channel.id}">${escapeHtml(channel.name)} · #${channel.id}${channel.status !== 'active' ? ` · ${escapeHtml(channel.status)}` : ''}</option>`).join('')}`;
-  form.elements.channelId.value = mapping?.channel_id || state.sub2apiChannels[0]?.id || '';
   updateMappingBaseGroupOptions(mapping?.group_id || '');
   form.elements.accountId.value = mapping?.account_id || '';
   form.elements.role.value = mapping?.role || 'primary';
@@ -1270,7 +1254,7 @@ async function handleAction(button) {
       await navigate('integrations');
     }
     if (action === 'edit-mapping') await openMappingDialog(state.mappings.find((mapping) => mapping.id === id));
-    if (action === 'delete-mapping' && confirm('删除该渠道映射及其对账历史？')) { await api(`/api/mappings/${id}`, { method: 'DELETE' }); toast('映射已删除'); navigate('integrations'); }
+    if (action === 'delete-mapping' && confirm('删除该分组映射及其对账历史？')) { await api(`/api/mappings/${id}`, { method: 'DELETE' }); toast('映射已删除'); navigate('integrations'); }
     if (action === 'reconcile') { const result = await api(`/api/mappings/${id}/reconcile`, { method: 'POST', body: {} }); toast(`对账完成：${result.status}`); navigate('integrations'); }
     if (action === 'activate-backup' && confirm('将该备用映射设为当前主映射？')) { await api(`/api/mappings/${id}/activate-backup`, { method: 'POST' }); toast('备用映射已激活'); navigate('integrations'); }
     if (action === 'rotate-credential') openCredentialDialog(state.providers.find((provider) => provider.id === id));
@@ -1353,7 +1337,6 @@ document.addEventListener('change', (event) => {
     updateMappingKeyOptions();
     updateMappingProviderGroupOptions();
   }
-  if (event.target.matches('#mapping-form [name="channelId"]')) updateMappingBaseGroupOptions();
   if (event.target.matches('#mapping-form [name="keyId"]')) {
     const key = state.keys.find((item) => item.id === event.target.value);
     if (key?.primary_group_ref) updateMappingProviderGroupOptions(key.primary_group_ref);
@@ -1462,7 +1445,6 @@ $('#mapping-form').addEventListener('submit', async (event) => {
   const payload = {
     connectionId: form.elements.connectionId.value,
     keyId: form.elements.keyId.value || null,
-    channelId: Number(form.elements.channelId.value),
     accountId: form.elements.accountId.value ? Number(form.elements.accountId.value) : null,
     groupId: form.elements.groupId.value ? Number(form.elements.groupId.value) : null,
     role: form.elements.role.value,
@@ -1470,7 +1452,7 @@ $('#mapping-form').addEventListener('submit', async (event) => {
     models: form.elements.models.value.split(',').map((value) => value.trim()).filter(Boolean),
     config
   };
-  try { await api(id ? `/api/mappings/${id}` : '/api/mappings', { method: id ? 'PUT' : 'POST', body: payload }); $('#mapping-dialog').close(); toast('渠道映射已保存'); navigate('integrations'); } catch (error) { toast(error.message, 'error'); }
+  try { await api(id ? `/api/mappings/${id}` : '/api/mappings', { method: id ? 'PUT' : 'POST', body: payload }); $('#mapping-dialog').close(); toast('分组映射已保存'); navigate('integrations'); } catch (error) { toast(error.message, 'error'); }
 });
 
 $('#credential-form').addEventListener('submit', async (event) => {

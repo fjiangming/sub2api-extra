@@ -121,7 +121,7 @@ test('auto-mapping processes every account from a multiple contains match', asyn
     db: context.db,
     config: context.config,
     sub2api: sub2apiFixture({
-      channels: [{ id: 1, name: 'GPT', status: 'active', group_ids: [3] }],
+      channels: [],
       groups: [{ id: 3, name: 'GPT accounts', status: 'active', rate_multiplier: 1 }],
       accounts: [
         { id: 108, name: 'AI2API-plus0.045', type: 'apikey', group_ids: [3], credentials_status: { has_api_key: true } },
@@ -137,7 +137,7 @@ test('auto-mapping processes every account from a multiple contains match', asyn
   assert.equal(preview.summary.pendingCreate, 2);
   assert.equal(preview.summary.conflict, 0);
   assert.deepEqual(preview.items.map((item) => item.accountId), [108, 113]);
-  assert.deepEqual(preview.items.map((item) => item.channelName), ['GPT', 'GPT']);
+  assert.equal(preview.items.some((item) => 'channelId' in item || 'channelName' in item), false);
   assert.deepEqual(preview.items.map((item) => item.accountMatch), ['contains', 'contains']);
   assert.deepEqual(new Set(String(exports[0].ids).split(',').map(Number)), new Set([108, 113]));
 
@@ -464,21 +464,19 @@ test('auto-mapping rolls back every insert when one item fails inside the apply 
 
 test('highest-rate grouping uses stable tie-breakers, excludes invalid rates and keeps unassigned rows', () => {
   const items = [
-    { id: 'channel-2', channel_id: 2, provider_name: 'Alpha', key_id: 'a', group_id: 1, comparison: { providerRate: 2 } },
-    { id: 'provider-z', channel_id: 1, provider_name: 'Zulu', key_id: 'a', group_id: 1, comparison: { providerRate: 2 } },
-    { id: 'key-z', channel_id: 1, provider_name: 'Alpha', key_id: 'z', group_id: 1, comparison: { providerRate: 2 } },
-    { id: 'winner', channel_id: 1, provider_name: 'Alpha', key_id: 'a', group_id: 1, enabled: false, comparison: { providerRate: 2 } },
-    { id: 'zero', channel_id: 1, provider_name: 'Alpha', key_id: '0', group_id: 1, comparison: { providerRate: 0 } },
-    { id: 'invalid', channel_id: 1, provider_name: 'Alpha', key_id: 'x', group_id: 1, comparison: { providerRate: 'not-a-rate' } },
-    { id: 'orphan', channel_id: 9, provider_name: 'Other', key_id: 'o', group_id: 999, comparison: { providerRate: 9 } }
+    { id: 'provider-z', provider_name: 'Zulu', key_id: 'a', account_id: 1, group_id: 1, comparison: { providerRate: 2 } },
+    { id: 'key-z', provider_name: 'Alpha', key_id: 'z', account_id: 2, group_id: 1, comparison: { providerRate: 2 } },
+    { id: 'winner', provider_name: 'Alpha', key_id: 'a', account_id: 3, group_id: 1, enabled: false, comparison: { providerRate: 2 } },
+    { id: 'zero', provider_name: 'Alpha', key_id: '0', account_id: 4, group_id: 1, comparison: { providerRate: 0 } },
+    { id: 'invalid', provider_name: 'Alpha', key_id: 'x', account_id: 5, group_id: 1, comparison: { providerRate: 'not-a-rate' } },
+    { id: 'orphan', provider_name: 'Other', key_id: 'o', account_id: 6, group_id: 999, comparison: { providerRate: 9 } }
   ];
   assert.equal(highestMapping(items.filter((item) => item.group_id === 1)).id, 'winner');
   const grouped = groupComparisons(items, {
     groups: [
       { id: 1, name: 'One', status: 'active', defaultRate: 1, effectiveRate: 1 },
       { id: 2, name: 'Two', status: 'inactive', defaultRate: 1, effectiveRate: 1 }
-    ],
-    channels: [{ id: 1, name: 'Channel', status: 'active', groupIds: [1], groupIdsKnown: true }]
+    ]
   });
   assert.equal(grouped.groups.length, 2);
   assert.equal(grouped.groups[0].highest.id, 'winner');

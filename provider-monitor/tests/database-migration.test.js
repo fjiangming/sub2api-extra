@@ -6,7 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
-test('schema v8 migration preserves mapping dependents and permits account-group identities', (t) => {
+test('schema v9 migration removes channel identity and preserves mapping dependents', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
   let db = createDatabase(databasePath);
@@ -70,34 +70,47 @@ test('schema v8 migration preserves mapping dependents and permits account-group
     ALTER TABLE sub2api_mappings_v7 RENAME TO sub2api_mappings;
     CREATE UNIQUE INDEX sub2api_mapping_account_identity
       ON sub2api_mappings(connection_id, channel_id) WHERE key_id IS NULL;
+    INSERT INTO sub2api_mappings(
+      id, connection_id, key_id, channel_id, account_id, group_id,
+      role, enabled, models_json, config_json, created_at, updated_at
+    ) VALUES ('mapping-duplicate', 'provider', 'key', 12, 21, 31, 'backup', 0, '[]', '{}', '${now}', '${now}');
+    INSERT INTO reconciliation_runs(
+      id, mapping_id, status, period_start, period_end, details_json, created_at
+    ) VALUES ('duplicate-reconciliation', 'mapping-duplicate', 'succeeded', '${now}', '${now}', '{}', '${now}');
     DELETE FROM schema_migrations;
-    INSERT INTO schema_migrations(version, applied_at) VALUES (7, '${now}');
+    INSERT INTO schema_migrations(version, applied_at) VALUES (8, '${now}');
   `);
   db.close();
 
   db = createDatabase(databasePath);
-  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 8').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 9').get());
+  assert.equal(db.prepare('PRAGMA table_info(sub2api_mappings)').all().find((column) => column.name === 'channel_id').notnull, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count, 1);
   assert.equal(db.prepare('SELECT status FROM sub2api_mapping_states WHERE mapping_id = ?').get('mapping').status, 'aligned');
   assert.equal(db.prepare('SELECT status FROM reconciliation_runs WHERE mapping_id = ?').get('mapping').status, 'succeeded');
+  assert.equal(db.prepare('SELECT mapping_id FROM reconciliation_runs WHERE id = ?').get('duplicate-reconciliation').mapping_id, 'mapping');
   assert.deepEqual(db.pragma('foreign_key_check'), []);
 
   db.prepare(`
     INSERT INTO sub2api_mappings(
       id, connection_id, key_id, channel_id, account_id, group_id,
       role, enabled, models_json, config_json, created_at, updated_at
-    ) VALUES ('mapping-2', 'provider', 'key', 11, 21, 32, 'primary', 1, '[]', '{}', ?, ?)
+    ) VALUES ('mapping-2', 'provider', 'key', NULL, 21, 32, 'primary', 1, '[]', '{}', ?, ?)
   `).run(now, now);
   db.prepare(`
     INSERT INTO sub2api_mappings(
       id, connection_id, key_id, channel_id, account_id, group_id,
       role, enabled, models_json, config_json, created_at, updated_at
-    ) VALUES ('mapping-3', 'provider', 'key', 11, 22, 31, 'primary', 1, '[]', '{}', ?, ?)
+    ) VALUES ('mapping-3', 'provider', 'key', NULL, 22, 31, 'primary', 1, '[]', '{}', ?, ?)
   `).run(now, now);
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count, 3);
+  db.close();
+  db = createDatabase(databasePath);
   assert.equal(db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count, 3);
   assert.throws(() => db.prepare(`
     INSERT INTO sub2api_mappings(
       id, connection_id, key_id, channel_id, account_id, group_id,
       role, enabled, models_json, config_json, created_at, updated_at
-    ) VALUES ('duplicate', 'provider', 'key', 11, 21, 31, 'primary', 1, '[]', '{}', ?, ?)
+    ) VALUES ('duplicate', 'provider', 'key', 999, 21, 31, 'primary', 1, '[]', '{}', ?, ?)
   `).run(now, now), /UNIQUE constraint failed/);
 });

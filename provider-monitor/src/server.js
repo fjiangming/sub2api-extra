@@ -98,9 +98,8 @@ const automationSchema = z.object({
 const mappingSchema = z.object({
   connectionId: z.string().uuid(),
   keyId: z.string().uuid().nullable().optional(),
-  channelId: z.number().int().positive(),
   accountId: z.number().int().positive().nullable().optional(),
-  groupId: z.number().int().positive().nullable().optional(),
+  groupId: z.number().int().positive(),
   role: z.enum(['primary', 'backup']).optional(),
   enabled: z.boolean().optional(),
   models: z.array(z.string().max(200)).max(500).optional(),
@@ -899,8 +898,7 @@ function createApplication(options = {}) {
   }));
 
   api.get('/mappings', (req, res) => res.json({ items: mappings.list({
-    connectionId: req.query.connectionId,
-    channelId: req.query.channelId
+    connectionId: req.query.connectionId
   }) }));
   api.post('/mappings', (req, res) => {
     const mapping = mappings.save(validate(mappingSchema, req.body));
@@ -922,7 +920,7 @@ function createApplication(options = {}) {
   api.post('/mappings/:id/activate-backup', (req, res) => {
     const mapping = mappings.activateBackup(req.params.id);
     queue.enqueue('sub2api_mapping_sync', { priority: 5 });
-    audit(db, req, 'mapping.activate_backup', 'mapping', mapping.id, { channelId: mapping.channel_id });
+    audit(db, req, 'mapping.activate_backup', 'mapping', mapping.id, { groupId: mapping.group_id });
     res.json(mapping);
   });
   api.get('/sub2api/channels', asyncRoute(async (_req, res) => res.json(await mappings.channels())));

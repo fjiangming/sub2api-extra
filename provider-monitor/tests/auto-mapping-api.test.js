@@ -37,9 +37,6 @@ test('auto-mapping HTTP API enforces CSRF and exposes preview, apply and grouped
   const keyId = seedProviderAssets(context.db, provider.id, apiKey);
   sub2api.authenticationStatus = () => ({ available: true, source: 'test' });
   sub2api.listAll = async (endpoint) => {
-    if (endpoint === '/api/v1/admin/channels') {
-      return { items: [{ id: 51, name: 'Unrelated API route', status: 'active', group_ids: [501] }] };
-    }
     if (endpoint === '/api/v1/admin/accounts') {
       return { items: [{ id: 901, name: 'API Supplier', type: 'api_key', group_ids: [501], credentials_status: { has_api_key: true } }] };
     }
@@ -94,6 +91,7 @@ test('auto-mapping HTTP API enforces CSRF and exposes preview, apply and grouped
   const preview = await previewResponse.json();
   assert.equal(preview.summary.pendingCreate, 1);
   assert.equal(preview.items[0].keyId, keyId);
+  assert.equal('channelId' in preview.items[0], false);
   assert.doesNotMatch(JSON.stringify(preview), /sk-api-route-test/);
   assert.equal(context.db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count, 0);
 
@@ -103,6 +101,7 @@ test('auto-mapping HTTP API enforces CSRF and exposes preview, apply and grouped
   assert.equal(applyResponse.status, 200);
   const applied = await applyResponse.json();
   assert.equal(applied.summary.created, 1);
+  assert.equal(context.db.prepare('SELECT channel_id FROM sub2api_mappings').get().channel_id, null);
 
   const comparisonsResponse = await fetch(`${base}/api/sub2api/comparisons`, { headers: { Cookie: cookie } });
   assert.equal(comparisonsResponse.status, 200);
