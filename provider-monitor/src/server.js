@@ -11,7 +11,10 @@ const { AppError, errorResponse } = require('./errors');
 const { redact, redactText } = require('./security/redaction');
 const { HttpClient } = require('./http/client');
 const { createAdapter, listAdapterTypes } = require('./adapters/registry');
-const { ProviderRepository } = require('./repositories/provider-repository');
+const {
+  ProviderRepository,
+  mergeProviderCredentials
+} = require('./repositories/provider-repository');
 const { QueryService } = require('./services/query-service');
 const { JobQueue } = require('./services/job-queue');
 const { NotificationService } = require('./services/notification-service');
@@ -50,6 +53,9 @@ const providerSchema = z.object({
 });
 
 const providerUpdateSchema = providerSchema.partial();
+const providerValidationSchema = providerSchema.extend({
+  existingProviderId: z.string().uuid().optional()
+});
 const alertRuleSchema = z.object({
   name: z.string().trim().min(1).max(120),
   enabled: z.boolean().optional(),
@@ -467,9 +473,23 @@ function createApplication(options = {}) {
     res.status(201).json({ provider, jobId });
   }));
   api.post('/providers/validate', asyncRoute(async (req, res) => {
-    const input = validate(providerSchema, req.body);
+    const input = validate(providerValidationSchema, req.body);
+    if (!listAdapterTypes().includes(input.adapterType)) {
+      throw new AppError('ADAPTER_NOT_FOUND', 'Unsupported provider adapter', { status: 400 });
+    }
+    const existing = input.existingProviderId
+      ? providers.get(input.existingProviderId, { forAdapter: true })
+      : null;
+    const storedCredentials = existing ? providers.getCredentials(existing) : {};
+    const submittedCredentials = input.credentials || {};
+    const credentials = mergeProviderCredentials(
+      storedCredentials,
+      submittedCredentials,
+      input.adapterType
+    );
+    const mayPersistRefreshedSession = existing && Object.keys(submittedCredentials).length === 0;
     const fakeConnection = {
-      id: crypto.randomUUID(),
+      id: existing?.id || crypto.randomUUID(),
       name: input.name,
       adapter_type: input.adapterType,
       base_url: input.baseUrl.replace(/\/+$/, ''),
@@ -480,10 +500,12 @@ function createApplication(options = {}) {
     };
     const adapter = createAdapter(input.adapterType, {
       connection: fakeConnection,
-      credentials: input.credentials || {},
+      credentials,
       http,
       config,
-      onCredentialsUpdated: async () => {}
+      onCredentialsUpdated: async (next) => {
+        if (mayPersistRefreshedSession) providers.updateCredentials(existing, next);
+      }
     });
     const probe = await adapter.probe();
     const account = await adapter.getAccount();
@@ -506,13 +528,21 @@ function createApplication(options = {}) {
   }));
   api.post('/providers/:id/validate', asyncRoute(async (req, res) => {
     const connection = providers.get(req.params.id, { forAdapter: true });
-    const candidate = { ...providers.getCredentials(connection), ...(req.body?.credentials || {}) };
+    const submittedCredentials = req.body?.credentials || {};
+    const candidate = mergeProviderCredentials(
+      providers.getCredentials(connection),
+      submittedCredentials,
+      connection.adapter_type
+    );
+    const mayPersistRefreshedSession = Object.keys(submittedCredentials).length === 0;
     const adapter = createAdapter(connection.adapter_type, {
       connection,
       credentials: candidate,
       http,
       config,
-      onCredentialsUpdated: async () => {}
+      onCredentialsUpdated: async (next) => {
+        if (mayPersistRefreshedSession) providers.updateCredentials(connection, next);
+      }
     });
     const probe = await adapter.probe();
     const account = await adapter.getAccount();

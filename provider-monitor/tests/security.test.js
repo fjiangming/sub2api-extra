@@ -9,6 +9,7 @@ const {
 const { assertSafeUrl, isPrivateIp } = require('../src/security/ssrf-guard');
 const { validateJsonPath } = require('../src/adapters/custom');
 const { redactText } = require('../src/security/redaction');
+const { classifyHttpError } = require('../src/http/client');
 
 test('credential envelope encrypts, authenticates and decrypts JSON', () => {
   const secret = '0123456789abcdef0123456789abcdef';
@@ -23,6 +24,19 @@ test('local administrator password uses a salted scrypt hash', () => {
   const encoded = createScryptPasswordHash('correct horse battery staple');
   assert.equal(verifyScryptPassword('correct horse battery staple', encoded), true);
   assert.equal(verifyScryptPassword('wrong password', encoded), false);
+});
+
+test('provider HTTP errors preserve upstream reason codes for adapter guidance', () => {
+  const error = classifyHttpError(
+    400,
+    { reason: 'TURNSTILE_VERIFICATION_FAILED', message: 'turnstile verification failed' },
+    { get() { return null; } }
+  );
+  assert.equal(error.code, 'REMOTE_REQUEST_FAILED');
+  assert.deepEqual(error.details, {
+    remoteCode: 'TURNSTILE_VERIFICATION_FAILED',
+    remoteStatus: 400
+  });
 });
 
 test('SSRF guard allows all private hosts when the host list is empty', async () => {

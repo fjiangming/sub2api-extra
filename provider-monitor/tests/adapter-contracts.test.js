@@ -7,6 +7,7 @@ const { OpenRouterAdapter } = require('../src/adapters/openrouter');
 const { LiteLlmAdapter } = require('../src/adapters/litellm');
 const { VoApiV2Adapter } = require('../src/adapters/voapi-v2');
 const { CustomAdapter } = require('../src/adapters/custom');
+const { AppError } = require('../src/errors');
 
 function context(type, responder, extra = {}) {
   return {
@@ -17,7 +18,7 @@ function context(type, responder, extra = {}) {
     },
     credentials: { systemToken: 'system-token', userId: '7', ...extra.credentials },
     config: { maxResponseBytes: 1024 * 1024 },
-    onCredentialsUpdated: async () => {},
+    onCredentialsUpdated: extra.onCredentialsUpdated || (async () => {}),
     http: {
       async requestJson(input, options) {
         return { data: await responder(new URL(input), options || {}) };
@@ -25,6 +26,68 @@ function context(type, responder, extra = {}) {
     }
   };
 }
+
+test('Sub2API OAuth token-pair mode refreshes and persists rotated credentials', async () => {
+  let updatedCredentials = null;
+  const requests = [];
+  const adapter = new Sub2ApiAdapter(context('sub2api', (url, options) => {
+    requests.push({ path: url.pathname, body: options.body });
+    if (url.pathname === '/api/v1/auth/refresh') {
+      return {
+        code: 0,
+        data: { access_token: 'rotated-access', refresh_token: 'rotated-refresh', expires_in: 7200 }
+      };
+    }
+    if (url.pathname === '/api/v1/user/profile') {
+      return { code: 0, data: { id: 7, username: 'oauth-user', balance: 4.5 } };
+    }
+    throw new Error(`Unexpected ${url.pathname}`);
+  }, {
+    connection: { auth_mode: 'token_pair' },
+    credentials: { refreshToken: 'browser-refresh-token' },
+    onCredentialsUpdated: async (next) => { updatedCredentials = next; }
+  }));
+
+  const account = await adapter.getAccount();
+  assert.equal(account.displayName, 'oauth-user');
+  assert.deepEqual(requests[0], {
+    path: '/api/v1/auth/refresh',
+    body: { refresh_token: 'browser-refresh-token' }
+  });
+  assert.equal(updatedCredentials.accessToken, 'rotated-access');
+  assert.equal(updatedCredentials.refreshToken, 'rotated-refresh');
+  assert.equal(updatedCredentials.expiresIn, 7200);
+});
+
+test('Sub2API authentication reports interactive and session-bound login requirements', async () => {
+  const turnstile = new Sub2ApiAdapter(context('sub2api', () => {
+    throw new AppError('REMOTE_REQUEST_FAILED', 'turnstile verification failed', {
+      status: 400,
+      details: { remoteCode: 'TURNSTILE_VERIFICATION_FAILED', remoteStatus: 400 }
+    });
+  }, {
+    connection: { auth_mode: 'account' },
+    credentials: { email: 'user@example.com', password: 'correct-password' }
+  }));
+  await assert.rejects(
+    turnstile.getAccount(),
+    (error) => error.code === 'CAPTCHA_REQUIRED' && error.status === 409
+  );
+
+  const sessionBound = new Sub2ApiAdapter(context('sub2api', () => {
+    throw new AppError('AUTH_FAILED', 'session fingerprint changed', {
+      status: 401,
+      details: { remoteCode: 'SESSION_BINDING_MISMATCH', remoteStatus: 401 }
+    });
+  }, {
+    connection: { auth_mode: 'token_pair' },
+    credentials: { accessToken: 'browser-access-token', tokenExpiresAt: Date.now() + 3600000 }
+  }));
+  await assert.rejects(
+    sessionBound.getAccount(),
+    (error) => error.code === 'SUB2API_SESSION_BINDING_INCOMPATIBLE' && error.status === 409
+  );
+});
 
 test('Sub2API contract returns account balance, keys and group associations', async () => {
   // Source: Wei-Shaw/sub2api user routes and DTOs, verified 2026-07-17.

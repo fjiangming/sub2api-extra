@@ -45,6 +45,7 @@ function createBrowserContext() {
     fetch: async () => { throw new Error('Unexpected fetch'); },
     sessionStorage,
     setTimeout,
+    URL,
     window: { addEventListener() {}, lucide: null }
   });
   const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
@@ -98,6 +99,46 @@ test('embedded SSO failures are actionable and do not request autofocus', () => 
   assert.match(source, /if \(ssoError\) \{[\s\S]*?removeItem\('provider-monitor\.session'\);[\s\S]*?return;/);
   assert.doesNotMatch(index, /\sautofocus(?:\s|>)/i);
   assert.match(index, /id="sub2api-login-link" target="_top"/);
+});
+
+test('Sub2API provider validation keeps the edited provider identity and separates account from OAuth credentials', () => {
+  const { context } = createBrowserContext();
+  const credentials = [{ dataset: { credential: 'password' }, value: 'replacement-password' }];
+  const form = {
+    elements: {
+      id: { value: '11111111-1111-4111-8111-111111111111' },
+      name: { value: 'Supplier' },
+      adapterType: { value: 'sub2api' },
+      baseUrl: { value: 'https://supplier.example' },
+      authMode: { value: 'account' },
+      remoteUserId: { value: '' },
+      enabled: { checked: true },
+      refreshIntervalMinutes: { value: '15' },
+      warningThreshold: { value: '' },
+      thresholdCurrency: { value: 'USD' },
+      typeConfig: { value: '{}' },
+      tags: { value: '' },
+      note: { value: '' },
+      accountDedupeKey: { value: '' }
+    },
+    querySelectorAll(selector) { return selector === '[data-credential]' ? credentials : []; }
+  };
+  context.testProviderForm = form;
+
+  const payload = JSON.parse(vm.runInContext(
+    'JSON.stringify(providerValidationPayload(testProviderForm))',
+    context
+  ));
+  assert.equal(payload.existingProviderId, form.elements.id.value);
+  assert.deepEqual(payload.credentials, { password: 'replacement-password' });
+  assert.equal(
+    vm.runInContext("credentialFieldsFor('sub2api', 'account').map(([name]) => name).join(',')", context),
+    'email,password'
+  );
+  assert.equal(
+    vm.runInContext("credentialFieldsFor('sub2api', 'token_pair').map(([name]) => name).join(',')", context),
+    'accessToken,refreshToken'
+  );
 });
 
 test('effective rates use at most three decimal places without trailing zeroes', () => {

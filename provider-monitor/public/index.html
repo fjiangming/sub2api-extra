@@ -72,7 +72,7 @@
         <label><span>名称</span><input name="name" maxlength="120" required></label>
         <label><span>适配器</span><select name="adapterType" required></select></label>
         <label class="span-2 provider-url-field"><span>基础地址</span><input name="baseUrl" type="url" placeholder="https://api.example.com" required><small id="provider-detection-status" class="provider-detection-status" aria-live="polite"></small></label>
-        <label><span>认证模式</span><select name="authMode"><option value="api_key">API Key</option><option value="system_token">系统令牌</option><option value="management_key">管理密钥</option><option value="account">账号登录</option><option value="bearer">Bearer Token</option></select></label>
+        <label><span>认证模式</span><select name="authMode"><option value="api_key">API Key</option><option value="system_token">系统令牌</option><option value="management_key">管理密钥</option><option value="account">账号登录</option><option value="token_pair">OAuth Token 对</option><option value="bearer">Bearer Token</option></select></label>
         <label><span>远端用户 ID</span><input name="remoteUserId"></label>
         <label><span>刷新间隔（分钟）</span><input name="refreshIntervalMinutes" type="number" min="1" max="1440" value="15"></label>
         <label><span>余额预警值</span><input name="warningThreshold" type="number" min="0" step="0.01"></label>

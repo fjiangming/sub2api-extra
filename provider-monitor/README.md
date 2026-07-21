@@ -38,6 +38,29 @@ Sub2API 会同步普通用户可见的默认倍率和用户有效倍率，并保
 
 不同分支可能关闭或改写密钥、分组端点。同步会把这类情况标记为"部分成功"，并继续保存已经确认的余额，不会伪造缺失能力。
 
+### Sub2API 供应商认证
+
+添加 Sub2API 供应商时支持两种模式：
+
+- **账号登录**：填写 Sub2API 本地邮箱和本地密码。编辑已有连接时，凭据留空会复用加密保存的值；重新填写邮箱或密码会丢弃旧会话 Token，避免旧 Token 覆盖新账号凭据。
+- **OAuth Token 对**：填写 Sub2API 当前会话的 Access Token 和 Refresh Token，适用于通过 Linux.do 等第三方 OAuth 快捷注册、没有本地密码的账号。Provider Monitor 会在刷新时保存服务端返回的新 Token 对。
+
+Sub2API 当前源码会为直接创建的 Linux.do OAuth 账号使用 `linuxdo-<subject>@linuxdo-connect.invalid` 合成邮箱，并生成一个不会展示给用户的随机本地密码。因此 Linux.do 邮箱和 Linux.do 密码都不能用于“账号登录”。优先在 Sub2API 的“个人资料 -> 账号绑定”中绑定真实邮箱并设置本地密码；无法绑定时再使用 OAuth Token 对。
+
+Token 对可以在一个单独的浏览器会话登录 Sub2API 后，从浏览器开发者工具读取：
+
+```js
+localStorage.getItem('auth_token')
+localStorage.getItem('refresh_token')
+```
+
+Token 对模式有两项上游约束：
+
+1. 必须先关闭 Sub2API 的“系统设置 -> 安全设置 -> 会话绑定”，然后重新登录生成不绑定浏览器 IP/UA 的 Token。
+2. Sub2API 的 Refresh Token 每次刷新后立即轮换，不能让浏览器和 Provider Monitor 长期共用同一个 Refresh Token。建议使用独立浏览器会话取得 Token，录入后直接关闭该会话窗口，不要点击退出登录。
+
+若 Sub2API 开启 Turnstile 或登录 TOTP，Provider Monitor 无法用纯邮箱密码完成交互验证，会分别返回 `CAPTCHA_REQUIRED` 或 `MFA_REQUIRED`；此时应使用上述 Token 对或为该账号调整交互登录策略。
+
 ---
 
 ## 快速开始：Docker Compose 拉取镜像部署

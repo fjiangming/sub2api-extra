@@ -30,6 +30,16 @@ function parseRetryAfter(value) {
   return null;
 }
 
+function remoteErrorCode(body) {
+  const candidates = [body?.reason, body?.error?.code, body?.code];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const value = candidate.trim();
+    if (value && !/^\d+$/.test(value)) return value;
+  }
+  return null;
+}
+
 function sanitizeHeaders(headers = {}) {
   const result = {};
   for (const [key, value] of Object.entries(headers)) {
@@ -71,33 +81,34 @@ function classifyHttpError(status, body, headers) {
     body?.error?.message ||
     body?.error ||
     `Provider returned HTTP ${status}`;
+  const details = { remoteCode: remoteErrorCode(body), remoteStatus: status };
 
   if (status === 401) {
-    return new AppError('AUTH_FAILED', message, { status: 401 });
+    return new AppError('AUTH_FAILED', message, { status: 401, details });
   }
   if (status === 403) {
-    return new AppError('PERMISSION_DENIED', message, { status: 403 });
+    return new AppError('PERMISSION_DENIED', message, { status: 403, details });
   }
   if (status === 404) {
-    return new AppError('CAPABILITY_UNSUPPORTED', message, { status: 404 });
+    return new AppError('CAPABILITY_UNSUPPORTED', message, { status: 404, details });
   }
   if (status === 429) {
     return new AppError('RATE_LIMITED', message, {
       status: 429,
       retryable: true,
-      details: { retryAfterMs: parseRetryAfter(headers.get('retry-after')) }
+      details: { ...details, retryAfterMs: parseRetryAfter(headers.get('retry-after')) }
     });
   }
   if (status >= 500) {
     return new AppError('REMOTE_SERVER_ERROR', message, {
       status: 502,
       retryable: true,
-      details: { remoteStatus: status }
+      details
     });
   }
   return new AppError('REMOTE_REQUEST_FAILED', message, {
     status: status >= 400 && status < 500 ? status : 502,
-    details: { remoteStatus: status }
+    details
   });
 }
 
@@ -224,6 +235,8 @@ class HttpClient {
 
 module.exports = {
   HttpClient,
+  classifyHttpError,
   parseRetryAfter,
+  remoteErrorCode,
   sanitizeHeaders
 };

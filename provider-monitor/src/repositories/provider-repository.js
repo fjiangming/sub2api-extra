@@ -9,6 +9,34 @@ function booleanValue(value, fallback = true) {
   return value ? 1 : 0;
 }
 
+const SUB2API_SESSION_CREDENTIAL_FIELDS = [
+  'accessToken',
+  'refreshToken',
+  'expiresIn',
+  'tokenExpiresAt',
+  'accessTokenExpiresAt',
+  'refreshTokenExpiresAt'
+];
+
+function mergeProviderCredentials(existing = {}, incoming = {}, adapterType = '') {
+  const merged = { ...existing, ...incoming };
+  if (adapterType !== 'sub2api') return merged;
+
+  const accountCredentialsChanged = ['email', 'password']
+    .some((field) => Object.prototype.hasOwnProperty.call(incoming, field));
+  if (accountCredentialsChanged) {
+    for (const field of SUB2API_SESSION_CREDENTIAL_FIELDS) delete merged[field];
+    return merged;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(incoming, 'accessToken')) {
+    delete merged.expiresIn;
+    delete merged.tokenExpiresAt;
+    delete merged.accessTokenExpiresAt;
+  }
+  return merged;
+}
+
 function publicConnection(row, credentialFields = []) {
   if (!row) return null;
   return {
@@ -161,10 +189,14 @@ class ProviderRepository {
 
     const update = this.db.transaction(() => {
       if (input.credentials && Object.keys(input.credentials).length > 0) {
-        this.updateCredentials(existing, {
-          ...this.getCredentials(existing),
-          ...input.credentials
-        });
+        this.updateCredentials(
+          existing,
+          mergeProviderCredentials(
+            this.getCredentials(existing),
+            input.credentials,
+            input.adapterType ?? existing.adapter_type
+          )
+        );
       }
       this.db.prepare(`
         UPDATE provider_connections SET
@@ -237,5 +269,6 @@ class ProviderRepository {
 module.exports = {
   ProviderRepository,
   publicConnection,
-  adapterConnection
+  adapterConnection,
+  mergeProviderCredentials
 };

@@ -45,6 +45,29 @@ function hasPrice(price) {
   ].some((value) => value != null);
 }
 
+function usesTokenPair(connection) {
+  return ['token_pair', 'bearer'].includes(String(connection?.auth_mode || '').toLowerCase());
+}
+
+function translateSub2ApiAuthError(error) {
+  const remoteCode = String(error?.details?.remoteCode || '');
+  if (remoteCode === 'SESSION_BINDING_MISMATCH') {
+    return new AppError(
+      'SUB2API_SESSION_BINDING_INCOMPATIBLE',
+      'Sub2API session binding must be disabled before OAuth tokens can be used by Provider Monitor',
+      { status: 409, details: error.details, cause: error }
+    );
+  }
+  if (remoteCode === 'TURNSTILE_VERIFICATION_FAILED') {
+    return new AppError(
+      'CAPTCHA_REQUIRED',
+      'Sub2API requires Turnstile verification; use an OAuth token pair or disable Turnstile for automated account login',
+      { status: 409, details: error.details, cause: error }
+    );
+  }
+  return error;
+}
+
 class Sub2ApiAdapter extends ProviderAdapter {
   capabilities() {
     return {
@@ -85,36 +108,51 @@ class Sub2ApiAdapter extends ProviderAdapter {
 
   async refreshToken() {
     if (!this.credentials.refreshToken) return null;
-    const response = await this.http.requestJson(
-      joinUrl(this.connection.base_url, '/api/v1/auth/refresh'),
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: { refresh_token: this.credentials.refreshToken },
-        retries: 0
-      }
-    );
+    let response;
+    try {
+      response = await this.http.requestJson(
+        joinUrl(this.connection.base_url, '/api/v1/auth/refresh'),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: { refresh_token: this.credentials.refreshToken },
+          retries: 0
+        }
+      );
+    } catch (error) {
+      throw translateSub2ApiAuthError(error);
+    }
     return this.updateTokenPair(unwrapEnvelope(response.data));
   }
 
   async login() {
+    if (usesTokenPair(this.connection)) {
+      throw new AppError('AUTH_EXPIRED', 'Sub2API OAuth token-pair credentials are missing or expired', {
+        status: 401
+      });
+    }
     if (!this.credentials.email || !this.credentials.password) {
       throw new AppError('AUTH_EXPIRED', 'Sub2API credentials require a refresh token or email and password', {
         status: 401
       });
     }
-    const response = await this.http.requestJson(
-      joinUrl(this.connection.base_url, '/api/v1/auth/login'),
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: {
-          email: this.credentials.email,
-          password: this.credentials.password
-        },
-        retries: 0
-      }
-    );
+    let response;
+    try {
+      response = await this.http.requestJson(
+        joinUrl(this.connection.base_url, '/api/v1/auth/login'),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: {
+            email: this.credentials.email,
+            password: this.credentials.password
+          },
+          retries: 0
+        }
+      );
+    } catch (error) {
+      throw translateSub2ApiAuthError(error);
+    }
     const data = unwrapEnvelope(response.data);
     if (data?.requires_2fa) {
       throw new AppError('MFA_REQUIRED', 'Sub2API requires interactive two-factor authentication', {
@@ -141,6 +179,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
       try {
         return await this.refreshToken();
       } catch (error) {
+        if (usesTokenPair(this.connection)) throw error;
         if (error.code !== 'AUTH_FAILED' && error.code !== 'BUSINESS_ERROR') throw error;
       }
     }
@@ -158,16 +197,21 @@ class Sub2ApiAdapter extends ProviderAdapter {
         }
       });
     } catch (error) {
-      if (error.code !== 'AUTH_FAILED') throw error;
+      const translated = translateSub2ApiAuthError(error);
+      if (translated.code !== 'AUTH_FAILED') throw translated;
       token = await this.getAccessToken(true);
-      return this.http.requestJson(joinUrl(this.connection.base_url, endpoint), {
-        ...options,
-        retries: 0,
-        headers: {
-          ...(options.headers || {}),
-          Authorization: `Bearer ${token}`
-        }
-      });
+      try {
+        return await this.http.requestJson(joinUrl(this.connection.base_url, endpoint), {
+          ...options,
+          retries: 0,
+          headers: {
+            ...(options.headers || {}),
+            Authorization: `Bearer ${token}`
+          }
+        });
+      } catch (retryError) {
+        throw translateSub2ApiAuthError(retryError);
+      }
     }
   }
 
@@ -430,5 +474,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
 
 module.exports = {
   Sub2ApiAdapter,
-  decodeJwtExpiration
+  decodeJwtExpiration,
+  translateSub2ApiAuthError,
+  usesTokenPair
 };

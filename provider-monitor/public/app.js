@@ -75,6 +75,10 @@ const CREDENTIAL_FIELDS = {
   'voapi-v2': [['apiKey', 'API Key', 'password'], ['userId', '用户 ID', 'text']],
   custom: [['apiKey', 'API Key', 'password'], ['bearerToken', 'Bearer Token', 'password']]
 };
+const SUB2API_CREDENTIAL_FIELDS = {
+  account: CREDENTIAL_FIELDS.sub2api.slice(0, 2),
+  token_pair: CREDENTIAL_FIELDS.sub2api.slice(2)
+};
 const ADAPTER_AUTH_MODES = {
   sub2api: 'account',
   'new-api': 'system_token',
@@ -853,8 +857,17 @@ async function renderActivity() {
   $('#main-content').innerHTML = `<div class="tabs"><button class="tab active" data-activity-tab="checks">检查记录</button><button class="tab" data-activity-tab="jobs">任务队列</button><button class="tab" data-activity-tab="audit">审计日志</button></div><div id="activity-checks" class="table-wrap"><table><thead><tr><th>供应商</th><th>类型</th><th>状态</th><th class="numeric">耗时</th><th>错误码</th><th>开始时间</th></tr></thead><tbody>${checksRows}</tbody></table></div><div id="activity-jobs" class="table-wrap" hidden><table><thead><tr><th>任务</th><th>供应商</th><th>状态</th><th class="numeric">尝试</th><th>错误</th><th>创建时间</th></tr></thead><tbody>${jobRows}</tbody></table></div><div id="activity-audit" class="table-wrap" hidden><table><thead><tr><th>操作者</th><th>动作</th><th>对象</th><th>ID</th><th>时间</th></tr></thead><tbody>${auditRows}</tbody></table></div>`;
 }
 
-function renderCredentialFields(adapter, provider = null) {
-  const fields = CREDENTIAL_FIELDS[adapter] || CREDENTIAL_FIELDS.custom;
+function credentialFieldsFor(adapter, authMode) {
+  if (adapter === 'sub2api') {
+    return ['token_pair', 'bearer'].includes(authMode)
+      ? SUB2API_CREDENTIAL_FIELDS.token_pair
+      : SUB2API_CREDENTIAL_FIELDS.account;
+  }
+  return CREDENTIAL_FIELDS[adapter] || CREDENTIAL_FIELDS.custom;
+}
+
+function renderCredentialFields(adapter, provider = null, authMode = '') {
+  const fields = credentialFieldsFor(adapter, authMode || provider?.auth_mode);
   $('#credential-fields').innerHTML = fields.map(([name, label, type]) => {
     const existing = provider?.credentialFields?.find((field) => field.name === name);
     return `<label><span>${escapeHtml(label)}</span><input data-credential="${name}" type="${type}" placeholder="${existing ? `已保存 ${existing.masked}，留空不修改` : ''}" autocomplete="off"></label>`;
@@ -919,7 +932,7 @@ function cancelProviderDetection({ clearStatus = false } = {}) {
 function applyProviderAdapter(form, adapterType, { fromDetection = false } = {}) {
   form.elements.adapterType.value = adapterType;
   form.elements.authMode.value = ADAPTER_AUTH_MODES[adapterType] || 'api_key';
-  renderCredentialFields(adapterType);
+  renderCredentialFields(adapterType, null, form.elements.authMode.value);
   form.dataset.credentialsTouched = 'false';
   form.dataset.autoDetectedAdapter = fromDetection ? adapterType : '';
 }
@@ -1034,7 +1047,7 @@ function openProviderDialog(provider = null) {
   form.elements.note.value = provider?.note || '';
   $('#provider-dialog-title').textContent = provider ? '编辑供应商' : '添加供应商';
   $('#provider-form-error').textContent = '';
-  renderCredentialFields(form.elements.adapterType.value, provider);
+  renderCredentialFields(form.elements.adapterType.value, provider, form.elements.authMode.value);
   $('#provider-dialog').showModal();
   icons();
 }
@@ -1054,6 +1067,12 @@ function providerPayload(form) {
     tags: form.elements.tags.value.split(',').map((x) => x.trim()).filter(Boolean), note: form.elements.note.value.trim(),
     accountDedupeKey: form.elements.accountDedupeKey.value.trim() || null
   };
+}
+
+function providerValidationPayload(form) {
+  const payload = providerPayload(form);
+  const existingProviderId = String(form.elements.id.value || '').trim();
+  return existingProviderId ? { ...payload, existingProviderId } : payload;
 }
 
 function fillProviderSelect(select, selected = '') {
@@ -1306,7 +1325,7 @@ async function handleAction(button) {
       if (outcome) toast(outcome.message);
     }
     if (action === 'validate-provider') {
-      const payload = providerPayload($('#provider-form'));
+      const payload = providerValidationPayload($('#provider-form'));
       const result = await api('/api/providers/validate', { method: 'POST', body: payload });
       toast(`连接有效，余额项 ${result.balances.length} 个`);
     }
@@ -1361,6 +1380,11 @@ document.addEventListener('change', (event) => {
     form.dataset.adapterTouched = 'true';
     applyProviderAdapter(form, adapter);
     if (!form.elements.baseUrl.value) form.elements.baseUrl.value = providerDefaults(adapter);
+  }
+  if (event.target.matches('#provider-form [name="authMode"]')) {
+    const form = $('#provider-form');
+    renderCredentialFields(form.elements.adapterType.value, null, event.target.value);
+    form.dataset.credentialsTouched = 'true';
   }
 });
 
