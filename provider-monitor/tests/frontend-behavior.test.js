@@ -174,6 +174,21 @@ test('integration groups render a collapsed outer winner and mark exactly one hi
   assert.match(expanded, /chevron-down/);
 });
 
+test('integration summary help explains every counter and its mapping scope', () => {
+  const { context } = createBrowserContext();
+  const help = vm.runInContext('integrationSummaryHelp()', context);
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+
+  assert.match(help, /data-lucide="circle-help"/);
+  assert.match(help, /一致/);
+  assert.match(help, /预警/);
+  assert.match(help, /错误/);
+  assert.match(help, /待检查/);
+  assert.match(help, /无映射分组不会计入“待检查”/);
+  assert.match(styles, /\.integration-status-help-panel \{/);
+  assert.match(styles, /\.integration-status-help:focus-within \.integration-status-help-panel/);
+});
+
 test('auto-mapping UI uses preview then apply and provides actionable export authentication errors', () => {
   const { context, source } = createBrowserContext();
   const styles = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');

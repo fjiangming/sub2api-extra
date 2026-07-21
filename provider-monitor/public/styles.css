@@ -174,7 +174,18 @@ tbody tr:hover { background: #fafbfa; }
 .base-instance-bar strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .base-instance-bar small { color: var(--muted); margin-top: 3px; }
 .base-instance-bar .status-dot { grid-row: 1 / span 2; }
-.base-instance-bar .status-summary { padding: 0; justify-content: flex-end; }
+.base-instance-bar .status-summary { position: relative; padding: 0; justify-content: flex-end; }
+.integration-status-help { position: static; border: 0; margin: 0; }
+.integration-status-help > summary { width: 24px; height: 24px; padding: 0; border: 1px solid var(--line-strong); border-radius: 50%; display: grid; place-items: center; list-style: none; color: var(--muted); background: var(--surface); cursor: pointer; }
+.integration-status-help > summary::-webkit-details-marker { display: none; }
+.integration-status-help > summary:hover, .integration-status-help > summary:focus-visible { color: var(--accent); border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px rgba(20,125,100,.12); }
+.integration-status-help > summary svg { width: 15px; height: 15px; }
+.integration-status-help-panel { position: absolute; z-index: 30; top: calc(100% + 8px); right: 0; width: min(370px, calc(100vw - 40px)); padding: 14px; border: 1px solid var(--line-strong); border-radius: 6px; display: none; gap: 10px; color: var(--text); background: var(--surface); box-shadow: var(--shadow); text-align: left; }
+.integration-status-help:hover .integration-status-help-panel, .integration-status-help:focus-within .integration-status-help-panel, .integration-status-help[open] .integration-status-help-panel { display: grid; }
+.integration-status-help-panel h3 { margin: 0 0 2px; font-size: 13px; }
+.integration-status-help-panel > div { display: grid; grid-template-columns: 58px minmax(0, 1fr); align-items: start; gap: 9px; }
+.integration-status-help-panel p { margin: 1px 0 0; color: var(--text); font-size: 12px; line-height: 1.45; }
+.integration-status-help-panel .integration-status-help-scope { margin: 2px 0 0; padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 .comparison-delta { font-weight: 700; }
 .comparison-delta.warning { color: var(--warning); }
 .integration-table table { min-width: 1180px; }
@@ -262,7 +273,7 @@ details summary { padding: 13px 18px; cursor: pointer; font-weight: 650; font-si
 
 @media (max-width: 720px) {
   .base-instance-bar { align-items: flex-start; flex-direction: column; }
-  .base-instance-bar .status-summary { justify-content: flex-start; }
+  .base-instance-bar .status-summary { width: 100%; justify-content: flex-start; }
   .security-setting-row { align-items: stretch; flex-direction: column; }
   .security-setting-row .button { margin-left: 0; width: 100%; }
 }
