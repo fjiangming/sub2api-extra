@@ -157,6 +157,138 @@ test('Sub2API paginated reads reject malformed collection responses', async (t) 
   );
 });
 
+test('local authentication completes configured Sub2API administrator 2FA without an SSO session', async (t) => {
+  const context = createTestContext({
+    PROVIDER_MONITOR_AUTH_MODE: 'local',
+    SUB2API_BASE_URL: 'https://sub2api.internal.example',
+    SUB2API_PUBLIC_URL: 'https://sub2api.example',
+    ADMIN_EMAIL: 'admin@example.com',
+    ADMIN_PASSWORD: 'configured-password',
+    SUB2API_ADMIN_TOKEN: ''
+  });
+  const originalFetch = global.fetch;
+  const upstreamRequests = [];
+  global.fetch = async (input, options = {}) => {
+    const url = new URL(input);
+    if (url.hostname !== 'sub2api.internal.example') return originalFetch(input, options);
+    upstreamRequests.push({
+      path: url.pathname,
+      authorization: options.headers?.Authorization || null,
+      body: options.body ? JSON.parse(options.body) : null
+    });
+    if (url.pathname === '/api/v1/auth/login') {
+      return new Response(JSON.stringify({
+        code: 0,
+        data: { requires_2fa: true, temp_token: 'configured-login-temp-token' }
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url.pathname === '/api/v1/auth/login/2fa') {
+      assert.deepEqual(JSON.parse(options.body), {
+        temp_token: 'configured-login-temp-token',
+        totp_code: '654321'
+      });
+      return new Response(JSON.stringify({
+        code: 0,
+        data: {
+          access_token: 'configured-session-token',
+          refresh_token: 'configured-refresh-token',
+          expires_in: 3600,
+          user: { id: 1, role: 'admin' }
+        }
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url.pathname === '/api/v1/auth/refresh') {
+      assert.deepEqual(JSON.parse(options.body), { refresh_token: 'configured-refresh-token' });
+      return new Response(JSON.stringify({
+        code: 0,
+        data: {
+          access_token: 'refreshed-configured-session-token',
+          refresh_token: 'rotated-configured-refresh-token',
+          expires_in: 3600
+        }
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url.pathname === '/api/v1/admin/channels') {
+      if (options.headers.Authorization === 'Bearer configured-session-token') {
+        return new Response(JSON.stringify({ code: 'TOKEN_EXPIRED', message: 'expired' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      assert.equal(options.headers.Authorization, 'Bearer refreshed-configured-session-token');
+      return new Response(JSON.stringify({
+        code: 0,
+        data: { items: [{ id: 11, name: 'Configured channel' }], total: 1 }
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    throw new Error(`Unexpected Sub2API endpoint: ${url.pathname}`);
+  };
+
+  const app = createApplication({ config: context.config, db: context.db, startBackground: false });
+  const enqueued = [];
+  app.locals.services.mappings.list = () => [{ enabled: true }];
+  app.locals.services.queue.enqueue = (type, options) => {
+    enqueued.push({ type, options });
+    return 'queued-test-job';
+  };
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => {
+    global.fetch = originalFetch;
+    await new Promise((resolve) => server.close(resolve));
+    await app.locals.close();
+    context.cleanup();
+  });
+
+  const loginResponse = await originalFetch(`${base}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'test-password' })
+  });
+  assert.equal(loginResponse.status, 200);
+  const session = await loginResponse.json();
+  assert.equal(session.authentication.mode, 'local');
+  assert.equal(enqueued.filter((job) => job.type === 'sub2api_mapping_sync').length, 1);
+
+  const firstChannels = await originalFetch(`${base}/api/sub2api/channels`, {
+    headers: { Authorization: `Session ${session.sessionToken}` }
+  });
+  assert.equal(firstChannels.status, 403);
+  assert.equal((await firstChannels.json()).error.code, 'SUB2API_LOGIN_2FA_REQUIRED');
+  assert.deepEqual(app.locals.services.sub2api.authenticationStatus(), {
+    available: false,
+    source: 'configured_credentials',
+    error: 'two_factor_required',
+    requiresTwoFactor: true
+  });
+
+  const twoFactorResponse = await originalFetch(`${base}/api/sub2api/step-up`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Session ${session.sessionToken}`,
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': session.csrfToken
+    },
+    body: JSON.stringify({ code: '654321' })
+  });
+  assert.equal(twoFactorResponse.status, 200);
+  assert.deepEqual(await twoFactorResponse.json(), { verified: true, expiresIn: 3600 });
+
+  const channelsResponse = await originalFetch(`${base}/api/sub2api/channels`, {
+    headers: { Authorization: `Session ${session.sessionToken}` }
+  });
+  assert.equal(channelsResponse.status, 200);
+  assert.equal((await channelsResponse.json()).items[0].name, 'Configured channel');
+  assert.deepEqual(app.locals.services.sub2api.authenticationStatus(), {
+    available: true,
+    source: 'configured_credentials'
+  });
+  assert.equal(upstreamRequests.filter((request) => request.path === '/api/v1/auth/login').length, 1);
+  assert.equal(upstreamRequests.filter((request) => request.path === '/api/v1/auth/login/2fa').length, 1);
+  assert.equal(upstreamRequests.filter((request) => request.path === '/api/v1/auth/refresh').length, 1);
+});
+
 test('Sub2API custom-menu token is exchanged for a local session without a second login', async (t) => {
   const context = createTestContext({
     PROVIDER_MONITOR_AUTH_MODE: 'sub2api',

@@ -210,7 +210,7 @@ function createApplication(options = {}) {
   const keyHealth = new KeyHealthService({ db, config, providers, http });
   const catalog = new CatalogService({ db, config, providers, http, queries });
   const checkins = new CheckInService({ db, config, providers, http });
-  const mappings = new MappingService({ db, config, sub2api });
+  const mappings = new MappingService({ db, config, sub2api, http });
   const credentials = new CredentialService({ db, config, providers, http });
   const detection = new DetectionService({ http });
   const backups = new BackupService({ db, config, transfers });
@@ -417,7 +417,7 @@ function createApplication(options = {}) {
   app.post('/api/auth/login', loginLimiter, asyncRoute(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     const session = await auth.login(req, res, req.body || {});
-    if (config.authMode === 'sub2api') enqueueSub2ApiRefresh();
+    enqueueSub2ApiRefresh();
     res.json(session);
   }));
 
@@ -1158,6 +1158,7 @@ function createApplication(options = {}) {
     if (backgroundStarted) return;
     backgroundStarted = true;
     queue.start();
+    enqueueSub2ApiRefresh();
     cronTasks.push(cron.schedule('* * * * *', () => {
       const due = db.prepare(`
         SELECT id FROM provider_connections

@@ -174,6 +174,76 @@ test('transfer preview/import, secret-free export and SQLite backup work togethe
   }
 });
 
+test('secret-free configuration restores provider shells disabled until credentials are supplied', () => {
+  const source = createTestContext();
+  const target = createTestContext();
+  try {
+    const sourceProviders = new ProviderRepository(source.db, source.config);
+    const sourceTransfers = new TransferService({ db: source.db, config: source.config, providers: sourceProviders });
+    const definitions = [
+      {
+        name: '247kan', adapterType: 'sub2api', baseUrl: 'https://api.247kan.com',
+        authMode: 'bearer', remoteUserId: '565', credentials: { accessToken: 'access-247' }
+      },
+      {
+        name: 'a6api', adapterType: 'new-api', baseUrl: 'https://a6api.com',
+        authMode: 'account', remoteUserId: '2160', credentials: { systemToken: 'system-a6', userId: '2160' }
+      },
+      {
+        name: 'ai2api', adapterType: 'sub2api', baseUrl: 'https://ai2api.cc',
+        authMode: 'account', remoteUserId: '115', credentials: { email: 'user@example.com', password: 'password' }
+      },
+      {
+        name: 'aijws', adapterType: 'custom', baseUrl: 'https://api.aijws.com',
+        authMode: 'api_key', credentials: { apiKey: 'custom-key' }
+      },
+      {
+        name: 'hubway', adapterType: 'sub2api', baseUrl: 'https://api.hubway.cc',
+        authMode: 'account', remoteUserId: '953', credentials: { email: 'hub@example.com', password: 'password' }
+      }
+    ];
+    for (const definition of definitions) sourceProviders.create(definition);
+
+    const content = sourceTransfers.exportConfiguration();
+    const targetProviders = new ProviderRepository(target.db, target.config);
+    const targetTransfers = new TransferService({ db: target.db, config: target.config, providers: targetProviders });
+    const preview = targetTransfers.previewImport({ format: 'provider-monitor', content });
+
+    assert.equal(preview.total, 5);
+    assert.equal(preview.create, 5);
+    assert.equal(preview.missingCredentials, 5);
+    assert.equal(preview.disableForMissingCredentials, 5);
+    assert.equal(preview.skipForMissingCredentials, 0);
+
+    const imported = targetTransfers.applyImport({ format: 'provider-monitor', content });
+    assert.equal(imported.created, 5);
+    assert.equal(imported.skipped, 0);
+    assert.equal(imported.disabledForMissingCredentials, 5);
+    assert.deepEqual(targetProviders.list().map((provider) => provider.name).sort(), definitions.map((item) => item.name).sort());
+    assert.equal(targetProviders.list().every((provider) => provider.enabled === false), true);
+
+    const a6api = targetProviders.list().find((provider) => provider.name === 'a6api');
+    assert.deepEqual(targetProviders.getCredentials(a6api.id), { userId: '2160' });
+    targetProviders.updateCredentials(a6api.id, { systemToken: 'local-system-token', userId: '2160' });
+    const secondPreview = targetTransfers.previewImport({ format: 'provider-monitor', content });
+    assert.equal(secondPreview.missingCredentials, 4);
+    assert.equal(secondPreview.disableForMissingCredentials, 4);
+    targetTransfers.applyImport({ format: 'provider-monitor', content });
+    assert.equal(targetProviders.get(a6api.id).enabled, true);
+    assert.equal(targetProviders.getCredentials(a6api.id).systemToken, 'local-system-token');
+
+    const emptyCsv = 'name,adapter_type,base_url\nBlank,deepseek,https://blank.example\n';
+    const emptyPreview = targetTransfers.previewImport({ format: 'csv', content: emptyCsv });
+    assert.equal(emptyPreview.skipForMissingCredentials, 1);
+    const emptyImport = targetTransfers.applyImport({ format: 'csv', content: emptyCsv });
+    assert.equal(emptyImport.skipped, 1);
+    assert.equal(targetProviders.list().length, 5);
+  } finally {
+    source.cleanup();
+    target.cleanup();
+  }
+});
+
 test('metadata key health checks require no paid request', async () => {
   const context = createTestContext();
   try {

@@ -124,6 +124,53 @@ function firstValue(...values) {
   return values.find((value) => value != null && value !== '');
 }
 
+function hasCredentialValue(credentials, ...names) {
+  return names.some((name) => {
+    const value = credentials?.[name];
+    if (typeof value === 'string') return value.trim().length > 0;
+    if (Array.isArray(value)) return value.length > 0;
+    if (value && typeof value === 'object') return Object.keys(value).length > 0;
+    return value != null && value !== false;
+  });
+}
+
+function hasUsableProviderCredentials(provider, credentials) {
+  const adapterType = provider.adapterType;
+  const authMode = String(provider.authMode || '').toLowerCase();
+
+  if (adapterType === 'sub2api') {
+    if (authMode === 'api_key') {
+      return hasCredentialValue(credentials, 'apiKey');
+    }
+    if (['bearer', 'token_pair'].includes(authMode)) {
+      return hasCredentialValue(credentials, 'accessToken', 'refreshToken');
+    }
+    return (
+      hasCredentialValue(credentials, 'accessToken', 'refreshToken') ||
+      (hasCredentialValue(credentials, 'email') && hasCredentialValue(credentials, 'password'))
+    );
+  }
+
+  if (['new-api', 'one-api', 'one-hub', 'done-hub', 'veloera'].includes(adapterType)) {
+    const hasToken = hasCredentialValue(credentials, 'systemToken', 'accessToken', 'apiKey');
+    const needsUserId = ['new-api', 'veloera'].includes(adapterType);
+    return hasToken && (!needsUserId || Boolean(provider.remoteUserId || credentials?.userId));
+  }
+
+  if (adapterType === 'deepseek') return hasCredentialValue(credentials, 'apiKey');
+  if (adapterType === 'openrouter') return hasCredentialValue(credentials, 'managementKey', 'apiKey');
+  if (adapterType === 'litellm') return hasCredentialValue(credentials, 'masterKey', 'apiKey');
+  if (adapterType === 'voapi-v2') {
+    return hasCredentialValue(credentials, 'accessToken', 'apiKey') &&
+      Boolean(provider.remoteUserId || credentials?.userId);
+  }
+  if (adapterType === 'custom' && provider.credentialFields.length === 0) {
+    return provider.restoreWithoutCredentials ||
+      Object.keys(credentials || {}).some((name) => hasCredentialValue(credentials, name));
+  }
+  return Object.keys(credentials || {}).some((name) => hasCredentialValue(credentials, name));
+}
+
 class TransferService {
   constructor({ db, config, providers }) {
     this.db = db;
@@ -258,6 +305,9 @@ class TransferService {
 
   #normalize(row, index) {
     const credentials = row.credentials && typeof row.credentials === 'object' ? { ...row.credentials } : {};
+    const credentialFields = Array.isArray(row.credentialFields)
+      ? row.credentialFields.map((field) => String(field).trim()).filter(Boolean)
+      : [];
     const apiKey = firstValue(row.apiKey, row.api_key, row.token, row.systemToken, row.system_token);
     if (apiKey && Object.keys(credentials).length === 0) credentials.apiKey = apiKey;
     const adapterType = normalizeAdapter(firstValue(row.adapterType, row.adapter_type, row.provider, row.platform, row.type));
@@ -290,7 +340,9 @@ class TransferService {
       typeConfig: row.typeConfig || row.type_config || {},
       tags: Array.isArray(row.tags) ? row.tags : String(row.tags || '').split(',').map((value) => value.trim()).filter(Boolean),
       note: row.note || '',
-      accountDedupeKey: firstValue(row.accountDedupeKey, row.account_dedupe_key, null)
+      accountDedupeKey: firstValue(row.accountDedupeKey, row.account_dedupe_key, null),
+      credentialFields,
+      restoreWithoutCredentials: Array.isArray(row.credentialFields)
     };
   }
 
@@ -313,11 +365,19 @@ class TransferService {
       const errors = [];
       if (!provider.baseUrl || !/^https?:\/\//i.test(provider.baseUrl)) errors.push('invalid_base_url');
       if (!supported.has(provider.adapterType)) errors.push('unsupported_adapter');
-      const missingCredentials = Object.keys(provider.credentials).length === 0 && !match;
+      const existingCredentials = match ? this.providers.getCredentials(match.id) : {};
+      const missingCredentials = !hasUsableProviderCredentials(provider, {
+        ...existingCredentials,
+        ...provider.credentials
+      });
+      const missingCredentialAction = missingCredentials
+        ? provider.restoreWithoutCredentials ? 'disable' : match ? 'preserve' : 'skip'
+        : null;
       return {
         action: errors.length ? 'invalid' : match ? 'update' : 'create',
         existingId: match?.id || null,
         missingCredentials,
+        missingCredentialAction,
         errors,
         provider
       };
@@ -329,6 +389,8 @@ class TransferService {
       update: items.filter((item) => item.action === 'update').length,
       invalid: items.filter((item) => item.action === 'invalid').length,
       missingCredentials: items.filter((item) => item.missingCredentials).length,
+      disableForMissingCredentials: items.filter((item) => item.missingCredentialAction === 'disable').length,
+      skipForMissingCredentials: items.filter((item) => item.missingCredentialAction === 'skip').length,
       items
     };
   }
@@ -342,16 +404,24 @@ class TransferService {
     const results = [];
     try {
       for (const item of preview.items) {
-        if (item.missingCredentials && item.action === 'create') {
+        if (item.missingCredentialAction === 'skip' && item.action === 'create') {
           results.push({ sourceIndex: item.provider.sourceIndex, status: 'skipped', reason: 'missing_credentials' });
           continue;
         }
         const payload = { ...item.provider };
         delete payload.sourceIndex;
+        delete payload.credentialFields;
+        delete payload.restoreWithoutCredentials;
+        if (item.missingCredentialAction === 'disable') payload.enabled = false;
         const provider = item.action === 'update'
           ? this.providers.update(item.existingId, payload)
           : this.providers.create(payload);
-        results.push({ sourceIndex: item.provider.sourceIndex, status: item.action === 'update' ? 'updated' : 'created', providerId: provider.id });
+        results.push({
+          sourceIndex: item.provider.sourceIndex,
+          status: item.action === 'update' ? 'updated' : 'created',
+          providerId: provider.id,
+          disabledForMissingCredentials: item.missingCredentialAction === 'disable'
+        });
       }
       const summary = {
         ...preview,
@@ -359,6 +429,7 @@ class TransferService {
         created: results.filter((item) => item.status === 'created').length,
         updated: results.filter((item) => item.status === 'updated').length,
         skipped: results.filter((item) => item.status === 'skipped').length,
+        disabledForMissingCredentials: results.filter((item) => item.disabledForMissingCredentials).length,
         results
       };
       this.db.prepare(`UPDATE import_runs SET status = 'succeeded', summary_json = ?, completed_at = ? WHERE id = ?`).run(stringifyJson(summary), nowIso(), runId);

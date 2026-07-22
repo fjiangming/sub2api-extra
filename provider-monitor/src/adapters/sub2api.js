@@ -49,6 +49,60 @@ function usesTokenPair(connection) {
   return ['token_pair', 'bearer'].includes(String(connection?.auth_mode || '').toLowerCase());
 }
 
+function usesApiKey(connection) {
+  return String(connection?.auth_mode || '').toLowerCase() === 'api_key';
+}
+
+function configuredApiKey(credentials = {}) {
+  return String(credentials.apiKey || credentials.bearerToken || credentials.token || '')
+    .trim()
+    .replace(/^Bearer\s+/i, '');
+}
+
+function gatewayQuota(data = {}) {
+  const quota = data.quota && typeof data.quota === 'object' ? data.quota : {};
+  const limit = toFiniteNumber(quota.limit);
+  const used = toFiniteNumber(quota.used ?? data.usage?.total?.cost);
+  let remaining = toFiniteNumber(quota.remaining ?? data.remaining ?? data.balance);
+  const unlimited = remaining === -1;
+  if (unlimited) remaining = null;
+  return {
+    currency: String(quota.unit || data.unit || 'USD'),
+    limit: limit != null && limit > 0 ? limit : null,
+    used,
+    remaining,
+    unlimited,
+    resetAt: toIsoDate(quota.reset_at),
+    resetInterval: quota.reset_interval || null
+  };
+}
+
+function gatewayKeyStatus(data = {}) {
+  const status = String(data.status || '').trim().toLowerCase();
+  if (status === 'quota_exhausted') return 'exhausted';
+  if (status === 'expired') return 'expired';
+  if (data.isValid === false) return status || 'disabled';
+  return status || 'active';
+}
+
+function gatewayUsageItem(data, period) {
+  const item = data?.usage?.[period];
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+  const inputTokens = toFiniteNumber(item.input_tokens, 0);
+  const outputTokens = toFiniteNumber(item.output_tokens, 0);
+  return {
+    currency: String(data.unit || data.quota?.unit || 'USD'),
+    cost: toFiniteNumber(item.cost ?? item.actual_cost),
+    requests: toFiniteNumber(item.requests),
+    inputTokens,
+    outputTokens,
+    totalTokens: toFiniteNumber(item.total_tokens, inputTokens + outputTokens),
+    model: null,
+    period: period === 'total' ? 'cumulative' : period,
+    raw: item
+  };
+}
+
 function translateSub2ApiAuthError(error) {
   const remoteCode = String(error?.details?.remoteCode || '');
   if (remoteCode === 'SESSION_BINDING_MISMATCH') {
@@ -70,6 +124,17 @@ function translateSub2ApiAuthError(error) {
 
 class Sub2ApiAdapter extends ProviderAdapter {
   capabilities() {
+    if (usesApiKey(this.connection)) {
+      return {
+        ...super.capabilities(),
+        accountBalance: true,
+        listKeys: true,
+        keyQuota: true,
+        listGroups: true,
+        keyGroup: true,
+        usageHistory: true
+      };
+    }
     return {
       ...super.capabilities(),
       accountBalance: true,
@@ -90,6 +155,51 @@ class Sub2ApiAdapter extends ProviderAdapter {
       version: null,
       capabilities: this.capabilities()
     };
+  }
+
+  apiKeyHeaders() {
+    const apiKey = configuredApiKey(this.credentials);
+    if (!apiKey) {
+      throw new AppError('AUTH_EXPIRED', 'Sub2API API Key credentials are missing', {
+        status: 401
+      });
+    }
+    return {
+      Accept: 'application/json',
+      Authorization: `Bearer ${apiKey}`
+    };
+  }
+
+  async getApiKeyUsage() {
+    if (this.apiKeyUsageInfo) return this.apiKeyUsageInfo;
+    const response = await this.http.requestJson(
+      joinUrl(this.connection.base_url, '/v1/usage'),
+      { headers: this.apiKeyHeaders(), retries: 1 }
+    );
+    const data = unwrapEnvelope(response.data, { allowNull: true });
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new AppError('SCHEMA_MISMATCH', 'Sub2API API Key usage response is invalid', {
+        status: 502
+      });
+    }
+    this.apiKeyUsageInfo = data;
+    return data;
+  }
+
+  async getApiKeyBilling() {
+    if (this.apiKeyBillingInfo) return this.apiKeyBillingInfo;
+    const response = await this.http.requestJson(
+      joinUrl(this.connection.base_url, '/v1/sub2api/billing'),
+      { headers: this.apiKeyHeaders(), retries: 1 }
+    );
+    const data = unwrapEnvelope(response.data, { allowNull: true });
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new AppError('SCHEMA_MISMATCH', 'Sub2API API Key billing response is invalid', {
+        status: 502
+      });
+    }
+    this.apiKeyBillingInfo = data;
+    return data;
   }
 
   async updateTokenPair(data) {
@@ -223,6 +333,24 @@ class Sub2ApiAdapter extends ProviderAdapter {
   }
 
   async getAccount() {
+    if (usesApiKey(this.connection)) {
+      const usage = await this.getApiKeyUsage();
+      return {
+        remoteId: String(
+          this.connection.remote_user_id ||
+          this.connection.account_dedupe_key ||
+          this.connection.id
+        ),
+        displayName: this.connection.name,
+        userGroup: usage.planName || null,
+        status: usage.isValid === false ? 'disabled' : 'active',
+        metadata: this.safeRaw({
+          authMode: 'api_key',
+          mode: usage.mode || null,
+          planName: usage.planName || null
+        })
+      };
+    }
     const profile = await this.getProfile();
     return {
       remoteId: String(profile.id ?? profile.email ?? this.connection.id),
@@ -239,6 +367,30 @@ class Sub2ApiAdapter extends ProviderAdapter {
   }
 
   async getAccountBalances(account) {
+    if (usesApiKey(this.connection)) {
+      const usage = await this.getApiKeyUsage();
+      const quota = gatewayQuota(usage);
+      return [{
+        scope: 'account',
+        remoteSubjectId: account?.remoteId || this.connection.id,
+        currency: quota.currency,
+        available: quota.remaining,
+        total: quota.limit,
+        used: quota.used,
+        granted: null,
+        toppedUp: null,
+        frozen: null,
+        unlimited: quota.unlimited,
+        sourceField: usage.quota ? 'quota.remaining' : 'remaining',
+        raw: this.safeRaw({
+          mode: usage.mode,
+          planName: usage.planName,
+          quota: usage.quota,
+          balance: usage.balance,
+          remaining: usage.remaining
+        })
+      }];
+    }
     const profile = await this.getProfile();
     return [
       {
@@ -263,6 +415,25 @@ class Sub2ApiAdapter extends ProviderAdapter {
   }
 
   async listGroups() {
+    if (usesApiKey(this.connection)) {
+      const billing = await this.getApiKeyBilling();
+      const remoteId = String(billing.billing_scope || 'token');
+      return [{
+        remoteId,
+        type: 'key_route_group',
+        name: remoteId === 'token' ? 'Current API Key' : remoteId,
+        ratio: toFiniteNumber(
+          billing.effective_rate_multiplier ??
+          billing.resolved_rate_multiplier ??
+          billing.group_rate_multiplier
+        ),
+        status: 'active',
+        metadata: this.safeRaw({
+          source: 'sub2api_key_billing',
+          ...billing
+        })
+      }];
+    }
     const [groupsResponse, ratesResponse] = await Promise.all([
       this.authenticatedRequest('/api/v1/groups/available'),
       this.authenticatedRequest('/api/v1/groups/rates').catch(() => ({ data: { data: {} } }))
@@ -289,6 +460,32 @@ class Sub2ApiAdapter extends ProviderAdapter {
   }
 
   async listKeys() {
+    if (usesApiKey(this.connection)) {
+      const [usage, billing] = await Promise.all([
+        this.getApiKeyUsage(),
+        this.getApiKeyBilling()
+      ]);
+      const apiKey = configuredApiKey(this.credentials);
+      const quota = gatewayQuota(usage);
+      return [{
+        remoteId: 'configured-api-key',
+        name: `${this.connection.name} API Key`,
+        maskedKey: this.maskKey(apiKey),
+        status: gatewayKeyStatus(usage),
+        primaryGroupRef: String(billing.billing_scope || 'token'),
+        backupGroupRef: null,
+        additionalGroupRefs: [],
+        quota,
+        expiresAt: toIsoDate(usage.expires_at ?? usage.subscription?.expires_at),
+        lastUsedAt: null,
+        metadata: this.safeRaw({
+          source: 'sub2api_gateway_usage',
+          mode: usage.mode || null,
+          planName: usage.planName || null,
+          daysUntilExpiry: usage.days_until_expiry ?? null
+        })
+      }];
+    }
     const result = [];
     const pageSize = 100;
     for (let page = 1; page <= 100; page += 1) {
@@ -335,6 +532,18 @@ class Sub2ApiAdapter extends ProviderAdapter {
   }
 
   async getUsage() {
+    if (usesApiKey(this.connection)) {
+      const data = await this.getApiKeyUsage();
+      return ['today', 'total']
+        .map((period) => gatewayUsageItem(data, period))
+        .filter(Boolean)
+        .map((item) => ({
+          ...item,
+          scope: 'account',
+          remoteSubjectId: this.connection.remote_user_id || this.connection.id,
+          raw: this.safeRaw(item.raw)
+        }));
+    }
     const response = await this.authenticatedRequest('/api/v1/usage/stats?period=today');
     const data = unwrapEnvelope(response.data);
     const inputTokens = toFiniteNumber(data.total_input_tokens ?? data.input_tokens, 0);
@@ -474,7 +683,11 @@ class Sub2ApiAdapter extends ProviderAdapter {
 
 module.exports = {
   Sub2ApiAdapter,
+  configuredApiKey,
   decodeJwtExpiration,
+  gatewayKeyStatus,
+  gatewayQuota,
   translateSub2ApiAuthError,
+  usesApiKey,
   usesTokenPair
 };

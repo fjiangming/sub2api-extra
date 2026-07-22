@@ -193,7 +193,7 @@
 
   <dialog id="sub2api-step-up-dialog" class="dialog">
     <form method="dialog" id="sub2api-step-up-form">
-      <header class="dialog-header"><div><h2>验证 Sub2API 二次认证</h2><p>授权当前 SSO 会话读取账号 Key，有效期为 15 分钟</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <header class="dialog-header"><div><h2>验证 Sub2API 二次认证</h2><p>完成配置管理员登录或授权当前管理员会话执行敏感读取</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
       <div class="form-grid"><label class="span-2"><span>TOTP 验证码</span><input name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" required></label></div>
       <p class="form-error" id="sub2api-step-up-error" role="alert"></p>
       <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="shield-check"></i><span>验证并继续</span></button></footer>

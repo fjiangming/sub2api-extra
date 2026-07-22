@@ -139,6 +139,18 @@ test('Sub2API provider validation keeps the edited provider identity and separat
     vm.runInContext("credentialFieldsFor('sub2api', 'token_pair').map(([name]) => name).join(',')", context),
     'accessToken,refreshToken'
   );
+  assert.equal(
+    vm.runInContext("credentialFieldsFor('sub2api', 'api_key').map(([name]) => name).join(',')", context),
+    'apiKey'
+  );
+});
+
+test('import feedback distinguishes disabled credential shells from skipped rows', () => {
+  const { source } = createBrowserContext();
+
+  assert.match(source, /state\.importPreview\.disableForMissingCredentials/);
+  assert.match(source, /state\.importPreview\.skipForMissingCredentials/);
+  assert.match(source, /result\.disabledForMissingCredentials/);
 });
 
 test('effective rates use at most three decimal places without trailing zeroes', () => {
@@ -237,9 +249,14 @@ test('auto-mapping UI uses preview then apply and provides actionable export aut
   assert.match(source, /requestAutoMappings\('apply'\)/);
   assert.match(source, /api\/sub2api\/step-up/);
   assert.match(source, /sub2api-step-up-dialog/);
+  assert.match(source, /SUB2API_LOGIN_2FA_REQUIRED/);
+  assert.doesNotMatch(source, /state\.authentication\?\.mode !== 'sub2api'/);
   assert.match(source, /data-action="auto-map" title="自动映射" aria-label="自动映射"/);
   assert.match(source, /comparisonData\.unassignedItems/);
   assert.match(source, /\[item\.keyName, item\.maskedKey\]/);
+  assert.match(source, /verified_gateway_billing/);
+  assert.match(source, /item\.baseMaskedKey/);
+  assert.match(source, /item\.providerMaskedKeys/);
   assert.doesNotMatch(source, /form\.elements\.channelId\b/);
   assert.doesNotMatch(source, /<th>Sub2API 渠道<\/th>/);
   assert.match(styles, /#auto-mapping-dialog \{ width: min\(1120px,[^}]+height: min\(780px,/);

@@ -37,7 +37,16 @@ function insertKey(db, providerId, { remoteId, name, apiKey, primaryGroupRef }) 
   return id;
 }
 
-function sub2apiFixture({ channels, groups, accounts, apiKeys, exportError = null, exportPayload = null, onExport = null }) {
+function sub2apiFixture({
+  channels,
+  groups,
+  accounts,
+  apiKeys,
+  accountCredentials = {},
+  exportError = null,
+  exportPayload = null,
+  onExport = null
+}) {
   return {
     authenticationStatus: () => ({ available: true, source: 'test' }),
     async listAll(endpoint) {
@@ -58,7 +67,10 @@ function sub2apiFixture({ channels, groups, accounts, apiKeys, exportError = nul
         return {
           accounts: ids.map((id) => {
             const account = accounts.find((item) => Number(item.id) === id);
-            return { name: account.name, credentials: { api_key: apiKeys[id] || '' } };
+            return {
+              name: account.name,
+              credentials: { ...accountCredentials[id], api_key: apiKeys[id] || '' }
+            };
           })
         };
       }
@@ -147,6 +159,86 @@ test('auto-mapping processes every account from a multiple contains match', asyn
     context.db.prepare('SELECT account_id FROM sub2api_mappings ORDER BY account_id').all().map((row) => row.account_id),
     [108, 113]
   );
+});
+
+test('auto-mapping verifies a different key when the gateway URL, billing scope and rate match', async (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'aijws', adapterType: 'sub2api', baseUrl: 'https://api.aijws.example',
+    authMode: 'api_key', credentials: { apiKey: 'sk-monitor-key-88888888' }, enabled: true
+  });
+  insertGroup(context.db, provider.id, { remoteId: 'token', name: 'Current API Key', ratio: 0.1 });
+  const keyId = insertKey(context.db, provider.id, {
+    remoteId: 'configured-api-key',
+    name: 'aijws API Key',
+    apiKey: 'sk-monitor-key-88888888',
+    primaryGroupRef: 'token'
+  });
+  const baseKey = 'sk-base-account-22222222';
+  const fixture = sub2apiFixture({
+    channels: [],
+    groups: [{ id: 91, name: 'Codex', status: 'active', rate_multiplier: 0.1 }],
+    accounts: [{
+      id: 901,
+      name: 'aijws',
+      type: 'upstream',
+      group_ids: [91],
+      credentials_status: { has_api_key: true }
+    }],
+    apiKeys: { 901: baseKey },
+    accountCredentials: { 901: { base_url: 'https://api.aijws.example/v1/' } }
+  });
+  const requests = [];
+  const http = {
+    async requestJson(input, options) {
+      requests.push({ path: new URL(input).pathname, authorization: options.headers.Authorization });
+      return {
+        data: {
+          billing_scope: 'token',
+          effective_rate_multiplier: 0.1
+        }
+      };
+    }
+  };
+  const rejected = new MappingService({
+    db: context.db,
+    config: context.config,
+    sub2api: fixture,
+    http: {
+      async requestJson() {
+        return { data: { billing_scope: 'token', effective_rate_multiplier: 0.2 } };
+      }
+    }
+  });
+  const rejectedPreview = await rejected.autoMappings({ mode: 'preview' });
+  assert.equal(rejectedPreview.summary.missingRemoteKey, 1);
+  assert.equal(rejectedPreview.items[0].keyVerification, 'gateway_billing_rate_mismatch');
+  assert.equal(context.db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count, 0);
+
+  const mappings = new MappingService({ db: context.db, config: context.config, sub2api: fixture, http });
+  const preview = await mappings.autoMappings({ mode: 'preview' });
+  const item = preview.items[0];
+  assert.equal(preview.summary.pendingCreate, 1);
+  assert.equal(item.keyId, keyId);
+  assert.equal(item.keyMatch, 'verified_gateway_billing');
+  assert.equal(item.verifiedBillingScope, 'token');
+  assert.notEqual(item.baseMaskedKey, item.providerMaskedKey);
+  assert.doesNotMatch(JSON.stringify(preview), /sk-(?:base-account|monitor-key)-/);
+  assert.deepEqual(requests[0], {
+    path: '/v1/sub2api/billing',
+    authorization: `Bearer ${baseKey}`
+  });
+
+  const applied = await mappings.autoMappings({ mode: 'apply' });
+  assert.equal(applied.summary.created, 1);
+  const config = JSON.parse(context.db.prepare(
+    'SELECT config_json FROM sub2api_mappings WHERE account_id = 901'
+  ).get().config_json);
+  assert.equal(config.autoMapping.source, 'provider_account_name_gateway_billing');
+  assert.equal(config.autoMapping.keyMatch, 'verified_gateway_billing');
+  assert.equal(config.autoMapping.billingScope, 'token');
 });
 
 test('auto-mapping never falls back to a provider-named channel', async (t) => {

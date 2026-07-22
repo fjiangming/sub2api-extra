@@ -77,7 +77,8 @@ const CREDENTIAL_FIELDS = {
 };
 const SUB2API_CREDENTIAL_FIELDS = {
   account: CREDENTIAL_FIELDS.sub2api.slice(0, 2),
-  token_pair: CREDENTIAL_FIELDS.sub2api.slice(2)
+  token_pair: CREDENTIAL_FIELDS.sub2api.slice(2),
+  api_key: [['apiKey', 'API Key', 'password']]
 };
 const ADAPTER_AUTH_MODES = {
   sub2api: 'account',
@@ -583,11 +584,35 @@ const AUTO_MAPPING_REASON_LABELS = {
   key_has_no_primary_group: 'Key 未配置主分组',
   mapping_exists: '映射已经存在'
 };
+const AUTO_MAPPING_KEY_VERIFICATION_LABELS = {
+  verified_gateway_billing: 'Key 不同，已通过同源计费验证',
+  gateway_verification_not_supported: '该供应商类型不支持跨 Key 验证',
+  gateway_remote_key_ambiguous: '供应商存在多个候选 Key，无法唯一确认',
+  gateway_base_url_missing: '基座账号未配置可验证的 Base URL',
+  gateway_base_url_mismatch: '基座账号与供应商 Base URL 不同',
+  gateway_billing_schema_mismatch: '供应商计费接口返回格式异常',
+  gateway_billing_scope_missing: '供应商计费接口未返回 billing scope',
+  gateway_billing_group_mismatch: '两枚 Key 的 billing scope 不一致',
+  gateway_billing_rate_mismatch: '两枚 Key 的计费倍率不一致',
+  gateway_primary_group_mismatch: '已同步 Key 的主分组与计费结果不一致'
+};
+
+function autoMappingVerificationLabel(item) {
+  if (item.keyMatch === 'verified_gateway_billing') {
+    return AUTO_MAPPING_KEY_VERIFICATION_LABELS.verified_gateway_billing;
+  }
+  const code = String(item.keyVerification || '');
+  if (AUTO_MAPPING_KEY_VERIFICATION_LABELS[code]) return AUTO_MAPPING_KEY_VERIFICATION_LABELS[code];
+  if (code.startsWith('gateway_billing_')) return '基座账号 Key 无法通过供应商计费验证';
+  return '';
+}
 
 function autoMappingErrorMessage(error) {
-  if (error.code === 'SUB2API_STEP_UP_REQUIRED') return '当前 Sub2API SSO 会话尚未获得账号 Key 读取授权，请重新完成 TOTP 二次验证。';
+  if (error.code === 'SUB2API_STEP_UP_REQUIRED') return '当前 Sub2API 管理员会话尚未获得账号 Key 读取授权，请完成 TOTP 二次验证。';
+  if (error.code === 'SUB2API_LOGIN_2FA_REQUIRED') return '配置的 Sub2API 管理员账号需要 TOTP 二次验证，请完成登录。';
   if (error.code === 'SUB2API_TOTP_NOT_ENABLED') return '当前 Sub2API 管理员未启用 TOTP，请先在 Sub2API 安全设置中启用。';
-  if (error.code === 'SUB2API_SSO_REQUIRED') return '账号 Key 只能由 Sub2API 管理员 SSO 会话读取，请从 Sub2API 自定义菜单重新打开本页面。';
+  if (error.code === 'SUB2API_SSO_REQUIRED') return '账号 Key 需要可执行敏感操作的 Sub2API 管理员会话，请配置管理员账号密码或使用管理员 SSO 会话。';
+  if (error.code === 'SUB2API_ADMIN_SESSION_REQUIRED') return 'Sub2API 管理员会话已失效，请重新完成管理员验证。';
   if (error.code === 'SUB2API_STEP_UP_UNAVAILABLE') return 'Sub2API 二次验证服务暂时不可用，请稍后重试。';
   if (error.code === 'SUB2API_KEY_EXPORT_FORBIDDEN') return 'Sub2API 拒绝读取账号 Key，请检查当前管理员的 TOTP 与敏感操作授权设置。';
   if (error.code === 'SUB2API_KEY_EXPORT_UNSUPPORTED') return '当前 Sub2API 版本不支持管理员账号数据导出，无法安全读取用于匹配的 API Key。';
@@ -602,9 +627,6 @@ function sub2apiStepUpErrorMessage(error) {
 }
 
 function ensureSub2ApiStepUp() {
-  if (state.authentication?.mode !== 'sub2api') {
-    return Promise.reject(new Error('当前登录方式不是 Sub2API SSO，无法完成二次验证。'));
-  }
   const dialog = $('#sub2api-step-up-dialog');
   const form = $('#sub2api-step-up-form');
   form.reset();
@@ -617,22 +639,38 @@ function ensureSub2ApiStepUp() {
   });
 }
 
-async function requestAutoMappings(mode, allowStepUp = true) {
+async function withSub2ApiTwoFactor(operation, attemptsRemaining = 2) {
   try {
-    return await api('/api/sub2api/auto-mappings', { method: 'POST', body: { mode } });
+    return await operation();
   } catch (error) {
-    if (!allowStepUp || error.code !== 'SUB2API_STEP_UP_REQUIRED') throw error;
+    if (attemptsRemaining <= 0 || !['SUB2API_STEP_UP_REQUIRED', 'SUB2API_LOGIN_2FA_REQUIRED'].includes(error.code)) throw error;
     await ensureSub2ApiStepUp();
-    return requestAutoMappings(mode, false);
+    return withSub2ApiTwoFactor(operation, attemptsRemaining - 1);
   }
+}
+
+function requestAutoMappings(mode) {
+  return withSub2ApiTwoFactor(() => api('/api/sub2api/auto-mappings', {
+    method: 'POST',
+    body: { mode }
+  }));
 }
 
 function paintAutoMappingPreview(result) {
   const summary = result.summary;
   const rows = result.items.map((item) => {
     const keyCandidates = item.keyCandidates?.map((candidate) => candidate.name).join('、');
-    const reason = AUTO_MAPPING_REASON_LABELS[item.reason] || item.reason || '';
-    const keyLabel = [item.keyName, item.maskedKey].filter(Boolean).join(' · ') || '-';
+    const verification = autoMappingVerificationLabel(item);
+    const reason = [AUTO_MAPPING_REASON_LABELS[item.reason] || item.reason, verification]
+      .filter(Boolean).join('；');
+    let keyLabel = [item.keyName, item.maskedKey].filter(Boolean).join(' · ') || '-';
+    const providerFingerprints = item.providerMaskedKeys?.length
+      ? item.providerMaskedKeys.join('、')
+      : item.providerMaskedKey;
+    if (item.baseMaskedKey && providerFingerprints && item.baseMaskedKey !== providerFingerprints) {
+      keyLabel = [item.keyName, `基座 ${item.baseMaskedKey} / 监控 ${providerFingerprints}`]
+        .filter(Boolean).join(' · ');
+    }
     return `<tr>
       <td>${badge(item.status)}</td>
       <td class="primary-cell"><strong>${escapeHtml(item.providerName || '-')}</strong><small>${escapeHtml(reason)}</small></td>
@@ -668,7 +706,9 @@ async function openAutoMappingPreview() {
 
 async function renderIntegrations() {
   const [comparisonData, reconciliationData, checkinData] = await Promise.all([
-    api('/api/sub2api/comparisons'), api('/api/reconciliations?limit=100'), api('/api/checkins?limit=100')
+    withSub2ApiTwoFactor(() => api('/api/sub2api/comparisons')),
+    api('/api/reconciliations?limit=100'),
+    api('/api/checkins?limit=100')
   ]);
   state.mappings = comparisonData.items;
   state.integrationGroups = comparisonData.groups || [];
@@ -685,7 +725,11 @@ async function renderIntegrations() {
   const providerCheckins = state.providers.map((provider) => `<tr><td>${escapeHtml(provider.name)}</td><td>${provider.capabilities?.checkIn ? badge('enabled', '支持') : badge('unknown', '未声明')}</td><td class="actions-cell"><button class="button small" data-action="provider-checkin" data-id="${provider.id}"><i data-lucide="calendar-check"></i><span>签到</span></button></td></tr>`).join('');
   const summary = comparisonData.summary;
   const status = comparisonData.status;
-  const authLabel = status.authentication?.available ? `凭据：${status.authentication.source}` : '缺少可用管理员凭据';
+  const authLabel = status.authentication?.available
+    ? `凭据：${status.authentication.source}`
+    : status.authentication?.requiresTwoFactor
+      ? '等待 Sub2API 二次验证'
+      : '缺少可用管理员凭据';
   $('#main-content').innerHTML = `<section class="base-instance-bar"><div><span class="status-dot ${status.authentication?.available ? 'healthy' : 'warning'}"></span><strong>${escapeHtml(status.publicUrl || status.baseUrl || '未配置基座 Sub2API')}</strong><small>${escapeHtml(authLabel)} · 最近检查 ${escapeHtml(timeAgo(status.lastCheckedAt))}</small></div><div class="status-summary"><span>${badge('aligned', `一致 ${summary.aligned}`)}</span><span>${badge('warning', `预警 ${summary.warning}`)}</span><span>${badge('failed', `错误 ${summary.error}`)}</span><span>${badge('unknown', `待检查 ${summary.unchecked}`)}</span>${integrationSummaryHelp()}</div></section><section class="section"><div class="section-header"><h2>分组与倍率对照</h2><p>${state.integrationGroups.length} 个 Sub2API 分组</p></div><div class="table-wrap integration-table">${mappingRows ? `<table><thead><tr><th>Sub2API 分组</th><th class="numeric">基座倍率</th><th>最高倍率供应商 / Key</th><th>供应商分组 / 倍率</th><th class="numeric">倍率差</th><th>检查</th><th>映射 / 对账</th><th></th></tr></thead><tbody>${mappingRows}</tbody></table>` : emptyState('waypoints', '暂无 Sub2API 分组', '刷新基座后显示分组与映射关系')}</div></section><section class="section"><div class="section-header"><h2>对账记录</h2></div><div class="table-wrap">${reconciliationRows ? `<table><thead><tr><th>供应商</th><th>结果</th><th>期间</th><th class="numeric">余额减少</th><th class="numeric">预期成本</th><th class="numeric">差异</th><th class="numeric">健康分</th></tr></thead><tbody>${reconciliationRows}</tbody></table>` : emptyState('calculator', '暂无对账记录', '映射创建后可执行对账')}</div></section><section class="section split-layout"><div><div class="section-header"><h2>签到记录</h2></div><div class="table-wrap">${checkinRows ? `<table><thead><tr><th>供应商</th><th>状态</th><th class="numeric">奖励</th><th class="numeric">签到前</th><th class="numeric">签到后</th><th>时间</th></tr></thead><tbody>${checkinRows}</tbody></table>` : emptyState('calendar-check', '暂无签到记录', '支持的供应商可手动或定时签到')}</div></div><div><div class="section-header"><h2>手动签到</h2></div><div class="table-wrap"><table><thead><tr><th>供应商</th><th>能力</th><th></th></tr></thead><tbody>${providerCheckins}</tbody></table></div></div></section>`;
 }
 
@@ -859,6 +903,7 @@ async function renderActivity() {
 
 function credentialFieldsFor(adapter, authMode) {
   if (adapter === 'sub2api') {
+    if (authMode === 'api_key') return SUB2API_CREDENTIAL_FIELDS.api_key;
     return ['token_pair', 'bearer'].includes(authMode)
       ? SUB2API_CREDENTIAL_FIELDS.token_pair
       : SUB2API_CREDENTIAL_FIELDS.account;
@@ -1145,9 +1190,13 @@ function updateMappingBaseGroupOptions(selected = '') {
 }
 
 async function openMappingDialog(mapping = null) {
-  const [keys, groups, baseGroups, monitors, settings] = await Promise.all([
-    api('/api/keys'), api('/api/groups'), api('/api/sub2api/groups'),
-    api('/api/sub2api/channel-monitors'), api('/api/settings')
+  const [keys, groups, [baseGroups, monitors], settings] = await Promise.all([
+    api('/api/keys'), api('/api/groups'),
+    withSub2ApiTwoFactor(() => Promise.all([
+      api('/api/sub2api/groups'),
+      api('/api/sub2api/channel-monitors')
+    ])),
+    api('/api/settings')
   ]);
   state.keys = keys.items;
   state.groups = groups.items;
@@ -1282,7 +1331,7 @@ async function handleAction(button) {
     }
     if (action === 'add-mapping') await openMappingDialog();
     if (action === 'refresh-comparisons') {
-      const result = await api('/api/sub2api/comparisons/refresh', { method: 'POST', body: {} });
+      const result = await withSub2ApiTwoFactor(() => api('/api/sub2api/comparisons/refresh', { method: 'POST', body: {} }));
       toast(`基座对照已刷新：${result.summary.aligned} 条一致，${result.summary.warning + result.summary.error} 条需处理`);
       await navigate('integrations');
     }
@@ -1303,7 +1352,7 @@ async function handleAction(button) {
     if (action === 'preview-import') {
       const form = $('#import-form');
       state.importPreview = await api('/api/imports/preview', { method: 'POST', body: { format: form.elements.format.value, content: form.elements.content.value } });
-      $('#import-preview').innerHTML = `<div class="status-summary"><span>${badge('created', `新增 ${state.importPreview.create}`)}</span><span>${badge('updated', `更新 ${state.importPreview.update}`)}</span><span>${badge(state.importPreview.invalid ? 'failed' : 'healthy', `无效 ${state.importPreview.invalid}`)}</span><span>${badge(state.importPreview.missingCredentials ? 'warning' : 'healthy', `缺凭据 ${state.importPreview.missingCredentials}`)}</span></div>`;
+      $('#import-preview').innerHTML = `<div class="status-summary"><span>${badge('created', `新增 ${state.importPreview.create}`)}</span><span>${badge('updated', `更新 ${state.importPreview.update}`)}</span><span>${badge(state.importPreview.invalid ? 'failed' : 'healthy', `无效 ${state.importPreview.invalid}`)}</span><span>${badge(state.importPreview.missingCredentials ? 'warning' : 'healthy', `缺凭据 ${state.importPreview.missingCredentials}`)}</span><span>${badge(state.importPreview.disableForMissingCredentials ? 'warning' : 'healthy', `导入后停用 ${state.importPreview.disableForMissingCredentials || 0}`)}</span><span>${badge(state.importPreview.skipForMissingCredentials ? 'warning' : 'healthy', `跳过 ${state.importPreview.skipForMissingCredentials || 0}`)}</span></div>`;
       $('button[type="submit"]', form).disabled = state.importPreview.invalid > 0;
       icons();
     }
@@ -1610,7 +1659,7 @@ $('#import-form').addEventListener('submit', async (event) => {
   try {
     await ensureReauth();
     const result = await api('/api/imports/apply', { method: 'POST', body: { format: form.elements.format.value, content: form.elements.content.value } });
-    $('#import-dialog').close(); toast(`导入完成：新增 ${result.created}，更新 ${result.updated}，跳过 ${result.skipped}`); navigate('providers');
+    $('#import-dialog').close(); toast(`导入完成：新增 ${result.created}，更新 ${result.updated}，待补凭据 ${result.disabledForMissingCredentials || 0}，跳过 ${result.skipped}`); navigate('providers');
   } catch (error) { toast(error.message, 'error'); }
 });
 

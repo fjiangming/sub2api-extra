@@ -78,6 +78,26 @@ function normalizeName(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function normalizeGatewayBaseUrl(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    if (!['http:', 'https:'].includes(url.protocol)) return null;
+    const path = url.pathname
+      .replace(/\/+$/, '')
+      .replace(/\/v1$/i, '');
+    return `${url.origin.toLowerCase()}${path}`;
+  } catch {
+    return null;
+  }
+}
+
+function equivalentRates(left, right) {
+  const first = finite(left);
+  const second = finite(right);
+  if (first == null || second == null) return false;
+  return Math.abs(first - second) <= Math.max(1e-9, Math.max(Math.abs(first), Math.abs(second)) * 1e-6);
+}
+
 function matchProviderAccounts(providerName, accounts) {
   const needle = normalizeName(providerName);
   if (!needle) return { status: 'unmatched', matchType: null, accounts: [] };
@@ -190,10 +210,11 @@ function comparisonSummary(items) {
 }
 
 class MappingService {
-  constructor({ db, config, sub2api }) {
+  constructor({ db, config, sub2api, http = null }) {
     this.db = db;
     this.config = config;
     this.sub2api = sub2api;
+    this.http = http;
     this.baseCatalogCache = null;
     this.baseCatalogRequest = null;
   }
@@ -456,8 +477,12 @@ class MappingService {
         const mappingId = crypto.randomUUID();
         const config = {
           autoMapping: {
-            source: 'provider_account_name_api_key',
+            source: item.keyMatch === 'verified_gateway_billing'
+              ? 'provider_account_name_gateway_billing'
+              : 'provider_account_name_api_key',
             accountMatch: item.accountMatch,
+            keyMatch: item.keyMatch || 'fingerprint',
+            billingScope: item.verifiedBillingScope || null,
             createdAt
           }
         };
@@ -499,7 +524,7 @@ class MappingService {
       });
     }
     const providers = this.db.prepare(`
-      SELECT p.id, p.name
+      SELECT p.id, p.name, p.adapter_type, p.auth_mode, p.base_url
       FROM provider_connections p
       WHERE p.enabled = 1 AND EXISTS (
         SELECT 1 FROM remote_keys k
@@ -511,6 +536,7 @@ class MappingService {
     const items = [];
     const accountsNeedingKeys = new Map();
     const providerAssets = new Map();
+    const gatewayKeyMatches = new Map();
     const workIdentities = new Set();
     const enqueueWork = (entry) => {
       const identity = [entry.provider.id, entry.baseGroup.id, entry.account.id].join('|');
@@ -593,7 +619,7 @@ class MappingService {
       }
     }
 
-    const fingerprints = await this.#accountKeyFingerprints(
+    const accountKeys = await this.#accountKeyDetails(
       [...accountsNeedingKeys.values()],
       { accessToken }
     );
@@ -609,19 +635,38 @@ class MappingService {
         accountId: account.id,
         accountName: account.name
       };
-      const fingerprint = fingerprints.get(account.id) || null;
+      const accountKey = accountKeys.get(account.id) || null;
+      const fingerprint = accountKey?.fingerprint || null;
       if (!fingerprint) {
         items.push({ ...baseItem, status: 'missing_api_key', reason: 'account_api_key_missing' });
         continue;
       }
       const assets = providerAssets.get(provider.id);
-      const keyMatches = assets.remoteKeys.filter((key) => key.masked_key && key.masked_key === fingerprint);
+      let keyMatches = assets.remoteKeys.filter((key) => key.masked_key && key.masked_key === fingerprint);
+      let gatewayMatch = null;
+      if (keyMatches.length === 0) {
+        const cacheKey = `${provider.id}|${account.id}`;
+        if (!gatewayKeyMatches.has(cacheKey)) {
+          gatewayKeyMatches.set(
+            cacheKey,
+            await this.#verifyGatewayKeyMatch(provider, accountKey, assets)
+          );
+        }
+        gatewayMatch = gatewayKeyMatches.get(cacheKey);
+        if (gatewayMatch.matched) keyMatches = [gatewayMatch.key];
+      }
       if (keyMatches.length === 0) {
         items.push({
           ...baseItem,
           status: 'missing_remote_key',
           reason: 'api_key_not_found_in_provider',
-          maskedKey: fingerprint
+          maskedKey: fingerprint,
+          baseMaskedKey: fingerprint,
+          providerMaskedKey: assets.remoteKeys.length === 1
+            ? assets.remoteKeys[0].masked_key || null
+            : null,
+          providerMaskedKeys: assets.remoteKeys.map((key) => key.masked_key).filter(Boolean),
+          keyVerification: gatewayMatch?.reason || null
         });
         continue;
       }
@@ -637,7 +682,9 @@ class MappingService {
       }
       const key = keyMatches[0];
       const providerRef = String(key.primary_group_ref || '').trim();
-      const providerGroup = providerRef
+      const providerGroup = gatewayMatch?.matched
+        ? gatewayMatch.providerGroup
+        : providerRef
         ? assets.remoteGroups.find((group) =>
           [group.id, group.remote_id, group.name].some((value) => String(value) === providerRef)
         )
@@ -647,6 +694,10 @@ class MappingService {
         keyId: key.id,
         keyName: key.name,
         maskedKey: key.masked_key,
+        baseMaskedKey: fingerprint,
+        providerMaskedKey: key.masked_key,
+        keyMatch: gatewayMatch?.matched ? 'verified_gateway_billing' : 'fingerprint',
+        verifiedBillingScope: gatewayMatch?.billingScope || null,
         providerGroupRef: providerGroup?.remote_id || providerRef || null,
         providerGroupName: providerGroup?.name || null,
         providerRate: finite(providerGroup?.ratio)
@@ -676,8 +727,70 @@ class MappingService {
     return { catalog, items };
   }
 
-  async #accountKeyFingerprints(accounts, { accessToken = null } = {}) {
-    const fingerprints = new Map();
+  async #verifyGatewayKeyMatch(provider, accountKey, assets) {
+    const rejected = (reason) => ({ matched: false, reason });
+    if (!this.http || provider.adapter_type !== 'sub2api' || provider.auth_mode !== 'api_key') {
+      return rejected('gateway_verification_not_supported');
+    }
+    if (assets.remoteKeys.length !== 1) return rejected('gateway_remote_key_ambiguous');
+
+    const providerBaseUrl = normalizeGatewayBaseUrl(provider.base_url);
+    const accountBaseUrl = normalizeGatewayBaseUrl(accountKey.baseUrl);
+    if (!providerBaseUrl || !accountBaseUrl) return rejected('gateway_base_url_missing');
+    if (providerBaseUrl !== accountBaseUrl) return rejected('gateway_base_url_mismatch');
+
+    let response;
+    try {
+      response = await this.http.requestJson(
+        new URL('/v1/sub2api/billing', `${provider.base_url.replace(/\/+$/, '')}/`).toString(),
+        {
+          headers: {
+            Accept: 'application/json',
+            Authorization: `Bearer ${accountKey.apiKey}`
+          },
+          retries: 0
+        }
+      );
+    } catch (error) {
+      return rejected(`gateway_billing_${error?.code || 'failed'}`);
+    }
+
+    const billing = response?.data?.data ?? response?.data;
+    if (!billing || typeof billing !== 'object' || Array.isArray(billing)) {
+      return rejected('gateway_billing_schema_mismatch');
+    }
+    const billingScope = String(billing.billing_scope || '').trim();
+    const billingRate = finite(
+      billing.effective_rate_multiplier ??
+      billing.resolved_rate_multiplier ??
+      billing.group_rate_multiplier
+    );
+    if (!billingScope) return rejected('gateway_billing_scope_missing');
+    const providerGroup = assets.remoteGroups.find((group) =>
+      [group.id, group.remote_id, group.name].some((value) => String(value) === billingScope)
+    );
+    if (!providerGroup) return rejected('gateway_billing_group_mismatch');
+    if (!equivalentRates(providerGroup.ratio, billingRate)) {
+      return rejected('gateway_billing_rate_mismatch');
+    }
+
+    const key = assets.remoteKeys[0];
+    const providerRef = String(key.primary_group_ref || '').trim();
+    if (providerRef && ![providerGroup.id, providerGroup.remote_id, providerGroup.name]
+      .some((value) => String(value) === providerRef)) {
+      return rejected('gateway_primary_group_mismatch');
+    }
+    return {
+      matched: true,
+      key,
+      providerGroup,
+      billingScope,
+      billingRate
+    };
+  }
+
+  async #accountKeyDetails(accounts, { accessToken = null } = {}) {
+    const details = new Map();
     for (let offset = 0; offset < accounts.length; offset += 50) {
       const batch = accounts.slice(offset, offset + 50);
       let payload;
@@ -692,7 +805,7 @@ class MappingService {
         if (remoteCode === 'STEP_UP_REQUIRED') {
           throw new AppError(
             'SUB2API_STEP_UP_REQUIRED',
-            'Sub2API requires recent TOTP verification for the current administrator SSO session',
+            'Sub2API requires recent TOTP verification for the current administrator session',
             { status: 403, details: { remoteCode, remoteStatus: remoteStatus || 403 } }
           );
         }
@@ -747,12 +860,19 @@ class MappingService {
             details: { accountId: batch[index].id }
           });
         }
-        const apiKey = String(exported[index]?.credentials?.api_key || '').trim();
-        if (apiKey) fingerprints.set(batch[index].id, maskKey(apiKey));
+        const credentials = exported[index]?.credentials;
+        const apiKey = String(credentials?.api_key || '').trim();
+        if (apiKey) {
+          details.set(batch[index].id, {
+            apiKey,
+            fingerprint: maskKey(apiKey),
+            baseUrl: String(credentials?.base_url || '').trim()
+          });
+        }
       }
       payload = null;
     }
-    return fingerprints;
+    return details;
   }
 
   #compareMapping(mapping, catalog) {
@@ -1041,6 +1161,8 @@ module.exports = {
   MappingService,
   dayInTimezone,
   normalizeName,
+  normalizeGatewayBaseUrl,
+  equivalentRates,
   normalizeBaseChannel,
   normalizeBaseGroup,
   normalizeBaseAccount,

@@ -20,6 +20,12 @@ Provider Monitor 是 Sub2API Extra 的供应商资产、余额、密钥分组和
 | **可观测性** | Prometheus 指标、结构化请求日志、request ID 与示例 Grafana Dashboard |
 | **安全防护** | AES-256-GCM 凭据加密、DNS 固定 SSRF 防护、管理员会话和 CSRF 防护 |
 
+配置 JSON、加密灾备包和 SQLite 备份的用途不同：
+
+- **导出配置**不会包含密码、Token 或 API Key。导入到空实例时会恢复供应商配置，但缺少凭据的供应商保持停用，补齐并验证凭据后才能启用。
+- **加密灾备包**包含供应商凭据，适合跨实例迁移供应商；凭据由单独的灾备密码加密。
+- **SQLite/远端备份**包含完整运行数据，适合整实例恢复。
+
 ## 支持的适配器
 
 | 类型 | 余额 | 密钥 | 分组/团队 | 主要凭据 |
@@ -116,9 +122,10 @@ PROVIDER_MONITOR_BIND_HOST=127.0.0.1
 # === 加密密钥（必填，至少 32 字符） ===
 PROVIDER_MONITOR_SECRET=<粘贴上一步生成的随机值>
 
-# === 认证方式 ===
-# sub2api：使用基座 Sub2API 管理员登录
+# === Provider Monitor 认证方式 ===
+# sub2api：使用基座 Sub2API 管理员 SSO 登录
 # local：使用本地管理员账号登录
+# 只决定本模块登录方式，不控制基座 Sub2API 联动
 PROVIDER_MONITOR_AUTH_MODE=sub2api
 
 # === 基座 Sub2API 连接 ===
@@ -126,6 +133,11 @@ PROVIDER_MONITOR_AUTH_MODE=sub2api
 SUB2API_BASE_URL=http://host.docker.internal:8080
 # 管理员浏览器实际访问的地址
 SUB2API_PUBLIC_URL=https://sub2api.example.com
+
+# 联动使用的 Sub2API 管理员凭据，local 模式下同样生效
+SUB2API_ADMIN_TOKEN=
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=<Sub2API 管理员密码>
 ```
 
 > 完整的配置项说明参见 `.env.example` 文件内注释。
@@ -262,7 +274,7 @@ Compose 只把业务端口发布到宿主机回环地址，外部访问需要经
 
 ## 基座 Sub2API 与单点登录
 
-Provider Monitor 把部署中的 Sub2API 作为"基座实例"。认证、渠道、分组、倍率、用量、Channel Monitor 和自动化写入都使用这组配置：
+Provider Monitor 把部署中的 Sub2API 作为"基座实例"。`PROVIDER_MONITOR_AUTH_MODE` 只决定谁来认证 Provider Monitor 管理页面；渠道、分组、倍率、用量、Channel Monitor 和自动化写入始终独立使用基座连接与管理员凭据：
 
 ```dotenv
 # 容器内实际调用的 API 地址
@@ -271,7 +283,12 @@ SUB2API_BASE_URL=http://host.docker.internal:8080
 # 管理员浏览器实际访问的地址，用于 iframe 来源白名单和返回链接
 SUB2API_PUBLIC_URL=https://sub2api.example.com
 
-PROVIDER_MONITOR_AUTH_MODE=sub2api
+SUB2API_ADMIN_TOKEN=
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=<Sub2API 管理员密码>
+
+# 可独立选择 local 或 sub2api，不会启停上述联动
+PROVIDER_MONITOR_AUTH_MODE=local
 ```
 
 在 Sub2API 管理后台的"设置 -> 自定义菜单"中添加 Provider Monitor 地址，例如 `https://provider-monitor.example.com`，并把可见性限制为管理员。Sub2API 自定义菜单附带的管理员 Token 会被远端 `/api/v1/auth/me` 校验，然后换成本模块自己的短期会话；不会要求再次输入密码，也不会把上游 Token 写入数据库。
@@ -291,7 +308,7 @@ HTTPS iframe 会同时设置普通 Cookie 和分区 Cookie，并在 URL Fragment
 3. Provider Monitor 比较基座分组有效倍率与供应商上游分组倍率，并按全局或映射级容差标记结果。
 4. 可创建"Sub2API 倍率偏差"告警规则。每条分组映射独立触发和恢复，系统每 5 分钟刷新一次，也可在页面手动刷新。
 
-自动映射查找名称中包含供应商名的 Sub2API API Key 账号，直接为账号关联的每个 Sub2API 分组匹配供应商 Key，不要求分组与渠道建立关系。系统使用脱敏 Key 指纹确认上游 Key。读取账号 Key 需要 Sub2API 管理员 SSO 会话；当 Sub2API 开启敏感操作二次验证时，Provider Monitor 会弹出 TOTP 验证框，使用当前 SSO 会话取得 15 分钟的 step-up 授权后自动重试。登录时完成的 TOTP 与敏感操作 step-up 是两项独立授权，管理员 API Key 不能代替该流程。
+自动映射查找名称中包含供应商名的 Sub2API API Key 账号，直接为账号关联的每个 Sub2API 分组匹配供应商 Key，不要求分组与渠道建立关系。系统使用脱敏 Key 指纹确认上游 Key。读取账号 Key 需要可执行敏感操作的 Sub2API 管理员会话；当配置账号启用登录 TOTP 或 Sub2API 要求敏感操作 step-up 时，Provider Monitor 会弹出 TOTP 验证框，完成验证后自动重试。配置账号取得的访问/刷新 Token 只保存在内存中并自动轮换；服务重启后可能需要重新完成登录 TOTP。管理员 API Key 不能代替敏感操作 step-up。
 
 检查状态会区分倍率偏差、基座分组缺失、供应商分组缺失、倍率缺失和供应商倍率无效。
 
@@ -378,7 +395,7 @@ npm start
 
 每次动作保存变更前后的渠道状态。服务端强制执行连续命中、冷却、每日动作上限和 Contract 变化暂停；备用映射切换与渠道启停均可回滚。
 
-SSO Token 只保存在内存中并随上游 Token 到期。需要无人值守地持续执行倍率检查、告警或自动化时，建议配置固定的 `SUB2API_ADMIN_TOKEN`；也可以使用管理员邮箱密码作为兼容回退。
+SSO Token 和配置账号取得的 Token 都只保存在内存中，刷新 Token 会按 Sub2API 协议轮换。需要无人值守地持续执行倍率检查、告警或自动化时，建议配置具备所需权限的 `SUB2API_ADMIN_TOKEN`；也可以使用管理员邮箱密码，启用 TOTP 时需在服务重启后完成一次交互验证。
 
 邮件通知的 SMTP `host`、`port`、`secure`、`user` 和 `from` 写入邮件通知通道的配置 JSON，密码写入同一通道的凭据 JSON。旧版 `PROVIDER_MONITOR_SMTP_*` 环境变量仍可作为兼容回退，但新部署不再需要配置。
 

@@ -89,6 +89,78 @@ test('Sub2API authentication reports interactive and session-bound login require
   );
 });
 
+test('Sub2API API Key mode exposes the configured key and its gateway billing group', async () => {
+  const requests = [];
+  const adapter = new Sub2ApiAdapter(context('sub2api', (url, options) => {
+    requests.push({ path: url.pathname, authorization: options.headers?.Authorization });
+    if (url.pathname === '/v1/usage') {
+      return {
+        mode: 'unrestricted',
+        isValid: true,
+        planName: 'Wallet Balance',
+        remaining: 12.5,
+        balance: 12.5,
+        unit: 'USD',
+        usage: {
+          today: {
+            requests: 2,
+            input_tokens: 10,
+            output_tokens: 20,
+            total_tokens: 30,
+            cost: 0.4
+          },
+          total: {
+            requests: 9,
+            input_tokens: 100,
+            output_tokens: 200,
+            total_tokens: 300,
+            cost: 1.5
+          }
+        }
+      };
+    }
+    if (url.pathname === '/v1/sub2api/billing') {
+      return {
+        object: 'sub2api.key_billing',
+        billing_scope: 'token',
+        group_rate_multiplier: 0.2,
+        resolved_rate_multiplier: 0.1,
+        effective_rate_multiplier: 0.1
+      };
+    }
+    throw new Error(`Unexpected ${url.pathname}`);
+  }, {
+    connection: { auth_mode: 'api_key' },
+    credentials: { apiKey: 'sk-abcdefgh12345678' }
+  }));
+
+  const account = await adapter.getAccount();
+  const [balance] = await adapter.getAccountBalances(account);
+  const [group] = await adapter.listGroups();
+  const [key] = await adapter.listKeys();
+  const usage = await adapter.getUsage();
+
+  assert.deepEqual(requests, [
+    { path: '/v1/usage', authorization: 'Bearer sk-abcdefgh12345678' },
+    { path: '/v1/sub2api/billing', authorization: 'Bearer sk-abcdefgh12345678' }
+  ]);
+  assert.equal(adapter.capabilities().listKeys, true);
+  assert.equal(adapter.capabilities().keyGroup, true);
+  assert.equal(adapter.capabilities().priceCatalog, false);
+  assert.equal(balance.available, 12.5);
+  assert.equal(balance.used, 1.5);
+  assert.equal(group.remoteId, 'token');
+  assert.equal(group.ratio, 0.1);
+  assert.equal(key.remoteId, 'configured-api-key');
+  assert.equal(key.maskedKey, 'sk-a...5678');
+  assert.equal(key.primaryGroupRef, 'token');
+  assert.equal(key.quota.remaining, 12.5);
+  assert.equal(usage.length, 2);
+  assert.equal(usage[0].period, 'today');
+  assert.equal(usage[1].period, 'cumulative');
+  assert.equal(usage[1].totalTokens, 300);
+});
+
 test('Sub2API contract returns account balance, keys and group associations', async () => {
   // Source: Wei-Shaw/sub2api user routes and DTOs, verified 2026-07-17.
   const adapter = new Sub2ApiAdapter(context('sub2api', (url) => {

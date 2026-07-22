@@ -26,6 +26,11 @@ function tokenExpiration(token, fallbackMs = 15 * 60000) {
   }
 }
 
+function isAdminUser(user) {
+  const role = String(user?.role || '').toLowerCase();
+  return role === 'admin' || role === 'root' || user?.is_admin === true || user?.isAdmin === true;
+}
+
 function unwrapSub2Api(payload) {
   if (payload?.code != null && Number(payload.code) !== 0 && Number(payload.code) !== 200) {
     throw new AppError('SUB2API_REQUEST_FAILED', remoteErrorMessage(payload, 'Sub2API rejected the request'), {
@@ -47,6 +52,9 @@ class Sub2ApiAdminClient {
     this.config = config;
     this.cachedToken = null;
     this.runtimeToken = null;
+    this.pendingLogin = null;
+    this.pendingStepUpToken = null;
+    this.tokenPromise = null;
     this.configuredTokenRejected = false;
   }
 
@@ -62,6 +70,7 @@ class Sub2ApiAdminClient {
 
   clearRuntimeToken(token = null) {
     if (!token || this.runtimeToken?.value === token) this.runtimeToken = null;
+    if (!token || this.pendingStepUpToken?.value === token) this.pendingStepUpToken = null;
   }
 
   authenticationStatus() {
@@ -78,6 +87,15 @@ class Sub2ApiAdminClient {
     if (this.cachedToken?.expiresAt > Date.now() + 1000) {
       return { available: true, source: 'configured_credentials' };
     }
+    if (this.pendingLogin?.expiresAt > Date.now()) {
+      return {
+        available: false,
+        source: 'configured_credentials',
+        error: 'two_factor_required',
+        requiresTwoFactor: true
+      };
+    }
+    if (this.cachedToken?.refreshToken) return { available: true, source: 'configured_credentials' };
     if (this.config.adminEmail && this.config.adminPassword) return { available: true, source: 'configured_credentials' };
     if (this.configuredTokenRejected) return { available: false, source: 'configured_token', error: 'invalid' };
     return { available: false, source: 'missing' };
@@ -90,14 +108,76 @@ class Sub2ApiAdminClient {
       return this.config.sub2apiAdminToken;
     }
     if (!force && this.cachedToken?.expiresAt > Date.now() + 60000) return this.cachedToken.value;
-    if (!this.config.adminEmail || !this.config.adminPassword) {
+    if (this.pendingLogin?.expiresAt > Date.now()) throw this.#loginTwoFactorRequired();
+    if (this.pendingLogin) this.pendingLogin = null;
+    if (!this.cachedToken?.refreshToken && (!this.config.adminEmail || !this.config.adminPassword)) {
       throw new AppError(
         'SUB2API_ADMIN_CREDENTIALS_REQUIRED',
         'An active Sub2API administrator SSO session, SUB2API_ADMIN_TOKEN, or ADMIN_EMAIL/ADMIN_PASSWORD is required for Sub2API integration',
         { status: 409 }
       );
     }
-    const payload = await this.request('/api/v1/auth/login', {
+    if (this.tokenPromise) return this.tokenPromise;
+    const operation = this.#configuredSessionToken();
+    this.tokenPromise = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.tokenPromise === operation) this.tokenPromise = null;
+    }
+  }
+
+  #loginTwoFactorRequired() {
+    return new AppError(
+      'SUB2API_LOGIN_2FA_REQUIRED',
+      'Sub2API requires a TOTP code to complete the configured administrator login',
+      { status: 403, details: { purpose: 'login' } }
+    );
+  }
+
+  #cacheTokenPair(data, { requireAdmin = false } = {}) {
+    if (!data?.access_token) {
+      throw new AppError('SCHEMA_MISMATCH', 'Sub2API authentication did not return an access token', {
+        status: 502
+      });
+    }
+    if (requireAdmin && !isAdminUser(data.user)) {
+      throw new AppError('SUB2API_ADMIN_REQUIRED', 'Sub2API administrator authentication failed', {
+        status: 403
+      });
+    }
+    this.cachedToken = {
+      value: data.access_token,
+      expiresAt: Date.now() + Number(data.expires_in || 3600) * 1000,
+      refreshToken: data.refresh_token || this.cachedToken?.refreshToken || null
+    };
+    this.pendingLogin = null;
+    return this.cachedToken.value;
+  }
+
+  async #configuredSessionToken() {
+    if (this.cachedToken?.refreshToken) {
+      try {
+        const refreshed = unwrapSub2Api(await this.request('/api/v1/auth/refresh', {
+          method: 'POST',
+          body: { refresh_token: this.cachedToken.refreshToken },
+          authenticated: false
+        }));
+        return this.#cacheTokenPair(refreshed);
+      } catch (error) {
+        if (Number(error?.status) >= 500 || error?.retryable) throw error;
+        this.cachedToken = null;
+      }
+    }
+
+    if (!this.config.adminEmail || !this.config.adminPassword) {
+      throw new AppError(
+        'SUB2API_ADMIN_CREDENTIALS_REQUIRED',
+        'ADMIN_EMAIL and ADMIN_PASSWORD are required to establish a Sub2API administrator session',
+        { status: 409 }
+      );
+    }
+    const login = unwrapSub2Api(await this.request('/api/v1/auth/login', {
       method: 'POST',
       body: {
         email: this.config.adminEmail,
@@ -105,18 +185,20 @@ class Sub2ApiAdminClient {
         turnstile_token: ''
       },
       authenticated: false
-    });
-    const login = unwrapSub2Api(payload);
-    if (!login?.access_token || !['admin', 'root'].includes(String(login.user?.role).toLowerCase())) {
-      throw new AppError('SUB2API_ADMIN_REQUIRED', 'Sub2API administrator authentication failed', {
-        status: 403
-      });
+    }));
+    if (login?.requires_2fa) {
+      if (!login.temp_token) {
+        throw new AppError('SCHEMA_MISMATCH', 'Sub2API 2FA login did not return a temporary token', {
+          status: 502
+        });
+      }
+      this.pendingLogin = {
+        tempToken: login.temp_token,
+        expiresAt: Date.now() + 5 * 60000
+      };
+      throw this.#loginTwoFactorRequired();
     }
-    this.cachedToken = {
-      value: login.access_token,
-      expiresAt: Date.now() + Number(login.expires_in || 3600) * 1000
-    };
-    return this.cachedToken.value;
+    return this.#cacheTokenPair(login, { requireAdmin: true });
   }
 
   async request(endpoint, options = {}) {
@@ -150,6 +232,12 @@ class Sub2ApiAdminClient {
         });
       }
       const payload = text ? JSON.parse(text) : null;
+      if (remoteErrorCode(payload) === 'STEP_UP_REQUIRED' && token) {
+        this.pendingStepUpToken = {
+          value: token,
+          expiresAt: tokenExpiration(token)
+        };
+      }
       if (!response.ok) {
         if (response.status === 401 && token && this.runtimeToken?.value === token) {
           this.clearRuntimeToken(token);
@@ -157,9 +245,15 @@ class Sub2ApiAdminClient {
         if (response.status === 401 && token && token === this.config.sub2apiAdminToken) {
           this.configuredTokenRejected = true;
         }
+        if (response.status === 401 && token && this.cachedToken?.value === token) {
+          this.cachedToken = {
+            ...this.cachedToken,
+            value: null,
+            expiresAt: 0
+          };
+        }
         if (response.status === 401 && authenticated && !explicitAccessToken && !options.forceTokenRefresh) {
-          this.cachedToken = null;
-          if (this.config.adminEmail && this.config.adminPassword) {
+          if (this.cachedToken?.refreshToken || (this.config.adminEmail && this.config.adminPassword)) {
             return this.request(endpoint, { ...options, forceTokenRefresh: true });
           }
         }
@@ -191,14 +285,31 @@ class Sub2ApiAdminClient {
   }
 
   async verifyStepUp(accessToken, code) {
-    const token = String(accessToken || '').trim();
-    if (!token) {
-      throw new AppError(
-        'SUB2API_SSO_REQUIRED',
-        'A Sub2API administrator SSO session is required for TOTP verification',
-        { status: 409 }
-      );
+    const explicitToken = String(accessToken || '').trim();
+    if (!explicitToken && this.pendingLogin?.expiresAt > Date.now()) {
+      try {
+        const login = await this.data('/api/v1/auth/login/2fa', {
+          method: 'POST',
+          body: {
+            temp_token: this.pendingLogin.tempToken,
+            totp_code: code
+          },
+          authenticated: false
+        });
+        this.#cacheTokenPair(login, { requireAdmin: true });
+        return {
+          verified: true,
+          expiresIn: Number(login.expires_in) || 0
+        };
+      } catch (error) {
+        throw this.#translateTwoFactorError(error);
+      }
     }
+    if (this.pendingLogin) this.pendingLogin = null;
+    const pendingToken = this.pendingStepUpToken?.expiresAt > Date.now()
+      ? this.pendingStepUpToken.value
+      : null;
+    const token = explicitToken || pendingToken || await this.adminToken();
     try {
       const result = await this.data('/api/v1/user/totp/step-up', {
         method: 'POST',
@@ -210,50 +321,55 @@ class Sub2ApiAdminClient {
           status: 502
         });
       }
+      this.pendingStepUpToken = null;
       return {
         verified: true,
         expiresIn: Number(result.expires_in) || 0
       };
     } catch (error) {
-      const remoteCode = String(error?.details?.remoteCode || '');
-      const details = {
-        remoteCode: remoteCode || null,
-        remoteStatus: Number(error?.details?.remoteStatus || error?.status) || null
-      };
-      if (remoteCode === 'TOTP_INVALID_CODE') {
-        throw new AppError('SUB2API_TOTP_INVALID_CODE', 'The TOTP code is invalid or expired', {
-          status: 400,
-          details
-        });
-      }
-      if (remoteCode === 'TOTP_TOO_MANY_ATTEMPTS') {
-        throw new AppError('SUB2API_TOTP_RATE_LIMITED', 'Too many TOTP attempts; try again later', {
-          status: 429,
-          retryable: true,
-          details
-        });
-      }
-      if (['TOTP_NOT_SETUP', 'STEP_UP_TOTP_NOT_ENABLED'].includes(remoteCode)) {
-        throw new AppError('SUB2API_TOTP_NOT_ENABLED', 'TOTP is not enabled for this Sub2API administrator', {
-          status: 409,
-          details
-        });
-      }
-      if (remoteCode === 'STEP_UP_UNAVAILABLE') {
-        throw new AppError('SUB2API_STEP_UP_UNAVAILABLE', 'Sub2API step-up verification is temporarily unavailable', {
-          status: 503,
-          retryable: true,
-          details
-        });
-      }
-      if (Number(error?.status) === 401) {
-        throw new AppError('SUB2API_SSO_REQUIRED', 'The Sub2API administrator SSO session is no longer valid', {
-          status: 401,
-          details
-        });
-      }
-      throw error;
+      throw this.#translateTwoFactorError(error);
     }
+  }
+
+  #translateTwoFactorError(error) {
+    const remoteCode = String(error?.details?.remoteCode || '');
+    const details = {
+      remoteCode: remoteCode || null,
+      remoteStatus: Number(error?.details?.remoteStatus || error?.status) || null
+    };
+    if (remoteCode === 'TOTP_INVALID_CODE') {
+      return new AppError('SUB2API_TOTP_INVALID_CODE', 'The TOTP code is invalid or expired', {
+        status: 400,
+        details
+      });
+    }
+    if (remoteCode === 'TOTP_TOO_MANY_ATTEMPTS') {
+      return new AppError('SUB2API_TOTP_RATE_LIMITED', 'Too many TOTP attempts; try again later', {
+        status: 429,
+        retryable: true,
+        details
+      });
+    }
+    if (['TOTP_NOT_SETUP', 'STEP_UP_TOTP_NOT_ENABLED'].includes(remoteCode)) {
+      return new AppError('SUB2API_TOTP_NOT_ENABLED', 'TOTP is not enabled for this Sub2API administrator', {
+        status: 409,
+        details
+      });
+    }
+    if (remoteCode === 'STEP_UP_UNAVAILABLE') {
+      return new AppError('SUB2API_STEP_UP_UNAVAILABLE', 'Sub2API step-up verification is temporarily unavailable', {
+        status: 503,
+        retryable: true,
+        details
+      });
+    }
+    if (Number(error?.status) === 401) {
+      return new AppError('SUB2API_ADMIN_SESSION_REQUIRED', 'The configured Sub2API administrator session is no longer valid', {
+        status: 401,
+        details
+      });
+    }
+    return error;
   }
 
   async listAll(endpoint, query = {}, options = {}) {

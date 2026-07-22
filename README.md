@@ -165,14 +165,18 @@ PROVIDER_MONITOR_DATABASE=./data/provider-monitor.db
 # 必填：加密密钥，至少 32 个字符，部署后不可更改
 PROVIDER_MONITOR_SECRET=替换为至少32个字符的随机字符串
 
-# 登录方式：local（本地账号）或 sub2api（基座管理员账号）
+# Provider Monitor 登录方式：local（本地账号）或 sub2api（基座管理员 SSO）
+# 该选项不控制基座联动功能。
 PROVIDER_MONITOR_AUTH_MODE=local
 PROVIDER_MONITOR_LOCAL_ADMIN_USER=admin
 PROVIDER_MONITOR_LOCAL_ADMIN_PASSWORD=替换为你的本地管理员密码
 
-# 基座 Sub2API
+# 基座 Sub2API；local 模式下仍需独立配置以下连接与管理员凭据
 SUB2API_BASE_URL=http://host.docker.internal:8080
 SUB2API_PUBLIC_URL=http://你的服务器地址:8080
+SUB2API_ADMIN_TOKEN=
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=替换为你的 Sub2API 管理员密码
 ```
 
 > 完整参数说明请参阅各模块的 `.env.example` 或模块 README。
