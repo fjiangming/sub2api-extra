@@ -25,15 +25,15 @@ function insertGroup(db, providerId, { remoteId, name, ratio }) {
   return id;
 }
 
-function insertKey(db, providerId, { remoteId, name, apiKey, primaryGroupRef }) {
+function insertKey(db, providerId, { remoteId, name, apiKey, primaryGroupRef, remoteAccountId = null }) {
   const now = nowIso();
   const id = crypto.randomUUID();
   db.prepare(`
     INSERT INTO remote_keys(
-      id, connection_id, remote_id, name, masked_key, status,
+      id, connection_id, remote_account_id, remote_id, name, masked_key, status,
       primary_group_ref, unlimited, metadata_json, first_seen_at, last_seen_at
-    ) VALUES (?, ?, ?, ?, ?, 'active', ?, 0, '{}', ?, ?)
-  `).run(id, providerId, remoteId, name, maskKey(apiKey), primaryGroupRef, now, now);
+    ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 0, '{}', ?, ?)
+  `).run(id, providerId, remoteAccountId, remoteId, name, maskKey(apiKey), primaryGroupRef, now, now);
   return id;
 }
 
@@ -159,6 +159,64 @@ test('auto-mapping processes every account from a multiple contains match', asyn
     context.db.prepare('SELECT account_id FROM sub2api_mappings ORDER BY account_id').all().map((row) => row.account_id),
     [108, 113]
   );
+});
+
+test('auto-mapping normalizes an sk prefix and resolves an inherited sole provider group', async (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'a6api', adapterType: 'new-api', baseUrl: 'https://a6api.example',
+    authMode: 'system_token', credentials: { systemToken: 'secret', userId: '1' }, enabled: true
+  });
+  insertGroup(context.db, provider.id, { remoteId: 'default', name: 'Default', ratio: 1 });
+  const remoteAccountId = crypto.randomUUID();
+  const now = nowIso();
+  context.db.prepare(`
+    INSERT INTO remote_accounts(
+      id, connection_id, remote_id, display_name, user_group, status,
+      metadata_json, first_seen_at, last_seen_at
+    ) VALUES (?, ?, '2160', 'A6 User', 'default', 'active', '{}', ?, ?)
+  `).run(remoteAccountId, provider.id, now, now);
+  const rawKey = 'UL0W-provider-token-frsI';
+  const keyId = insertKey(context.db, provider.id, {
+    remoteId: 'a6-key', name: 'A6 Key', apiKey: rawKey, remoteAccountId
+  });
+  const mappings = new MappingService({
+    db: context.db,
+    config: context.config,
+    sub2api: sub2apiFixture({
+      channels: [],
+      groups: [{ id: 21, name: 'GPT Plus', status: 'active', rate_multiplier: 1 }],
+      accounts: [{
+        id: 107,
+        name: 'https://a6api.example/',
+        type: 'api_key',
+        group_ids: [21],
+        credentials_status: { has_api_key: true }
+      }],
+      apiKeys: { 107: `sk-${rawKey}` }
+    })
+  });
+
+  const preview = await mappings.autoMappings({ mode: 'preview' });
+  assert.equal(preview.summary.pendingCreate, 1);
+  assert.equal(preview.summary.missingRemoteKey, 0);
+  assert.equal(preview.items[0].keyId, keyId);
+  assert.equal(preview.items[0].keyMatch, 'normalized_fingerprint');
+  assert.equal(preview.items[0].keyVerification, 'api_key_prefix_normalized');
+  assert.equal(preview.items[0].providerGroupRef, 'default');
+  assert.equal(preview.items[0].providerGroupSource, 'account_inherited');
+  assert.equal(preview.items[0].providerRateScope, 'group_multiplier');
+  assert.equal(preview.items[0].channelCostVerified, false);
+  assert.notEqual(preview.items[0].baseMaskedKey, preview.items[0].providerMaskedKey);
+
+  const applied = await mappings.autoMappings({ mode: 'apply' });
+  assert.equal(applied.summary.created, 1);
+  assert.equal(applied.comparisons.items[0].comparison.details.providerGroupSource, 'account_inherited');
+  assert.equal(context.db.prepare(
+    'SELECT key_id FROM sub2api_mappings WHERE account_id = 107 AND group_id = 21'
+  ).get().key_id, keyId);
 });
 
 test('auto-mapping verifies a different key when the gateway URL, billing scope and rate match', async (t) => {

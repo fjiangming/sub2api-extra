@@ -65,6 +65,9 @@ test('mapping comparison persists Sub2API group-rate drift and drives alert reco
   assert.equal(comparison.items[0].comparison.baseGroupRate, 1.2);
   assert.equal(comparison.items[0].comparison.baseGroupId, 7);
   assert.equal('inferredBaseGroup' in comparison.items[0].comparison.details, false);
+  assert.equal(comparison.items[0].comparison.details.providerGroupSource, 'mapping_explicit');
+  assert.equal(comparison.items[0].comparison.details.providerRateScope, 'group_multiplier');
+  assert.equal(comparison.items[0].comparison.details.channelCostVerified, false);
   assert.ok(Math.abs(comparison.items[0].comparison.differenceRatio - 0.5) < 1e-9);
 
   mappings.save({

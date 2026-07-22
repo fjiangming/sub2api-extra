@@ -186,7 +186,10 @@ test('integration groups render a collapsed outer winner and mark exactly one hi
       comparison: {
         providerGroupName: 'Premium', providerRate: 1.5, baseGroupRate: 1.1,
         status: 'rate_mismatch',
-        differenceRatio: -0.2667, details: { providerGroupStatus: 'inactive' }
+        differenceRatio: -0.2667, details: {
+          providerGroupStatus: 'inactive', providerGroupSource: 'account_inherited',
+          providerRateScope: 'group_multiplier', channelCostVerified: false
+        }
       }
     },
     items: [
@@ -196,7 +199,10 @@ test('integration groups render a collapsed outer winner and mark exactly one hi
         comparison: {
           providerGroupName: 'Premium', providerRate: 1.5, baseGroupRate: 1.1,
           status: 'rate_mismatch',
-          differenceRatio: -0.2667, details: { providerGroupStatus: 'inactive' }
+          differenceRatio: -0.2667, details: {
+            providerGroupStatus: 'inactive', providerGroupSource: 'account_inherited',
+            providerRateScope: 'group_multiplier', channelCostVerified: false
+          }
         }
       },
       {
@@ -218,6 +224,9 @@ test('integration groups render a collapsed outer winner and mark exactly one hi
   assert.equal((collapsed.match(/highest-rate-row/g) || []).length, 1);
   assert.equal((collapsed.match(/data-integration-parent="101" hidden/g) || []).length, 2);
   assert.match(collapsed, /badge inactive/);
+  assert.match(collapsed, /继承账号/);
+  assert.match(collapsed, /分组倍率/);
+  assert.match(collapsed, /渠道成本未验证/);
   assert.match(collapsed, /aria-expanded="false"/);
 
   vm.runInContext("state.integrationExpandedGroups.add('101')", context);

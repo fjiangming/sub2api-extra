@@ -516,6 +516,27 @@ function integrationRate(value) {
   return formatEffectiveRate(value);
 }
 
+const PROVIDER_GROUP_SOURCE_LABELS = {
+  mapping_explicit: ['info', '映射指定'],
+  key_explicit: ['info', 'Key 指定'],
+  account_inherited: ['info', '继承账号'],
+  gateway_verified: ['healthy', '计费验证'],
+  base_group_name_inferred: ['warning', '同名推断'],
+  sole_group_inferred: ['warning', '唯一分组推断']
+};
+
+function providerGroupSourceBadge(comparison = {}) {
+  const definition = PROVIDER_GROUP_SOURCE_LABELS[comparison.details?.providerGroupSource];
+  return definition ? ` ${badge(definition[0], definition[1])}` : '';
+}
+
+function integrationProviderRate(comparison = {}) {
+  const parts = [integrationRate(comparison.providerRate)];
+  if (comparison.details?.providerRateScope === 'group_multiplier') parts.push('分组倍率');
+  if (comparison.details?.channelCostVerified === false) parts.push('渠道成本未验证');
+  return parts.join(' · ');
+}
+
 function integrationSummaryHelp() {
   return `<details class="integration-status-help">
     <summary title="查看状态说明" aria-label="查看联动状态说明" aria-describedby="integration-status-help-panel"><i data-lucide="circle-help"></i></summary>
@@ -538,11 +559,12 @@ function integrationDetailRow(item, groupKey, expanded) {
   const comparison = item.comparison || {};
   const providerGroupState = comparison.details?.providerGroupStatus && !['active', 'enabled'].includes(comparison.details.providerGroupStatus.toLowerCase())
     ? ` ${badge(comparison.details.providerGroupStatus)}` : '';
+  const providerGroupSource = providerGroupSourceBadge(comparison);
   return `<tr class="integration-detail-row${item.isHighestRate ? ' highest-rate-row' : ''}" data-integration-parent="${escapeHtml(groupKey)}" ${expanded ? '' : 'hidden'}>
     <td class="primary-cell integration-indent"><strong>${item.account_id ? `账号 #${item.account_id}` : '账户级映射'}</strong><small>${item.role === 'primary' ? '主映射' : '备用映射'}</small></td>
     <td class="numeric">${integrationRate(comparison.baseGroupRate)}</td>
     <td class="primary-cell"><strong>${escapeHtml(item.provider_name)}</strong><small>${escapeHtml(item.key_name || '账户级')} · ${escapeHtml(item.masked_key || '-')}</small></td>
-    <td class="primary-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${item.isHighestRate ? ` ${badge('highest', '最高')}` : ''}</strong><small>${integrationRate(comparison.providerRate)}</small></td>
+    <td class="primary-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${providerGroupSource}${item.isHighestRate ? ` ${badge('highest', '最高')}` : ''}</strong><small>${integrationProviderRate(comparison)}</small></td>
     <td class="numeric comparison-delta ${comparison.status === 'rate_mismatch' ? 'warning' : ''}">${integrationDelta(comparison)}</td>
     <td>${badge(comparison.status || 'unknown', comparison.status ? null : '待检查')}</td>
     <td>${item.reconciliation_status ? badge(item.reconciliation_status) : '-'}</td>
@@ -559,12 +581,13 @@ function integrationGroupRows(group) {
     ? ` ${badge(group.status)}` : '';
   const providerGroupState = comparison.details?.providerGroupStatus && !['active', 'enabled'].includes(comparison.details.providerGroupStatus.toLowerCase())
     ? ` ${badge(comparison.details.providerGroupStatus)}` : '';
+  const providerGroupSource = providerGroupSourceBadge(comparison);
   const detailRows = (group.items || []).map((item) => integrationDetailRow(item, groupKey, expanded)).join('');
   return `<tr class="integration-group-row" data-integration-group="${escapeHtml(groupKey)}">
     <td class="primary-cell"><strong>${escapeHtml(group.groupName)}${baseGroupState}</strong><small>#${escapeHtml(group.groupId)}${group.platform ? ` · ${escapeHtml(group.platform)}` : ''}</small></td>
     <td class="numeric"><strong>${integrationRate(group.baseRate)}</strong></td>
     <td class="primary-cell"><strong>${escapeHtml(highest?.provider_name || '-')}</strong><small>${highest ? `${escapeHtml(highest.key_name || '账户级')} · ${escapeHtml(highest.masked_key || '-')}` : '暂无有效倍率映射'}</small></td>
-    <td class="primary-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${highest ? ` ${badge('highest', '最高')}` : ''}</strong><small>${integrationRate(comparison.providerRate)}</small></td>
+    <td class="primary-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${providerGroupSource}${highest ? ` ${badge('highest', '最高')}` : ''}</strong><small>${integrationProviderRate(comparison)}</small></td>
     <td class="numeric comparison-delta ${comparison.status === 'rate_mismatch' ? 'warning' : ''}">${integrationDelta(comparison)}</td>
     <td>${highest ? badge(comparison.status || 'unknown') : badge('unknown', '无映射')}</td>
     <td>${badge(group.mappingCount ? 'info' : 'unknown', `${group.mappingCount || 0} 条`)}</td>
@@ -586,6 +609,7 @@ const AUTO_MAPPING_REASON_LABELS = {
 };
 const AUTO_MAPPING_KEY_VERIFICATION_LABELS = {
   verified_gateway_billing: 'Key 不同，已通过同源计费验证',
+  api_key_prefix_normalized: '已按 sk- 前缀规范化匹配',
   gateway_verification_not_supported: '该供应商类型不支持跨 Key 验证',
   gateway_remote_key_ambiguous: '供应商存在多个候选 Key，无法唯一确认',
   gateway_base_url_missing: '基座账号未配置可验证的 Base URL',

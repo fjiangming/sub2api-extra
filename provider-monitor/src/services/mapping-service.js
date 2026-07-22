@@ -3,6 +3,10 @@ const { AppError, asAppError } = require('../errors');
 const { nowIso, parseJson, stringifyJson } = require('../db');
 const { maskKey } = require('../security/redaction');
 
+const ROUTED_GROUP_RATE_ADAPTERS = new Set([
+  'new-api', 'one-api', 'one-hub', 'done-hub', 'veloera'
+]);
+
 function dayInTimezone(value, timezone) {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone || 'Asia/Shanghai',
@@ -76,6 +80,18 @@ function normalizeBaseGroup(group, rates = {}) {
 
 function normalizeName(value) {
   return String(value || '').trim().toLowerCase();
+}
+
+function apiKeyFingerprintVariants(value) {
+  const apiKey = String(value || '').trim();
+  if (!apiKey) return [];
+  const variants = [apiKey];
+  if (apiKey.startsWith('sk-')) {
+    if (apiKey.length > 3) variants.push(apiKey.slice(3));
+  } else {
+    variants.push(`sk-${apiKey}`);
+  }
+  return [...new Set(variants.map((item) => maskKey(item)).filter(Boolean))];
 }
 
 function normalizeGatewayBaseUrl(value) {
@@ -225,7 +241,8 @@ class MappingService {
     if (connectionId) { clauses.push('m.connection_id = ?'); params.push(connectionId); }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     return this.db.prepare(`
-      SELECT m.*, p.name AS provider_name, k.name AS key_name, k.masked_key,
+      SELECT m.*, p.name AS provider_name, p.adapter_type AS provider_adapter_type,
+        k.name AS key_name, k.masked_key,
         r.status AS reconciliation_status, r.difference_amount,
         r.difference_ratio, r.health_score, r.completed_at AS reconciled_at,
         s.status AS comparison_status, s.provider_group_ref AS comparison_provider_group_ref,
@@ -560,10 +577,12 @@ class MappingService {
       }
 
       const remoteKeys = this.db.prepare(`
-        SELECT id, name, masked_key, primary_group_ref, status
-        FROM remote_keys
-        WHERE connection_id = ? AND status != 'missing'
-        ORDER BY name COLLATE NOCASE, id
+        SELECT k.id, k.name, k.masked_key, k.primary_group_ref, k.status,
+          a.user_group AS account_user_group
+        FROM remote_keys k
+        LEFT JOIN remote_accounts a ON a.id = k.remote_account_id
+        WHERE k.connection_id = ? AND k.status != 'missing'
+        ORDER BY k.name COLLATE NOCASE, k.id
       `).all(provider.id);
       const remoteGroups = this.db.prepare(`
         SELECT id, remote_id, name, ratio, status
@@ -637,12 +656,17 @@ class MappingService {
       };
       const accountKey = accountKeys.get(account.id) || null;
       const fingerprint = accountKey?.fingerprint || null;
+      const fingerprints = accountKey?.fingerprints || (fingerprint ? [fingerprint] : []);
       if (!fingerprint) {
         items.push({ ...baseItem, status: 'missing_api_key', reason: 'account_api_key_missing' });
         continue;
       }
       const assets = providerAssets.get(provider.id);
-      let keyMatches = assets.remoteKeys.filter((key) => key.masked_key && key.masked_key === fingerprint);
+      let keyMatches = assets.remoteKeys.filter((key) =>
+        key.masked_key && fingerprints.includes(key.masked_key)
+      );
+      const normalizedFingerprintMatch = keyMatches.length > 0 &&
+        keyMatches.every((key) => key.masked_key !== fingerprint);
       let gatewayMatch = null;
       if (keyMatches.length === 0) {
         const cacheKey = `${provider.id}|${account.id}`;
@@ -681,14 +705,26 @@ class MappingService {
         continue;
       }
       const key = keyMatches[0];
-      const providerRef = String(key.primary_group_ref || '').trim();
-      const providerGroup = gatewayMatch?.matched
+      const keyProviderRef = String(key.primary_group_ref || '').trim();
+      const accountProviderRef = String(key.account_user_group || '').trim();
+      const providerRef = keyProviderRef || accountProviderRef;
+      let providerGroupSource = keyProviderRef
+        ? 'key_explicit'
+        : accountProviderRef
+          ? 'account_inherited'
+          : null;
+      let providerGroup = gatewayMatch?.matched
         ? gatewayMatch.providerGroup
         : providerRef
-        ? assets.remoteGroups.find((group) =>
-          [group.id, group.remote_id, group.name].some((value) => String(value) === providerRef)
-        )
-        : null;
+          ? assets.remoteGroups.find((group) =>
+            [group.id, group.remote_id, group.name].some((value) => String(value) === providerRef)
+          )
+          : null;
+      if (gatewayMatch?.matched) providerGroupSource = 'gateway_verified';
+      if (!providerGroup && !providerRef && assets.remoteGroups.length === 1) {
+        providerGroup = assets.remoteGroups[0];
+        providerGroupSource = 'sole_group_inferred';
+      }
       const keyItem = {
         ...baseItem,
         keyId: key.id,
@@ -696,11 +732,19 @@ class MappingService {
         maskedKey: key.masked_key,
         baseMaskedKey: fingerprint,
         providerMaskedKey: key.masked_key,
-        keyMatch: gatewayMatch?.matched ? 'verified_gateway_billing' : 'fingerprint',
+        keyMatch: gatewayMatch?.matched
+          ? 'verified_gateway_billing'
+          : normalizedFingerprintMatch
+            ? 'normalized_fingerprint'
+            : 'fingerprint',
+        keyVerification: normalizedFingerprintMatch ? 'api_key_prefix_normalized' : null,
         verifiedBillingScope: gatewayMatch?.billingScope || null,
         providerGroupRef: providerGroup?.remote_id || providerRef || null,
         providerGroupName: providerGroup?.name || null,
-        providerRate: finite(providerGroup?.ratio)
+        providerGroupSource,
+        providerRate: finite(providerGroup?.ratio),
+        providerRateScope: 'group_multiplier',
+        channelCostVerified: ROUTED_GROUP_RATE_ADAPTERS.has(provider.adapter_type) ? false : null
       };
       if (!providerGroup) {
         items.push({
@@ -863,9 +907,11 @@ class MappingService {
         const credentials = exported[index]?.credentials;
         const apiKey = String(credentials?.api_key || '').trim();
         if (apiKey) {
+          const fingerprints = apiKeyFingerprintVariants(apiKey);
           details.set(batch[index].id, {
             apiKey,
-            fingerprint: maskKey(apiKey),
+            fingerprint: fingerprints[0],
+            fingerprints,
             baseUrl: String(credentials?.base_url || '').trim()
           });
         }
@@ -883,11 +929,25 @@ class MappingService {
       ORDER BY name COLLATE NOCASE
     `).all(mapping.connection_id).map((row) => ({ ...row, metadata: parseJson(row.metadata_json, {}) }));
     const key = mapping.key_id
-      ? this.db.prepare('SELECT primary_group_ref, backup_group_ref FROM remote_keys WHERE id = ?').get(mapping.key_id)
+      ? this.db.prepare(`
+          SELECT k.primary_group_ref, k.backup_group_ref, a.user_group AS account_user_group
+          FROM remote_keys k
+          LEFT JOIN remote_accounts a ON a.id = k.remote_account_id
+          WHERE k.id = ?
+        `).get(mapping.key_id)
       : null;
     const explicitProviderRef = config.upstreamGroupRef == null ? null : String(config.upstreamGroupRef);
-    const providerRef = explicitProviderRef || key?.primary_group_ref || null;
+    const keyProviderRef = String(key?.primary_group_ref || '').trim() || null;
+    const accountProviderRef = String(key?.account_user_group || '').trim() || null;
+    const providerRef = explicitProviderRef || keyProviderRef || accountProviderRef || null;
     const providerRefSpecified = providerRef != null && String(providerRef).trim() !== '';
+    let providerGroupSource = explicitProviderRef
+      ? 'mapping_explicit'
+      : keyProviderRef
+        ? 'key_explicit'
+        : accountProviderRef
+          ? 'account_inherited'
+          : null;
     let providerGroup = providerRef
       ? providerGroups.find((group) => [group.id, group.remote_id, group.name].some((value) => String(value) === String(providerRef)))
       : null;
@@ -896,8 +956,12 @@ class MappingService {
     const baseGroup = baseGroupId == null ? null : catalog.groups.find((group) => Number(group.id) === Number(baseGroupId));
     if (!providerGroup && !providerRefSpecified && baseGroup) {
       providerGroup = providerGroups.find((group) => group.name.toLowerCase() === baseGroup.name.toLowerCase()) || null;
+      if (providerGroup) providerGroupSource = 'base_group_name_inferred';
     }
-    if (!providerGroup && !providerRefSpecified && providerGroups.length === 1) providerGroup = providerGroups[0];
+    if (!providerGroup && !providerRefSpecified && providerGroups.length === 1) {
+      providerGroup = providerGroups[0];
+      providerGroupSource = 'sole_group_inferred';
+    }
 
     const storedTolerance = parseJson(this.db.prepare(`SELECT value_json FROM settings WHERE key = 'sub2apiRateToleranceRatio'`).get()?.value_json, 0.05);
     const toleranceRatio = Math.max(0, finite(config.rateToleranceRatio) ?? finite(storedTolerance) ?? 0.05);
@@ -932,7 +996,11 @@ class MappingService {
         baseGroupDefaultRate: baseGroup?.defaultRate ?? null,
         baseGroupEffectiveRate: baseGroup?.effectiveRate ?? null,
         baseGroupPlatform: baseGroup?.platform || '',
-        providerGroupStatus: providerGroup?.status || null
+        providerGroupStatus: providerGroup?.status || null,
+        providerGroupSource,
+        providerRateScope: 'group_multiplier',
+        channelCostVerified: ROUTED_GROUP_RATE_ADAPTERS.has(mapping.provider_adapter_type) ? false : null,
+        providerAdapterType: mapping.provider_adapter_type || null
       }
     };
   }
