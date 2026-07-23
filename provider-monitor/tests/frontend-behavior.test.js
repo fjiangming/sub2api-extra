@@ -298,6 +298,7 @@ test('provider payload exposes dynamic route rate controls for New API', () => {
       secondaryWarningThreshold: { value: '' },
       thresholdCurrency: { value: 'USD' }, rechargeMultiplier: { value: '' },
       rechargeUrl: { value: '' },
+      rechargeLoginMode: { value: 'adapter' },
       dynamicRouteRateEnabled: { checked: true },
       dynamicRouteRateStatistic: { value: 'p90' },
       dynamicRouteRateLookbackDays: { value: '14' },
@@ -312,10 +313,16 @@ test('provider payload exposes dynamic route rate controls for New API', () => {
   assert.deepEqual(payload.typeConfig.dynamicRouteRate, {
     enabled: true, statistic: 'p90', lookbackDays: 14, minimumSamples: 5
   });
+  assert.equal(payload.typeConfig.rechargeLogin.enabled, true);
   assert.equal(payload.typeConfig.preserved, true);
+  assert.equal(
+    vm.runInContext("credentialFieldsFor('new-api', 'system_token').map(([name]) => name).join(',')", context),
+    'systemToken,userId,webUsername,webPassword'
+  );
   assert.match(source, /dynamicRouteRateEnabled/);
   assert.match(index, /name="dynamicRouteRateEnabled"/);
   assert.match(index, /name="rechargeUrl" type="url"/);
+  assert.match(index, /name="rechargeLoginMode"/);
   assert.match(index, /name="secondaryWarningThreshold"/);
   assert.match(index, /value="serverchan">Server酱（个人微信）/);
   assert.match(index, /Token 加权平均/);

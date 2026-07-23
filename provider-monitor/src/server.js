@@ -32,6 +32,13 @@ const { TransferService } = require('./services/transfer-service');
 const { DetectionService } = require('./services/detection-service');
 const { BackupService } = require('./services/backup-service');
 const { RetentionService } = require('./services/retention-service');
+const {
+  RechargeLinkService,
+  pageHeaders,
+  renderEntryPage,
+  renderProviderLoginPage,
+  renderErrorPage
+} = require('./services/recharge-link-service');
 const { Metrics } = require('./metrics');
 const { AuthService } = require('./auth');
 
@@ -48,7 +55,14 @@ const providerSchema = z.object({
   secondaryWarningThreshold: z.number().nonnegative().optional().nullable(),
   thresholdCurrency: z.string().trim().min(1).max(12).optional(),
   rechargeUrl: z.string().trim().url().max(2048)
-    .refine((value) => /^https?:\/\//i.test(value), '充值链接必须使用 HTTP 或 HTTPS')
+    .refine((value) => {
+      try {
+        const url = new URL(value);
+        return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password;
+      } catch {
+        return false;
+      }
+    }, '充值链接必须使用不含账号密码的 HTTP 或 HTTPS 地址')
     .optional().nullable(),
   rechargeMultiplier: z.number().positive().max(1000000).optional().nullable(),
   typeConfig: z.record(z.string(), z.any()).optional(),
@@ -242,7 +256,8 @@ function createApplication(options = {}) {
   transfers.applyRuntimeSettings();
   const http = new HttpClient(config);
   const queries = new QueryService(db, config);
-  const notifications = new NotificationService({ db, config });
+  const rechargeLinks = new RechargeLinkService({ db, config, providers, http });
+  const notifications = new NotificationService({ db, config, rechargeLinks });
   const alerts = new AlertService({ db, config, queries, notifications });
   const sub2api = new Sub2ApiAdminClient(config);
   const automation = new AutomationService({ db, config, sub2api });
@@ -376,6 +391,7 @@ function createApplication(options = {}) {
   const loginLimiter = rateLimit({ windowMs: 15 * 60000, limit: 20, standardHeaders: true, legacyHeaders: false });
   const passwordChangeLimiter = rateLimit({ windowMs: 15 * 60000, limit: 10, standardHeaders: true, legacyHeaders: false });
   const sub2apiStepUpLimiter = rateLimit({ windowMs: 15 * 60000, limit: 10, standardHeaders: true, legacyHeaders: false });
+  const rechargeEntryLimiter = rateLimit({ windowMs: 15 * 60000, limit: 30, standardHeaders: true, legacyHeaders: false });
   const enqueueSub2ApiRefresh = () => {
     if (mappings.list().some((mapping) => mapping.enabled)) {
       queue.enqueue('sub2api_mapping_sync', { priority: 5 });
@@ -453,6 +469,44 @@ function createApplication(options = {}) {
     if (!config.metricsEnabled) return res.status(404).end();
     res.type(metrics.contentType()).send(await metrics.render());
   }));
+  app.get('/recharge-entry', rechargeEntryLimiter, (req, res) => {
+    pageHeaders(res);
+    try {
+      const token = String(req.query.ticket || '');
+      res.type('html').send(renderEntryPage(rechargeLinks.preview(token), token));
+    } catch (error) {
+      res.status(error.status || 404).type('html').send(renderErrorPage(error.message || '充值入口无效'));
+    }
+  });
+  app.post(
+    '/recharge-entry',
+    rechargeEntryLimiter,
+    express.urlencoded({ extended: false, limit: '8kb' }),
+    asyncRoute(async (req, res) => {
+      try {
+        const descriptor = await rechargeLinks.consume(String(req.body?.ticket || ''));
+        audit(db, req, 'recharge_entry.consume', 'provider', descriptor.connectionId, {
+          adapterType: descriptor.adapterType,
+          mode: descriptor.mode
+        });
+        if (descriptor.mode === 'redirect') {
+          res.setHeader('Cache-Control', 'no-store');
+          return res.redirect(303, descriptor.url);
+        }
+        if (descriptor.mode === 'json_form_popup') {
+          pageHeaders(res, ["'self'", new URL(descriptor.loginUrl).origin]);
+          return res.type('html').send(renderProviderLoginPage(descriptor));
+        }
+        throw new AppError('RECHARGE_LOGIN_MODE_UNSUPPORTED', '不支持该供应商的充值登录方式', { status: 409 });
+      } catch (error) {
+        pageHeaders(res);
+        const fallbackUrl = error?.details?.fallbackUrl || null;
+        return res.status(error.status || 502).type('html').send(
+          renderErrorPage(error.message || '无法建立供应商登录会话', fallbackUrl)
+        );
+      }
+    })
+  );
 
   app.post('/api/auth/login', loginLimiter, asyncRoute(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
@@ -615,6 +669,15 @@ function createApplication(options = {}) {
     });
     audit(db, req, 'provider.clone_without_credentials', 'provider', clone.id, { sourceId: source.id });
     res.status(201).json(clone);
+  });
+  api.post('/providers/:id/recharge-link', auth.requireRecentReauth(), (req, res) => {
+    const result = rechargeLinks.issue(req.params.id);
+    audit(db, req, 'recharge_entry.issue', 'provider', req.params.id, {
+      mode: result.mode,
+      reason: result.reason || null,
+      expiresAt: result.expiresAt || null
+    });
+    res.json(result);
   });
   api.get('/providers/:id/assets', (req, res) => {
     providers.get(req.params.id);
@@ -1279,7 +1342,7 @@ function createApplication(options = {}) {
   app.locals.services = {
     config, db, providers, queries, notifications, alerts, automation, analysis,
     keyHealth, catalog, checkins, mappings, credentials, transfers, sub2api,
-    metrics, auth, queue, sync, detection, backups, retention
+    metrics, auth, queue, sync, detection, backups, retention, rechargeLinks
   };
   app.locals.startBackground = startBackground;
   app.locals.close = close;

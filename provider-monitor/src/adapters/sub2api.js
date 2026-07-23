@@ -59,6 +59,17 @@ function configuredApiKey(credentials = {}) {
     .replace(/^Bearer\s+/i, '');
 }
 
+function rechargeTargetPath(connection, targetUrl) {
+  try {
+    const base = new URL(connection.base_url);
+    const target = new URL(targetUrl);
+    if (base.origin !== target.origin) return null;
+    return `${target.pathname}${target.search}${target.hash}` || '/';
+  } catch {
+    return null;
+  }
+}
+
 function gatewayQuota(data = {}) {
   const quota = data.quota && typeof data.quota === 'object' ? data.quota : {};
   const limit = toFiniteNumber(quota.limit);
@@ -146,6 +157,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
       usageHistory: true,
       priceCatalog: true,
       rechargeQuote: true,
+      rechargeLogin: true,
       credentialRefresh: true
     };
   }
@@ -296,6 +308,45 @@ class Sub2ApiAdapter extends ProviderAdapter {
       }
     }
     return this.login();
+  }
+
+  rechargeLoginSupport(targetUrl) {
+    if (usesApiKey(this.connection)) return { supported: false, reason: 'api_key_has_no_user_session' };
+    if (!rechargeTargetPath(this.connection, targetUrl)) {
+      return { supported: false, reason: 'recharge_target_origin_mismatch' };
+    }
+    const hasSession = Boolean(this.credentials.accessToken || this.credentials.refreshToken);
+    const hasAccount = Boolean(this.credentials.email && this.credentials.password);
+    return hasSession || hasAccount
+      ? { supported: true, mode: 'sub2api_token_fragment' }
+      : { supported: false, reason: 'login_credentials_missing' };
+  }
+
+  async createRechargeLogin(targetUrl) {
+    const support = this.rechargeLoginSupport(targetUrl);
+    if (!support.supported) {
+      throw new AppError('RECHARGE_LOGIN_UNAVAILABLE', 'Sub2API recharge login is not available', {
+        status: 409,
+        details: { reason: support.reason }
+      });
+    }
+    const accessToken = await this.getAccessToken();
+    const expiry = Number(this.credentials.tokenExpiresAt) || decodeJwtExpiration(accessToken);
+    const expiresIn = expiry
+      ? Math.max(60, Math.floor((expiry - Date.now()) / 1000))
+      : Math.max(60, Number(this.credentials.expiresIn) || 3600);
+    const fragment = new URLSearchParams({
+      access_token: accessToken,
+      token_type: 'Bearer',
+      expires_in: String(expiresIn),
+      redirect: rechargeTargetPath(this.connection, targetUrl)
+    });
+    return {
+      mode: 'redirect',
+      adapterType: 'sub2api',
+      targetUrl,
+      url: `${joinUrl(this.connection.base_url, '/auth/callback')}#${fragment.toString()}`
+    };
   }
 
   async authenticatedRequest(endpoint, options = {}) {

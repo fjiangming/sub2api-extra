@@ -39,9 +39,10 @@ function loadConfig(env = process.env) {
 
   const sub2apiBaseUrl = normalizeUrl(env.SUB2API_BASE_URL, 'http://localhost:8080');
   const dataDir = resolveProjectPath(env.PROVIDER_MONITOR_DATA_DIR, 'data', projectRoot);
+  const port = parseInteger(env.PORT, 9871, 1, 65535);
   const config = {
     env: env.NODE_ENV || 'development',
-    port: parseInteger(env.PORT, 9871, 1, 65535),
+    port,
     bindHost: String(env.PROVIDER_MONITOR_BIND_HOST || '127.0.0.1').trim() || '127.0.0.1',
     projectRoot,
     dataDir,
@@ -59,6 +60,8 @@ function loadConfig(env = process.env) {
     localAdminPassword: String(env.PROVIDER_MONITOR_LOCAL_ADMIN_PASSWORD || ''),
     localAdminPasswordHash: String(env.PROVIDER_MONITOR_LOCAL_ADMIN_PASSWORD_HASH || ''),
     sessionTtlMinutes: parseInteger(env.PROVIDER_MONITOR_SESSION_TTL_MINUTES, 480, 15, 1440),
+    providerMonitorPublicUrl: normalizeUrl(env.PROVIDER_MONITOR_PUBLIC_URL, ''),
+    rechargeLinkTtlMinutes: parseInteger(env.PROVIDER_MONITOR_RECHARGE_LINK_TTL_MINUTES, 60, 5, 1440),
     queryTimeoutMs: parseInteger(env.PROVIDER_MONITOR_QUERY_TIMEOUT_MS, 15000, 1000, 120000),
     maxResponseBytes: parseInteger(env.PROVIDER_MONITOR_MAX_RESPONSE_BYTES, 2 * 1024 * 1024, 1024, 20 * 1024 * 1024),
     globalConcurrency: parseInteger(env.PROVIDER_MONITOR_CONCURRENCY, 5, 1, 20),

@@ -92,6 +92,7 @@ class ProviderAdapter {
       usageHistory: false,
       priceCatalog: false,
       rechargeQuote: false,
+      rechargeLogin: false,
       dynamicRouteRates: false,
       checkIn: false,
       credentialRefresh: false,
@@ -149,6 +150,16 @@ class ProviderAdapter {
 
   async getRechargeQuote() {
     return null;
+  }
+
+  rechargeLoginSupport() {
+    return { supported: false, reason: 'adapter_unsupported' };
+  }
+
+  async createRechargeLogin() {
+    throw new AppError('CAPABILITY_UNSUPPORTED', 'Provider does not support recharge login bridging', {
+      status: 404
+    });
   }
 
   async getCheckInStatus() {

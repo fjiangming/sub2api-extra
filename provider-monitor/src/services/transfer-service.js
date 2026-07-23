@@ -33,7 +33,9 @@ const SETTING_DEFAULTS = {
   jobRetentionDays: 90,
   auditRetentionDays: 365,
   notificationRetentionDays: 180,
-  keyHealthConcurrency: 3
+  keyHealthConcurrency: 3,
+  providerMonitorPublicUrl: '',
+  rechargeLinkTtlMinutes: 60
 };
 
 const RUNTIME_SETTING_KEYS = new Set([
@@ -41,7 +43,7 @@ const RUNTIME_SETTING_KEYS = new Set([
   'sessionTtlMinutes', 'queryTimeoutMs', 'maxResponseBytes', 'defaultRefreshMinutes',
   'staleAfterMinutes', 'rawSnapshotRetentionDays', 'snapshotRetentionDays',
   'jobRetentionDays', 'auditRetentionDays', 'notificationRetentionDays',
-  'keyHealthConcurrency'
+  'keyHealthConcurrency', 'providerMonitorPublicUrl', 'rechargeLinkTtlMinutes'
 ]);
 
 const BOOLEAN_SETTINGS = new Set(['automationEnabled', 'allowPrivateNetworks']);
@@ -57,8 +59,10 @@ const INTEGER_SETTINGS = {
   jobRetentionDays: [7, 3650],
   auditRetentionDays: [30, 3650],
   notificationRetentionDays: [7, 3650],
-  keyHealthConcurrency: [1, 10]
+  keyHealthConcurrency: [1, 10],
+  rechargeLinkTtlMinutes: [5, 1440]
 };
+const URL_SETTINGS = new Set(['providerMonitorPublicUrl']);
 
 const NOTIFICATION_TYPES = new Set([
   'webhook', 'telegram', 'gotify', 'bark', 'email', 'wecom', 'serverchan', 'dingtalk', 'feishu'
@@ -77,6 +81,19 @@ function normalizeSettingValue(key, value, fallback) {
     return Boolean(value);
   }
   if (LIST_SETTINGS.has(key)) return normalizeStringList(value);
+  if (URL_SETTINGS.has(key)) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    try {
+      const url = new URL(raw);
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return fallback;
+      url.search = '';
+      url.hash = '';
+      return url.toString().replace(/\/+$/, '');
+    } catch {
+      return fallback;
+    }
+  }
   if (INTEGER_SETTINGS[key]) {
     const [min, max] = INTEGER_SETTINGS[key];
     const parsed = Number.parseInt(value, 10);
@@ -101,7 +118,9 @@ function runtimeDefaults(config) {
     jobRetentionDays: config.jobRetentionDays,
     auditRetentionDays: config.auditRetentionDays,
     notificationRetentionDays: config.notificationRetentionDays,
-    keyHealthConcurrency: config.keyHealthConcurrency
+    keyHealthConcurrency: config.keyHealthConcurrency,
+    providerMonitorPublicUrl: config.providerMonitorPublicUrl,
+    rechargeLinkTtlMinutes: config.rechargeLinkTtlMinutes
   };
 }
 
@@ -239,6 +258,13 @@ class TransferService {
   saveSettings(input) {
     const unknown = Object.keys(input).filter((key) => !Object.prototype.hasOwnProperty.call(this.defaults, key));
     if (unknown.length) throw new AppError('SETTING_UNKNOWN', `Unknown settings: ${unknown.join(', ')}`, { status: 400 });
+    for (const key of URL_SETTINGS) {
+      if (!Object.prototype.hasOwnProperty.call(input, key) || !String(input[key] || '').trim()) continue;
+      const normalized = normalizeSettingValue(key, input[key], null);
+      if (!normalized) {
+        throw new AppError('SETTING_INVALID', `${key} must be a valid HTTP or HTTPS URL`, { status: 400 });
+      }
+    }
     const upsert = this.db.prepare(`
       INSERT INTO settings(key, value_json, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at

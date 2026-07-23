@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 14;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -341,6 +341,18 @@ CREATE TABLE IF NOT EXISTS notification_deliveries (
   created_at TEXT NOT NULL,
   delivered_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS recharge_access_tickets (
+  token_hash TEXT PRIMARY KEY,
+  connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
+  alert_event_id TEXT REFERENCES alert_events(id) ON DELETE SET NULL,
+  target_url TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS recharge_access_ticket_expiry
+  ON recharge_access_tickets(expires_at);
 
 CREATE TABLE IF NOT EXISTS automation_rules (
   id TEXT PRIMARY KEY,

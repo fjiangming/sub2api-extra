@@ -21,6 +21,7 @@ const BUSINESS_TABLES = [
   'alert_events',
   'notification_channels',
   'notification_deliveries',
+  'recharge_access_tickets',
   'automation_rules',
   'automation_actions',
   'audit_logs',

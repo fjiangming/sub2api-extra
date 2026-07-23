@@ -193,6 +193,25 @@ test('transfer preview/import, secret-free export and SQLite backup work togethe
       cooldownMinutes: 180,
       enabled: true
     });
+    providers.create({
+      name: 'New API Recharge Login',
+      adapterType: 'new-api',
+      baseUrl: 'https://new-api.example',
+      authMode: 'system_token',
+      remoteUserId: '7',
+      credentials: {
+        systemToken: 'new-api-system-secret',
+        userId: '7',
+        webUsername: 'wallet-user',
+        webPassword: 'wallet-password-secret'
+      },
+      rechargeUrl: 'https://new-api.example/wallet',
+      typeConfig: { rechargeLogin: { enabled: true } }
+    });
+    transfers.saveSettings({
+      providerMonitorPublicUrl: 'https://monitor.example.com',
+      rechargeLinkTtlMinutes: 30
+    });
     const exported = transfers.exportConfiguration();
     assert.equal(JSON.stringify(exported).includes('sk-imported-secret'), false);
     assert.equal(JSON.stringify(exported).includes('SCT_BACKUP_SECRET'), false);
@@ -207,6 +226,15 @@ test('transfer preview/import, secret-free export and SQLite backup work togethe
       exported.notificationChannels.find((channel) => channel.name === 'Legacy WeCom URL').config.url,
       '[REDACTED]'
     );
+    const exportedRechargeLogin = exported.providers.find((provider) => provider.name === 'New API Recharge Login');
+    assert.equal(exportedRechargeLogin.typeConfig.rechargeLogin.enabled, true);
+    assert.deepEqual(
+      exportedRechargeLogin.credentialFields.sort(),
+      ['systemToken', 'userId', 'webPassword', 'webUsername'].sort()
+    );
+    assert.equal(JSON.stringify(exportedRechargeLogin).includes('wallet-password-secret'), false);
+    assert.equal(exported.settings.providerMonitorPublicUrl, 'https://monitor.example.com');
+    assert.equal(exported.settings.rechargeLinkTtlMinutes, 30);
     const bundle = transfers.exportDisasterBundle('twelve-char-password');
     assert.equal(JSON.stringify(bundle).includes('sk-imported-secret'), false);
     assert.equal(JSON.stringify(bundle).includes('SCT_BACKUP_SECRET'), false);
@@ -224,6 +252,10 @@ test('transfer preview/import, secret-free export and SQLite backup work togethe
       decoded.notificationChannels.find((channel) => channel.name === 'Legacy WeCom URL').config.url,
       /WECOM_CONFIG_SECRET/
     );
+    const decodedRechargeLogin = decoded.providers.find((provider) => provider.name === 'New API Recharge Login');
+    assert.equal(decodedRechargeLogin.typeConfig.rechargeLogin.enabled, true);
+    assert.equal(decodedRechargeLogin.credentials.webUsername, 'wallet-user');
+    assert.equal(decodedRechargeLogin.credentials.webPassword, 'wallet-password-secret');
 
     const targetProviders = new ProviderRepository(target.db, target.config);
     const targetTransfers = new TransferService({
@@ -274,6 +306,14 @@ test('transfer preview/import, secret-free export and SQLite backup work togethe
     assert.equal(
       backupDb.prepare('SELECT recharge_url FROM provider_connections WHERE name = ?').get('Imported').recharge_url,
       'https://api.deepseek.com/account/recharge'
+    );
+    assert.equal(
+      JSON.parse(backupDb.prepare('SELECT type_config_json FROM provider_connections WHERE name = ?').get('New API Recharge Login').type_config_json).rechargeLogin.enabled,
+      true
+    );
+    assert.equal(
+      JSON.parse(backupDb.prepare('SELECT value_json FROM settings WHERE key = ?').get('providerMonitorPublicUrl').value_json),
+      'https://monitor.example.com'
     );
   } finally {
     if (backupDb?.open) backupDb.close();

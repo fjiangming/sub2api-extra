@@ -89,6 +89,48 @@ test('Sub2API authentication reports interactive and session-bound login require
   );
 });
 
+test('Sub2API recharge login uses the official fragment callback without exposing a refresh token', async () => {
+  const adapter = new Sub2ApiAdapter(context('sub2api', () => {
+    throw new Error('No remote request expected');
+  }, {
+    connection: { auth_mode: 'token_pair' },
+    credentials: {
+      accessToken: 'short-lived-browser-access',
+      refreshToken: 'never-send-this-refresh-token',
+      tokenExpiresAt: Date.now() + 3600000
+    }
+  }));
+
+  const descriptor = await adapter.createRechargeLogin('https://provider.example/purchase?plan=wallet');
+  const [callback, rawFragment] = descriptor.url.split('#');
+  const fragment = new URLSearchParams(rawFragment);
+  assert.equal(descriptor.mode, 'redirect');
+  assert.equal(callback, 'https://provider.example/auth/callback');
+  assert.equal(fragment.get('access_token'), 'short-lived-browser-access');
+  assert.equal(fragment.get('redirect'), '/purchase?plan=wallet');
+  assert.equal(fragment.has('refresh_token'), false);
+  assert.equal(descriptor.url.includes('never-send-this-refresh-token'), false);
+  assert.equal(adapter.rechargeLoginSupport('https://other.example/purchase').supported, false);
+});
+
+test('New API family recharge login requires separate web credentials', async () => {
+  const withoutWebLogin = new OneApiFamilyAdapter(context('new-api', () => null));
+  assert.deepEqual(
+    withoutWebLogin.rechargeLoginSupport('https://provider.example/wallet'),
+    { supported: false, reason: 'web_login_credentials_missing' }
+  );
+
+  const adapter = new OneApiFamilyAdapter(context('new-api', () => null, {
+    credentials: { webUsername: 'wallet-user', webPassword: 'wallet-password' }
+  }));
+  const descriptor = await adapter.createRechargeLogin('https://provider.example/wallet');
+  assert.equal(descriptor.mode, 'json_form_popup');
+  assert.equal(descriptor.loginUrl, 'https://provider.example/api/user/login');
+  assert.equal(descriptor.body.username, 'wallet-user');
+  assert.equal(descriptor.body.password, 'wallet-password');
+  assert.equal(Object.hasOwn(descriptor.body, 'systemToken'), false);
+});
+
 test('Sub2API API Key mode exposes the configured key and its gateway billing group', async () => {
   const requests = [];
   const adapter = new Sub2ApiAdapter(context('sub2api', (url, options) => {

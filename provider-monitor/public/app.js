@@ -65,11 +65,11 @@ const VIEW_META = {
 };
 const CREDENTIAL_FIELDS = {
   sub2api: [['email', '邮箱', 'text'], ['password', '密码', 'password'], ['accessToken', 'Access Token', 'password'], ['refreshToken', 'Refresh Token', 'password']],
-  'new-api': [['systemToken', '系统令牌', 'password'], ['userId', '用户 ID', 'text']],
-  'one-api': [['systemToken', '系统令牌', 'password'], ['userId', '用户 ID', 'text']],
-  'one-hub': [['systemToken', '系统令牌', 'password'], ['userId', '用户 ID', 'text']],
-  'done-hub': [['systemToken', '系统令牌', 'password'], ['userId', '用户 ID', 'text']],
-  veloera: [['systemToken', '系统令牌', 'password'], ['userId', '用户 ID', 'text']],
+  'new-api': [['systemToken', '系统令牌', 'password'], ['userId', '用户 ID', 'text'], ['webUsername', '充值网页账号', 'text'], ['webPassword', '充值网页密码', 'password']],
+  'one-api': [['systemToken', '系统令牌', 'password'], ['userId', '用户 ID', 'text'], ['webUsername', '充值网页账号', 'text'], ['webPassword', '充值网页密码', 'password']],
+  'one-hub': [['systemToken', '系统令牌', 'password'], ['userId', '用户 ID', 'text'], ['webUsername', '充值网页账号', 'text'], ['webPassword', '充值网页密码', 'password']],
+  'done-hub': [['systemToken', '系统令牌', 'password'], ['userId', '用户 ID', 'text'], ['webUsername', '充值网页账号', 'text'], ['webPassword', '充值网页密码', 'password']],
+  veloera: [['systemToken', '系统令牌', 'password'], ['userId', '用户 ID', 'text'], ['webUsername', '充值网页账号', 'text'], ['webPassword', '充值网页密码', 'password']],
   deepseek: [['apiKey', 'API Key', 'password']],
   openrouter: [['apiKey', '普通 API Key', 'password'], ['managementKey', 'Management Key', 'password']],
   litellm: [['masterKey', 'Master Key', 'password']],
@@ -360,10 +360,13 @@ function renderProviders() {
     const catalogAction = provider.capabilities?.priceCatalog
       ? `<button class="icon-button small" data-action="sync-catalog" data-id="${provider.id}" title="同步价格目录" aria-label="同步价格目录"><i data-lucide="badge-dollar-sign"></i></button>`
       : '';
+    const rechargeAction = provider.rechargeUrl
+      ? `<button class="icon-button small" data-action="open-recharge" data-id="${provider.id}" title="打开充值入口" aria-label="打开充值入口"><i data-lucide="wallet-cards"></i></button>`
+      : '';
     return `<article class="provider-item">
       <div class="provider-item-header"><span class="provider-icon"><i data-lucide="server"></i></span><div><h3>${escapeHtml(provider.name)}</h3><div class="url" title="${escapeHtml(provider.base_url)}">${escapeHtml(provider.base_url)}</div></div>${badge(status, statusLabel)}</div>
       <div class="provider-meta"><div><span>适配器</span><strong>${escapeHtml(provider.adapter_type)}</strong></div><div><span>刷新间隔</span><strong>${provider.refresh_interval_minutes} 分钟</strong></div><div><span>最近成功</span><strong>${timeAgo(provider.last_success_at)}</strong></div><div><span>密钥能力</span><strong>${provider.capabilities?.listKeys ? '可查询' : provider.last_success_at ? '不支持' : '待探测'}</strong></div></div>
-      <div class="provider-actions"><button class="button small" data-action="sync-provider" data-id="${provider.id}"><i data-lucide="refresh-cw"></i><span>同步</span></button><button class="button small" data-action="provider-assets" data-id="${provider.id}"><i data-lucide="database"></i><span>资产</span></button><span class="action-spacer"></span><button class="icon-button small" data-action="provider-checkin" data-id="${provider.id}" title="签到" aria-label="签到"><i data-lucide="calendar-check"></i></button>${catalogAction}<button class="icon-button small" data-action="rotate-credential" data-id="${provider.id}" title="轮换凭据" aria-label="轮换凭据"><i data-lucide="rotate-cw"></i></button><button class="icon-button small" data-action="clone-provider" data-id="${provider.id}" title="复制连接（不含凭据）" aria-label="复制连接（不含凭据）"><i data-lucide="copy"></i></button><button class="icon-button small" data-action="edit-provider" data-id="${provider.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-provider" data-id="${provider.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></div>
+      <div class="provider-actions"><button class="button small" data-action="sync-provider" data-id="${provider.id}"><i data-lucide="refresh-cw"></i><span>同步</span></button><button class="button small" data-action="provider-assets" data-id="${provider.id}"><i data-lucide="database"></i><span>资产</span></button><span class="action-spacer"></span>${rechargeAction}<button class="icon-button small" data-action="provider-checkin" data-id="${provider.id}" title="签到" aria-label="签到"><i data-lucide="calendar-check"></i></button>${catalogAction}<button class="icon-button small" data-action="rotate-credential" data-id="${provider.id}" title="轮换凭据" aria-label="轮换凭据"><i data-lucide="rotate-cw"></i></button><button class="icon-button small" data-action="clone-provider" data-id="${provider.id}" title="复制连接（不含凭据）" aria-label="复制连接（不含凭据）"><i data-lucide="copy"></i></button><button class="icon-button small" data-action="edit-provider" data-id="${provider.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-provider" data-id="${provider.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></div>
     </article>`;
   }).join('');
   $('#main-content').innerHTML = items ? `<div class="provider-grid">${items}</div>` : emptyState('server-cog', '暂无供应商', '添加第一个供应商连接');
@@ -838,6 +841,8 @@ async function renderSettings() {
   const systemSettingsPanel = `<section class="section"><form class="panel" id="system-settings-form"><div class="panel-header"><h2>系统参数</h2></div><div class="panel-body"><div class="form-grid">
     <label class="toggle-field"><input name="automationEnabled" type="checkbox" ${settings.automationEnabled ? 'checked' : ''}><span>允许真实自动化</span></label>
     <label class="toggle-field"><input name="allowPrivateNetworks" type="checkbox" ${settings.allowPrivateNetworks ? 'checked' : ''}><span>忽略私网主机限制</span></label>
+    <label class="span-2"><span>Provider Monitor 公开地址</span><input name="providerMonitorPublicUrl" type="url" placeholder="https://monitor.example.com" value="${escapeHtml(settings.providerMonitorPublicUrl || '')}"></label>
+    <label><span>充值入口有效期（分钟）</span><input name="rechargeLinkTtlMinutes" type="number" min="5" max="1440" value="${settings.rechargeLinkTtlMinutes || 60}"></label>
     <label class="span-2"><span>浏览器 Origin</span><textarea name="allowedOrigins" rows="3">${escapeHtml((settings.allowedOrigins || []).join('\n'))}</textarea></label>
     <label class="span-2"><span>私网主机限制（留空则全部放行）</span><textarea name="allowedHosts" rows="3">${escapeHtml((settings.allowedHosts || []).join('\n'))}</textarea></label>
     <label><span>会话时长（分钟）</span><input name="sessionTtlMinutes" type="number" min="15" max="1440" value="${settings.sessionTtlMinutes}"></label>
@@ -899,6 +904,8 @@ async function saveSystemSettings(eventOrForm) {
     const settings = await api('/api/settings', { method: 'PUT', body: {
       automationEnabled: form.elements.automationEnabled.checked,
       allowPrivateNetworks: form.elements.allowPrivateNetworks.checked,
+      providerMonitorPublicUrl: form.elements.providerMonitorPublicUrl.value.trim(),
+      rechargeLinkTtlMinutes: Number(form.elements.rechargeLinkTtlMinutes.value),
       allowedOrigins: parseSettingsList(form.elements.allowedOrigins.value),
       allowedHosts: parseSettingsList(form.elements.allowedHosts.value),
       sessionTtlMinutes: Number(form.elements.sessionTtlMinutes.value),
@@ -1192,6 +1199,7 @@ function openProviderDialog(provider = null) {
   form.elements.thresholdCurrency.value = provider?.threshold_currency || 'USD';
   form.elements.rechargeMultiplier.value = provider?.recharge?.manualMultiplier ?? '';
   form.elements.rechargeUrl.value = provider?.rechargeUrl || '';
+  form.elements.rechargeLoginMode.value = provider?.typeConfig?.rechargeLogin?.enabled === true ? 'adapter' : 'direct';
   const dynamicRouteRate = provider?.typeConfig?.dynamicRouteRate === true
     ? { enabled: true }
     : provider?.typeConfig?.dynamicRouteRate || {};
@@ -1239,6 +1247,10 @@ function providerPayload(form) {
     statistic: form.elements.dynamicRouteRateStatistic.value || 'median',
     lookbackDays: Number(form.elements.dynamicRouteRateLookbackDays.value || 30),
     minimumSamples: Number(form.elements.dynamicRouteRateMinimumSamples.value || 3)
+  };
+  typeConfig.rechargeLogin = {
+    ...(typeConfig.rechargeLogin && typeof typeConfig.rechargeLogin === 'object' ? typeConfig.rechargeLogin : {}),
+    enabled: form.elements.rechargeLoginMode?.value === 'adapter'
   };
   const balanceThresholds = providerBalanceThresholds(form);
   return {
@@ -1511,6 +1523,12 @@ async function handleAction(button) {
     if (action === 'delete-provider' && confirm('删除该供应商及其历史快照？')) { await api(`/api/providers/${id}`, { method: 'DELETE' }); toast('供应商已删除'); navigate('providers'); }
     if (action === 'clone-provider') { await api(`/api/providers/${id}/clone`, { method: 'POST', body: {} }); toast('已复制连接，凭据为空且默认停用'); navigate('providers'); }
     if (action === 'sync-provider') { await api(`/api/providers/${id}/sync`, { method: 'POST' }); toast('同步任务已加入队列'); setTimeout(() => navigate(state.view), 1200); }
+    if (action === 'open-recharge') {
+      await ensureReauth();
+      const result = await api(`/api/providers/${id}/recharge-link`, { method: 'POST', body: {} });
+      window.location.assign(result.url);
+      return;
+    }
     if (action === 'sync-all') { await api('/api/providers/sync-all', { method: 'POST' }); toast('全部同步任务已加入队列'); }
     if (action === 'sync-catalog') { const result = await api(`/api/providers/${id}/catalog/sync`, { method: 'POST' }); toast(catalogResultMessage(result)); if (state.view === 'costs') await navigate('costs'); }
     if (action === 'sync-catalogs') {

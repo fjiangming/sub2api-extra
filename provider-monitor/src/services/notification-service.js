@@ -28,9 +28,10 @@ function notificationMessage(event, markdown = false) {
 }
 
 class NotificationService {
-  constructor({ db, config }) {
+  constructor({ db, config, rechargeLinks = null }) {
     this.db = db;
     this.config = config;
+    this.rechargeLinks = rechargeLinks;
   }
 
   listChannels() {
@@ -147,8 +148,29 @@ class NotificationService {
       LEFT JOIN encrypted_credentials e ON e.id = c.credential_id
       WHERE c.enabled = 1
     `).all();
+    if (channels.length === 0) return [];
+    let deliveryEvent = event;
+    if (this.rechargeLinks && event?.details?.rechargeUrl) {
+      try {
+        const rechargeUrl = this.rechargeLinks.notificationUrl(event);
+        if (rechargeUrl) {
+          deliveryEvent = {
+            ...event,
+            details: { ...(event.details || {}), rechargeUrl }
+          };
+        }
+      } catch (error) {
+        if (this.config.env !== 'test') {
+          console.warn(JSON.stringify({
+            level: 'warn',
+            message: 'Recharge login link generation failed; using the direct recharge URL',
+            code: error?.code || 'RECHARGE_LINK_FAILED'
+          }));
+        }
+      }
+    }
     return Promise.allSettled(
-      channels.map((channel) => this.#deliverWithRetry(channel, event))
+      channels.map((channel) => this.#deliverWithRetry(channel, deliveryEvent))
     );
   }
 

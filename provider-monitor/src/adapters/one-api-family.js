@@ -52,6 +52,14 @@ const FAMILY_CONFIG = {
   }
 };
 
+function sameOriginTarget(connection, targetUrl) {
+  try {
+    return new URL(connection.base_url).origin === new URL(targetUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
 class OneApiFamilyAdapter extends ProviderAdapter {
   constructor(context) {
     super(context);
@@ -72,6 +80,7 @@ class OneApiFamilyAdapter extends ProviderAdapter {
       usageHistory: true,
       priceCatalog: ['new-api', 'veloera'].includes(this.type),
       rechargeQuote: true,
+      rechargeLogin: true,
       dynamicRouteRates: this.type === 'new-api',
       checkIn: ['new-api', 'veloera'].includes(this.type)
     };
@@ -246,6 +255,38 @@ class OneApiFamilyAdapter extends ProviderAdapter {
       source: 'provider_quote',
       errorCode: 'RECHARGE_QUOTE_UNAVAILABLE',
       metadata: { quotaDisplayType }
+    };
+  }
+
+  rechargeLoginSupport(targetUrl) {
+    if (!sameOriginTarget(this.connection, targetUrl)) {
+      return { supported: false, reason: 'recharge_target_origin_mismatch' };
+    }
+    const username = this.credentials.webUsername || this.credentials.username;
+    const password = this.credentials.webPassword || this.credentials.password;
+    return username && password
+      ? { supported: true, mode: 'new_api_browser_login' }
+      : { supported: false, reason: 'web_login_credentials_missing' };
+  }
+
+  async createRechargeLogin(targetUrl) {
+    const support = this.rechargeLoginSupport(targetUrl);
+    if (!support.supported) {
+      throw new AppError('RECHARGE_LOGIN_UNAVAILABLE', 'New API recharge login is not available', {
+        status: 409,
+        details: { reason: support.reason }
+      });
+    }
+    return {
+      mode: 'json_form_popup',
+      adapterType: this.type,
+      loginUrl: joinUrl(this.connection.base_url, '/api/user/login'),
+      targetUrl,
+      body: {
+        username: this.credentials.webUsername || this.credentials.username,
+        password: this.credentials.webPassword || this.credentials.password
+      },
+      waitMs: 8000
     };
   }
 

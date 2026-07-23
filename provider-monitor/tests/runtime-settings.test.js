@@ -80,7 +80,9 @@ test('system settings persist runtime policy and update the shared config object
     snapshotRetentionDays: 240,
     jobRetentionDays: 120,
     auditRetentionDays: 500,
-    notificationRetentionDays: 200
+    notificationRetentionDays: 200,
+    providerMonitorPublicUrl: 'https://monitor.example.com/',
+    rechargeLinkTtlMinutes: 30
   });
 
   assert.equal(settings.automationEnabled, true);
@@ -90,6 +92,8 @@ test('system settings persist runtime policy and update the shared config object
   assert.equal(context.config.allowPrivateNetworks, true);
   assert.equal(context.config.sessionTtlMinutes, 90);
   assert.equal(context.config.maxResponseBytes, 3145728);
+  assert.equal(context.config.providerMonitorPublicUrl, 'https://monitor.example.com');
+  assert.equal(context.config.rechargeLinkTtlMinutes, 30);
 
   const restartedConfig = {
     ...context.config,
@@ -107,4 +111,19 @@ test('system settings persist runtime policy and update the shared config object
   assert.equal(restartedConfig.automationEnabled, true);
   assert.deepEqual(restartedConfig.allowedOrigins, ['https://console.example']);
   assert.deepEqual(restartedConfig.allowedHosts, ['supplier.internal', '10.0.0.8']);
+  assert.equal(restartedConfig.providerMonitorPublicUrl, 'https://monitor.example.com');
+});
+
+test('system settings reject a non-HTTP Provider Monitor public URL', (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const transfers = new TransferService({
+    db: context.db,
+    config: context.config,
+    providers: new ProviderRepository(context.db, context.config)
+  });
+  assert.throws(
+    () => transfers.saveSettings({ providerMonitorPublicUrl: 'javascript:alert(1)' }),
+    (error) => error.code === 'SETTING_INVALID'
+  );
 });

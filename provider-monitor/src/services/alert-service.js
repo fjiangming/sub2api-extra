@@ -601,6 +601,7 @@ class AlertService {
     );
     const event = {
       id: eventId,
+      connection_id: provider.id,
       status: activeStatus,
       severity: evaluation.severity || 'warning',
       message: evaluation.message,

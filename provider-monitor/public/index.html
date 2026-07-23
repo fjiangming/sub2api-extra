@@ -80,6 +80,7 @@
         <label><span>币种</span><input name="thresholdCurrency" value="USD" maxlength="12"></label>
         <label><span>充值倍率（支付 1 = 余额）</span><input name="rechargeMultiplier" type="number" min="0.000001" step="0.0001" placeholder="自动获取"></label>
         <label class="span-2"><span>充值链接</span><input name="rechargeUrl" type="url" maxlength="2048" placeholder="https://supplier.example/account/recharge"></label>
+        <label><span>充值登录方式</span><select name="rechargeLoginMode"><option value="direct">直接打开</option><option value="adapter">适配器自动登录</option></select></label>
         <label><span>账户去重键</span><input name="accountDedupeKey" maxlength="200"></label>
         <label class="toggle-field"><input name="enabled" type="checkbox" checked><span>启用定时检查</span></label>
       </div>
