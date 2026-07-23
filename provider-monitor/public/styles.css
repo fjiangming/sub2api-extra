@@ -167,6 +167,33 @@ tbody tr:hover { background: #fafbfa; }
 .currency-row strong { font-size: 16px; font-variant-numeric: tabular-nums; }
 .action-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .action-grid .button { width: 100%; justify-content: flex-start; }
+.test-suite-tabs .tab { display: inline-flex; align-items: center; gap: 7px; }
+.test-suite-tabs .tab svg { width: 16px; height: 16px; }
+.test-runner-panel { max-width: 980px; }
+.test-runner-form { margin: 0; }
+.test-control-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 18px; }
+.test-readiness { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: #f8f9f8; }
+.test-readiness-state { min-height: 42px; padding: 10px 18px; display: flex; align-items: center; gap: 8px; font-weight: 650; }
+.test-readiness-state svg { width: 17px; height: 17px; }
+.test-readiness-state.ready { color: var(--accent); }
+.test-readiness-state.error { color: var(--danger); }
+.test-readiness-grid, .test-result-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--line); }
+.test-readiness-grid > div, .test-result-grid > div { min-width: 0; padding: 12px 18px; border-right: 1px solid var(--line); }
+.test-readiness-grid > div:last-child, .test-result-grid > div:nth-child(4n) { border-right: 0; }
+.test-readiness-grid span, .test-result-grid span { display: block; color: var(--muted); margin-bottom: 4px; font-size: 11px; }
+.test-readiness-grid strong, .test-result-grid strong { display: block; overflow-wrap: anywhere; font-size: 12px; }
+.test-runner-actions { min-height: 64px; padding: 12px 18px; display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+.test-simulation-mark { margin-right: auto; display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+.test-simulation-mark svg { width: 16px; height: 16px; }
+.test-result-panel { max-width: 980px; margin-top: 18px; }
+.test-result-grid { border-top: 0; grid-template-rows: repeat(2, minmax(62px, auto)); }
+.test-result-grid > div { border-bottom: 1px solid var(--line); display: flex; flex-direction: column; justify-content: center; }
+.test-result-grid > div:nth-last-child(-n+4) { border-bottom: 0; }
+.test-result-note { min-height: 46px; padding: 11px 18px; border-top: 1px solid var(--line); display: flex; align-items: center; gap: 8px; color: #876415; background: var(--warning-soft); font-size: 12px; }
+.test-result-note svg { width: 16px; height: 16px; flex: 0 0 auto; }
+.test-result-pending { min-height: 112px; padding: 24px; display: flex; align-items: center; justify-content: center; gap: 9px; color: var(--muted); }
+.test-result-pending svg { width: 20px; height: 20px; }
+.test-result-pending.error { color: var(--danger); }
 .status-summary { display: flex; flex-wrap: wrap; gap: 8px; padding: 2px 0 14px; }
 .base-instance-bar { min-height: 66px; padding: 12px 16px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); display: flex; align-items: center; justify-content: space-between; gap: 18px; }
 .base-instance-bar > div:first-child { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 9px; }
@@ -285,6 +312,9 @@ details summary { padding: 13px 18px; cursor: pointer; font-weight: 650; font-si
   .base-instance-bar .status-summary { width: 100%; justify-content: flex-start; }
   .security-setting-row { align-items: stretch; flex-direction: column; }
   .security-setting-row .button { margin-left: 0; width: 100%; }
+  .test-readiness-grid, .test-result-grid { grid-template-columns: 1fr 1fr; }
+  .test-readiness-grid > div:nth-child(2n), .test-result-grid > div:nth-child(2n) { border-right: 0; }
+  .test-readiness-grid > div:nth-child(-n+2), .test-result-grid > div:nth-child(-n+6) { border-bottom: 1px solid var(--line); }
 }
 
 @media (max-width: 760px) {
@@ -320,4 +350,5 @@ details summary { padding: 13px 18px; cursor: pointer; font-weight: 650; font-si
   #provider-form .dialog-actions .action-spacer { display: none; }
   .chart { height: 320px; }
   .action-grid { grid-template-columns: 1fr; }
+  .test-control-grid { grid-template-columns: 1fr; }
 }

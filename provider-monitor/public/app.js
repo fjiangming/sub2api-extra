@@ -60,6 +60,7 @@ const VIEW_META = {
   alerts: ['告警中心', '规则、事件与通知通道'],
   integrations: ['Sub2API 联动', '分组映射、签到、对账与健康联动'],
   automation: ['自动化', '低余额联动与可回滚操作'],
+  tests: ['测试中心', '模拟通知、充值入口与移动端跳转'],
   activity: ['运行记录', '检查、任务与审计日志'],
   settings: ['设置与备份', '运行参数、凭据生命周期与数据迁移']
 };
@@ -301,6 +302,7 @@ async function navigate(view) {
     if (view === 'alerts') await renderAlerts();
     if (view === 'integrations') await renderIntegrations();
     if (view === 'automation') await renderAutomation();
+    if (view === 'tests') await renderTests();
     if (view === 'activity') await renderActivity();
     if (view === 'settings') await renderSettings();
   } catch (error) {
@@ -982,6 +984,135 @@ async function renderAutomation() {
   $('#main-content').innerHTML = `<div class="table-wrap">${ruleRows ? `<table><thead><tr><th>规则</th><th>供应商</th><th>模式</th><th>状态</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table>` : emptyState('workflow', '暂无自动化规则', '规则默认使用演练模式')}</div><section class="section"><div class="section-header"><h2>动作记录</h2></div><div class="table-wrap">${actionRows ? `<table><thead><tr><th>动作</th><th>结果</th><th>演练</th><th>渠道 ID</th><th>时间</th><th></th></tr></thead><tbody>${actionRows}</tbody></table>` : emptyState('history', '暂无动作', '触发规则后将在此记录')}</div></section>`;
 }
 
+const RECHARGE_TEST_REASON_LABELS = {
+  automatic_login_disabled: '供应商配置为直接打开',
+  public_url_missing: '未配置 Provider Monitor 公开地址',
+  insecure_public_origin: 'Provider Monitor 公开地址不是安全地址',
+  insecure_provider_origin: '供应商基础地址不是安全地址',
+  adapter_unsupported: '该适配器暂不支持网页登录',
+  api_key_has_no_user_session: 'Sub2API API Key 模式没有网页登录会话',
+  recharge_target_origin_mismatch: '充值链接与供应商基础地址不同源',
+  login_credentials_missing: '缺少可用的供应商登录凭据',
+  web_login_credentials_missing: '缺少充值网页账号或密码',
+  link_generation_failed: '一次性充值入口签发失败'
+};
+
+function rechargeTestReasonLabel(reason) {
+  return RECHARGE_TEST_REASON_LABELS[reason] || reason || '';
+}
+
+function rechargeTestTargetHost(value) {
+  if (!value) return '未配置';
+  try { return new URL(value).hostname; } catch { return '地址无效'; }
+}
+
+function rechargeTestReadinessHtml(provider, channel) {
+  if (!provider) return '<div class="test-readiness-state error"><i data-lucide="circle-alert"></i><span>暂无可测试的供应商</span></div>';
+  const hasRechargeUrl = Boolean(provider.rechargeUrl);
+  const adapterLogin = provider.typeConfig?.rechargeLogin?.enabled === true;
+  return `<div class="test-readiness-state ${hasRechargeUrl && channel ? 'ready' : 'error'}">
+      <i data-lucide="${hasRechargeUrl && channel ? 'circle-check' : 'circle-alert'}"></i>
+      <span>${hasRechargeUrl ? channel ? '可以发送模拟告警' : '请选择通知通道' : '该供应商未配置充值链接'}</span>
+    </div>
+    <div class="test-readiness-grid">
+      <div><span>适配器</span><strong>${escapeHtml(adapterLabel(provider.adapter_type))}</strong></div>
+      <div><span>充值目标</span><strong>${escapeHtml(rechargeTestTargetHost(provider.rechargeUrl))}</strong></div>
+      <div><span>请求方式</span><strong>${adapterLogin ? '适配器自动登录' : '直接打开'}</strong></div>
+      <div><span>通知通道</span><strong>${channel ? `${escapeHtml(channel.name)}${channel.enabled ? '' : '（停用）'}` : '未选择'}</strong></div>
+    </div>`;
+}
+
+function updateRechargeAlertTestReadiness(form = $('#recharge-alert-test-form')) {
+  if (!form) return;
+  const provider = state.providers.find((item) => item.id === form.elements.connectionId.value);
+  const channel = state.channels.find((item) => item.id === form.elements.notificationChannelId.value);
+  $('#recharge-test-readiness').innerHTML = rechargeTestReadinessHtml(provider, channel);
+  $('button[type="submit"]', form).disabled = form.dataset.running === 'true' || !provider?.rechargeUrl || !channel;
+  icons();
+}
+
+function rechargeAlertTestResultHtml(result) {
+  const recharge = result.recharge || {};
+  const adapterEntry = recharge.mode === 'adapter';
+  const reason = rechargeTestReasonLabel(recharge.reason);
+  return `<section class="panel test-result-panel">
+    <div class="panel-header"><h2>发送结果</h2><div class="panel-actions">${badge(result.status === 'delivered' ? 'succeeded' : 'failed', result.status === 'delivered' ? '已送达' : result.status)}</div></div>
+    <div class="test-result-grid">
+      <div><span>供应商</span><strong>${escapeHtml(result.provider?.name || '-')}</strong></div>
+      <div><span>通知通道</span><strong>${escapeHtml(result.channel?.name || '-')}</strong></div>
+      <div><span>充值入口</span><strong>${adapterEntry ? '一次性自动登录入口' : '原充值链接'}</strong></div>
+      <div><span>目标主机</span><strong>${escapeHtml(recharge.targetHost || '-')}</strong></div>
+      <div><span>模拟余额</span><strong>${formatNumber(result.alert?.balance, 2)} ${escapeHtml(result.alert?.currency || '')}</strong></div>
+      <div><span>模拟阈值</span><strong>${formatNumber(result.alert?.threshold, 2)} ${escapeHtml(result.alert?.currency || '')}</strong></div>
+      <div><span>入口到期</span><strong>${recharge.expiresAt ? formatDate(recharge.expiresAt) : '不适用'}</strong></div>
+      <div><span>发送时间</span><strong>${formatDate(result.sentAt)}</strong></div>
+    </div>
+    ${reason ? `<div class="test-result-note"><i data-lucide="info"></i><span>${escapeHtml(reason)}，本次已发送原充值链接。</span></div>` : ''}
+  </section>`;
+}
+
+async function runRechargeAlertTest(form) {
+  const resultRegion = $('#recharge-test-result');
+  form.dataset.running = 'true';
+  updateRechargeAlertTestReadiness(form);
+  resultRegion.innerHTML = `<section class="panel test-result-panel"><div class="test-result-pending"><i class="spin" data-lucide="loader-circle"></i><strong>正在发送模拟告警</strong></div></section>`;
+  icons();
+  try {
+    const body = {
+      connectionId: form.elements.connectionId.value,
+      channelId: form.elements.notificationChannelId.value
+    };
+    const result = await withRecentReauth(() => api('/api/simulations/recharge-alert', {
+      method: 'POST',
+      body
+    }));
+    resultRegion.innerHTML = rechargeAlertTestResultHtml(result);
+    toast(`模拟告警已发送至 ${result.channel.name}`);
+  } catch (error) {
+    resultRegion.innerHTML = `<section class="panel test-result-panel"><div class="test-result-pending error"><i data-lucide="circle-alert"></i><strong>${escapeHtml(error.message)}</strong></div></section>`;
+    toast(error.message, 'error');
+  } finally {
+    delete form.dataset.running;
+    updateRechargeAlertTestReadiness(form);
+    icons();
+  }
+}
+
+async function renderTests() {
+  const channels = await api('/api/notification-channels');
+  state.channels = channels.items;
+  setTopActions('<button class="button" data-action="refresh-view"><i data-lucide="refresh-cw"></i><span>刷新</span></button>');
+  const providerOptions = state.providers.map((provider) => `<option value="${escapeHtml(provider.id)}">${escapeHtml(provider.name)} · ${escapeHtml(adapterLabel(provider.adapter_type))}${provider.rechargeUrl ? '' : ' · 未配置充值链接'}</option>`).join('');
+  const channelOptions = state.channels.map((channel) => `<option value="${escapeHtml(channel.id)}">${escapeHtml(channel.name)} · ${escapeHtml(channel.type)}${channel.enabled ? '' : ' · 停用'}</option>`).join('');
+  $('#main-content').innerHTML = `
+    <div class="tabs test-suite-tabs" role="tablist" aria-label="测试项目">
+      <button class="tab active" type="button" role="tab" aria-selected="true"><i data-lucide="bell-ring"></i><span>告警充值入口</span></button>
+    </div>
+    <section class="panel test-runner-panel">
+      <div class="panel-header"><h2>手机通知链路</h2><div class="panel-actions">${badge('dry_run', '模拟')}</div></div>
+      <form id="recharge-alert-test-form" class="test-runner-form">
+        <div class="test-control-grid">
+          <label><span>供应商</span><select name="connectionId" ${providerOptions ? '' : 'disabled'}>${providerOptions || '<option value="">暂无供应商</option>'}</select></label>
+          <label><span>通知通道</span><select name="notificationChannelId" ${channelOptions ? '' : 'disabled'}>${channelOptions || '<option value="">暂无通知通道</option>'}</select></label>
+        </div>
+        <div id="recharge-test-readiness" class="test-readiness"></div>
+        <footer class="test-runner-actions">
+          <span class="test-simulation-mark"><i data-lucide="shield-check"></i><span>隔离模拟</span></span>
+          <button class="button primary" type="submit"><i data-lucide="send"></i><span>发送测试告警</span></button>
+        </footer>
+      </form>
+    </section>
+    <div id="recharge-test-result" aria-live="polite"></div>`;
+  const form = $('#recharge-alert-test-form');
+  form.elements.connectionId.addEventListener('change', () => updateRechargeAlertTestReadiness(form));
+  form.elements.notificationChannelId.addEventListener('change', () => updateRechargeAlertTestReadiness(form));
+  form.addEventListener('submit', (event) => {
+    event.preventDefault();
+    runRechargeAlertTest(form);
+  });
+  updateRechargeAlertTestReadiness(form);
+}
+
 async function renderActivity() {
   const [checks, jobs, auditLogs] = await Promise.all([api('/api/checks?limit=100'), api('/api/jobs?limit=100'), api('/api/audit-logs?limit=100')]);
   state.checks = checks.items;
@@ -1495,6 +1626,16 @@ function ensureReauth() {
     state.reauthResolve = resolve;
     state.reauthReject = reject;
   });
+}
+
+async function withRecentReauth(operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error.code !== 'REAUTH_REQUIRED') throw error;
+    await ensureReauth();
+    return operation();
+  }
 }
 
 function openImportDialog() {

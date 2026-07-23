@@ -141,6 +141,16 @@ class NotificationService {
     return this.#deliverToChannel(this.#getChannel(id), fakeEvent, false);
   }
 
+  async testRechargeAlert(id, event) {
+    const channel = this.#getChannel(id);
+    const prepared = this.#prepareDeliveryEvent(event);
+    const delivery = await this.#deliverToChannel(channel, prepared.event, false);
+    return {
+      delivery,
+      recharge: prepared.recharge
+    };
+  }
+
   async dispatch(event) {
     const channels = this.db.prepare(`
       SELECT c.*, e.payload AS credential_payload
@@ -149,29 +159,49 @@ class NotificationService {
       WHERE c.enabled = 1
     `).all();
     if (channels.length === 0) return [];
-    let deliveryEvent = event;
-    if (this.rechargeLinks && event?.details?.rechargeUrl) {
-      try {
-        const rechargeUrl = this.rechargeLinks.notificationUrl(event);
-        if (rechargeUrl) {
-          deliveryEvent = {
-            ...event,
-            details: { ...(event.details || {}), rechargeUrl }
-          };
-        }
-      } catch (error) {
-        if (this.config.env !== 'test') {
-          console.warn(JSON.stringify({
-            level: 'warn',
-            message: 'Recharge login link generation failed; using the direct recharge URL',
-            code: error?.code || 'RECHARGE_LINK_FAILED'
-          }));
-        }
-      }
-    }
+    const deliveryEvent = this.#prepareDeliveryEvent(event).event;
     return Promise.allSettled(
       channels.map((channel) => this.#deliverWithRetry(channel, deliveryEvent))
     );
+  }
+
+  #prepareDeliveryEvent(event) {
+    const directUrl = normalizedRechargeUrl(event);
+    let recharge = directUrl
+      ? { mode: 'direct', url: directUrl, reason: null, expiresAt: null }
+      : null;
+    if (!this.rechargeLinks || !directUrl) return { event, recharge };
+
+    try {
+      const issued = this.rechargeLinks.notificationLink(event);
+      if (!issued?.url) return { event, recharge };
+      recharge = issued;
+      return {
+        event: {
+          ...event,
+          details: { ...(event.details || {}), rechargeUrl: issued.url }
+        },
+        recharge
+      };
+    } catch (error) {
+      if (this.config.env !== 'test') {
+        console.warn(JSON.stringify({
+          level: 'warn',
+          message: 'Recharge login link generation failed; using the direct recharge URL',
+          code: error?.code || 'RECHARGE_LINK_FAILED'
+        }));
+      }
+      return {
+        event,
+        recharge: recharge
+          ? {
+              ...recharge,
+              reason: 'link_generation_failed',
+              errorCode: error?.code || 'RECHARGE_LINK_FAILED'
+            }
+          : null
+      };
+    }
   }
 
   async #deliverWithRetry(channel, event) {

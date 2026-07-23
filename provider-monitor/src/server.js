@@ -32,6 +32,7 @@ const { TransferService } = require('./services/transfer-service');
 const { DetectionService } = require('./services/detection-service');
 const { BackupService } = require('./services/backup-service');
 const { RetentionService } = require('./services/retention-service');
+const { SimulationService } = require('./services/simulation-service');
 const {
   RechargeLinkService,
   pageHeaders,
@@ -115,6 +116,10 @@ const notificationSchema = z.object({
   enabled: z.boolean().optional(),
   config: z.record(z.string(), z.any()).optional(),
   credentials: z.record(z.string(), z.any()).optional()
+});
+const rechargeAlertSimulationSchema = z.object({
+  connectionId: z.string().uuid(),
+  channelId: z.string().uuid()
 });
 const automationConfigSchema = z.object({
   currency: z.string().max(12).optional(),
@@ -258,6 +263,7 @@ function createApplication(options = {}) {
   const queries = new QueryService(db, config);
   const rechargeLinks = new RechargeLinkService({ db, config, providers, http });
   const notifications = new NotificationService({ db, config, rechargeLinks });
+  const simulations = new SimulationService({ providers, notifications });
   const alerts = new AlertService({ db, config, queries, notifications });
   const sub2api = new Sub2ApiAdminClient(config);
   const automation = new AutomationService({ db, config, sub2api });
@@ -392,6 +398,7 @@ function createApplication(options = {}) {
   const passwordChangeLimiter = rateLimit({ windowMs: 15 * 60000, limit: 10, standardHeaders: true, legacyHeaders: false });
   const sub2apiStepUpLimiter = rateLimit({ windowMs: 15 * 60000, limit: 10, standardHeaders: true, legacyHeaders: false });
   const rechargeEntryLimiter = rateLimit({ windowMs: 15 * 60000, limit: 30, standardHeaders: true, legacyHeaders: false });
+  const simulationLimiter = rateLimit({ windowMs: 15 * 60000, limit: 30, standardHeaders: true, legacyHeaders: false });
   const enqueueSub2ApiRefresh = () => {
     if (mappings.list().some((mapping) => mapping.enabled)) {
       queue.enqueue('sub2api_mapping_sync', { priority: 5 });
@@ -1001,6 +1008,24 @@ function createApplication(options = {}) {
     res.json(result);
   }));
 
+  api.post(
+    '/simulations/recharge-alert',
+    simulationLimiter,
+    auth.requireRecentReauth(),
+    asyncRoute(async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const input = validate(rechargeAlertSimulationSchema, req.body || {});
+      const result = await simulations.rechargeAlert(input);
+      audit(db, req, 'simulation.recharge_alert', 'provider', input.connectionId, {
+        channelId: input.channelId,
+        deliveryStatus: result.status,
+        rechargeMode: result.recharge?.mode || null,
+        rechargeReason: result.recharge?.reason || null
+      });
+      res.json(result);
+    })
+  );
+
   api.get('/automation-rules', (_req, res) => res.json({ items: automation.listRules() }));
   api.post('/automation-rules', (req, res) => {
     const rule = automation.saveRule(validate(automationSchema, req.body));
@@ -1342,7 +1367,8 @@ function createApplication(options = {}) {
   app.locals.services = {
     config, db, providers, queries, notifications, alerts, automation, analysis,
     keyHealth, catalog, checkins, mappings, credentials, transfers, sub2api,
-    metrics, auth, queue, sync, detection, backups, retention, rechargeLinks
+    metrics, auth, queue, sync, detection, backups, retention, rechargeLinks,
+    simulations
   };
   app.locals.startBackground = startBackground;
   app.locals.close = close;

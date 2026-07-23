@@ -205,10 +205,14 @@ class RechargeLinkService {
   }
 
   notificationUrl(event) {
+    const issued = this.notificationLink(event);
+    return issued?.mode === 'adapter' ? issued.url : null;
+  }
+
+  notificationLink(event) {
     const connectionId = event?.connection_id || event?.details?.connectionId;
     if (!connectionId || !event?.details?.rechargeUrl) return null;
-    const issued = this.issue(connectionId, { alertEventId: event.id });
-    return issued.mode === 'adapter' ? issued.url : null;
+    return this.issue(connectionId, { alertEventId: event.id });
   }
 
   #ticket(token) {

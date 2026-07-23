@@ -138,6 +138,36 @@ test('alert severity labels are displayed in Chinese', () => {
   assert.match(source, /alertSeverityLabel\(event\.severity\)/);
 });
 
+test('test center exposes provider-scoped mobile recharge alert simulation', () => {
+  const { context, source } = createBrowserContext();
+  const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+  const readiness = vm.runInContext(`rechargeTestReadinessHtml({
+    id: 'provider-id', name: 'Sub2API Wallet', adapter_type: 'sub2api',
+    rechargeUrl: 'https://supplier.example/purchase',
+    typeConfig: { rechargeLogin: { enabled: true } }
+  }, {
+    id: 'channel-id', name: 'Personal WeChat', type: 'serverchan', enabled: false
+  })`, context);
+
+  assert.match(index, /data-view="tests"/);
+  assert.match(index, /flask-conical/);
+  assert.match(source, /async function renderTests\(\)/);
+  assert.match(source, /api\('\/api\/simulations\/recharge-alert'/);
+  assert.match(source, /name="notificationChannelId"/);
+  assert.match(source, /withRecentReauth/);
+  assert.match(readiness, /Sub2API/);
+  assert.match(readiness, /supplier\.example/);
+  assert.match(readiness, /适配器自动登录/);
+  assert.match(readiness, /Personal WeChat（停用）/);
+  assert.equal(
+    vm.runInContext("rechargeTestReasonLabel('web_login_credentials_missing')", context),
+    '缺少充值网页账号或密码'
+  );
+  assert.match(styles, /\.test-runner-panel/);
+  assert.match(styles, /\.test-result-grid/);
+});
+
 test('alert rule form only enables fields used by the selected type', () => {
   const { context } = createBrowserContext();
   const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
