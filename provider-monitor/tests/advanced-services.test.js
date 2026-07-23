@@ -187,7 +187,9 @@ test('secret-free configuration restores provider shells disabled until credenti
       },
       {
         name: 'a6api', adapterType: 'new-api', baseUrl: 'https://a6api.com',
-        authMode: 'account', remoteUserId: '2160', credentials: { systemToken: 'system-a6', userId: '2160' }
+        authMode: 'account', remoteUserId: '2160', rechargeMultiplier: 10,
+        rechargeUrl: 'https://a6api.com/console/recharge',
+        credentials: { systemToken: 'system-a6', userId: '2160' }
       },
       {
         name: 'ai2api', adapterType: 'sub2api', baseUrl: 'https://ai2api.cc',
@@ -223,6 +225,9 @@ test('secret-free configuration restores provider shells disabled until credenti
     assert.equal(targetProviders.list().every((provider) => provider.enabled === false), true);
 
     const a6api = targetProviders.list().find((provider) => provider.name === 'a6api');
+    assert.equal(a6api.recharge.multiplier, 10);
+    assert.equal(a6api.recharge.source, 'manual');
+    assert.equal(a6api.rechargeUrl, 'https://a6api.com/console/recharge');
     assert.deepEqual(targetProviders.getCredentials(a6api.id), { userId: '2160' });
     targetProviders.updateCredentials(a6api.id, { systemToken: 'local-system-token', userId: '2160' });
     const secondPreview = targetTransfers.previewImport({ format: 'provider-monitor', content });

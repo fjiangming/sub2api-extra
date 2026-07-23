@@ -87,6 +87,85 @@ test('a local AUTH_REQUIRED response still clears the expired session', async ()
   assert.deepEqual(removedSessionKeys, ['provider-monitor.session']);
 });
 
+test('integration recharge and composite columns use the documented multiplier direction', () => {
+  const { context, source } = createBrowserContext();
+  const recharge = vm.runInContext(
+    "integrationRecharge({ rechargeMultiplier: 10, rechargeSource: 'manual' })",
+    context
+  );
+  const composite = vm.runInContext(
+    'integrationCompositeRate({ providerRate: 0.8, rechargeMultiplier: 10 })',
+    context
+  );
+  const defaultRate = vm.runInContext(
+    "integrationRecharge({ rechargeMultiplier: 1, rechargeSource: 'default', rechargeStatus: 'default' })",
+    context
+  );
+  const cachedRate = vm.runInContext(
+    "integrationRecharge({ rechargeMultiplier: 1, rechargeSource: 'provider_payment_config', rechargeStatus: 'unavailable' })",
+    context
+  );
+  const dynamicRate = vm.runInContext(`integrationProviderRate({
+    providerRate: 0.024,
+    details: {
+      providerRateScope: 'dynamic_route_history',
+      dynamicRouteRate: {
+        statistic: 'median', sampleCount: 57, minMultiplier: 0.0102,
+        maxMultiplier: 0.0534, status: 'detected',
+        summary: { latest: { channelName: 'Latest route' } }
+      }
+    }
+  })`, context);
+  assert.match(recharge, /1:10/);
+  assert.match(recharge, /手工/);
+  assert.match(defaultRate, /1:1/);
+  assert.match(defaultRate, /默认/);
+  assert.match(cachedRate, /1:1/);
+  assert.match(cachedRate, /缓存/);
+  assert.match(dynamicRate, /动态实测 P50/);
+  assert.match(dynamicRate, /57 次/);
+  assert.match(dynamicRate, /Latest route/);
+  assert.equal(composite, '×0.08');
+  assert.match(source, /充值倍率/);
+  assert.match(source, /综合倍率/);
+});
+
+test('alert severity labels are displayed in Chinese', () => {
+  const { context, source } = createBrowserContext();
+
+  assert.equal(vm.runInContext("alertSeverityLabel('warning')", context), '预警');
+  assert.equal(vm.runInContext("alertSeverityLabel('error')", context), '错误');
+  assert.match(source, /alertSeverityLabel\(event\.severity\)/);
+});
+
+test('recharge automation payload does not include Sub2API channel IDs', () => {
+  const { context } = createBrowserContext();
+  const elements = {
+    name: { value: 'Recharge account' },
+    triggerType: { value: 'low_balance' },
+    connectionId: { value: '11111111-1111-4111-8111-111111111111' },
+    enabled: { checked: true },
+    dryRun: { checked: true },
+    threshold: { value: '20' },
+    currency: { value: 'USD' },
+    channelIds: { value: '7, 8' },
+    action: { value: 'trigger_recharge_webhook' },
+    consecutiveMatches: { value: '2' },
+    cooldownMinutes: { value: '360' },
+    dailyMaximumActions: { value: '1' },
+    contractPauseHours: { value: '24' },
+    webhookUrl: { value: 'https://recharge.example/hook' }
+  };
+  context.automationForm = { elements };
+
+  const payload = JSON.parse(vm.runInContext('JSON.stringify(automationPayload(automationForm))', context));
+
+  assert.equal(Object.hasOwn(payload.config, 'channelIds'), false);
+  assert.equal(payload.config.webhookUrl, elements.webhookUrl.value);
+  assert.equal(vm.runInContext("automationUsesChannelIds('trigger_recharge_webhook')", context), false);
+  assert.equal(vm.runInContext("automationUsesChannelIds('disable_sub2api_channel')", context), true);
+});
+
 test('embedded SSO failures are actionable and do not request autofocus', () => {
   const { context, source } = createBrowserContext();
   const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
@@ -116,6 +195,12 @@ test('Sub2API provider validation keeps the edited provider identity and separat
       refreshIntervalMinutes: { value: '15' },
       warningThreshold: { value: '' },
       thresholdCurrency: { value: 'USD' },
+      rechargeMultiplier: { value: '' },
+      rechargeUrl: { value: 'https://supplier.example/account/recharge' },
+      dynamicRouteRateEnabled: { checked: false },
+      dynamicRouteRateStatistic: { value: 'median' },
+      dynamicRouteRateLookbackDays: { value: '30' },
+      dynamicRouteRateMinimumSamples: { value: '3' },
       typeConfig: { value: '{}' },
       tags: { value: '' },
       note: { value: '' },
@@ -130,7 +215,9 @@ test('Sub2API provider validation keeps the edited provider identity and separat
     context
   ));
   assert.equal(payload.existingProviderId, form.elements.id.value);
+  assert.equal(payload.rechargeUrl, 'https://supplier.example/account/recharge');
   assert.deepEqual(payload.credentials, { password: 'replacement-password' });
+  assert.equal(payload.typeConfig.dynamicRouteRate.enabled, false);
   assert.equal(
     vm.runInContext("credentialFieldsFor('sub2api', 'account').map(([name]) => name).join(',')", context),
     'email,password'
@@ -143,6 +230,39 @@ test('Sub2API provider validation keeps the edited provider identity and separat
     vm.runInContext("credentialFieldsFor('sub2api', 'api_key').map(([name]) => name).join(',')", context),
     'apiKey'
   );
+});
+
+test('provider payload exposes dynamic route rate controls for New API', () => {
+  const { context, source } = createBrowserContext();
+  const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const form = {
+    elements: {
+      id: { value: '' }, name: { value: 'Dynamic' }, adapterType: { value: 'new-api' },
+      baseUrl: { value: 'https://dynamic.example' }, authMode: { value: 'system_token' },
+      remoteUserId: { value: '7' }, enabled: { checked: true },
+      refreshIntervalMinutes: { value: '15' }, warningThreshold: { value: '' },
+      thresholdCurrency: { value: 'USD' }, rechargeMultiplier: { value: '' },
+      rechargeUrl: { value: '' },
+      dynamicRouteRateEnabled: { checked: true },
+      dynamicRouteRateStatistic: { value: 'p90' },
+      dynamicRouteRateLookbackDays: { value: '14' },
+      dynamicRouteRateMinimumSamples: { value: '5' },
+      typeConfig: { value: '{"preserved":true}' }, tags: { value: '' }, note: { value: '' },
+      accountDedupeKey: { value: '' }
+    },
+    querySelectorAll() { return []; }
+  };
+  context.dynamicProviderForm = form;
+  const payload = JSON.parse(vm.runInContext('JSON.stringify(providerPayload(dynamicProviderForm))', context));
+  assert.deepEqual(payload.typeConfig.dynamicRouteRate, {
+    enabled: true, statistic: 'p90', lookbackDays: 14, minimumSamples: 5
+  });
+  assert.equal(payload.typeConfig.preserved, true);
+  assert.match(source, /dynamicRouteRateEnabled/);
+  assert.match(index, /name="dynamicRouteRateEnabled"/);
+  assert.match(index, /name="rechargeUrl" type="url"/);
+  assert.match(index, /value="serverchan">Server酱（个人微信）/);
+  assert.match(index, /Token 加权平均/);
 });
 
 test('import feedback distinguishes disabled credential shells from skipped rows', () => {
@@ -172,8 +292,8 @@ test('effective rates use at most three decimal places without trailing zeroes',
   assert.doesNotMatch(source, /formatNumber\([^\r\n]*,\s*4\)/);
 });
 
-test('integration groups render a collapsed outer winner and mark exactly one highest-rate detail', () => {
-  const { context } = createBrowserContext();
+test('integration groups render the highest-composite winner and mark exactly one detail', () => {
+  const { context, source } = createBrowserContext();
   const group = {
     groupId: 101,
     groupName: 'Retail',
@@ -184,7 +304,8 @@ test('integration groups render a collapsed outer winner and mark exactly one hi
       id: 'high', account_id: 501, provider_name: 'Supplier A',
       key_name: 'High key', masked_key: 'sk-h...7890',
       comparison: {
-        providerGroupName: 'Premium', providerRate: 1.5, baseGroupRate: 1.1,
+        providerGroupName: 'Premium', providerRate: 1.5, rechargeMultiplier: 1,
+        compositeRate: 1.5, baseGroupRate: 1.1,
         status: 'rate_mismatch',
         differenceRatio: -0.2667, details: {
           providerGroupStatus: 'inactive', providerGroupSource: 'account_inherited',
@@ -197,7 +318,8 @@ test('integration groups render a collapsed outer winner and mark exactly one hi
         id: 'high', account_id: 501, provider_name: 'Supplier A',
         key_name: 'High key', masked_key: 'sk-h...7890', isHighestRate: true,
         comparison: {
-          providerGroupName: 'Premium', providerRate: 1.5, baseGroupRate: 1.1,
+          providerGroupName: 'Premium', providerRate: 1.5, rechargeMultiplier: 1,
+          compositeRate: 1.5, baseGroupRate: 1.1,
           status: 'rate_mismatch',
           differenceRatio: -0.2667, details: {
             providerGroupStatus: 'inactive', providerGroupSource: 'account_inherited',
@@ -222,6 +344,10 @@ test('integration groups render a collapsed outer winner and mark exactly one hi
   assert.match(collapsed, /Supplier A/);
   assert.match(collapsed, /sk-h\.\.\.7890/);
   assert.equal((collapsed.match(/highest-rate-row/g) || []).length, 1);
+  assert.match(collapsed, /综合最高/);
+  assert.match(source, /最高综合倍率供应商/);
+  assert.match(source, /综合倍率差/);
+  assert.match(source, /（基座倍率 - 综合倍率）÷ 综合倍率/);
   assert.equal((collapsed.match(/data-integration-parent="101" hidden/g) || []).length, 2);
   assert.match(collapsed, /badge inactive/);
   assert.match(collapsed, /继承账号/);

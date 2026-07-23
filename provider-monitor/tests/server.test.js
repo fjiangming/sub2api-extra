@@ -47,6 +47,65 @@ test('HTTP API enforces login and CSRF while serving the operational frontend', 
   });
   assert.equal(createRule.status, 201);
 
+  const createProvider = await fetch(`${base}/api/providers`, {
+    method: 'POST',
+    headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
+    body: JSON.stringify({
+      name: 'Manual recharge supplier', adapterType: 'custom', baseUrl: 'https://supplier.example',
+      authMode: 'api_key', credentials: { apiKey: 'secret' }, enabled: false,
+      warningThreshold: 20, thresholdCurrency: 'USD',
+      rechargeUrl: 'https://supplier.example/account/recharge'
+    })
+  });
+  assert.equal(createProvider.status, 201);
+  assert.equal((await createProvider.json()).provider.rechargeUrl, 'https://supplier.example/account/recharge');
+
+  const invalidRechargeUrl = await fetch(`${base}/api/providers`, {
+    method: 'POST',
+    headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
+    body: JSON.stringify({
+      name: 'Invalid recharge link', adapterType: 'custom', baseUrl: 'https://invalid.example',
+      authMode: 'api_key', credentials: { apiKey: 'secret' }, enabled: false,
+      rechargeUrl: 'javascript:alert(1)'
+    })
+  });
+  assert.equal(invalidRechargeUrl.status, 400);
+
+  const createServerChan = await fetch(`${base}/api/notification-channels`, {
+    method: 'POST',
+    headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
+    body: JSON.stringify({
+      name: 'Personal WeChat', type: 'serverchan', enabled: false,
+      config: {}, credentials: { sendKey: 'SCT_TEST_KEY' }
+    })
+  });
+  assert.equal(createServerChan.status, 201);
+  assert.equal((await createServerChan.json()).type, 'serverchan');
+
+  const createRechargeRule = await fetch(`${base}/api/automation-rules`, {
+    method: 'POST',
+    headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
+    body: JSON.stringify({
+      name: 'Recharge account', triggerType: 'low_balance', enabled: true, dryRun: true,
+      config: {
+        action: 'trigger_recharge_webhook', threshold: 20, currency: 'USD',
+        webhookUrl: 'https://recharge.example/hook'
+      }
+    })
+  });
+  assert.equal(createRechargeRule.status, 201);
+  assert.equal(Object.hasOwn((await createRechargeRule.json()).config, 'channelIds'), false);
+
+  const createChannelRuleWithoutChannel = await fetch(`${base}/api/automation-rules`, {
+    method: 'POST',
+    headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
+    body: JSON.stringify({
+      name: 'Disable channel', triggerType: 'low_balance', enabled: true, dryRun: true,
+      config: { action: 'disable_sub2api_channel', threshold: 20, currency: 'USD' }
+    })
+  });
+  assert.equal(createChannelRuleWithoutChannel.status, 400);
+
   const updateSettings = await fetch(`${base}/api/settings`, {
     method: 'PUT',
     headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },

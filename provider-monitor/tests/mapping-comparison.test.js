@@ -8,7 +8,7 @@ const { QueryService } = require('../src/services/query-service');
 const { MappingService } = require('../src/services/mapping-service');
 const { AlertService } = require('../src/services/alert-service');
 
-test('mapping comparison persists Sub2API group-rate drift and drives alert recovery', async (t) => {
+test('mapping comparison persists Sub2API composite-rate drift and drives alert recovery', async (t) => {
   const context = createTestContext();
   t.after(() => context.cleanup());
   const providers = new ProviderRepository(context.db, context.config);
@@ -18,6 +18,7 @@ test('mapping comparison persists Sub2API group-rate drift and drives alert reco
     baseUrl: 'https://supplier.example',
     authMode: 'system_token',
     credentials: { systemToken: 'secret', userId: '1' },
+    rechargeMultiplier: 10,
     enabled: true
   });
   const groupId = crypto.randomUUID();
@@ -64,11 +65,17 @@ test('mapping comparison persists Sub2API group-rate drift and drives alert reco
   assert.equal(comparison.items[0].comparison.providerRate, 0.8);
   assert.equal(comparison.items[0].comparison.baseGroupRate, 1.2);
   assert.equal(comparison.items[0].comparison.baseGroupId, 7);
+  assert.equal(comparison.items[0].comparison.rechargeMultiplier, 10);
+  assert.equal(comparison.items[0].comparison.rechargeSource, 'manual');
+  assert.ok(Math.abs(comparison.items[0].comparison.compositeRate - 0.08) < 1e-12);
   assert.equal('inferredBaseGroup' in comparison.items[0].comparison.details, false);
   assert.equal(comparison.items[0].comparison.details.providerGroupSource, 'mapping_explicit');
   assert.equal(comparison.items[0].comparison.details.providerRateScope, 'group_multiplier');
+  assert.equal(comparison.items[0].comparison.details.compositeFormula, 'provider_rate/recharge_multiplier');
+  assert.equal(comparison.items[0].comparison.details.differenceRateScope, 'composite_rate');
+  assert.equal(comparison.items[0].comparison.details.differenceFormula, '(base_group_rate-composite_rate)/abs(composite_rate)');
   assert.equal(comparison.items[0].comparison.details.channelCostVerified, false);
-  assert.ok(Math.abs(comparison.items[0].comparison.differenceRatio - 0.5) < 1e-9);
+  assert.ok(Math.abs(comparison.items[0].comparison.differenceRatio - 14) < 1e-9);
 
   mappings.save({
     config: { upstreamGroupRef: 'removed-supplier-group', rateToleranceRatio: 0.05 }
@@ -98,8 +105,11 @@ test('mapping comparison persists Sub2API group-rate drift and drives alert reco
   const active = await alerts.evaluateConnection(provider.id);
   assert.equal(active[0].status, 'active');
   assert.equal(active[0].details.mappingId, mapping.id);
+  assert.equal(active[0].details.rechargeMultiplier, 10);
+  assert.ok(Math.abs(active[0].details.compositeRate - 0.08) < 1e-12);
+  assert.equal(active[0].details.differenceRateScope, 'composite_rate');
 
-  baseRate = 0.82;
+  baseRate = 0.082;
   comparison = await mappings.refreshComparisons({ force: true });
   assert.equal(comparison.items[0].comparison.status, 'aligned');
   const resolved = await alerts.evaluateConnection(provider.id);
@@ -116,6 +126,91 @@ test('mapping comparison persists Sub2API group-rate drift and drives alert reco
   comparison = await mappings.refreshComparisons({ force: true });
   assert.equal(comparison.items[0].comparison.status, 'missing_base_group');
   assert.equal(comparison.summary.error, 1);
+});
+
+test('mapping comparison prefers configured per-key dynamic route rates over nominal groups', async (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Dynamic Supplier',
+    adapterType: 'new-api',
+    baseUrl: 'https://dynamic.example',
+    authMode: 'system_token',
+    credentials: { systemToken: 'secret', userId: '1' },
+    typeConfig: {
+      dynamicRouteRate: { enabled: true, statistic: 'median', lookbackDays: 30, minimumSamples: 3 }
+    },
+    enabled: true
+  });
+  const now = nowIso();
+  const groupId = crypto.randomUUID();
+  const keyId = crypto.randomUUID();
+  context.db.prepare(`
+    INSERT INTO remote_groups(
+      id, connection_id, remote_id, group_type, name, ratio, status,
+      metadata_json, first_seen_at, last_seen_at
+    ) VALUES (?, ?, 'default', 'key_route_group', 'default', 1, 'active', '{}', ?, ?)
+  `).run(groupId, provider.id, now, now);
+  context.db.prepare(`
+    INSERT INTO remote_keys(
+      id, connection_id, remote_id, name, masked_key, status, primary_group_ref,
+      unlimited, metadata_json, first_seen_at, last_seen_at
+    ) VALUES (?, ?, '2141', 'route-key', 'sk-a...1234', 'enabled', 'default', 1, '{}', ?, ?)
+  `).run(keyId, provider.id, now, now);
+  context.db.prepare(`
+    INSERT INTO provider_dynamic_route_rates(
+      key_id, connection_id, selected_multiplier, statistic, sample_count,
+      min_multiplier, median_multiplier, p90_multiplier, max_multiplier,
+      weighted_average_multiplier, latest_multiplier, status, summary_json,
+      observed_from, observed_to, checked_at, updated_at
+    ) VALUES (?, ?, 0.024, 'median', 57, 0.0102, 0.024, 0.024293, 0.0534,
+      0.022, 0.030664, 'detected', ?, ?, ?, ?, ?)
+  `).run(
+    keyId,
+    provider.id,
+    JSON.stringify({ latest: { channelName: 'Latest route', model: 'gpt-test' } }),
+    now,
+    now,
+    now,
+    now
+  );
+  const sub2api = {
+    authenticationStatus: () => ({ available: true, source: 'test' }),
+    async data(endpoint) {
+      if (endpoint === '/api/v1/admin/groups/all') {
+        return [{ id: 7, name: 'Retail', status: 'active', rate_multiplier: 0.12 }];
+      }
+      if (endpoint === '/api/v1/groups/rates') return { 7: 0.12 };
+      throw new Error(`Unexpected data endpoint: ${endpoint}`);
+    }
+  };
+  const mappings = new MappingService({ db: context.db, config: context.config, sub2api });
+  mappings.save({
+    connectionId: provider.id,
+    keyId,
+    groupId: 7,
+    enabled: true,
+    config: { upstreamGroupRef: 'default', rateToleranceRatio: 0.05 }
+  });
+
+  let result = await mappings.refreshComparisons();
+  let comparison = result.items[0].comparison;
+  assert.equal(comparison.providerRate, 0.024);
+  assert.equal(comparison.compositeRate, 0.024);
+  assert.equal(comparison.details.providerGroupRate, 1);
+  assert.equal(comparison.details.providerRateScope, 'dynamic_route_history');
+  assert.equal(comparison.details.dynamicRouteRate.sampleCount, 57);
+  assert.equal(comparison.details.dynamicRouteRate.summary.latest.channelName, 'Latest route');
+  assert.equal(comparison.details.requestBillingVerified, true);
+  assert.ok(Math.abs(comparison.differenceRatio - 4) < 1e-12);
+
+  context.db.prepare('DELETE FROM provider_dynamic_route_rates WHERE key_id = ?').run(keyId);
+  result = await mappings.refreshComparisons({ force: true });
+  comparison = result.items[0].comparison;
+  assert.equal(comparison.status, 'missing_dynamic_route_rate');
+  assert.equal(comparison.providerRate, null);
+  assert.equal(comparison.compositeRate, null);
 });
 
 test('rate alerts are tracked and recovered independently for every mapping', async (t) => {
@@ -149,6 +244,10 @@ test('rate alerts are tracked and recovered independently for every mapping', as
     insertMapping.run(mappingId, provider.id, 101 + index, now, now);
     insertState.run(mappingId, now);
   });
+  const listedMappings = new MappingService({ db: context.db, config: context.config, sub2api: {} }).list();
+  assert.equal(listedMappings[0].comparison.rechargeMultiplier, 1);
+  assert.equal(listedMappings[0].comparison.rechargeSource, 'default');
+  assert.equal(listedMappings[0].comparison.compositeRate, 0.8);
 
   const delivered = [];
   const alerts = new AlertService({

@@ -242,6 +242,131 @@ test('One API family variants preserve their current balance and group semantics
   }
 });
 
+test('New API recharge quote uses the authenticated user price instead of quota conversion fields', async () => {
+  const requests = [];
+  const adapter = new OneApiFamilyAdapter(context('new-api', (url, options) => {
+    requests.push({ path: url.pathname, body: options.body });
+    if (url.pathname === '/api/status') {
+      return {
+        success: true,
+        data: {
+          quota_per_unit: 500000,
+          quota_display_type: 'USD',
+          price: 6.96,
+          payment_fx_rate_cny_per_usd: 6.76
+        }
+      };
+    }
+    if (url.pathname === '/api/user/topup/info') {
+      return { success: true, data: { min_topup: 1, amount_options: [1, 10], discount: {} } };
+    }
+    if (url.pathname === '/api/user/amount') {
+      assert.deepEqual(options.body, { amount: 1 });
+      return { message: 'success', data: '6.96' };
+    }
+    throw new Error(`Unexpected ${url.pathname}`);
+  }));
+
+  const quote = await adapter.getRechargeQuote();
+  assert.equal(adapter.capabilities().rechargeQuote, true);
+  assert.equal(quote.source, 'provider_quote');
+  assert.equal(quote.paidCurrency, 'CNY');
+  assert.equal(quote.balanceCurrency, 'USD');
+  assert.equal(quote.paidAmount, 6.96);
+  assert.equal(quote.creditedAmount, 1);
+  assert.ok(Math.abs(quote.multiplier - (1 / 6.96)) < 1e-12);
+  assert.deepEqual(requests.map((request) => request.path), [
+    '/api/status', '/api/user/topup/info', '/api/user/amount'
+  ]);
+});
+
+test('New API dynamic route rates use successful request billing logs without paid probes', async () => {
+  const requests = [];
+  const adapter = new OneApiFamilyAdapter(context('new-api', (url) => {
+    requests.push(url);
+    if (url.pathname === '/api/log/self') {
+      return {
+        success: true,
+        data: {
+          total: 5,
+          items: [
+            {
+              created_at: 100, token_id: 9, token_name: 'route-key', model_name: 'model-a',
+              channel: 11, channel_name: 'Low', prompt_tokens: 100, completion_tokens: 0,
+              quota: 3, other: JSON.stringify({ request_final_status: 'success', model_ratio: 0.03, group_ratio: 1 })
+            },
+            {
+              created_at: 200, token_id: 9, token_name: 'route-key', model_name: 'model-a',
+              channel: 12, channel_name: 'High', prompt_tokens: 100, completion_tokens: 0,
+              quota: 5, other: { request_final_status: 'success', model_ratio: 0.05, group_ratio: 1 }
+            },
+            {
+              created_at: 300, token_id: 9, token_name: 'route-key', model_name: 'model-a',
+              quota: 50, other: { request_final_status: 'refunded', model_ratio: 0.5, group_ratio: 1 }
+            },
+            {
+              created_at: 400, token_id: 9, token_name: 'route-key', model_name: 'legacy',
+              quota: 0, other: 'null'
+            },
+            {
+              created_at: 500, token_id: 10, token_name: 'historical-key', model_name: 'model-b',
+              channel: 13, channel_name: 'Historical', prompt_tokens: 100, completion_tokens: 0,
+              quota: 7, other: { request_final_status: 'success', model_ratio: 0.07, group_ratio: 1 }
+            }
+          ]
+        }
+      };
+    }
+    throw new Error(`Unexpected ${url.pathname}`);
+  }));
+
+  const rates = await adapter.getDynamicRouteRates({
+    enabled: true,
+    statistic: 'median',
+    minimumSamples: 2,
+    keys: [{ remoteId: '9', name: 'route-key' }]
+  });
+  const rate = rates.find((item) => item.remoteKeyId === '9');
+  const historical = rates.find((item) => item.remoteKeyId === '10');
+  assert.equal(adapter.capabilities().dynamicRouteRates, true);
+  assert.equal(rate.remoteKeyId, '9');
+  assert.equal(rate.sampleCount, 2);
+  assert.equal(rate.selectedMultiplier, 0.04);
+  assert.equal(rate.minMultiplier, 0.03);
+  assert.equal(rate.maxMultiplier, 0.05);
+  assert.equal(rate.latest.channelName, 'High');
+  assert.equal(historical.keyName, 'historical-key');
+  assert.equal(historical.selectedMultiplier, 0.07);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].searchParams.get('type'), '0');
+});
+
+test('Sub2API account payment config exposes its balance recharge multiplier', async () => {
+  const adapter = new Sub2ApiAdapter(context('sub2api', (url) => {
+    if (url.pathname === '/api/v1/payment/checkout-info') {
+      return {
+        code: 0,
+        data: {
+          balance_recharge_multiplier: 10,
+          balance_disabled: false,
+          recharge_fee_rate: 0.02
+        }
+      };
+    }
+    throw new Error(`Unexpected ${url.pathname}`);
+  }, {
+    connection: { auth_mode: 'token_pair' },
+    credentials: { accessToken: 'access-token', tokenExpiresAt: Date.now() + 3600000 }
+  }));
+
+  const quote = await adapter.getRechargeQuote();
+  assert.equal(quote.source, 'provider_payment_config');
+  assert.equal(quote.multiplier, 10);
+  assert.equal(quote.paidAmount, 1);
+  assert.equal(quote.creditedAmount, 10);
+  assert.equal(quote.metadata.rechargeFeeRate, 0.02);
+});
+
 test('DeepSeek and OpenRouter contracts retain independent balance meanings', async () => {
   const deepseek = new DeepSeekAdapter(context('deepseek', () => ({
     is_available: true,

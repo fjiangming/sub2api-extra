@@ -48,6 +48,7 @@ const ADAPTERS = [
   ['deepseek', 'DeepSeek'], ['openrouter', 'OpenRouter'], ['litellm', 'LiteLLM'],
   ['voapi-v2', 'VoAPI v2'], ['custom', '自定义 JSONPath']
 ];
+const DYNAMIC_ROUTE_RATE_ADAPTERS = new Set(['new-api']);
 const VIEW_META = {
   overview: ['资产总览', '供应商余额、状态与风险'],
   providers: ['供应商连接', '连接验证、同步与适配器能力'],
@@ -254,8 +255,12 @@ function formatMoney(value, currency = 'USD') {
 }
 
 function badge(status, label = null) {
-  const text = label || ({ healthy: '正常', warning: '预警', stale: '陈旧', unknown: '未知', active: '活动', inactive: '停用', enabled: '启用', disabled: '停用', missing: '缺失', succeeded: '成功', partial: '部分成功', failed: '失败', pending: '等待', pending_create: '待新增', running: '执行中', dry_run: '演练', resolved: '已恢复', acknowledged: '已确认', expired: '已到期', exhausted: '已耗尽', passed: '通过', info: '信息', already_checked: '今日已签', unsupported: '不支持', manual_action_required: '需人工处理', created: '已创建', existing: '已存在', unmatched: '未匹配', conflict: '冲突', missing_api_key: '缺少 API Key', missing_remote_key: '远端 Key 未找到', updated: '已更新', aligned: '倍率一致', rate_mismatch: '倍率偏差', missing_base_group: '基座分组缺失', base_group_unselected: '未选基座分组', missing_provider_group: '供应商分组缺失', missing_rate: '倍率缺失', invalid_provider_rate: '供应商倍率无效', mapping_disabled: '映射已停用' }[status] || status || '未知');
+  const text = label || ({ healthy: '正常', warning: '预警', stale: '陈旧', unknown: '未知', active: '活动', inactive: '停用', enabled: '启用', disabled: '停用', missing: '缺失', succeeded: '成功', partial: '部分成功', failed: '失败', pending: '等待', pending_create: '待新增', running: '执行中', dry_run: '演练', resolved: '已恢复', acknowledged: '已确认', expired: '已到期', exhausted: '已耗尽', passed: '通过', info: '信息', already_checked: '今日已签', unsupported: '不支持', manual_action_required: '需人工处理', created: '已创建', existing: '已存在', unmatched: '未匹配', conflict: '冲突', missing_api_key: '缺少 API Key', missing_remote_key: '远端 Key 未找到', updated: '已更新', aligned: '综合倍率一致', rate_mismatch: '综合倍率偏差', missing_base_group: '基座分组缺失', base_group_unselected: '未选基座分组', missing_provider_group: '供应商分组缺失', missing_dynamic_route_rate: '动态倍率缺失', missing_rate: '倍率缺失', invalid_provider_rate: '供应商倍率无效', mapping_disabled: '映射已停用' }[status] || status || '未知');
   return `<span class="badge ${escapeHtml(status || 'unknown')}">${escapeHtml(text)}</span>`;
+}
+
+function alertSeverityLabel(severity) {
+  return ({ info: '信息', warning: '预警', error: '错误' })[severity] || severity || '未知';
 }
 
 function emptyState(icon, title, text) {
@@ -532,9 +537,62 @@ function providerGroupSourceBadge(comparison = {}) {
 
 function integrationProviderRate(comparison = {}) {
   const parts = [integrationRate(comparison.providerRate)];
-  if (comparison.details?.providerRateScope === 'group_multiplier') parts.push('分组倍率');
-  if (comparison.details?.channelCostVerified === false) parts.push('渠道成本未验证');
+  if (comparison.details?.providerRateScope === 'dynamic_route_history') {
+    const dynamic = comparison.details.dynamicRouteRate || {};
+    const statisticLabel = {
+      median: 'P50', p90: 'P90', weighted_average: 'Token 加权', latest: '最近一次'
+    }[dynamic.statistic] || '历史实测';
+    parts.push(`动态实测 ${statisticLabel}`);
+    parts.push(`${dynamic.sampleCount || 0} 次`);
+    if (dynamic.minMultiplier != null && dynamic.maxMultiplier != null) {
+      parts.push(`${integrationRate(dynamic.minMultiplier)}~${integrationRate(dynamic.maxMultiplier)}`);
+    }
+    const latestChannel = dynamic.summary?.latest?.channelName;
+    if (latestChannel) parts.push(`最近 ${escapeHtml(latestChannel)}`);
+    if (dynamic.status === 'unavailable') parts.push('缓存');
+    else if (dynamic.status === 'low_confidence') parts.push('样本少');
+  } else {
+    if (comparison.details?.providerRateScope === 'group_multiplier') parts.push('分组倍率');
+    if (comparison.details?.channelCostVerified === false) parts.push('渠道成本未验证');
+  }
   return parts.join(' · ');
+}
+
+const RECHARGE_SOURCE_LABELS = {
+  manual: '手工',
+  default: '默认',
+  provider_quote: '用户报价',
+  provider_status_price: '站点价格',
+  provider_payment_config: '支付配置',
+  provider_billing: '计费接口'
+};
+
+function rechargeMultiplier(comparison = {}, recharge = {}) {
+  const value = Number(comparison.rechargeMultiplier ?? recharge.multiplier);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function integrationRecharge(comparison = {}, recharge = {}) {
+  const multiplier = rechargeMultiplier(comparison, recharge);
+  if (multiplier == null) return '<strong>-</strong><small>未获取</small>';
+  const formatted = new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 4 }).format(multiplier);
+  const source = comparison.rechargeSource || recharge.source;
+  const status = comparison.rechargeStatus || recharge.status;
+  const sourceLabel = status === 'unavailable' ? '缓存' : RECHARGE_SOURCE_LABELS[source] || '接口';
+  const currencyPair = recharge.paidCurrency && recharge.balanceCurrency
+    ? ` · ${recharge.paidCurrency}→${recharge.balanceCurrency}`
+    : '';
+  return `<strong title="支付 1 单位可获得 ${formatted} 单位供应商余额">1:${formatted}</strong><small>${escapeHtml(`${sourceLabel}${currencyPair}`)}</small>`;
+}
+
+function integrationCompositeRate(comparison = {}, recharge = {}) {
+  const stored = Number(comparison.compositeRate);
+  if (comparison.compositeRate != null && Number.isFinite(stored)) return integrationRate(stored);
+  const providerRate = Number(comparison.providerRate);
+  const multiplier = rechargeMultiplier(comparison, recharge);
+  return Number.isFinite(providerRate) && multiplier != null
+    ? integrationRate(providerRate / multiplier)
+    : '-';
 }
 
 function integrationSummaryHelp() {
@@ -542,8 +600,8 @@ function integrationSummaryHelp() {
     <summary title="查看状态说明" aria-label="查看联动状态说明" aria-describedby="integration-status-help-panel"><i data-lucide="circle-help"></i></summary>
     <div class="integration-status-help-panel" id="integration-status-help-panel" role="tooltip">
       <h3>状态说明</h3>
-      <div><span>${badge('aligned', '一致')}</span><p>映射完整，供应商倍率与基座倍率的差值在容差范围内。</p></div>
-      <div><span>${badge('warning', '预警')}</span><p>存在倍率偏差，或供应商分组、倍率等映射信息不完整。</p></div>
+      <div><span>${badge('aligned', '一致')}</span><p>映射完整，综合倍率与基座倍率的差值在容差范围内。</p></div>
+      <div><span>${badge('warning', '预警')}</span><p>存在综合倍率偏差，或供应商分组、动态路由样本、倍率等映射信息不完整。</p></div>
       <div><span>${badge('failed', '错误')}</span><p>映射引用的 Sub2API 分组已经不存在，需要修正映射。</p></div>
       <div><span>${badge('unknown', '待检查')}</span><p>已有映射尚未生成检查结果，刷新基座后会重新计算。</p></div>
       <p class="integration-status-help-scope">这里只统计已有映射；无映射分组不会计入“待检查”，停用映射也不计入这四项。</p>
@@ -564,7 +622,9 @@ function integrationDetailRow(item, groupKey, expanded) {
     <td class="primary-cell integration-indent"><strong>${item.account_id ? `账号 #${item.account_id}` : '账户级映射'}</strong><small>${item.role === 'primary' ? '主映射' : '备用映射'}</small></td>
     <td class="numeric">${integrationRate(comparison.baseGroupRate)}</td>
     <td class="primary-cell"><strong>${escapeHtml(item.provider_name)}</strong><small>${escapeHtml(item.key_name || '账户级')} · ${escapeHtml(item.masked_key || '-')}</small></td>
-    <td class="primary-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${providerGroupSource}${item.isHighestRate ? ` ${badge('highest', '最高')}` : ''}</strong><small>${integrationProviderRate(comparison)}</small></td>
+    <td class="primary-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${providerGroupSource}${item.isHighestRate ? ` ${badge('highest', '综合最高')}` : ''}</strong><small>${integrationProviderRate(comparison)}</small></td>
+    <td class="numeric">${integrationRecharge(comparison, item.recharge)}</td>
+    <td class="numeric"><strong title="供应商分组倍率 ÷ 充值倍率">${integrationCompositeRate(comparison, item.recharge)}</strong></td>
     <td class="numeric comparison-delta ${comparison.status === 'rate_mismatch' ? 'warning' : ''}">${integrationDelta(comparison)}</td>
     <td>${badge(comparison.status || 'unknown', comparison.status ? null : '待检查')}</td>
     <td>${item.reconciliation_status ? badge(item.reconciliation_status) : '-'}</td>
@@ -586,8 +646,10 @@ function integrationGroupRows(group) {
   return `<tr class="integration-group-row" data-integration-group="${escapeHtml(groupKey)}">
     <td class="primary-cell"><strong>${escapeHtml(group.groupName)}${baseGroupState}</strong><small>#${escapeHtml(group.groupId)}${group.platform ? ` · ${escapeHtml(group.platform)}` : ''}</small></td>
     <td class="numeric"><strong>${integrationRate(group.baseRate)}</strong></td>
-    <td class="primary-cell"><strong>${escapeHtml(highest?.provider_name || '-')}</strong><small>${highest ? `${escapeHtml(highest.key_name || '账户级')} · ${escapeHtml(highest.masked_key || '-')}` : '暂无有效倍率映射'}</small></td>
-    <td class="primary-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${providerGroupSource}${highest ? ` ${badge('highest', '最高')}` : ''}</strong><small>${integrationProviderRate(comparison)}</small></td>
+    <td class="primary-cell"><strong>${escapeHtml(highest?.provider_name || '-')}</strong><small>${highest ? `${escapeHtml(highest.key_name || '账户级')} · ${escapeHtml(highest.masked_key || '-')}` : '暂无有效综合倍率映射'}</small></td>
+    <td class="primary-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${providerGroupSource}${highest ? ` ${badge('highest', '综合最高')}` : ''}</strong><small>${integrationProviderRate(comparison)}</small></td>
+    <td class="numeric">${integrationRecharge(comparison, highest?.recharge)}</td>
+    <td class="numeric"><strong title="供应商分组倍率 ÷ 充值倍率">${integrationCompositeRate(comparison, highest?.recharge)}</strong></td>
     <td class="numeric comparison-delta ${comparison.status === 'rate_mismatch' ? 'warning' : ''}">${integrationDelta(comparison)}</td>
     <td>${highest ? badge(comparison.status || 'unknown') : badge('unknown', '无映射')}</td>
     <td>${badge(group.mappingCount ? 'info' : 'unknown', `${group.mappingCount || 0} 条`)}</td>
@@ -754,7 +816,7 @@ async function renderIntegrations() {
     : status.authentication?.requiresTwoFactor
       ? '等待 Sub2API 二次验证'
       : '缺少可用管理员凭据';
-  $('#main-content').innerHTML = `<section class="base-instance-bar"><div><span class="status-dot ${status.authentication?.available ? 'healthy' : 'warning'}"></span><strong>${escapeHtml(status.publicUrl || status.baseUrl || '未配置基座 Sub2API')}</strong><small>${escapeHtml(authLabel)} · 最近检查 ${escapeHtml(timeAgo(status.lastCheckedAt))}</small></div><div class="status-summary"><span>${badge('aligned', `一致 ${summary.aligned}`)}</span><span>${badge('warning', `预警 ${summary.warning}`)}</span><span>${badge('failed', `错误 ${summary.error}`)}</span><span>${badge('unknown', `待检查 ${summary.unchecked}`)}</span>${integrationSummaryHelp()}</div></section><section class="section"><div class="section-header"><h2>分组与倍率对照</h2><p>${state.integrationGroups.length} 个 Sub2API 分组</p></div><div class="table-wrap integration-table">${mappingRows ? `<table><thead><tr><th>Sub2API 分组</th><th class="numeric">基座倍率</th><th>最高倍率供应商 / Key</th><th>供应商分组 / 倍率</th><th class="numeric">倍率差</th><th>检查</th><th>映射 / 对账</th><th></th></tr></thead><tbody>${mappingRows}</tbody></table>` : emptyState('waypoints', '暂无 Sub2API 分组', '刷新基座后显示分组与映射关系')}</div></section><section class="section"><div class="section-header"><h2>对账记录</h2></div><div class="table-wrap">${reconciliationRows ? `<table><thead><tr><th>供应商</th><th>结果</th><th>期间</th><th class="numeric">余额减少</th><th class="numeric">预期成本</th><th class="numeric">差异</th><th class="numeric">健康分</th></tr></thead><tbody>${reconciliationRows}</tbody></table>` : emptyState('calculator', '暂无对账记录', '映射创建后可执行对账')}</div></section><section class="section split-layout"><div><div class="section-header"><h2>签到记录</h2></div><div class="table-wrap">${checkinRows ? `<table><thead><tr><th>供应商</th><th>状态</th><th class="numeric">奖励</th><th class="numeric">签到前</th><th class="numeric">签到后</th><th>时间</th></tr></thead><tbody>${checkinRows}</tbody></table>` : emptyState('calendar-check', '暂无签到记录', '支持的供应商可手动或定时签到')}</div></div><div><div class="section-header"><h2>手动签到</h2></div><div class="table-wrap"><table><thead><tr><th>供应商</th><th>能力</th><th></th></tr></thead><tbody>${providerCheckins}</tbody></table></div></div></section>`;
+  $('#main-content').innerHTML = `<section class="base-instance-bar"><div><span class="status-dot ${status.authentication?.available ? 'healthy' : 'warning'}"></span><strong>${escapeHtml(status.publicUrl || status.baseUrl || '未配置基座 Sub2API')}</strong><small>${escapeHtml(authLabel)} · 最近检查 ${escapeHtml(timeAgo(status.lastCheckedAt))}</small></div><div class="status-summary"><span>${badge('aligned', `一致 ${summary.aligned}`)}</span><span>${badge('warning', `预警 ${summary.warning}`)}</span><span>${badge('failed', `错误 ${summary.error}`)}</span><span>${badge('unknown', `待检查 ${summary.unchecked}`)}</span>${integrationSummaryHelp()}</div></section><section class="section"><div class="section-header"><h2>分组与倍率对照</h2><p>${state.integrationGroups.length} 个 Sub2API 分组</p></div><div class="table-wrap integration-table">${mappingRows ? `<table><thead><tr><th>Sub2API 分组</th><th class="numeric">基座倍率</th><th>最高综合倍率供应商 / Key</th><th>供应商分组 / 倍率</th><th class="numeric" title="支付 1 单位可获得的供应商余额">充值倍率</th><th class="numeric" title="供应商分组倍率 ÷ 充值倍率">综合倍率</th><th class="numeric" title="（基座倍率 - 综合倍率）÷ 综合倍率">综合倍率差</th><th>检查</th><th>映射 / 对账</th><th></th></tr></thead><tbody>${mappingRows}</tbody></table>` : emptyState('waypoints', '暂无 Sub2API 分组', '刷新基座后显示分组与映射关系')}</div></section><section class="section"><div class="section-header"><h2>对账记录</h2></div><div class="table-wrap">${reconciliationRows ? `<table><thead><tr><th>供应商</th><th>结果</th><th>期间</th><th class="numeric">余额减少</th><th class="numeric">预期成本</th><th class="numeric">差异</th><th class="numeric">健康分</th></tr></thead><tbody>${reconciliationRows}</tbody></table>` : emptyState('calculator', '暂无对账记录', '映射创建后可执行对账')}</div></section><section class="section split-layout"><div><div class="section-header"><h2>签到记录</h2></div><div class="table-wrap">${checkinRows ? `<table><thead><tr><th>供应商</th><th>状态</th><th class="numeric">奖励</th><th class="numeric">签到前</th><th class="numeric">签到后</th><th>时间</th></tr></thead><tbody>${checkinRows}</tbody></table>` : emptyState('calendar-check', '暂无签到记录', '支持的供应商可手动或定时签到')}</div></div><div><div class="section-header"><h2>手动签到</h2></div><div class="table-wrap"><table><thead><tr><th>供应商</th><th>能力</th><th></th></tr></thead><tbody>${providerCheckins}</tbody></table></div></div></section>`;
 }
 
 async function renderSettings() {
@@ -790,7 +852,7 @@ async function renderSettings() {
     <label><span>审计记录保留（天）</span><input name="auditRetentionDays" type="number" min="30" max="3650" value="${settings.auditRetentionDays}"></label>
     <label><span>通知记录保留（天）</span><input name="notificationRetentionDays" type="number" min="7" max="3650" value="${settings.notificationRetentionDays}"></label>
   </div></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="button" data-action="save-system-settings"><i data-lucide="save"></i><span>保存系统参数</span></button></footer></form></section>`;
-  $('#main-content').innerHTML = `<section class="base-instance-bar"><div><span class="status-dot ${sub2apiStatus.authentication?.available ? 'healthy' : 'warning'}"></span><strong>基座 Sub2API</strong><small>${escapeHtml(sub2apiStatus.publicUrl || sub2apiStatus.baseUrl || '未配置')} · 最近检查 ${escapeHtml(timeAgo(sub2apiStatus.lastCheckedAt))}</small></div><div>${authStatus}</div></section><div class="split-layout"><form class="panel" id="settings-form"><div class="panel-header"><h2>运行设置</h2></div><div class="form-grid"><label><span>显示币种</span><input name="displayCurrency" value="${escapeHtml(settings.displayCurrency)}"></label><label><span>预测最短跨度（小时）</span><input name="forecastMinSpanHours" type="number" min="1" value="${settings.forecastMinSpanHours}"></label><label><span>对账容差</span><input name="reconciliationToleranceRatio" type="number" min="0" step="0.01" value="${settings.reconciliationToleranceRatio}"></label><label><span>倍率偏差容差</span><input name="sub2apiRateToleranceRatio" type="number" min="0" step="0.01" value="${settings.sub2apiRateToleranceRatio}"></label><label><span>价格刷新（小时）</span><input name="catalogRefreshHours" type="number" min="1" value="${settings.catalogRefreshHours}"></label><label><span>异常跌幅（%）</span><input name="anomalyDropPercent" type="number" min="1" value="${settings.anomalyDropPercent}"></label><label><span>异常突增倍数</span><input name="anomalySpikeMultiplier" type="number" min="1" step="0.1" value="${settings.anomalySpikeMultiplier}"></label><label class="span-2"><span>汇率（JSON）</span><textarea name="currencyRates" rows="4">${escapeHtml(JSON.stringify(settings.currencyRates, null, 2))}</textarea></label></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存设置</span></button></footer></form><div>${securityPanel}<div class="section-header ${securityPanel ? 'section' : ''}"><h2>数据导出</h2></div><div class="panel"><div class="panel-body action-grid"><button class="button" data-action="download" data-url="/api/exports/balances.csv" data-filename="provider-monitor-balances.csv"><i data-lucide="wallet-cards"></i><span>余额 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/usage.csv" data-filename="provider-monitor-usage.csv"><i data-lucide="activity"></i><span>用量 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/alerts.csv" data-filename="provider-monitor-alerts.csv"><i data-lucide="bell"></i><span>告警 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/env" data-filename="provider-monitor-import.env"><i data-lucide="file-code-2"></i><span>环境变量模板</span></button><button class="button" data-action="export-disaster"><i data-lucide="lock-keyhole"></i><span>加密灾备包</span></button></div></div><div class="section-header section"><h2>SQLite 备份</h2></div><div class="table-wrap">${backupRows ? `<table><thead><tr><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${backupRows}</tbody></table>` : emptyState('database-backup', '暂无备份', '创建在线一致性备份')}</div></div></div><section class="section"><div class="section-header"><h2>远端备份目标</h2><div class="section-actions"><button class="button small" data-action="run-remote-backups"><i data-lucide="cloud-upload"></i><span>立即备份</span></button><button class="button small primary" data-action="add-backup-target"><i data-lucide="plus"></i><span>添加目标</span></button></div></div><div class="table-wrap">${targetRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>最近结果</th><th>最近备份</th><th></th></tr></thead><tbody>${targetRows}</tbody></table>` : emptyState('cloud-upload', '暂无远端目标', '添加本地目录、WebDAV 或 S3 兼容目标')}</div></section><section class="section"><div class="section-header"><h2>远端备份记录</h2></div><div class="table-wrap">${remoteRunRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${remoteRunRows}</tbody></table>` : emptyState('history', '暂无远端备份记录', '执行远端备份后显示')}</div></section><section class="section"><div class="section-header"><h2>凭据生命周期</h2></div><div class="table-wrap">${lifecycleRows ? `<table><thead><tr><th>供应商 / 字段</th><th>到期状态</th><th>最近轮换</th><th>凭据到期</th><th></th></tr></thead><tbody>${lifecycleRows}</tbody></table>` : emptyState('key-round', '暂无凭据', '添加供应商后显示')}</div></section>`;
+  $('#main-content').innerHTML = `<section class="base-instance-bar"><div><span class="status-dot ${sub2apiStatus.authentication?.available ? 'healthy' : 'warning'}"></span><strong>基座 Sub2API</strong><small>${escapeHtml(sub2apiStatus.publicUrl || sub2apiStatus.baseUrl || '未配置')} · 最近检查 ${escapeHtml(timeAgo(sub2apiStatus.lastCheckedAt))}</small></div><div>${authStatus}</div></section><div class="split-layout"><form class="panel" id="settings-form"><div class="panel-header"><h2>运行设置</h2></div><div class="form-grid"><label><span>显示币种</span><input name="displayCurrency" value="${escapeHtml(settings.displayCurrency)}"></label><label><span>预测最短跨度（小时）</span><input name="forecastMinSpanHours" type="number" min="1" value="${settings.forecastMinSpanHours}"></label><label><span>对账容差</span><input name="reconciliationToleranceRatio" type="number" min="0" step="0.01" value="${settings.reconciliationToleranceRatio}"></label><label><span>综合倍率偏差容差</span><input name="sub2apiRateToleranceRatio" type="number" min="0" step="0.01" value="${settings.sub2apiRateToleranceRatio}"></label><label><span>价格刷新（小时）</span><input name="catalogRefreshHours" type="number" min="1" value="${settings.catalogRefreshHours}"></label><label><span>异常跌幅（%）</span><input name="anomalyDropPercent" type="number" min="1" value="${settings.anomalyDropPercent}"></label><label><span>异常突增倍数</span><input name="anomalySpikeMultiplier" type="number" min="1" step="0.1" value="${settings.anomalySpikeMultiplier}"></label><label class="span-2"><span>汇率（JSON）</span><textarea name="currencyRates" rows="4">${escapeHtml(JSON.stringify(settings.currencyRates, null, 2))}</textarea></label></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存设置</span></button></footer></form><div>${securityPanel}<div class="section-header ${securityPanel ? 'section' : ''}"><h2>数据导出</h2></div><div class="panel"><div class="panel-body action-grid"><button class="button" data-action="download" data-url="/api/exports/balances.csv" data-filename="provider-monitor-balances.csv"><i data-lucide="wallet-cards"></i><span>余额 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/usage.csv" data-filename="provider-monitor-usage.csv"><i data-lucide="activity"></i><span>用量 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/alerts.csv" data-filename="provider-monitor-alerts.csv"><i data-lucide="bell"></i><span>告警 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/env" data-filename="provider-monitor-import.env"><i data-lucide="file-code-2"></i><span>环境变量模板</span></button><button class="button" data-action="export-disaster"><i data-lucide="lock-keyhole"></i><span>加密灾备包</span></button></div></div><div class="section-header section"><h2>SQLite 备份</h2></div><div class="table-wrap">${backupRows ? `<table><thead><tr><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${backupRows}</tbody></table>` : emptyState('database-backup', '暂无备份', '创建在线一致性备份')}</div></div></div><section class="section"><div class="section-header"><h2>远端备份目标</h2><div class="section-actions"><button class="button small" data-action="run-remote-backups"><i data-lucide="cloud-upload"></i><span>立即备份</span></button><button class="button small primary" data-action="add-backup-target"><i data-lucide="plus"></i><span>添加目标</span></button></div></div><div class="table-wrap">${targetRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>最近结果</th><th>最近备份</th><th></th></tr></thead><tbody>${targetRows}</tbody></table>` : emptyState('cloud-upload', '暂无远端目标', '添加本地目录、WebDAV 或 S3 兼容目标')}</div></section><section class="section"><div class="section-header"><h2>远端备份记录</h2></div><div class="table-wrap">${remoteRunRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${remoteRunRows}</tbody></table>` : emptyState('history', '暂无远端备份记录', '执行远端备份后显示')}</div></section><section class="section"><div class="section-header"><h2>凭据生命周期</h2></div><div class="table-wrap">${lifecycleRows ? `<table><thead><tr><th>供应商 / 字段</th><th>到期状态</th><th>最近轮换</th><th>凭据到期</th><th></th></tr></thead><tbody>${lifecycleRows}</tbody></table>` : emptyState('key-round', '暂无凭据', '添加供应商后显示')}</div></section>`;
   $('.split-layout', $('#main-content')).insertAdjacentHTML('afterend', systemSettingsPanel);
   $('#settings-form').addEventListener('submit', saveSettings);
   $('#system-settings-form').addEventListener('submit', saveSystemSettings);
@@ -897,7 +959,7 @@ async function renderAlerts() {
   state.alertRules = rules.items;
   state.channels = channels.items;
   setTopActions(`<button class="button" data-action="evaluate-alerts"><i data-lucide="scan-line"></i><span>立即评估</span></button><button class="button primary" data-action="add-alert-rule"><i data-lucide="plus"></i><span>添加规则</span></button>`);
-  const eventList = state.alerts.map((event) => `<div class="alert-item"><span class="alert-symbol ${event.severity === 'error' ? 'error' : ''}"><i data-lucide="${event.severity === 'error' ? 'octagon-alert' : 'triangle-alert'}"></i></span><div><p>${escapeHtml(event.message)}</p><small>${formatDate(event.triggered_at)} · ${escapeHtml(event.severity)}</small></div><div>${badge(event.status)}${event.status === 'active' ? `<button class="icon-button small" data-action="ack-alert" data-id="${event.id}" title="确认告警" aria-label="确认告警"><i data-lucide="check"></i></button>` : ''}</div></div>`).join('');
+  const eventList = state.alerts.map((event) => `<div class="alert-item"><span class="alert-symbol ${event.severity === 'error' ? 'error' : ''}"><i data-lucide="${event.severity === 'error' ? 'octagon-alert' : 'triangle-alert'}"></i></span><div><p>${escapeHtml(event.message)}</p><small>${formatDate(event.triggered_at)} · ${escapeHtml(alertSeverityLabel(event.severity))}</small></div><div>${badge(event.status)}${event.status === 'active' ? `<button class="icon-button small" data-action="ack-alert" data-id="${event.id}" title="确认告警" aria-label="确认告警"><i data-lucide="check"></i></button>` : ''}</div></div>`).join('');
   const ruleRows = state.alertRules.map((rule) => `<tr><td class="primary-cell"><strong>${escapeHtml(rule.name)}</strong><small>${escapeHtml(rule.rule_type)}</small></td><td>${rule.connection_id ? escapeHtml(state.providers.find((p) => p.id === rule.connection_id)?.name || '-') : '全部'}</td><td>${rule.threshold ?? '-'}</td><td>${rule.currency || '-'}</td><td>${rule.enabled ? badge('enabled') : badge('disabled')}</td><td class="actions-cell"><button class="icon-button small" data-action="edit-alert-rule" data-id="${rule.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-alert-rule" data-id="${rule.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></td></tr>`).join('');
   const channelRows = state.channels.map((channel) => `<tr><td class="primary-cell"><strong>${escapeHtml(channel.name)}</strong><small>${escapeHtml(channel.type)}</small></td><td>${channel.enabled ? badge('enabled') : badge('disabled')}</td><td>${channel.credentialFields.map((f) => escapeHtml(f.name)).join(', ') || '-'}</td><td class="actions-cell"><button class="icon-button small" data-action="test-channel" data-id="${channel.id}" title="测试" aria-label="测试"><i data-lucide="send"></i></button><button class="icon-button small" data-action="edit-channel" data-id="${channel.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-channel" data-id="${channel.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></td></tr>`).join('');
   $('#main-content').innerHTML = `<div class="split-layout"><div class="panel"><div class="panel-header"><h2>告警事件</h2></div><div class="alert-list">${eventList || emptyState('bell-off', '暂无告警', '当前没有触发中的风险事件')}</div></div><div class="panel"><div class="panel-header"><h2>通知通道</h2><div class="panel-actions"><button class="icon-button small" data-action="add-channel" title="添加通知通道" aria-label="添加通知通道"><i data-lucide="plus"></i></button></div></div>${channelRows ? `<div class="table-wrap"><table><thead><tr><th>通道</th><th>状态</th><th>凭据</th><th></th></tr></thead><tbody>${channelRows}</tbody></table></div>` : emptyState('send', '暂无通知通道', '添加 Webhook、Telegram、Gotify、Bark 或邮件')}</div></div><section class="section"><div class="section-header"><h2>告警规则</h2></div><div class="table-wrap">${ruleRows ? `<table><thead><tr><th>规则</th><th>供应商</th><th>阈值</th><th>币种</th><th>状态</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table>` : emptyState('list-checks', '暂无规则', '供应商连接中的余额预警值仍会生成内置规则')}</div></section>`;
@@ -1004,6 +1066,24 @@ function applyProviderAdapter(form, adapterType, { fromDetection = false } = {})
   renderCredentialFields(adapterType, null, form.elements.authMode.value);
   form.dataset.credentialsTouched = 'false';
   form.dataset.autoDetectedAdapter = fromDetection ? adapterType : '';
+  updateDynamicRouteRateFields(form);
+}
+
+function updateDynamicRouteRateFields(form) {
+  const fieldset = $('#dynamic-route-rate-fieldset');
+  if (!fieldset) return;
+  if (!form.elements.dynamicRouteRateEnabled) return;
+  const supported = DYNAMIC_ROUTE_RATE_ADAPTERS.has(form.elements.adapterType.value);
+  fieldset.hidden = !supported;
+  const enabledControl = form.elements.dynamicRouteRateEnabled;
+  enabledControl.disabled = !supported;
+  if (!supported) enabledControl.checked = false;
+  const active = supported && enabledControl.checked;
+  for (const name of [
+    'dynamicRouteRateStatistic', 'dynamicRouteRateLookbackDays', 'dynamicRouteRateMinimumSamples'
+  ]) {
+    if (form.elements[name]) form.elements[name].disabled = !active;
+  }
 }
 
 async function detectProvider(form, { manual = false } = {}) {
@@ -1109,6 +1189,15 @@ function openProviderDialog(provider = null) {
   form.elements.refreshIntervalMinutes.value = provider?.refresh_interval_minutes || 15;
   form.elements.warningThreshold.value = provider?.warning_threshold ?? '';
   form.elements.thresholdCurrency.value = provider?.threshold_currency || 'USD';
+  form.elements.rechargeMultiplier.value = provider?.recharge?.manualMultiplier ?? '';
+  form.elements.rechargeUrl.value = provider?.rechargeUrl || '';
+  const dynamicRouteRate = provider?.typeConfig?.dynamicRouteRate === true
+    ? { enabled: true }
+    : provider?.typeConfig?.dynamicRouteRate || {};
+  form.elements.dynamicRouteRateEnabled.checked = dynamicRouteRate.enabled === true;
+  form.elements.dynamicRouteRateStatistic.value = dynamicRouteRate.statistic || 'median';
+  form.elements.dynamicRouteRateLookbackDays.value = dynamicRouteRate.lookbackDays || 30;
+  form.elements.dynamicRouteRateMinimumSamples.value = dynamicRouteRate.minimumSamples || 3;
   form.elements.accountDedupeKey.value = provider?.account_dedupe_key || '';
   form.elements.enabled.checked = provider?.enabled ?? true;
   form.elements.typeConfig.value = JSON.stringify(provider?.typeConfig || {}, null, 2);
@@ -1117,6 +1206,7 @@ function openProviderDialog(provider = null) {
   $('#provider-dialog-title').textContent = provider ? '编辑供应商' : '添加供应商';
   $('#provider-form-error').textContent = '';
   renderCredentialFields(form.elements.adapterType.value, provider, form.elements.authMode.value);
+  updateDynamicRouteRateFields(form);
   $('#provider-dialog').showModal();
   icons();
 }
@@ -1126,13 +1216,23 @@ function providerPayload(form) {
   $$('[data-credential]', form).forEach((input) => { if (input.value) credentials[input.dataset.credential] = input.value; });
   let typeConfig;
   try { typeConfig = JSON.parse(form.elements.typeConfig.value || '{}'); } catch { throw new Error('高级配置不是有效 JSON'); }
+  typeConfig.dynamicRouteRate = {
+    enabled: DYNAMIC_ROUTE_RATE_ADAPTERS.has(form.elements.adapterType.value) &&
+      form.elements.dynamicRouteRateEnabled.checked,
+    statistic: form.elements.dynamicRouteRateStatistic.value || 'median',
+    lookbackDays: Number(form.elements.dynamicRouteRateLookbackDays.value || 30),
+    minimumSamples: Number(form.elements.dynamicRouteRateMinimumSamples.value || 3)
+  };
   return {
     name: form.elements.name.value.trim(), adapterType: form.elements.adapterType.value,
     baseUrl: normalizeProviderBaseUrl(form.elements.baseUrl.value), authMode: form.elements.authMode.value,
     credentials, remoteUserId: form.elements.remoteUserId.value.trim() || null,
     enabled: form.elements.enabled.checked, refreshIntervalMinutes: Number(form.elements.refreshIntervalMinutes.value || 15),
     warningThreshold: form.elements.warningThreshold.value === '' ? null : Number(form.elements.warningThreshold.value),
-    thresholdCurrency: form.elements.thresholdCurrency.value.trim() || 'USD', typeConfig,
+    thresholdCurrency: form.elements.thresholdCurrency.value.trim() || 'USD',
+    rechargeMultiplier: form.elements.rechargeMultiplier.value === '' ? null : Number(form.elements.rechargeMultiplier.value),
+    rechargeUrl: form.elements.rechargeUrl.value.trim() || null,
+    typeConfig,
     tags: form.elements.tags.value.split(',').map((x) => x.trim()).filter(Boolean), note: form.elements.note.value.trim(),
     accountDedupeKey: form.elements.accountDedupeKey.value.trim() || null
   };
@@ -1152,7 +1252,7 @@ function fillProviderSelect(select, selected = '') {
 function updateAlertRuleFields() {
   const form = $('#alert-rule-form');
   const rateMismatch = form.elements.ruleType.value === 'rate_mismatch';
-  $('#alert-threshold-label').textContent = rateMismatch ? '倍率阈值（%）' : '阈值';
+  $('#alert-threshold-label').textContent = rateMismatch ? '综合倍率阈值（%）' : '阈值';
 }
 
 function openAlertRule(rule = null) {
@@ -1185,7 +1285,47 @@ function openAutomation(rule = null) {
   form.elements.contractPauseHours.value = rule?.config?.contractPauseHours || 24;
   form.elements.webhookUrl.value = rule?.config?.webhookUrl || '';
   form.elements.enabled.checked = rule?.enabled ?? false; form.elements.dryRun.checked = rule?.dryRun ?? true;
+  updateAutomationActionFields(form);
   $('#automation-dialog').showModal(); icons();
+}
+
+function automationUsesChannelIds(action) {
+  return action !== 'trigger_recharge_webhook';
+}
+
+function updateAutomationActionFields(form = $('#automation-form')) {
+  const usesChannelIds = automationUsesChannelIds(form.elements.action.value);
+  const usesWebhook = form.elements.action.value === 'trigger_recharge_webhook';
+  const channelField = form.querySelector('[data-automation-channel-field]');
+  const webhookField = form.querySelector('[data-automation-webhook-field]');
+  channelField.hidden = !usesChannelIds;
+  webhookField.hidden = !usesWebhook;
+  form.elements.channelIds.required = usesChannelIds;
+  form.elements.webhookUrl.required = usesWebhook;
+}
+
+function automationPayload(form) {
+  const channelIds = automationUsesChannelIds(form.elements.action.value)
+    ? form.elements.channelIds.value.split(',').map((value) => Number(value.trim())).filter(Number.isFinite)
+    : [];
+  return {
+    name: form.elements.name.value,
+    triggerType: form.elements.triggerType.value,
+    connectionId: form.elements.connectionId.value || null,
+    enabled: form.elements.enabled.checked,
+    dryRun: form.elements.dryRun.checked,
+    config: {
+      threshold: form.elements.threshold.value === '' ? undefined : Number(form.elements.threshold.value),
+      currency: form.elements.currency.value,
+      ...(automationUsesChannelIds(form.elements.action.value) ? { channelIds } : {}),
+      action: form.elements.action.value,
+      consecutiveMatches: Number(form.elements.consecutiveMatches.value),
+      cooldownMinutes: Number(form.elements.cooldownMinutes.value),
+      dailyMaximumActions: Number(form.elements.dailyMaximumActions.value),
+      contractPauseHours: Number(form.elements.contractPauseHours.value),
+      ...(form.elements.webhookUrl.value ? { webhookUrl: form.elements.webhookUrl.value } : {})
+    }
+  };
 }
 
 function updateMappingKeyOptions(selected = '') {
@@ -1400,7 +1540,8 @@ async function handleAction(button) {
     if (action === 'validate-provider') {
       const payload = providerValidationPayload($('#provider-form'));
       const result = await api('/api/providers/validate', { method: 'POST', body: payload });
-      toast(`连接有效，余额项 ${result.balances.length} 个`);
+      const recharge = result.recharge?.multiplier ? `，充值倍率 1:${formatRateValue(result.recharge.multiplier)}` : '';
+      toast(`连接有效，余额项 ${result.balances.length} 个${recharge}`);
     }
   } catch (error) { toast(error.message, 'error'); }
 }
@@ -1459,6 +1600,9 @@ document.addEventListener('change', (event) => {
     renderCredentialFields(form.elements.adapterType.value, null, event.target.value);
     form.dataset.credentialsTouched = 'true';
   }
+  if (event.target.matches('#provider-form [name="dynamicRouteRateEnabled"]')) {
+    updateDynamicRouteRateFields(event.target.form);
+  }
 });
 
 let searchTimer;
@@ -1494,6 +1638,7 @@ $('#logout-button').addEventListener('click', async () => {
 });
 $('#provider-dialog').addEventListener('close', () => cancelProviderDetection({ clearStatus: true }));
 $('#alert-rule-form')?.elements?.ruleType?.addEventListener('change', updateAlertRuleFields);
+$('#automation-form')?.elements?.action?.addEventListener('change', (event) => updateAutomationActionFields(event.target.form));
 
 $('#provider-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const id = form.elements.id.value;
@@ -1520,8 +1665,7 @@ $('#notification-form').addEventListener('submit', async (event) => {
 
 $('#automation-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const id = form.elements.id.value;
-  const channelIds = form.elements.channelIds.value.split(',').map((v) => Number(v.trim())).filter(Number.isFinite);
-  const payload = { name: form.elements.name.value, triggerType: form.elements.triggerType.value, connectionId: form.elements.connectionId.value || null, enabled: form.elements.enabled.checked, dryRun: form.elements.dryRun.checked, config: { threshold: form.elements.threshold.value === '' ? undefined : Number(form.elements.threshold.value), currency: form.elements.currency.value, channelIds, action: form.elements.action.value, consecutiveMatches: Number(form.elements.consecutiveMatches.value), cooldownMinutes: Number(form.elements.cooldownMinutes.value), dailyMaximumActions: Number(form.elements.dailyMaximumActions.value), contractPauseHours: Number(form.elements.contractPauseHours.value), ...(form.elements.webhookUrl.value ? { webhookUrl: form.elements.webhookUrl.value } : {}) } };
+  const payload = automationPayload(form);
   try { await api(id ? `/api/automation-rules/${id}` : '/api/automation-rules', { method: id ? 'PUT' : 'POST', body: payload }); $('#automation-dialog').close(); toast('自动化规则已保存'); navigate('automation'); } catch (error) { toast(error.message, 'error'); }
 });
 

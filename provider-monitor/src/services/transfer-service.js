@@ -223,6 +223,8 @@ class TransferService {
         refreshIntervalMinutes: provider.refresh_interval_minutes,
         warningThreshold: provider.warning_threshold,
         thresholdCurrency: provider.threshold_currency,
+        rechargeUrl: provider.rechargeUrl,
+        rechargeMultiplier: provider.recharge?.manualMultiplier,
         typeConfig: provider.typeConfig,
         tags: provider.tags,
         note: provider.note,
@@ -325,6 +327,9 @@ class TransferService {
       credentials.masterKey = apiKey;
     }
     const baseUrl = firstValue(row.baseUrl, row.base_url, row.url, row.endpoint, row.host);
+    const hasRechargeMultiplier = ['rechargeMultiplier', 'recharge_multiplier']
+      .some((field) => Object.prototype.hasOwnProperty.call(row, field));
+    const rechargeMultiplier = firstValue(row.rechargeMultiplier, row.recharge_multiplier);
     return {
       sourceIndex: index,
       name: String(firstValue(row.name, row.label, row.title, `${adapterType}-${index + 1}`)),
@@ -337,6 +342,10 @@ class TransferService {
       refreshIntervalMinutes: Number(firstValue(row.refreshIntervalMinutes, row.refresh_interval_minutes, this.config.defaultRefreshMinutes)),
       warningThreshold: firstValue(row.warningThreshold, row.warning_threshold, null) == null ? null : Number(firstValue(row.warningThreshold, row.warning_threshold)),
       thresholdCurrency: firstValue(row.thresholdCurrency, row.threshold_currency, 'USD'),
+      rechargeUrl: firstValue(row.rechargeUrl, row.recharge_url, null),
+      ...(hasRechargeMultiplier
+        ? { rechargeMultiplier: rechargeMultiplier == null ? null : Number(rechargeMultiplier) }
+        : {}),
       typeConfig: row.typeConfig || row.type_config || {},
       tags: Array.isArray(row.tags) ? row.tags : String(row.tags || '').split(',').map((value) => value.trim()).filter(Boolean),
       note: row.note || '',

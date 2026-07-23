@@ -331,13 +331,14 @@ test('auto-mapping never falls back to a provider-named channel', async (t) => {
   assert.equal(context.db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count, 0);
 });
 
-test('auto-mapping previews, preserves manual rows, maps one account to multiple groups and selects the highest rate', async (t) => {
+test('auto-mapping previews, preserves manual rows, maps one account to multiple groups and selects the highest composite rate', async (t) => {
   const context = createTestContext();
   t.after(() => context.cleanup());
   const providers = new ProviderRepository(context.db, context.config);
   const provider = providers.create({
     name: 'Supplier A', adapterType: 'new-api', baseUrl: 'https://supplier-a.example',
-    authMode: 'system_token', credentials: { systemToken: 'secret', userId: '1' }, enabled: true
+    authMode: 'system_token', credentials: { systemToken: 'secret', userId: '1' },
+    rechargeMultiplier: 1, enabled: true
   });
   insertGroup(context.db, provider.id, { remoteId: 'premium', name: 'Premium', ratio: 1.5 });
   insertGroup(context.db, provider.id, { remoteId: 'economy', name: 'Economy', ratio: 0.8 });
@@ -403,6 +404,7 @@ test('auto-mapping previews, preserves manual rows, maps one account to multiple
   assert.equal(retail.mappingCount, 2);
   assert.equal(retail.highest.key_id, highKeyId);
   assert.equal(retail.highest.comparison.providerRate, 1.5);
+  assert.equal(retail.highest.comparison.compositeRate, 1.5);
   assert.equal(retail.items.filter((item) => item.isHighestRate).length, 1);
   assert.equal(team.highest.key_id, highKeyId);
   assert.equal(unmapped.mappingCount, 0);
@@ -612,16 +614,18 @@ test('auto-mapping rolls back every insert when one item fails inside the apply 
   assert.equal(context.db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count, 0);
 });
 
-test('highest-rate grouping uses stable tie-breakers, excludes invalid rates and keeps unassigned rows', () => {
+test('highest-composite-rate grouping ignores raw-rate winners, uses stable tie-breakers and excludes invalid rates', () => {
   const items = [
-    { id: 'provider-z', provider_name: 'Zulu', key_id: 'a', account_id: 1, group_id: 1, comparison: { providerRate: 2 } },
-    { id: 'key-z', provider_name: 'Alpha', key_id: 'z', account_id: 2, group_id: 1, comparison: { providerRate: 2 } },
-    { id: 'winner', provider_name: 'Alpha', key_id: 'a', account_id: 3, group_id: 1, enabled: false, comparison: { providerRate: 2 } },
-    { id: 'zero', provider_name: 'Alpha', key_id: '0', account_id: 4, group_id: 1, comparison: { providerRate: 0 } },
-    { id: 'invalid', provider_name: 'Alpha', key_id: 'x', account_id: 5, group_id: 1, comparison: { providerRate: 'not-a-rate' } },
-    { id: 'orphan', provider_name: 'Other', key_id: 'o', account_id: 6, group_id: 999, comparison: { providerRate: 9 } }
+    { id: 'raw-rate-only', provider_name: 'Zulu', key_id: 'a', account_id: 1, group_id: 1, comparison: { providerRate: 9, compositeRate: 1.5 } },
+    { id: 'key-z', provider_name: 'Alpha', key_id: 'z', account_id: 2, group_id: 1, comparison: { providerRate: 2, compositeRate: 2 } },
+    { id: 'winner', provider_name: 'Alpha', key_id: 'a', account_id: 3, group_id: 1, enabled: false, comparison: { providerRate: 1, compositeRate: 2 } },
+    { id: 'zero', provider_name: 'Alpha', key_id: '0', account_id: 4, group_id: 1, comparison: { providerRate: 8, compositeRate: 0 } },
+    { id: 'invalid', provider_name: 'Alpha', key_id: 'x', account_id: 5, group_id: 1, comparison: { providerRate: 8, compositeRate: 'not-a-rate' } },
+    { id: 'missing-recharge', provider_name: 'Alpha', key_id: 'm', account_id: 6, group_id: 1, comparison: { providerRate: 99, compositeRate: null } },
+    { id: 'orphan', provider_name: 'Other', key_id: 'o', account_id: 7, group_id: 999, comparison: { providerRate: 9, compositeRate: 9 } }
   ];
   assert.equal(highestMapping(items.filter((item) => item.group_id === 1)).id, 'winner');
+  assert.equal(highestMapping(items.filter((item) => item.group_id === 1)).comparison.providerRate, 1);
   const grouped = groupComparisons(items, {
     groups: [
       { id: 1, name: 'One', status: 'active', defaultRate: 1, effectiveRate: 1 },

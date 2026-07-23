@@ -7,6 +7,12 @@ const {
   extractItems
 } = require('./base');
 const { AppError } = require('../errors');
+const {
+  finiteNonnegative,
+  finitePositive,
+  normalizeDynamicRouteConfig,
+  summarizeDynamicRouteObservations
+} = require('../services/dynamic-route-rate');
 
 const FAMILY_CONFIG = {
   'new-api': {
@@ -65,6 +71,8 @@ class OneApiFamilyAdapter extends ProviderAdapter {
       groupsDerivedFromKeys: ['one-hub', 'done-hub'].includes(this.type),
       usageHistory: true,
       priceCatalog: ['new-api', 'veloera'].includes(this.type),
+      rechargeQuote: true,
+      dynamicRouteRates: this.type === 'new-api',
       checkIn: ['new-api', 'veloera'].includes(this.type)
     };
   }
@@ -157,6 +165,88 @@ class OneApiFamilyAdapter extends ProviderAdapter {
         })
       }
     ];
+  }
+
+  async getRechargeQuote() {
+    const status = await this.ensureStatus();
+    const quotaPerUnit = toFiniteNumber(status?.quota_per_unit, 500000) || 500000;
+    const quotaDisplayType = String(status?.quota_display_type || 'USD').toUpperCase();
+    const statusPrice = toFiniteNumber(status?.price);
+    const paidCurrency = status?.payment_fx_rate_cny_per_usd != null || status?.usd_exchange_rate != null
+      ? 'CNY'
+      : null;
+    const balanceCurrency = quotaDisplayType === 'TOKENS' ? 'USD' : quotaDisplayType;
+
+    try {
+      const infoResponse = await this.http.requestJson(
+        joinUrl(this.connection.base_url, '/api/user/topup/info'),
+        { headers: this.headers(), retries: 0 }
+      );
+      const info = unwrapEnvelope(infoResponse.data, { allowNull: true }) || {};
+      const minimum = Math.max(1, Math.ceil(toFiniteNumber(info.min_topup, 1) || 1));
+      const quoteAmount = minimum;
+      const amountResponse = await this.http.requestJson(
+        joinUrl(this.connection.base_url, '/api/user/amount'),
+        {
+          method: 'POST',
+          headers: { ...this.headers(), 'Content-Type': 'application/json' },
+          body: { amount: quoteAmount },
+          retries: 0
+        }
+      );
+      const paidAmount = toFiniteNumber(unwrapEnvelope(amountResponse.data));
+      const creditedAmount = quotaDisplayType === 'TOKENS'
+        ? quoteAmount / quotaPerUnit
+        : quoteAmount;
+      if (paidAmount != null && paidAmount > 0 && creditedAmount > 0) {
+        return {
+          available: true,
+          multiplier: creditedAmount / paidAmount,
+          paidAmount,
+          creditedAmount,
+          paidCurrency,
+          balanceCurrency,
+          source: 'provider_quote',
+          metadata: this.safeRaw({
+            quoteAmount,
+            minimumTopUp: minimum,
+            quotaDisplayType,
+            quotaPerUnit,
+            amountDiscount: info.discount?.[quoteAmount] ?? info.discount?.[String(quoteAmount)] ?? null
+          })
+        };
+      }
+    } catch (error) {
+      if (!(statusPrice != null && statusPrice > 0)) {
+        return {
+          available: false,
+          multiplier: null,
+          source: 'provider_quote',
+          errorCode: error.code || 'RECHARGE_QUOTE_UNAVAILABLE',
+          metadata: { quotaDisplayType }
+        };
+      }
+    }
+
+    if (statusPrice != null && statusPrice > 0) {
+      return {
+        available: true,
+        multiplier: 1 / statusPrice,
+        paidAmount: statusPrice,
+        creditedAmount: 1,
+        paidCurrency,
+        balanceCurrency,
+        source: 'provider_status_price',
+        metadata: this.safeRaw({ quotaDisplayType, quotaPerUnit, price: statusPrice })
+      };
+    }
+    return {
+      available: false,
+      multiplier: null,
+      source: 'provider_quote',
+      errorCode: 'RECHARGE_QUOTE_UNAVAILABLE',
+      metadata: { quotaDisplayType }
+    };
   }
 
   async listGroups() {
@@ -300,6 +390,96 @@ class OneApiFamilyAdapter extends ProviderAdapter {
       period: 'today',
       raw: this.safeRaw(data)
     }];
+  }
+
+  async getDynamicRouteRates(options = {}) {
+    const config = normalizeDynamicRouteConfig(options);
+    if (this.type !== 'new-api' || !config.enabled) return [];
+
+    const knownKeys = Array.isArray(options.keys) ? options.keys : [];
+    const keysById = new Map(knownKeys.map((key) => [String(key.remoteId), key]));
+    const keysByName = new Map();
+    for (const key of knownKeys) {
+      const name = String(key.name || '').trim();
+      if (!name) continue;
+      if (keysByName.has(name)) keysByName.set(name, null);
+      else keysByName.set(name, key);
+    }
+
+    const endTimestamp = Math.floor(Date.now() / 1000);
+    const startTimestamp = endTimestamp - config.lookbackDays * 86400;
+    const pageSize = 100;
+    const rows = [];
+    for (let page = 1; rows.length < config.maxRecords; page += 1) {
+      const query = new URLSearchParams({
+        p: String(page),
+        page_size: String(pageSize),
+        type: '0',
+        start_timestamp: String(startTimestamp),
+        end_timestamp: String(endTimestamp)
+      });
+      const response = await this.http.requestJson(
+        joinUrl(this.connection.base_url, `/api/log/self?${query.toString()}`),
+        { headers: this.headers(), retries: 1 }
+      );
+      const { items, total, hasTotal } = extractItems(response.data);
+      rows.push(...items.slice(0, config.maxRecords - rows.length));
+      if (items.length === 0 || (hasTotal && rows.length >= total) || items.length < pageSize) break;
+    }
+
+    const observationsByKey = new Map(knownKeys.map((key) => [String(key.remoteId), []]));
+    for (const row of rows) {
+      let other = row.other || {};
+      if (typeof other === 'string') {
+        try { other = JSON.parse(other); } catch { other = {}; }
+      }
+      if (!other || typeof other !== 'object' || Array.isArray(other)) other = {};
+      if (other.request_final_status && other.request_final_status !== 'success') continue;
+      const modelRatio = finitePositive(row.model_ratio ?? other.model_ratio);
+      const groupRatio = finitePositive(row.group_ratio ?? other.group_ratio) ?? 1;
+      if (modelRatio == null) continue;
+
+      const tokenId = row.token_id == null ? null : String(row.token_id);
+      const tokenName = String(row.token_name || '').trim();
+      const knownKey = (tokenId && keysById.get(tokenId)) || keysByName.get(tokenName) || null;
+      const remoteKeyId = String(knownKey?.remoteId ?? tokenId ?? tokenName);
+      if (!remoteKeyId) continue;
+      if (!observationsByKey.has(remoteKeyId)) observationsByKey.set(remoteKeyId, []);
+      observationsByKey.get(remoteKeyId).push({
+        keyName: knownKey?.name || tokenName || remoteKeyId,
+        requestAt: toIsoDate(row.created_at),
+        model: row.model_name || null,
+        channelId: other.actual_channel_id ?? row.channel ?? null,
+        channelName: row.channel_name || null,
+        multiplier: modelRatio * groupRatio,
+        modelRatio,
+        groupRatio,
+        completionRatio: finitePositive(other.completion_ratio) ?? 1,
+        cacheRatio: finiteNonnegative(other.cache_ratio) ?? 1,
+        promptTokens: toFiniteNumber(row.prompt_tokens, 0) || 0,
+        completionTokens: toFiniteNumber(row.completion_tokens, 0) || 0,
+        cacheTokens: toFiniteNumber(other.cache_tokens, 0) || 0
+      });
+    }
+
+    const allKeysById = new Map(knownKeys.map((key) => [String(key.remoteId), key]));
+    for (const [remoteId, observations] of observationsByKey) {
+      if (!allKeysById.has(remoteId)) {
+        allKeysById.set(remoteId, {
+          remoteId,
+          name: observations[0]?.keyName || remoteId
+        });
+      }
+    }
+    const allKeys = [...allKeysById.values()];
+    return allKeys.map((key) => ({
+      remoteKeyId: String(key.remoteId),
+      keyName: key.name || String(key.remoteId),
+      ...summarizeDynamicRouteObservations(
+        observationsByKey.get(String(key.remoteId)) || [],
+        config
+      )
+    }));
   }
 
   async getPriceCatalog() {

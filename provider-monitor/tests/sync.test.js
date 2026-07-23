@@ -15,11 +15,24 @@ function json(res, body) {
 }
 
 test('New API sync persists account balance, key quota and key groups', async (t) => {
+  let dynamicRouteFailure = false;
   const server = http.createServer((req, res) => {
     if (req.url === '/api/status') return json(res, { success: true, data: { version: 'test', quota_per_unit: 500000 } });
     if (req.url === '/api/user/self') return json(res, { success: true, data: { id: 42, username: 'alice', quota: 10000000, used_quota: 2500000, group: 'default', status: 1 } });
     if (req.url === '/api/user/self/groups') return json(res, { success: true, data: [{ id: 'premium', name: 'Premium', ratio: 1.2 }] });
     if (req.url.startsWith('/api/log/self/stat')) return json(res, { success: true, data: { quota: 2500000, rpm: 1, tpm: 10 } });
+    if (req.url.startsWith('/api/log/self?')) {
+      if (dynamicRouteFailure) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ message: 'temporary log failure' }));
+      }
+      return json(res, { success: true, data: { total: 1, items: [{
+      created_at: Math.floor(Date.now() / 1000), token_id: 9, token_name: 'build-key',
+      model_name: 'model-a', channel: 31, channel_name: 'Low route', quota: 20,
+      prompt_tokens: 100, completion_tokens: 0,
+      other: { request_final_status: 'success', model_ratio: 0.2, group_ratio: 1 }
+      }] } });
+    }
     if (req.url.startsWith('/api/token/')) return json(res, { success: true, data: { items: [{ id: 9, name: 'build-key', key: 'sk-example-secret', status: 1, group: 'premium', unlimited_quota: false, remain_quota: 1500000, used_quota: 500000, expired_time: -1 }], total: 1 } });
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ message: 'not found' }));
@@ -39,7 +52,10 @@ test('New API sync persists account balance, key quota and key groups', async (t
     credentials: { systemToken: 'system-token' },
     enabled: true,
     warningThreshold: 5,
-    thresholdCurrency: 'USD'
+    thresholdCurrency: 'USD',
+    typeConfig: {
+      dynamicRouteRate: { enabled: true, statistic: 'latest', lookbackDays: 30, minimumSamples: 1 }
+    }
   });
   const sync = new SyncService({
     db: context.db,
@@ -53,6 +69,7 @@ test('New API sync persists account balance, key quota and key groups', async (t
   assert.equal(result.balanceCount, 1);
   assert.equal(result.keyCount, 1);
   assert.equal(result.groupCount, 1);
+  assert.equal(result.dynamicRouteKeyCount, 1);
 
   const queries = new QueryService(context.db, context.config);
   const summary = queries.summary();
@@ -65,6 +82,26 @@ test('New API sync persists account balance, key quota and key groups', async (t
   assert.equal(keys[0].primary_group_ref, 'premium');
   assert.deepEqual(keys[0].additionalGroups, ['Premium']);
   assert.equal(keys[0].masked_key.includes('example-secret'), false);
+  const dynamicRate = context.db.prepare(`
+    SELECT selected_multiplier, statistic, sample_count, status, summary_json
+    FROM provider_dynamic_route_rates WHERE connection_id = ?
+  `).get(provider.id);
+  assert.equal(dynamicRate.selected_multiplier, 0.2);
+  assert.equal(dynamicRate.statistic, 'latest');
+  assert.equal(dynamicRate.sample_count, 1);
+  assert.equal(dynamicRate.status, 'detected');
+  assert.equal(JSON.parse(dynamicRate.summary_json).latest.channelName, 'Low route');
+  dynamicRouteFailure = true;
+  const partial = await sync.run(provider.id);
+  assert.equal(partial.status, 'partial');
+  assert.equal(partial.warnings.some((warning) => warning.capability === 'getDynamicRouteRates'), true);
+  const cachedDynamicRate = context.db.prepare(`
+    SELECT selected_multiplier, status, error_code FROM provider_dynamic_route_rates
+    WHERE connection_id = ?
+  `).get(provider.id);
+  assert.equal(cachedDynamicRate.selected_multiplier, 0.2);
+  assert.equal(cachedDynamicRate.status, 'unavailable');
+  assert.equal(Boolean(cachedDynamicRate.error_code), true);
   context.db.prepare("UPDATE provider_connections SET last_error_code = 'REMOTE_SERVER_ERROR' WHERE id = ?").run(provider.id);
   assert.equal(queries.summary().accounts[0].status, 'error');
 });
@@ -147,6 +184,54 @@ test('post-sync failure degrades the run without invalidating persisted balance'
   assert.equal(result.warnings.some((warning) => warning.capability === 'postSync'), true);
   assert.equal(providers.get(provider.id).last_error_code, null);
   assert.equal(new QueryService(context.db, context.config).summary().accounts[0].available, 8);
+});
+
+test('detected recharge multiplier is retained while a manual override controls the effective value', (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Recharge Supplier', adapterType: 'new-api', baseUrl: 'https://recharge.example',
+    authMode: 'system_token', credentials: { systemToken: 'secret', userId: '7' }
+  });
+
+  let recharge = providers.get(provider.id).recharge;
+  assert.equal(recharge.multiplier, 1);
+  assert.equal(recharge.source, 'default');
+  assert.equal(recharge.status, 'default');
+
+  providers.recordRecharge(provider.id, {
+    available: true,
+    multiplier: 10,
+    paidAmount: 1,
+    creditedAmount: 10,
+    paidCurrency: 'CNY',
+    balanceCurrency: 'USD',
+    source: 'provider_quote'
+  });
+  recharge = providers.get(provider.id).recharge;
+  assert.equal(recharge.multiplier, 10);
+  assert.equal(recharge.source, 'provider_quote');
+  assert.equal(recharge.status, 'detected');
+
+  providers.update(provider.id, { rechargeMultiplier: 8 });
+  recharge = providers.get(provider.id).recharge;
+  assert.equal(recharge.multiplier, 8);
+  assert.equal(recharge.manualMultiplier, 8);
+  assert.equal(recharge.detectedMultiplier, 10);
+  assert.equal(recharge.source, 'manual');
+
+  providers.recordRecharge(provider.id, {
+    available: false,
+    source: 'provider_quote',
+    errorCode: 'REMOTE_REQUEST_FAILED'
+  });
+  providers.update(provider.id, { rechargeMultiplier: null });
+  recharge = providers.get(provider.id).recharge;
+  assert.equal(recharge.multiplier, 10);
+  assert.equal(recharge.source, 'provider_quote');
+  assert.equal(recharge.status, 'unavailable');
+  assert.equal(recharge.errorCode, 'REMOTE_REQUEST_FAILED');
 });
 
 test('sync calls for one provider share in-flight work and scheduled circuit can be manually bypassed', async (t) => {

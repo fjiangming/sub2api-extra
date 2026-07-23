@@ -4,6 +4,7 @@ const { AppError, asAppError } = require('../errors');
 const { nowIso, stringifyJson } = require('../db');
 const { maskKey, redact, redactText } = require('../security/redaction');
 const { upsertGroups } = require('./group-store');
+const { normalizeDynamicRouteConfig } = require('./dynamic-route-rate');
 
 function schemaShape(value, depth = 0) {
   if (depth >= 8) return 'depth-limit';
@@ -44,7 +45,11 @@ class SyncService {
       const appError = asAppError(error);
       if (appError.code === 'INTERNAL_ERROR') throw appError;
       warnings.push({ capability: label, code: appError.code, message: redactText(appError.message) });
-      return { ok: false, value: [] };
+      return {
+        ok: false,
+        value: [],
+        error: { code: appError.code, message: redactText(appError.message) }
+      };
     }
   }
 
@@ -134,6 +139,32 @@ class SyncService {
       const groupsResult = await this.#optional('listGroups', () => adapter.listGroups(), warnings);
       const keysResult = await this.#optional('listKeys', () => adapter.listKeys(), warnings);
       const usageResult = await this.#optional('getUsage', () => adapter.getUsage(), warnings);
+      const rechargeResult = probe.capabilities?.rechargeQuote
+        ? await this.#optional('getRechargeQuote', () => adapter.getRechargeQuote(), warnings)
+        : { ok: true, value: null };
+      const dynamicRouteConfig = normalizeDynamicRouteConfig(
+        connection.type_config_json?.dynamicRouteRate
+      );
+      let dynamicRouteResult = null;
+      if (dynamicRouteConfig.enabled) {
+        if (probe.capabilities?.dynamicRouteRates) {
+          dynamicRouteResult = await this.#optional(
+            'getDynamicRouteRates',
+            () => adapter.getDynamicRouteRates({
+              ...dynamicRouteConfig,
+              keys: keysResult.ok ? keysResult.value : []
+            }),
+            warnings
+          );
+        } else {
+          const error = {
+            code: 'CAPABILITY_UNSUPPORTED',
+            message: 'Provider adapter does not expose dynamic route billing logs'
+          };
+          warnings.push({ capability: 'getDynamicRouteRates', ...error });
+          dynamicRouteResult = { ok: false, value: [], error };
+        }
+      }
       const groupsComplete = groupsResult.ok &&
         (!probe.capabilities?.groupsDerivedFromKeys || keysResult.ok);
       if (keysResult.ok) {
@@ -168,7 +199,13 @@ class SyncService {
           : previousSchemas.keys || ['unknown'],
         usage: usageResult.ok
           ? schemaComponent(usageResult.value, previousSchemas.usage)
-          : previousSchemas.usage || ['unknown']
+          : previousSchemas.usage || ['unknown'],
+        recharge: rechargeResult.ok
+          ? schemaComponent(rechargeResult.value, previousSchemas.recharge)
+          : previousSchemas.recharge || ['unknown'],
+        dynamicRouteRates: dynamicRouteResult?.ok
+          ? schemaComponent(dynamicRouteResult.value, previousSchemas.dynamicRouteRates)
+          : previousSchemas.dynamicRouteRates || ['unknown']
       };
       const fingerprint = {
         ...probe,
@@ -185,6 +222,9 @@ class SyncService {
         keys: keysResult.value,
         keysComplete: keysResult.ok,
         usage: usageResult.value,
+        recharge: rechargeResult.ok ? rechargeResult.value : null,
+        dynamicRoute: dynamicRouteResult,
+        dynamicRouteConfig,
         capturedAt,
         warnings
       });
@@ -253,6 +293,13 @@ class SyncService {
       if (data.keysComplete) this.#replaceKeyGroupRelations(connection.id, data.keys);
       this.#insertSnapshots(connection.id, accountId, data.balances, data.groups, data.keys, data.capturedAt);
       this.#insertUsage(connection.id, accountId, data.usage || [], data.capturedAt);
+      if (data.recharge) this.providers.recordRecharge(connection.id, data.recharge, data.capturedAt);
+      const dynamicRouteKeyCount = this.#recordDynamicRouteRates(
+        connection.id,
+        data.dynamicRoute,
+        data.dynamicRouteConfig,
+        data.capturedAt
+      );
 
       const nextCheckAt = this.#nextCheckAt(connection);
       this.db.prepare(`
@@ -276,6 +323,7 @@ class SyncService {
         groupCount: data.groups.length,
         keyCount: data.keys.length,
         usageCount: (data.usage || []).length,
+        dynamicRouteKeyCount,
         capturedAt: data.capturedAt
       };
     });
@@ -308,6 +356,81 @@ class SyncService {
       capturedAt
     );
     return id;
+  }
+
+  #recordDynamicRouteRates(connectionId, result, config, capturedAt) {
+    if (!config?.enabled || !result) return 0;
+    if (!result.ok) {
+      this.db.prepare(`
+        UPDATE provider_dynamic_route_rates
+        SET status = 'unavailable', error_code = ?, checked_at = ?, updated_at = ?
+        WHERE connection_id = ?
+      `).run(result.error?.code || 'DYNAMIC_ROUTE_RATE_UNAVAILABLE', capturedAt, capturedAt, connectionId);
+      return 0;
+    }
+
+    const keyByRemoteId = this.db.prepare(`
+      SELECT id, remote_id FROM remote_keys WHERE connection_id = ?
+    `).all(connectionId).reduce((map, row) => map.set(String(row.remote_id), row.id), new Map());
+    const upsert = this.db.prepare(`
+      INSERT INTO provider_dynamic_route_rates(
+        key_id, connection_id, selected_multiplier, statistic, sample_count,
+        min_multiplier, median_multiplier, p90_multiplier, max_multiplier,
+        weighted_average_multiplier, latest_multiplier, status, error_code,
+        summary_json, observed_from, observed_to, checked_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+      ON CONFLICT(key_id) DO UPDATE SET
+        connection_id = excluded.connection_id,
+        selected_multiplier = excluded.selected_multiplier,
+        statistic = excluded.statistic,
+        sample_count = excluded.sample_count,
+        min_multiplier = excluded.min_multiplier,
+        median_multiplier = excluded.median_multiplier,
+        p90_multiplier = excluded.p90_multiplier,
+        max_multiplier = excluded.max_multiplier,
+        weighted_average_multiplier = excluded.weighted_average_multiplier,
+        latest_multiplier = excluded.latest_multiplier,
+        status = excluded.status,
+        error_code = NULL,
+        summary_json = excluded.summary_json,
+        observed_from = excluded.observed_from,
+        observed_to = excluded.observed_to,
+        checked_at = excluded.checked_at,
+        updated_at = excluded.updated_at
+    `);
+    let count = 0;
+    for (const item of result.value || []) {
+      const keyId = keyByRemoteId.get(String(item.remoteKeyId));
+      if (!keyId) continue;
+      upsert.run(
+        keyId,
+        connectionId,
+        item.selectedMultiplier ?? null,
+        item.statistic || config.statistic,
+        item.sampleCount || 0,
+        item.minMultiplier ?? null,
+        item.medianMultiplier ?? null,
+        item.p90Multiplier ?? null,
+        item.maxMultiplier ?? null,
+        item.weightedAverageMultiplier ?? null,
+        item.latestMultiplier ?? null,
+        item.status || 'unknown',
+        stringifyJson({
+          latest: item.latest || null,
+          models: item.models || [],
+          channels: item.channels || [],
+          source: 'provider_request_logs',
+          lookbackDays: config.lookbackDays,
+          minimumSamples: config.minimumSamples
+        }),
+        item.observedFrom || null,
+        item.observedTo || null,
+        capturedAt,
+        capturedAt
+      );
+      count += 1;
+    }
+    return count;
   }
 
   #upsertGroups(connectionId, groups, capturedAt, complete) {

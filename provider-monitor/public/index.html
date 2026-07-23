@@ -77,10 +77,18 @@
         <label><span>刷新间隔（分钟）</span><input name="refreshIntervalMinutes" type="number" min="1" max="1440" value="15"></label>
         <label><span>余额预警值</span><input name="warningThreshold" type="number" min="0" step="0.01"></label>
         <label><span>币种</span><input name="thresholdCurrency" value="USD" maxlength="12"></label>
+        <label><span>充值倍率（支付 1 = 余额）</span><input name="rechargeMultiplier" type="number" min="0.000001" step="0.0001" placeholder="自动获取"></label>
+        <label class="span-2"><span>充值链接</span><input name="rechargeUrl" type="url" maxlength="2048" placeholder="https://supplier.example/account/recharge"></label>
         <label><span>账户去重键</span><input name="accountDedupeKey" maxlength="200"></label>
         <label class="toggle-field"><input name="enabled" type="checkbox" checked><span>启用定时检查</span></label>
       </div>
       <fieldset><legend>凭据</legend><div class="form-grid" id="credential-fields"></div></fieldset>
+      <fieldset id="dynamic-route-rate-fieldset" hidden><legend>动态路由倍率</legend><div class="form-grid">
+        <label class="toggle-field span-2"><input name="dynamicRouteRateEnabled" type="checkbox"><span>从历史请求日志查询实际倍率</span></label>
+        <label><span>统计口径</span><select name="dynamicRouteRateStatistic"><option value="median">中位数（P50）</option><option value="p90">P90</option><option value="weighted_average">Token 加权平均</option><option value="latest">最近一次</option></select></label>
+        <label><span>回看天数</span><input name="dynamicRouteRateLookbackDays" type="number" min="1" max="90" value="30"></label>
+        <label><span>最少样本数</span><input name="dynamicRouteRateMinimumSamples" type="number" min="1" max="1000" value="3"></label>
+      </div></fieldset>
       <details><summary>高级配置</summary><div class="form-grid advanced-grid"><label class="span-2"><span>适配器配置（JSON）</span><textarea name="typeConfig" rows="5">{}</textarea></label><label><span>标签（逗号分隔）</span><input name="tags"></label><label><span>备注</span><input name="note"></label></div></details>
       <p class="form-error" id="provider-form-error" role="alert"></p>
       <footer class="dialog-actions"><button class="button" type="button" data-action="detect-provider" title="重新识别供应商类型"><i data-lucide="scan-search"></i><span>重新识别</span></button><button class="button" type="button" data-action="validate-provider" title="验证连接"><i data-lucide="shield-check"></i><span>验证连接</span></button><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存</span></button></footer>
@@ -109,7 +117,7 @@
       <input type="hidden" name="id">
       <div class="form-grid">
         <label class="span-2"><span>名称</span><input name="name" required></label>
-        <label><span>类型</span><select name="ruleType"><option value="low_balance">低余额 / 低额度</option><option value="runway_below">可用天数</option><option value="stale_data">数据陈旧</option><option value="sync_failed">同步失败</option><option value="key_expiry">密钥到期</option><option value="key_disabled">密钥停用</option><option value="rate_mismatch">Sub2API 倍率偏差</option><option value="asset_drift">资产漂移</option><option value="contract_changed">接口契约变化</option><option value="anomaly">用量或余额异常</option><option value="credential_expiry">凭据久未轮换</option><option value="automation_failed">自动化失败</option></select></label>
+        <label><span>类型</span><select name="ruleType"><option value="low_balance">低余额 / 低额度</option><option value="runway_below">可用天数</option><option value="stale_data">数据陈旧</option><option value="sync_failed">同步失败</option><option value="key_expiry">密钥到期</option><option value="key_disabled">密钥停用</option><option value="rate_mismatch">Sub2API 综合倍率偏差</option><option value="asset_drift">资产漂移</option><option value="contract_changed">接口契约变化</option><option value="anomaly">用量或余额异常</option><option value="credential_expiry">凭据久未轮换</option><option value="automation_failed">自动化失败</option></select></label>
         <label><span>供应商</span><select name="connectionId"><option value="">全部</option></select></label>
         <label><span>余额范围</span><select name="scope"><option value="account">账户</option><option value="key">Key</option><option value="team">Team Budget</option></select></label>
         <label><span id="alert-threshold-label">阈值</span><input name="threshold" type="number" step="0.01"></label>
@@ -128,7 +136,7 @@
       <input type="hidden" name="id">
       <div class="form-grid">
         <label><span>名称</span><input name="name" required></label>
-        <label><span>类型</span><select name="type"><option value="webhook">Webhook</option><option value="telegram">Telegram</option><option value="gotify">Gotify</option><option value="bark">Bark</option><option value="email">Email</option><option value="wecom">企业微信</option><option value="dingtalk">钉钉</option><option value="feishu">飞书</option></select></label>
+        <label><span>类型</span><select name="type"><option value="webhook">Webhook</option><option value="telegram">Telegram</option><option value="gotify">Gotify</option><option value="bark">Bark</option><option value="email">Email</option><option value="wecom">企业微信</option><option value="serverchan">Server酱（个人微信）</option><option value="dingtalk">钉钉</option><option value="feishu">飞书</option></select></label>
         <label class="span-2"><span>配置（JSON）</span><textarea name="config" rows="6">{}</textarea></label>
         <label class="span-2"><span>凭据（JSON）</span><textarea name="credentials" rows="5">{}</textarea></label>
         <label class="toggle-field"><input name="enabled" type="checkbox" checked><span>启用</span></label>
@@ -147,13 +155,13 @@
         <label><span>供应商</span><select name="connectionId"><option value="">全部</option></select></label>
         <label><span>阈值</span><input name="threshold" type="number" min="0" step="0.01"></label>
         <label><span>币种</span><input name="currency" value="USD" required></label>
-        <label class="span-2"><span>Sub2API 渠道 ID（逗号分隔）</span><input name="channelIds" placeholder="1, 2, 3" required></label>
+        <label class="span-2" data-automation-channel-field><span>Sub2API 渠道 ID（逗号分隔）</span><input name="channelIds" placeholder="1, 2, 3" required></label>
         <label class="span-2"><span>动作</span><select name="action"><option value="disable_sub2api_channel">停用渠道</option><option value="enable_sub2api_channel">启用渠道</option><option value="switch_to_backup">切换备用映射</option><option value="trigger_recharge_webhook">触发充值工单 Webhook</option><option value="remind_credential_rotation">生成凭据轮换提醒</option><option value="create_route_recommendation">生成路由建议</option></select></label>
         <label><span>连续命中</span><input name="consecutiveMatches" type="number" min="1" value="2"></label>
         <label><span>冷却（分钟）</span><input name="cooldownMinutes" type="number" min="1" value="60"></label>
         <label><span>每日动作上限</span><input name="dailyMaximumActions" type="number" min="1" value="10"></label>
         <label><span>Contract 暂停（小时）</span><input name="contractPauseHours" type="number" min="1" value="24"></label>
-        <label class="span-2"><span>充值 Webhook（仅对应动作使用）</span><input name="webhookUrl" type="url"></label>
+        <label class="span-2" data-automation-webhook-field hidden><span>充值 Webhook</span><input name="webhookUrl" type="url"></label>
         <label class="toggle-field"><input name="enabled" type="checkbox"><span>启用规则</span></label>
         <label class="toggle-field"><input name="dryRun" type="checkbox" checked><span>演练模式</span></label>
       </div>

@@ -31,7 +31,8 @@ test('auto-mapping HTTP API enforces CSRF and exposes preview, apply and grouped
   const { providers, sub2api } = app.locals.services;
   const provider = providers.create({
     name: 'API Supplier', adapterType: 'new-api', baseUrl: 'https://api-supplier.example',
-    authMode: 'system_token', credentials: { systemToken: 'secret', userId: '1' }, enabled: true
+    authMode: 'system_token', credentials: { systemToken: 'secret', userId: '1' },
+    rechargeMultiplier: 1, enabled: true
   });
   const apiKey = 'sk-api-route-test-12345678';
   const keyId = seedProviderAssets(context.db, provider.id, apiKey);
@@ -109,6 +110,7 @@ test('auto-mapping HTTP API enforces CSRF and exposes preview, apply and grouped
   assert.equal(comparisons.items.length, 1);
   assert.equal(comparisons.groups.length, 2);
   assert.equal(comparisons.groups.find((group) => group.groupId === 501).highest.key_id, keyId);
+  assert.equal(comparisons.groups.find((group) => group.groupId === 501).highest.comparison.compositeRate, 1.5);
   assert.equal(comparisons.groups.find((group) => group.groupId === 502).mappingCount, 0);
   assert.deepEqual(comparisons.unassignedItems, []);
 

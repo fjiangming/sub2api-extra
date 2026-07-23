@@ -6,16 +6,27 @@ async function safeFetch(input, config, options = {}) {
   const resolution = await resolveSafeUrl(input, config);
   const dispatcher = createPinnedDispatcher(resolution);
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs || config.queryTimeoutMs);
+  const {
+    timeoutMs = config.queryTimeoutMs,
+    readBody = false,
+    ...requestOptions
+  } = options;
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(resolution.url, {
-      ...options,
+      ...requestOptions,
       redirect: 'error',
       signal: controller.signal,
       dispatcher
     });
-    await response.body?.cancel();
-    return { ok: response.ok, status: response.status, headers: response.headers };
+    const body = readBody ? await response.text() : null;
+    if (!readBody) await response.body?.cancel();
+    return {
+      ok: response.ok,
+      status: response.status,
+      headers: response.headers,
+      ...(readBody ? { body } : {})
+    };
   } catch (error) {
     if (error?.name === 'AbortError' || controller.signal.aborted) {
       throw new AppError('TIMEOUT', 'Outbound request timed out', { status: 504, retryable: true });

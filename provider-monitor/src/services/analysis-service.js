@@ -167,7 +167,7 @@ class AnalysisService {
       if (delta < 0 && dropPercent >= Number(config.anomalyDropPercent || globalConfig.anomalyDropPercent || 20)) {
         anomalies.push(this.#anomaly({
           connectionId, type: 'balance_drop', currency, severity: dropPercent >= 50 ? 'error' : 'warning',
-          message: `${provider.name} balance dropped ${dropPercent.toFixed(1)}% in ${currency}.`,
+          message: `${provider.name} 的 ${currency} 余额下降了 ${dropPercent.toFixed(1)}%。`,
           score: dropPercent,
           details: { previous, latest, delta, dropPercent }
         }, activeFingerprints));
@@ -178,21 +178,21 @@ class AnalysisService {
       if (delta < 0 && usedDelta != null && usedDelta <= 0) {
         anomalies.push(this.#anomaly({
           connectionId, type: 'balance_drop_without_usage', currency, severity: 'warning',
-          message: `${provider.name} balance decreased without a matching usage increase.`,
+          message: `${provider.name} 的余额下降，但未检测到对应的用量增长。`,
           score: Math.abs(delta), details: { previous, latest, delta, usedDelta }
         }, activeFingerprints));
       }
       if (usedDelta != null && usedDelta < 0) {
         anomalies.push(this.#anomaly({
           connectionId, type: 'usage_counter_reset', currency, severity: 'info',
-          message: `${provider.name} cumulative usage counter moved backwards or reset.`,
+          message: `${provider.name} 的累计用量计数发生回退或重置。`,
           score: Math.abs(usedDelta), details: { previous, latest, usedDelta }
         }, activeFingerprints));
       }
       if (latest.source_field !== previous.source_field && latest.source_field && previous.source_field) {
         anomalies.push(this.#anomaly({
           connectionId, type: 'balance_unit_or_source_changed', currency, severity: 'warning',
-          message: `${provider.name} balance source field changed from ${previous.source_field} to ${latest.source_field}.`,
+          message: `${provider.name} 的余额来源字段从 ${previous.source_field} 变更为 ${latest.source_field}。`,
           score: null, details: { previousSource: previous.source_field, latestSource: latest.source_field }
         }, activeFingerprints));
       }
@@ -208,7 +208,7 @@ class AnalysisService {
           if (keyDelta >= 0 && Math.abs(keyDelta - usedDelta) > tolerance) {
             anomalies.push(this.#anomaly({
               connectionId, type: 'key_account_usage_mismatch', currency, severity: 'warning',
-              message: `${provider.name} key usage does not match account usage.`,
+              message: `${provider.name} 的 Key 用量与账户用量不一致。`,
               score: Math.abs(keyDelta - usedDelta), details: { accountUsedDelta: usedDelta, keyUsedDelta: keyDelta, tolerance }
             }, activeFingerprints));
           }
@@ -227,7 +227,7 @@ class AnalysisService {
         if (baseline > 0 && latestRate >= baseline * Number(config.anomalySpikeMultiplier || globalConfig.anomalySpikeMultiplier || 3)) {
           anomalies.push(this.#anomaly({
             connectionId, type: 'usage_spike', currency, severity: 'warning',
-            message: `${provider.name} recent burn rate is ${(latestRate / baseline).toFixed(1)}x its baseline.`,
+            message: `${provider.name} 的近期消耗速率为基准值的 ${(latestRate / baseline).toFixed(1)} 倍。`,
             score: latestRate / baseline, details: { latestRate, baseline }
           }, activeFingerprints));
         }

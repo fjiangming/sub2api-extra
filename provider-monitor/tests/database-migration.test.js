@@ -6,7 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
-test('schema v9 migration removes channel identity and preserves mapping dependents', (t) => {
+test('schema v12 migration preserves mappings and adds provider recharge fields', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
   let db = createDatabase(databasePath);
@@ -49,6 +49,7 @@ test('schema v9 migration removes channel identity and preserves mapping depende
 
   db.pragma('foreign_keys = OFF');
   db.exec(`
+    ALTER TABLE provider_connections DROP COLUMN recharge_url;
     DROP INDEX IF EXISTS sub2api_mapping_identity;
     CREATE TABLE sub2api_mappings_v7 (
       id TEXT PRIMARY KEY,
@@ -83,7 +84,10 @@ test('schema v9 migration removes channel identity and preserves mapping depende
   db.close();
 
   db = createDatabase(databasePath);
-  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 9').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 12').get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());
+  assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'recharge_url'));
   assert.equal(db.prepare('PRAGMA table_info(sub2api_mappings)').all().find((column) => column.name === 'channel_id').notnull, 0);
   assert.equal(db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count, 1);
   assert.equal(db.prepare('SELECT status FROM sub2api_mapping_states WHERE mapping_id = ?').get('mapping').status, 'aligned');

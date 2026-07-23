@@ -2,6 +2,99 @@ const crypto = require('crypto');
 const { AppError } = require('../errors');
 const { nowIso, parseJson, stringifyJson } = require('../db');
 
+const ALERT_TERM_LABELS = {
+  aligned: '综合倍率一致',
+  rate_mismatch: '综合倍率偏差',
+  missing_base_group: '基座分组缺失',
+  base_group_unselected: '未选择基座分组',
+  missing_provider_group: '供应商分组缺失',
+  missing_dynamic_route_rate: '动态路由倍率缺失',
+  missing_rate: '倍率缺失',
+  invalid_provider_rate: '供应商倍率无效',
+  enabled: '启用',
+  disabled: '停用',
+  expired: '已到期',
+  exhausted: '已耗尽',
+  missing: '缺失',
+  created: '新增',
+  updated: '变更',
+  removed: '移除',
+  contract_changed: '接口协议变更',
+  key: 'Key',
+  group: '分组',
+  provider: '供应商',
+  disable_sub2api_channel: '停用 Sub2API 渠道',
+  switch_to_backup: '切换到备用渠道'
+};
+
+function alertTermLabel(value) {
+  return ALERT_TERM_LABELS[value] || value;
+}
+
+function localizeLegacyAlertMessage(message) {
+  const text = String(message || '');
+  let match = text.match(/^(.+) recovered: (.+)$/s);
+  if (match) return `${match[1]} 已恢复：${localizeLegacyAlertMessage(match[2])}`;
+
+  match = text.match(/^(.+) mapped group (.+) has rate status ([a-z0-9_]+)(?: \((-?\d+(?:\.\d+)?)%\))?\.$/i);
+  if (match) {
+    return `${match[1]} 映射分组“${match[2]}”的倍率状态为${alertTermLabel(match[3])}${match[4] == null ? '' : `（偏差 ${match[4]}%）`}。`;
+  }
+
+  match = text.match(/^(.+) team (.+) has (-?\d+(?:\.\d+)?) ([A-Z]+) remaining\.$/);
+  if (match) return `${match[1]} 团队“${match[2]}”的剩余额度为 ${match[3]} ${match[4]}。`;
+
+  match = text.match(/^(.+) key (.+) has (-?\d+(?:\.\d+)?) ([A-Z]+) remaining\.$/);
+  if (match) return `${match[1]} Key“${match[2]}”的剩余额度为 ${match[3]} ${match[4]}。`;
+
+  match = text.match(/^(.+) balance is (-?\d+(?:\.\d+)?) ([A-Z]+), at or below (-?\d+(?:\.\d+)?) ([A-Z]+)\.$/);
+  if (match) return `${match[1]} 余额为 ${match[2]} ${match[3]}，已低于或等于预警值 ${match[4]} ${match[5]}。`;
+
+  match = text.match(/^(.+) estimated runway is (-?\d+(?:\.\d+)?) days\.$/);
+  if (match) return `${match[1]} 预计还可使用 ${match[2]} 天。`;
+
+  match = text.match(/^(.+) has no successful balance update within (-?\d+(?:\.\d+)?) minutes\.$/);
+  if (match) return `${match[1]} 已连续 ${match[2]} 分钟未成功更新余额。`;
+
+  match = text.match(/^(.+) sync failed: (.+)\.$/s);
+  if (match) return `${match[1]} 同步失败：${match[2]}。`;
+
+  match = text.match(/^(.+) key (.+) expires at (.+)\.$/s);
+  if (match) return `${match[1]} Key“${match[2]}”将于 ${match[3]} 到期。`;
+
+  match = text.match(/^(.+) key (.+) is ([a-z0-9_]+)\.$/i);
+  if (match) return `${match[1]} Key“${match[2]}”当前状态为${alertTermLabel(match[3])}。`;
+
+  match = text.match(/^(.+) detected ([a-z0-9_]+) on ([a-z0-9_]+)\.$/i);
+  if (match) return `${match[1]} 检测到${alertTermLabel(match[3])}发生${alertTermLabel(match[2])}。`;
+
+  match = text.match(/^(.+) credentials have not been rotated for (\d+) days\.$/);
+  if (match) return `${match[1]} 的凭据已 ${match[2]} 天未轮换。`;
+
+  match = text.match(/^(.+) automation ([a-z0-9_]+) failed: (.+)\.$/is);
+  if (match) return `${match[1]} 自动化动作“${alertTermLabel(match[2])}”执行失败：${match[3]}。`;
+
+  match = text.match(/^(.+) balance dropped (-?\d+(?:\.\d+)?)% in ([A-Z]+)\.$/);
+  if (match) return `${match[1]} 的 ${match[3]} 余额下降了 ${match[2]}%。`;
+
+  match = text.match(/^(.+) balance decreased without a matching usage increase\.$/);
+  if (match) return `${match[1]} 的余额下降，但未检测到对应的用量增长。`;
+
+  match = text.match(/^(.+) cumulative usage counter moved backwards or reset\.$/);
+  if (match) return `${match[1]} 的累计用量计数发生回退或重置。`;
+
+  match = text.match(/^(.+) balance source field changed from (.+) to (.+)\.$/s);
+  if (match) return `${match[1]} 的余额来源字段从 ${match[2]} 变更为 ${match[3]}。`;
+
+  match = text.match(/^(.+) key usage does not match account usage\.$/);
+  if (match) return `${match[1]} 的 Key 用量与账户用量不一致。`;
+
+  match = text.match(/^(.+) recent burn rate is (-?\d+(?:\.\d+)?)x its baseline\.$/);
+  if (match) return `${match[1]} 的近期消耗速率为基准值的 ${match[2]} 倍。`;
+
+  return text;
+}
+
 class AlertService {
   constructor({ db, config, queries, notifications }) {
     this.db = db;
@@ -77,7 +170,12 @@ class AlertService {
     const rows = status
       ? this.db.prepare(`SELECT * FROM alert_events WHERE status = ? ORDER BY triggered_at DESC LIMIT ?`).all(status, limit)
       : this.db.prepare(`SELECT * FROM alert_events ORDER BY triggered_at DESC LIMIT ?`).all(limit);
-    return rows.map((row) => ({ ...row, details: parseJson(row.details_json, {}), details_json: undefined }));
+    return rows.map((row) => ({
+      ...row,
+      message: localizeLegacyAlertMessage(row.message),
+      details: parseJson(row.details_json, {}),
+      details_json: undefined
+    }));
   }
 
   acknowledge(id) {
@@ -138,6 +236,7 @@ class AlertService {
         ABS(COALESCE(s.difference_ratio, 0)) DESC
     `).all(provider.id);
     const evaluations = states.map((state) => {
+      const comparisonDetails = parseJson(state.details_json, {});
       const effectiveThreshold = thresholdRatio ?? state.tolerance_ratio;
       const differenceExceeded = state.difference_ratio != null &&
         Math.abs(state.difference_ratio) > Number(effectiveThreshold ?? 0);
@@ -151,7 +250,7 @@ class AlertService {
         subjectId: state.mapping_id,
         severity: config.severity || (state.status === 'missing_base_group' ? 'error' : 'warning'),
         message: matched
-          ? `${provider.name} mapped group ${state.base_group_name || state.group_id} has rate status ${alertStatus}${differencePercent == null ? '' : ` (${differencePercent.toFixed(2)}%)`}.`
+          ? `${provider.name} 映射分组“${state.base_group_name || state.group_id}”的倍率状态为${alertTermLabel(alertStatus)}${differencePercent == null ? '' : `（偏差 ${differencePercent.toFixed(2)}%）`}。`
           : '',
         details: matched ? {
           mappingId: state.mapping_id,
@@ -161,8 +260,11 @@ class AlertService {
           comparisonStatus: state.status,
           providerGroup: state.provider_group_name,
           providerRate: state.provider_rate,
+          rechargeMultiplier: comparisonDetails.rechargeMultiplier ?? null,
+          compositeRate: comparisonDetails.compositeRate ?? null,
           baseGroup: state.base_group_name,
           baseRate: state.base_group_rate,
+          differenceRateScope: comparisonDetails.differenceRateScope || 'composite_rate',
           differenceRatio: state.difference_ratio,
           thresholdRatio: effectiveThreshold,
           checkedAt: state.checked_at
@@ -218,7 +320,7 @@ class AlertService {
         return {
           matched: Boolean(matchedTeam), subjectType: 'team', subjectId: matchedTeam?.id || provider.id,
           severity: config.severity || 'warning',
-          message: matchedTeam ? `${provider.name} team ${group?.name || matchedTeam.id} has ${Number(matchedTeam.latest.available).toFixed(2)} ${currency} remaining.` : '',
+          message: matchedTeam ? `${provider.name} 团队“${group?.name || matchedTeam.id}”的剩余额度为 ${Number(matchedTeam.latest.available).toFixed(2)} ${currency}。` : '',
           details: { team: matchedTeam, threshold: rule.threshold, currency }
         };
       }
@@ -247,7 +349,7 @@ class AlertService {
         return {
           matched: Boolean(matchedKey), subjectType: 'key', subjectId: matchedKey?.id || provider.id,
           severity: config.severity || 'warning',
-          message: matchedKey ? `${provider.name} key ${matchedKey.name} has ${Number(matchedKey.latest.available).toFixed(2)} ${matchedKey.latest.currency || currency} remaining.` : '',
+          message: matchedKey ? `${provider.name} Key“${matchedKey.name}”的剩余额度为 ${Number(matchedKey.latest.available).toFixed(2)} ${matchedKey.latest.currency || currency}。` : '',
           details: { key: matchedKey, threshold: rule.threshold, consecutiveMatches: required }
         };
       }
@@ -265,9 +367,14 @@ class AlertService {
         subjectId: provider.id,
         severity: config.severity || 'warning',
         message: matched
-          ? `${provider.name} balance is ${Number(rows[0].available).toFixed(2)} ${currency}, at or below ${rule.threshold} ${currency}.`
+          ? `${provider.name} 余额为 ${Number(rows[0].available).toFixed(2)} ${currency}，已低于或等于预警值 ${rule.threshold} ${currency}。`
           : '',
-        details: { currency, threshold: rule.threshold, latest: rows[0] || null }
+        details: {
+          currency,
+          threshold: rule.threshold,
+          latest: rows[0] || null,
+          ...(matched && provider.recharge_url ? { rechargeUrl: provider.recharge_url } : {})
+        }
       };
     }
     if (rule.rule_type === 'runway_below') {
@@ -278,7 +385,7 @@ class AlertService {
         subjectType: 'account',
         subjectId: provider.id,
         severity: config.severity || 'warning',
-        message: matched ? `${provider.name} estimated runway is ${forecast.runwayDays.toFixed(1)} days.` : '',
+        message: matched ? `${provider.name} 预计还可使用 ${forecast.runwayDays.toFixed(1)} 天。` : '',
         details: forecast
       };
     }
@@ -293,7 +400,7 @@ class AlertService {
         subjectType: 'connection',
         subjectId: provider.id,
         severity: config.severity || 'warning',
-        message: matched ? `${provider.name} has no successful balance update within ${minutes} minutes.` : '',
+        message: matched ? `${provider.name} 已连续 ${minutes} 分钟未成功更新余额。` : '',
         details: { lastSuccessAt: provider.last_success_at, ageMinutes }
       };
     }
@@ -304,7 +411,7 @@ class AlertService {
         subjectType: 'connection',
         subjectId: provider.id,
         severity: config.severity || 'error',
-        message: matched ? `${provider.name} sync failed: ${provider.last_error_message || provider.last_error_code}.` : '',
+        message: matched ? `${provider.name} 同步失败：${provider.last_error_message || provider.last_error_code}。` : '',
         details: { code: provider.last_error_code, message: provider.last_error_message }
       };
     }
@@ -322,7 +429,7 @@ class AlertService {
         subjectType: 'key',
         subjectId: key?.id || provider.id,
         severity: config.severity || 'warning',
-        message: key ? `${provider.name} key ${key.name} expires at ${key.expires_at}.` : '',
+        message: key ? `${provider.name} Key“${key.name}”将于 ${key.expires_at} 到期。` : '',
         details: { key, days }
       };
     }
@@ -335,7 +442,7 @@ class AlertService {
       return {
         matched: Boolean(key), subjectType: 'key', subjectId: key?.id || provider.id,
         severity: config.severity || 'error',
-        message: key ? `${provider.name} key ${key.name} is ${key.status}.` : '', details: { key }
+        message: key ? `${provider.name} Key“${key.name}”当前状态为${alertTermLabel(key.status)}。` : '', details: { key }
       };
     }
     if (rule.rule_type === 'asset_drift' || rule.rule_type === 'contract_changed') {
@@ -348,7 +455,7 @@ class AlertService {
       return {
         matched: Boolean(change), subjectType: change?.asset_type || 'connection', subjectId: change?.asset_id || provider.id,
         severity: config.severity || change?.severity || 'warning',
-        message: change ? `${provider.name} detected ${change.change_type} on ${change.asset_type}.` : '', details: { change }
+        message: change ? `${provider.name} 检测到${alertTermLabel(change.asset_type)}发生${alertTermLabel(change.change_type)}。` : '', details: { change }
       };
     }
     if (rule.rule_type === 'anomaly') {
@@ -372,7 +479,7 @@ class AlertService {
       const matched = ageDays >= threshold;
       return {
         matched, subjectType: 'credential', subjectId: provider.id, severity: config.severity || 'warning',
-        message: matched ? `${provider.name} credentials have not been rotated for ${Math.floor(ageDays)} days.` : '',
+        message: matched ? `${provider.name} 的凭据已 ${Math.floor(ageDays)} 天未轮换。` : '',
         details: { ageDays, threshold, rotatedAt: connection?.rotated_at || null }
       };
     }
@@ -385,7 +492,7 @@ class AlertService {
       return {
         matched: Boolean(action), subjectType: 'automation', subjectId: action?.id || provider.id,
         severity: config.severity || 'error',
-        message: action ? `${provider.name} automation ${action.action_type} failed: ${action.error_message}.` : '', details: { action }
+        message: action ? `${provider.name} 自动化动作“${alertTermLabel(action.action_type)}”执行失败：${action.error_message}。` : '', details: { action }
       };
     }
     if (rule.rule_type === 'rate_mismatch') {
@@ -420,7 +527,7 @@ class AlertService {
           await this.notifications.dispatch({
             id: existing.id,
             severity: 'info',
-            message: `${provider.name} recovered: ${existing.message}`,
+            message: `${provider.name} 已恢复：${localizeLegacyAlertMessage(existing.message)}`,
             triggered_at: nowIso(),
             details: { recoveredFrom: existing.severity, originalTriggeredAt: existing.triggered_at }
           });
@@ -476,5 +583,6 @@ class AlertService {
 }
 
 module.exports = {
-  AlertService
+  AlertService,
+  localizeLegacyAlertMessage
 };

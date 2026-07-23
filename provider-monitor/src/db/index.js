@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 12;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS provider_connections (
   refresh_interval_minutes INTEGER NOT NULL DEFAULT 15,
   warning_threshold REAL,
   threshold_currency TEXT,
+  recharge_url TEXT,
   capabilities_json TEXT NOT NULL DEFAULT '{}',
   fingerprint_json TEXT NOT NULL DEFAULT '{}',
   type_config_json TEXT NOT NULL DEFAULT '{}',
@@ -54,6 +55,23 @@ DROP INDEX IF EXISTS provider_connection_identity;
 CREATE UNIQUE INDEX provider_connection_identity
   ON provider_connections(base_url, adapter_type, COALESCE(account_dedupe_key, remote_user_id))
   WHERE account_dedupe_key IS NOT NULL OR remote_user_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS provider_recharge_rates (
+  connection_id TEXT PRIMARY KEY REFERENCES provider_connections(id) ON DELETE CASCADE,
+  detected_multiplier REAL CHECK (detected_multiplier IS NULL OR detected_multiplier > 0),
+  manual_multiplier REAL CHECK (manual_multiplier IS NULL OR manual_multiplier > 0),
+  quote_paid_amount REAL,
+  quote_credited_amount REAL,
+  paid_currency TEXT,
+  balance_currency TEXT,
+  detection_source TEXT,
+  status TEXT NOT NULL DEFAULT 'unknown',
+  error_code TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  detected_at TEXT,
+  checked_at TEXT,
+  updated_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS remote_accounts (
   id TEXT PRIMARY KEY,
@@ -104,6 +122,30 @@ CREATE TABLE IF NOT EXISTS remote_keys (
   last_seen_at TEXT NOT NULL,
   UNIQUE(connection_id, remote_id)
 );
+
+CREATE TABLE IF NOT EXISTS provider_dynamic_route_rates (
+  key_id TEXT PRIMARY KEY REFERENCES remote_keys(id) ON DELETE CASCADE,
+  connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
+  selected_multiplier REAL CHECK (selected_multiplier IS NULL OR selected_multiplier > 0),
+  statistic TEXT NOT NULL,
+  sample_count INTEGER NOT NULL DEFAULT 0,
+  min_multiplier REAL,
+  median_multiplier REAL,
+  p90_multiplier REAL,
+  max_multiplier REAL,
+  weighted_average_multiplier REAL,
+  latest_multiplier REAL,
+  status TEXT NOT NULL DEFAULT 'unknown',
+  error_code TEXT,
+  summary_json TEXT NOT NULL DEFAULT '{}',
+  observed_from TEXT,
+  observed_to TEXT,
+  checked_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS dynamic_route_rate_connection_lookup
+  ON provider_dynamic_route_rates(connection_id, checked_at DESC);
 
 CREATE TABLE IF NOT EXISTS remote_key_groups (
   key_id TEXT NOT NULL REFERENCES remote_keys(id) ON DELETE CASCADE,
@@ -639,6 +681,14 @@ function migrateSub2ApiMappingsV9(db) {
   }
 }
 
+function migrateProviderRechargeUrlV12(db) {
+  const rechargeUrlColumn = db.prepare('PRAGMA table_info(provider_connections)').all()
+    .find((column) => column.name === 'recharge_url');
+  if (!rechargeUrlColumn) {
+    db.exec('ALTER TABLE provider_connections ADD COLUMN recharge_url TEXT');
+  }
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -648,6 +698,7 @@ function createDatabase(databasePath) {
   try {
     db.exec(SCHEMA);
     migrateSub2ApiMappingsV9(db);
+    migrateProviderRechargeUrlV12(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

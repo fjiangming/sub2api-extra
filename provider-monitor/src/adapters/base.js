@@ -91,6 +91,8 @@ class ProviderAdapter {
       groupsDerivedFromKeys: false,
       usageHistory: false,
       priceCatalog: false,
+      rechargeQuote: false,
+      dynamicRouteRates: false,
       checkIn: false,
       credentialRefresh: false,
       writeOperations: false
@@ -137,8 +139,16 @@ class ProviderAdapter {
     return [];
   }
 
+  async getDynamicRouteRates() {
+    return [];
+  }
+
   async getPriceCatalog() {
     return [];
+  }
+
+  async getRechargeQuote() {
+    return null;
   }
 
   async getCheckInStatus() {

@@ -46,6 +46,10 @@ const providerSchema = z.object({
   refreshIntervalMinutes: z.number().int().min(1).max(1440).optional(),
   warningThreshold: z.number().nonnegative().optional().nullable(),
   thresholdCurrency: z.string().trim().min(1).max(12).optional(),
+  rechargeUrl: z.string().trim().url().max(2048)
+    .refine((value) => /^https?:\/\//i.test(value), '充值链接必须使用 HTTP 或 HTTPS')
+    .optional().nullable(),
+  rechargeMultiplier: z.number().positive().max(1000000).optional().nullable(),
   typeConfig: z.record(z.string(), z.any()).optional(),
   tags: z.array(z.string().max(40)).max(20).optional(),
   note: z.string().max(2000).optional(),
@@ -74,31 +78,48 @@ const alertRuleSchema = z.object({
 });
 const notificationSchema = z.object({
   name: z.string().trim().min(1).max(120),
-  type: z.enum(['webhook', 'telegram', 'gotify', 'bark', 'email', 'wecom', 'dingtalk', 'feishu']),
+  type: z.enum(['webhook', 'telegram', 'gotify', 'bark', 'email', 'wecom', 'serverchan', 'dingtalk', 'feishu']),
   enabled: z.boolean().optional(),
   config: z.record(z.string(), z.any()).optional(),
   credentials: z.record(z.string(), z.any()).optional()
 });
+const automationConfigSchema = z.object({
+  currency: z.string().max(12).optional(),
+  threshold: z.number().optional(),
+  channelIds: z.array(z.number().int().positive()).optional(),
+  action: z.enum([
+    'disable_sub2api_channel', 'enable_sub2api_channel', 'switch_to_backup',
+    'trigger_recharge_webhook', 'remind_credential_rotation', 'create_route_recommendation'
+  ]),
+  consecutiveMatches: z.number().int().min(1).max(20).optional(),
+  cooldownMinutes: z.number().int().min(1).max(10080).optional(),
+  dailyMaximumActions: z.number().int().min(1).max(1000).optional(),
+  contractPauseHours: z.number().min(1).max(720).optional(),
+  webhookUrl: z.string().url().optional()
+}).passthrough().superRefine((config, context) => {
+  if (config.action !== 'trigger_recharge_webhook' && !config.channelIds?.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['channelIds'],
+      message: 'At least one Sub2API channel ID is required for this action'
+    });
+  }
+  if (config.action === 'trigger_recharge_webhook' && !config.webhookUrl) {
+    context.addIssue({
+      code: 'custom',
+      path: ['webhookUrl'],
+      message: 'Recharge webhook URL is required'
+    });
+  }
+});
+
 const automationSchema = z.object({
   name: z.string().trim().min(1).max(120),
   enabled: z.boolean().optional(),
   dryRun: z.boolean().optional(),
   triggerType: z.enum(['low_balance', 'balance_recovered', 'key_failed', 'anomaly_detected', 'contract_changed']),
   connectionId: z.string().uuid().optional().nullable(),
-  config: z.object({
-    currency: z.string().max(12).optional(),
-    threshold: z.number().optional(),
-    channelIds: z.array(z.number().int().positive()).min(1),
-    action: z.enum([
-      'disable_sub2api_channel', 'enable_sub2api_channel', 'switch_to_backup',
-      'trigger_recharge_webhook', 'remind_credential_rotation', 'create_route_recommendation'
-    ]),
-    consecutiveMatches: z.number().int().min(1).max(20).optional(),
-    cooldownMinutes: z.number().int().min(1).max(10080).optional(),
-    dailyMaximumActions: z.number().int().min(1).max(1000).optional(),
-    contractPauseHours: z.number().min(1).max(720).optional(),
-    webhookUrl: z.string().url().optional()
-  }).passthrough()
+  config: automationConfigSchema
 });
 
 const mappingSchema = z.object({
@@ -510,7 +531,8 @@ function createApplication(options = {}) {
     const probe = await adapter.probe();
     const account = await adapter.getAccount();
     const balances = await adapter.getAccountBalances(account);
-    res.json({ valid: true, probe, account, balances });
+    const recharge = await adapter.getRechargeQuote();
+    res.json({ valid: true, probe, account, balances, recharge });
   }));
   api.get('/providers/:id', (req, res) => res.json(providers.get(req.params.id)));
   api.post('/providers/:id/probe', asyncRoute(async (req, res) => {
@@ -547,8 +569,9 @@ function createApplication(options = {}) {
     const probe = await adapter.probe();
     const account = await adapter.getAccount();
     const balances = await adapter.getAccountBalances(account);
+    const recharge = await adapter.getRechargeQuote();
     audit(db, req, 'provider.validate', 'provider', connection.id, { balanceCount: balances.length });
-    res.json({ valid: true, probe, account, balances });
+    res.json({ valid: true, probe, account, balances, recharge });
   }));
   api.post('/providers/:id/clone', (req, res) => {
     const source = providers.get(req.params.id);
@@ -563,6 +586,8 @@ function createApplication(options = {}) {
       refreshIntervalMinutes: source.refresh_interval_minutes,
       warningThreshold: source.warning_threshold,
       thresholdCurrency: source.threshold_currency,
+      rechargeUrl: source.rechargeUrl,
+      rechargeMultiplier: source.recharge?.manualMultiplier,
       typeConfig: source.typeConfig,
       tags: source.tags,
       note: source.note,
@@ -596,6 +621,7 @@ function createApplication(options = {}) {
     }
     const provider = providers.update(req.params.id, input);
     audit(db, req, 'provider.update', 'provider', provider.id, { input });
+    if (provider.enabled) queue.enqueue('provider_sync', { connectionId: provider.id, priority: 10 });
     res.json(provider);
   });
   api.delete('/providers/:id', (req, res) => {

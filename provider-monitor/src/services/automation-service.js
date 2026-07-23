@@ -100,9 +100,13 @@ class AutomationService {
       const config = parseJson(rule.config_json, {});
       const safety = this.#safetyState(rule, connectionId, config);
       if (!safety.allowed || !this.#matches(connectionId, rule.trigger_type, config)) continue;
-      for (const channelId of config.channelIds || []) {
-        if (this.#deduplicated(rule, connectionId, config, Number(channelId))) continue;
-        actions.push(await this.#execute(rule, connectionId, Number(channelId), config.action));
+      const targetChannelIds = config.action === 'trigger_recharge_webhook'
+        ? [null]
+        : config.channelIds || [];
+      for (const channelId of targetChannelIds) {
+        const normalizedChannelId = channelId == null ? null : Number(channelId);
+        if (this.#deduplicated(rule, connectionId, config, normalizedChannelId)) continue;
+        actions.push(await this.#execute(rule, connectionId, normalizedChannelId, config.action));
       }
     }
     return actions;
@@ -123,11 +127,12 @@ class AutomationService {
         connectionId: id,
         matched: this.#matches(id, rule.trigger_type, config),
         safety,
-        proposedActions: (config.channelIds || []).map((channelId) => ({
-          action: config.action,
-          channelId: Number(channelId),
-          deduplicated: this.#deduplicated(rule, id, config, Number(channelId))
-        }))
+        proposedActions: (config.action === 'trigger_recharge_webhook' ? [null] : config.channelIds || [])
+          .map((channelId) => ({
+            action: config.action,
+            ...(channelId == null ? {} : { channelId: Number(channelId) }),
+            deduplicated: this.#deduplicated(rule, id, config, channelId == null ? null : Number(channelId))
+          }))
       };
     });
   }
@@ -159,11 +164,21 @@ class AutomationService {
     return Boolean(this.db.prepare(`
       SELECT id FROM automation_actions
       WHERE rule_id = ? AND connection_id = ? AND action_type = ?
-        AND json_extract(after_json, '$.channelId') = ?
+        AND (
+          (? IS NULL AND json_type(after_json, '$.channelId') IS NULL)
+          OR json_extract(after_json, '$.channelId') = ?
+        )
         AND status IN ('succeeded', 'dry_run') AND rolled_back_at IS NULL
         AND created_at >= ?
       ORDER BY created_at DESC LIMIT 1
-    `).get(rule.id, connectionId, config.action, channelId, new Date(Date.now() - cooldownMinutes * 60000).toISOString()));
+    `).get(
+      rule.id,
+      connectionId,
+      config.action,
+      channelId,
+      channelId,
+      new Date(Date.now() - cooldownMinutes * 60000).toISOString()
+    ));
   }
 
   #matches(connectionId, triggerType, config) {
@@ -216,8 +231,8 @@ class AutomationService {
     const dryRun = Boolean(rule.dry_run) || !this.config.automationEnabled;
     const desiredStatus = actionType === 'disable_sub2api_channel' ? 'disabled'
       : actionType === 'enable_sub2api_channel' ? 'active' : null;
-    let before = { channelId, status: null };
-    let after = { channelId, status: desiredStatus };
+    let before = channelId == null ? {} : { channelId, status: null };
+    let after = channelId == null ? {} : { channelId, status: desiredStatus };
     this.db.prepare(`
       INSERT INTO automation_actions(
         id, rule_id, connection_id, action_type, status, dry_run,
@@ -252,10 +267,10 @@ class AutomationService {
           if (!config.webhookUrl) throw new AppError('WEBHOOK_URL_REQUIRED', 'Recharge webhook URL is required', { status: 400 });
           const response = await safeFetch(config.webhookUrl, this.config, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ event: 'provider_monitor.recharge_required', connectionId, channelId, ruleId: rule.id })
+            body: JSON.stringify({ event: 'provider_monitor.recharge_required', connectionId, ruleId: rule.id })
           });
           if (!response.ok) throw new AppError('WEBHOOK_FAILED', `Recharge webhook returned HTTP ${response.status}`, { status: 502 });
-          after = { channelId, delivered: true };
+          after = { delivered: true };
         } else {
           after = { channelId, recommendation: actionType, connectionId, createdAt: nowIso() };
         }

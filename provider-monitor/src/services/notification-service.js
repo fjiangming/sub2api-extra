@@ -6,6 +6,27 @@ const { maskValue, redactText } = require('../security/redaction');
 const { safeFetch } = require('../http/safe-fetch');
 const { nowIso, parseJson, stringifyJson } = require('../db');
 
+function normalizedRechargeUrl(event) {
+  const value = event?.details?.rechargeUrl;
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol) ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function notificationMessage(event, markdown = false) {
+  const rechargeUrl = normalizedRechargeUrl(event);
+  if (!rechargeUrl) return event.message;
+  if (markdown) {
+    const markdownUrl = rechargeUrl.replace(/\(/g, '%28').replace(/\)/g, '%29');
+    return `${event.message}\n[立即充值](${markdownUrl})`;
+  }
+  return `${event.message}\n充值链接：${rechargeUrl}`;
+}
+
 class NotificationService {
   constructor({ db, config }) {
     this.db = db;
@@ -191,7 +212,7 @@ class NotificationService {
     const title = config.titlePrefix
       ? `${config.titlePrefix} ${event.severity.toUpperCase()}`
       : `Provider Monitor ${event.severity.toUpperCase()}`;
-    const message = event.message;
+    const message = notificationMessage(event);
     if (type === 'webhook') {
       return this.#postJson(config.url, {
         event: 'provider_monitor.alert',
@@ -229,10 +250,27 @@ class NotificationService {
       });
     }
     if (type === 'wecom') {
+      const markdownMessage = notificationMessage(event, true).replace(/\n/g, '\n>');
       return this.#postJson(config.url || credentials.webhookUrl, {
         msgtype: 'markdown',
-        markdown: { content: `**${title}**\n>${message}\n>${event.triggered_at}` }
+        markdown: { content: `**${title}**\n>${markdownMessage}\n>${event.triggered_at}` }
       });
+    }
+    if (type === 'serverchan') {
+      const sendKey = String(credentials.sendKey || '').trim();
+      if (!sendKey.startsWith('SCT')) {
+        throw new AppError('NOTIFICATION_CREDENTIAL_INVALID', 'Server酱需要 SCT 开头的 Turbo SendKey', {
+          status: 400
+        });
+      }
+      const baseUrl = this.config.env === 'test' && config.baseUrl
+        ? config.baseUrl
+        : 'https://sctapi.ftqq.com/';
+      const target = new URL(`${encodeURIComponent(sendKey)}.send`, baseUrl).toString();
+      return this.#postForm(target, {
+        title: title.replace(/[\r\n]+/g, ' ').slice(0, 120),
+        desp: `${notificationMessage(event, true)}\n\n触发时间：${event.triggered_at}`
+      }, 'Server酱');
     }
     if (type === 'dingtalk') {
       const target = new URL(config.url || credentials.webhookUrl);
@@ -304,8 +342,31 @@ class NotificationService {
       });
     }
   }
+
+  async #postForm(input, body, serviceName) {
+    const response = await safeFetch(input, this.config, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+      body: new URLSearchParams(body).toString(),
+      readBody: true
+    });
+    if (!response.ok) {
+      throw new AppError('NOTIFICATION_FAILED', `${serviceName} returned HTTP ${response.status}`, {
+        status: 502,
+        retryable: response.status === 429 || response.status >= 500
+      });
+    }
+    const result = parseJson(response.body, null);
+    if (!result || Number(result.code) !== 0) {
+      const reason = redactText(result?.message || result?.info || 'unknown response').slice(0, 300);
+      throw new AppError('NOTIFICATION_FAILED', `${serviceName} rejected the notification: ${reason}`, {
+        status: 502
+      });
+    }
+  }
 }
 
 module.exports = {
-  NotificationService
+  NotificationService,
+  notificationMessage
 };

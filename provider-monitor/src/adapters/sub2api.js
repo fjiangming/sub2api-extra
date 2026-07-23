@@ -132,7 +132,8 @@ class Sub2ApiAdapter extends ProviderAdapter {
         keyQuota: true,
         listGroups: true,
         keyGroup: true,
-        usageHistory: true
+        usageHistory: true,
+        rechargeQuote: true
       };
     }
     return {
@@ -144,6 +145,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
       keyGroup: true,
       usageHistory: true,
       priceCatalog: true,
+      rechargeQuote: true,
       credentialRefresh: true
     };
   }
@@ -412,6 +414,88 @@ class Sub2ApiAdapter extends ProviderAdapter {
         })
       }
     ];
+  }
+
+  async getRechargeQuote() {
+    if (usesApiKey(this.connection)) {
+      try {
+        const billing = await this.getApiKeyBilling();
+        const multiplier = toFiniteNumber(
+          billing.balance_recharge_multiplier ?? billing.recharge_multiplier
+        );
+        if (multiplier != null && multiplier > 0) {
+          return {
+            available: true,
+            multiplier,
+            paidAmount: 1,
+            creditedAmount: multiplier,
+            paidCurrency: billing.payment_currency || null,
+            balanceCurrency: billing.balance_currency || 'USD',
+            source: 'provider_billing',
+            metadata: this.safeRaw({ billingScope: billing.billing_scope || null })
+          };
+        }
+        return {
+          available: false,
+          multiplier: null,
+          source: 'provider_billing',
+          errorCode: 'RECHARGE_RATE_NOT_EXPOSED',
+          metadata: { authMode: 'api_key' }
+        };
+      } catch (error) {
+        return {
+          available: false,
+          multiplier: null,
+          source: 'provider_billing',
+          errorCode: error.code || 'RECHARGE_RATE_UNAVAILABLE',
+          metadata: { authMode: 'api_key' }
+        };
+      }
+    }
+
+    try {
+      let response;
+      try {
+        response = await this.authenticatedRequest('/api/v1/payment/checkout-info', { retries: 0 });
+      } catch (error) {
+        if (error.code !== 'CAPABILITY_UNSUPPORTED') throw error;
+        response = await this.authenticatedRequest('/api/v1/payment/config', { retries: 0 });
+      }
+      const data = unwrapEnvelope(response.data, { allowNull: true }) || {};
+      const multiplier = toFiniteNumber(
+        data.balance_recharge_multiplier ?? data.recharge_multiplier
+      );
+      if (multiplier != null && multiplier > 0) {
+        return {
+          available: true,
+          multiplier,
+          paidAmount: 1,
+          creditedAmount: multiplier,
+          paidCurrency: data.payment_currency || data.default_currency || null,
+          balanceCurrency: data.balance_currency || 'USD',
+          source: 'provider_payment_config',
+          metadata: this.safeRaw({
+            balanceDisabled: data.balance_disabled ?? null,
+            rechargeFeeRate: toFiniteNumber(data.recharge_fee_rate)
+          })
+        };
+      }
+      return {
+        available: false,
+        multiplier: null,
+        source: 'provider_payment_config',
+        errorCode: 'RECHARGE_RATE_NOT_EXPOSED',
+        metadata: {}
+      };
+    } catch (error) {
+      return {
+        available: false,
+        multiplier: null,
+        source: 'provider_payment_config',
+        errorCode: error.code || 'RECHARGE_RATE_UNAVAILABLE',
+        metadata: {}
+      };
+    }
   }
 
   async listGroups() {
