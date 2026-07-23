@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const Database = require('better-sqlite3');
 const { createTestContext } = require('./helpers');
 const { ProviderRepository } = require('../src/repositories/provider-repository');
 const { AnalysisService } = require('../src/services/analysis-service');
@@ -12,6 +13,9 @@ const { TransferService } = require('../src/services/transfer-service');
 const { KeyHealthService } = require('../src/services/key-health-service');
 const { SyncService } = require('../src/services/sync-service');
 const { QueryService } = require('../src/services/query-service');
+const { AlertService } = require('../src/services/alert-service');
+const { NotificationService } = require('../src/services/notification-service');
+const { decryptJson } = require('../src/security/encryption');
 const { nowIso } = require('../src/db');
 
 function createProvider(context, overrides = {}) {
@@ -141,6 +145,8 @@ test('credential rotation validates first and supports an encrypted rollback', a
 
 test('transfer preview/import, secret-free export and SQLite backup work together', async () => {
   const context = createTestContext();
+  const target = createTestContext();
+  let backupDb;
   try {
     const providers = new ProviderRepository(context.db, context.config);
     const transfers = new TransferService({ db: context.db, config: context.config, providers });
@@ -149,11 +155,100 @@ test('transfer preview/import, secret-free export and SQLite backup work togethe
     assert.equal(preview.create, 1);
     const imported = transfers.applyImport({ format: 'csv', content: csv });
     assert.equal(imported.created, 1);
+    const importedProvider = providers.list().find((provider) => provider.name === 'Imported');
+    providers.update(importedProvider.id, {
+      warningThreshold: 5,
+      thresholdCurrency: 'USD',
+      rechargeUrl: 'https://api.deepseek.com/account/recharge',
+      note: 'Credential copied by mistake: sk-imported-secret'
+    });
+    const notifications = new NotificationService({ db: context.db, config: context.config });
+    notifications.save({
+      name: 'Personal WeChat',
+      type: 'serverchan',
+      enabled: true,
+      config: {},
+      credentials: { sendKey: 'SCT_BACKUP_SECRET' }
+    });
+    notifications.save({
+      name: 'Legacy WeCom URL',
+      type: 'wecom',
+      enabled: false,
+      config: { url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=WECOM_CONFIG_SECRET' }
+    });
+    const alerts = new AlertService({
+      db: context.db,
+      config: context.config,
+      queries: new QueryService(context.db, context.config),
+      notifications
+    });
+    alerts.saveRule({
+      name: 'Imported low balance',
+      ruleType: 'low_balance',
+      connectionId: importedProvider.id,
+      currency: 'USD',
+      threshold: 5,
+      consecutiveMatches: 2,
+      cooldownMinutes: 180,
+      enabled: true
+    });
     const exported = transfers.exportConfiguration();
     assert.equal(JSON.stringify(exported).includes('sk-imported-secret'), false);
+    assert.equal(JSON.stringify(exported).includes('SCT_BACKUP_SECRET'), false);
+    assert.equal(JSON.stringify(exported).includes('WECOM_CONFIG_SECRET'), false);
+    assert.equal(exported.alertRules.length, 1);
+    assert.equal(exported.alertRules[0].connectionRef.sourceId, importedProvider.id);
+    assert.deepEqual(
+      exported.notificationChannels.find((channel) => channel.name === 'Personal WeChat').credentialFields,
+      ['sendKey']
+    );
+    assert.equal(
+      exported.notificationChannels.find((channel) => channel.name === 'Legacy WeCom URL').config.url,
+      '[REDACTED]'
+    );
     const bundle = transfers.exportDisasterBundle('twelve-char-password');
     assert.equal(JSON.stringify(bundle).includes('sk-imported-secret'), false);
-    assert.equal(transfers.decodeDisasterBundle(bundle, 'twelve-char-password').providers[0].credentials.apiKey, 'sk-imported-secret');
+    assert.equal(JSON.stringify(bundle).includes('SCT_BACKUP_SECRET'), false);
+    const decoded = transfers.decodeDisasterBundle(bundle, 'twelve-char-password');
+    assert.equal(decoded.providers[0].credentials.apiKey, 'sk-imported-secret');
+    assert.match(decoded.providers[0].note, /sk-imported-secret/);
+    assert.equal(decoded.providers[0].rechargeUrl, 'https://api.deepseek.com/account/recharge');
+    assert.equal(decoded.alertRules[0].name, 'Imported low balance');
+    assert.equal(
+      decoded.notificationChannels.find((channel) => channel.name === 'Personal WeChat').credentials.sendKey,
+      'SCT_BACKUP_SECRET'
+    );
+    assert.match(
+      decoded.notificationChannels.find((channel) => channel.name === 'Legacy WeCom URL').config.url,
+      /WECOM_CONFIG_SECRET/
+    );
+
+    const targetProviders = new ProviderRepository(target.db, target.config);
+    const targetTransfers = new TransferService({
+      db: target.db,
+      config: target.config,
+      providers: targetProviders
+    });
+    const providerRestore = targetTransfers.applyImport({ format: 'provider-monitor', content: decoded });
+    const restored = targetTransfers.restoreDisasterConfiguration(decoded, providerRestore);
+    assert.deepEqual(restored, { alertRules: 1, notificationChannels: 2 });
+    const restoredProvider = targetProviders.list().find((provider) => provider.name === 'Imported');
+    const restoredRule = target.db.prepare('SELECT * FROM alert_rules WHERE name = ?').get('Imported low balance');
+    assert.equal(restoredRule.connection_id, restoredProvider.id);
+    assert.notEqual(restoredRule.connection_id, importedProvider.id);
+    assert.equal(restoredRule.consecutive_matches, 2);
+    assert.equal(restoredRule.cooldown_minutes, 180);
+    const restoredChannel = target.db.prepare(`
+      SELECT c.*, e.payload AS credential_payload
+      FROM notification_channels c
+      LEFT JOIN encrypted_credentials e ON e.id = c.credential_id
+      WHERE c.name = 'Personal WeChat'
+    `).get();
+    assert.equal(restoredChannel.type, 'serverchan');
+    assert.deepEqual(
+      decryptJson(restoredChannel.credential_payload, target.config.secret),
+      { sendKey: 'SCT_BACKUP_SECRET' }
+    );
     providers.create({
       name: 'New API Profile', adapterType: 'new-api', baseUrl: 'https://new-api.example',
       authMode: 'system_token', remoteUserId: '5', accountDedupeKey: 'new-api-profile',
@@ -168,9 +263,19 @@ test('transfer preview/import, secret-free export and SQLite backup work togethe
     assert.equal(profiles.find((item) => item.provider === 'new-api').apiKey, 'system-profile-secret');
     assert.equal(profiles.find((item) => item.provider === 'litellm').apiKey, 'master-profile-secret');
     const backup = await transfers.backupDatabase('test');
-    assert.equal(fs.existsSync(path.join(context.config.dataDir, 'backups', backup.filename)), true);
+    const backupPath = path.join(context.config.dataDir, 'backups', backup.filename);
+    assert.equal(fs.existsSync(backupPath), true);
+    backupDb = new Database(backupPath, { readonly: true });
+    assert.equal(backupDb.prepare('SELECT COUNT(*) count FROM alert_rules').get().count, 1);
+    assert.equal(backupDb.prepare('SELECT COUNT(*) count FROM notification_channels').get().count, 2);
+    assert.equal(
+      backupDb.prepare('SELECT recharge_url FROM provider_connections WHERE name = ?').get('Imported').recharge_url,
+      'https://api.deepseek.com/account/recharge'
+    );
   } finally {
+    if (backupDb?.open) backupDb.close();
     context.cleanup();
+    target.cleanup();
   }
 });
 

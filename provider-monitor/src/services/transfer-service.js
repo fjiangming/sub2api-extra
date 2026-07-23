@@ -4,6 +4,7 @@ const path = require('path');
 const { parse: parseCsv } = require('csv-parse/sync');
 const { AppError } = require('../errors');
 const { encryptJson, decryptJson } = require('../security/encryption');
+const { redact, redactText } = require('../security/redaction');
 const { nowIso, parseJson, stringifyJson } = require('../db');
 
 const SETTING_DEFAULTS = {
@@ -58,6 +59,12 @@ const INTEGER_SETTINGS = {
   notificationRetentionDays: [7, 3650],
   keyHealthConcurrency: [1, 10]
 };
+
+const NOTIFICATION_TYPES = new Set([
+  'webhook', 'telegram', 'gotify', 'bark', 'email', 'wecom', 'serverchan', 'dingtalk', 'feishu'
+]);
+const SENSITIVE_NOTIFICATION_URL_TYPES = new Set(['webhook', 'wecom', 'dingtalk', 'feishu']);
+const SENSITIVE_CREDENTIAL_FIELD = /password|secret|token|api[_-]?key|authorization|cookie|credential|(?:master|management|device|send|access)[_-]?key|webhook/i;
 
 function normalizeStringList(value) {
   const values = Array.isArray(value) ? value : String(value || '').split(',');
@@ -122,6 +129,43 @@ function normalizeAdapter(value) {
 
 function firstValue(...values) {
   return values.find((value) => value != null && value !== '');
+}
+
+function redactConfigurationStrings(value) {
+  if (Array.isArray(value)) return value.map((item) => redactConfigurationStrings(item));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, redactConfigurationStrings(item)])
+    );
+  }
+  return typeof value === 'string' ? redactText(value) : value;
+}
+
+function secretFreeConfiguration(value) {
+  return redactConfigurationStrings(redact(value || {}));
+}
+
+function secretFreeNotificationConfiguration(type, value) {
+  const config = secretFreeConfiguration(value);
+  if (SENSITIVE_NOTIFICATION_URL_TYPES.has(type)) {
+    for (const field of ['url', 'webhookUrl']) {
+      if (config[field]) config[field] = '[REDACTED]';
+    }
+  }
+  return config;
+}
+
+function redactKnownSecretStrings(value, secrets) {
+  if (Array.isArray(value)) return value.map((item) => redactKnownSecretStrings(item, secrets));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, redactKnownSecretStrings(item, secrets)])
+    );
+  }
+  if (typeof value !== 'string') return value;
+  let result = redactText(value);
+  for (const secret of secrets) result = result.split(secret).join('[REDACTED]');
+  return result;
 }
 
 function hasCredentialValue(credentials, ...names) {
@@ -209,11 +253,85 @@ class TransferService {
     return settings;
   }
 
-  exportConfiguration() {
-    return {
+  #sensitiveCredentialValues(providers) {
+    const values = new Set();
+    const collect = (credentials) => {
+      for (const [field, value] of Object.entries(credentials || {})) {
+        if (
+          SENSITIVE_CREDENTIAL_FIELD.test(field) &&
+          typeof value === 'string' &&
+          value.length >= 4
+        ) {
+          values.add(value);
+        }
+      }
+    };
+    for (const provider of providers) collect(this.providers.getCredentials(provider.id));
+    for (const row of this.db.prepare(`
+      SELECT e.payload FROM notification_channels c
+      JOIN encrypted_credentials e ON e.id = c.credential_id
+    `).all()) {
+      collect(decryptJson(row.payload, this.config.secret));
+    }
+    return [...values].sort((left, right) => right.length - left.length);
+  }
+
+  #exportAlertRules(providerReferences, includeSensitive) {
+    return this.db.prepare('SELECT * FROM alert_rules ORDER BY created_at, id').all().map((row) => ({
+      ...row,
+      connectionRef: row.connection_id
+        ? providerReferences.get(row.connection_id) || { sourceId: row.connection_id }
+        : null,
+      config: includeSensitive
+        ? parseJson(row.config_json, {})
+        : secretFreeConfiguration(parseJson(row.config_json, {})),
+      config_json: undefined
+    }));
+  }
+
+  #exportNotificationChannels(includeCredentials = false) {
+    return this.db.prepare(`
+      SELECT c.*, e.payload AS credential_payload
+      FROM notification_channels c
+      LEFT JOIN encrypted_credentials e ON e.id = c.credential_id
+      ORDER BY c.created_at, c.id
+    `).all().map((row) => {
+      const credentials = row.credential_payload
+        ? decryptJson(row.credential_payload, this.config.secret)
+        : {};
+      const config = parseJson(row.config_json, {});
+      return {
+        id: row.id,
+        name: row.name,
+        type: row.type,
+        enabled: Boolean(row.enabled),
+        config: includeCredentials ? config : secretFreeNotificationConfiguration(row.type, config),
+        credentialFields: Object.entries(credentials)
+          .filter(([, value]) => value != null && value !== '')
+          .map(([name]) => name),
+        ...(includeCredentials ? { credentials } : {}),
+        createdAt: row.created_at,
+        updatedAt: row.updated_at
+      };
+    });
+  }
+
+  exportConfiguration(options = {}) {
+    const includeSensitive = options.includeSensitive === true;
+    const providers = this.providers.list();
+    const providerReferences = new Map(providers.map((provider) => [provider.id, {
+      sourceId: provider.id,
+      name: provider.name,
+      adapterType: provider.adapter_type,
+      baseUrl: provider.base_url,
+      accountDedupeKey: provider.account_dedupe_key,
+      remoteUserId: provider.remote_user_id
+    }]));
+    const payload = {
       schema: 'provider-monitor/config-v1',
       exportedAt: nowIso(),
-      providers: this.providers.list().map((provider) => ({
+      providers: providers.map((provider) => ({
+        sourceId: provider.id,
         name: provider.name,
         adapterType: provider.adapter_type,
         baseUrl: provider.base_url,
@@ -225,31 +343,46 @@ class TransferService {
         thresholdCurrency: provider.threshold_currency,
         rechargeUrl: provider.rechargeUrl,
         rechargeMultiplier: provider.recharge?.manualMultiplier,
-        typeConfig: provider.typeConfig,
+        typeConfig: includeSensitive
+          ? provider.typeConfig
+          : secretFreeConfiguration(provider.typeConfig),
         tags: provider.tags,
-        note: provider.note,
+        note: includeSensitive ? provider.note : redactText(provider.note),
         accountDedupeKey: provider.account_dedupe_key,
         credentialFields: provider.credentialFields.map((field) => field.name)
       })),
-      alertRules: this.db.prepare('SELECT * FROM alert_rules').all().map((row) => ({ ...row, config: parseJson(row.config_json, {}), config_json: undefined })),
-      mappings: this.db.prepare('SELECT * FROM sub2api_mappings').all().map((row) => ({ ...row, models: parseJson(row.models_json, []), config: parseJson(row.config_json, {}), models_json: undefined, config_json: undefined })),
+      alertRules: this.#exportAlertRules(providerReferences, includeSensitive),
+      notificationChannels: this.#exportNotificationChannels(includeSensitive),
+      mappings: this.db.prepare('SELECT * FROM sub2api_mappings').all().map((row) => ({
+        ...row,
+        models: parseJson(row.models_json, []),
+        config: includeSensitive
+          ? parseJson(row.config_json, {})
+          : secretFreeConfiguration(parseJson(row.config_json, {})),
+        models_json: undefined,
+        config_json: undefined
+      })),
       settings: this.settings()
     };
+    return includeSensitive
+      ? payload
+      : redactKnownSecretStrings(payload, this.#sensitiveCredentialValues(providers));
   }
 
   exportDisasterBundle(password) {
     if (String(password || '').length < 12) {
       throw new AppError('EXPORT_PASSWORD_WEAK', 'Disaster bundle password must contain at least 12 characters', { status: 400 });
     }
+    const configuration = this.exportConfiguration({ includeSensitive: true });
     const providers = this.providers.list().map((provider) => ({
-      ...this.exportConfiguration().providers.find((row) => row.name === provider.name && row.baseUrl === provider.base_url),
+      ...configuration.providers.find((row) => row.sourceId === provider.id),
       credentials: this.providers.getCredentials(provider.id)
     }));
     const payload = {
+      ...configuration,
       schema: 'provider-monitor/disaster-v1',
-      exportedAt: nowIso(),
       providers,
-      settings: this.settings()
+      notificationChannels: this.#exportNotificationChannels(true)
     };
     return {
       schema: 'provider-monitor/encrypted-bundle-v1',
@@ -263,6 +396,148 @@ class TransferService {
       throw new AppError('IMPORT_FORMAT_INVALID', 'Encrypted disaster bundle is invalid', { status: 400 });
     }
     return decryptJson(bundle.payload, password);
+  }
+
+  restoreDisasterConfiguration(decoded, providerImport) {
+    const alertRules = Array.isArray(decoded?.alertRules) ? decoded.alertRules : [];
+    const notificationChannels = Array.isArray(decoded?.notificationChannels)
+      ? decoded.notificationChannels
+      : [];
+    if (alertRules.length > 1000 || notificationChannels.length > 1000) {
+      throw new AppError('IMPORT_TOO_LARGE', 'Disaster configuration exceeds the restore limit', {
+        status: 413
+      });
+    }
+
+    const providerIdMap = new Map();
+    for (const result of providerImport?.results || []) {
+      const source = decoded.providers?.[result.sourceIndex];
+      if (source?.sourceId && result.providerId) providerIdMap.set(source.sourceId, result.providerId);
+    }
+    const providerExists = this.db.prepare('SELECT id FROM provider_connections WHERE id = ?');
+    const now = nowIso();
+    const restore = this.db.transaction(() => {
+      let restoredAlertRules = 0;
+      let restoredNotificationChannels = 0;
+      const upsertRule = this.db.prepare(`
+        INSERT INTO alert_rules(
+          id, name, enabled, connection_id, rule_type, scope, currency, threshold,
+          consecutive_matches, cooldown_minutes, config_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          enabled = excluded.enabled,
+          connection_id = excluded.connection_id,
+          rule_type = excluded.rule_type,
+          scope = excluded.scope,
+          currency = excluded.currency,
+          threshold = excluded.threshold,
+          consecutive_matches = excluded.consecutive_matches,
+          cooldown_minutes = excluded.cooldown_minutes,
+          config_json = excluded.config_json,
+          updated_at = excluded.updated_at
+      `);
+      for (const rule of alertRules) {
+        const sourceConnectionId = rule.connectionId ?? rule.connection_id ?? rule.connectionRef?.sourceId ?? null;
+        let connectionId = null;
+        if (sourceConnectionId) {
+          connectionId = providerIdMap.get(sourceConnectionId) ||
+            providerExists.get(sourceConnectionId)?.id || null;
+          if (!connectionId) {
+            throw new AppError(
+              'DISASTER_REFERENCE_INVALID',
+              `Alert rule ${rule.name || rule.id || 'unknown'} references a provider that was not restored`,
+              { status: 409 }
+            );
+          }
+        }
+        const name = String(rule.name || '').trim();
+        const ruleType = String(rule.ruleType || rule.rule_type || '').trim();
+        if (!name || !ruleType) {
+          throw new AppError('IMPORT_FORMAT_INVALID', 'Disaster bundle contains an invalid alert rule', {
+            status: 400
+          });
+        }
+        upsertRule.run(
+          rule.id || crypto.randomUUID(),
+          name,
+          rule.enabled === false || rule.enabled === 0 ? 0 : 1,
+          connectionId,
+          ruleType,
+          rule.scope || 'account',
+          rule.currency || null,
+          rule.threshold ?? null,
+          Number(rule.consecutiveMatches ?? rule.consecutive_matches ?? 1),
+          Number(rule.cooldownMinutes ?? rule.cooldown_minutes ?? 60),
+          stringifyJson(rule.config || parseJson(rule.config_json, {})),
+          rule.createdAt || rule.created_at || now,
+          now
+        );
+        restoredAlertRules += 1;
+      }
+
+      for (const channel of notificationChannels) {
+        const type = String(channel.type || '').trim();
+        if (!NOTIFICATION_TYPES.has(type) || !String(channel.name || '').trim()) {
+          throw new AppError('IMPORT_FORMAT_INVALID', 'Disaster bundle contains an invalid notification channel', {
+            status: 400
+          });
+        }
+        const requestedId = channel.id || crypto.randomUUID();
+        const existing = this.db.prepare(`
+          SELECT * FROM notification_channels
+          WHERE id = ? OR (name = ? AND type = ?)
+          ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END LIMIT 1
+        `).get(requestedId, channel.name, type, requestedId);
+        const channelId = existing?.id || requestedId;
+        let credentialId = existing?.credential_id || null;
+        const channelCredentials = channel.credentials && typeof channel.credentials === 'object' && !Array.isArray(channel.credentials)
+          ? channel.credentials
+          : {};
+        if (Object.keys(channelCredentials).length > 0) {
+          credentialId ||= crypto.randomUUID();
+          this.db.prepare(`
+            INSERT INTO encrypted_credentials(id, payload, created_at, rotated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, rotated_at = excluded.rotated_at
+          `).run(
+            credentialId,
+            encryptJson(channelCredentials, this.config.secret),
+            existing?.created_at || now,
+            now
+          );
+        }
+        const missingCredentials = Array.isArray(channel.credentialFields) &&
+          channel.credentialFields.length > 0 && !credentialId;
+        this.db.prepare(`
+          INSERT INTO notification_channels(
+            id, name, type, enabled, credential_id, config_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            type = excluded.type,
+            enabled = excluded.enabled,
+            credential_id = excluded.credential_id,
+            config_json = excluded.config_json,
+            updated_at = excluded.updated_at
+        `).run(
+          channelId,
+          String(channel.name).trim(),
+          type,
+          missingCredentials || channel.enabled === false || channel.enabled === 0 ? 0 : 1,
+          credentialId,
+          stringifyJson(channel.config || {}),
+          channel.createdAt || channel.created_at || now,
+          now
+        );
+        restoredNotificationChannels += 1;
+      }
+      return {
+        alertRules: restoredAlertRules,
+        notificationChannels: restoredNotificationChannels
+      };
+    });
+    return restore();
   }
 
   #records(format, content) {

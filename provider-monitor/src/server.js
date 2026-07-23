@@ -1105,11 +1105,16 @@ function createApplication(options = {}) {
     const decoded = transfers.decodeDisasterBundle(req.body?.bundle, req.body?.password);
     const result = transfers.applyImport({ format: 'provider-monitor', content: decoded });
     if (decoded.settings) transfers.saveSettings(decoded.settings);
+    const restored = transfers.restoreDisasterConfiguration(decoded, result);
     for (const item of result.results || []) {
       if (item.providerId && providers.get(item.providerId).enabled) queue.enqueue('provider_sync', { connectionId: item.providerId, priority: 5 });
     }
-    audit(db, req, 'import.disaster_bundle', 'import', result.id, { created: result.created, updated: result.updated });
-    res.json(result);
+    audit(db, req, 'import.disaster_bundle', 'import', result.id, {
+      created: result.created,
+      updated: result.updated,
+      restored
+    });
+    res.json({ ...result, restored });
   });
   api.get('/backups', (_req, res) => res.json({ items: transfers.listBackups() }));
   api.post('/backups', auth.requireRecentReauth(), asyncRoute(async (req, res) => {
