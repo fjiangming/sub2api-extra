@@ -82,6 +82,65 @@ test('alert remains acknowledged while matched and resolves after balance recove
   assert.equal(event.acknowledged_at, null);
 });
 
+test('provider balance thresholds create and recover independent built-in alerts', async (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Tiered Budget API', adapterType: 'custom', baseUrl: 'https://tiered.example.com',
+    authMode: 'api_key', credentials: { apiKey: 'secret' },
+    warningThreshold: 10, secondaryWarningThreshold: 3, thresholdCurrency: 'USD'
+  });
+  const delivered = [];
+  const queries = new QueryService(context.db, context.config);
+  const alerts = new AlertService({
+    db: context.db,
+    config: context.config,
+    queries,
+    notifications: { dispatch: async (event) => delivered.push(event) }
+  });
+  const capturedAt = Date.now();
+  context.db.prepare('UPDATE provider_connections SET last_success_at = ? WHERE id = ?')
+    .run(new Date(capturedAt).toISOString(), provider.id);
+
+  insertSnapshot(context.db, provider.id, 8, new Date(capturedAt).toISOString());
+  await alerts.evaluateConnection(provider.id);
+  let events = alerts.listEvents();
+  assert.equal(events.length, 1);
+  assert.equal(events[0].details.alertLevel, 1);
+  assert.equal(events[0].severity, 'warning');
+  assert.equal(events[0].rule_id, null);
+  assert.match(events[0].message, /触发1级余额告警/);
+  assert.equal(queries.summary().accounts.find((account) => account.connectionId === provider.id).status, 'warning');
+
+  insertSnapshot(context.db, provider.id, 2, new Date(capturedAt + 1000).toISOString());
+  await alerts.evaluateConnection(provider.id);
+  events = alerts.listEvents();
+  assert.equal(events.length, 2);
+  assert.deepEqual(events.map((event) => event.details.alertLevel).sort(), [1, 2]);
+  assert.equal(events.find((event) => event.details.alertLevel === 2).severity, 'error');
+  assert.match(events.find((event) => event.details.alertLevel === 2).message, /触发2级余额告警/);
+  assert.equal(delivered.length, 2);
+  assert.equal(queries.summary().accounts.find((account) => account.connectionId === provider.id).status, 'error');
+
+  insertSnapshot(context.db, provider.id, 5, new Date(capturedAt + 2000).toISOString());
+  await alerts.evaluateConnection(provider.id);
+  events = alerts.listEvents();
+  assert.equal(events.find((event) => event.details.alertLevel === 1).status, 'active');
+  assert.equal(events.find((event) => event.details.alertLevel === 2).status, 'resolved');
+  assert.equal(delivered.length, 3);
+  assert.equal(queries.summary().accounts.find((account) => account.connectionId === provider.id).status, 'warning');
+
+  insertSnapshot(context.db, provider.id, 2, new Date(capturedAt + 3000).toISOString());
+  await alerts.evaluateConnection(provider.id);
+  assert.equal(alerts.listEvents().find((event) => event.details.alertLevel === 2).status, 'active');
+  assert.equal(delivered.length, 4);
+  providers.update(provider.id, { secondaryWarningThreshold: null });
+  await alerts.evaluateConnection(provider.id);
+  assert.equal(alerts.listEvents().find((event) => event.details.alertLevel === 2).status, 'resolved');
+  assert.equal(delivered.length, 5);
+});
+
 test('low balance alert sends the configured recharge link to WeCom', async (t) => {
   const payloads = [];
   const receiver = http.createServer(async (request, response) => {

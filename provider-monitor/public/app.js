@@ -962,7 +962,7 @@ async function renderAlerts() {
   const eventList = state.alerts.map((event) => `<div class="alert-item"><span class="alert-symbol ${event.severity === 'error' ? 'error' : ''}"><i data-lucide="${event.severity === 'error' ? 'octagon-alert' : 'triangle-alert'}"></i></span><div><p>${escapeHtml(event.message)}</p><small>${formatDate(event.triggered_at)} · ${escapeHtml(alertSeverityLabel(event.severity))}</small></div><div>${badge(event.status)}${event.status === 'active' ? `<button class="icon-button small" data-action="ack-alert" data-id="${event.id}" title="确认告警" aria-label="确认告警"><i data-lucide="check"></i></button>` : ''}</div></div>`).join('');
   const ruleRows = state.alertRules.map((rule) => `<tr><td class="primary-cell"><strong>${escapeHtml(rule.name)}</strong><small>${escapeHtml(rule.rule_type)}</small></td><td>${rule.connection_id ? escapeHtml(state.providers.find((p) => p.id === rule.connection_id)?.name || '-') : '全部'}</td><td>${rule.threshold ?? '-'}</td><td>${rule.currency || '-'}</td><td>${rule.enabled ? badge('enabled') : badge('disabled')}</td><td class="actions-cell"><button class="icon-button small" data-action="edit-alert-rule" data-id="${rule.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-alert-rule" data-id="${rule.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></td></tr>`).join('');
   const channelRows = state.channels.map((channel) => `<tr><td class="primary-cell"><strong>${escapeHtml(channel.name)}</strong><small>${escapeHtml(channel.type)}</small></td><td>${channel.enabled ? badge('enabled') : badge('disabled')}</td><td>${channel.credentialFields.map((f) => escapeHtml(f.name)).join(', ') || '-'}</td><td class="actions-cell"><button class="icon-button small" data-action="test-channel" data-id="${channel.id}" title="测试" aria-label="测试"><i data-lucide="send"></i></button><button class="icon-button small" data-action="edit-channel" data-id="${channel.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-channel" data-id="${channel.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></td></tr>`).join('');
-  $('#main-content').innerHTML = `<div class="split-layout"><div class="panel"><div class="panel-header"><h2>告警事件</h2></div><div class="alert-list">${eventList || emptyState('bell-off', '暂无告警', '当前没有触发中的风险事件')}</div></div><div class="panel"><div class="panel-header"><h2>通知通道</h2><div class="panel-actions"><button class="icon-button small" data-action="add-channel" title="添加通知通道" aria-label="添加通知通道"><i data-lucide="plus"></i></button></div></div>${channelRows ? `<div class="table-wrap"><table><thead><tr><th>通道</th><th>状态</th><th>凭据</th><th></th></tr></thead><tbody>${channelRows}</tbody></table></div>` : emptyState('send', '暂无通知通道', '添加 Webhook、Telegram、Gotify、Bark 或邮件')}</div></div><section class="section"><div class="section-header"><h2>告警规则</h2></div><div class="table-wrap">${ruleRows ? `<table><thead><tr><th>规则</th><th>供应商</th><th>阈值</th><th>币种</th><th>状态</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table>` : emptyState('list-checks', '暂无规则', '供应商连接中的余额预警值仍会生成内置规则')}</div></section>`;
+  $('#main-content').innerHTML = `<div class="split-layout"><div class="panel"><div class="panel-header"><h2>告警事件</h2></div><div class="alert-list">${eventList || emptyState('bell-off', '暂无告警', '当前没有触发中的风险事件')}</div></div><div class="panel"><div class="panel-header"><h2>通知通道</h2><div class="panel-actions"><button class="icon-button small" data-action="add-channel" title="添加通知通道" aria-label="添加通知通道"><i data-lucide="plus"></i></button></div></div>${channelRows ? `<div class="table-wrap"><table><thead><tr><th>通道</th><th>状态</th><th>凭据</th><th></th></tr></thead><tbody>${channelRows}</tbody></table></div>` : emptyState('send', '暂无通知通道', '添加 Webhook、Telegram、Gotify、Bark 或邮件')}</div></div><section class="section"><div class="section-header"><h2>告警规则</h2></div><div class="table-wrap">${ruleRows ? `<table><thead><tr><th>规则</th><th>供应商</th><th>阈值</th><th>币种</th><th>状态</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table>` : emptyState('list-checks', '暂无规则', '供应商的两级余额阈值仍会生成内置规则')}</div></section>`;
 }
 
 async function renderAutomation() {
@@ -1188,6 +1188,7 @@ function openProviderDialog(provider = null) {
   form.elements.remoteUserId.value = provider?.remote_user_id || '';
   form.elements.refreshIntervalMinutes.value = provider?.refresh_interval_minutes || 15;
   form.elements.warningThreshold.value = provider?.warning_threshold ?? '';
+  form.elements.secondaryWarningThreshold.value = provider?.secondary_warning_threshold ?? '';
   form.elements.thresholdCurrency.value = provider?.threshold_currency || 'USD';
   form.elements.rechargeMultiplier.value = provider?.recharge?.manualMultiplier ?? '';
   form.elements.rechargeUrl.value = provider?.rechargeUrl || '';
@@ -1211,6 +1212,22 @@ function openProviderDialog(provider = null) {
   icons();
 }
 
+function providerBalanceThresholds(form) {
+  const warningThreshold = form.elements.warningThreshold.value === ''
+    ? null
+    : Number(form.elements.warningThreshold.value);
+  const secondaryWarningThreshold = form.elements.secondaryWarningThreshold.value === ''
+    ? null
+    : Number(form.elements.secondaryWarningThreshold.value);
+  if (secondaryWarningThreshold != null && warningThreshold == null) {
+    throw new Error('设置二级余额阈值前，请先填写一级余额阈值');
+  }
+  if (secondaryWarningThreshold != null && secondaryWarningThreshold >= warningThreshold) {
+    throw new Error('二级余额阈值必须小于一级余额阈值');
+  }
+  return { warningThreshold, secondaryWarningThreshold };
+}
+
 function providerPayload(form) {
   const credentials = {};
   $$('[data-credential]', form).forEach((input) => { if (input.value) credentials[input.dataset.credential] = input.value; });
@@ -1223,12 +1240,13 @@ function providerPayload(form) {
     lookbackDays: Number(form.elements.dynamicRouteRateLookbackDays.value || 30),
     minimumSamples: Number(form.elements.dynamicRouteRateMinimumSamples.value || 3)
   };
+  const balanceThresholds = providerBalanceThresholds(form);
   return {
     name: form.elements.name.value.trim(), adapterType: form.elements.adapterType.value,
     baseUrl: normalizeProviderBaseUrl(form.elements.baseUrl.value), authMode: form.elements.authMode.value,
     credentials, remoteUserId: form.elements.remoteUserId.value.trim() || null,
     enabled: form.elements.enabled.checked, refreshIntervalMinutes: Number(form.elements.refreshIntervalMinutes.value || 15),
-    warningThreshold: form.elements.warningThreshold.value === '' ? null : Number(form.elements.warningThreshold.value),
+    ...balanceThresholds,
     thresholdCurrency: form.elements.thresholdCurrency.value.trim() || 'USD',
     rechargeMultiplier: form.elements.rechargeMultiplier.value === '' ? null : Number(form.elements.rechargeMultiplier.value),
     rechargeUrl: form.elements.rechargeUrl.value.trim() || null,
@@ -1249,10 +1267,43 @@ function fillProviderSelect(select, selected = '') {
   select.value = selected || '';
 }
 
-function updateAlertRuleFields() {
-  const form = $('#alert-rule-form');
-  const rateMismatch = form.elements.ruleType.value === 'rate_mismatch';
-  $('#alert-threshold-label').textContent = rateMismatch ? '综合倍率阈值（%）' : '阈值';
+const ALERT_RULE_FIELD_CONFIG = Object.freeze({
+  low_balance: { fields: ['scope', 'threshold', 'currency', 'consecutiveMatches'], thresholdLabel: '余额阈值', min: '0', step: '0.01' },
+  runway_below: { fields: ['threshold', 'currency'], thresholdLabel: '可用天数阈值', min: '0', step: '0.1' },
+  stale_data: { fields: ['threshold'], thresholdLabel: '陈旧时间（分钟）', min: '1', step: '1' },
+  sync_failed: { fields: [] },
+  key_expiry: { fields: ['threshold'], thresholdLabel: '提前预警（天）', min: '0', step: '1' },
+  key_disabled: { fields: [] },
+  rate_mismatch: { fields: ['threshold'], thresholdLabel: '倍率偏差（%）', min: '0', step: '0.01' },
+  asset_drift: { fields: [] },
+  contract_changed: { fields: [] },
+  anomaly: { fields: [] },
+  credential_expiry: { fields: ['threshold'], thresholdLabel: '最长未轮换（天）', min: '1', step: '1' },
+  automation_failed: { fields: [] }
+});
+
+function alertRuleFieldConfig(ruleType) {
+  return ALERT_RULE_FIELD_CONFIG[ruleType] || { fields: [] };
+}
+
+function updateAlertRuleFields(form = $('#alert-rule-form'), { resetValues = false } = {}) {
+  const config = alertRuleFieldConfig(form.elements.ruleType.value);
+  const activeFields = new Set(config.fields);
+  form.querySelectorAll('[data-alert-field]').forEach((field) => {
+    field.hidden = !activeFields.has(field.dataset.alertField);
+  });
+  for (const fieldName of ['scope', 'threshold', 'currency', 'consecutiveMatches']) {
+    form.elements[fieldName].required = activeFields.has(fieldName);
+  }
+  form.elements.threshold.min = config.min || '';
+  form.elements.threshold.step = config.step || 'any';
+  $('#alert-threshold-label').textContent = config.thresholdLabel || '阈值';
+  if (resetValues) {
+    form.elements.scope.value = 'account';
+    form.elements.threshold.value = '';
+    form.elements.currency.value = 'USD';
+    form.elements.consecutiveMatches.value = '1';
+  }
 }
 
 function openAlertRule(rule = null) {
@@ -1263,6 +1314,24 @@ function openAlertRule(rule = null) {
   form.elements.threshold.value = rule?.threshold ?? ''; form.elements.currency.value = rule?.currency || 'USD';
   form.elements.consecutiveMatches.value = rule?.consecutive_matches || 1; form.elements.cooldownMinutes.value = rule?.cooldown_minutes || 60;
   form.elements.enabled.checked = rule?.enabled ?? true; updateAlertRuleFields(); $('#alert-rule-dialog').showModal(); icons();
+}
+
+function alertRulePayload(form) {
+  const activeFields = new Set(alertRuleFieldConfig(form.elements.ruleType.value).fields);
+  return {
+    name: form.elements.name.value.trim(),
+    ruleType: form.elements.ruleType.value,
+    connectionId: form.elements.connectionId.value || null,
+    scope: activeFields.has('scope') ? form.elements.scope.value : 'account',
+    threshold: activeFields.has('threshold') && form.elements.threshold.value !== ''
+      ? Number(form.elements.threshold.value)
+      : null,
+    currency: activeFields.has('currency') ? form.elements.currency.value.trim() || null : null,
+    consecutiveMatches: activeFields.has('consecutiveMatches') ? Number(form.elements.consecutiveMatches.value) : 1,
+    cooldownMinutes: Number(form.elements.cooldownMinutes.value),
+    enabled: form.elements.enabled.checked,
+    config: {}
+  };
 }
 
 function openChannel(channel = null) {
@@ -1637,7 +1706,7 @@ $('#logout-button').addEventListener('click', async () => {
   showLogin();
 });
 $('#provider-dialog').addEventListener('close', () => cancelProviderDetection({ clearStatus: true }));
-$('#alert-rule-form')?.elements?.ruleType?.addEventListener('change', updateAlertRuleFields);
+$('#alert-rule-form')?.elements?.ruleType?.addEventListener('change', (event) => updateAlertRuleFields(event.target.form, { resetValues: true }));
 $('#automation-form')?.elements?.action?.addEventListener('change', (event) => updateAutomationActionFields(event.target.form));
 
 $('#provider-form').addEventListener('submit', async (event) => {
@@ -1651,7 +1720,7 @@ $('#provider-form').addEventListener('submit', async (event) => {
 
 $('#alert-rule-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const id = form.elements.id.value;
-  const payload = { name: form.elements.name.value, ruleType: form.elements.ruleType.value, connectionId: form.elements.connectionId.value || null, scope: form.elements.scope.value, threshold: form.elements.threshold.value === '' ? null : Number(form.elements.threshold.value), currency: form.elements.currency.value || null, consecutiveMatches: Number(form.elements.consecutiveMatches.value), cooldownMinutes: Number(form.elements.cooldownMinutes.value), enabled: form.elements.enabled.checked, config: {} };
+  const payload = alertRulePayload(form);
   try { await api(id ? `/api/alert-rules/${id}` : '/api/alert-rules', { method: id ? 'PUT' : 'POST', body: payload }); $('#alert-rule-dialog').close(); toast('告警规则已保存'); navigate('alerts'); } catch (error) { toast(error.message, 'error'); }
 });
 

@@ -11,6 +11,14 @@ function balanceStatus(row, config) {
     return 'stale';
   }
   if (
+    row.secondary_warning_threshold != null &&
+    row.available != null &&
+    Number(row.available) <= Number(row.secondary_warning_threshold) &&
+    (!row.threshold_currency || row.threshold_currency === row.currency)
+  ) {
+    return 'error';
+  }
+  if (
     row.warning_threshold != null &&
     row.available != null &&
     Number(row.available) <= Number(row.warning_threshold) &&
@@ -38,7 +46,7 @@ class QueryService {
         WHERE s.subject_type = 'account'
       )
       SELECT p.id AS connection_id, p.name, p.adapter_type, p.base_url,
-        p.account_dedupe_key, p.warning_threshold, p.threshold_currency,
+        p.account_dedupe_key, p.warning_threshold, p.secondary_warning_threshold, p.threshold_currency,
         p.last_sync_at, p.last_success_at, p.last_error_code, p.last_error_message,
         r.subject_id, r.currency, r.available, r.total, r.used, r.frozen,
         r.unlimited, r.captured_at

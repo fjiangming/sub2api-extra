@@ -158,6 +158,7 @@ test('transfer preview/import, secret-free export and SQLite backup work togethe
     const importedProvider = providers.list().find((provider) => provider.name === 'Imported');
     providers.update(importedProvider.id, {
       warningThreshold: 5,
+      secondaryWarningThreshold: 2,
       thresholdCurrency: 'USD',
       rechargeUrl: 'https://api.deepseek.com/account/recharge',
       note: 'Credential copied by mistake: sk-imported-secret'
@@ -213,6 +214,7 @@ test('transfer preview/import, secret-free export and SQLite backup work togethe
     assert.equal(decoded.providers[0].credentials.apiKey, 'sk-imported-secret');
     assert.match(decoded.providers[0].note, /sk-imported-secret/);
     assert.equal(decoded.providers[0].rechargeUrl, 'https://api.deepseek.com/account/recharge');
+    assert.equal(decoded.providers[0].secondaryWarningThreshold, 2);
     assert.equal(decoded.alertRules[0].name, 'Imported low balance');
     assert.equal(
       decoded.notificationChannels.find((channel) => channel.name === 'Personal WeChat').credentials.sendKey,
@@ -233,6 +235,7 @@ test('transfer preview/import, secret-free export and SQLite backup work togethe
     const restored = targetTransfers.restoreDisasterConfiguration(decoded, providerRestore);
     assert.deepEqual(restored, { alertRules: 1, notificationChannels: 2 });
     const restoredProvider = targetProviders.list().find((provider) => provider.name === 'Imported');
+    assert.equal(restoredProvider.secondary_warning_threshold, 2);
     const restoredRule = target.db.prepare('SELECT * FROM alert_rules WHERE name = ?').get('Imported low balance');
     assert.equal(restoredRule.connection_id, restoredProvider.id);
     assert.notEqual(restoredRule.connection_id, importedProvider.id);

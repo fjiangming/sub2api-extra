@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS provider_connections (
   enabled INTEGER NOT NULL DEFAULT 1,
   refresh_interval_minutes INTEGER NOT NULL DEFAULT 15,
   warning_threshold REAL,
+  secondary_warning_threshold REAL,
   threshold_currency TEXT,
   recharge_url TEXT,
   capabilities_json TEXT NOT NULL DEFAULT '{}',
@@ -689,6 +690,14 @@ function migrateProviderRechargeUrlV12(db) {
   }
 }
 
+function migrateSecondaryWarningThresholdV13(db) {
+  const secondaryThresholdColumn = db.prepare('PRAGMA table_info(provider_connections)').all()
+    .find((column) => column.name === 'secondary_warning_threshold');
+  if (!secondaryThresholdColumn) {
+    db.exec('ALTER TABLE provider_connections ADD COLUMN secondary_warning_threshold REAL');
+  }
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -699,6 +708,7 @@ function createDatabase(databasePath) {
     db.exec(SCHEMA);
     migrateSub2ApiMappingsV9(db);
     migrateProviderRechargeUrlV12(db);
+    migrateSecondaryWarningThresholdV13(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

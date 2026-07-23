@@ -198,19 +198,45 @@ class AlertService {
     const rules = this.db.prepare(`
       SELECT * FROM alert_rules WHERE enabled = 1 AND (connection_id IS NULL OR connection_id = ?)
     `).all(connectionId);
-    if (provider.warning_threshold != null) {
-      rules.push({
+    const implicitRules = [
+      {
         id: `implicit-${connectionId}`,
-        rule_type: 'low_balance',
-        scope: 'account',
-        currency: provider.threshold_currency || 'USD',
         threshold: provider.warning_threshold,
-        consecutive_matches: 1,
-        cooldown_minutes: 60,
-        config_json: '{}'
-      });
-    }
+        level: 1,
+        severity: 'warning'
+      },
+      {
+        id: `implicit-secondary-${connectionId}`,
+        threshold: provider.secondary_warning_threshold,
+        level: 2,
+        severity: 'error'
+      }
+    ].map((definition) => ({
+      id: definition.id,
+      rule_type: 'low_balance',
+      scope: 'account',
+      currency: provider.threshold_currency || 'USD',
+      threshold: definition.threshold,
+      consecutive_matches: 1,
+      cooldown_minutes: 60,
+      config_json: stringifyJson({
+        implicitBalanceLevel: definition.level,
+        severity: definition.severity
+      })
+    }));
     const events = [];
+    for (const rule of implicitRules) {
+      if (rule.threshold != null) {
+        rules.push(rule);
+      } else {
+        events.push(await this.#applyEvaluation(provider, rule, {
+          matched: false,
+          subjectType: 'account',
+          subjectId: provider.id,
+          severity: parseJson(rule.config_json, {}).severity
+        }));
+      }
+    }
     for (const rule of rules) {
       if (rule.rule_type === 'rate_mismatch') {
         for (const evaluation of this.#evaluateRateMismatch(provider, rule)) {
@@ -361,17 +387,21 @@ class AlertService {
       `).all(provider.id, currency, Math.max(1, rule.consecutive_matches || 1));
       const matched = rows.length >= (rule.consecutive_matches || 1) &&
         rows.every((row) => Number(row.available) <= Number(rule.threshold));
+      const implicitBalanceLevel = Number(config.implicitBalanceLevel) || null;
       return {
         matched,
         subjectType: 'account',
         subjectId: provider.id,
         severity: config.severity || 'warning',
         message: matched
-          ? `${provider.name} 余额为 ${Number(rows[0].available).toFixed(2)} ${currency}，已低于或等于预警值 ${rule.threshold} ${currency}。`
+          ? implicitBalanceLevel
+            ? `${provider.name} 触发${implicitBalanceLevel}级余额告警：当前余额为 ${Number(rows[0].available).toFixed(2)} ${currency}，已低于或等于阈值 ${rule.threshold} ${currency}。`
+            : `${provider.name} 余额为 ${Number(rows[0].available).toFixed(2)} ${currency}，已低于或等于预警值 ${rule.threshold} ${currency}。`
           : '',
         details: {
           currency,
           threshold: rule.threshold,
+          ...(implicitBalanceLevel ? { alertLevel: implicitBalanceLevel } : {}),
           latest: rows[0] || null,
           ...(matched && provider.recharge_url ? { rechargeUrl: provider.recharge_url } : {})
         }

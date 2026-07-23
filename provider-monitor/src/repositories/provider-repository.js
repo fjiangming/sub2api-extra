@@ -42,6 +42,21 @@ function positiveNumber(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function validateBalanceThresholds(warningThreshold, secondaryWarningThreshold) {
+  for (const threshold of [warningThreshold, secondaryWarningThreshold]) {
+    if (threshold != null && (!Number.isFinite(Number(threshold)) || Number(threshold) < 0)) {
+      throw new AppError('PROVIDER_THRESHOLD_INVALID', '余额阈值必须是大于或等于 0 的数字', { status: 400 });
+    }
+  }
+  if (secondaryWarningThreshold == null) return;
+  if (warningThreshold == null) {
+    throw new AppError('PROVIDER_THRESHOLD_INVALID', '二级余额阈值需要先设置一级余额阈值', { status: 400 });
+  }
+  if (Number(secondaryWarningThreshold) >= Number(warningThreshold)) {
+    throw new AppError('PROVIDER_THRESHOLD_INVALID', '二级余额阈值必须小于一级余额阈值', { status: 400 });
+  }
+}
+
 function rechargeInfo(row) {
   const manualMultiplier = positiveNumber(row.recharge_manual_multiplier);
   const detectedMultiplier = positiveNumber(row.recharge_detected_multiplier);
@@ -189,6 +204,7 @@ class ProviderRepository {
     const nextCheckAt = input.enabled === false
       ? null
       : new Date(Date.now() + refreshMinutes * 60000).toISOString();
+    validateBalanceThresholds(input.warningThreshold, input.secondaryWarningThreshold);
 
     const insert = this.db.transaction(() => {
       this.db
@@ -199,10 +215,10 @@ class ProviderRepository {
       this.db.prepare(`
         INSERT INTO provider_connections(
           id, name, adapter_type, base_url, auth_mode, credential_id, remote_user_id,
-          enabled, refresh_interval_minutes, warning_threshold, threshold_currency,
+          enabled, refresh_interval_minutes, warning_threshold, secondary_warning_threshold, threshold_currency,
           recharge_url, type_config_json, tags_json, note, account_dedupe_key, next_check_at,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
         input.name,
@@ -214,6 +230,7 @@ class ProviderRepository {
         booleanValue(input.enabled),
         refreshMinutes,
         input.warningThreshold ?? null,
+        input.secondaryWarningThreshold ?? null,
         input.thresholdCurrency || 'USD',
         input.rechargeUrl || null,
         stringifyJson(input.typeConfig || {}),
@@ -254,6 +271,13 @@ class ProviderRepository {
     const nextCheckAt = enabled
       ? existing.next_check_at || new Date().toISOString()
       : null;
+    const warningThreshold = input.warningThreshold === undefined
+      ? existing.warning_threshold
+      : input.warningThreshold;
+    const secondaryWarningThreshold = input.secondaryWarningThreshold === undefined
+      ? existing.secondary_warning_threshold
+      : input.secondaryWarningThreshold;
+    validateBalanceThresholds(warningThreshold, secondaryWarningThreshold);
 
     const update = this.db.transaction(() => {
       if (input.credentials && Object.keys(input.credentials).length > 0) {
@@ -269,7 +293,7 @@ class ProviderRepository {
       this.db.prepare(`
         UPDATE provider_connections SET
           name = ?, adapter_type = ?, base_url = ?, auth_mode = ?, remote_user_id = ?,
-          enabled = ?, refresh_interval_minutes = ?, warning_threshold = ?,
+          enabled = ?, refresh_interval_minutes = ?, warning_threshold = ?, secondary_warning_threshold = ?,
           threshold_currency = ?, recharge_url = ?, type_config_json = ?, tags_json = ?, note = ?,
           account_dedupe_key = ?, next_check_at = ?, updated_at = ?
         WHERE id = ?
@@ -281,7 +305,8 @@ class ProviderRepository {
         input.remoteUserId === undefined ? existing.remote_user_id : input.remoteUserId || null,
         enabled,
         refreshMinutes,
-        input.warningThreshold === undefined ? existing.warning_threshold : input.warningThreshold,
+        warningThreshold,
+        secondaryWarningThreshold,
         input.thresholdCurrency ?? existing.threshold_currency,
         input.rechargeUrl === undefined ? existing.recharge_url : input.rechargeUrl || null,
         stringifyJson(input.typeConfig ?? existing.type_config_json),

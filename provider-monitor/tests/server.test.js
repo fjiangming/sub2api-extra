@@ -47,18 +47,44 @@ test('HTTP API enforces login and CSRF while serving the operational frontend', 
   });
   assert.equal(createRule.status, 201);
 
+  const incompleteBalanceRule = await fetch(`${base}/api/alert-rules`, {
+    method: 'POST',
+    headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
+    body: JSON.stringify({ name: 'Incomplete balance rule', ruleType: 'low_balance', currency: 'USD' })
+  });
+  assert.equal(incompleteBalanceRule.status, 400);
+
+  const completeBalanceRule = await fetch(`${base}/api/alert-rules`, {
+    method: 'POST',
+    headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
+    body: JSON.stringify({
+      name: 'Complete balance rule', ruleType: 'low_balance', scope: 'account',
+      threshold: 20, currency: 'USD', consecutiveMatches: 2, cooldownMinutes: 60
+    })
+  });
+  assert.equal(completeBalanceRule.status, 201);
+
   const createProvider = await fetch(`${base}/api/providers`, {
     method: 'POST',
     headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
     body: JSON.stringify({
       name: 'Manual recharge supplier', adapterType: 'custom', baseUrl: 'https://supplier.example',
       authMode: 'api_key', credentials: { apiKey: 'secret' }, enabled: false,
-      warningThreshold: 20, thresholdCurrency: 'USD',
+      warningThreshold: 20, secondaryWarningThreshold: 5, thresholdCurrency: 'USD',
       rechargeUrl: 'https://supplier.example/account/recharge'
     })
   });
   assert.equal(createProvider.status, 201);
-  assert.equal((await createProvider.json()).provider.rechargeUrl, 'https://supplier.example/account/recharge');
+  const createdProvider = (await createProvider.json()).provider;
+  assert.equal(createdProvider.rechargeUrl, 'https://supplier.example/account/recharge');
+  assert.equal(createdProvider.secondary_warning_threshold, 5);
+
+  const invalidThresholdUpdate = await fetch(`${base}/api/providers/${createdProvider.id}`, {
+    method: 'PUT',
+    headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
+    body: JSON.stringify({ secondaryWarningThreshold: 25 })
+  });
+  assert.equal(invalidThresholdUpdate.status, 400);
 
   const invalidRechargeUrl = await fetch(`${base}/api/providers`, {
     method: 'POST',

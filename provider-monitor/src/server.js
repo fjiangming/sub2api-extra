@@ -45,6 +45,7 @@ const providerSchema = z.object({
   enabled: z.boolean().optional(),
   refreshIntervalMinutes: z.number().int().min(1).max(1440).optional(),
   warningThreshold: z.number().nonnegative().optional().nullable(),
+  secondaryWarningThreshold: z.number().nonnegative().optional().nullable(),
   thresholdCurrency: z.string().trim().min(1).max(12).optional(),
   rechargeUrl: z.string().trim().url().max(2048)
     .refine((value) => /^https?:\/\//i.test(value), '充值链接必须使用 HTTP 或 HTTPS')
@@ -60,7 +61,12 @@ const providerUpdateSchema = providerSchema.partial();
 const providerValidationSchema = providerSchema.extend({
   existingProviderId: z.string().uuid().optional()
 });
-const alertRuleSchema = z.object({
+const alertRuleThresholdTypes = new Set([
+  'low_balance', 'runway_below', 'stale_data', 'key_expiry',
+  'credential_expiry', 'rate_mismatch'
+]);
+const alertRuleCurrencyTypes = new Set(['low_balance', 'runway_below']);
+const alertRuleBaseSchema = z.object({
   name: z.string().trim().min(1).max(120),
   enabled: z.boolean().optional(),
   connectionId: z.string().uuid().optional().nullable(),
@@ -69,13 +75,26 @@ const alertRuleSchema = z.object({
     'key_disabled', 'asset_drift', 'contract_changed', 'anomaly',
     'credential_expiry', 'automation_failed', 'rate_mismatch'
   ]),
-  scope: z.string().optional(),
-  currency: z.string().max(12).optional().nullable(),
-  threshold: z.number().optional().nullable(),
+  scope: z.enum(['account', 'key', 'team']).optional(),
+  currency: z.string().trim().max(12).optional().nullable(),
+  threshold: z.number().nonnegative().optional().nullable(),
   consecutiveMatches: z.number().int().min(1).max(20).optional(),
   cooldownMinutes: z.number().int().min(1).max(10080).optional(),
   config: z.record(z.string(), z.any()).optional()
 });
+const validateAlertRuleFields = (input, context) => {
+  if (alertRuleThresholdTypes.has(input.ruleType) && input.threshold == null) {
+    context.addIssue({ code: 'custom', path: ['threshold'], message: 'Threshold is required for this alert type' });
+  }
+  if (alertRuleCurrencyTypes.has(input.ruleType) && !input.currency?.trim()) {
+    context.addIssue({ code: 'custom', path: ['currency'], message: 'Currency is required for this alert type' });
+  }
+  if (['stale_data', 'credential_expiry'].includes(input.ruleType) && Number(input.threshold) < 1) {
+    context.addIssue({ code: 'custom', path: ['threshold'], message: 'Threshold must be at least 1 for this alert type' });
+  }
+};
+const alertRuleSchema = alertRuleBaseSchema.superRefine(validateAlertRuleFields);
+const alertRuleUpdateSchema = alertRuleBaseSchema.partial();
 const notificationSchema = z.object({
   name: z.string().trim().min(1).max(120),
   type: z.enum(['webhook', 'telegram', 'gotify', 'bark', 'email', 'wecom', 'serverchan', 'dingtalk', 'feishu']),
@@ -585,6 +604,7 @@ function createApplication(options = {}) {
       enabled: false,
       refreshIntervalMinutes: source.refresh_interval_minutes,
       warningThreshold: source.warning_threshold,
+      secondaryWarningThreshold: source.secondary_warning_threshold,
       thresholdCurrency: source.threshold_currency,
       rechargeUrl: source.rechargeUrl,
       rechargeMultiplier: source.recharge?.manualMultiplier,
@@ -848,7 +868,23 @@ function createApplication(options = {}) {
     res.status(201).json(rule);
   });
   api.put('/alert-rules/:id', (req, res) => {
-    const rule = alerts.saveRule(validate(alertRuleSchema.partial(), req.body), req.params.id);
+    const input = validate(alertRuleUpdateSchema, req.body);
+    const existing = alerts.listRules().find((item) => item.id === req.params.id);
+    if (!existing) throw new AppError('ALERT_RULE_NOT_FOUND', 'Alert rule was not found', { status: 404 });
+    validate(alertRuleSchema, {
+      name: existing.name,
+      enabled: existing.enabled,
+      connectionId: existing.connection_id,
+      ruleType: existing.rule_type,
+      scope: existing.scope,
+      currency: existing.currency,
+      threshold: existing.threshold,
+      consecutiveMatches: existing.consecutive_matches,
+      cooldownMinutes: existing.cooldown_minutes,
+      config: existing.config,
+      ...input
+    });
+    const rule = alerts.saveRule(input, req.params.id);
     audit(db, req, 'alert_rule.update', 'alert_rule', rule.id, { rule });
     res.json(rule);
   });

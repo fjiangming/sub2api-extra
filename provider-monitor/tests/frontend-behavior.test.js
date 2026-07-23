@@ -138,6 +138,58 @@ test('alert severity labels are displayed in Chinese', () => {
   assert.match(source, /alertSeverityLabel\(event\.severity\)/);
 });
 
+test('alert rule form only enables fields used by the selected type', () => {
+  const { context } = createBrowserContext();
+  const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const controls = {
+    name: { value: 'Low balance' },
+    ruleType: { value: 'low_balance' },
+    connectionId: { value: '' },
+    scope: { value: 'account' },
+    threshold: { value: '20' },
+    currency: { value: 'USD' },
+    consecutiveMatches: { value: '2' },
+    cooldownMinutes: { value: '60' },
+    enabled: { checked: true }
+  };
+  const fields = ['scope', 'threshold', 'currency', 'consecutiveMatches'].map((name) => ({
+    dataset: { alertField: name }, hidden: false
+  }));
+  const form = {
+    elements: controls,
+    querySelectorAll(selector) { return selector === '[data-alert-field]' ? fields : []; }
+  };
+  context.testAlertRuleForm = form;
+
+  vm.runInContext('updateAlertRuleFields(testAlertRuleForm)', context);
+  assert.equal(fields.every((field) => !field.hidden), true);
+  assert.equal(controls.threshold.required, true);
+  assert.equal(controls.currency.required, true);
+  assert.equal(
+    vm.runInContext("alertRuleFieldConfig('runway_below').fields.join(',')", context),
+    'threshold,currency'
+  );
+
+  const lowBalancePayload = JSON.parse(vm.runInContext('JSON.stringify(alertRulePayload(testAlertRuleForm))', context));
+  assert.equal(lowBalancePayload.threshold, 20);
+  assert.equal(lowBalancePayload.currency, 'USD');
+  assert.equal(lowBalancePayload.consecutiveMatches, 2);
+
+  controls.ruleType.value = 'sync_failed';
+  vm.runInContext('updateAlertRuleFields(testAlertRuleForm)', context);
+  assert.equal(fields.every((field) => field.hidden), true);
+  assert.equal(controls.threshold.required, false);
+  assert.equal(controls.currency.required, false);
+  const syncFailurePayload = JSON.parse(vm.runInContext('JSON.stringify(alertRulePayload(testAlertRuleForm))', context));
+  assert.equal(syncFailurePayload.threshold, null);
+  assert.equal(syncFailurePayload.currency, null);
+  assert.equal(syncFailurePayload.consecutiveMatches, 1);
+
+  assert.match(index, /data-alert-field="scope"/);
+  assert.match(index, /data-alert-field="threshold"/);
+  assert.match(index, /name="cooldownMinutes"[^>]+required/);
+});
+
 test('recharge automation payload does not include Sub2API channel IDs', () => {
   const { context } = createBrowserContext();
   const elements = {
@@ -194,6 +246,7 @@ test('Sub2API provider validation keeps the edited provider identity and separat
       enabled: { checked: true },
       refreshIntervalMinutes: { value: '15' },
       warningThreshold: { value: '' },
+      secondaryWarningThreshold: { value: '' },
       thresholdCurrency: { value: 'USD' },
       rechargeMultiplier: { value: '' },
       rechargeUrl: { value: 'https://supplier.example/account/recharge' },
@@ -215,6 +268,7 @@ test('Sub2API provider validation keeps the edited provider identity and separat
     context
   ));
   assert.equal(payload.existingProviderId, form.elements.id.value);
+  assert.equal(payload.secondaryWarningThreshold, null);
   assert.equal(payload.rechargeUrl, 'https://supplier.example/account/recharge');
   assert.deepEqual(payload.credentials, { password: 'replacement-password' });
   assert.equal(payload.typeConfig.dynamicRouteRate.enabled, false);
@@ -241,6 +295,7 @@ test('provider payload exposes dynamic route rate controls for New API', () => {
       baseUrl: { value: 'https://dynamic.example' }, authMode: { value: 'system_token' },
       remoteUserId: { value: '7' }, enabled: { checked: true },
       refreshIntervalMinutes: { value: '15' }, warningThreshold: { value: '' },
+      secondaryWarningThreshold: { value: '' },
       thresholdCurrency: { value: 'USD' }, rechargeMultiplier: { value: '' },
       rechargeUrl: { value: '' },
       dynamicRouteRateEnabled: { checked: true },
@@ -261,8 +316,35 @@ test('provider payload exposes dynamic route rate controls for New API', () => {
   assert.match(source, /dynamicRouteRateEnabled/);
   assert.match(index, /name="dynamicRouteRateEnabled"/);
   assert.match(index, /name="rechargeUrl" type="url"/);
+  assert.match(index, /name="secondaryWarningThreshold"/);
   assert.match(index, /value="serverchan">Server酱（个人微信）/);
   assert.match(index, /Token 加权平均/);
+});
+
+test('provider balance alert levels require the secondary threshold to be lower', () => {
+  const { context } = createBrowserContext();
+  context.thresholdForm = {
+    elements: {
+      warningThreshold: { value: '20' },
+      secondaryWarningThreshold: { value: '5' }
+    }
+  };
+
+  assert.deepEqual(
+    JSON.parse(vm.runInContext('JSON.stringify(providerBalanceThresholds(thresholdForm))', context)),
+    { warningThreshold: 20, secondaryWarningThreshold: 5 }
+  );
+  context.thresholdForm.elements.secondaryWarningThreshold.value = '20';
+  assert.throws(
+    () => vm.runInContext('providerBalanceThresholds(thresholdForm)', context),
+    /必须小于一级/
+  );
+  context.thresholdForm.elements.warningThreshold.value = '';
+  context.thresholdForm.elements.secondaryWarningThreshold.value = '5';
+  assert.throws(
+    () => vm.runInContext('providerBalanceThresholds(thresholdForm)', context),
+    /先填写一级/
+  );
 });
 
 test('import feedback distinguishes disabled credential shells from skipped rows', () => {

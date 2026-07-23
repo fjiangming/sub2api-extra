@@ -340,6 +340,7 @@ class TransferService {
         enabled: provider.enabled,
         refreshIntervalMinutes: provider.refresh_interval_minutes,
         warningThreshold: provider.warning_threshold,
+        secondaryWarningThreshold: provider.secondary_warning_threshold,
         thresholdCurrency: provider.threshold_currency,
         rechargeUrl: provider.rechargeUrl,
         rechargeMultiplier: provider.recharge?.manualMultiplier,
@@ -616,6 +617,9 @@ class TransferService {
       enabled: row.enabled == null ? true : !['false', '0', 0, false].includes(row.enabled),
       refreshIntervalMinutes: Number(firstValue(row.refreshIntervalMinutes, row.refresh_interval_minutes, this.config.defaultRefreshMinutes)),
       warningThreshold: firstValue(row.warningThreshold, row.warning_threshold, null) == null ? null : Number(firstValue(row.warningThreshold, row.warning_threshold)),
+      secondaryWarningThreshold: firstValue(row.secondaryWarningThreshold, row.secondary_warning_threshold, null) == null
+        ? null
+        : Number(firstValue(row.secondaryWarningThreshold, row.secondary_warning_threshold)),
       thresholdCurrency: firstValue(row.thresholdCurrency, row.threshold_currency, 'USD'),
       rechargeUrl: firstValue(row.rechargeUrl, row.recharge_url, null),
       ...(hasRechargeMultiplier
