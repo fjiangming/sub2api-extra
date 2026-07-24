@@ -155,6 +155,10 @@ test('test center exposes provider-scoped mobile recharge alert simulation', () 
   assert.match(source, /async function renderTests\(\)/);
   assert.match(source, /api\('\/api\/simulations\/recharge-alert'/);
   assert.match(source, /name="notificationChannelId"/);
+  assert.match(source, /name="openMobilePreview"[^>]+checked/);
+  assert.match(source, /openMobilePreviewWindow/);
+  assert.match(source, /width=430,height=860/);
+  assert.match(source, /data-action="open-mobile-preview"/);
   assert.match(source, /withRecentReauth/);
   assert.match(readiness, /Sub2API/);
   assert.match(readiness, /supplier\.example/);

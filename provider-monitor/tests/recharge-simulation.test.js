@@ -125,7 +125,9 @@ test('recharge alert simulation sends the selected mobile notification without c
   assert.equal(automaticResult.recharge.mode, 'adapter');
   assert.equal(automaticResult.recharge.targetHost, 'monitor.example');
   assert.ok(automaticResult.recharge.expiresAt);
-  assert.doesNotMatch(JSON.stringify(automaticResult), /ticket=/);
+  assert.equal(Object.hasOwn(automaticResult.recharge, 'url'), false);
+  assert.equal(automaticResult.mobilePreview.mode, 'adapter');
+  assert.match(automaticResult.mobilePreview.url, /^https:\/\/monitor\.example\/recharge-entry\?ticket=/);
 
   assert.equal(received.length, 1);
   assert.equal(received[0].details.test, true);
@@ -133,6 +135,7 @@ test('recharge alert simulation sends the selected mobile notification without c
   assert.match(received[0].message, /\[模拟测试\]/);
   assert.match(received[0].details.rechargeUrl, /^https:\/\/monitor\.example\/recharge-entry\?ticket=/);
   assert.match(received[0].message, /monitor\.example\/recharge-entry\?ticket=/);
+  assert.notEqual(automaticResult.mobilePreview.url, received[0].details.rechargeUrl);
 
   const direct = await fetch(`${base}/api/simulations/recharge-alert`, {
     method: 'POST',
@@ -144,6 +147,7 @@ test('recharge alert simulation sends the selected mobile notification without c
   assert.equal(directResult.recharge.mode, 'direct');
   assert.equal(directResult.recharge.reason, 'adapter_unsupported');
   assert.equal(directResult.recharge.targetHost, 'custom.example');
+  assert.equal(directResult.mobilePreview.url, 'https://custom.example/billing');
   assert.equal(received[1].details.rechargeUrl, 'https://custom.example/billing');
 
   const missingRecharge = await fetch(`${base}/api/simulations/recharge-alert`, {
@@ -157,9 +161,13 @@ test('recharge alert simulation sends the selected mobile notification without c
 
   assert.equal(context.db.prepare('SELECT COUNT(*) count FROM alert_events').get().count, 0);
   assert.equal(context.db.prepare('SELECT COUNT(*) count FROM notification_deliveries').get().count, 0);
-  assert.equal(context.db.prepare('SELECT COUNT(*) count FROM recharge_access_tickets').get().count, 1);
+  assert.equal(context.db.prepare('SELECT COUNT(*) count FROM recharge_access_tickets').get().count, 2);
   assert.equal(
     context.db.prepare("SELECT COUNT(*) count FROM audit_logs WHERE action = 'simulation.recharge_alert'").get().count,
     2
+  );
+  assert.equal(
+    context.db.prepare("SELECT COUNT(*) count FROM audit_logs WHERE details_json LIKE '%ticket=%'").get().count,
+    0
   );
 });

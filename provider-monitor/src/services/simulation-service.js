@@ -20,10 +20,19 @@ function publicRechargeResult(recharge) {
   };
 }
 
+function mobilePreviewResult(recharge) {
+  if (!recharge?.url) return null;
+  return {
+    ...publicRechargeResult(recharge),
+    url: recharge.url
+  };
+}
+
 class SimulationService {
-  constructor({ providers, notifications }) {
+  constructor({ providers, notifications, rechargeLinks }) {
     this.providers = providers;
     this.notifications = notifications;
+    this.rechargeLinks = rechargeLinks;
   }
 
   async rechargeAlert(input) {
@@ -69,6 +78,10 @@ class SimulationService {
       }
     };
     const sent = await this.notifications.testRechargeAlert(channel.id, event);
+    let mobilePreview = null;
+    try {
+      mobilePreview = this.rechargeLinks.issue(provider.id);
+    } catch {}
     return {
       testType: 'recharge_alert',
       status: sent.delivery.status,
@@ -92,12 +105,14 @@ class SimulationService {
         thresholdConfigured: configuredThreshold != null,
         currency
       },
-      recharge: publicRechargeResult(sent.recharge)
+      recharge: publicRechargeResult(sent.recharge),
+      mobilePreview: mobilePreviewResult(mobilePreview)
     };
   }
 }
 
 module.exports = {
   SimulationService,
-  publicRechargeResult
+  publicRechargeResult,
+  mobilePreviewResult
 };
