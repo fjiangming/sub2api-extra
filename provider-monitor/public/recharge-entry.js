@@ -2,7 +2,21 @@
   const stage = document.body.dataset.rechargeStage;
   if (stage === 'confirm') {
     const form = document.querySelector('#recharge-entry-form');
-    if (form) window.setTimeout(() => form.requestSubmit(), 50);
+    const button = form?.querySelector('button[type="submit"]');
+    const status = document.querySelector('#recharge-entry-status');
+    let submitting = false;
+    form?.addEventListener('submit', (event) => {
+      if (submitting) {
+        event.preventDefault();
+        return;
+      }
+      submitting = true;
+      if (button) button.disabled = true;
+      if (status) status.textContent = '正在建立自动登录会话';
+    });
+    if (form) window.setTimeout(() => {
+      if (!submitting) form.requestSubmit();
+    }, 50);
     return;
   }
   if (stage !== 'provider-login') return;

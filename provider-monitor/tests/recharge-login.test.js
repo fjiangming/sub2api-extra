@@ -66,6 +66,10 @@ test('recharge entry tickets are hashed, preview-safe and single use for Sub2API
   const firstPreview = await fetch(issued.url);
   assert.equal(firstPreview.status, 200);
   assert.match(firstPreview.headers.get('cache-control'), /no-store/);
+  assert.match(
+    firstPreview.headers.get('content-security-policy'),
+    /form-action 'self' https:\/\/sub2api\.example/
+  );
   assert.match(await firstPreview.text(), /正在前往 Sub2API Wallet/);
   const secondPreview = await fetch(issued.url);
   assert.equal(secondPreview.status, 200);
@@ -78,6 +82,10 @@ test('recharge entry tickets are hashed, preview-safe and single use for Sub2API
     redirect: 'manual'
   });
   assert.equal(consumed.status, 303);
+  assert.match(
+    consumed.headers.get('content-security-policy'),
+    /form-action 'self' https:\/\/sub2api\.example/
+  );
   const location = consumed.headers.get('location');
   assert.match(location, /^https:\/\/sub2api\.example\/auth\/callback#/);
   assert.match(location, /access_token=browser-access-token/);

@@ -486,11 +486,13 @@ function createApplication(options = {}) {
     res.type(metrics.contentType()).send(await metrics.render());
   }));
   app.get('/recharge-entry', rechargeEntryLimiter, (req, res) => {
-    pageHeaders(res);
     try {
       const token = String(req.query.ticket || '');
-      res.type('html').send(renderEntryPage(rechargeLinks.preview(token), token));
+      const preview = rechargeLinks.preview(token);
+      pageHeaders(res, ["'self'", preview.targetOrigin]);
+      res.type('html').send(renderEntryPage(preview, token));
     } catch (error) {
+      pageHeaders(res);
       res.status(error.status || 404).type('html').send(renderErrorPage(error.message || '充值入口无效'));
     }
   });
@@ -506,7 +508,7 @@ function createApplication(options = {}) {
           mode: descriptor.mode
         });
         if (descriptor.mode === 'redirect') {
-          res.setHeader('Cache-Control', 'no-store');
+          pageHeaders(res, ["'self'", new URL(descriptor.url).origin]);
           return res.redirect(303, descriptor.url);
         }
         if (descriptor.mode === 'json_form_popup') {

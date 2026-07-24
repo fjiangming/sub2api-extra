@@ -235,10 +235,12 @@ class RechargeLinkService {
 
   preview(token) {
     const row = this.#ticket(token);
+    const target = new URL(row.target_url);
     return {
       providerName: row.provider_name,
       adapterType: row.adapter_type,
-      targetHost: new URL(row.target_url).hostname,
+      targetHost: target.hostname,
+      targetOrigin: target.origin,
       expiresAt: row.expires_at
     };
   }
