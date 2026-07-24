@@ -36,7 +36,6 @@ const state = {
   reconciliations: [],
   importPreview: null,
   backupTargets: [],
-  mobilePreviewUrl: '',
   reauthResolve: null,
   reauthReject: null,
   sub2apiStepUpResolve: null,
@@ -1044,7 +1043,7 @@ function rechargeAlertTestResultHtml(result) {
   const previewOnly = result.previewOnly === true;
   const succeeded = previewOnly ? result.status === 'preview_ready' : result.status === 'delivered';
   return `<section class="panel test-result-panel">
-    <div class="panel-header"><h2>${previewOnly ? '预览结果' : '发送结果'}</h2><div class="panel-actions">${result.mobilePreview?.url ? '<button class="button small" type="button" data-action="open-mobile-preview"><i data-lucide="smartphone"></i><span>打开移动端预览</span></button>' : ''}${badge(succeeded ? 'succeeded' : 'failed', previewOnly && succeeded ? '预览已生成' : succeeded ? '已送达' : result.status)}</div></div>
+    <div class="panel-header"><h2>${previewOnly ? '预览结果' : '发送结果'}</h2><div class="panel-actions">${previewOnly && result.mobilePreview?.url ? '<button class="button small" type="button" data-action="regenerate-mobile-preview"><i data-lucide="refresh-cw"></i><span>重新生成预览</span></button>' : ''}${badge(succeeded ? 'succeeded' : 'failed', previewOnly && succeeded ? '预览已生成' : succeeded ? '已送达' : result.status)}</div></div>
     <div class="test-result-grid">
       <div><span>供应商</span><strong>${escapeHtml(result.provider?.name || '-')}</strong></div>
       <div><span>通知通道</span><strong>${previewOnly ? '未发送' : escapeHtml(result.channel?.name || '-')}</strong></div>
@@ -1082,7 +1081,6 @@ async function runRechargeAlertTest(form) {
   const previewWindow = previewOnly
     ? openMobilePreviewWindow()
     : null;
-  state.mobilePreviewUrl = '';
   form.dataset.running = 'true';
   updateRechargeAlertTestReadiness(form);
   resultRegion.innerHTML = `<section class="panel test-result-panel"><div class="test-result-pending"><i class="spin" data-lucide="loader-circle"></i><strong>${previewOnly ? '正在生成移动端预览' : '正在发送模拟告警'}</strong></div></section>`;
@@ -1097,10 +1095,9 @@ async function runRechargeAlertTest(form) {
       method: 'POST',
       body
     }));
-    state.mobilePreviewUrl = result.mobilePreview?.url || '';
     resultRegion.innerHTML = rechargeAlertTestResultHtml(result);
-    if (previewWindow && !previewWindow.closed && state.mobilePreviewUrl) {
-      previewWindow.location.replace(state.mobilePreviewUrl);
+    if (previewWindow && !previewWindow.closed && result.mobilePreview?.url) {
+      previewWindow.location.replace(result.mobilePreview.url);
       previewWindow.focus?.();
     }
     toast(previewOnly ? '移动端预览已打开，未发送任何通知' : `模拟告警已发送至 ${result.channel.name}`);
@@ -1122,7 +1119,6 @@ async function runRechargeAlertTest(form) {
 async function renderTests() {
   const channels = await api('/api/notification-channels');
   state.channels = channels.items;
-  state.mobilePreviewUrl = '';
   setTopActions('<button class="button" data-action="refresh-view"><i data-lucide="refresh-cw"></i><span>刷新</span></button>');
   const providerOptions = state.providers.map((provider) => `<option value="${escapeHtml(provider.id)}">${escapeHtml(provider.name)} · ${escapeHtml(adapterLabel(provider.adapter_type))}${provider.rechargeUrl ? '' : ' · 未配置充值链接'}</option>`).join('');
   const channelOptions = state.channels.map((channel) => `<option value="${escapeHtml(channel.id)}">${escapeHtml(channel.name)} · ${escapeHtml(channel.type)}${channel.enabled ? '' : ' · 停用'}</option>`).join('');
@@ -1747,9 +1743,13 @@ async function handleAction(button) {
     if (action === 'edit-channel') openChannel(state.channels.find((c) => c.id === id));
     if (action === 'delete-channel' && confirm('删除该通知通道？')) { await api(`/api/notification-channels/${id}`, { method: 'DELETE' }); toast('通道已删除'); navigate('alerts'); }
     if (action === 'test-channel') { await api(`/api/notification-channels/${id}/test`, { method: 'POST' }); toast('测试通知已发送'); }
-    if (action === 'open-mobile-preview') {
-      const popup = state.mobilePreviewUrl ? openMobilePreviewWindow(state.mobilePreviewUrl) : null;
-      if (!popup) toast('浏览器阻止了移动端预览窗口，请允许本站弹出窗口后重试', 'error');
+    if (action === 'regenerate-mobile-preview') {
+      const form = $('#recharge-alert-test-form');
+      if (form && form.dataset.running !== 'true') {
+        form.elements.previewOnly.checked = true;
+        updateRechargeAlertTestReadiness(form);
+        form.requestSubmit();
+      }
     }
     if (action === 'add-automation') openAutomation();
     if (action === 'edit-automation') openAutomation(state.automationRules.find((r) => r.id === id));

@@ -1304,7 +1304,10 @@ function createApplication(options = {}) {
   const nodeModules = path.join(config.projectRoot, 'node_modules');
   app.use('/vendor/echarts', express.static(path.join(nodeModules, 'echarts', 'dist'), { maxAge: '7d' }));
   app.use('/vendor/lucide', express.static(path.join(nodeModules, 'lucide', 'dist', 'umd'), { maxAge: '7d' }));
-  app.use(express.static(path.join(config.projectRoot, 'public'), { maxAge: config.env === 'production' ? '1h' : 0 }));
+  app.use(express.static(path.join(config.projectRoot, 'public'), {
+    maxAge: 0,
+    setHeaders: (res) => res.setHeader('Cache-Control', 'no-store, max-age=0')
+  }));
   app.get('/{*splat}', (req, res, next) => {
     if (req.path.startsWith('/api/') || req.path === '/metrics') return next();
     return res.sendFile(path.join(config.projectRoot, 'public', 'index.html'));

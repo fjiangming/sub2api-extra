@@ -165,7 +165,8 @@ test('test center exposes provider-scoped mobile recharge alert simulation', () 
   assert.match(source, /\.\.\.\(!previewOnly \? \{ channelId:/);
   assert.match(source, /openMobilePreviewWindow/);
   assert.match(source, /width=430,height=860/);
-  assert.match(source, /data-action="open-mobile-preview"/);
+  assert.match(source, /data-action="regenerate-mobile-preview"/);
+  assert.match(source, /form.requestSubmit()/);
   assert.match(source, /withRecentReauth/);
   assert.match(readiness, /Sub2API/);
   assert.match(readiness, /supplier\.example/);

@@ -146,6 +146,43 @@ test('New API recharge entry submits only its web login credentials to the provi
   assert.doesNotMatch(html, /never-render-system-token/);
 });
 
+test('a failed adapter login releases the ticket for a later retry', async (t) => {
+  const context = createTestContext({ PROVIDER_MONITOR_PUBLIC_URL: 'https://monitor.example' });
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Retryable Sub2API Wallet',
+    adapterType: 'sub2api',
+    baseUrl: 'https://sub2api.example',
+    authMode: 'account',
+    credentials: { email: 'user@example.com', password: 'secret-password' },
+    enabled: false,
+    rechargeUrl: 'https://sub2api.example/purchase',
+    typeConfig: { rechargeLogin: { enabled: true } }
+  });
+  let attempts = 0;
+  const rechargeLinks = new RechargeLinkService({
+    db: context.db,
+    config: context.config,
+    providers,
+    http: {
+      requestJson: async () => {
+        attempts += 1;
+        throw new Error('temporary upstream failure');
+      }
+    }
+  });
+  t.after(() => context.cleanup());
+
+  const ticket = ticketFrom(rechargeLinks.issue(provider.id).url);
+  await assert.rejects(() => rechargeLinks.consume(ticket), /temporary upstream failure/);
+  assert.equal(
+    context.db.prepare('SELECT consumed_at FROM recharge_access_tickets').get().consumed_at,
+    null
+  );
+  await assert.rejects(() => rechargeLinks.consume(ticket), /temporary upstream failure/);
+  assert.equal(attempts, 2);
+});
+
 test('low-balance notifications replace the direct URL with a one-time recharge entry', async (t) => {
   let receivedPayload = null;
   const receiver = http.createServer((req, res) => {

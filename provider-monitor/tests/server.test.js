@@ -19,7 +19,11 @@ test('HTTP API enforces login and CSRF while serving the operational frontend', 
   assert.equal(health.status, 200);
   const index = await fetch(base);
   assert.equal(index.status, 200);
+  assert.match(index.headers.get('cache-control'), /no-store/);
   assert.match(await index.text(), /Provider Monitor/);
+  const applicationScript = await fetch(`${base}/app.js`);
+  assert.equal(applicationScript.status, 200);
+  assert.match(applicationScript.headers.get('cache-control'), /no-store/);
   const unauthorized = await fetch(`${base}/api/summary`);
   assert.equal(unauthorized.status, 401);
 

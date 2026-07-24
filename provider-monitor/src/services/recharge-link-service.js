@@ -256,22 +256,27 @@ class RechargeLinkService {
       throw new AppError('RECHARGE_TICKET_USED', '该充值入口已使用或已过期', { status: 410 });
     }
 
-    const connection = this.#connection(row.connection_id);
-    if (!rechargeLoginEnabled(connection)) {
-      return {
-        mode: 'redirect',
-        adapterType: connection.adapter_type,
-        connectionId: connection.id,
-        url: row.target_url,
-        targetUrl: row.target_url
-      };
-    }
     try {
+      const connection = this.#connection(row.connection_id);
+      if (!rechargeLoginEnabled(connection)) {
+        return {
+          mode: 'redirect',
+          adapterType: connection.adapter_type,
+          connectionId: connection.id,
+          url: row.target_url,
+          targetUrl: row.target_url
+        };
+      }
       return {
         ...(await this.#adapter(connection).createRechargeLogin(row.target_url)),
         connectionId: connection.id
       };
     } catch (error) {
+      // Release only this attempt's reservation so transient adapter failures can be retried.
+      this.db.prepare(`
+        UPDATE recharge_access_tickets SET consumed_at = NULL
+        WHERE token_hash = ? AND consumed_at = ? AND expires_at > ?
+      `).run(row.token_hash, consumedAt, nowIso());
       throw new AppError(
         error.code || 'RECHARGE_LOGIN_FAILED',
         error.message || '无法建立供应商登录会话',
