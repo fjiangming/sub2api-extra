@@ -77,13 +77,6 @@ test('recharge alert simulation sends the selected mobile notification without c
     credentials: { apiKey: 'missing-key' },
     enabled: false
   });
-  const channel = notifications.save({
-    name: 'Disabled mobile receiver',
-    type: 'webhook',
-    enabled: false,
-    config: { url: `http://127.0.0.1:${receiver.address().port}/mobile-alert` }
-  });
-
   const server = app.listen(0, '127.0.0.1');
   await new Promise((resolve) => server.once('listening', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -98,7 +91,7 @@ test('recharge alert simulation sends the selected mobile notification without c
   const beforeReauth = await fetch(`${base}/api/simulations/recharge-alert`, {
     method: 'POST',
     headers: mutationHeaders(auth),
-    body: JSON.stringify({ connectionId: sub2api.id, channelId: channel.id })
+    body: JSON.stringify({ connectionId: sub2api.id, previewOnly: true })
   });
   assert.equal(beforeReauth.status, 403);
   assert.equal((await beforeReauth.json()).error.code, 'REAUTH_REQUIRED');
@@ -111,23 +104,46 @@ test('recharge alert simulation sends the selected mobile notification without c
   });
   assert.equal(reauth.status, 200);
 
+  const preview = await fetch(`${base}/api/simulations/recharge-alert`, {
+    method: 'POST',
+    headers: mutationHeaders(auth),
+    body: JSON.stringify({ connectionId: sub2api.id, previewOnly: true })
+  });
+  assert.equal(preview.status, 200);
+  assert.match(preview.headers.get('cache-control'), /no-store/);
+  const previewResult = await preview.json();
+  assert.equal(previewResult.status, 'preview_ready');
+  assert.equal(previewResult.previewOnly, true);
+  assert.equal(previewResult.channel, null);
+  assert.equal(previewResult.recharge.mode, 'adapter');
+  assert.equal(previewResult.mobilePreview.mode, 'adapter');
+  assert.match(previewResult.mobilePreview.url, /^https:\/\/monitor\.example\/recharge-entry\?ticket=/);
+  assert.equal(received.length, 0);
+  assert.equal(context.db.prepare('SELECT COUNT(*) count FROM notification_channels').get().count, 0);
+
+  const channel = notifications.save({
+    name: 'Disabled mobile receiver',
+    type: 'webhook',
+    enabled: false,
+    config: { url: `http://127.0.0.1:${receiver.address().port}/mobile-alert` }
+  });
+
   const automatic = await fetch(`${base}/api/simulations/recharge-alert`, {
     method: 'POST',
     headers: mutationHeaders(auth),
-    body: JSON.stringify({ connectionId: sub2api.id, channelId: channel.id })
+    body: JSON.stringify({ connectionId: sub2api.id, channelId: channel.id, previewOnly: false })
   });
   assert.equal(automatic.status, 200);
-  assert.match(automatic.headers.get('cache-control'), /no-store/);
   const automaticResult = await automatic.json();
   assert.equal(automaticResult.status, 'delivered');
   assert.equal(automaticResult.simulated, true);
+  assert.equal(automaticResult.previewOnly, false);
   assert.equal(automaticResult.channel.enabled, false);
   assert.equal(automaticResult.recharge.mode, 'adapter');
   assert.equal(automaticResult.recharge.targetHost, 'monitor.example');
   assert.ok(automaticResult.recharge.expiresAt);
   assert.equal(Object.hasOwn(automaticResult.recharge, 'url'), false);
-  assert.equal(automaticResult.mobilePreview.mode, 'adapter');
-  assert.match(automaticResult.mobilePreview.url, /^https:\/\/monitor\.example\/recharge-entry\?ticket=/);
+  assert.equal(automaticResult.mobilePreview, null);
 
   assert.equal(received.length, 1);
   assert.equal(received[0].details.test, true);
@@ -135,25 +151,46 @@ test('recharge alert simulation sends the selected mobile notification without c
   assert.match(received[0].message, /\[模拟测试\]/);
   assert.match(received[0].details.rechargeUrl, /^https:\/\/monitor\.example\/recharge-entry\?ticket=/);
   assert.match(received[0].message, /monitor\.example\/recharge-entry\?ticket=/);
-  assert.notEqual(automaticResult.mobilePreview.url, received[0].details.rechargeUrl);
+  assert.notEqual(previewResult.mobilePreview.url, received[0].details.rechargeUrl);
+
+  const directPreview = await fetch(`${base}/api/simulations/recharge-alert`, {
+    method: 'POST',
+    headers: mutationHeaders(auth),
+    body: JSON.stringify({ connectionId: directProvider.id, previewOnly: true })
+  });
+  assert.equal(directPreview.status, 200);
+  const directPreviewResult = await directPreview.json();
+  assert.equal(directPreviewResult.status, 'preview_ready');
+  assert.equal(directPreviewResult.recharge.reason, 'adapter_unsupported');
+  assert.equal(directPreviewResult.mobilePreview.url, 'https://custom.example/billing');
+  assert.equal(received.length, 1);
 
   const direct = await fetch(`${base}/api/simulations/recharge-alert`, {
     method: 'POST',
     headers: mutationHeaders(auth),
-    body: JSON.stringify({ connectionId: directProvider.id, channelId: channel.id })
+    body: JSON.stringify({ connectionId: directProvider.id, channelId: channel.id, previewOnly: false })
   });
   assert.equal(direct.status, 200);
   const directResult = await direct.json();
   assert.equal(directResult.recharge.mode, 'direct');
   assert.equal(directResult.recharge.reason, 'adapter_unsupported');
   assert.equal(directResult.recharge.targetHost, 'custom.example');
-  assert.equal(directResult.mobilePreview.url, 'https://custom.example/billing');
+  assert.equal(directResult.mobilePreview, null);
   assert.equal(received[1].details.rechargeUrl, 'https://custom.example/billing');
+
+  const missingChannel = await fetch(`${base}/api/simulations/recharge-alert`, {
+    method: 'POST',
+    headers: mutationHeaders(auth),
+    body: JSON.stringify({ connectionId: sub2api.id, previewOnly: false })
+  });
+  assert.equal(missingChannel.status, 400);
+  assert.equal((await missingChannel.json()).error.code, 'VALIDATION_ERROR');
+  assert.equal(received.length, 2);
 
   const missingRecharge = await fetch(`${base}/api/simulations/recharge-alert`, {
     method: 'POST',
     headers: mutationHeaders(auth),
-    body: JSON.stringify({ connectionId: missingRechargeProvider.id, channelId: channel.id })
+    body: JSON.stringify({ connectionId: missingRechargeProvider.id, previewOnly: true })
   });
   assert.equal(missingRecharge.status, 409);
   assert.equal((await missingRecharge.json()).error.code, 'RECHARGE_URL_MISSING');
@@ -164,7 +201,7 @@ test('recharge alert simulation sends the selected mobile notification without c
   assert.equal(context.db.prepare('SELECT COUNT(*) count FROM recharge_access_tickets').get().count, 2);
   assert.equal(
     context.db.prepare("SELECT COUNT(*) count FROM audit_logs WHERE action = 'simulation.recharge_alert'").get().count,
-    2
+    4
   );
   assert.equal(
     context.db.prepare("SELECT COUNT(*) count FROM audit_logs WHERE details_json LIKE '%ticket=%'").get().count,

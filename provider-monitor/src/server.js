@@ -119,7 +119,16 @@ const notificationSchema = z.object({
 });
 const rechargeAlertSimulationSchema = z.object({
   connectionId: z.string().uuid(),
-  channelId: z.string().uuid()
+  channelId: z.string().uuid().optional().nullable(),
+  previewOnly: z.boolean().optional().default(false)
+}).superRefine((input, context) => {
+  if (!input.previewOnly && !input.channelId) {
+    context.addIssue({
+      code: 'custom',
+      path: ['channelId'],
+      message: 'Notification channel is required when previewOnly is false'
+    });
+  }
 });
 const automationConfigSchema = z.object({
   currency: z.string().max(12).optional(),
@@ -1017,7 +1026,8 @@ function createApplication(options = {}) {
       const input = validate(rechargeAlertSimulationSchema, req.body || {});
       const result = await simulations.rechargeAlert(input);
       audit(db, req, 'simulation.recharge_alert', 'provider', input.connectionId, {
-        channelId: input.channelId,
+        channelId: input.channelId || null,
+        previewOnly: input.previewOnly,
         deliveryStatus: result.status,
         rechargeMode: result.recharge?.mode || null,
         rechargeReason: result.recharge?.reason || null

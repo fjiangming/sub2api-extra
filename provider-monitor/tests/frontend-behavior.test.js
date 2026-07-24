@@ -149,13 +149,20 @@ test('test center exposes provider-scoped mobile recharge alert simulation', () 
   }, {
     id: 'channel-id', name: 'Personal WeChat', type: 'serverchan', enabled: false
   })`, context);
+  const previewReadiness = vm.runInContext(`rechargeTestReadinessHtml({
+    id: 'provider-id', name: 'Sub2API Wallet', adapter_type: 'sub2api',
+    rechargeUrl: 'https://supplier.example/purchase',
+    typeConfig: { rechargeLogin: { enabled: true } }
+  }, null, true)`, context);
 
   assert.match(index, /data-view="tests"/);
   assert.match(index, /flask-conical/);
   assert.match(source, /async function renderTests\(\)/);
   assert.match(source, /api\('\/api\/simulations\/recharge-alert'/);
   assert.match(source, /name="notificationChannelId"/);
-  assert.match(source, /name="openMobilePreview"[^>]+checked/);
+  assert.match(source, /name="previewOnly"[^>]+checked/);
+  assert.match(source, /仅打开移动端预览（不发送通知）/);
+  assert.match(source, /\.\.\.\(!previewOnly \? \{ channelId:/);
   assert.match(source, /openMobilePreviewWindow/);
   assert.match(source, /width=430,height=860/);
   assert.match(source, /data-action="open-mobile-preview"/);
@@ -164,6 +171,8 @@ test('test center exposes provider-scoped mobile recharge alert simulation', () 
   assert.match(readiness, /supplier\.example/);
   assert.match(readiness, /适配器自动登录/);
   assert.match(readiness, /Personal WeChat（停用）/);
+  assert.match(previewReadiness, /仅生成移动端预览，不发送通知/);
+  assert.match(previewReadiness, /通知通道<\/span><strong>不发送/);
   assert.equal(
     vm.runInContext("rechargeTestReasonLabel('web_login_credentials_missing')", context),
     '缺少充值网页账号或密码'

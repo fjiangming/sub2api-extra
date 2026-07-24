@@ -1007,19 +1007,20 @@ function rechargeTestTargetHost(value) {
   try { return new URL(value).hostname; } catch { return '地址无效'; }
 }
 
-function rechargeTestReadinessHtml(provider, channel) {
+function rechargeTestReadinessHtml(provider, channel, previewOnly = false) {
   if (!provider) return '<div class="test-readiness-state error"><i data-lucide="circle-alert"></i><span>暂无可测试的供应商</span></div>';
   const hasRechargeUrl = Boolean(provider.rechargeUrl);
   const adapterLogin = provider.typeConfig?.rechargeLogin?.enabled === true;
-  return `<div class="test-readiness-state ${hasRechargeUrl && channel ? 'ready' : 'error'}">
-      <i data-lucide="${hasRechargeUrl && channel ? 'circle-check' : 'circle-alert'}"></i>
-      <span>${hasRechargeUrl ? channel ? '可以发送模拟告警' : '请选择通知通道' : '该供应商未配置充值链接'}</span>
+  const ready = hasRechargeUrl && (previewOnly || channel);
+  return `<div class="test-readiness-state ${ready ? 'ready' : 'error'}">
+      <i data-lucide="${ready ? 'circle-check' : 'circle-alert'}"></i>
+      <span>${hasRechargeUrl ? previewOnly ? '仅生成移动端预览，不发送通知' : channel ? '可以发送模拟告警' : '请选择通知通道' : '该供应商未配置充值链接'}</span>
     </div>
     <div class="test-readiness-grid">
       <div><span>适配器</span><strong>${escapeHtml(adapterLabel(provider.adapter_type))}</strong></div>
       <div><span>充值目标</span><strong>${escapeHtml(rechargeTestTargetHost(provider.rechargeUrl))}</strong></div>
       <div><span>请求方式</span><strong>${adapterLogin ? '适配器自动登录' : '直接打开'}</strong></div>
-      <div><span>通知通道</span><strong>${channel ? `${escapeHtml(channel.name)}${channel.enabled ? '' : '（停用）'}` : '未选择'}</strong></div>
+      <div><span>通知通道</span><strong>${previewOnly ? '不发送' : channel ? `${escapeHtml(channel.name)}${channel.enabled ? '' : '（停用）'}` : '未选择'}</strong></div>
     </div>`;
 }
 
@@ -1027,8 +1028,12 @@ function updateRechargeAlertTestReadiness(form = $('#recharge-alert-test-form'))
   if (!form) return;
   const provider = state.providers.find((item) => item.id === form.elements.connectionId.value);
   const channel = state.channels.find((item) => item.id === form.elements.notificationChannelId.value);
-  $('#recharge-test-readiness').innerHTML = rechargeTestReadinessHtml(provider, channel);
-  $('button[type="submit"]', form).disabled = form.dataset.running === 'true' || !provider?.rechargeUrl || !channel;
+  const previewOnly = form.elements.previewOnly.checked;
+  form.elements.notificationChannelId.disabled = previewOnly || state.channels.length === 0;
+  $('#recharge-test-readiness').innerHTML = rechargeTestReadinessHtml(provider, channel, previewOnly);
+  const submit = $('button[type="submit"]', form);
+  submit.disabled = form.dataset.running === 'true' || !provider?.rechargeUrl || (!previewOnly && !channel);
+  submit.innerHTML = `<i data-lucide="${previewOnly ? 'smartphone' : 'send'}"></i><span>${previewOnly ? '打开移动端预览' : '发送测试告警'}</span>`;
   icons();
 }
 
@@ -1036,19 +1041,21 @@ function rechargeAlertTestResultHtml(result) {
   const recharge = result.recharge || {};
   const adapterEntry = recharge.mode === 'adapter';
   const reason = rechargeTestReasonLabel(recharge.reason);
+  const previewOnly = result.previewOnly === true;
+  const succeeded = previewOnly ? result.status === 'preview_ready' : result.status === 'delivered';
   return `<section class="panel test-result-panel">
-    <div class="panel-header"><h2>发送结果</h2><div class="panel-actions">${result.mobilePreview?.url ? '<button class="button small" type="button" data-action="open-mobile-preview"><i data-lucide="smartphone"></i><span>打开移动端预览</span></button>' : ''}${badge(result.status === 'delivered' ? 'succeeded' : 'failed', result.status === 'delivered' ? '已送达' : result.status)}</div></div>
+    <div class="panel-header"><h2>${previewOnly ? '预览结果' : '发送结果'}</h2><div class="panel-actions">${result.mobilePreview?.url ? '<button class="button small" type="button" data-action="open-mobile-preview"><i data-lucide="smartphone"></i><span>打开移动端预览</span></button>' : ''}${badge(succeeded ? 'succeeded' : 'failed', previewOnly && succeeded ? '预览已生成' : succeeded ? '已送达' : result.status)}</div></div>
     <div class="test-result-grid">
       <div><span>供应商</span><strong>${escapeHtml(result.provider?.name || '-')}</strong></div>
-      <div><span>通知通道</span><strong>${escapeHtml(result.channel?.name || '-')}</strong></div>
+      <div><span>通知通道</span><strong>${previewOnly ? '未发送' : escapeHtml(result.channel?.name || '-')}</strong></div>
       <div><span>充值入口</span><strong>${adapterEntry ? '一次性自动登录入口' : '原充值链接'}</strong></div>
       <div><span>目标主机</span><strong>${escapeHtml(recharge.targetHost || '-')}</strong></div>
       <div><span>模拟余额</span><strong>${formatNumber(result.alert?.balance, 2)} ${escapeHtml(result.alert?.currency || '')}</strong></div>
       <div><span>模拟阈值</span><strong>${formatNumber(result.alert?.threshold, 2)} ${escapeHtml(result.alert?.currency || '')}</strong></div>
       <div><span>入口到期</span><strong>${recharge.expiresAt ? formatDate(recharge.expiresAt) : '不适用'}</strong></div>
-      <div><span>发送时间</span><strong>${formatDate(result.sentAt)}</strong></div>
+      <div><span>${previewOnly ? '生成时间' : '发送时间'}</span><strong>${formatDate(result.sentAt)}</strong></div>
     </div>
-    ${reason ? `<div class="test-result-note"><i data-lucide="info"></i><span>${escapeHtml(reason)}，本次已发送原充值链接。</span></div>` : ''}
+    ${reason ? `<div class="test-result-note"><i data-lucide="info"></i><span>${escapeHtml(reason)}，${previewOnly ? '预览将打开原充值链接。' : '本次已发送原充值链接。'}</span></div>` : ''}
   </section>`;
 }
 
@@ -1071,18 +1078,20 @@ function openMobilePreviewWindow(url = '') {
 
 async function runRechargeAlertTest(form) {
   const resultRegion = $('#recharge-test-result');
-  const previewWindow = form.elements.openMobilePreview.checked
+  const previewOnly = form.elements.previewOnly.checked;
+  const previewWindow = previewOnly
     ? openMobilePreviewWindow()
     : null;
   state.mobilePreviewUrl = '';
   form.dataset.running = 'true';
   updateRechargeAlertTestReadiness(form);
-  resultRegion.innerHTML = `<section class="panel test-result-panel"><div class="test-result-pending"><i class="spin" data-lucide="loader-circle"></i><strong>正在发送模拟告警</strong></div></section>`;
+  resultRegion.innerHTML = `<section class="panel test-result-panel"><div class="test-result-pending"><i class="spin" data-lucide="loader-circle"></i><strong>${previewOnly ? '正在生成移动端预览' : '正在发送模拟告警'}</strong></div></section>`;
   icons();
   try {
     const body = {
       connectionId: form.elements.connectionId.value,
-      channelId: form.elements.notificationChannelId.value
+      previewOnly,
+      ...(!previewOnly ? { channelId: form.elements.notificationChannelId.value } : {})
     };
     const result = await withRecentReauth(() => api('/api/simulations/recharge-alert', {
       method: 'POST',
@@ -1094,7 +1103,7 @@ async function runRechargeAlertTest(form) {
       previewWindow.location.replace(state.mobilePreviewUrl);
       previewWindow.focus?.();
     }
-    toast(`模拟告警已发送至 ${result.channel.name}`);
+    toast(previewOnly ? '移动端预览已打开，未发送任何通知' : `模拟告警已发送至 ${result.channel.name}`);
   } catch (error) {
     if (previewWindow && !previewWindow.closed) {
       try {
@@ -1131,7 +1140,7 @@ async function renderTests() {
         <div id="recharge-test-readiness" class="test-readiness"></div>
         <footer class="test-runner-actions">
           <span class="test-simulation-mark"><i data-lucide="shield-check"></i><span>隔离模拟</span></span>
-          <label class="toggle-field test-preview-toggle"><input name="openMobilePreview" type="checkbox" checked><span>发送后打开移动端预览</span></label>
+          <label class="toggle-field test-preview-toggle"><input name="previewOnly" type="checkbox" checked><span>仅打开移动端预览（不发送通知）</span></label>
           <button class="button primary" type="submit"><i data-lucide="send"></i><span>发送测试告警</span></button>
         </footer>
       </form>
@@ -1140,6 +1149,7 @@ async function renderTests() {
   const form = $('#recharge-alert-test-form');
   form.elements.connectionId.addEventListener('change', () => updateRechargeAlertTestReadiness(form));
   form.elements.notificationChannelId.addEventListener('change', () => updateRechargeAlertTestReadiness(form));
+  form.elements.previewOnly.addEventListener('change', () => updateRechargeAlertTestReadiness(form));
   form.addEventListener('submit', (event) => {
     event.preventDefault();
     runRechargeAlertTest(form);

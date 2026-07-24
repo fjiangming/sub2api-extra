@@ -42,12 +42,11 @@ class SimulationService {
         status: 409
       });
     }
-    const channel = this.notifications.listChannels()
-      .find((item) => item.id === input.channelId);
-    if (!channel) {
-      throw new AppError('CHANNEL_NOT_FOUND', 'Notification channel was not found', {
-        status: 404
-      });
+    const channel = input.previewOnly
+      ? null
+      : this.notifications.listChannels().find((item) => item.id === input.channelId);
+    if (!input.previewOnly && !channel) {
+      throw new AppError('CHANNEL_NOT_FOUND', 'Notification channel was not found', { status: 404 });
     }
 
     const configuredThreshold = provider.warning_threshold == null
@@ -77,27 +76,30 @@ class SimulationService {
         rechargeUrl: provider.rechargeUrl
       }
     };
-    const sent = await this.notifications.testRechargeAlert(channel.id, event);
-    let mobilePreview = null;
-    try {
-      mobilePreview = this.rechargeLinks.issue(provider.id);
-    } catch {}
+    const sent = input.previewOnly
+      ? null
+      : await this.notifications.testRechargeAlert(channel.id, event);
+    const mobilePreview = input.previewOnly
+      ? this.rechargeLinks.issue(provider.id)
+      : null;
+    const recharge = input.previewOnly ? mobilePreview : sent.recharge;
     return {
       testType: 'recharge_alert',
-      status: sent.delivery.status,
+      status: input.previewOnly ? 'preview_ready' : sent.delivery.status,
       simulated: true,
+      previewOnly: input.previewOnly,
       sentAt: triggeredAt,
       provider: {
         id: provider.id,
         name: provider.name,
         adapterType: provider.adapter_type
       },
-      channel: {
+      channel: channel ? {
         id: channel.id,
         name: channel.name,
         type: channel.type,
         enabled: channel.enabled
-      },
+      } : null,
       alert: {
         severity: event.severity,
         balance,
@@ -105,7 +107,7 @@ class SimulationService {
         thresholdConfigured: configuredThreshold != null,
         currency
       },
-      recharge: publicRechargeResult(sent.recharge),
+      recharge: publicRechargeResult(recharge),
       mobilePreview: mobilePreviewResult(mobilePreview)
     };
   }
