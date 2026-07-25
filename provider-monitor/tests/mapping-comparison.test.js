@@ -32,6 +32,7 @@ test('mapping comparison persists Sub2API composite-rate drift and drives alert 
 
   let baseRate = 1.2;
   let baseGroups = [{ id: 7, name: 'Retail', status: 'active', rate_multiplier: baseRate }];
+  let baseAccountAvailable = true;
   const sub2api = {
     authenticationStatus: () => ({ available: true, source: 'test' }),
     async listAll(endpoint) {
@@ -47,6 +48,14 @@ test('mapping comparison persists Sub2API composite-rate drift and drives alert 
         return baseGroups.map((group) => ({ ...group, rate_multiplier: baseRate }));
       }
       if (endpoint === '/api/v1/groups/rates') return { 7: baseRate };
+      if (endpoint === '/api/v1/admin/accounts/70') {
+        if (!baseAccountAvailable) {
+          const error = new Error('Account not found');
+          error.status = 404;
+          throw error;
+        }
+        return { id: 70, name: 'Supplier A account', priority: 17 };
+      }
       throw new Error(`Unexpected data endpoint: ${endpoint}`);
     }
   };
@@ -54,6 +63,7 @@ test('mapping comparison persists Sub2API composite-rate drift and drives alert 
   assert.deepEqual((await mappings.channelMonitors()).items, []);
   const mapping = mappings.save({
     connectionId: provider.id,
+    accountId: 70,
     groupId: 7,
     enabled: true,
     config: { upstreamGroupRef: 'supplier-low-cost', rateToleranceRatio: 0.05 }
@@ -65,6 +75,7 @@ test('mapping comparison persists Sub2API composite-rate drift and drives alert 
   assert.equal(comparison.items[0].comparison.providerRate, 0.8);
   assert.equal(comparison.items[0].comparison.baseGroupRate, 1.2);
   assert.equal(comparison.items[0].comparison.baseGroupId, 7);
+  assert.deepEqual(comparison.items[0].baseAccount, { id: 70, name: 'Supplier A account', priority: 17 });
   assert.equal(comparison.items[0].comparison.rechargeMultiplier, 10);
   assert.equal(comparison.items[0].comparison.rechargeSource, 'manual');
   assert.ok(Math.abs(comparison.items[0].comparison.compositeRate - 0.08) < 1e-12);
@@ -126,6 +137,10 @@ test('mapping comparison persists Sub2API composite-rate drift and drives alert 
   comparison = await mappings.refreshComparisons({ force: true });
   assert.equal(comparison.items[0].comparison.status, 'missing_base_group');
   assert.equal(comparison.summary.error, 1);
+
+  baseAccountAvailable = false;
+  comparison = await mappings.comparisons({ force: true });
+  assert.equal(comparison.items[0].baseAccount, null);
 });
 
 test('mapping comparison prefers configured per-key dynamic route rates over nominal groups', async (t) => {

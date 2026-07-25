@@ -39,7 +39,7 @@ test('auto-mapping HTTP API enforces CSRF and exposes preview, apply and grouped
   sub2api.authenticationStatus = () => ({ available: true, source: 'test' });
   sub2api.listAll = async (endpoint) => {
     if (endpoint === '/api/v1/admin/accounts') {
-      return { items: [{ id: 901, name: 'API Supplier', type: 'api_key', group_ids: [501], credentials_status: { has_api_key: true } }] };
+      return { items: [{ id: 901, name: 'API Supplier', type: 'api_key', priority: 17, group_ids: [501], credentials_status: { has_api_key: true } }] };
     }
     throw new Error(`Unexpected list endpoint: ${endpoint}`);
   };
@@ -108,7 +108,9 @@ test('auto-mapping HTTP API enforces CSRF and exposes preview, apply and grouped
   assert.equal(comparisonsResponse.status, 200);
   const comparisons = await comparisonsResponse.json();
   assert.equal(comparisons.items.length, 1);
+  assert.deepEqual(comparisons.items[0].baseAccount, { id: 901, name: 'API Supplier', priority: 17 });
   assert.equal(comparisons.groups.length, 2);
+  assert.equal(comparisons.groups.find((group) => group.groupId === 501).highest.baseAccount.priority, 17);
   assert.equal(comparisons.groups.find((group) => group.groupId === 501).highest.key_id, keyId);
   assert.equal(comparisons.groups.find((group) => group.groupId === 501).highest.comparison.compositeRate, 1.5);
   assert.equal(comparisons.groups.find((group) => group.groupId === 502).mappingCount, 0);

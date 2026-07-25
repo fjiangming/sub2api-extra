@@ -109,6 +109,11 @@ th { color: var(--muted); background: #f8f9f8; font-size: 11px; text-transform: 
 .table-name-filter-input svg { flex: 0 0 13px; width: 13px; height: 13px; color: var(--muted); }
 .table-name-filter-input input { width: 118px; min-width: 0; height: 26px; padding: 0; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 11px; font-weight: 600; text-transform: none; }
 .table-name-filter-input input::placeholder { color: var(--muted); font-weight: 500; }
+.sub2api-base-groups { min-width: 150px; display: grid; gap: 5px; }
+.sub2api-base-group { display: grid; gap: 2px; }
+.sub2api-base-group + .sub2api-base-group { padding-top: 5px; border-top: 1px solid var(--line); }
+.sub2api-base-group strong { color: var(--text); font-size: 12px; font-weight: 650; text-transform: none; white-space: normal; }
+.sub2api-base-group small { color: var(--muted); font-size: 10px; font-weight: 500; text-transform: none; white-space: nowrap; }
 .table-header-sort { flex: 0 0 28px; width: 28px; height: 28px; border-radius: 4px; color: var(--muted); }
 .table-header-sort.active { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .table-header-sort svg { width: 14px; height: 14px; }
@@ -233,7 +238,7 @@ tbody tr:hover { background: #fafbfa; }
 .integration-status-help-panel .integration-status-help-scope { margin: 2px 0 0; padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 .comparison-delta { font-weight: 700; }
 .comparison-delta.warning { color: var(--warning); }
-.integration-table table { min-width: 1380px; }
+.integration-table table { min-width: 1460px; }
 .integration-group-row { background: #f8faf8; }
 .integration-group-row td { height: 58px; border-bottom-color: var(--line-strong); }
 .integration-group-row:hover { background: #f3f7f4; }

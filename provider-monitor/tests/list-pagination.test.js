@@ -190,6 +190,32 @@ test('large operational list endpoints return bounded pages with totals', async 
     'inventory-only-group', provider.id, 'inventory-only', 'Inventory Only',
     '{}', now, now
   );
+  const insertMapping = context.db.prepare(`
+    INSERT INTO sub2api_mappings(
+      id, connection_id, key_id, account_id, group_id, role, enabled,
+      models_json, config_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?)
+  `);
+  insertMapping.run(
+    'mapped-base-plus', provider.id, 'pagination-key', 101, 3, 'primary', 1,
+    JSON.stringify({ upstreamGroupRef: 'remote-group-0' }), now, now
+  );
+  insertMapping.run(
+    'mapped-base-pro', provider.id, 'pagination-key', 102, 8, 'backup', 1,
+    JSON.stringify({ upstreamGroupRef: 'Group 0' }), now, now
+  );
+  insertMapping.run(
+    'disabled-base-group', provider.id, 'pagination-key', 103, 99, 'primary', 0,
+    JSON.stringify({ upstreamGroupRef: 'remote-group-0' }), now, now
+  );
+  context.db.prepare(`
+    INSERT INTO sub2api_mapping_states(
+      mapping_id, status, provider_group_ref, provider_group_name, provider_rate,
+      base_group_id, base_group_name, base_group_rate, difference_ratio,
+      tolerance_ratio, details_json, checked_at
+    ) VALUES ('mapped-base-plus', 'aligned', 'remote-group-0', 'Group 0', 0.4,
+      3, 'Base Plus', 0.2, 0, 0.05, '{}', ?)
+  `).run(now);
 
   const allAssetGroups = await request('/api/groups');
   assert.equal(allAssetGroups.items.some((item) => item.id === 'unresolved-derived-group'), true);
@@ -235,6 +261,18 @@ test('large operational list endpoints return bounded pages with totals', async 
   assert.equal(filteredGroups.items.every((item) => item.platform === 'openai'), true);
   assert.equal(filteredGroups.filterOptions.providers.some((item) => item.id === otherProvider.id), true);
   assert.equal(filteredGroups.filterOptions.platforms.includes('anthropic'), true);
+  const mappedGroup = filteredGroups.items.find((item) => item.name === 'Group 0');
+  assert.deepEqual(
+    mappedGroup.sub2apiGroups
+      .map((item) => [item.groupId, item.groupName, item.role, item.status])
+      .sort((left, right) => left[0] - right[0]),
+    [[3, 'Base Plus', 'primary', 'aligned'], [8, null, 'backup', null]]
+  );
+  assert.deepEqual(
+    filteredGroups.items.find((item) => item.name === 'Group 1').sub2apiGroups,
+    []
+  );
+  assert.equal(mappedGroup.sub2apiGroups.some((item) => item.groupId === 99), false);
 
   const includeNameQuery = new URLSearchParams({
     excludeMissing: 'true', requireRatio: 'true', page: '1', pageSize: '10',

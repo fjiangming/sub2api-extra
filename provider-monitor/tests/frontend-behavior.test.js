@@ -104,6 +104,15 @@ test('large operational tables render server-side pagination controls', () => {
   assert.doesNotMatch(source, /api\('\/api\/prices'\)/);
 });
 
+test('Sub2API integrations expose a confirmed bulk mapping delete action', () => {
+  const { source } = createBrowserContext();
+  assert.match(source, /data-action="delete-all-mappings"/);
+  assert.match(source, /state\.mappings\.length \? '' : 'disabled'/);
+  assert.match(source, /确定删除全部.*条映射关系及其对账历史？此操作不可撤销。/);
+  assert.match(source, /api\('\/api\/mappings', \{ method: 'DELETE' \}\)/);
+  assert.match(source, /result\.deletedMappings/);
+});
+
 test('cost table filters stay combined across pagination and remain visible for empty results', async () => {
   const { context, source } = createBrowserContext();
   let requestedUrl = '';
@@ -194,6 +203,88 @@ test('cost table filters stay combined across pagination and remain visible for 
   assert.match(source, /updateCostListFilter\('cost-groups', 'nameQuery', value\)/);
 });
 
+test('group name filtering keeps the input focused after the table header is repainted', async () => {
+  const { context } = createBrowserContext();
+  const input = {
+    disabled: false,
+    focusCalls: 0,
+    selectionStart: 4,
+    selectionEnd: 4,
+    value: 'grok',
+    focus() { this.focusCalls += 1; },
+    setSelectionRange(start, end) {
+      this.selectionStart = start;
+      this.selectionEnd = end;
+    }
+  };
+  const root = { innerHTML: '', setAttribute() {} };
+  context.document.activeElement = input;
+  context.document.querySelector = (selector) => selector.includes('data-cost-name-query') ? input : root;
+  context.document.querySelectorAll = () => [];
+  context.fetch = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        items: [],
+        pagination: { page: 1, pageSize: 50, total: 0, totalPages: 1 },
+        summary: {},
+        filterOptions: { providers: [], platforms: [] }
+      };
+    }
+  });
+  vm.runInContext(`
+    state.view = 'costs';
+    state.costListFilters['cost-groups'] = {
+      nameQuery: '', nameMode: 'include', connectionId: '', platform: '', rateSort: ''
+    };
+  `, context);
+
+  await vm.runInContext("updateCostListFilter('cost-groups', 'nameQuery', 'grok')", context);
+
+  assert.equal(input.disabled, false);
+  assert.equal(input.focusCalls, 1);
+  assert.equal(input.selectionStart, 4);
+  assert.equal(input.selectionEnd, 4);
+});
+
+test('an older group name response does not repaint over newer input', async () => {
+  const { context } = createBrowserContext();
+  const input = { value: 'g', selectionStart: 1, selectionEnd: 1 };
+  const root = { innerHTML: 'unchanged', setAttribute() {} };
+  let resolveResponse;
+  context.document.activeElement = input;
+  context.document.querySelector = (selector) => selector.includes('data-cost-name-query') ? input : root;
+  context.document.querySelectorAll = () => [];
+  context.fetch = () => new Promise((resolve) => { resolveResponse = resolve; });
+  vm.runInContext(`
+    state.view = 'costs';
+    state.costListFilters['cost-groups'] = {
+      nameQuery: '', nameMode: 'include', connectionId: '', platform: '', rateSort: ''
+    };
+    state.pagedLists['cost-groups'] = { marker: 'original' };
+  `, context);
+
+  const request = vm.runInContext("updateCostListFilter('cost-groups', 'nameQuery', 'g')", context);
+  input.value = 'gr';
+  resolveResponse({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        items: [{ id: 'stale' }],
+        pagination: { page: 1, pageSize: 50, total: 1, totalPages: 1 },
+        summary: {},
+        filterOptions: { providers: [], platforms: [] }
+      };
+    }
+  });
+  await request;
+
+  assert.equal(vm.runInContext("state.pagedLists['cost-groups'].marker", context), 'original');
+  assert.equal(root.innerHTML, 'unchanged');
+});
+
 test('integration recharge and composite columns use the documented multiplier direction', () => {
   const { context, source } = createBrowserContext();
   const recharge = vm.runInContext(
@@ -235,6 +326,23 @@ test('integration recharge and composite columns use the documented multiplier d
   assert.equal(composite, '×0.08');
   assert.match(source, /充值倍率/);
   assert.match(source, /综合倍率/);
+});
+
+test('group price rows render corresponding Sub2API base groups', () => {
+  const { context, source } = createBrowserContext();
+  const html = vm.runInContext(`sub2apiBaseGroupsHtml([
+    { groupId: 3, groupName: 'gpt plus号池', role: 'primary', status: 'aligned' },
+    { groupId: 3, groupName: 'gpt plus号池', role: 'backup', status: 'rate_mismatch' },
+    { groupId: 21, groupName: null, role: 'primary', status: 'missing_base_group' }
+  ])`, context);
+
+  assert.match(html, /gpt plus号池/);
+  assert.match(html, /#3 · 2 条映射 · 主映射、备用映射/);
+  assert.match(html, /基座分组 #21/);
+  assert.match(html, /缺失/);
+  assert.equal(vm.runInContext('sub2apiBaseGroupsHtml([])', context), '-');
+  assert.match(source, /Sub2API 基座分组/);
+  assert.match(source, /sub2apiBaseGroupsHtml\(group\.sub2apiGroups\)/);
 });
 
 test('alert severity labels are displayed in Chinese', () => {
@@ -542,6 +650,7 @@ test('integration groups render the highest-composite winner and mark exactly on
     mappingCount: 2,
     highest: {
       id: 'high', account_id: 501, provider_name: 'Supplier A',
+      baseAccount: { id: 501, name: 'Supplier A account', priority: 17 },
       key_name: 'High key', masked_key: 'sk-h...7890',
       comparison: {
         providerGroupName: 'Premium', providerRate: 1.5, rechargeMultiplier: 1,
@@ -556,6 +665,7 @@ test('integration groups render the highest-composite winner and mark exactly on
     items: [
       {
         id: 'high', account_id: 501, provider_name: 'Supplier A',
+        baseAccount: { id: 501, name: 'Supplier A account', priority: 17 },
         key_name: 'High key', masked_key: 'sk-h...7890', isHighestRate: true,
         comparison: {
           providerGroupName: 'Premium', providerRate: 1.5, rechargeMultiplier: 1,
@@ -569,6 +679,7 @@ test('integration groups render the highest-composite winner and mark exactly on
       },
       {
         id: 'low', account_id: 502, provider_name: 'Supplier A',
+        baseAccount: { id: 502, name: 'Supplier A backup', priority: 3 },
         key_name: 'Low key', masked_key: 'sk-l...4321', isHighestRate: false,
         comparison: {
           providerGroupName: 'Economy', providerRate: 0.8, baseGroupRate: 1.1,
@@ -585,6 +696,11 @@ test('integration groups render the highest-composite winner and mark exactly on
   assert.match(collapsed, /sk-h\.\.\.7890/);
   assert.equal((collapsed.match(/highest-rate-row/g) || []).length, 1);
   assert.match(collapsed, /综合最高/);
+  assert.equal(vm.runInContext('integrationAccountPriority({ baseAccount: { priority: 17 } })', context), '17');
+  assert.equal(vm.runInContext('integrationAccountPriority({ baseAccount: { priority: 0 } })', context), '0');
+  assert.equal(vm.runInContext('integrationAccountPriority({})', context), '-');
+  assert.equal(vm.runInContext('integrationAccountPriority(null)', context), '-');
+  assert.match(source, /账号优先级/);
   assert.match(source, /最高综合倍率供应商/);
   assert.match(source, /综合倍率差/);
   assert.match(source, /（基座倍率 - 综合倍率）÷ 综合倍率/);

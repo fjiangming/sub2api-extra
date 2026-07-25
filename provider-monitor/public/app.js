@@ -344,6 +344,43 @@ function costGroupNameFilterHeaderHtml() {
   return `<th><div class="table-column-control group-name-filter"><span>分组</span><select data-cost-filter="nameMode" data-list-key="cost-groups" aria-label="分组名称筛选方式" title="分组名称筛选方式"><option value="include" ${mode === 'include' ? 'selected' : ''}>包含</option><option value="exclude" ${mode === 'exclude' ? 'selected' : ''}>排除</option></select><label class="table-name-filter-input" title="${title}"><i data-lucide="${mode === 'exclude' ? 'list-minus' : 'search'}"></i><input type="search" value="${escapeHtml(query)}" data-cost-name-query data-list-key="cost-groups" maxlength="500" placeholder="名称1、名称2" aria-label="${title}"></label></div></th>`;
 }
 
+function sub2apiBaseGroupsHtml(mappings = []) {
+  const grouped = new Map();
+  for (const mapping of mappings) {
+    const groupId = String(mapping.groupId ?? '').trim();
+    if (!groupId) continue;
+    const current = grouped.get(groupId) || {
+      groupId,
+      groupName: '',
+      mappingCount: 0,
+      roles: new Set(),
+      missing: false
+    };
+    if (!current.groupName && mapping.groupName) current.groupName = String(mapping.groupName);
+    current.mappingCount += 1;
+    if (mapping.role) current.roles.add(mapping.role);
+    if (mapping.status === 'missing_base_group') current.missing = true;
+    grouped.set(groupId, current);
+  }
+  if (grouped.size === 0) return '-';
+  const roleLabel = (role) => ({ primary: '主映射', backup: '备用映射' }[role] || role);
+  const items = [...grouped.values()].sort((left, right) => {
+    const leftNumber = Number(left.groupId);
+    const rightNumber = Number(right.groupId);
+    if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) return leftNumber - rightNumber;
+    return left.groupId.localeCompare(right.groupId, 'zh-CN');
+  });
+  return `<div class="sub2api-base-groups">${items.map((item) => {
+    const label = item.groupName || `基座分组 #${item.groupId}`;
+    const details = [
+      item.groupName ? `#${item.groupId}` : null,
+      `${item.mappingCount} 条映射`,
+      [...item.roles].map(roleLabel).join('、')
+    ].filter(Boolean).join(' · ');
+    return `<div class="sub2api-base-group"><strong>${escapeHtml(label)}${item.missing ? ` ${badge('missing', '缺失')}` : ''}</strong><small>${escapeHtml(details)}</small></div>`;
+  }).join('')}</div>`;
+}
+
 async function requestPagedList(listKey, requestedPage = 1) {
   const endpoint = PAGED_LIST_ENDPOINTS[listKey];
   if (!endpoint) throw new Error('未知分页列表');
@@ -400,20 +437,47 @@ async function updateCostListFilter(listKey, filterName, value) {
   const normalizedValue = filterName === 'nameQuery' ? String(value || '').trim() : value;
   if (filters[filterName] === normalizedValue) return;
   filters[filterName] = normalizedValue;
-  const controls = $$(`[data-list-key="${listKey}"][data-cost-filter], [data-list-key="${listKey}"][data-cost-name-query], [data-list-key="${listKey}"][data-action="sort-cost-rate"]`);
+  const nameInputSelector = `[data-list-key="${listKey}"][data-cost-name-query]`;
+  const controls = $$(`[data-list-key="${listKey}"][data-cost-filter], [data-list-key="${listKey}"][data-action="sort-cost-rate"]`);
   controls.forEach((control) => { control.disabled = true; });
   const root = $(`[data-paged-list="${listKey}"]`);
   root?.setAttribute('aria-busy', 'true');
+  const requestIsCurrent = () => {
+    if (filters[filterName] !== normalizedValue) return false;
+    if (filterName !== 'nameQuery') return true;
+    const input = $(nameInputSelector);
+    return !input || String(input.value || '').trim() === normalizedValue;
+  };
   try {
     const result = await requestPagedList(listKey, 1);
-    if (state.view !== 'costs') return;
+    if (state.view !== 'costs' || !requestIsCurrent()) return;
+    const currentInput = filterName === 'nameQuery' ? $(nameInputSelector) : null;
+    const focusedSelection = currentInput && document.activeElement === currentInput
+      ? {
+          start: currentInput.selectionStart ?? currentInput.value.length,
+          end: currentInput.selectionEnd ?? currentInput.value.length
+        }
+      : null;
     state.pagedLists[listKey] = result;
     paintPagedList(listKey);
+    if (focusedSelection) {
+      const nextInput = $(nameInputSelector);
+      if (nextInput) {
+        const valueLength = nextInput.value.length;
+        nextInput.focus({ preventScroll: true });
+        nextInput.setSelectionRange(
+          Math.min(focusedSelection.start, valueLength),
+          Math.min(focusedSelection.end, valueLength)
+        );
+      }
+    }
   } catch (error) {
+    if (!requestIsCurrent()) return;
     Object.assign(filters, previous);
     if (state.view === 'costs') paintPagedList(listKey);
     throw error;
   } finally {
+    controls.forEach((control) => { control.disabled = false; });
     root?.setAttribute('aria-busy', 'false');
   }
 }
@@ -676,13 +740,13 @@ function paintCostGroups() {
     const multiplier = formatEffectiveRate(group.ratio);
     const defaultMultiplier = formatEffectiveRate(defaultRatio);
     const compositeRate = formatEffectiveRate(group.compositeRate);
-    return `<tr><td class="primary-cell"><strong>${escapeHtml(group.name)}</strong><small>${escapeHtml(group.remote_id)}</small></td><td>${escapeHtml(group.provider_name)}</td><td>${escapeHtml(group.platform || metadata.platform || '-')}</td><td class="numeric"><strong>${multiplier}</strong></td><td class="primary-cell numeric">${integrationRecharge({}, group.recharge)}</td><td class="numeric"><strong title="有效倍率 ÷ 充值倍率">${compositeRate}</strong></td><td class="numeric">${defaultMultiplier}</td><td>${escapeHtml(peak)}</td><td class="numeric">${metadata.image_price_1k == null ? '-' : formatMoney(metadata.image_price_1k, 'USD')}</td><td class="numeric">${metadata.image_price_2k == null ? '-' : formatMoney(metadata.image_price_2k, 'USD')}</td><td class="numeric">${metadata.image_price_4k == null ? '-' : formatMoney(metadata.image_price_4k, 'USD')}</td></tr>`;
+    return `<tr><td class="primary-cell"><strong>${escapeHtml(group.name)}</strong><small>${escapeHtml(group.remote_id)}</small></td><td>${sub2apiBaseGroupsHtml(group.sub2apiGroups)}</td><td>${escapeHtml(group.provider_name)}</td><td>${escapeHtml(group.platform || metadata.platform || '-')}</td><td class="numeric"><strong>${multiplier}</strong></td><td class="primary-cell numeric">${integrationRecharge({}, group.recharge)}</td><td class="numeric"><strong title="有效倍率 ÷ 充值倍率">${compositeRate}</strong></td><td class="numeric">${defaultMultiplier}</td><td>${escapeHtml(peak)}</td><td class="numeric">${metadata.image_price_1k == null ? '-' : formatMoney(metadata.image_price_1k, 'USD')}</td><td class="numeric">${metadata.image_price_2k == null ? '-' : formatMoney(metadata.image_price_2k, 'USD')}</td><td class="numeric">${metadata.image_price_4k == null ? '-' : formatMoney(metadata.image_price_4k, 'USD')}</td></tr>`;
   }).join('');
   const providerOptions = result.filterOptions?.providers || state.providers;
   const platformOptions = result.filterOptions?.platforms || [...new Set(result.items.map((group) => group.platform || group.metadata?.platform).filter(Boolean))];
   root.innerHTML = pagedTableHtml({
     rows,
-    headers: `${costGroupNameFilterHeaderHtml()}${costFilterHeaderHtml('cost-groups', 'connectionId', '供应商', providerOptions)}${costFilterHeaderHtml('cost-groups', 'platform', '平台', platformOptions)}<th class="numeric">有效倍率</th><th class="numeric">充值倍率</th>${costRateSortHeaderHtml('cost-groups', '综合倍率')}<th class="numeric">默认倍率</th><th>峰值倍率</th><th class="numeric">图片 1K</th><th class="numeric">图片 2K</th><th class="numeric">图片 4K</th>`,
+    headers: `${costGroupNameFilterHeaderHtml()}<th>Sub2API 基座分组</th>${costFilterHeaderHtml('cost-groups', 'connectionId', '供应商', providerOptions)}${costFilterHeaderHtml('cost-groups', 'platform', '平台', platformOptions)}<th class="numeric">有效倍率</th><th class="numeric">充值倍率</th>${costRateSortHeaderHtml('cost-groups', '综合倍率')}<th class="numeric">默认倍率</th><th>峰值倍率</th><th class="numeric">图片 1K</th><th class="numeric">图片 2K</th><th class="numeric">图片 4K</th>`,
     emptyIcon: 'boxes',
     emptyTitle: filters.nameQuery || filters.connectionId || filters.platform ? '没有匹配的分组倍率' : '暂无分组倍率',
     emptyText: filters.nameQuery || filters.connectionId || filters.platform ? '调整表头中的名称、供应商或平台筛选' : '先同步支持分组查询的供应商',
@@ -899,6 +963,13 @@ function integrationMappingActions(item) {
   return `<button class="icon-button small" data-action="reconcile" data-id="${item.id}" title="立即对账" aria-label="立即对账"><i data-lucide="calculator"></i></button>${item.role === 'backup' ? `<button class="icon-button small" data-action="activate-backup" data-id="${item.id}" title="激活备用映射" aria-label="激活备用映射"><i data-lucide="arrow-right-left"></i></button>` : ''}<button class="icon-button small" data-action="edit-mapping" data-id="${item.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-mapping" data-id="${item.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button>`;
 }
 
+function integrationAccountPriority(item = {}) {
+  const priority = Number(item?.baseAccount?.priority);
+  return item?.baseAccount?.priority != null && Number.isFinite(priority)
+    ? formatNumber(priority, 0)
+    : '-';
+}
+
 function integrationDetailRow(item, groupKey, expanded) {
   const comparison = item.comparison || {};
   const providerGroupState = comparison.details?.providerGroupStatus && !['active', 'enabled'].includes(comparison.details.providerGroupStatus.toLowerCase())
@@ -906,6 +977,7 @@ function integrationDetailRow(item, groupKey, expanded) {
   const providerGroupSource = providerGroupSourceBadge(comparison);
   return `<tr class="integration-detail-row${item.isHighestRate ? ' highest-rate-row' : ''}" data-integration-parent="${escapeHtml(groupKey)}" ${expanded ? '' : 'hidden'}>
     <td class="primary-cell integration-indent"><strong>${item.account_id ? `账号 #${item.account_id}` : '账户级映射'}</strong><small>${item.role === 'primary' ? '主映射' : '备用映射'}</small></td>
+    <td class="numeric"><strong>${integrationAccountPriority(item)}</strong></td>
     <td class="numeric">${integrationRate(comparison.baseGroupRate)}</td>
     <td class="primary-cell"><strong>${escapeHtml(item.provider_name)}</strong><small>${escapeHtml(item.key_name || '账户级')} · ${escapeHtml(item.masked_key || '-')}</small></td>
     <td class="primary-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${providerGroupSource}${item.isHighestRate ? ` ${badge('highest', '综合最高')}` : ''}</strong><small>${integrationProviderRate(comparison)}</small></td>
@@ -931,6 +1003,7 @@ function integrationGroupRows(group) {
   const detailRows = (group.items || []).map((item) => integrationDetailRow(item, groupKey, expanded)).join('');
   return `<tr class="integration-group-row" data-integration-group="${escapeHtml(groupKey)}">
     <td class="primary-cell"><strong>${escapeHtml(group.groupName)}${baseGroupState}</strong><small>#${escapeHtml(group.groupId)}${group.platform ? ` · ${escapeHtml(group.platform)}` : ''}</small></td>
+    <td class="numeric"><strong>${integrationAccountPriority(highest)}</strong></td>
     <td class="numeric"><strong>${integrationRate(group.baseRate)}</strong></td>
     <td class="primary-cell"><strong>${escapeHtml(highest?.provider_name || '-')}</strong><small>${highest ? `${escapeHtml(highest.key_name || '账户级')} · ${escapeHtml(highest.masked_key || '-')}` : '暂无有效综合倍率映射'}</small></td>
     <td class="primary-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${providerGroupSource}${highest ? ` ${badge('highest', '综合最高')}` : ''}</strong><small>${integrationProviderRate(comparison)}</small></td>
@@ -1086,7 +1159,7 @@ async function renderIntegrations() {
   state.integrationGroups = comparisonData.groups || [];
   state.sub2apiStatus = comparisonData.status;
   state.reconciliations = reconciliationData.items;
-  setTopActions(`<button class="button" data-action="refresh-comparisons" title="刷新基座" aria-label="刷新基座"><i data-lucide="refresh-cw"></i><span>刷新基座</span></button><button class="button primary" data-action="auto-map" title="自动映射" aria-label="自动映射"><i data-lucide="wand-sparkles"></i><span>自动映射</span></button><button class="button" data-action="add-mapping" title="添加映射" aria-label="添加映射"><i data-lucide="plus"></i><span>添加映射</span></button>`);
+  setTopActions(`<button class="button" data-action="refresh-comparisons" title="刷新基座" aria-label="刷新基座"><i data-lucide="refresh-cw"></i><span>刷新基座</span></button><button class="button primary" data-action="auto-map" title="自动映射" aria-label="自动映射"><i data-lucide="wand-sparkles"></i><span>自动映射</span></button><button class="button" data-action="add-mapping" title="添加映射" aria-label="添加映射"><i data-lucide="plus"></i><span>添加映射</span></button><button class="button danger" data-action="delete-all-mappings" title="删除全部映射" aria-label="删除全部映射" ${state.mappings.length ? '' : 'disabled'}><i data-lucide="trash-2"></i><span>删除全部映射</span></button>`);
   const groupedRows = state.integrationGroups.map(integrationGroupRows).join('');
   const unassigned = comparisonData.unassignedItems?.length
     ? integrationGroupRows({ groupId: 'unassigned', groupName: '未归组', baseRate: null, channels: [], mappingCount: comparisonData.unassignedItems.length, highest: null, items: comparisonData.unassignedItems })
@@ -1102,7 +1175,7 @@ async function renderIntegrations() {
     : status.authentication?.requiresTwoFactor
       ? '等待 Sub2API 二次验证'
       : '缺少可用管理员凭据';
-  $('#main-content').innerHTML = `<section class="base-instance-bar"><div><span class="status-dot ${status.authentication?.available ? 'healthy' : 'warning'}"></span><strong>${escapeHtml(status.publicUrl || status.baseUrl || '未配置基座 Sub2API')}</strong><small>${escapeHtml(authLabel)} · 最近检查 ${escapeHtml(timeAgo(status.lastCheckedAt))}</small></div><div class="status-summary"><span>${badge('aligned', `一致 ${summary.aligned}`)}</span><span>${badge('warning', `预警 ${summary.warning}`)}</span><span>${badge('failed', `错误 ${summary.error}`)}</span><span>${badge('unknown', `待检查 ${summary.unchecked}`)}</span>${integrationSummaryHelp()}</div></section><section class="section"><div class="section-header"><h2>分组与倍率对照</h2><p>${state.integrationGroups.length} 个 Sub2API 分组</p></div><div class="table-wrap integration-table">${mappingRows ? `<table><thead><tr><th>Sub2API 分组</th><th class="numeric">基座倍率</th><th>最高综合倍率供应商 / Key</th><th>供应商分组 / 倍率</th><th class="numeric" title="支付 1 单位可获得的供应商余额">充值倍率</th><th class="numeric" title="供应商分组倍率 ÷ 充值倍率">综合倍率</th><th class="numeric" title="（基座倍率 - 综合倍率）÷ 综合倍率">综合倍率差</th><th>检查</th><th>映射 / 对账</th><th></th></tr></thead><tbody>${mappingRows}</tbody></table>` : emptyState('waypoints', '暂无 Sub2API 分组', '刷新基座后显示分组与映射关系')}</div></section><section class="section"><div class="section-header"><h2>对账记录</h2></div><div class="table-wrap">${reconciliationRows ? `<table><thead><tr><th>供应商</th><th>结果</th><th>期间</th><th class="numeric">余额减少</th><th class="numeric">预期成本</th><th class="numeric">差异</th><th class="numeric">健康分</th></tr></thead><tbody>${reconciliationRows}</tbody></table>` : emptyState('calculator', '暂无对账记录', '映射创建后可执行对账')}</div></section><section class="section split-layout"><div><div class="section-header"><h2>签到记录</h2></div><div class="table-wrap">${checkinRows ? `<table><thead><tr><th>供应商</th><th>状态</th><th class="numeric">奖励</th><th class="numeric">签到前</th><th class="numeric">签到后</th><th>时间</th></tr></thead><tbody>${checkinRows}</tbody></table>` : emptyState('calendar-check', '暂无签到记录', '支持的供应商可手动或定时签到')}</div></div><div><div class="section-header"><h2>手动签到</h2></div><div class="table-wrap"><table><thead><tr><th>供应商</th><th>能力</th><th></th></tr></thead><tbody>${providerCheckins}</tbody></table></div></div></section>`;
+  $('#main-content').innerHTML = `<section class="base-instance-bar"><div><span class="status-dot ${status.authentication?.available ? 'healthy' : 'warning'}"></span><strong>${escapeHtml(status.publicUrl || status.baseUrl || '未配置基座 Sub2API')}</strong><small>${escapeHtml(authLabel)} · 最近检查 ${escapeHtml(timeAgo(status.lastCheckedAt))}</small></div><div class="status-summary"><span>${badge('aligned', `一致 ${summary.aligned}`)}</span><span>${badge('warning', `预警 ${summary.warning}`)}</span><span>${badge('failed', `错误 ${summary.error}`)}</span><span>${badge('unknown', `待检查 ${summary.unchecked}`)}</span>${integrationSummaryHelp()}</div></section><section class="section"><div class="section-header"><h2>分组与倍率对照</h2><p>${state.integrationGroups.length} 个 Sub2API 分组</p></div><div class="table-wrap integration-table">${mappingRows ? `<table><thead><tr><th>Sub2API 分组</th><th class="numeric" title="Sub2API 基座账号优先级">账号优先级</th><th class="numeric">基座倍率</th><th>最高综合倍率供应商 / Key</th><th>供应商分组 / 倍率</th><th class="numeric" title="支付 1 单位可获得的供应商余额">充值倍率</th><th class="numeric" title="供应商分组倍率 ÷ 充值倍率">综合倍率</th><th class="numeric" title="（基座倍率 - 综合倍率）÷ 综合倍率">综合倍率差</th><th>检查</th><th>映射 / 对账</th><th></th></tr></thead><tbody>${mappingRows}</tbody></table>` : emptyState('waypoints', '暂无 Sub2API 分组', '刷新基座后显示分组与映射关系')}</div></section><section class="section"><div class="section-header"><h2>对账记录</h2></div><div class="table-wrap">${reconciliationRows ? `<table><thead><tr><th>供应商</th><th>结果</th><th>期间</th><th class="numeric">余额减少</th><th class="numeric">预期成本</th><th class="numeric">差异</th><th class="numeric">健康分</th></tr></thead><tbody>${reconciliationRows}</tbody></table>` : emptyState('calculator', '暂无对账记录', '映射创建后可执行对账')}</div></section><section class="section split-layout"><div><div class="section-header"><h2>签到记录</h2></div><div class="table-wrap">${checkinRows ? `<table><thead><tr><th>供应商</th><th>状态</th><th class="numeric">奖励</th><th class="numeric">签到前</th><th class="numeric">签到后</th><th>时间</th></tr></thead><tbody>${checkinRows}</tbody></table>` : emptyState('calendar-check', '暂无签到记录', '支持的供应商可手动或定时签到')}</div></div><div><div class="section-header"><h2>手动签到</h2></div><div class="table-wrap"><table><thead><tr><th>供应商</th><th>能力</th><th></th></tr></thead><tbody>${providerCheckins}</tbody></table></div></div></section>`;
 }
 
 async function renderSettings() {
@@ -2130,6 +2203,13 @@ async function handleAction(button) {
       await navigate('integrations');
     }
     if (action === 'edit-mapping') await openMappingDialog(state.mappings.find((mapping) => mapping.id === id));
+    if (action === 'delete-all-mappings') {
+      const count = state.mappings.length;
+      if (!count || !confirm(`确定删除全部 ${count} 条映射关系及其对账历史？此操作不可撤销。`)) return;
+      const result = await api('/api/mappings', { method: 'DELETE' });
+      toast(`已删除 ${result.deletedMappings} 条映射关系`);
+      await navigate('integrations');
+    }
     if (action === 'delete-mapping' && confirm('删除该分组映射及其对账历史？')) { await api(`/api/mappings/${id}`, { method: 'DELETE' }); toast('映射已删除'); navigate('integrations'); }
     if (action === 'reconcile') { const result = await api(`/api/mappings/${id}/reconcile`, { method: 'POST', body: {} }); toast(`对账完成：${result.status}`); navigate('integrations'); }
     if (action === 'activate-backup' && confirm('将该备用映射设为当前主映射？')) { await api(`/api/mappings/${id}/activate-backup`, { method: 'POST' }); toast('备用映射已激活'); navigate('integrations'); }

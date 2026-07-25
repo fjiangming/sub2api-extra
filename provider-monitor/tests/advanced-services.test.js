@@ -116,6 +116,47 @@ test('manual backup activation swaps roles and can switch back to the original p
   }
 });
 
+test('bulk mapping deletion cascades comparison states and reconciliation history', () => {
+  const context = createTestContext();
+  try {
+    const { provider } = createProvider(context);
+    const mappings = new MappingService({ db: context.db, config: context.config, sub2api: {} });
+    const first = mappings.save({ connectionId: provider.id, groupId: 21 });
+    const second = mappings.save({ connectionId: provider.id, groupId: 22 });
+    const now = nowIso();
+    const insertState = context.db.prepare(`
+      INSERT INTO sub2api_mapping_states(
+        mapping_id, status, tolerance_ratio, details_json, checked_at
+      ) VALUES (?, 'aligned', 0.05, '{}', ?)
+    `);
+    const insertReconciliation = context.db.prepare(`
+      INSERT INTO reconciliation_runs(
+        id, mapping_id, status, period_start, period_end, details_json, created_at
+      ) VALUES (?, ?, 'succeeded', ?, ?, '{}', ?)
+    `);
+    [first, second].forEach((mapping, index) => {
+      insertState.run(mapping.id, now);
+      insertReconciliation.run(`bulk-delete-${index}`, mapping.id, now, now, now);
+    });
+
+    assert.deepEqual(mappings.deleteAll(), {
+      deletedMappings: 2,
+      deletedComparisonStates: 2,
+      deletedReconciliations: 2
+    });
+    assert.equal(context.db.prepare('SELECT COUNT(*) AS count FROM sub2api_mappings').get().count, 0);
+    assert.equal(context.db.prepare('SELECT COUNT(*) AS count FROM sub2api_mapping_states').get().count, 0);
+    assert.equal(context.db.prepare('SELECT COUNT(*) AS count FROM reconciliation_runs').get().count, 0);
+    assert.deepEqual(mappings.deleteAll(), {
+      deletedMappings: 0,
+      deletedComparisonStates: 0,
+      deletedReconciliations: 0
+    });
+  } finally {
+    context.cleanup();
+  }
+});
+
 test('credential rotation validates first and supports an encrypted rollback', async () => {
   const context = createTestContext();
   try {

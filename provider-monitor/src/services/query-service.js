@@ -11,6 +11,10 @@ function deserializeGroup(row) {
     metadata: parseJson(row.metadata_json, {}),
     metadata_json: undefined
   };
+  if (Object.prototype.hasOwnProperty.call(row, 'sub2api_groups_json')) {
+    result.sub2apiGroups = parseJson(row.sub2api_groups_json, []);
+    result.sub2api_groups_json = undefined;
+  }
   if (!Object.prototype.hasOwnProperty.call(row, 'recharge_multiplier')) return result;
   return {
     ...result,
@@ -320,6 +324,29 @@ class QueryService {
       WHEN rr.detected_multiplier > 0 THEN COALESCE(rr.status, 'unknown')
       ELSE 'default'
     END`;
+    const mappingProviderRefSql = `COALESCE(
+      NULLIF(TRIM(CAST(json_extract(m.config_json, '$.upstreamGroupRef') AS TEXT)), ''),
+      NULLIF(TRIM(k.primary_group_ref), ''),
+      NULLIF(TRIM(a.user_group), ''),
+      NULLIF(TRIM(s.provider_group_ref), '')
+    )`;
+    const sub2ApiGroupsSql = `(
+      SELECT COALESCE(json_group_array(json_object(
+        'mappingId', m.id,
+        'groupId', m.group_id,
+        'groupName', CASE WHEN s.base_group_id = m.group_id THEN s.base_group_name ELSE NULL END,
+        'role', m.role,
+        'status', CASE WHEN s.base_group_id = m.group_id THEN s.status ELSE NULL END
+      )), '[]')
+      FROM sub2api_mappings m
+      LEFT JOIN remote_keys k ON k.id = m.key_id
+      LEFT JOIN remote_accounts a ON a.id = k.remote_account_id
+      LEFT JOIN sub2api_mapping_states s ON s.mapping_id = m.id
+      WHERE m.connection_id = g.connection_id
+        AND m.enabled = 1
+        AND m.group_id IS NOT NULL
+        AND ${mappingProviderRefSql} IN (g.remote_id, g.name, g.id)
+    )`;
     const clauses = [];
     const params = [];
     if (connectionId) { clauses.push('g.connection_id = ?'); params.push(connectionId); }
@@ -366,6 +393,7 @@ class QueryService {
       : 'p.name COLLATE NOCASE, g.name COLLATE NOCASE, g.id';
     const items = this.db.prepare(`
       SELECT g.*, p.name AS provider_name, p.adapter_type, ${platformSql} AS platform,
+        ${sub2ApiGroupsSql} AS sub2api_groups_json,
         ${rechargeMultiplierSql} AS recharge_multiplier,
         ${rechargeSourceSql} AS recharge_source,
         ${rechargeStatusSql} AS recharge_status,

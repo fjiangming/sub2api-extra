@@ -1159,6 +1159,11 @@ function createApplication(options = {}) {
   api.get('/mappings', (req, res) => res.json({ items: mappings.list({
     connectionId: req.query.connectionId
   }) }));
+  api.delete('/mappings', (req, res) => {
+    const result = mappings.deleteAll();
+    audit(db, req, 'mapping.delete_all', 'mapping', null, result);
+    res.json(result);
+  });
   api.post('/mappings', (req, res) => {
     const mapping = mappings.save(validate(mappingSchema, req.body));
     queue.enqueue('sub2api_mapping_sync', { priority: 5 });

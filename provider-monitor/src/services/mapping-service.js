@@ -177,6 +177,7 @@ function normalizeBaseAccount(account) {
     id: finite(account?.id ?? account?.account_id),
     name: String(account?.name || account?.id || 'Unnamed account'),
     type: String(account?.type || '').toLowerCase(),
+    priority: finite(account?.priority ?? account?.account_priority),
     groupIds: normalizeGroupIds(account),
     hasApiKey: Boolean(
       account?.credentials_status?.has_api_key ||
@@ -209,6 +210,22 @@ function highestMapping(items) {
       if (keyDifference !== 0) return keyDifference;
       return String(left.id).localeCompare(String(right.id));
     })[0] || null;
+}
+
+function attachBaseAccounts(items, accounts) {
+  const accountsById = new Map(accounts.map((account) => [Number(account.id), account]));
+  return items.map((item) => {
+    const accountId = finite(item.account_id);
+    const account = accountId == null ? null : accountsById.get(Number(accountId)) || null;
+    return {
+      ...item,
+      baseAccount: account ? {
+        id: account.id,
+        name: account.name,
+        priority: account.priority
+      } : null
+    };
+  });
 }
 
 function groupComparisons(items, catalog) {
@@ -281,6 +298,10 @@ class MappingService {
     this.http = http;
     this.baseCatalogCache = null;
     this.baseCatalogRequest = null;
+    this.baseAccountsCache = null;
+    this.baseAccountsRequest = null;
+    this.baseAccountCache = new Map();
+    this.baseAccountRequests = new Map();
   }
 
   list({ connectionId } = {}) {
@@ -440,6 +461,19 @@ class MappingService {
     if (!result.changes) throw new AppError('MAPPING_NOT_FOUND', 'Sub2API mapping was not found', { status: 404 });
   }
 
+  deleteAll() {
+    return this.db.transaction(() => {
+      const deletedComparisonStates = this.db.prepare('SELECT COUNT(*) AS count FROM sub2api_mapping_states').get().count;
+      const deletedReconciliations = this.db.prepare('SELECT COUNT(*) AS count FROM reconciliation_runs').get().count;
+      const result = this.db.prepare('DELETE FROM sub2api_mappings').run();
+      return {
+        deletedMappings: result.changes,
+        deletedComparisonStates,
+        deletedReconciliations
+      };
+    })();
+  }
+
   activateBackup(id) {
     const selected = this.get(id);
     if (selected.role !== 'backup') {
@@ -501,9 +535,16 @@ class MappingService {
     };
   }
 
-  async comparisons({ connectionId = null, catalog = null } = {}) {
-    const baseCatalog = catalog || await this.#baseCatalog();
-    const items = this.list({ connectionId });
+  async comparisons({ connectionId = null, catalog = null, accountCatalog = null, force = false, accessToken = null } = {}) {
+    const listedItems = this.list({ connectionId });
+    const accountIds = [...new Set(listedItems
+      .map((item) => finite(item.account_id))
+      .filter((accountId) => accountId != null))];
+    const [baseCatalog, baseAccounts] = await Promise.all([
+      catalog || this.#baseCatalog({ force, accessToken }),
+      accountCatalog || this.#mappedBaseAccounts(accountIds, { force, accessToken })
+    ]);
+    const items = attachBaseAccounts(listedItems, baseAccounts.accounts);
     return {
       status: this.status(),
       summary: comparisonSummary(items),
@@ -547,7 +588,7 @@ class MappingService {
         );
       }
     })();
-    return this.comparisons({ connectionId, catalog: baseCatalog });
+    return this.comparisons({ connectionId, catalog: baseCatalog, force });
   }
 
   async autoMappings({ mode = 'preview' } = {}, { accessToken = null } = {}) {
@@ -615,17 +656,11 @@ class MappingService {
   }
 
   async #discoverAutoMappings({ accessToken = null } = {}) {
-    const [catalog, accountsResult] = await Promise.all([
+    const [catalog, accountCatalog] = await Promise.all([
       this.#baseCatalog({ force: true, accessToken }),
-      this.sub2api.listAll('/api/v1/admin/accounts', {}, { maxItems: 50000, accessToken })
+      this.#baseAccounts({ force: true, accessToken })
     ]);
-    const accounts = accountsResult.items.map(normalizeBaseAccount).filter((account) => account.id != null);
-    if (accounts.length !== accountsResult.items.length) {
-      throw new AppError('SCHEMA_MISMATCH', 'Sub2API account list contained an item without an ID', {
-        status: 502,
-        details: { endpoint: '/api/v1/admin/accounts' }
-      });
-    }
+    const accounts = accountCatalog.accounts;
     const providers = this.db.prepare(`
       SELECT p.id, p.name, p.adapter_type, p.auth_mode, p.base_url
       FROM provider_connections p
@@ -1162,6 +1197,83 @@ class MappingService {
     }
   }
 
+  async #baseAccounts({ force = false, accessToken = null } = {}) {
+    if (!force && this.baseAccountsCache?.expiresAt > Date.now()) return this.baseAccountsCache.value;
+    if (!force && this.baseAccountsRequest) return this.baseAccountsRequest;
+    const request = (async () => {
+      const result = await this.sub2api.listAll(
+        '/api/v1/admin/accounts',
+        {},
+        { maxItems: 50000, accessToken }
+      );
+      const accounts = result.items.map(normalizeBaseAccount).filter((account) => account.id != null);
+      if (accounts.length !== result.items.length) {
+        throw new AppError('SCHEMA_MISMATCH', 'Sub2API account list contained an item without an ID', {
+          status: 502,
+          details: { endpoint: '/api/v1/admin/accounts' }
+        });
+      }
+      const expiresAt = Date.now() + 30000;
+      const value = { accounts, capturedAt: nowIso() };
+      this.baseAccountsCache = { value, expiresAt };
+      for (const account of accounts) {
+        this.baseAccountCache.set(Number(account.id), { value: account, expiresAt });
+      }
+      return value;
+    })();
+    if (!force) this.baseAccountsRequest = request;
+    try {
+      return await request;
+    } finally {
+      if (this.baseAccountsRequest === request) this.baseAccountsRequest = null;
+    }
+  }
+
+  async #mappedBaseAccounts(accountIds, { force = false, accessToken = null } = {}) {
+    const accounts = [];
+    for (let offset = 0; offset < accountIds.length; offset += 10) {
+      const batch = await Promise.all(accountIds.slice(offset, offset + 10).map((accountId) =>
+        this.#baseAccount(accountId, { force, accessToken })
+      ));
+      accounts.push(...batch.filter(Boolean));
+    }
+    return { accounts, capturedAt: nowIso() };
+  }
+
+  async #baseAccount(accountId, { force = false, accessToken = null } = {}) {
+    const id = Number(accountId);
+    const cached = this.baseAccountCache.get(id);
+    if (!force && cached?.expiresAt > Date.now()) return cached.value;
+    if (!force && this.baseAccountRequests.has(id)) return this.baseAccountRequests.get(id);
+    const request = (async () => {
+      let payload;
+      try {
+        payload = await this.sub2api.data(`/api/v1/admin/accounts/${id}`, {
+          ...(accessToken ? { accessToken } : {})
+        });
+      } catch (error) {
+        if (Number(error?.status) !== 404) throw error;
+        this.baseAccountCache.set(id, { value: null, expiresAt: Date.now() + 30000 });
+        return null;
+      }
+      const account = normalizeBaseAccount(payload?.account ?? payload);
+      if (account.id == null) {
+        throw new AppError('SCHEMA_MISMATCH', 'Sub2API account response did not contain an ID', {
+          status: 502,
+          details: { endpoint: `/api/v1/admin/accounts/${id}` }
+        });
+      }
+      this.baseAccountCache.set(id, { value: account, expiresAt: Date.now() + 30000 });
+      return account;
+    })();
+    if (!force) this.baseAccountRequests.set(id, request);
+    try {
+      return await request;
+    } finally {
+      if (this.baseAccountRequests.get(id) === request) this.baseAccountRequests.delete(id);
+    }
+  }
+
   #snapshot(connectionId, subjectType, subjectId, currency, at) {
     const subjectClause = subjectId ? 'AND subject_id = ?' : '';
     const params = [connectionId, subjectType];
@@ -1340,6 +1452,7 @@ module.exports = {
   matchProviderAccounts,
   mappingIdentity,
   highestMapping,
+  attachBaseAccounts,
   groupComparisons,
   comparisonSummary,
   autoMappingSummary

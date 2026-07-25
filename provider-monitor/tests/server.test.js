@@ -83,6 +83,26 @@ test('HTTP API enforces login and CSRF while serving the operational frontend', 
   assert.equal(createdProvider.rechargeUrl, 'https://supplier.example/account/recharge');
   assert.equal(createdProvider.secondary_warning_threshold, 5);
 
+  const createMapping = await fetch(`${base}/api/mappings`, {
+    method: 'POST',
+    headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
+    body: JSON.stringify({ connectionId: createdProvider.id, groupId: 7 })
+  });
+  assert.equal(createMapping.status, 201);
+  const deleteMappings = await fetch(`${base}/api/mappings`, {
+    method: 'DELETE',
+    headers: { Cookie: cookie, 'X-CSRF-Token': session.csrfToken }
+  });
+  assert.equal(deleteMappings.status, 200);
+  assert.deepEqual(await deleteMappings.json(), {
+    deletedMappings: 1,
+    deletedComparisonStates: 0,
+    deletedReconciliations: 0
+  });
+  const mappingsAfterDelete = await fetch(`${base}/api/mappings`, { headers: { Cookie: cookie } });
+  assert.deepEqual((await mappingsAfterDelete.json()).items, []);
+  assert.equal(context.db.prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'mapping.delete_all'").get().count, 1);
+
   const invalidThresholdUpdate = await fetch(`${base}/api/providers/${createdProvider.id}`, {
     method: 'PUT',
     headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
