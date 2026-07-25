@@ -8,6 +8,7 @@ const { z } = require('zod');
 const { loadConfig } = require('./config');
 const { createDatabase, nowIso, parseJson, stringifyJson } = require('./db');
 const { AppError, errorResponse } = require('./errors');
+const { resolvePagination } = require('./pagination');
 const { redact, redactText } = require('./security/redaction');
 const { HttpClient } = require('./http/client');
 const { createAdapter, listAdapterTypes } = require('./adapters/registry');
@@ -241,6 +242,33 @@ function audit(db, req, action, targetType, targetId, details = {}) {
     stringifyJson(redact(details)),
     nowIso()
   );
+}
+
+function hasPagination(query) {
+  return query.page != null || query.pageSize != null || query.page_size != null;
+}
+
+function pageSize(query) {
+  return query.pageSize ?? query.page_size;
+}
+
+function listResponse(result) {
+  return Array.isArray(result) ? { items: result } : result;
+}
+
+function auditLogList(db, query) {
+  if (hasPagination(query)) {
+    const total = db.prepare('SELECT COUNT(*) AS total FROM audit_logs').get().total;
+    const resolved = resolvePagination({ page: query.page, pageSize: pageSize(query), total });
+    const items = db.prepare(`
+      SELECT * FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+    `).all(resolved.limit, resolved.offset);
+    return { items, pagination: resolved.pagination };
+  }
+  const limit = Math.min(500, Math.max(1, Number(query.limit) || 200));
+  return {
+    items: db.prepare('SELECT * FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT ?').all(limit)
+  };
 }
 
 function frameAncestorSources(config) {
@@ -831,7 +859,25 @@ function createApplication(options = {}) {
     res.setHeader('Content-Disposition', 'attachment; filename="provider-keys.csv"');
     res.send(`\uFEFF${lines.join('\r\n')}`);
   });
-  api.get('/groups', (req, res) => res.json({ items: queries.groups(req.query.connectionId || null) }));
+  api.get('/groups', (req, res) => {
+    const result = hasPagination(req.query)
+      ? queries.groupsPage({
+          connectionId: req.query.connectionId,
+          platform: req.query.platform,
+          nameQuery: req.query.nameQuery,
+          nameMode: req.query.nameMode,
+          rateSort: req.query.rateSort,
+          excludeMissing: req.query.excludeMissing === 'true',
+          requireRatio: req.query.requireRatio === 'true',
+          page: req.query.page,
+          pageSize: pageSize(req.query)
+        })
+      : queries.groups(req.query.connectionId || null, {
+          excludeUnresolved: req.query.excludeUnresolved === 'true',
+          requireRatio: req.query.requireRatio === 'true'
+        });
+    res.json(listResponse(result));
+  });
   api.get('/balances', (req, res) => {
     const clauses = ['r.row_number = 1'];
     const params = [];
@@ -890,20 +936,26 @@ function createApplication(options = {}) {
     connectionId: req.query.connectionId,
     days: Number(req.query.days || 30)
   }) }));
-  api.get('/asset-changes', (req, res) => res.json({ items: analysis.listChanges({
+  api.get('/asset-changes', (req, res) => res.json(listResponse(analysis.listChanges({
     connectionId: req.query.connectionId,
-    limit: Number(req.query.limit || 200)
-  }) }));
-  api.get('/anomalies', (req, res) => res.json({ items: analysis.listAnomalies({
+    limit: Number(req.query.limit || 200),
+    page: req.query.page,
+    pageSize: pageSize(req.query)
+  }))));
+  api.get('/anomalies', (req, res) => res.json(listResponse(analysis.listAnomalies({
     connectionId: req.query.connectionId,
     activeOnly: req.query.activeOnly === 'true',
-    limit: Number(req.query.limit || 200)
-  }) }));
-  api.get('/key-health', (req, res) => res.json({ items: keyHealth.list({
+    limit: Number(req.query.limit || 200),
+    page: req.query.page,
+    pageSize: pageSize(req.query)
+  }))));
+  api.get('/key-health', (req, res) => res.json(listResponse(keyHealth.list({
     connectionId: req.query.connectionId,
     keyId: req.query.keyId,
-    limit: Number(req.query.limit || 200)
-  }) }));
+    limit: Number(req.query.limit || 200),
+    page: req.query.page,
+    pageSize: pageSize(req.query)
+  }))));
   api.post('/providers/:id/key-health', asyncRoute(async (req, res) => {
     const level = validate(z.enum(['metadata', 'models', 'paid', 'capabilities']), req.body?.level || 'metadata');
     const result = await keyHealth.checkConnection(req.params.id, level);
@@ -911,11 +963,19 @@ function createApplication(options = {}) {
     res.json(result);
   }));
   api.get('/models', (req, res) => res.json({ items: catalog.models(req.query.connectionId || null) }));
-  api.get('/prices', (req, res) => res.json({ items: catalog.prices({
+  api.get('/models/options', (req, res) => res.json(catalog.modelOptions({
+    query: req.query.query,
+    limit: req.query.limit
+  })));
+  api.get('/prices', (req, res) => res.json(listResponse(catalog.prices({
     connectionId: req.query.connectionId,
     model: req.query.model,
-    limit: Number(req.query.limit || 5000)
-  }) }));
+    platform: req.query.platform,
+    rateSort: req.query.rateSort,
+    limit: Number(req.query.limit || 5000),
+    page: req.query.page,
+    pageSize: pageSize(req.query)
+  }))));
   api.get('/comparisons', (req, res) => {
     if (!req.query.model) throw new AppError('VALIDATION_ERROR', 'model is required', { status: 400 });
     res.json({ items: catalog.comparisons(req.query.model) });
@@ -931,11 +991,18 @@ function createApplication(options = {}) {
     audit(db, req, 'provider.checkin', 'provider', req.params.id, { status: result.status, rewardAmount: result.rewardAmount });
     res.json(result);
   }));
-  api.get('/checks', (req, res) => res.json({ items: queries.checkRuns({
+  api.get('/checks', (req, res) => res.json(listResponse(queries.checkRuns({
     connectionId: req.query.connectionId,
-    limit: req.query.limit
-  }) }));
-  api.get('/jobs', (req, res) => res.json({ items: queue.list(req.query.limit) }));
+    limit: req.query.limit,
+    page: req.query.page,
+    pageSize: pageSize(req.query)
+  }))));
+  api.get('/jobs', (req, res) => {
+    const result = hasPagination(req.query)
+      ? queue.list({ page: req.query.page, pageSize: pageSize(req.query) })
+      : queue.list(req.query.limit);
+    res.json(listResponse(result));
+  });
   api.get('/jobs/:id', (req, res) => {
     const job = queue.get(req.params.id);
     if (!job) throw new AppError('JOB_NOT_FOUND', 'Job was not found', { status: 404 });
@@ -1291,14 +1358,8 @@ function createApplication(options = {}) {
     res.json({ items });
   }));
 
-  api.get('/audit-logs', (req, res) => {
-    const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
-    res.json({ items: db.prepare(`SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT ?`).all(limit) });
-  });
-  api.get('/audit', (req, res) => {
-    const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 200));
-    res.json({ items: db.prepare(`SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT ?`).all(limit) });
-  });
+  api.get('/audit-logs', (req, res) => res.json(auditLogList(db, req.query)));
+  api.get('/audit', (req, res) => res.json(auditLogList(db, req.query)));
   app.use('/api', api);
 
   const nodeModules = path.join(config.projectRoot, 'node_modules');

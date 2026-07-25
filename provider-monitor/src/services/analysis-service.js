@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { nowIso, parseJson, stringifyJson } = require('../db');
+const { resolvePagination } = require('../pagination');
 
 const VOLATILE_METADATA_KEY = /^(?:spend|usage(?:_|$)|used(?:_|$)|current_|last_|request_count$|requestCount$|byok_usage$)/i;
 
@@ -259,21 +260,69 @@ class AnalysisService {
     return { id, ...input, fingerprint };
   }
 
-  listChanges({ connectionId, limit = 200 } = {}) {
-    const rows = connectionId
-      ? this.db.prepare(`SELECT * FROM asset_change_events WHERE connection_id = ? ORDER BY detected_at DESC LIMIT ?`).all(connectionId, limit)
-      : this.db.prepare(`SELECT * FROM asset_change_events ORDER BY detected_at DESC LIMIT ?`).all(limit);
-    return rows.map((row) => ({ ...row, before: parseJson(row.before_json, {}), after: parseJson(row.after_json, {}), before_json: undefined, after_json: undefined }));
+  listChanges({ connectionId, limit = 200, page, pageSize } = {}) {
+    const clauses = [];
+    const params = [];
+    if (connectionId) { clauses.push('connection_id = ?'); params.push(connectionId); }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const paginated = page != null || pageSize != null;
+    let rows;
+    let pagination;
+    if (paginated) {
+      const total = this.db.prepare(`SELECT COUNT(*) AS total FROM asset_change_events ${where}`).get(...params).total;
+      const resolved = resolvePagination({ page, pageSize, total });
+      pagination = resolved.pagination;
+      rows = this.db.prepare(`
+        SELECT * FROM asset_change_events ${where}
+        ORDER BY detected_at DESC, id DESC LIMIT ? OFFSET ?
+      `).all(...params, resolved.limit, resolved.offset);
+    } else {
+      const safeLimit = Math.min(500, Math.max(1, Number(limit) || 200));
+      rows = this.db.prepare(`
+        SELECT * FROM asset_change_events ${where}
+        ORDER BY detected_at DESC, id DESC LIMIT ?
+      `).all(...params, safeLimit);
+    }
+    const items = rows.map((row) => ({ ...row, before: parseJson(row.before_json, {}), after: parseJson(row.after_json, {}), before_json: undefined, after_json: undefined }));
+    return paginated ? { items, pagination } : items;
   }
 
-  listAnomalies({ connectionId, activeOnly = false, limit = 200 } = {}) {
+  listAnomalies({ connectionId, activeOnly = false, limit = 200, page, pageSize } = {}) {
+    const scopeClauses = [];
+    const scopeParams = [];
+    if (connectionId) { scopeClauses.push('connection_id = ?'); scopeParams.push(connectionId); }
     const clauses = [];
     const params = [];
     if (connectionId) { clauses.push('connection_id = ?'); params.push(connectionId); }
     if (activeOnly) clauses.push('resolved_at IS NULL');
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-    params.push(limit);
-    return this.db.prepare(`SELECT * FROM anomaly_events ${where} ORDER BY detected_at DESC LIMIT ?`).all(...params).map((row) => ({ ...row, details: parseJson(row.details_json, {}), details_json: undefined }));
+    const paginated = page != null || pageSize != null;
+    let rows;
+    let pagination;
+    let summary;
+    if (paginated) {
+      const total = this.db.prepare(`SELECT COUNT(*) AS total FROM anomaly_events ${where}`).get(...params).total;
+      const scopeWhere = scopeClauses.length ? `WHERE ${scopeClauses.join(' AND ')}` : '';
+      const active = this.db.prepare(`
+        SELECT COUNT(*) AS total FROM anomaly_events ${scopeWhere}
+        ${scopeWhere ? 'AND' : 'WHERE'} resolved_at IS NULL
+      `).get(...scopeParams).total;
+      const resolved = resolvePagination({ page, pageSize, total });
+      pagination = resolved.pagination;
+      summary = { active: Number(active || 0) };
+      rows = this.db.prepare(`
+        SELECT * FROM anomaly_events ${where}
+        ORDER BY detected_at DESC, id DESC LIMIT ? OFFSET ?
+      `).all(...params, resolved.limit, resolved.offset);
+    } else {
+      const safeLimit = Math.min(500, Math.max(1, Number(limit) || 200));
+      rows = this.db.prepare(`
+        SELECT * FROM anomaly_events ${where}
+        ORDER BY detected_at DESC, id DESC LIMIT ?
+      `).all(...params, safeLimit);
+    }
+    const items = rows.map((row) => ({ ...row, details: parseJson(row.details_json, {}), details_json: undefined }));
+    return paginated ? { items, pagination, summary } : items;
   }
 }
 

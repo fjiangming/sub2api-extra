@@ -6,7 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
-test('schema v14 migration preserves mappings and adds recharge access tickets', (t) => {
+test('schema v15 migration preserves mappings and adds recharge access tickets', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
   let db = createDatabase(databasePath);
@@ -85,7 +85,7 @@ test('schema v14 migration preserves mappings and adds recharge access tickets',
   db.close();
 
   db = createDatabase(databasePath);
-  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 14').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 15').get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());
   assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'recharge_url'));

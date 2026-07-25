@@ -87,6 +87,113 @@ test('a local AUTH_REQUIRED response still clears the expired session', async ()
   assert.deepEqual(removedSessionKeys, ['provider-monitor.session']);
 });
 
+test('large operational tables render server-side pagination controls', () => {
+  const { context, source } = createBrowserContext();
+  const html = vm.runInContext(`paginationHtml('cost-prices', {
+    page: 2, pageSize: 25, total: 61, totalPages: 3
+  })`, context);
+
+  assert.match(html, /第 26–50 条，共 61 条/);
+  assert.match(html, /data-list-key="cost-prices"/);
+  assert.match(html, /data-page="3"/);
+  assert.match(source, /'activity-audit': '\/api\/audit-logs'/);
+  assert.match(source, /'cost-groups': '\/api\/groups\?excludeMissing=true&requireRatio=true'/);
+  assert.match(source, /api\('\/api\/groups\?excludeUnresolved=true'\)/);
+  assert.match(source, /if \(!state\.pagedLists\[listKey\]\)/);
+  assert.doesNotMatch(source, /api\('\/api\/checks\?limit=100'\)/);
+  assert.doesNotMatch(source, /api\('\/api\/prices'\)/);
+});
+
+test('cost table filters stay combined across pagination and remain visible for empty results', async () => {
+  const { context, source } = createBrowserContext();
+  let requestedUrl = '';
+  context.fetch = async (input) => {
+    requestedUrl = String(input);
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return {
+          items: [],
+          pagination: { page: 3, pageSize: 50, total: 0, totalPages: 1 },
+          summary: { models: 0 },
+          filterOptions: { providers: [], platforms: [] }
+        };
+      }
+    };
+  };
+  vm.runInContext(`
+    state.costListFilters['cost-prices'] = {
+      connectionId: 'provider/a', platform: 'openai & compatible', rateSort: 'desc'
+    };
+    state.pagedLists['cost-prices'] = {
+      pagination: { page: 1, pageSize: 50, total: 100, totalPages: 2 }
+    };
+  `, context);
+
+  await vm.runInContext("requestPagedList('cost-prices', 3)", context);
+  const requested = new URL(requestedUrl, 'http://provider-monitor.local');
+  assert.equal(requested.searchParams.get('page'), '3');
+  assert.equal(requested.searchParams.get('pageSize'), '50');
+  assert.equal(requested.searchParams.get('connectionId'), 'provider/a');
+  assert.equal(requested.searchParams.get('platform'), 'openai & compatible');
+  assert.equal(requested.searchParams.get('rateSort'), 'desc');
+
+  vm.runInContext(`
+    state.costListFilters['cost-groups'] = {
+      nameQuery: 'GPT、Image <活动>', nameMode: 'exclude',
+      connectionId: 'provider/a', platform: 'openai', rateSort: 'asc'
+    };
+    state.pagedLists['cost-groups'] = {
+      pagination: { page: 1, pageSize: 25, total: 40, totalPages: 2 }
+    };
+  `, context);
+  await vm.runInContext("requestPagedList('cost-groups', 2)", context);
+  const groupRequest = new URL(requestedUrl, 'http://provider-monitor.local');
+  assert.equal(groupRequest.searchParams.get('page'), '2');
+  assert.equal(groupRequest.searchParams.get('nameQuery'), 'GPT、Image <活动>');
+  assert.equal(groupRequest.searchParams.get('nameMode'), 'exclude');
+  assert.equal(groupRequest.searchParams.get('connectionId'), 'provider/a');
+  assert.equal(groupRequest.searchParams.get('platform'), 'openai');
+  assert.equal(groupRequest.searchParams.get('rateSort'), 'asc');
+
+  const providerHeader = vm.runInContext(`costFilterHeaderHtml(
+    'cost-prices', 'connectionId', '供应商', [{ id: 'provider/a', name: 'Provider A' }]
+  )`, context);
+  const platformHeader = vm.runInContext(`costFilterHeaderHtml(
+    'cost-prices', 'platform', '平台', ['openai & compatible', 'anthropic']
+  )`, context);
+  const rateHeader = vm.runInContext("costRateSortHeaderHtml('cost-prices', '综合倍率')", context);
+  const nameHeader = vm.runInContext('costGroupNameFilterHeaderHtml()', context);
+  const emptyTable = vm.runInContext(`pagedTableHtml({
+    rows: '', headers: '<th>筛选表头</th>', emptyIcon: 'boxes',
+    emptyTitle: '没有匹配项', emptyText: '调整筛选', listKey: 'cost-prices',
+    pagination: { page: 1, pageSize: 25, total: 0, totalPages: 1 },
+    keepHeaderWhenEmpty: true
+  })`, context);
+
+  assert.match(providerHeader, /data-cost-filter="connectionId"/);
+  assert.match(providerHeader, /value="provider\/a" selected/);
+  assert.match(platformHeader, /data-cost-filter="platform"/);
+  assert.match(platformHeader, /openai &amp; compatible/);
+  assert.match(rateHeader, /data-sort-direction="desc"/);
+  assert.match(rateHeader, /data-lucide="arrow-down"/);
+  assert.match(rateHeader, /当前综合倍率降序/);
+  assert.match(nameHeader, /data-cost-filter="nameMode"/);
+  assert.match(nameHeader, /value="exclude" selected/);
+  assert.match(nameHeader, /data-cost-name-query/);
+  assert.match(nameHeader, /value="GPT、Image &lt;活动&gt;"/);
+  assert.match(nameHeader, /排除名称中包含任一输入项的分组/);
+  assert.match(nameHeader, /placeholder="名称1、名称2"/);
+  assert.match(emptyTable, /筛选表头/);
+  assert.match(emptyTable, /没有匹配项/);
+  assert.match(vm.runInContext("costRateSortHeaderHtml('cost-groups', '综合倍率')", context), /当前综合倍率升序/);
+  assert.match(source, /有效倍率 ÷ 充值倍率/);
+  assert.match(source, /integrationRecharge\(\{\}, group\.recharge\)/);
+  assert.match(source, /integrationRecharge\(\{\}, item\.recharge\)/);
+  assert.match(source, /updateCostListFilter\('cost-groups', 'nameQuery', value\)/);
+});
+
 test('integration recharge and composite columns use the documented multiplier direction', () => {
   const { context, source } = createBrowserContext();
   const recharge = vm.runInContext(

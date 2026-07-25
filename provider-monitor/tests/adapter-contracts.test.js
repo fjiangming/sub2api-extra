@@ -190,6 +190,7 @@ test('Sub2API API Key mode exposes the configured key and its gateway billing gr
   assert.equal(adapter.capabilities().keyGroup, true);
   assert.equal(adapter.capabilities().priceCatalog, false);
   assert.equal(balance.available, 12.5);
+  assert.equal(adapter.capabilities().groupsDerivedFromKeys, false);
   assert.equal(balance.used, 1.5);
   assert.equal(group.remoteId, 'token');
   assert.equal(group.ratio, 0.1);
@@ -205,19 +206,39 @@ test('Sub2API API Key mode exposes the configured key and its gateway billing gr
 
 test('Sub2API contract returns account balance, keys and group associations', async () => {
   // Source: Wei-Shaw/sub2api user routes and DTOs, verified 2026-07-17.
+  let keyRequests = 0;
   const adapter = new Sub2ApiAdapter(context('sub2api', (url) => {
     if (url.pathname === '/api/v1/user/profile') return { code: 0, data: { id: 7, email: 'user@example.com', username: 'user', balance: 12.5, frozen_balance: 1, total_recharged: 20 } };
     if (url.pathname === '/api/v1/groups/available') return { code: 0, data: [{ id: 3, name: 'Claude', platform: 'anthropic', rate_multiplier: 1.2, status: 'active' }] };
     if (url.pathname === '/api/v1/groups/rates') return { code: 0, data: { 3: 0.9 } };
-    if (url.pathname === '/api/v1/keys') return { code: 0, data: { items: [{ id: 9, name: 'client', key: 'sk-secret-value', group_id: 3, status: 'active', quota: 10, quota_used: 4 }], total: 1 } };
+    if (url.pathname === '/api/v1/keys') {
+      keyRequests += 1;
+      return { code: 0, data: { items: [
+        { id: 9, name: 'client', key: 'sk-secret-value', group_id: 3, status: 'active', quota: 10, quota_used: 4 },
+        {
+          id: 10, name: 'private-client', key: 'sk-private-value', group_id: 40,
+          status: 'active', quota: 0, quota_used: 0,
+          group: { id: 40, name: 'Private Campaign', platform: 'openai', rate_multiplier: 0.5, status: 'inactive' }
+        },
+        {
+          id: 11, name: 'unpriced-client', key: 'sk-unpriced-value', group_id: 41,
+          status: 'active', quota: 0, quota_used: 0,
+          group: { id: 41, name: 'Unknown Rate', platform: 'openai', status: 'inactive' }
+        }
+      ], total: 3 } };
+    }
     if (url.pathname === '/api/v1/usage/stats') return { code: 0, data: { total_cost: 2, total_requests: 3, total_input_tokens: 60, total_output_tokens: 40 } };
     if (url.pathname === '/api/v1/channels/available') return { code: 0, data: [{ name: 'Claude Route', platforms: [{ platform: 'anthropic', groups: [{ id: 3, name: 'Claude', rate_multiplier: 1.2 }], supported_models: [{ name: 'claude-test', platform: 'anthropic', pricing: { billing_mode: 'token', input_price: 0.000003, output_price: 0.000015, cache_read_price: 0.0000003, cache_write_price: 0.00000375 } }] }] }] };
     throw new Error(`Unexpected ${url.pathname}`);
   }, { credentials: { accessToken: 'access-token', tokenExpiresAt: Date.now() + 3600000 } }));
   const account = await adapter.getAccount();
   const [balance] = await adapter.getAccountBalances(account);
-  const [group] = await adapter.listGroups();
-  const [key] = await adapter.listKeys();
+  const groups = await adapter.listGroups();
+  const keys = await adapter.listKeys();
+  const group = groups.find((item) => item.remoteId === '3');
+  const privateGroup = groups.find((item) => item.remoteId === '40');
+  const unpricedGroup = groups.find((item) => item.remoteId === '41');
+  const key = keys[0];
   const [usage] = await adapter.getUsage();
   const catalog = await adapter.getPriceCatalog();
   assert.equal(balance.available, 12.5);
@@ -225,17 +246,29 @@ test('Sub2API contract returns account balance, keys and group associations', as
   assert.equal(group.ratio, 0.9);
   assert.equal(group.metadata.default_rate_multiplier, 1.2);
   assert.equal(group.metadata.effective_rate_multiplier, 0.9);
+  assert.equal(group.metadata.derivedFromKey, undefined);
+  assert.equal(privateGroup.name, 'Private Campaign');
+  assert.equal(privateGroup.ratio, 0.5);
+  assert.equal(privateGroup.status, 'inactive');
+  assert.equal(privateGroup.metadata.derivedFromKey, true);
+  assert.equal(unpricedGroup.ratio, null);
+  assert.equal(unpricedGroup.metadata.derivedFromKey, true);
+  assert.equal(keys[1].groupSnapshots[0].remoteId, '40');
   assert.equal(key.primaryGroupRef, '3');
   assert.equal(key.quota.remaining, 6);
   assert.equal(usage.totalTokens, 100);
   assert.equal(adapter.capabilities().priceCatalog, true);
+  assert.equal(adapter.capabilities().groupsDerivedFromKeys, true);
   assert.equal(catalog.status, 'succeeded');
+  assert.equal(catalog.groupsComplete, true);
   assert.equal(catalog.groups[0].ratio, 0.9);
   assert.equal(catalog.models[0].remoteId, 'claude-test');
   assert.equal(catalog.prices[0].inputPerMillion, 2.7);
   assert.ok(Math.abs(catalog.prices[0].outputPerMillion - 13.5) < 1e-10);
   assert.ok(Math.abs(catalog.prices[0].cacheReadPerMillion - 0.27) < 1e-10);
   assert.equal(catalog.prices[0].raw.groupRatio, 0.9);
+  assert.equal(catalog.groups.some((item) => item.remoteId === '40' && item.ratio === 0.5), true);
+  assert.equal(keyRequests, 1);
 });
 
 test('Sub2API catalog keeps group rates when channel pricing is not exposed', async () => {
@@ -248,6 +281,7 @@ test('Sub2API catalog keeps group rates when channel pricing is not exposed', as
 
   const catalog = await adapter.getPriceCatalog();
   assert.equal(catalog.status, 'partial');
+  assert.equal(catalog.groupsComplete, false);
   assert.equal(catalog.source, 'sub2api_group_rates');
   assert.equal(catalog.groups[0].ratio, 0.05);
   assert.equal(catalog.prices.length, 0);

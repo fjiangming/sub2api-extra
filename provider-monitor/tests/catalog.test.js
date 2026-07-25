@@ -14,6 +14,7 @@ test('Sub2API catalog sync persists effective group rates and multiplied model p
       baseUrl: 'https://sub2api.example',
       authMode: 'account',
       credentials: { accessToken: 'access-token', tokenExpiresAt: Date.now() + 3600000 },
+      rechargeMultiplier: 10,
       enabled: true
     });
     const catalog = new CatalogService({
@@ -42,6 +43,9 @@ test('Sub2API catalog sync persists effective group rates and multiplied model p
     assert.equal(price.input_per_million, 0.08);
     assert.equal(price.output_per_million, 0.32);
     assert.equal(price.groupRatio, 0.04);
+    assert.equal(price.recharge.multiplier, 10);
+    assert.equal(price.recharge.source, 'manual');
+    assert.equal(price.compositeRate, 0.004);
     assert.equal(price.groupName, 'Codex');
   } finally {
     context.cleanup();

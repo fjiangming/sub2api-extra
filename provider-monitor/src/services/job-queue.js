@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { nowIso, parseJson, stringifyJson } = require('../db');
+const { resolvePagination } = require('../pagination');
 const { redactText } = require('../security/redaction');
 
 class JobQueue {
@@ -71,14 +72,34 @@ class JobQueue {
     await Promise.allSettled(this.active.values());
   }
 
-  list(limit = 100) {
-    return this.db.prepare(`
-      SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?
-    `).all(Math.min(500, Math.max(1, Number(limit) || 100))).map((row) => ({
+  list(options = 100) {
+    const paginated = options != null && typeof options === 'object' &&
+      (options.page != null || options.pageSize != null);
+    let rows;
+    let pagination;
+    if (paginated) {
+      const total = this.db.prepare('SELECT COUNT(*) AS total FROM jobs').get().total;
+      const resolved = resolvePagination({
+        page: options.page,
+        pageSize: options.pageSize,
+        total
+      });
+      pagination = resolved.pagination;
+      rows = this.db.prepare(`
+        SELECT * FROM jobs ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+      `).all(resolved.limit, resolved.offset);
+    } else {
+      const limit = options != null && typeof options === 'object' ? options.limit : options;
+      rows = this.db.prepare(`
+        SELECT * FROM jobs ORDER BY created_at DESC, id DESC LIMIT ?
+      `).all(Math.min(500, Math.max(1, Number(limit) || 100)));
+    }
+    const items = rows.map((row) => ({
       ...row,
       payload: parseJson(row.payload_json, {}),
       payload_json: undefined
     }));
+    return paginated ? { items, pagination } : items;
   }
 
   get(id) {

@@ -3,6 +3,7 @@ const { AppError, asAppError } = require('../errors');
 const { joinUrl } = require('../adapters/base');
 const { redactText } = require('../security/redaction');
 const { nowIso, parseJson, stringifyJson } = require('../db');
+const { resolvePagination } = require('../pagination');
 
 class KeyHealthService {
   constructor({ db, config, providers, http }) {
@@ -191,19 +192,46 @@ class KeyHealthService {
     return results;
   }
 
-  list({ connectionId, keyId, limit = 200 } = {}) {
+  list({ connectionId, keyId, limit = 200, page, pageSize } = {}) {
     const clauses = [];
     const params = [];
     if (connectionId) { clauses.push('h.connection_id = ?'); params.push(connectionId); }
     if (keyId) { clauses.push('h.key_id = ?'); params.push(keyId); }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-    params.push(Math.min(500, Math.max(1, Number(limit) || 200)));
-    return this.db.prepare(`
-      SELECT h.*, k.name AS key_name, p.name AS provider_name
-      FROM key_health_checks h JOIN remote_keys k ON k.id = h.key_id
-      JOIN provider_connections p ON p.id = h.connection_id
-      ${where} ORDER BY h.checked_at DESC LIMIT ?
-    `).all(...params).map((row) => ({ ...row, details: parseJson(row.details_json, {}), details_json: undefined }));
+    const paginated = page != null || pageSize != null;
+    let rows;
+    let pagination;
+    let summary;
+    if (paginated) {
+      const totals = this.db.prepare(`
+        SELECT COUNT(*) AS total,
+          SUM(CASE WHEN h.status = 'passed' THEN 1 ELSE 0 END) AS passed,
+          SUM(CASE WHEN h.status = 'failed' THEN 1 ELSE 0 END) AS failed
+        FROM key_health_checks h ${where}
+      `).get(...params);
+      const resolved = resolvePagination({ page, pageSize, total: totals.total });
+      pagination = resolved.pagination;
+      summary = {
+        passed: Number(totals.passed || 0),
+        failed: Number(totals.failed || 0)
+      };
+      rows = this.db.prepare(`
+        SELECT h.*, k.name AS key_name, p.name AS provider_name
+        FROM key_health_checks h JOIN remote_keys k ON k.id = h.key_id
+        JOIN provider_connections p ON p.id = h.connection_id
+        ${where} ORDER BY h.checked_at DESC, h.id DESC LIMIT ? OFFSET ?
+      `).all(...params, resolved.limit, resolved.offset);
+    } else {
+      const safeLimit = Math.min(500, Math.max(1, Number(limit) || 200));
+      rows = this.db.prepare(`
+        SELECT h.*, k.name AS key_name, p.name AS provider_name
+        FROM key_health_checks h JOIN remote_keys k ON k.id = h.key_id
+        JOIN provider_connections p ON p.id = h.connection_id
+        ${where} ORDER BY h.checked_at DESC, h.id DESC LIMIT ?
+      `).all(...params, safeLimit);
+    }
+    const items = rows.map((row) => ({ ...row, details: parseJson(row.details_json, {}), details_json: undefined }));
+    return paginated ? { items, pagination, summary } : items;
   }
 }
 

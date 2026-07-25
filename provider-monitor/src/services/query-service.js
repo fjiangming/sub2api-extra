@@ -1,7 +1,60 @@
 const { parseJson } = require('../db');
+const { resolvePagination } = require('../pagination');
 
 function nullableNumber(value) {
   return value == null ? null : Number(value);
+}
+
+function deserializeGroup(row) {
+  const result = {
+    ...row,
+    metadata: parseJson(row.metadata_json, {}),
+    metadata_json: undefined
+  };
+  if (!Object.prototype.hasOwnProperty.call(row, 'recharge_multiplier')) return result;
+  return {
+    ...result,
+    compositeRate: nullableNumber(row.composite_rate),
+    recharge: {
+      multiplier: nullableNumber(row.recharge_multiplier),
+      source: row.recharge_source || null,
+      status: row.recharge_status || null,
+      paidCurrency: row.recharge_paid_currency || null,
+      balanceCurrency: row.recharge_balance_currency || null
+    },
+    composite_rate: undefined,
+    recharge_multiplier: undefined,
+    recharge_source: undefined,
+    recharge_status: undefined,
+    recharge_paid_currency: undefined,
+    recharge_balance_currency: undefined
+  };
+}
+
+function deserializeCheckRun(row) {
+  return { ...row, summary: parseJson(row.summary_json, {}), summary_json: undefined };
+}
+
+function normalizeRateSort(value) {
+  return value === 'asc' || value === 'desc' ? value : '';
+}
+
+function normalizeNameFilterMode(value) {
+  return value === 'exclude' ? 'exclude' : 'include';
+}
+
+function normalizeNameFilterTerms(value) {
+  const seen = new Set();
+  const terms = [];
+  for (const raw of String(value || '').slice(0, 1000).split(/[,，、;；\r\n]+/)) {
+    const term = raw.trim().slice(0, 120);
+    const identity = term.toLocaleLowerCase('zh-CN');
+    if (!term || seen.has(identity)) continue;
+    seen.add(identity);
+    terms.push(term);
+    if (terms.length >= 20) break;
+  }
+  return terms;
 }
 
 function balanceStatus(row, config) {
@@ -227,9 +280,15 @@ class QueryService {
     }));
   }
 
-  groups(connectionId = null) {
-    const where = connectionId ? 'WHERE g.connection_id = ?' : '';
-    const params = connectionId ? [connectionId] : [];
+  groups(connectionId = null, { excludeUnresolved = false, requireRatio = false } = {}) {
+    const clauses = [];
+    const params = [];
+    if (connectionId) { clauses.push('g.connection_id = ?'); params.push(connectionId); }
+    if (excludeUnresolved) {
+      clauses.push("NOT (g.ratio IS NULL AND COALESCE(json_extract(g.metadata_json, '$.derivedFromKey'), 0) = 1)");
+    }
+    if (requireRatio) clauses.push('g.ratio IS NOT NULL');
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     return this.db.prepare(`
       SELECT g.*, p.name AS provider_name, COUNT(DISTINCT kg.key_id) AS key_count
       FROM remote_groups g
@@ -238,11 +297,93 @@ class QueryService {
       ${where}
       GROUP BY g.id
       ORDER BY p.name COLLATE NOCASE, g.name COLLATE NOCASE
-    `).all(...params).map((row) => ({
-      ...row,
-      metadata: parseJson(row.metadata_json, {}),
-      metadata_json: undefined
-    }));
+    `).all(...params).map(deserializeGroup);
+  }
+
+  groupsPage({ connectionId, platform, nameQuery, nameMode, rateSort, excludeMissing = false, requireRatio = false, page, pageSize } = {}) {
+    const platformSql = `COALESCE(
+      NULLIF(TRIM(CAST(json_extract(g.metadata_json, '$.platform') AS TEXT)), ''),
+      p.adapter_type
+    )`;
+    const rechargeMultiplierSql = `CASE
+      WHEN rr.manual_multiplier > 0 THEN rr.manual_multiplier
+      WHEN rr.detected_multiplier > 0 THEN rr.detected_multiplier
+      ELSE 1
+    END`;
+    const rechargeSourceSql = `CASE
+      WHEN rr.manual_multiplier > 0 THEN 'manual'
+      WHEN rr.detected_multiplier > 0 THEN rr.detection_source
+      ELSE 'default'
+    END`;
+    const rechargeStatusSql = `CASE
+      WHEN rr.manual_multiplier > 0 THEN 'manual'
+      WHEN rr.detected_multiplier > 0 THEN COALESCE(rr.status, 'unknown')
+      ELSE 'default'
+    END`;
+    const clauses = [];
+    const params = [];
+    if (connectionId) { clauses.push('g.connection_id = ?'); params.push(connectionId); }
+    if (platform) { clauses.push(`${platformSql} = ? COLLATE NOCASE`); params.push(platform); }
+    const nameTerms = normalizeNameFilterTerms(nameQuery);
+    if (nameTerms.length > 0) {
+      const exclude = normalizeNameFilterMode(nameMode) === 'exclude';
+      const comparison = exclude ? '= 0' : '> 0';
+      const joiner = exclude ? ' AND ' : ' OR ';
+      clauses.push(`(${nameTerms.map(() => `INSTR(LOWER(g.name), LOWER(?)) ${comparison}`).join(joiner)})`);
+      params.push(...nameTerms);
+    }
+    if (excludeMissing) clauses.push("g.status != 'missing'");
+    if (requireRatio) clauses.push('g.ratio IS NOT NULL');
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const optionClauses = [];
+    if (excludeMissing) optionClauses.push("g.status != 'missing'");
+    if (requireRatio) optionClauses.push('g.ratio IS NOT NULL');
+    const optionWhere = optionClauses.length ? `WHERE ${optionClauses.join(' AND ')}` : '';
+    const filterOptions = {
+      providers: this.db.prepare(`
+        SELECT DISTINCT p.id, p.name
+        FROM remote_groups g JOIN provider_connections p ON p.id = g.connection_id
+        ${optionWhere}
+        ORDER BY p.name COLLATE NOCASE, p.id
+      `).all(),
+      platforms: this.db.prepare(`
+        SELECT DISTINCT ${platformSql} AS platform
+        FROM remote_groups g JOIN provider_connections p ON p.id = g.connection_id
+        ${optionWhere}
+        ORDER BY platform COLLATE NOCASE
+      `).all().map((row) => row.platform).filter(Boolean)
+    };
+    const total = this.db.prepare(`
+      SELECT COUNT(*) AS total
+      FROM remote_groups g JOIN provider_connections p ON p.id = g.connection_id
+      ${where}
+    `).get(...params).total;
+    const resolved = resolvePagination({ page, pageSize, total });
+    const normalizedRateSort = normalizeRateSort(rateSort);
+    const orderBy = normalizedRateSort
+      ? `composite_rate IS NULL, composite_rate ${normalizedRateSort.toUpperCase()},
+        g.ratio ${normalizedRateSort.toUpperCase()}, p.name COLLATE NOCASE, g.name COLLATE NOCASE, g.id`
+      : 'p.name COLLATE NOCASE, g.name COLLATE NOCASE, g.id';
+    const items = this.db.prepare(`
+      SELECT g.*, p.name AS provider_name, p.adapter_type, ${platformSql} AS platform,
+        ${rechargeMultiplierSql} AS recharge_multiplier,
+        ${rechargeSourceSql} AS recharge_source,
+        ${rechargeStatusSql} AS recharge_status,
+        rr.paid_currency AS recharge_paid_currency,
+        rr.balance_currency AS recharge_balance_currency,
+        CASE WHEN g.ratio IS NULL THEN NULL
+          ELSE g.ratio / (${rechargeMultiplierSql}) END AS composite_rate,
+        COUNT(DISTINCT kg.key_id) AS key_count
+      FROM remote_groups g
+      JOIN provider_connections p ON p.id = g.connection_id
+      LEFT JOIN provider_recharge_rates rr ON rr.connection_id = g.connection_id
+      LEFT JOIN remote_key_groups kg ON kg.group_id = g.id
+      ${where}
+      GROUP BY g.id
+      ORDER BY ${orderBy}
+      LIMIT ? OFFSET ?
+    `).all(...params, resolved.limit, resolved.offset).map(deserializeGroup);
+    return { items, pagination: resolved.pagination, filterOptions };
   }
 
   history({ connectionId, currency, days = 30, subjectType = 'account' }) {
@@ -382,12 +523,31 @@ class QueryService {
     `).all(...params).map((row) => ({ ...row, raw: parseJson(row.raw_json, {}), raw_json: undefined }));
   }
 
-  checkRuns({ connectionId, limit = 50 } = {}) {
-    const safeLimit = Math.min(500, Math.max(1, Number(limit) || 50));
-    const rows = connectionId
-      ? this.db.prepare(`SELECT * FROM check_runs WHERE connection_id = ? ORDER BY started_at DESC LIMIT ?`).all(connectionId, safeLimit)
-      : this.db.prepare(`SELECT * FROM check_runs ORDER BY started_at DESC LIMIT ?`).all(safeLimit);
-    return rows.map((row) => ({ ...row, summary: parseJson(row.summary_json, {}), summary_json: undefined }));
+  checkRuns({ connectionId, limit = 50, page, pageSize } = {}) {
+    const clauses = [];
+    const params = [];
+    if (connectionId) { clauses.push('connection_id = ?'); params.push(connectionId); }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const paginated = page != null || pageSize != null;
+    let rows;
+    let pagination;
+    if (paginated) {
+      const total = this.db.prepare(`SELECT COUNT(*) AS total FROM check_runs ${where}`).get(...params).total;
+      const resolved = resolvePagination({ page, pageSize, total });
+      pagination = resolved.pagination;
+      rows = this.db.prepare(`
+        SELECT * FROM check_runs ${where}
+        ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?
+      `).all(...params, resolved.limit, resolved.offset);
+    } else {
+      const safeLimit = Math.min(500, Math.max(1, Number(limit) || 50));
+      rows = this.db.prepare(`
+        SELECT * FROM check_runs ${where}
+        ORDER BY started_at DESC, id DESC LIMIT ?
+      `).all(...params, safeLimit);
+    }
+    const items = rows.map(deserializeCheckRun);
+    return paginated ? { items, pagination } : items;
   }
 }
 

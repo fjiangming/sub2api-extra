@@ -2,6 +2,18 @@ const browserSession = typeof sessionStorage === 'undefined'
   ? { getItem: () => '', setItem: () => {}, removeItem: () => {} }
   : sessionStorage;
 
+const LIST_PAGE_SIZE = 25;
+const PAGED_LIST_ENDPOINTS = Object.freeze({
+  'cost-groups': '/api/groups?excludeMissing=true&requireRatio=true',
+  'cost-prices': '/api/prices',
+  'risk-anomalies': '/api/anomalies',
+  'risk-changes': '/api/asset-changes',
+  'risk-health': '/api/key-health',
+  'activity-checks': '/api/checks',
+  'activity-jobs': '/api/jobs',
+  'activity-audit': '/api/audit-logs'
+});
+
 const state = {
   csrfToken: '',
   sessionToken: browserSession.getItem('provider-monitor.session') || '',
@@ -21,6 +33,13 @@ const state = {
   checks: [],
   jobs: [],
   audit: [],
+  pagedLists: {},
+  activityTab: 'checks',
+  costModelOptions: [],
+  costListFilters: {
+    'cost-groups': { nameQuery: '', nameMode: 'include', connectionId: '', platform: '', rateSort: '' },
+    'cost-prices': { connectionId: '', platform: '', rateSort: '' }
+  },
   chart: null,
   assetsTab: 'keys',
   assetProviderId: '',
@@ -268,6 +287,143 @@ function emptyState(icon, title, text) {
   return `<div class="empty"><div><i data-lucide="${icon}"></i><strong>${escapeHtml(title)}</strong><span>${escapeHtml(text)}</span></div></div>`;
 }
 
+function paginationHtml(listKey, pagination) {
+  if (!pagination || pagination.total <= 0) return '';
+  const { page, pageSize, total, totalPages } = pagination;
+  const start = (page - 1) * pageSize + 1;
+  const end = Math.min(total, page * pageSize);
+  const previousDisabled = page <= 1 ? 'disabled' : '';
+  const nextDisabled = page >= totalPages ? 'disabled' : '';
+  return `<footer class="table-pagination" aria-label="列表分页"><span class="pagination-summary">第 ${start}–${end} 条，共 ${total} 条</span><div class="pagination-actions"><button class="icon-button small" data-action="paginate" data-list-key="${escapeHtml(listKey)}" data-page="1" title="第一页" aria-label="第一页" ${previousDisabled}><i data-lucide="chevrons-left"></i></button><button class="icon-button small" data-action="paginate" data-list-key="${escapeHtml(listKey)}" data-page="${page - 1}" title="上一页" aria-label="上一页" ${previousDisabled}><i data-lucide="chevron-left"></i></button><span class="pagination-position" aria-live="polite">${page} / ${totalPages}</span><button class="icon-button small" data-action="paginate" data-list-key="${escapeHtml(listKey)}" data-page="${page + 1}" title="下一页" aria-label="下一页" ${nextDisabled}><i data-lucide="chevron-right"></i></button><button class="icon-button small" data-action="paginate" data-list-key="${escapeHtml(listKey)}" data-page="${totalPages}" title="最后一页" aria-label="最后一页" ${nextDisabled}><i data-lucide="chevrons-right"></i></button></div></footer>`;
+}
+
+function pagedTableHtml({ rows, headers, emptyIcon, emptyTitle, emptyText, listKey, pagination, keepHeaderWhenEmpty = false }) {
+  let content = emptyState(emptyIcon, emptyTitle, emptyText);
+  if (rows) content = `<table><thead><tr>${headers}</tr></thead><tbody>${rows}</tbody></table>`;
+  else if (keepHeaderWhenEmpty) content = `<table><thead><tr>${headers}</tr></thead><tbody></tbody></table>${content}`;
+  return `<div class="table-wrap">${content}</div>${paginationHtml(listKey, pagination)}`;
+}
+
+function costListFiltersFor(listKey) {
+  return state.costListFilters[listKey] || {};
+}
+
+function costFilterHeaderHtml(listKey, filterName, label, options = []) {
+  const selected = costListFiltersFor(listKey)[filterName] || '';
+  const normalized = options.map((option) => ({
+    value: String(typeof option === 'string' ? option : option.id ?? option.value ?? ''),
+    label: String(typeof option === 'string' ? option : option.name ?? option.label ?? option.id ?? '')
+  })).filter((option) => option.value);
+  if (selected && !normalized.some((option) => option.value === selected)) {
+    const provider = state.providers.find((item) => item.id === selected);
+    normalized.unshift({ value: selected, label: provider?.name || selected });
+  }
+  const optionHtml = normalized.map((option) => `<option value="${escapeHtml(option.value)}" ${option.value === selected ? 'selected' : ''}>${escapeHtml(option.label)}</option>`).join('');
+  const scope = listKey === 'cost-groups' ? '分组倍率' : '最新价格目录';
+  const allLabel = filterName === 'connectionId' ? '全部供应商' : '全部平台';
+  return `<th><div class="table-column-control"><span>${escapeHtml(label)}</span><select data-cost-filter="${escapeHtml(filterName)}" data-list-key="${escapeHtml(listKey)}" aria-label="按${escapeHtml(label)}筛选${scope}" title="按${escapeHtml(label)}筛选"><option value="">${allLabel}</option>${optionHtml}</select></div></th>`;
+}
+
+function costRateSortHeaderHtml(listKey, label) {
+  const direction = costListFiltersFor(listKey).rateSort || '';
+  const config = direction === 'asc'
+    ? { icon: 'arrow-up', title: `当前${label}升序，点击切换为降序` }
+    : direction === 'desc'
+      ? { icon: 'arrow-down', title: `当前${label}降序，点击恢复默认顺序` }
+      : { icon: 'arrow-up-down', title: `按${label}升序` };
+  return `<th class="numeric"><div class="table-column-control numeric"><span>${escapeHtml(label)}</span><button class="icon-button small table-header-sort ${direction ? 'active' : ''}" type="button" data-action="sort-cost-rate" data-list-key="${escapeHtml(listKey)}" data-sort-direction="${direction}" title="${config.title}" aria-label="${config.title}"><i data-lucide="${config.icon}"></i></button></div></th>`;
+}
+
+function costGroupNameFilterHeaderHtml() {
+  const filters = costListFiltersFor('cost-groups');
+  const query = filters.nameQuery || '';
+  const mode = filters.nameMode === 'exclude' ? 'exclude' : 'include';
+  const title = mode === 'exclude'
+    ? '排除名称中包含任一输入项的分组；多个名称用逗号或顿号分隔'
+    : '仅显示名称中包含任一输入项的分组；多个名称用逗号或顿号分隔';
+  return `<th><div class="table-column-control group-name-filter"><span>分组</span><select data-cost-filter="nameMode" data-list-key="cost-groups" aria-label="分组名称筛选方式" title="分组名称筛选方式"><option value="include" ${mode === 'include' ? 'selected' : ''}>包含</option><option value="exclude" ${mode === 'exclude' ? 'selected' : ''}>排除</option></select><label class="table-name-filter-input" title="${title}"><i data-lucide="${mode === 'exclude' ? 'list-minus' : 'search'}"></i><input type="search" value="${escapeHtml(query)}" data-cost-name-query data-list-key="cost-groups" maxlength="500" placeholder="名称1、名称2" aria-label="${title}"></label></div></th>`;
+}
+
+async function requestPagedList(listKey, requestedPage = 1) {
+  const endpoint = PAGED_LIST_ENDPOINTS[listKey];
+  if (!endpoint) throw new Error('未知分页列表');
+  const currentPageSize = state.pagedLists[listKey]?.pagination?.pageSize || LIST_PAGE_SIZE;
+  const separator = endpoint.includes('?') ? '&' : '?';
+  const parameters = [
+    ['page', Math.max(1, Number(requestedPage) || 1)],
+    ['pageSize', currentPageSize]
+  ];
+  const filters = costListFiltersFor(listKey);
+  const filterNames = listKey === 'cost-groups'
+    ? ['nameQuery', 'nameMode', 'connectionId', 'platform', 'rateSort']
+    : ['connectionId', 'platform', 'rateSort'];
+  for (const name of filterNames) {
+    if (filters[name]) parameters.push([name, filters[name]]);
+  }
+  const query = parameters.map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`).join('&');
+  return api(`${endpoint}${separator}${query}`);
+}
+
+function paintPagedList(listKey) {
+  if (listKey === 'cost-groups') paintCostGroups();
+  if (listKey === 'cost-prices') paintCostPrices();
+  if (listKey === 'risk-anomalies') paintRiskAnomalies();
+  if (listKey === 'risk-changes') paintRiskChanges();
+  if (listKey === 'risk-health') paintRiskHealth();
+  if (listKey.startsWith('activity-')) paintActivityList(listKey.slice('activity-'.length));
+}
+
+async function changeListPage(listKey, requestedPage) {
+  const current = state.pagedLists[listKey]?.pagination;
+  if (!current) return;
+  const targetPage = Math.min(current.totalPages, Math.max(1, Number(requestedPage) || 1));
+  if (targetPage === current.page) return;
+  const buttons = $$(`[data-action="paginate"][data-list-key="${listKey}"]`);
+  buttons.forEach((button) => { button.disabled = true; });
+  try {
+    state.pagedLists[listKey] = await requestPagedList(listKey, targetPage);
+    paintPagedList(listKey);
+  } catch (error) {
+    paintPagedList(listKey);
+    throw error;
+  }
+}
+
+async function updateCostListFilter(listKey, filterName, value) {
+  if (!['cost-groups', 'cost-prices'].includes(listKey)) return;
+  const allowedFilters = listKey === 'cost-groups'
+    ? ['nameQuery', 'nameMode', 'connectionId', 'platform', 'rateSort']
+    : ['connectionId', 'platform', 'rateSort'];
+  if (!allowedFilters.includes(filterName)) return;
+  const filters = costListFiltersFor(listKey);
+  const previous = { ...filters };
+  const normalizedValue = filterName === 'nameQuery' ? String(value || '').trim() : value;
+  if (filters[filterName] === normalizedValue) return;
+  filters[filterName] = normalizedValue;
+  const controls = $$(`[data-list-key="${listKey}"][data-cost-filter], [data-list-key="${listKey}"][data-cost-name-query], [data-list-key="${listKey}"][data-action="sort-cost-rate"]`);
+  controls.forEach((control) => { control.disabled = true; });
+  const root = $(`[data-paged-list="${listKey}"]`);
+  root?.setAttribute('aria-busy', 'true');
+  try {
+    const result = await requestPagedList(listKey, 1);
+    if (state.view !== 'costs') return;
+    state.pagedLists[listKey] = result;
+    paintPagedList(listKey);
+  } catch (error) {
+    Object.assign(filters, previous);
+    if (state.view === 'costs') paintPagedList(listKey);
+    throw error;
+  } finally {
+    root?.setAttribute('aria-busy', 'false');
+  }
+}
+
+async function cycleCostRateSort(listKey) {
+  const current = costListFiltersFor(listKey).rateSort || '';
+  const next = current === '' ? 'asc' : current === 'asc' ? 'desc' : '';
+  await updateCostListFilter(listKey, 'rateSort', next);
+}
+
 async function loadBase() {
   const [providers, summary] = await Promise.all([api('/api/providers'), api('/api/summary')]);
   state.providers = providers.items;
@@ -375,7 +531,7 @@ function renderProviders() {
 }
 
 async function renderAssets() {
-  const [keys, groups] = await Promise.all([api('/api/keys'), api('/api/groups')]);
+  const [keys, groups] = await Promise.all([api('/api/keys'), api('/api/groups?excludeUnresolved=true')]);
   state.keys = keys.items;
   state.groups = groups.items;
   if (!state.providers.some((provider) => provider.id === state.assetProviderId)) {
@@ -471,13 +627,47 @@ async function renderUsage() {
 }
 
 async function renderCosts() {
-  const [prices, models, groups] = await Promise.all([api('/api/prices'), api('/api/models'), api('/api/groups')]);
-  state.prices = prices.items;
-  const modelNames = [...new Set([...prices.items.map((item) => item.model_id), ...models.items.map((item) => item.name || item.remote_id)])].sort();
+  const [groups, prices, modelOptions] = await Promise.all([
+    requestPagedList('cost-groups', state.pagedLists['cost-groups']?.pagination?.page || 1),
+    requestPagedList('cost-prices', state.pagedLists['cost-prices']?.pagination?.page || 1),
+    api('/api/models/options?limit=50')
+  ]);
+  state.pagedLists['cost-groups'] = groups;
+  state.pagedLists['cost-prices'] = prices;
+  state.costModelOptions = modelOptions.items;
   const catalogProviders = state.providers.filter((provider) => provider.capabilities?.priceCatalog);
   setTopActions(catalogProviders.length > 0 ? `<button class="button" data-action="sync-catalogs"><i data-lucide="refresh-cw"></i><span>同步目录</span></button>` : '');
-  const activeGroups = groups.items.filter((group) => group.status !== 'missing');
-  const groupRows = activeGroups.map((group) => {
+  $('#main-content').innerHTML = `<div class="filter-bar"><input id="cost-model" list="cost-model-options" autocomplete="off" placeholder="输入模型名称进行推荐比较" aria-label="模型名称"><datalist id="cost-model-options"></datalist><button class="button" data-action="compare-model"><i data-lucide="scale"></i><span>比较</span></button></div><div id="cost-comparison"></div><section class="section"><div class="section-header"><h2>分组倍率</h2><p id="cost-groups-summary"></p></div><div id="cost-groups-list" data-paged-list="cost-groups"></div></section><section class="section"><div class="section-header"><h2>最新价格目录</h2><p id="cost-prices-summary"></p></div><div id="cost-prices-list" data-paged-list="cost-prices"></div></section>`;
+  paintCostModelOptions();
+  paintCostGroups();
+  paintCostPrices();
+}
+
+function paintCostModelOptions() {
+  const list = $('#cost-model-options');
+  if (!list) return;
+  list.innerHTML = (state.costModelOptions || [])
+    .map((item) => `<option value="${escapeHtml(item.name)}"></option>`)
+    .join('');
+}
+
+let costModelOptionsSequence = 0;
+async function loadCostModelOptions(query = '') {
+  const sequence = ++costModelOptionsSequence;
+  const result = await api(`/api/models/options?query=${encodeURIComponent(query)}&limit=50`);
+  if (sequence !== costModelOptionsSequence || state.view !== 'costs') return;
+  state.costModelOptions = result.items;
+  paintCostModelOptions();
+}
+
+function paintCostGroups() {
+  const result = state.pagedLists['cost-groups'];
+  const root = $('#cost-groups-list');
+  if (!result || !root) return;
+  const filters = costListFiltersFor('cost-groups');
+  const summary = $('#cost-groups-summary');
+  if (summary) summary.textContent = `${result.pagination.total} 个可用分组`;
+  const rows = result.items.map((group) => {
     const metadata = group.metadata || {};
     const defaultRatio = metadata.default_rate_multiplier ?? metadata.rate_multiplier;
     const peak = metadata.peak_rate_enabled
@@ -485,15 +675,46 @@ async function renderCosts() {
       : '-';
     const multiplier = formatEffectiveRate(group.ratio);
     const defaultMultiplier = formatEffectiveRate(defaultRatio);
-    return `<tr><td class="primary-cell"><strong>${escapeHtml(group.name)}</strong><small>${escapeHtml(group.remote_id)}</small></td><td>${escapeHtml(group.provider_name)}</td><td>${escapeHtml(metadata.platform || '-')}</td><td class="numeric"><strong>${multiplier}</strong></td><td class="numeric">${defaultMultiplier}</td><td>${escapeHtml(peak)}</td><td class="numeric">${metadata.image_price_1k == null ? '-' : formatMoney(metadata.image_price_1k, 'USD')}</td><td class="numeric">${metadata.image_price_2k == null ? '-' : formatMoney(metadata.image_price_2k, 'USD')}</td><td class="numeric">${metadata.image_price_4k == null ? '-' : formatMoney(metadata.image_price_4k, 'USD')}</td></tr>`;
+    const compositeRate = formatEffectiveRate(group.compositeRate);
+    return `<tr><td class="primary-cell"><strong>${escapeHtml(group.name)}</strong><small>${escapeHtml(group.remote_id)}</small></td><td>${escapeHtml(group.provider_name)}</td><td>${escapeHtml(group.platform || metadata.platform || '-')}</td><td class="numeric"><strong>${multiplier}</strong></td><td class="primary-cell numeric">${integrationRecharge({}, group.recharge)}</td><td class="numeric"><strong title="有效倍率 ÷ 充值倍率">${compositeRate}</strong></td><td class="numeric">${defaultMultiplier}</td><td>${escapeHtml(peak)}</td><td class="numeric">${metadata.image_price_1k == null ? '-' : formatMoney(metadata.image_price_1k, 'USD')}</td><td class="numeric">${metadata.image_price_2k == null ? '-' : formatMoney(metadata.image_price_2k, 'USD')}</td><td class="numeric">${metadata.image_price_4k == null ? '-' : formatMoney(metadata.image_price_4k, 'USD')}</td></tr>`;
   }).join('');
-  const rows = prices.items.map((item) => {
+  const providerOptions = result.filterOptions?.providers || state.providers;
+  const platformOptions = result.filterOptions?.platforms || [...new Set(result.items.map((group) => group.platform || group.metadata?.platform).filter(Boolean))];
+  root.innerHTML = pagedTableHtml({
+    rows,
+    headers: `${costGroupNameFilterHeaderHtml()}${costFilterHeaderHtml('cost-groups', 'connectionId', '供应商', providerOptions)}${costFilterHeaderHtml('cost-groups', 'platform', '平台', platformOptions)}<th class="numeric">有效倍率</th><th class="numeric">充值倍率</th>${costRateSortHeaderHtml('cost-groups', '综合倍率')}<th class="numeric">默认倍率</th><th>峰值倍率</th><th class="numeric">图片 1K</th><th class="numeric">图片 2K</th><th class="numeric">图片 4K</th>`,
+    emptyIcon: 'boxes',
+    emptyTitle: filters.nameQuery || filters.connectionId || filters.platform ? '没有匹配的分组倍率' : '暂无分组倍率',
+    emptyText: filters.nameQuery || filters.connectionId || filters.platform ? '调整表头中的名称、供应商或平台筛选' : '先同步支持分组查询的供应商',
+    listKey: 'cost-groups', pagination: result.pagination, keepHeaderWhenEmpty: true
+  });
+  icons();
+}
+
+function paintCostPrices() {
+  const result = state.pagedLists['cost-prices'];
+  const root = $('#cost-prices-list');
+  if (!result || !root) return;
+  const filters = costListFiltersFor('cost-prices');
+  state.prices = result.items;
+  const summary = $('#cost-prices-summary');
+  if (summary) summary.textContent = `${result.summary?.models || 0} 个模型 · ${result.pagination.total} 条价格`;
+  const rows = result.items.map((item) => {
     const currency = item.displayCurrency || item.currency;
     const groupLabel = [item.groupName, item.channelName].filter(Boolean).join(' · ') || item.group_ref || '-';
-    const multiplier = formatEffectiveRate(item.groupRatio);
-    return `<tr><td class="primary-cell"><strong>${escapeHtml(item.model_id)}</strong><small>${escapeHtml(item.billing_mode)}</small></td><td>${escapeHtml(item.provider_name)}</td><td>${escapeHtml(groupLabel)}</td><td class="numeric">${multiplier}</td><td class="numeric">${item.effectiveInputPrice == null ? '-' : formatMoney(item.effectiveInputPrice, currency)}</td><td class="numeric">${item.effectiveOutputPrice == null ? '-' : formatMoney(item.effectiveOutputPrice, currency)}</td><td class="numeric">${item.effectiveRequestPrice == null ? '-' : formatMoney(item.effectiveRequestPrice, currency)}</td><td>${formatDate(item.captured_at)}</td></tr>`;
+    return `<tr><td class="primary-cell"><strong>${escapeHtml(item.model_id)}</strong><small>${escapeHtml(item.billing_mode)}</small></td><td>${escapeHtml(item.provider_name)}</td><td>${escapeHtml(item.platform || '-')}</td><td>${escapeHtml(groupLabel)}</td><td class="numeric">${formatEffectiveRate(item.groupRatio)}</td><td class="primary-cell numeric">${integrationRecharge({}, item.recharge)}</td><td class="numeric"><strong title="有效倍率 ÷ 充值倍率">${formatEffectiveRate(item.compositeRate)}</strong></td><td class="numeric">${item.effectiveInputPrice == null ? '-' : formatMoney(item.effectiveInputPrice, currency)}</td><td class="numeric">${item.effectiveOutputPrice == null ? '-' : formatMoney(item.effectiveOutputPrice, currency)}</td><td class="numeric">${item.effectiveRequestPrice == null ? '-' : formatMoney(item.effectiveRequestPrice, currency)}</td><td>${formatDate(item.captured_at)}</td></tr>`;
   }).join('');
-  $('#main-content').innerHTML = `<div class="filter-bar"><select id="cost-model"><option value="">选择模型进行推荐比较</option>${modelNames.map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(model)}</option>`).join('')}</select><button class="button" data-action="compare-model"><i data-lucide="scale"></i><span>比较</span></button></div><div id="cost-comparison"></div><section class="section"><div class="section-header"><h2>分组倍率</h2><p>${activeGroups.length} 个可用分组</p></div><div class="table-wrap">${groupRows ? `<table><thead><tr><th>分组</th><th>供应商</th><th>平台</th><th class="numeric">有效倍率</th><th class="numeric">默认倍率</th><th>峰值倍率</th><th class="numeric">图片 1K</th><th class="numeric">图片 2K</th><th class="numeric">图片 4K</th></tr></thead><tbody>${groupRows}</tbody></table>` : emptyState('boxes', '暂无分组倍率', '先同步支持分组查询的供应商')}</div></section><section class="section"><div class="section-header"><h2>最新价格目录</h2><p>${models.items.length} 个模型 · ${prices.items.length} 条价格</p></div><div class="table-wrap">${rows ? `<table><thead><tr><th>模型</th><th>供应商</th><th>分组 / 渠道</th><th class="numeric">倍率</th><th class="numeric">输入 / 百万</th><th class="numeric">输出 / 百万</th><th class="numeric">单次</th><th>同步时间</th></tr></thead><tbody>${rows}</tbody></table>` : emptyState('badge-dollar-sign', '暂无模型价格', '供应商未返回可用的模型价格')}</div></section>`;
+  const providerOptions = result.filterOptions?.providers || state.providers;
+  const platformOptions = result.filterOptions?.platforms || [...new Set(result.items.map((item) => item.platform).filter(Boolean))];
+  root.innerHTML = pagedTableHtml({
+    rows,
+    headers: `<th>模型</th>${costFilterHeaderHtml('cost-prices', 'connectionId', '供应商', providerOptions)}${costFilterHeaderHtml('cost-prices', 'platform', '平台', platformOptions)}<th>分组 / 渠道</th><th class="numeric">有效倍率</th><th class="numeric">充值倍率</th>${costRateSortHeaderHtml('cost-prices', '综合倍率')}<th class="numeric">输入 / 百万</th><th class="numeric">输出 / 百万</th><th class="numeric">单次</th><th>同步时间</th>`,
+    emptyIcon: 'badge-dollar-sign',
+    emptyTitle: filters.connectionId || filters.platform ? '没有匹配的模型价格' : '暂无模型价格',
+    emptyText: filters.connectionId || filters.platform ? '调整表头中的供应商或平台筛选' : '供应商未返回可用的模型价格',
+    listKey: 'cost-prices', pagination: result.pagination, keepHeaderWhenEmpty: true
+  });
+  icons();
 }
 
 async function loadCostComparison() {
@@ -507,13 +728,73 @@ async function loadCostComparison() {
 
 async function renderRisks() {
   const [anomalies, changes, health] = await Promise.all([
-    api('/api/anomalies?limit=200'), api('/api/asset-changes?limit=200'), api('/api/key-health?limit=200')
+    requestPagedList('risk-anomalies', state.pagedLists['risk-anomalies']?.pagination?.page || 1),
+    requestPagedList('risk-changes', state.pagedLists['risk-changes']?.pagination?.page || 1),
+    requestPagedList('risk-health', state.pagedLists['risk-health']?.pagination?.page || 1)
   ]);
+  state.pagedLists['risk-anomalies'] = anomalies;
+  state.pagedLists['risk-changes'] = changes;
+  state.pagedLists['risk-health'] = health;
   setTopActions(`<button class="button" data-action="health-all"><i data-lucide="stethoscope"></i><span>元数据检测</span></button><button class="button" data-action="refresh-view"><i data-lucide="refresh-cw"></i><span>刷新</span></button>`);
-  const anomalyRows = anomalies.items.map((item) => `<tr><td>${badge(item.resolved_at ? 'resolved' : item.severity)}</td><td class="primary-cell"><strong>${escapeHtml(item.anomaly_type)}</strong><small>${escapeHtml(item.message)}</small></td><td>${escapeHtml(state.providers.find((p) => p.id === item.connection_id)?.name || '-')}</td><td class="numeric">${formatNumber(item.score)}</td><td>${formatDate(item.detected_at)}</td></tr>`).join('');
-  const changeRows = changes.items.map((item) => `<tr><td>${badge(item.severity)}</td><td>${escapeHtml(item.asset_type)}</td><td>${escapeHtml(item.change_type)}</td><td>${escapeHtml(state.providers.find((p) => p.id === item.connection_id)?.name || '-')}</td><td>${escapeHtml(item.after?.changedFields?.join(', ') || item.remote_id || '-')}</td><td>${formatDate(item.detected_at)}</td></tr>`).join('');
-  const healthRows = health.items.map((item) => `<tr><td class="primary-cell"><strong>${escapeHtml(item.key_name)}</strong><small>${escapeHtml(item.provider_name)}</small></td><td>${badge(item.status)}</td><td>${escapeHtml(item.level)}</td><td class="numeric">${item.latency_ms == null ? '-' : `${item.latency_ms} ms`}</td><td class="numeric">${item.model_count ?? '-'}</td><td>${escapeHtml(item.error_code || '-')}</td><td>${formatDate(item.checked_at)}</td></tr>`).join('');
-  $('#main-content').innerHTML = `<div class="stats-grid"><div class="stat"><span class="stat-label"><i data-lucide="triangle-alert"></i>活动异常</span><strong class="stat-value">${anomalies.items.filter((item) => !item.resolved_at).length}</strong><span class="stat-detail">余额、用量与契约</span></div><div class="stat"><span class="stat-label"><i data-lucide="git-compare-arrows"></i>资产变化</span><strong class="stat-value">${changes.items.length}</strong><span class="stat-detail">最近 200 条</span></div><div class="stat"><span class="stat-label"><i data-lucide="shield-check"></i>检测通过</span><strong class="stat-value">${health.items.filter((item) => item.status === 'passed').length}</strong><span class="stat-detail">Key 健康记录</span></div><div class="stat"><span class="stat-label"><i data-lucide="shield-x"></i>检测失败</span><strong class="stat-value">${health.items.filter((item) => item.status === 'failed').length}</strong><span class="stat-detail">需要处理</span></div></div><section class="section"><div class="section-header"><h2>异常</h2></div><div class="table-wrap">${anomalyRows ? `<table><thead><tr><th>状态</th><th>异常</th><th>供应商</th><th class="numeric">评分</th><th>时间</th></tr></thead><tbody>${anomalyRows}</tbody></table>` : emptyState('shield-check', '暂无异常', '同步完成后自动分析余额和用量')}</div></section><section class="section"><div class="section-header"><h2>配置漂移</h2></div><div class="table-wrap">${changeRows ? `<table><thead><tr><th>级别</th><th>资产</th><th>变化</th><th>供应商</th><th>字段</th><th>时间</th></tr></thead><tbody>${changeRows}</tbody></table>` : emptyState('git-compare-arrows', '暂无变化记录', '第二次同步后开始对比资产')}</div></section><section class="section"><div class="section-header"><h2>Key 健康记录</h2></div><div class="table-wrap">${healthRows ? `<table><thead><tr><th>Key</th><th>结果</th><th>级别</th><th class="numeric">延迟</th><th class="numeric">模型数</th><th>错误</th><th>时间</th></tr></thead><tbody>${healthRows}</tbody></table>` : emptyState('stethoscope', '暂无健康检测', '可执行免费的元数据检测')}</div></section>`;
+  $('#main-content').innerHTML = `<div class="stats-grid"><div class="stat"><span class="stat-label"><i data-lucide="triangle-alert"></i>活动异常</span><strong class="stat-value" id="risk-active-count">0</strong><span class="stat-detail">余额、用量与契约</span></div><div class="stat"><span class="stat-label"><i data-lucide="git-compare-arrows"></i>资产变化</span><strong class="stat-value" id="risk-change-count">0</strong><span class="stat-detail">累计变化记录</span></div><div class="stat"><span class="stat-label"><i data-lucide="shield-check"></i>检测通过</span><strong class="stat-value" id="risk-passed-count">0</strong><span class="stat-detail">全部 Key 健康记录</span></div><div class="stat"><span class="stat-label"><i data-lucide="shield-x"></i>检测失败</span><strong class="stat-value" id="risk-failed-count">0</strong><span class="stat-detail">需要处理</span></div></div><section class="section"><div class="section-header"><h2>异常</h2><p id="risk-anomalies-summary"></p></div><div id="risk-anomalies-list" data-paged-list="risk-anomalies"></div></section><section class="section"><div class="section-header"><h2>配置漂移</h2><p id="risk-changes-summary"></p></div><div id="risk-changes-list" data-paged-list="risk-changes"></div></section><section class="section"><div class="section-header"><h2>Key 健康记录</h2><p id="risk-health-summary"></p></div><div id="risk-health-list" data-paged-list="risk-health"></div></section>`;
+  paintRiskAnomalies();
+  paintRiskChanges();
+  paintRiskHealth();
+}
+
+function paintRiskSummary() {
+  const anomalies = state.pagedLists['risk-anomalies'];
+  const changes = state.pagedLists['risk-changes'];
+  const health = state.pagedLists['risk-health'];
+  if ($('#risk-active-count')) $('#risk-active-count').textContent = anomalies?.summary?.active || 0;
+  if ($('#risk-change-count')) $('#risk-change-count').textContent = changes?.pagination?.total || 0;
+  if ($('#risk-passed-count')) $('#risk-passed-count').textContent = health?.summary?.passed || 0;
+  if ($('#risk-failed-count')) $('#risk-failed-count').textContent = health?.summary?.failed || 0;
+}
+
+function paintRiskAnomalies() {
+  const result = state.pagedLists['risk-anomalies'];
+  const root = $('#risk-anomalies-list');
+  if (!result || !root) return;
+  if ($('#risk-anomalies-summary')) $('#risk-anomalies-summary').textContent = `${result.pagination.total} 条记录`;
+  const rows = result.items.map((item) => `<tr><td>${badge(item.resolved_at ? 'resolved' : item.severity)}</td><td class="primary-cell"><strong>${escapeHtml(item.anomaly_type)}</strong><small>${escapeHtml(item.message)}</small></td><td>${escapeHtml(state.providers.find((provider) => provider.id === item.connection_id)?.name || '-')}</td><td class="numeric">${formatNumber(item.score)}</td><td>${formatDate(item.detected_at)}</td></tr>`).join('');
+  root.innerHTML = pagedTableHtml({
+    rows, headers: '<th>状态</th><th>异常</th><th>供应商</th><th class="numeric">评分</th><th>时间</th>',
+    emptyIcon: 'shield-check', emptyTitle: '暂无异常', emptyText: '同步完成后自动分析余额和用量',
+    listKey: 'risk-anomalies', pagination: result.pagination
+  });
+  paintRiskSummary();
+  icons();
+}
+
+function paintRiskChanges() {
+  const result = state.pagedLists['risk-changes'];
+  const root = $('#risk-changes-list');
+  if (!result || !root) return;
+  if ($('#risk-changes-summary')) $('#risk-changes-summary').textContent = `${result.pagination.total} 条记录`;
+  const rows = result.items.map((item) => `<tr><td>${badge(item.severity)}</td><td>${escapeHtml(item.asset_type)}</td><td>${escapeHtml(item.change_type)}</td><td>${escapeHtml(state.providers.find((provider) => provider.id === item.connection_id)?.name || '-')}</td><td>${escapeHtml(item.after?.changedFields?.join(', ') || item.remote_id || '-')}</td><td>${formatDate(item.detected_at)}</td></tr>`).join('');
+  root.innerHTML = pagedTableHtml({
+    rows, headers: '<th>级别</th><th>资产</th><th>变化</th><th>供应商</th><th>字段</th><th>时间</th>',
+    emptyIcon: 'git-compare-arrows', emptyTitle: '暂无变化记录', emptyText: '第二次同步后开始对比资产',
+    listKey: 'risk-changes', pagination: result.pagination
+  });
+  paintRiskSummary();
+  icons();
+}
+
+function paintRiskHealth() {
+  const result = state.pagedLists['risk-health'];
+  const root = $('#risk-health-list');
+  if (!result || !root) return;
+  if ($('#risk-health-summary')) $('#risk-health-summary').textContent = `${result.pagination.total} 条记录`;
+  const rows = result.items.map((item) => `<tr><td class="primary-cell"><strong>${escapeHtml(item.key_name)}</strong><small>${escapeHtml(item.provider_name)}</small></td><td>${badge(item.status)}</td><td>${escapeHtml(item.level)}</td><td class="numeric">${item.latency_ms == null ? '-' : `${item.latency_ms} ms`}</td><td class="numeric">${item.model_count ?? '-'}</td><td>${escapeHtml(item.error_code || '-')}</td><td>${formatDate(item.checked_at)}</td></tr>`).join('');
+  root.innerHTML = pagedTableHtml({
+    rows, headers: '<th>Key</th><th>结果</th><th>级别</th><th class="numeric">延迟</th><th class="numeric">模型数</th><th>错误</th><th>时间</th>',
+    emptyIcon: 'stethoscope', emptyTitle: '暂无健康检测', emptyText: '可执行免费的元数据检测',
+    listKey: 'risk-health', pagination: result.pagination
+  });
+  paintRiskSummary();
+  icons();
 }
 
 function integrationDelta(comparison = {}) {
@@ -1154,15 +1435,86 @@ async function renderTests() {
 }
 
 async function renderActivity() {
-  const [checks, jobs, auditLogs] = await Promise.all([api('/api/checks?limit=100'), api('/api/jobs?limit=100'), api('/api/audit-logs?limit=100')]);
-  state.checks = checks.items;
-  state.jobs = jobs.items;
-  state.audit = auditLogs.items;
+  const selected = ['checks', 'jobs', 'audit'].includes(state.activityTab) ? state.activityTab : 'checks';
+  state.activityTab = selected;
+  const selectedKey = `activity-${selected}`;
+  state.pagedLists[selectedKey] = await requestPagedList(
+    selectedKey,
+    state.pagedLists[selectedKey]?.pagination?.page || 1
+  );
   setTopActions(`<button class="button" data-action="refresh-view"><i data-lucide="refresh-cw"></i><span>刷新</span></button>`);
-  const checksRows = state.checks.map((run) => `<tr><td>${escapeHtml(state.providers.find((p) => p.id === run.connection_id)?.name || '-')}</td><td>${escapeHtml(run.job_type)}</td><td>${badge(run.status)}</td><td class="numeric">${run.duration_ms == null ? '-' : `${run.duration_ms} ms`}</td><td>${escapeHtml(run.error_code || '-')}</td><td>${formatDate(run.started_at)}</td></tr>`).join('');
-  const jobRows = state.jobs.map((job) => `<tr><td>${escapeHtml(job.type)}</td><td>${escapeHtml(state.providers.find((p) => p.id === job.connection_id)?.name || '-')}</td><td>${badge(job.status)}</td><td class="numeric">${job.attempt}</td><td>${escapeHtml(job.last_error || '-')}</td><td>${formatDate(job.created_at)}</td></tr>`).join('');
-  const auditRows = state.audit.map((log) => `<tr><td>${escapeHtml(log.actor_name || '-')}</td><td>${escapeHtml(log.action)}</td><td>${escapeHtml(log.target_type || '-')}</td><td>${escapeHtml(log.target_id || '-')}</td><td>${formatDate(log.created_at)}</td></tr>`).join('');
-  $('#main-content').innerHTML = `<div class="tabs"><button class="tab active" data-activity-tab="checks">检查记录</button><button class="tab" data-activity-tab="jobs">任务队列</button><button class="tab" data-activity-tab="audit">审计日志</button></div><div id="activity-checks" class="table-wrap"><table><thead><tr><th>供应商</th><th>类型</th><th>状态</th><th class="numeric">耗时</th><th>错误码</th><th>开始时间</th></tr></thead><tbody>${checksRows}</tbody></table></div><div id="activity-jobs" class="table-wrap" hidden><table><thead><tr><th>任务</th><th>供应商</th><th>状态</th><th class="numeric">尝试</th><th>错误</th><th>创建时间</th></tr></thead><tbody>${jobRows}</tbody></table></div><div id="activity-audit" class="table-wrap" hidden><table><thead><tr><th>操作者</th><th>动作</th><th>对象</th><th>ID</th><th>时间</th></tr></thead><tbody>${auditRows}</tbody></table></div>`;
+  const tabs = [
+    ['checks', '检查记录'], ['jobs', '任务队列'], ['audit', '审计日志']
+  ].map(([name, label]) => {
+    const active = name === selected;
+    return `<button id="activity-${name}-tab" class="tab ${active ? 'active' : ''}" data-activity-tab="${name}" role="tab" aria-selected="${active}" aria-controls="activity-${name}" tabindex="${active ? 0 : -1}">${label}</button>`;
+  }).join('');
+  const panels = ['checks', 'jobs', 'audit'].map((name) => `<div id="activity-${name}" role="tabpanel" aria-labelledby="activity-${name}-tab" ${name === selected ? '' : 'hidden'}><div id="activity-${name}-list" data-paged-list="activity-${name}"></div></div>`).join('');
+  $('#main-content').innerHTML = `<div class="tabs" role="tablist" aria-label="运行记录类型">${tabs}</div>${panels}`;
+  ['checks', 'jobs', 'audit'].forEach((name) => {
+    if (state.pagedLists[`activity-${name}`]) paintActivityList(name);
+  });
+}
+
+async function selectActivityTab(name) {
+  if (!['checks', 'jobs', 'audit'].includes(name)) return;
+  state.activityTab = name;
+  $$('[data-activity-tab]').forEach((tab) => {
+    const active = tab.dataset.activityTab === name;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', String(active));
+    tab.tabIndex = active ? 0 : -1;
+  });
+  ['checks', 'jobs', 'audit'].forEach((panelName) => {
+    const panel = $(`#activity-${panelName}`);
+    if (panel) panel.hidden = panelName !== name;
+  });
+  const listKey = `activity-${name}`;
+  if (!state.pagedLists[listKey]) {
+    const root = $(`#activity-${name}-list`);
+    if (root) root.innerHTML = `<div class="table-wrap">${emptyState('loader-circle', '正在加载', '')}</div>`;
+    icons();
+    state.pagedLists[listKey] = await requestPagedList(listKey, 1);
+  }
+  paintActivityList(name);
+}
+
+function paintActivityList(name) {
+  const listKey = `activity-${name}`;
+  const result = state.pagedLists[listKey];
+  const root = $(`#activity-${name}-list`);
+  if (!result || !root) return;
+  let rows = '';
+  let headers = '';
+  let emptyIcon = 'scroll-text';
+  let emptyTitle = '暂无运行记录';
+  let emptyText = '执行同步或管理操作后将在此显示';
+  if (name === 'checks') {
+    state.checks = result.items;
+    rows = result.items.map((run) => `<tr><td>${escapeHtml(state.providers.find((provider) => provider.id === run.connection_id)?.name || '-')}</td><td>${escapeHtml(run.job_type)}</td><td>${badge(run.status)}</td><td class="numeric">${run.duration_ms == null ? '-' : `${run.duration_ms} ms`}</td><td>${escapeHtml(run.error_code || '-')}</td><td>${formatDate(run.started_at)}</td></tr>`).join('');
+    headers = '<th>供应商</th><th>类型</th><th>状态</th><th class="numeric">耗时</th><th>错误码</th><th>开始时间</th>';
+    emptyIcon = 'clipboard-check';
+    emptyTitle = '暂无检查记录';
+  }
+  if (name === 'jobs') {
+    state.jobs = result.items;
+    rows = result.items.map((job) => `<tr><td>${escapeHtml(job.type)}</td><td>${escapeHtml(state.providers.find((provider) => provider.id === job.connection_id)?.name || '-')}</td><td>${badge(job.status)}</td><td class="numeric">${job.attempt}</td><td>${escapeHtml(job.last_error || '-')}</td><td>${formatDate(job.created_at)}</td></tr>`).join('');
+    headers = '<th>任务</th><th>供应商</th><th>状态</th><th class="numeric">尝试</th><th>错误</th><th>创建时间</th>';
+    emptyIcon = 'list-checks';
+    emptyTitle = '暂无任务记录';
+  }
+  if (name === 'audit') {
+    state.audit = result.items;
+    rows = result.items.map((log) => `<tr><td>${escapeHtml(log.actor_name || '-')}</td><td>${escapeHtml(log.action)}</td><td>${escapeHtml(log.target_type || '-')}</td><td>${escapeHtml(log.target_id || '-')}</td><td>${formatDate(log.created_at)}</td></tr>`).join('');
+    headers = '<th>操作者</th><th>动作</th><th>对象</th><th>ID</th><th>时间</th>';
+    emptyIcon = 'file-clock';
+    emptyTitle = '暂无审计日志';
+  }
+  root.innerHTML = pagedTableHtml({
+    rows, headers, emptyIcon, emptyTitle, emptyText,
+    listKey, pagination: result.pagination
+  });
+  icons();
 }
 
 function credentialFieldsFor(adapter, authMode) {
@@ -1732,6 +2084,8 @@ async function handleAction(button) {
       const results = await Promise.allSettled(state.providers.map((provider) => api(`/api/providers/${provider.id}/key-health`, { method: 'POST', body: { level: 'metadata' } })));
       toast(`健康检测完成：${results.filter((result) => result.status === 'fulfilled').length}/${results.length}`); navigate('risks');
     }
+    if (action === 'paginate') await changeListPage(button.dataset.listKey, button.dataset.page);
+    if (action === 'sort-cost-rate') await cycleCostRateSort(button.dataset.listKey);
     if (action === 'refresh-trends') await loadTrend();
     if (action === 'compare-model') await loadCostComparison();
     if (action === 'evaluate-alerts') { await api('/api/alerts/evaluate', { method: 'POST' }); toast('告警评估完成'); navigate('alerts'); }
@@ -1835,12 +2189,18 @@ document.addEventListener('click', (event) => {
   if (action) handleAction(action);
   const activityTab = event.target.closest('[data-activity-tab]');
   if (activityTab) {
-    $$('[data-activity-tab]').forEach((tab) => tab.classList.toggle('active', tab === activityTab));
-    ['checks', 'jobs', 'audit'].forEach((name) => { $(`#activity-${name}`).hidden = name !== activityTab.dataset.activityTab; });
+    selectActivityTab(activityTab.dataset.activityTab).catch((error) => toast(error.message, 'error'));
   }
 });
 
 document.addEventListener('keydown', (event) => {
+  if (event.target.matches('[data-cost-name-query]') && event.key === 'Enter') {
+    event.preventDefault();
+    clearTimeout(costGroupNameFilterTimer);
+    updateCostListFilter('cost-groups', 'nameQuery', event.target.value)
+      .catch((error) => toast(error.message, 'error'));
+    return;
+  }
   const tab = event.target.closest('[role="tab"]');
   if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
   const tabs = $$('[role="tab"]', tab.closest('[role="tablist"]')).filter((item) => !item.disabled);
@@ -1856,6 +2216,10 @@ document.addEventListener('keydown', (event) => {
 document.addEventListener('change', (event) => {
   if (event.target.matches('#trend-provider, #trend-days, #trend-currency')) loadTrend().catch((e) => toast(e.message, 'error'));
   if (event.target.matches('#asset-status')) filterAssets().catch((e) => toast(e.message, 'error'));
+  if (event.target.matches('[data-cost-filter]')) {
+    updateCostListFilter(event.target.dataset.listKey, event.target.dataset.costFilter, event.target.value)
+      .catch((error) => toast(error.message, 'error'));
+  }
   if (event.target.matches('#mapping-form [name="connectionId"]')) {
     updateMappingKeyOptions();
     updateMappingProviderGroupOptions();
@@ -1882,9 +2246,23 @@ document.addEventListener('change', (event) => {
 });
 
 let searchTimer;
+let costModelSearchTimer;
+let costGroupNameFilterTimer;
 document.addEventListener('input', (event) => {
   if (event.target.matches('#asset-search')) {
     clearTimeout(searchTimer); searchTimer = setTimeout(() => filterAssets().catch((e) => toast(e.message, 'error')), 250);
+  }
+  if (event.target.matches('#cost-model')) {
+    clearTimeout(costModelSearchTimer);
+    costModelSearchTimer = setTimeout(() => loadCostModelOptions(event.target.value).catch((error) => toast(error.message, 'error')), 200);
+  }
+  if (event.target.matches('[data-cost-name-query]')) {
+    clearTimeout(costGroupNameFilterTimer);
+    const value = event.target.value;
+    costGroupNameFilterTimer = setTimeout(() => {
+      updateCostListFilter('cost-groups', 'nameQuery', value)
+        .catch((error) => toast(error.message, 'error'));
+    }, 300);
   }
   if (event.target.matches('#provider-form [name="baseUrl"]')) {
     scheduleProviderDetection(event.target.form);

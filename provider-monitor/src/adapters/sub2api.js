@@ -154,6 +154,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
       keyQuota: true,
       listGroups: true,
       keyGroup: true,
+      groupsDerivedFromKeys: true,
       usageHistory: true,
       priceCatalog: true,
       rechargeQuote: true,
@@ -551,6 +552,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
 
   async listGroups() {
     if (usesApiKey(this.connection)) {
+      this.groupListComplete = true;
       const billing = await this.getApiKeyBilling();
       const remoteId = String(billing.billing_scope || 'token');
       return [{
@@ -569,32 +571,62 @@ class Sub2ApiAdapter extends ProviderAdapter {
         })
       }];
     }
-    const [groupsResponse, ratesResponse] = await Promise.all([
+    const [groupsResponse, ratesResponse, keysResult] = await Promise.all([
       this.authenticatedRequest('/api/v1/groups/available'),
-      this.authenticatedRequest('/api/v1/groups/rates').catch(() => ({ data: { data: {} } }))
+      this.authenticatedRequest('/api/v1/groups/rates').catch(() => ({ data: { data: {} } })),
+      this.listKeys().then(
+        (value) => ({ ok: true, value }),
+        () => ({ ok: false, value: [] })
+      )
     ]);
+    this.groupListComplete = keysResult.ok;
     const groups = unwrapEnvelope(groupsResponse.data) || [];
     const rates = normalizeGroupRates(unwrapEnvelope(ratesResponse.data, { allowNull: true }));
-    return groups.map((group) => {
-      const defaultRateMultiplier = toFiniteNumber(group.rate_multiplier, 1);
-      const effectiveRateMultiplier = resolveGroupRate(rates, group.id, defaultRateMultiplier);
-      return {
-        remoteId: String(group.id),
-        type: 'key_route_group',
-        name: group.name || String(group.id),
-        ratio: effectiveRateMultiplier,
-        status: group.status || 'active',
-        metadata: this.safeRaw({
-          ...group,
-          default_rate_multiplier: defaultRateMultiplier,
-          effective_rate_multiplier: effectiveRateMultiplier,
-          personalized_rate: effectiveRateMultiplier !== defaultRateMultiplier
-        })
-      };
-    });
+    const merged = new Map(groups.map((group) => {
+      const normalized = this.normalizeUserGroup(group, rates);
+      return [normalized.remoteId, normalized];
+    }));
+    for (const key of keysResult.value) {
+      for (const snapshot of key.groupSnapshots || []) {
+        if (merged.has(snapshot.remoteId)) continue;
+        const normalized = this.normalizeUserGroup(snapshot.metadata, rates);
+        merged.set(normalized.remoteId, normalized);
+      }
+    }
+    return [...merged.values()];
   }
 
   async listKeys() {
+    if (!this.keyListPromise) this.keyListPromise = this.loadKeys();
+    return this.keyListPromise;
+  }
+
+  normalizeUserGroup(group, rates = null, { derivedFromKey = Boolean(group?.derivedFromKey) } = {}) {
+    const remoteId = String(group.id);
+    const defaultRateMultiplier = toFiniteNumber(group.rate_multiplier, derivedFromKey ? null : 1);
+    const embeddedRateMultiplier = derivedFromKey
+      ? toFiniteNumber(group.effective_rate_multiplier, defaultRateMultiplier)
+      : defaultRateMultiplier;
+    const effectiveRateMultiplier = rates == null
+      ? embeddedRateMultiplier
+      : resolveGroupRate(rates, group.id, embeddedRateMultiplier);
+    return {
+      remoteId,
+      type: 'key_route_group',
+      name: group.name || remoteId,
+      ratio: effectiveRateMultiplier,
+      status: group.status || 'active',
+      metadata: this.safeRaw({
+        ...group,
+        default_rate_multiplier: defaultRateMultiplier,
+        effective_rate_multiplier: effectiveRateMultiplier,
+        personalized_rate: effectiveRateMultiplier !== defaultRateMultiplier,
+        ...(derivedFromKey ? { derivedFromKey: true } : {})
+      })
+    };
+  }
+
+  async loadKeys() {
     if (usesApiKey(this.connection)) {
       const [usage, billing] = await Promise.all([
         this.getApiKeyUsage(),
@@ -632,6 +664,9 @@ class Sub2ApiAdapter extends ProviderAdapter {
         const limit = toFiniteNumber(key.quota, 0);
         const used = toFiniteNumber(key.quota_used, 0);
         const unlimited = limit === 0;
+        const groupSnapshot = key.group?.id == null
+          ? null
+          : this.normalizeUserGroup(key.group, null, { derivedFromKey: true });
         result.push({
           remoteId: String(key.id),
           name: key.name || `Key ${key.id}`,
@@ -640,6 +675,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
           primaryGroupRef: key.group_id == null ? null : String(key.group_id),
           backupGroupRef: null,
           additionalGroupRefs: [],
+          groupSnapshots: groupSnapshot ? [groupSnapshot] : [],
           quota: {
             currency: 'USD',
             limit: unlimited ? null : limit,
@@ -808,7 +844,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
       models: [...models.values()],
       prices: [...prices.values()],
       groups,
-      groupsComplete: true,
+      groupsComplete: this.groupListComplete !== false,
       source: channels.length > 0 ? 'sub2api_channels' : 'sub2api_group_rates',
       status: prices.size > 0 ? 'succeeded' : 'partial',
       warning

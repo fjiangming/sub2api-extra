@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 14;
+const SCHEMA_VERSION = 15;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -265,6 +265,9 @@ CREATE TABLE IF NOT EXISTS check_runs (
 CREATE INDEX IF NOT EXISTS check_run_lookup
   ON check_runs(connection_id, started_at DESC);
 
+CREATE INDEX IF NOT EXISTS check_run_recent
+  ON check_runs(started_at DESC, id DESC);
+
 CREATE TABLE IF NOT EXISTS jobs (
   id TEXT PRIMARY KEY,
   type TEXT NOT NULL,
@@ -283,6 +286,9 @@ CREATE TABLE IF NOT EXISTS jobs (
 
 CREATE INDEX IF NOT EXISTS pending_job_lookup
   ON jobs(status, run_after, priority DESC);
+
+CREATE INDEX IF NOT EXISTS job_recent
+  ON jobs(created_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS alert_rules (
   id TEXT PRIMARY KEY,
@@ -393,6 +399,9 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   created_at TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS audit_log_recent
+  ON audit_logs(created_at DESC, id DESC);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value_json TEXT NOT NULL,
@@ -415,6 +424,9 @@ CREATE TABLE IF NOT EXISTS asset_change_events (
 CREATE INDEX IF NOT EXISTS asset_change_lookup
   ON asset_change_events(connection_id, detected_at DESC);
 
+CREATE INDEX IF NOT EXISTS asset_change_recent
+  ON asset_change_events(detected_at DESC, id DESC);
+
 CREATE TABLE IF NOT EXISTS anomaly_events (
   id TEXT PRIMARY KEY,
   connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
@@ -433,6 +445,9 @@ CREATE TABLE IF NOT EXISTS anomaly_events (
 CREATE INDEX IF NOT EXISTS anomaly_lookup
   ON anomaly_events(connection_id, detected_at DESC);
 
+CREATE INDEX IF NOT EXISTS anomaly_recent
+  ON anomaly_events(detected_at DESC, id DESC);
+
 CREATE TABLE IF NOT EXISTS key_health_checks (
   id TEXT PRIMARY KEY,
   connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
@@ -449,6 +464,9 @@ CREATE TABLE IF NOT EXISTS key_health_checks (
 
 CREATE INDEX IF NOT EXISTS key_health_lookup
   ON key_health_checks(key_id, checked_at DESC);
+
+CREATE INDEX IF NOT EXISTS key_health_recent
+  ON key_health_checks(checked_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS remote_models (
   id TEXT PRIMARY KEY,

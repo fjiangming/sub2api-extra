@@ -106,6 +106,83 @@ test('New API sync persists account balance, key quota and key groups', async (t
   assert.equal(queries.summary().accounts[0].status, 'error');
 });
 
+test('Sub2API sync recovers a key-bound private group omitted from the available catalog', async (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Private Group Provider', adapterType: 'sub2api', baseUrl: 'https://sub2api.example',
+    authMode: 'token_pair',
+    credentials: { accessToken: 'access-token', tokenExpiresAt: Date.now() + 3600000 }
+  });
+  let keyFailure = false;
+  const sync = new SyncService({
+    db: context.db,
+    config: context.config,
+    providers,
+    http: {
+      async requestJson(input) {
+        const url = new URL(input);
+        if (url.pathname === '/api/v1/user/profile') {
+          return { data: { code: 0, data: { id: 7, username: 'user', balance: 10 } } };
+        }
+        if (url.pathname === '/api/v1/groups/available') {
+          return { data: { code: 0, data: [{ id: 3, name: 'Public', rate_multiplier: 1, status: 'active' }] } };
+        }
+        if (url.pathname === '/api/v1/groups/rates') {
+          return { data: { code: 0, data: { 3: 0.8 } } };
+        }
+        if (url.pathname === '/api/v1/keys') {
+          if (keyFailure) {
+            throw new AppError('REMOTE_SERVER_ERROR', 'temporary key failure', {
+              status: 502, retryable: true
+            });
+          }
+          return { data: { code: 0, data: { items: [{
+            id: 9, name: 'Campaign Key', key: 'sk-private-secret', group_id: 40,
+            status: 'active', quota: 0, quota_used: 0,
+            group: {
+              id: 40, name: 'Private Campaign', platform: 'openai',
+              rate_multiplier: 0.5, status: 'inactive'
+            }
+          }], total: 1 } } };
+        }
+        if (url.pathname === '/api/v1/usage/stats') {
+          return { data: { code: 0, data: { total_cost: 0, total_requests: 0 } } };
+        }
+        if (url.pathname === '/api/v1/payment/checkout-info') {
+          return { data: { code: 0, data: { balance_recharge_multiplier: 10 } } };
+        }
+        throw new Error(`Unexpected ${url.pathname}`);
+      }
+    }
+  });
+
+  const result = await sync.run(provider.id, { manual: true });
+  assert.equal(result.status, 'succeeded');
+  const group = context.db.prepare(`
+    SELECT name, ratio, status, metadata_json FROM remote_groups
+    WHERE connection_id = ? AND remote_id = '40'
+  `).get(provider.id);
+  assert.equal(group.name, 'Private Campaign');
+  assert.equal(group.ratio, 0.5);
+  assert.equal(group.status, 'inactive');
+  assert.equal(JSON.parse(group.metadata_json).derivedFromKey, true);
+  const [key] = new QueryService(context.db, context.config).keys({ connectionId: provider.id });
+  assert.equal(key.primary_group_ref, '40');
+  assert.deepEqual(key.additionalGroups, ['Private Campaign']);
+
+  keyFailure = true;
+  const partial = await sync.run(provider.id, { manual: true });
+  assert.equal(partial.status, 'partial');
+  assert.equal(partial.warnings.some((warning) => warning.capability === 'listKeys'), true);
+  const preserved = context.db.prepare(`
+    SELECT name, ratio, status FROM remote_groups
+    WHERE connection_id = ? AND remote_id = '40'
+  `).get(provider.id);
+  assert.deepEqual(preserved, { name: 'Private Campaign', ratio: 0.5, status: 'inactive' });
+});
+
 test('missing optional group endpoint produces a partial sync without losing balance', async (t) => {
   const server = http.createServer((req, res) => {
     if (req.url === '/api/status') return json(res, { success: true, data: { quota_per_unit: 500000 } });
