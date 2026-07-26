@@ -168,6 +168,7 @@ const automationConfigSchema = z.object({
   cooldownMinutes: z.number().int().min(1).max(10080).optional(),
   dailyMaximumActions: z.number().int().min(1).max(1000).optional(),
   contractPauseHours: z.number().min(1).max(720).optional(),
+  notifyOnAction: z.boolean().optional(),
   webhookUrl: z.string().url().optional()
 }).passthrough().superRefine((config, context) => {
   if (automationAccountActions.has(config.action) && !config.accountIds?.length) {
@@ -415,7 +416,7 @@ function createApplication(options = {}) {
   const alerts = new AlertService({ db, config, queries, notifications });
   const sub2api = new Sub2ApiAdminClient(config);
   const mappings = new MappingService({ db, config, sub2api, http });
-  const automation = new AutomationService({ db, config, sub2api, mappings });
+  const automation = new AutomationService({ db, config, sub2api, mappings, notifications });
   const analysis = new AnalysisService({ db, config });
   const keyHealth = new KeyHealthService({ db, config, providers, http });
   const catalog = new CatalogService({ db, config, providers, http, queries });

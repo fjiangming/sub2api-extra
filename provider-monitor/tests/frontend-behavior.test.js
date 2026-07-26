@@ -563,6 +563,7 @@ test('automation payload separates account targets and builds scheduled mapping 
     connectionId: { value: '11111111-1111-4111-8111-111111111111' },
     enabled: { checked: true },
     dryRun: { checked: true },
+    notifyOnAction: { checked: false },
     threshold: { value: '20' },
     currency: { value: 'USD' },
     accountIds: { value: '17, 18' },
@@ -585,6 +586,7 @@ test('automation payload separates account targets and builds scheduled mapping 
 
   assert.equal(Object.hasOwn(payload.config, 'channelIds'), false);
   assert.equal(Object.hasOwn(payload.config, 'accountIds'), false);
+  assert.equal(payload.config.notifyOnAction, false);
   assert.equal(payload.config.webhookUrl, elements.webhookUrl.value);
   assert.equal(vm.runInContext("automationUsesChannelIds('trigger_recharge_webhook')", context), false);
   assert.equal(vm.runInContext("automationUsesChannelIds('disable_sub2api_account')", context), false);
@@ -598,6 +600,7 @@ test('automation payload separates account targets and builds scheduled mapping 
   elements.triggerType.value = 'scheduled';
   elements.action.value = 'rebuild_sub2api_mappings';
   elements.scheduledConditionType.value = 'composite_rate_difference';
+  elements.notifyOnAction.checked = true;
   const scheduledPayload = JSON.parse(vm.runInContext('JSON.stringify(automationPayload(automationForm))', context));
   assert.equal(scheduledPayload.connectionId, null);
   assert.equal(scheduledPayload.config.scheduleIntervalMinutes, 1440);
@@ -609,6 +612,9 @@ test('automation payload separates account targets and builds scheduled mapping 
   assert.equal(scheduledPayload.config.targetMode, 'matched_mapping_accounts');
   assert.equal(scheduledPayload.config.cooldownMinutes, 360);
   assert.equal(scheduledPayload.config.contractPauseHours, 24);
+  assert.equal(scheduledPayload.config.notifyOnAction, true);
+  assert.match(index, /name="notifyOnAction"/);
+  assert.match(index, /动作触发时通知/);
   assert.match(index, /name="scheduledConditionType"/);
   assert.match(index, /name="scheduledConditionOperator"/);
   assert.match(index, /name="scheduledConditionThreshold"/);

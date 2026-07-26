@@ -401,11 +401,13 @@ test('scheduled mapping workflow disables each account whose refreshed composite
       return { summary: { deletedMappings: 0, createdMappings: 3, skipped: 0 } };
     }
   };
+  const dispatched = [];
   const automation = new AutomationService({
     db: context.db,
     config: context.config,
     sub2api,
-    mappings
+    mappings,
+    notifications: { dispatch: async (event) => dispatched.push(event) }
   });
   const rule = automation.saveRule({
     name: 'Disable negative composite accounts',
@@ -421,7 +423,8 @@ test('scheduled mapping workflow disables each account whose refreshed composite
       targetMode: 'matched_mapping_accounts',
       cooldownMinutes: 60,
       dailyMaximumActions: 10,
-      contractPauseHours: 24
+      contractPauseHours: 24,
+      notifyOnAction: true
     }
   });
 
@@ -443,8 +446,65 @@ test('scheduled mapping workflow disables each account whose refreshed composite
     ['negative-a', 'negative-b']
   );
   assert.equal(accountAction.after.workflowContext.condition.threshold, 0);
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0].id, null);
+  assert.equal(dispatched[0].severity, 'warning');
+  assert.equal(dispatched[0].connection_id, provider.id);
+  assert.equal(
+    dispatched[0].message,
+    '自动化规则「Disable negative composite accounts」已触发：综合倍率偏差 < 0%（命中 2 个映射），已执行「停用 Sub2API 账号 #17（Negative account）」'
+  );
+  assert.equal(dispatched[0].details.source, 'automation_rule');
+  assert.equal(dispatched[0].details.actionType, 'disable_sub2api_account');
+  assert.equal(dispatched[0].details.condition.matchedMappings.length, 2);
   assert.equal((await automation.evaluateScheduled()).length, 0);
+  assert.equal(dispatched.length, 1);
   assert.equal(automation.previewRule(rule.id)[0].conditionMatchedTargets, 1);
+});
+
+test('automation rules with notify-on-action alert through channels and survive dispatch failures', async (t) => {
+  const context = createTestContext({ PROVIDER_MONITOR_AUTOMATION_ENABLED: 'false' });
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Notify Provider', adapterType: 'custom', baseUrl: 'https://notify.example.com',
+    authMode: 'api_key', credentials: { apiKey: 'secret' }
+  });
+  insertSnapshot(context.db, provider.id, 1);
+  const dispatched = [];
+  const automation = new AutomationService({
+    db: context.db,
+    config: context.config,
+    notifications: {
+      async dispatch(event) {
+        dispatched.push(event);
+        throw new Error('channel down');
+      }
+    }
+  });
+  automation.saveRule({
+    name: 'Disable low balance account', enabled: true, dryRun: true, triggerType: 'low_balance',
+    connectionId: provider.id,
+    config: {
+      currency: 'USD', threshold: 2, accountIds: [7],
+      action: 'disable_sub2api_account', notifyOnAction: true
+    }
+  });
+  const actions = await automation.evaluateConnection(provider.id);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].status, 'dry_run');
+  assert.equal(dispatched.length, 1);
+  assert.equal(dispatched[0].id, null);
+  assert.equal(dispatched[0].severity, 'info');
+  assert.equal(
+    dispatched[0].message,
+    '[演练] 自动化规则「Disable low balance account」已触发：低余额，计划执行「停用 Sub2API 账号 #7」'
+  );
+  assert.equal(dispatched[0].details.dryRun, true);
+  assert.equal(dispatched[0].details.targetId, 7);
+  assert.equal(automation.listActions()[0].status, 'dry_run');
+  assert.equal((await automation.evaluateConnection(provider.id)).length, 0);
+  assert.equal(dispatched.length, 1);
 });
 
 test('recharge webhook runs once per provider without a Sub2API channel ID', async (t) => {

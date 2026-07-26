@@ -29,6 +29,24 @@ const SUPPORTED_ACTIONS = new Set([
   'create_route_recommendation',
   'rebuild_sub2api_mappings'
 ]);
+const ACTION_LABELS = {
+  disable_sub2api_account: '停用 Sub2API 账号',
+  enable_sub2api_account: '启用 Sub2API 账号',
+  switch_to_backup: '切换备用映射',
+  trigger_recharge_webhook: '触发充值 Webhook',
+  remind_credential_rotation: '提醒凭据轮换',
+  create_route_recommendation: '创建线路推荐',
+  rebuild_sub2api_mappings: '重建全部 Sub2API 映射'
+};
+const TRIGGER_LABELS = {
+  low_balance: '低余额',
+  balance_recovered: '余额恢复',
+  key_failed: 'Key 健康检查失败',
+  anomaly_detected: '检测到异常',
+  contract_changed: '接口协议变更',
+  scheduled: '定时任务'
+};
+const CONDITION_OPERATOR_LABELS = { lt: '<', lte: '≤', gt: '>', gte: '≥' };
 
 function actionTargets(config) {
   if (TARGETLESS_ACTIONS.has(config.action)) return [null];
@@ -53,11 +71,12 @@ function comparisonConditionMatches(value, operator, threshold) {
 }
 
 class AutomationService {
-  constructor({ db, config, sub2api, mappings = null }) {
+  constructor({ db, config, sub2api, mappings = null, notifications = null }) {
     this.db = db;
     this.config = config;
     this.sub2api = sub2api;
     this.mappings = mappings;
+    this.notifications = notifications;
   }
 
   listRules() {
@@ -507,12 +526,62 @@ class AutomationService {
         UPDATE automation_actions SET status = ?, before_json = ?, after_json = ?,
           completed_at = ? WHERE id = ?
       `).run(dryRun ? 'dry_run' : 'succeeded', stringifyJson(before), stringifyJson(after), nowIso(), id);
+      await this.#notifyActionExecution(rule, {
+        actionId: id, actionType, connectionId, targetId, dryRun, after, workflowContext
+      });
       return { id, actionType, status: dryRun ? 'dry_run' : 'succeeded', dryRun, before, after };
     } catch (error) {
       this.db.prepare(`
         UPDATE automation_actions SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?
       `).run(redactText(error?.message || error).slice(0, 1000), nowIso(), id);
       throw error;
+    }
+  }
+
+  #actionConditionSummary(rule, workflowContext) {
+    const condition = workflowContext?.condition;
+    if (condition?.type === 'composite_rate_difference') {
+      const operator = CONDITION_OPERATOR_LABELS[condition.operator] || condition.operator;
+      const matched = condition.matchedMappings?.length || 0;
+      return `综合倍率偏差 ${operator} ${condition.threshold}%${matched ? `（命中 ${matched} 个映射）` : ''}`;
+    }
+    return TRIGGER_LABELS[rule.trigger_type] || rule.trigger_type;
+  }
+
+  async #notifyActionExecution(rule, execution) {
+    if (!this.notifications) return;
+    const config = parseJson(rule.config_json, {});
+    if (config.notifyOnAction !== true) return;
+    if (rule.trigger_type === 'scheduled' && !execution.workflowContext) return;
+    const actionLabel = ACTION_LABELS[execution.actionType] || execution.actionType;
+    const targetLabel = execution.targetId == null
+      ? ''
+      : ACCOUNT_ACTIONS.has(execution.actionType)
+        ? ` #${execution.targetId}${execution.after?.name ? `（${execution.after.name}）` : ''}`
+        : `（渠道 #${execution.targetId}）`;
+    const message = `${execution.dryRun ? '[演练] ' : ''}自动化规则「${rule.name}」已触发：` +
+      `${this.#actionConditionSummary(rule, execution.workflowContext)}，` +
+      `${execution.dryRun ? '计划执行' : '已执行'}「${actionLabel}${targetLabel}」`;
+    try {
+      await this.notifications.dispatch({
+        id: null,
+        severity: execution.dryRun ? 'info' : 'warning',
+        message,
+        triggered_at: nowIso(),
+        connection_id: execution.connectionId || null,
+        details: {
+          source: 'automation_rule',
+          ruleId: rule.id,
+          ruleName: rule.name,
+          actionId: execution.actionId,
+          actionType: execution.actionType,
+          dryRun: execution.dryRun,
+          ...(execution.targetId == null ? {} : { targetId: execution.targetId }),
+          ...(execution.workflowContext?.condition ? { condition: execution.workflowContext.condition } : {})
+        }
+      });
+    } catch {
+      // The action already completed; notification failures are recorded per channel and must not fail it.
     }
   }
 

@@ -2416,6 +2416,7 @@ function openAutomation(rule = null) {
   form.elements.contractPauseHours.value = rule?.config?.contractPauseHours || 24;
   form.elements.webhookUrl.value = rule?.config?.webhookUrl || '';
   form.elements.enabled.checked = rule?.enabled ?? false; form.elements.dryRun.checked = rule?.dryRun ?? true;
+  form.elements.notifyOnAction.checked = rule?.config?.notifyOnAction ?? false;
   updateAutomationActionFields(form);
   $('#automation-dialog').showModal(); icons();
 }
@@ -2514,6 +2515,7 @@ function automationPayload(form) {
       cooldownMinutes: Number(form.elements.cooldownMinutes.value),
       contractPauseHours: Number(form.elements.contractPauseHours.value),
       dailyMaximumActions: Number(form.elements.dailyMaximumActions.value),
+      notifyOnAction: form.elements.notifyOnAction.checked,
       ...(!scheduled && form.elements.webhookUrl.value ? { webhookUrl: form.elements.webhookUrl.value } : {})
     }
   };
