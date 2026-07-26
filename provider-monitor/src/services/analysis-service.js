@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const { nowIso, parseJson, stringifyJson } = require('../db');
 const { resolvePagination } = require('../pagination');
 
-const VOLATILE_METADATA_KEY = /^(?:spend|usage(?:_|$)|used(?:_|$)|current_|last_|request_count$|requestCount$|byok_usage$)/i;
+const VOLATILE_METADATA_KEY = /^(?:spend|usage(?:_|$)|used(?:_|$)|current_|last_|request_count$|requestCount$|byok_usage$|observed_at$|observedAt$)/i;
 
 function stableMetadata(value) {
   if (Array.isArray(value)) return value.map(stableMetadata);
@@ -56,10 +56,13 @@ class AnalysisService {
 
   captureInventory(connectionId) {
     const provider = this.db.prepare(`SELECT fingerprint_json FROM provider_connections WHERE id = ?`).get(connectionId);
+    // Rows already marked missing were reported as removed when they first
+    // disappeared; keeping them out of the snapshot avoids re-reporting the
+    // same removal on every subsequent sync.
     return {
       fingerprint: parseJson(provider?.fingerprint_json, {}),
-      keys: new Map(this.db.prepare(`SELECT * FROM remote_keys WHERE connection_id = ?`).all(connectionId).map((row) => [String(row.remote_id), { id: row.id, value: comparableKey(row) }])),
-      groups: new Map(this.db.prepare(`SELECT * FROM remote_groups WHERE connection_id = ?`).all(connectionId).map((row) => [`${row.group_type}:${row.remote_id}`, { id: row.id, value: comparableGroup(row) }]))
+      keys: new Map(this.db.prepare(`SELECT * FROM remote_keys WHERE connection_id = ? AND status != 'missing'`).all(connectionId).map((row) => [String(row.remote_id), { id: row.id, value: comparableKey(row) }])),
+      groups: new Map(this.db.prepare(`SELECT * FROM remote_groups WHERE connection_id = ? AND status != 'missing'`).all(connectionId).map((row) => [`${row.group_type}:${row.remote_id}`, { id: row.id, value: comparableGroup(row) }]))
     };
   }
 

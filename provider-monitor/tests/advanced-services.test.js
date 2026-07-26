@@ -55,6 +55,48 @@ test('analysis records inventory drift and detects balance anomalies', () => {
   }
 });
 
+test('inventory drift reports a removal once and ignores volatile observed_at metadata', () => {
+  const context = createTestContext();
+  try {
+    const { provider } = createProvider(context);
+    const analysis = new AnalysisService({ db: context.db, config: context.config });
+    const seenAt = nowIso();
+    context.db.prepare(`
+      INSERT INTO remote_keys(id, connection_id, remote_id, name, status, first_seen_at, last_seen_at)
+      VALUES (?, ?, '1', 'Active', 'active', ?, ?), (?, ?, '2', 'Gone', 'missing', ?, ?)
+    `).run(crypto.randomUUID(), provider.id, seenAt, seenAt, crypto.randomUUID(), provider.id, seenAt, seenAt);
+    context.db.prepare(`
+      INSERT INTO remote_groups(id, connection_id, remote_id, group_type, name, status, metadata_json, first_seen_at, last_seen_at)
+      VALUES (?, ?, '7', 'key_route_group', 'Default', 'active', ?, ?, ?),
+        (?, ?, '8', 'key_route_group', 'Gone', 'missing', '{}', ?, ?)
+    `).run(
+      crypto.randomUUID(), provider.id, JSON.stringify({ observed_at: '2026-07-26T13:49:03Z' }), seenAt, seenAt,
+      crypto.randomUUID(), provider.id, seenAt, seenAt
+    );
+    const syncData = {
+      probe: {},
+      keys: [{ remoteId: '1', name: 'Active', status: 'active', metadata: {} }],
+      keysComplete: true,
+      groups: [{ remoteId: '7', type: 'key_route_group', name: 'Default', metadata: { observed_at: '2026-07-26T14:07:04Z' } }],
+      groupsComplete: true
+    };
+
+    analysis.recordInventoryChanges(provider.id, analysis.captureInventory(provider.id), syncData);
+    assert.equal(analysis.listChanges({ connectionId: provider.id }).length, 0);
+
+    analysis.recordInventoryChanges(provider.id, analysis.captureInventory(provider.id), {
+      ...syncData, keys: [], keysComplete: true
+    });
+    const changes = analysis.listChanges({ connectionId: provider.id });
+    assert.equal(changes.length, 1);
+    assert.equal(changes[0].change_type, 'removed');
+    assert.equal(changes[0].asset_type, 'key');
+    assert.equal(changes[0].remote_id, '1');
+  } finally {
+    context.cleanup();
+  }
+});
+
 test('mapping reconciliation aggregates Sub2API group usage across channels and combines monitor health', async () => {
   const context = createTestContext();
   try {
