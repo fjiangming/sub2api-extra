@@ -42,6 +42,45 @@ test('the server listens on port 9871 by default and supports an environment ove
   assert.equal(loadConfig({ ...baseEnv, PORT: '4321' }).port, 4321);
 });
 
+test('all retention settings support a one-day minimum', (t) => {
+  const retentionEnv = {
+    PROVIDER_MONITOR_RAW_SNAPSHOT_RETENTION_DAYS: '1',
+    PROVIDER_MONITOR_SNAPSHOT_RETENTION_DAYS: '1',
+    PROVIDER_MONITOR_JOB_RETENTION_DAYS: '1',
+    PROVIDER_MONITOR_AUDIT_RETENTION_DAYS: '1',
+    PROVIDER_MONITOR_NOTIFICATION_RETENTION_DAYS: '1',
+    PROVIDER_MONITOR_ASSET_CHANGE_RETENTION_DAYS: '1'
+  };
+  const context = createTestContext(retentionEnv);
+  t.after(() => context.cleanup());
+  const retentionKeys = [
+    'rawSnapshotRetentionDays',
+    'snapshotRetentionDays',
+    'jobRetentionDays',
+    'auditRetentionDays',
+    'notificationRetentionDays',
+    'assetChangeRetentionDays'
+  ];
+
+  for (const key of retentionKeys) assert.equal(context.config[key], 1);
+
+  const transfers = new TransferService({
+    db: context.db,
+    config: context.config,
+    providers: new ProviderRepository(context.db, context.config)
+  });
+  const settings = transfers.saveSettings(
+    Object.fromEntries(retentionKeys.map((key) => [key, 1]))
+  );
+
+  for (const key of retentionKeys) assert.equal(settings[key], 1);
+
+  const clampedSettings = transfers.saveSettings(
+    Object.fromEntries(retentionKeys.map((key) => [key, 0]))
+  );
+  for (const key of retentionKeys) assert.equal(clampedSettings[key], 1);
+});
+
 test('an empty private host list remains empty at runtime', (t) => {
   const context = createTestContext({ PROVIDER_MONITOR_ALLOWED_HOSTS: '' });
   t.after(() => context.cleanup());

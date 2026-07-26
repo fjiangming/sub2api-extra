@@ -58,12 +58,12 @@ const INTEGER_SETTINGS = {
   maxResponseBytes: [1024, 20 * 1024 * 1024],
   defaultRefreshMinutes: [1, 1440],
   staleAfterMinutes: [5, 10080],
-  rawSnapshotRetentionDays: [7, 3650],
-  snapshotRetentionDays: [30, 3650],
-  jobRetentionDays: [7, 3650],
-  auditRetentionDays: [30, 3650],
-  notificationRetentionDays: [7, 3650],
-  assetChangeRetentionDays: [7, 3650],
+  rawSnapshotRetentionDays: [1, 3650],
+  snapshotRetentionDays: [1, 3650],
+  jobRetentionDays: [1, 3650],
+  auditRetentionDays: [1, 3650],
+  notificationRetentionDays: [1, 3650],
+  assetChangeRetentionDays: [1, 3650],
   keyHealthConcurrency: [1, 10],
   rechargeLinkTtlMinutes: [5, 1440]
 };

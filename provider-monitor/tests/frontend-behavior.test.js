@@ -74,6 +74,22 @@ test('an upstream Sub2API 401 does not clear the Provider Monitor session', asyn
   assert.deepEqual(removedSessionKeys, []);
 });
 
+test('all retention inputs allow a one-day minimum', () => {
+  const { source } = createBrowserContext();
+  const retentionKeys = [
+    'rawSnapshotRetentionDays',
+    'snapshotRetentionDays',
+    'jobRetentionDays',
+    'auditRetentionDays',
+    'notificationRetentionDays',
+    'assetChangeRetentionDays'
+  ];
+
+  for (const key of retentionKeys) {
+    assert.match(source, new RegExp(`<input name="${key}" type="number" min="1" max="3650"`));
+  }
+});
+
 test('a local AUTH_REQUIRED response still clears the expired session', async () => {
   const { context, removedSessionKeys } = createBrowserContext();
   context.fetch = async () => errorResponse('AUTH_REQUIRED', 'Administrator login is required');
