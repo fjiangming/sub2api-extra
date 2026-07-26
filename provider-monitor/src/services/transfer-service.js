@@ -35,6 +35,7 @@ const SETTING_DEFAULTS = {
   jobRetentionDays: 90,
   auditRetentionDays: 365,
   notificationRetentionDays: 180,
+  assetChangeRetentionDays: 180,
   keyHealthConcurrency: 3,
   providerMonitorPublicUrl: '',
   rechargeLinkTtlMinutes: 60
@@ -45,7 +46,8 @@ const RUNTIME_SETTING_KEYS = new Set([
   'sessionTtlMinutes', 'queryTimeoutMs', 'maxResponseBytes', 'defaultRefreshMinutes',
   'staleAfterMinutes', 'rawSnapshotRetentionDays', 'snapshotRetentionDays',
   'jobRetentionDays', 'auditRetentionDays', 'notificationRetentionDays',
-  'keyHealthConcurrency', 'providerMonitorPublicUrl', 'rechargeLinkTtlMinutes'
+  'assetChangeRetentionDays', 'keyHealthConcurrency', 'providerMonitorPublicUrl',
+  'rechargeLinkTtlMinutes'
 ]);
 
 const BOOLEAN_SETTINGS = new Set(['automationEnabled', 'allowPrivateNetworks']);
@@ -61,6 +63,7 @@ const INTEGER_SETTINGS = {
   jobRetentionDays: [7, 3650],
   auditRetentionDays: [30, 3650],
   notificationRetentionDays: [7, 3650],
+  assetChangeRetentionDays: [7, 3650],
   keyHealthConcurrency: [1, 10],
   rechargeLinkTtlMinutes: [5, 1440]
 };
@@ -176,6 +179,7 @@ function runtimeDefaults(config) {
     jobRetentionDays: config.jobRetentionDays,
     auditRetentionDays: config.auditRetentionDays,
     notificationRetentionDays: config.notificationRetentionDays,
+    assetChangeRetentionDays: config.assetChangeRetentionDays,
     keyHealthConcurrency: config.keyHealthConcurrency,
     providerMonitorPublicUrl: config.providerMonitorPublicUrl,
     rechargeLinkTtlMinutes: config.rechargeLinkTtlMinutes

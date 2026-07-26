@@ -13,6 +13,7 @@ class RetentionService {
     const jobBefore = new Date(referenceTime - this.config.jobRetentionDays * 86400000).toISOString();
     const auditBefore = new Date(referenceTime - this.config.auditRetentionDays * 86400000).toISOString();
     const notificationBefore = new Date(referenceTime - this.config.notificationRetentionDays * 86400000).toISOString();
+    const assetChangeBefore = new Date(referenceTime - this.config.assetChangeRetentionDays * 86400000).toISOString();
 
     const aggregate = this.db.transaction(() => {
       this.#aggregateBalances(rawBefore, 'hourly', '%Y-%m-%dT%H:00:00.000Z');
@@ -31,10 +32,11 @@ class RetentionService {
       jobs: this.#deleteBatches('jobs', "status IN ('succeeded', 'failed') AND updated_at < ?", [jobBefore]),
       checks: this.#deleteBatches('check_runs', 'completed_at IS NOT NULL AND completed_at < ?', [jobBefore]),
       audits: this.#deleteBatches('audit_logs', 'created_at < ?', [auditBefore]),
-      notifications: this.#deleteBatches('notification_deliveries', 'created_at < ?', [notificationBefore])
+      notifications: this.#deleteBatches('notification_deliveries', 'created_at < ?', [notificationBefore]),
+      assetChanges: this.#deleteBatches('asset_change_events', 'detected_at < ?', [assetChangeBefore])
     };
     removed.credentialBackups = this.credentials.cleanupExpiredBackups();
-    return { ranAt: nowIso(), cutoffs: { rawBefore, hourlyBefore, jobBefore, auditBefore, notificationBefore }, removed };
+    return { ranAt: nowIso(), cutoffs: { rawBefore, hourlyBefore, jobBefore, auditBefore, notificationBefore, assetChangeBefore }, removed };
   }
 
   #aggregateBalances(before, granularity, format) {

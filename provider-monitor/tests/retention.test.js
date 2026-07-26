@@ -17,7 +17,8 @@ test('retention downsamples old snapshots and keeps latest raw values available 
     PROVIDER_MONITOR_SNAPSHOT_RETENTION_DAYS: '30',
     PROVIDER_MONITOR_JOB_RETENTION_DAYS: '7',
     PROVIDER_MONITOR_AUDIT_RETENTION_DAYS: '30',
-    PROVIDER_MONITOR_NOTIFICATION_RETENTION_DAYS: '7'
+    PROVIDER_MONITOR_NOTIFICATION_RETENTION_DAYS: '7',
+    PROVIDER_MONITOR_ASSET_CHANGE_RETENTION_DAYS: '30'
   });
   try {
     const providers = new ProviderRepository(context.db, context.config);
@@ -41,6 +42,13 @@ test('retention downsamples old snapshots and keeps latest raw values available 
       balance.run(provider.id, provider.id, amount, capturedAt);
       usage.run(provider.id, provider.id, 100 - amount, capturedAt);
     }
+    const assetChange = context.db.prepare(`
+      INSERT INTO asset_change_events(
+        id, connection_id, asset_type, remote_id, change_type, severity, detected_at
+      ) VALUES (?, ?, 'key', ?, 'removed', 'warning', ?)
+    `);
+    assetChange.run('change-old', provider.id, '101', atDaysAgo(40));
+    assetChange.run('change-recent', provider.id, '102', atDaysAgo(1));
     const retention = new RetentionService({
       db: context.db, config: context.config,
       credentials: { cleanupExpiredBackups: () => 0 }
@@ -50,6 +58,10 @@ test('retention downsamples old snapshots and keeps latest raw values available 
     assert.equal(context.db.prepare("SELECT COUNT(*) count FROM balance_aggregates WHERE granularity = 'hourly'").get().count, 1);
     assert.equal(context.db.prepare("SELECT COUNT(*) count FROM balance_aggregates WHERE granularity = 'daily'").get().count, 1);
     assert.equal(context.db.prepare('SELECT COUNT(*) count FROM usage_snapshots').get().count, 1);
+    assert.deepEqual(
+      context.db.prepare('SELECT id FROM asset_change_events').all().map((row) => row.id),
+      ['change-recent']
+    );
     const history = new QueryService(context.db, context.config).history({
       connectionId: provider.id, currency: 'USD', days: 60, subjectType: 'account'
     });

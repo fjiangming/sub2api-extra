@@ -405,6 +405,7 @@ npm start
 | `PROVIDER_MONITOR_JOB_RETENTION_DAYS` | `90` | 任务记录保留天数 |
 | `PROVIDER_MONITOR_AUDIT_RETENTION_DAYS` | `365` | 审计日志保留天数 |
 | `PROVIDER_MONITOR_NOTIFICATION_RETENTION_DAYS` | `180` | 通知记录保留天数 |
+| `PROVIDER_MONITOR_ASSET_CHANGE_RETENTION_DAYS` | `180` | 配置漂移（资产变化）记录保留天数 |
 | `PROVIDER_MONITOR_ALLOWED_HOSTS` | 空 | 私网主机限制名单（逗号分隔；留空放行全部） |
 | `PROVIDER_MONITOR_ALLOW_PRIVATE_NETWORKS` | `false` | 非空名单存在时，是否忽略名单并允许全部私网访问 |
 | `PROVIDER_MONITOR_ALLOWED_ORIGINS` | 空 | 额外 CORS Origin（逗号分隔） |

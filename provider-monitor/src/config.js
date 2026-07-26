@@ -74,6 +74,7 @@ function loadConfig(env = process.env) {
     jobRetentionDays: parseInteger(env.PROVIDER_MONITOR_JOB_RETENTION_DAYS, 90, 7, 3650),
     auditRetentionDays: parseInteger(env.PROVIDER_MONITOR_AUDIT_RETENTION_DAYS, 365, 30, 3650),
     notificationRetentionDays: parseInteger(env.PROVIDER_MONITOR_NOTIFICATION_RETENTION_DAYS, 180, 7, 3650),
+    assetChangeRetentionDays: parseInteger(env.PROVIDER_MONITOR_ASSET_CHANGE_RETENTION_DAYS, 180, 7, 3650),
     allowedHosts: parseList(env.PROVIDER_MONITOR_ALLOWED_HOSTS),
     allowPrivateNetworks: parseBoolean(env.PROVIDER_MONITOR_ALLOW_PRIVATE_NETWORKS, false),
     allowedOrigins: parseList(env.PROVIDER_MONITOR_ALLOWED_ORIGINS),
