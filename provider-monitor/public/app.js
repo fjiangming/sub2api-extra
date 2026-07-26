@@ -76,9 +76,8 @@ const VIEW_META = {
   trends: ['余额趋势', '历史快照、消耗速度与可用天数'],
   costs: ['价格比较', '模型价格、分组倍率与供应商推荐'],
   risks: ['健康与漂移', 'Key 检测、资产变化与异常识别'],
-  alerts: ['告警中心', '规则、事件与通知通道'],
   integrations: ['Sub2API 联动', '分组映射、签到、对账与健康联动'],
-  automation: ['自动化', '低余额联动与可回滚操作'],
+  automation: ['规则与自动化', '告警事件、通知与受控动作'],
   tests: ['测试中心', '模拟通知、充值入口与移动端跳转'],
   activity: ['运行记录', '检查、任务与审计日志'],
   settings: ['设置与备份', '运行参数、凭据生命周期与数据迁移']
@@ -275,7 +274,7 @@ function formatMoney(value, currency = 'USD') {
 }
 
 function badge(status, label = null) {
-  const text = label || ({ healthy: '正常', warning: '预警', stale: '陈旧', unknown: '未知', active: '活动', inactive: '停用', enabled: '启用', disabled: '停用', missing: '缺失', succeeded: '成功', partial: '部分成功', failed: '失败', pending: '等待', pending_create: '待新增', running: '执行中', dry_run: '演练', resolved: '已恢复', acknowledged: '已确认', expired: '已到期', exhausted: '已耗尽', passed: '通过', info: '信息', already_checked: '今日已签', unsupported: '不支持', manual_action_required: '需人工处理', created: '已创建', existing: '已存在', unmatched: '未匹配', conflict: '冲突', missing_api_key: '缺少 API Key', missing_remote_key: '远端 Key 未找到', updated: '已更新', aligned: '综合倍率一致', rate_mismatch: '综合倍率偏差', missing_base_group: '基座分组缺失', base_group_unselected: '未选基座分组', missing_provider_group: '供应商分组缺失', missing_dynamic_route_rate: '动态倍率缺失', missing_rate: '倍率缺失', invalid_provider_rate: '供应商倍率无效', mapping_disabled: '映射已停用' }[status] || status || '未知');
+  const text = label || ({ healthy: '正常', warning: '预警', stale: '陈旧', unknown: '未知', active: '活动', inactive: '停用', enabled: '启用', disabled: '停用', missing: '缺失', succeeded: '成功', partial: '部分成功', failed: '失败', pending: '等待', pending_create: '待新增', running: '执行中', dry_run: '演练', resolved: '已恢复', acknowledged: '已确认', expired: '已到期', exhausted: '已耗尽', passed: '通过', info: '信息', already_checked: '今日已签', unsupported: '不支持', manual_action_required: '需人工处理', created: '已创建', existing: '已存在', unmatched: '未匹配', conflict: '冲突', missing_api_key: '缺少 API Key', missing_remote_key: '远端 Key 未找到', updated: '已更新', aligned: '综合倍率一致', rate_mismatch: '综合倍率偏差', missing_base_group: '基座分组缺失', base_group_unselected: '未选基座分组', missing_provider_group: '供应商分组缺失', missing_provider_price: '供应商单价缺失', partial_provider_price: '部分日志单价缺失', missing_reference_price: '日志模型官方价缺失', partial_reference_price: '部分日志模型缺价', missing_dynamic_route_rate: '动态倍率缺失', missing_rate: '倍率缺失', invalid_provider_rate: '供应商倍率无效', mapping_disabled: '映射已停用' }[status] || status || '未知');
   return `<span class="badge ${escapeHtml(status || 'unknown')}">${escapeHtml(text)}</span>`;
 }
 
@@ -495,6 +494,7 @@ async function loadBase() {
 }
 
 async function navigate(view) {
+  view = view === 'alerts' ? 'automation' : view;
   state.view = view;
   window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
   $$('.module-tab').forEach((item) => {
@@ -519,7 +519,6 @@ async function navigate(view) {
     if (view === 'trends') await renderTrends();
     if (view === 'costs') await renderCosts();
     if (view === 'risks') await renderRisks();
-    if (view === 'alerts') await renderAlerts();
     if (view === 'integrations') await renderIntegrations();
     if (view === 'automation') await renderAutomation();
     if (view === 'tests') await renderTests();
@@ -871,6 +870,18 @@ function integrationRate(value) {
   return formatEffectiveRate(value);
 }
 
+function integrationMeasuredValue(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '-';
+  const absolute = Math.abs(number);
+  const maximumFractionDigits = absolute > 0 && absolute < 0.01 ? 6 : absolute < 1 ? 5 : 3;
+  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits }).format(number);
+}
+
+function integrationMeasuredRate(value) {
+  return value == null ? '-' : `×${integrationMeasuredValue(value)}`;
+}
+
 const PROVIDER_GROUP_SOURCE_LABELS = {
   mapping_explicit: ['info', '映射指定'],
   key_explicit: ['info', 'Key 指定'],
@@ -886,21 +897,50 @@ function providerGroupSourceBadge(comparison = {}) {
 }
 
 function integrationProviderRate(comparison = {}) {
-  const parts = [integrationRate(comparison.providerRate)];
-  if (comparison.details?.providerRateScope === 'dynamic_route_history') {
+  const dynamicRouteHistory = comparison.details?.providerRateScope === 'dynamic_route_history';
+  const parts = [dynamicRouteHistory
+    ? integrationMeasuredRate(comparison.providerRate)
+    : integrationRate(comparison.providerRate)];
+  if (dynamicRouteHistory) {
     const dynamic = comparison.details.dynamicRouteRate || {};
+    const totalObservationCount = dynamic.summary?.totalObservationCount || dynamic.sampleCount || 0;
+    const hasUnusableObservations = totalObservationCount > (dynamic.sampleCount || 0);
     const statisticLabel = {
-      median: 'P50', p90: 'P90', weighted_average: 'Token 加权', latest: '最近一次'
+      median: 'P50', p90: 'P90', weighted_average: '成本加权',
+      latest: hasUnusableObservations ? '最近可计算' : '最近一次'
     }[dynamic.statistic] || '历史实测';
-    parts.push(`动态实测 ${statisticLabel}`);
-    parts.push(`${dynamic.sampleCount || 0} 次`);
-    if (dynamic.minMultiplier != null && dynamic.maxMultiplier != null) {
-      parts.push(`${integrationRate(dynamic.minMultiplier)}~${integrationRate(dynamic.maxMultiplier)}`);
+    parts.push(`日志价÷官方价 ${statisticLabel}`);
+    parts.push(hasUnusableObservations
+      ? `${totalObservationCount} 条日志/${dynamic.sampleCount || 0} 条可计算`
+      : `${dynamic.sampleCount || 0} 次`);
+    if ((dynamic.sampleCount || 0) > 1 && dynamic.minMultiplier != null && dynamic.maxMultiplier != null) {
+      parts.push(`范围 ${integrationMeasuredRate(dynamic.minMultiplier)}~${integrationMeasuredRate(dynamic.maxMultiplier)}`);
     }
-    const latestChannel = dynamic.summary?.latest?.channelName;
+    const latest = dynamic.summary?.latest || {};
+    const latestChannel = latest.channelName;
     if (latestChannel) parts.push(`最近 ${escapeHtml(latestChannel)}`);
+    const priceSourceLabel = {
+      log_explicit: '日志单价',
+      log_ratio: '日志倍率换算',
+      mixed: '混合单价来源'
+    }[latest.providerPriceSource];
+    if (priceSourceLabel) parts.push(priceSourceLabel);
+    if (
+      latest.providerInputPerMillion != null && latest.referenceInputPerMillion != null
+    ) {
+      const providerPrices = `$${integrationMeasuredValue(latest.providerInputPerMillion)}` +
+        (latest.providerOutputPerMillion == null ? '' : `/$${integrationMeasuredValue(latest.providerOutputPerMillion)}`);
+      const referencePrices = `$${integrationMeasuredValue(latest.referenceInputPerMillion)}` +
+        (latest.referenceOutputPerMillion == null ? '' : `/$${integrationMeasuredValue(latest.referenceOutputPerMillion)}`);
+      parts.push(`${providerPrices}÷${referencePrices}`);
+    }
+    const missingModels = dynamic.summary?.referenceMissingModels || [];
+    if (missingModels.length > 0) parts.push(`缺官方价/别名 ${missingModels.map(escapeHtml).join('、')}`);
+    const missingProviderModels = dynamic.summary?.providerPriceMissingModels || [];
+    if (missingProviderModels.length > 0) parts.push(`缺供应商单价 ${missingProviderModels.map(escapeHtml).join('、')}`);
     if (dynamic.status === 'unavailable') parts.push('缓存');
     else if (dynamic.status === 'low_confidence') parts.push('样本少');
+    else if (dynamic.status === 'recalculation_required') parts.push('待重新同步');
   } else {
     if (comparison.details?.providerRateScope === 'group_multiplier') parts.push('分组倍率');
     if (comparison.details?.channelCostVerified === false) parts.push('渠道成本未验证');
@@ -951,7 +991,7 @@ function integrationSummaryHelp() {
     <div class="integration-status-help-panel" id="integration-status-help-panel" role="tooltip">
       <h3>状态说明</h3>
       <div><span>${badge('aligned', '一致')}</span><p>映射完整，综合倍率与基座倍率的差值在容差范围内。</p></div>
-      <div><span>${badge('warning', '预警')}</span><p>存在综合倍率偏差，或供应商分组、动态路由样本、倍率等映射信息不完整。</p></div>
+      <div><span>${badge('warning', '预警')}</span><p>存在综合倍率偏差，或供应商分组、官方参考价格、动态路由样本、倍率等映射信息不完整。</p></div>
       <div><span>${badge('failed', '错误')}</span><p>映射引用的 Sub2API 分组已经不存在，需要修正映射。</p></div>
       <div><span>${badge('unknown', '待检查')}</span><p>已有映射尚未生成检查结果，刷新基座后会重新计算。</p></div>
       <p class="integration-status-help-scope">这里只统计已有映射；无映射分组不会计入“待检查”，停用映射也不计入这四项。</p>
@@ -980,7 +1020,7 @@ function integrationDetailRow(item, groupKey, expanded) {
     <td class="numeric"><strong>${integrationAccountPriority(item)}</strong></td>
     <td class="numeric">${integrationRate(comparison.baseGroupRate)}</td>
     <td class="primary-cell"><strong>${escapeHtml(item.provider_name)}</strong><small>${escapeHtml(item.key_name || '账户级')} · ${escapeHtml(item.masked_key || '-')}</small></td>
-    <td class="primary-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${providerGroupSource}${item.isHighestRate ? ` ${badge('highest', '综合最高')}` : ''}</strong><small>${integrationProviderRate(comparison)}</small></td>
+    <td class="primary-cell integration-provider-rate-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${providerGroupSource}${item.isHighestRate ? ` ${badge('highest', '综合最高')}` : ''}</strong><small>${integrationProviderRate(comparison)}</small></td>
     <td class="numeric">${integrationRecharge(comparison, item.recharge)}</td>
     <td class="numeric"><strong title="供应商分组倍率 ÷ 充值倍率">${integrationCompositeRate(comparison, item.recharge)}</strong></td>
     <td class="numeric comparison-delta ${comparison.status === 'rate_mismatch' ? 'warning' : ''}">${integrationDelta(comparison)}</td>
@@ -1006,7 +1046,7 @@ function integrationGroupRows(group) {
     <td class="numeric"><strong>${integrationAccountPriority(highest)}</strong></td>
     <td class="numeric"><strong>${integrationRate(group.baseRate)}</strong></td>
     <td class="primary-cell"><strong>${escapeHtml(highest?.provider_name || '-')}</strong><small>${highest ? `${escapeHtml(highest.key_name || '账户级')} · ${escapeHtml(highest.masked_key || '-')}` : '暂无有效综合倍率映射'}</small></td>
-    <td class="primary-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${providerGroupSource}${highest ? ` ${badge('highest', '综合最高')}` : ''}</strong><small>${integrationProviderRate(comparison)}</small></td>
+    <td class="primary-cell integration-provider-rate-cell"><strong>${escapeHtml(comparison.providerGroupName || comparison.providerGroupRef || '-')}${providerGroupState}${providerGroupSource}${highest ? ` ${badge('highest', '综合最高')}` : ''}</strong><small>${integrationProviderRate(comparison)}</small></td>
     <td class="numeric">${integrationRecharge(comparison, highest?.recharge)}</td>
     <td class="numeric"><strong title="供应商分组倍率 ÷ 充值倍率">${integrationCompositeRate(comparison, highest?.recharge)}</strong></td>
     <td class="numeric comparison-delta ${comparison.status === 'rate_mismatch' ? 'warning' : ''}">${integrationDelta(comparison)}</td>
@@ -1213,7 +1253,7 @@ async function renderSettings() {
     <label><span>审计记录保留（天）</span><input name="auditRetentionDays" type="number" min="30" max="3650" value="${settings.auditRetentionDays}"></label>
     <label><span>通知记录保留（天）</span><input name="notificationRetentionDays" type="number" min="7" max="3650" value="${settings.notificationRetentionDays}"></label>
   </div></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="button" data-action="save-system-settings"><i data-lucide="save"></i><span>保存系统参数</span></button></footer></form></section>`;
-  $('#main-content').innerHTML = `<section class="base-instance-bar"><div><span class="status-dot ${sub2apiStatus.authentication?.available ? 'healthy' : 'warning'}"></span><strong>基座 Sub2API</strong><small>${escapeHtml(sub2apiStatus.publicUrl || sub2apiStatus.baseUrl || '未配置')} · 最近检查 ${escapeHtml(timeAgo(sub2apiStatus.lastCheckedAt))}</small></div><div>${authStatus}</div></section><div class="split-layout"><form class="panel" id="settings-form"><div class="panel-header"><h2>运行设置</h2></div><div class="form-grid"><label><span>显示币种</span><input name="displayCurrency" value="${escapeHtml(settings.displayCurrency)}"></label><label><span>预测最短跨度（小时）</span><input name="forecastMinSpanHours" type="number" min="1" value="${settings.forecastMinSpanHours}"></label><label><span>对账容差</span><input name="reconciliationToleranceRatio" type="number" min="0" step="0.01" value="${settings.reconciliationToleranceRatio}"></label><label><span>综合倍率偏差容差</span><input name="sub2apiRateToleranceRatio" type="number" min="0" step="0.01" value="${settings.sub2apiRateToleranceRatio}"></label><label><span>价格刷新（小时）</span><input name="catalogRefreshHours" type="number" min="1" value="${settings.catalogRefreshHours}"></label><label><span>异常跌幅（%）</span><input name="anomalyDropPercent" type="number" min="1" value="${settings.anomalyDropPercent}"></label><label><span>异常突增倍数</span><input name="anomalySpikeMultiplier" type="number" min="1" step="0.1" value="${settings.anomalySpikeMultiplier}"></label><label class="span-2"><span>汇率（JSON）</span><textarea name="currencyRates" rows="4">${escapeHtml(JSON.stringify(settings.currencyRates, null, 2))}</textarea></label></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存设置</span></button></footer></form><div>${securityPanel}<div class="section-header ${securityPanel ? 'section' : ''}"><h2>数据导出</h2></div><div class="panel"><div class="panel-body action-grid"><button class="button" data-action="download" data-url="/api/exports/balances.csv" data-filename="provider-monitor-balances.csv"><i data-lucide="wallet-cards"></i><span>余额 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/usage.csv" data-filename="provider-monitor-usage.csv"><i data-lucide="activity"></i><span>用量 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/alerts.csv" data-filename="provider-monitor-alerts.csv"><i data-lucide="bell"></i><span>告警 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/env" data-filename="provider-monitor-import.env"><i data-lucide="file-code-2"></i><span>环境变量模板</span></button><button class="button" data-action="export-disaster"><i data-lucide="lock-keyhole"></i><span>加密灾备包</span></button></div></div><div class="section-header section"><h2>SQLite 备份</h2></div><div class="table-wrap">${backupRows ? `<table><thead><tr><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${backupRows}</tbody></table>` : emptyState('database-backup', '暂无备份', '创建在线一致性备份')}</div></div></div><section class="section"><div class="section-header"><h2>远端备份目标</h2><div class="section-actions"><button class="button small" data-action="run-remote-backups"><i data-lucide="cloud-upload"></i><span>立即备份</span></button><button class="button small primary" data-action="add-backup-target"><i data-lucide="plus"></i><span>添加目标</span></button></div></div><div class="table-wrap">${targetRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>最近结果</th><th>最近备份</th><th></th></tr></thead><tbody>${targetRows}</tbody></table>` : emptyState('cloud-upload', '暂无远端目标', '添加本地目录、WebDAV 或 S3 兼容目标')}</div></section><section class="section"><div class="section-header"><h2>远端备份记录</h2></div><div class="table-wrap">${remoteRunRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${remoteRunRows}</tbody></table>` : emptyState('history', '暂无远端备份记录', '执行远端备份后显示')}</div></section><section class="section"><div class="section-header"><h2>凭据生命周期</h2></div><div class="table-wrap">${lifecycleRows ? `<table><thead><tr><th>供应商 / 字段</th><th>到期状态</th><th>最近轮换</th><th>凭据到期</th><th></th></tr></thead><tbody>${lifecycleRows}</tbody></table>` : emptyState('key-round', '暂无凭据', '添加供应商后显示')}</div></section>`;
+  $('#main-content').innerHTML = `<section class="base-instance-bar"><div><span class="status-dot ${sub2apiStatus.authentication?.available ? 'healthy' : 'warning'}"></span><strong>基座 Sub2API</strong><small>${escapeHtml(sub2apiStatus.publicUrl || sub2apiStatus.baseUrl || '未配置')} · 最近检查 ${escapeHtml(timeAgo(sub2apiStatus.lastCheckedAt))}</small></div><div>${authStatus}</div></section><div class="split-layout"><form class="panel" id="settings-form"><div class="panel-header"><h2>运行设置</h2></div><div class="form-grid"><label><span>显示币种</span><input name="displayCurrency" value="${escapeHtml(settings.displayCurrency)}"></label><label><span>预测最短跨度（小时）</span><input name="forecastMinSpanHours" type="number" min="1" value="${settings.forecastMinSpanHours}"></label><label><span>对账容差</span><input name="reconciliationToleranceRatio" type="number" min="0" step="0.01" value="${settings.reconciliationToleranceRatio}"></label><label><span>综合倍率偏差容差</span><input name="sub2apiRateToleranceRatio" type="number" min="0" step="0.01" value="${settings.sub2apiRateToleranceRatio}"></label><label><span>价格刷新（小时）</span><input name="catalogRefreshHours" type="number" min="1" value="${settings.catalogRefreshHours}"></label><label><span>异常跌幅（%）</span><input name="anomalyDropPercent" type="number" min="1" value="${settings.anomalyDropPercent}"></label><label><span>异常突增倍数</span><input name="anomalySpikeMultiplier" type="number" min="1" step="0.1" value="${settings.anomalySpikeMultiplier}"></label><label class="span-2"><span>汇率（JSON）</span><textarea name="currencyRates" rows="4">${escapeHtml(JSON.stringify(settings.currencyRates, null, 2))}</textarea></label><label class="span-2"><span>官方模型单价（USD / 1M，JSON）</span><textarea name="officialModelPrices" rows="10">${escapeHtml(JSON.stringify(settings.officialModelPrices || {}, null, 2))}</textarea></label></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存设置</span></button></footer></form><div>${securityPanel}<div class="section-header ${securityPanel ? 'section' : ''}"><h2>数据导出</h2></div><div class="panel"><div class="panel-body action-grid"><button class="button" data-action="download" data-url="/api/exports/balances.csv" data-filename="provider-monitor-balances.csv"><i data-lucide="wallet-cards"></i><span>余额 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/usage.csv" data-filename="provider-monitor-usage.csv"><i data-lucide="activity"></i><span>用量 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/alerts.csv" data-filename="provider-monitor-alerts.csv"><i data-lucide="bell"></i><span>告警 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/env" data-filename="provider-monitor-import.env"><i data-lucide="file-code-2"></i><span>环境变量模板</span></button><button class="button" data-action="export-disaster"><i data-lucide="lock-keyhole"></i><span>加密灾备包</span></button></div></div><div class="section-header section"><h2>SQLite 备份</h2></div><div class="table-wrap">${backupRows ? `<table><thead><tr><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${backupRows}</tbody></table>` : emptyState('database-backup', '暂无备份', '创建在线一致性备份')}</div></div></div><section class="section"><div class="section-header"><h2>远端备份目标</h2><div class="section-actions"><button class="button small" data-action="run-remote-backups"><i data-lucide="cloud-upload"></i><span>立即备份</span></button><button class="button small primary" data-action="add-backup-target"><i data-lucide="plus"></i><span>添加目标</span></button></div></div><div class="table-wrap">${targetRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>最近结果</th><th>最近备份</th><th></th></tr></thead><tbody>${targetRows}</tbody></table>` : emptyState('cloud-upload', '暂无远端目标', '添加本地目录、WebDAV 或 S3 兼容目标')}</div></section><section class="section"><div class="section-header"><h2>远端备份记录</h2></div><div class="table-wrap">${remoteRunRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${remoteRunRows}</tbody></table>` : emptyState('history', '暂无远端备份记录', '执行远端备份后显示')}</div></section><section class="section"><div class="section-header"><h2>凭据生命周期</h2></div><div class="table-wrap">${lifecycleRows ? `<table><thead><tr><th>供应商 / 字段</th><th>到期状态</th><th>最近轮换</th><th>凭据到期</th><th></th></tr></thead><tbody>${lifecycleRows}</tbody></table>` : emptyState('key-round', '暂无凭据', '添加供应商后显示')}</div></section>`;
   $('.split-layout', $('#main-content')).insertAdjacentHTML('afterend', systemSettingsPanel);
   $('#settings-form').addEventListener('submit', saveSettings);
   $('#system-settings-form').addEventListener('submit', saveSystemSettings);
@@ -1231,11 +1271,38 @@ function openBackupTarget(target = null) {
   $('#backup-target-dialog').showModal(); icons();
 }
 
+function parseOfficialModelPrices(value) {
+  let prices;
+  try { prices = JSON.parse(value || '{}'); } catch { throw new Error('官方模型单价不是有效 JSON'); }
+  if (!prices || typeof prices !== 'object' || Array.isArray(prices)) {
+    throw new Error('官方模型单价必须是模型到价格对象的 JSON 映射');
+  }
+  for (const [key, entry] of Object.entries(prices)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`模型 ${key} 的官方单价必须是对象`);
+    }
+    const input = entry.inputPerMillion ?? entry.input;
+    const output = entry.outputPerMillion ?? entry.output;
+    const cachedInput = entry.cacheReadPerMillion ?? entry.cachedInputPerMillion ??
+      entry.cacheRead ?? entry.cachedInput;
+    const values = [input, output, cachedInput].filter((item) => item != null && item !== '');
+    const model = String(entry.model || entry.officialModel || '').trim();
+    if (values.length === 0 && !model) throw new Error(`模型 ${key} 需要填写单价或目标模型`);
+    if ([input, output].some((item) => item != null && item !== '' && (!Number.isFinite(Number(item)) || Number(item) <= 0))) {
+      throw new Error(`模型 ${key} 的输入和输出单价必须大于 0`);
+    }
+    if (cachedInput != null && cachedInput !== '' && (!Number.isFinite(Number(cachedInput)) || Number(cachedInput) < 0)) {
+      throw new Error(`模型 ${key} 的缓存单价不能小于 0`);
+    }
+  }
+  return prices;
+}
+
 async function saveSettings(event) {
   event.preventDefault();
   const form = event.currentTarget;
   try {
-    await api('/api/settings', { method: 'PUT', body: {
+    const settings = await api('/api/settings', { method: 'PUT', body: {
       displayCurrency: form.elements.displayCurrency.value.trim() || 'USD',
       forecastMinSpanHours: Number(form.elements.forecastMinSpanHours.value),
       reconciliationToleranceRatio: Number(form.elements.reconciliationToleranceRatio.value),
@@ -1243,8 +1310,10 @@ async function saveSettings(event) {
       catalogRefreshHours: Number(form.elements.catalogRefreshHours.value),
       anomalyDropPercent: Number(form.elements.anomalyDropPercent.value),
       anomalySpikeMultiplier: Number(form.elements.anomalySpikeMultiplier.value),
-      currencyRates: JSON.parse(form.elements.currencyRates.value || '{}')
+      currencyRates: JSON.parse(form.elements.currencyRates.value || '{}'),
+      officialModelPrices: parseOfficialModelPrices(form.elements.officialModelPrices.value)
     } });
+    state.settings = settings;
     toast('设置已保存');
   } catch (error) { toast(error.message, 'error'); }
 }
@@ -1316,26 +1385,168 @@ async function loadTrend() {
   $('#forecast-panel').innerHTML = `<div class="currency-list"><div class="currency-row"><span>当前余额</span><strong>${formatMoney(forecast.currentAvailable, currency)}</strong></div><div class="currency-row"><span>日均消耗</span><strong>${forecast.dailyBurn == null ? '-' : formatMoney(forecast.dailyBurn, currency)}</strong></div><div class="currency-row"><span>预计可用</span><strong>${forecast.runwayDays == null ? '-' : `${formatNumber(forecast.runwayDays, 1)} 天`}</strong></div><div class="currency-row"><span>样本</span><strong>${forecast.sampleCount || history.items.length}</strong></div><div class="currency-row"><span>可信度</span>${badge(forecast.confidence === 'medium' ? 'healthy' : 'unknown', forecast.confidence === 'medium' ? '中等' : '较低')}</div></div>`;
 }
 
-async function renderAlerts() {
-  const [events, rules, channels] = await Promise.all([api('/api/alerts'), api('/api/alert-rules'), api('/api/notification-channels')]);
+async function renderAutomation() {
+  const [alertRules, automationRules, events, channels, actions] = await Promise.all([
+    api('/api/alert-rules'),
+    api('/api/automation-rules'),
+    api('/api/alerts'),
+    api('/api/notification-channels'),
+    api('/api/automation-actions')
+  ]);
+  const rules = normalizeUnifiedRules(alertRules.items, automationRules.items);
+  state.alertRules = rules.filter((rule) => rule.kind === 'alert');
+  state.automationRules = rules.filter((rule) => rule.kind === 'automation');
   state.alerts = events.items;
-  state.alertRules = rules.items;
   state.channels = channels.items;
-  setTopActions(`<button class="button" data-action="evaluate-alerts"><i data-lucide="scan-line"></i><span>立即评估</span></button><button class="button primary" data-action="add-alert-rule"><i data-lucide="plus"></i><span>添加规则</span></button>`);
+  state.automationActions = actions.items;
+  setTopActions(`<button class="button" data-action="evaluate-alerts" title="立即评估告警" aria-label="立即评估告警"><i data-lucide="scan-line"></i><span>立即评估</span></button><button class="button" data-action="add-alert-rule" title="添加告警规则" aria-label="添加告警规则"><i data-lucide="bell-plus"></i><span>告警规则</span></button><button class="button primary" data-action="add-automation" title="添加自动化规则" aria-label="添加自动化规则"><i data-lucide="workflow"></i><span>自动化规则</span></button>`);
+  const ruleRows = rules.map(unifiedRuleRow).join('');
   const eventList = state.alerts.map((event) => `<div class="alert-item"><span class="alert-symbol ${event.severity === 'error' ? 'error' : ''}"><i data-lucide="${event.severity === 'error' ? 'octagon-alert' : 'triangle-alert'}"></i></span><div><p>${escapeHtml(event.message)}</p><small>${formatDate(event.triggered_at)} · ${escapeHtml(alertSeverityLabel(event.severity))}</small></div><div>${badge(event.status)}${event.status === 'active' ? `<button class="icon-button small" data-action="ack-alert" data-id="${event.id}" title="确认告警" aria-label="确认告警"><i data-lucide="check"></i></button>` : ''}</div></div>`).join('');
-  const ruleRows = state.alertRules.map((rule) => `<tr><td class="primary-cell"><strong>${escapeHtml(rule.name)}</strong><small>${escapeHtml(rule.rule_type)}</small></td><td>${rule.connection_id ? escapeHtml(state.providers.find((p) => p.id === rule.connection_id)?.name || '-') : '全部'}</td><td>${rule.threshold ?? '-'}</td><td>${rule.currency || '-'}</td><td>${rule.enabled ? badge('enabled') : badge('disabled')}</td><td class="actions-cell"><button class="icon-button small" data-action="edit-alert-rule" data-id="${rule.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-alert-rule" data-id="${rule.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></td></tr>`).join('');
-  const channelRows = state.channels.map((channel) => `<tr><td class="primary-cell"><strong>${escapeHtml(channel.name)}</strong><small>${escapeHtml(channel.type)}</small></td><td>${channel.enabled ? badge('enabled') : badge('disabled')}</td><td>${channel.credentialFields.map((f) => escapeHtml(f.name)).join(', ') || '-'}</td><td class="actions-cell"><button class="icon-button small" data-action="test-channel" data-id="${channel.id}" title="测试" aria-label="测试"><i data-lucide="send"></i></button><button class="icon-button small" data-action="edit-channel" data-id="${channel.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-channel" data-id="${channel.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></td></tr>`).join('');
-  $('#main-content').innerHTML = `<div class="split-layout"><div class="panel"><div class="panel-header"><h2>告警事件</h2></div><div class="alert-list">${eventList || emptyState('bell-off', '暂无告警', '当前没有触发中的风险事件')}</div></div><div class="panel"><div class="panel-header"><h2>通知通道</h2><div class="panel-actions"><button class="icon-button small" data-action="add-channel" title="添加通知通道" aria-label="添加通知通道"><i data-lucide="plus"></i></button></div></div>${channelRows ? `<div class="table-wrap"><table><thead><tr><th>通道</th><th>状态</th><th>凭据</th><th></th></tr></thead><tbody>${channelRows}</tbody></table></div>` : emptyState('send', '暂无通知通道', '添加 Webhook、Telegram、Gotify、Bark 或邮件')}</div></div><section class="section"><div class="section-header"><h2>告警规则</h2></div><div class="table-wrap">${ruleRows ? `<table><thead><tr><th>规则</th><th>供应商</th><th>阈值</th><th>币种</th><th>状态</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table>` : emptyState('list-checks', '暂无规则', '供应商的两级余额阈值仍会生成内置规则')}</div></section>`;
+  const channelRows = state.channels.map((channel) => `<tr><td class="primary-cell"><strong>${escapeHtml(channel.name)}</strong><small>${escapeHtml(channel.type)}</small></td><td>${channel.enabled ? badge('enabled') : badge('disabled')}</td><td>${channel.credentialFields.map((field) => escapeHtml(field.name)).join(', ') || '-'}</td><td class="actions-cell"><button class="icon-button small" data-action="test-channel" data-id="${channel.id}" title="测试" aria-label="测试"><i data-lucide="send"></i></button><button class="icon-button small" data-action="edit-channel" data-id="${channel.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-channel" data-id="${channel.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></td></tr>`).join('');
+  const actionRows = state.automationActions.map((action) => `<tr><td>${escapeHtml(automationActionLabel(action.action_type))}</td><td>${badge(action.status)}</td><td>${action.dryRun ? '是' : '否'}</td><td>${escapeHtml(automationActionTarget(action))}</td><td>${formatDate(action.created_at)}</td><td class="actions-cell">${action.status === 'succeeded' && !action.rolled_back_at && automationActionCanRollback(action.action_type) ? `<button class="button small" data-action="rollback-automation" data-id="${action.id}"><i data-lucide="undo-2"></i><span>回滚</span></button>` : ''}</td></tr>`).join('');
+  const activeAlerts = state.alerts.filter((event) => event.status === 'active').length;
+  const failedActions = state.automationActions.filter((action) => action.status === 'failed').length;
+  $('#main-content').innerHTML = `<div class="status-summary" aria-label="规则与自动化摘要">${badge('info', `告警规则 ${state.alertRules.length}`)}${badge('enabled', `自动化规则 ${state.automationRules.length}`)}${badge(activeAlerts ? 'warning' : 'healthy', `活动告警 ${activeAlerts}`)}${badge(failedActions ? 'failed' : 'healthy', `失败动作 ${failedActions}`)}</div><div class="section-header"><h2>规则</h2></div><div class="table-wrap">${ruleRows ? `<table><thead><tr><th>规则</th><th>触发条件</th><th>动作</th><th>范围</th><th>模式</th><th>状态</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table>` : emptyState('workflow', '暂无规则', '添加告警规则或自动化规则')}</div><section class="section split-layout"><div class="panel"><div class="panel-header"><h2>告警事件</h2></div><div class="alert-list">${eventList || emptyState('bell-off', '暂无告警', '当前没有触发中的风险事件')}</div></div><div class="panel"><div class="panel-header"><h2>通知通道</h2><div class="panel-actions"><button class="icon-button small" data-action="add-channel" title="添加通知通道" aria-label="添加通知通道"><i data-lucide="plus"></i></button></div></div>${channelRows ? `<div class="table-wrap"><table><thead><tr><th>通道</th><th>状态</th><th>凭据</th><th></th></tr></thead><tbody>${channelRows}</tbody></table></div>` : emptyState('send', '暂无通知通道', '添加 Webhook、Telegram、Gotify、Bark 或邮件')}</div></section><section class="section"><div class="section-header"><h2>动作记录</h2></div><div class="table-wrap">${actionRows ? `<table><thead><tr><th>动作</th><th>结果</th><th>演练</th><th>目标 / 结果</th><th>时间</th><th></th></tr></thead><tbody>${actionRows}</tbody></table>` : emptyState('history', '暂无动作', '触发自动化规则后将在此记录')}</div></section>`;
 }
 
-async function renderAutomation() {
-  const [rules, actions] = await Promise.all([api('/api/automation-rules'), api('/api/automation-actions')]);
-  state.automationRules = rules.items;
-  state.automationActions = actions.items;
-  setTopActions(`<button class="button primary" data-action="add-automation"><i data-lucide="plus"></i><span>添加规则</span></button>`);
-  const ruleRows = state.automationRules.map((rule) => `<tr><td class="primary-cell"><strong>${escapeHtml(rule.name)}</strong><small>${escapeHtml(rule.trigger_type)}</small></td><td>${rule.connection_id ? escapeHtml(state.providers.find((p) => p.id === rule.connection_id)?.name || '-') : '全部'}</td><td>${rule.dryRun ? badge('dry_run') : badge('active', '实执行')}</td><td>${rule.enabled ? badge('enabled') : badge('disabled')}</td><td class="actions-cell"><button class="icon-button small" data-action="dry-run-automation" data-id="${rule.id}" title="预览执行条件" aria-label="预览执行条件"><i data-lucide="scan-search"></i></button><button class="icon-button small" data-action="edit-automation" data-id="${rule.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-automation" data-id="${rule.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></td></tr>`).join('');
-  const actionRows = state.automationActions.map((action) => `<tr><td>${escapeHtml(action.action_type)}</td><td>${badge(action.status)}</td><td>${action.dryRun ? '是' : '否'}</td><td>${escapeHtml(action.after?.channelId || '-')}</td><td>${formatDate(action.created_at)}</td><td class="actions-cell">${action.status === 'succeeded' && !action.rolled_back_at ? `<button class="button small" data-action="rollback-automation" data-id="${action.id}"><i data-lucide="undo-2"></i><span>回滚</span></button>` : ''}</td></tr>`).join('');
-  $('#main-content').innerHTML = `<div class="table-wrap">${ruleRows ? `<table><thead><tr><th>规则</th><th>供应商</th><th>模式</th><th>状态</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table>` : emptyState('workflow', '暂无自动化规则', '规则默认使用演练模式')}</div><section class="section"><div class="section-header"><h2>动作记录</h2></div><div class="table-wrap">${actionRows ? `<table><thead><tr><th>动作</th><th>结果</th><th>演练</th><th>渠道 ID</th><th>时间</th><th></th></tr></thead><tbody>${actionRows}</tbody></table>` : emptyState('history', '暂无动作', '触发规则后将在此记录')}</div></section>`;
+const ALERT_RULE_TYPE_LABELS = {
+  low_balance: '低余额 / 低额度',
+  runway_below: '可用天数不足',
+  stale_data: '数据陈旧',
+  sync_failed: '同步失败',
+  key_expiry: '密钥到期',
+  key_disabled: '密钥停用',
+  rate_mismatch: 'Sub2API 综合倍率偏差',
+  asset_drift: '资产漂移',
+  contract_changed: '接口契约变化',
+  anomaly: '用量或余额异常',
+  credential_expiry: '凭据久未轮换',
+  automation_failed: '自动化失败'
+};
+
+const AUTOMATION_ACTION_LABELS = {
+  create_alert_event: '创建告警事件',
+  disable_sub2api_account: '停用 Sub2API 账号',
+  enable_sub2api_account: '启用 Sub2API 账号',
+  switch_to_backup: '切换备用映射',
+  trigger_recharge_webhook: '触发充值工单 Webhook',
+  remind_credential_rotation: '生成凭据轮换提醒',
+  create_route_recommendation: '生成路由建议',
+  rebuild_sub2api_mappings: '重建全部 Sub2API 映射',
+  disable_sub2api_channel: '停用 Sub2API 渠道（旧动作）',
+  enable_sub2api_channel: '启用 Sub2API 渠道（旧动作）'
+};
+
+const AUTOMATION_TRIGGER_LABELS = {
+  low_balance: '余额低于阈值',
+  balance_recovered: '余额恢复',
+  key_failed: 'Key 健康失败',
+  anomaly_detected: '检测到异常',
+  contract_changed: '接口契约变化',
+  scheduled: '按时间运行'
+};
+
+const AUTOMATION_CONDITION_OPERATOR_LABELS = {
+  lt: '<',
+  lte: '≤',
+  gt: '>',
+  gte: '≥'
+};
+
+function normalizeUnifiedRules(alertRules, automationRules) {
+  return [
+    ...alertRules.map((rule) => ({
+      ...rule,
+      kind: 'alert',
+      triggerType: rule.rule_type,
+      actionType: 'create_alert_event',
+      executionMode: 'event'
+    })),
+    ...automationRules.map((rule) => ({
+      ...rule,
+      kind: 'automation',
+      triggerType: rule.trigger_type,
+      actionType: rule.config?.action || null,
+      executionMode: rule.dryRun ? 'dry_run' : 'live'
+    }))
+  ].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function alertRuleTypeLabel(ruleType) {
+  return ALERT_RULE_TYPE_LABELS[ruleType] || ruleType || '-';
+}
+
+function automationActionLabel(actionType) {
+  return AUTOMATION_ACTION_LABELS[actionType] || actionType || '-';
+}
+
+function automationTriggerLabel(triggerType) {
+  return AUTOMATION_TRIGGER_LABELS[triggerType] || triggerType || '-';
+}
+
+function ruleTriggerDetail(rule) {
+  if (rule.kind === 'automation' && rule.triggerType === 'scheduled') {
+    const minutes = Number(rule.config?.scheduleIntervalMinutes || 0);
+    const details = [];
+    if (minutes > 0 && minutes % 1440 === 0) details.push(`每 ${minutes / 1440} 天`);
+    else if (minutes > 0 && minutes % 60 === 0) details.push(`每 ${minutes / 60} 小时`);
+    else if (minutes > 0) details.push(`每 ${minutes} 分钟`);
+    if (rule.config?.condition?.type === 'composite_rate_difference') {
+      const operator = AUTOMATION_CONDITION_OPERATOR_LABELS[rule.config.condition.operator] || rule.config.condition.operator;
+      details.push(`综合倍率偏差 ${operator} ${formatNumber(rule.config.condition.threshold)}%`);
+    }
+    return details.join(' · ');
+  }
+  const threshold = rule.kind === 'alert' ? rule.threshold : rule.config?.threshold;
+  const currency = rule.kind === 'alert' ? rule.currency : rule.config?.currency;
+  const consecutiveMatches = rule.kind === 'alert' ? rule.consecutive_matches : rule.config?.consecutiveMatches;
+  const details = [];
+  if (threshold != null) details.push(`${formatNumber(threshold)}${currency ? ` ${currency}` : ''}`);
+  if (Number(consecutiveMatches) > 1) details.push(`连续 ${consecutiveMatches} 次`);
+  return details.join(' · ');
+}
+
+function automationRuleActionLabel(rule) {
+  const action = automationActionLabel(rule.actionType);
+  return rule.config?.onMatchAction
+    ? `${action}；命中后${automationActionLabel(rule.config.onMatchAction)}`
+    : action;
+}
+
+function unifiedRuleRow(rule) {
+  const alertRule = rule.kind === 'alert';
+  const triggerLabel = alertRule
+    ? alertRuleTypeLabel(rule.triggerType)
+    : automationTriggerLabel(rule.triggerType);
+  const triggerDetail = ruleTriggerDetail(rule);
+  const providerName = rule.triggerType === 'scheduled'
+    ? '全局'
+    : rule.connection_id
+      ? state.providers.find((provider) => provider.id === rule.connection_id)?.name || '-'
+      : '全部';
+  const scope = alertRule && rule.rule_type === 'low_balance'
+    ? ({ account: '账户', key: 'Key', team: 'Team Budget' })[rule.scope] || rule.scope
+    : '';
+  const mode = alertRule
+    ? badge('info', '持续评估')
+    : rule.executionMode === 'dry_run' ? badge('dry_run') : badge('active', '实执行');
+  const actions = alertRule
+    ? `<button class="icon-button small" data-action="edit-alert-rule" data-id="${rule.id}" title="编辑告警规则" aria-label="编辑告警规则"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-alert-rule" data-id="${rule.id}" title="删除告警规则" aria-label="删除告警规则"><i data-lucide="trash-2"></i></button>`
+    : `<button class="icon-button small" data-action="dry-run-automation" data-id="${rule.id}" title="预览执行条件" aria-label="预览执行条件"><i data-lucide="scan-search"></i></button><button class="icon-button small" data-action="edit-automation" data-id="${rule.id}" title="编辑自动化规则" aria-label="编辑自动化规则"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-automation" data-id="${rule.id}" title="删除自动化规则" aria-label="删除自动化规则"><i data-lucide="trash-2"></i></button>`;
+  return `<tr data-rule-kind="${rule.kind}"><td class="primary-cell"><strong>${escapeHtml(rule.name)}</strong><small>${alertRule ? '告警规则' : '自动化规则'}</small></td><td class="primary-cell rule-trigger-cell"><strong>${escapeHtml(triggerLabel)}</strong>${triggerDetail ? `<small>${escapeHtml(triggerDetail)}</small>` : ''}</td><td>${escapeHtml(alertRule ? automationActionLabel(rule.actionType) : automationRuleActionLabel(rule))}</td><td class="primary-cell"><strong>${escapeHtml(providerName)}</strong>${scope ? `<small>${escapeHtml(scope)}</small>` : ''}</td><td>${mode}</td><td>${rule.enabled ? badge('enabled') : badge('disabled')}</td><td class="actions-cell">${actions}</td></tr>`;
+}
+
+function automationActionTarget(action) {
+  if (action.after?.accountId) return `账号 #${action.after.accountId}`;
+  if (action.after?.channelId) return `渠道 #${action.after.channelId}`;
+  if (action.after?.createdMappings != null) return `新建 ${action.after.createdMappings} 条`;
+  if (action.after?.wouldCreateMappings != null) return `预计新建 ${action.after.wouldCreateMappings} 条`;
+  return '-';
+}
+
+function automationActionCanRollback(actionType) {
+  return ['disable_sub2api_account', 'enable_sub2api_account', 'switch_to_backup',
+    'disable_sub2api_channel', 'enable_sub2api_channel'].includes(actionType);
 }
 
 const RECHARGE_TEST_REASON_LABELS = {
@@ -1600,12 +1811,206 @@ function credentialFieldsFor(adapter, authMode) {
   return CREDENTIAL_FIELDS[adapter] || CREDENTIAL_FIELDS.custom;
 }
 
+function usesMultipleApiKeyEditor(adapter, authMode) {
+  return adapter === 'sub2api' && authMode === 'api_key';
+}
+
+function usesRemoteApiKeySelection(adapter, authMode, apiKeySource = '') {
+  if (adapter === 'new-api') return authMode === 'api_key';
+  if (adapter === 'sub2api' && authMode === 'api_key') return apiKeySource === 'remote';
+  return adapter === 'sub2api' && ['account', 'token_pair', 'bearer'].includes(authMode);
+}
+
+function selectedSub2ApiKeySource(form) {
+  return form.elements.sub2apiApiKeySource?.value || 'manual';
+}
+
+function formUsesRemoteApiKeySelection(form) {
+  return usesRemoteApiKeySelection(
+    form.elements.adapterType.value,
+    form.elements.authMode.value,
+    selectedSub2ApiKeySource(form)
+  );
+}
+
+function providerApiKeyRow(entry = {}, index = 0, { monitored = true } = {}) {
+  const stored = Boolean(entry.id);
+  const generatedId = globalThis.crypto?.randomUUID?.() ||
+    `api-key-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const id = String(entry.id || generatedId);
+  const name = String(entry.name || `API Key ${index + 1}`);
+  const masked = String(entry.masked || '');
+  return `<div class="provider-api-key-row" data-provider-api-key-row>
+    <input type="hidden" data-api-key-id value="${escapeHtml(id)}">
+    <label><span>名称</span><input data-api-key-name value="${escapeHtml(name)}" maxlength="120" required></label>
+    <label><span>API Key</span><input data-api-key-value type="password" autocomplete="off" placeholder="${masked ? `已保存 ${escapeHtml(masked)}，留空不修改` : '输入 API Key'}" ${stored ? '' : 'required'}></label>
+    <label class="toggle-field provider-api-key-monitor"><input type="checkbox" data-api-key-monitored ${monitored ? 'checked' : ''}><span>监控</span></label>
+    <button class="icon-button" type="button" data-action="remove-provider-api-key" title="移除 API Key" aria-label="移除 API Key"><i data-lucide="trash-2"></i></button>
+  </div>`;
+}
+
+function renderProviderApiKeyEditor(provider = null) {
+  const source = provider?.typeConfig?.apiKeySource ||
+    (provider?.configuredApiKeys?.length ? 'manual' : 'remote');
+  const entries = provider?.configuredApiKeys?.length
+    ? provider.configuredApiKeys
+    : [{}];
+  const monitoredIds = Array.isArray(provider?.typeConfig?.monitoredKeyIds)
+    ? new Set(provider.typeConfig.monitoredKeyIds.map(String))
+    : null;
+  const sessionFields = CREDENTIAL_FIELDS.sub2api.map(([name, label, type]) => {
+    const existing = provider?.credentialFields?.find((field) => field.name === name);
+    return `<label><span>${escapeHtml(label)}</span><input data-credential="${name}" type="${type}" placeholder="${existing ? `已保存 ${existing.masked}，留空不修改` : ''}" autocomplete="off"></label>`;
+  }).join('');
+  $('#credential-fields').innerHTML = `<div class="provider-api-key-editor span-2">
+    <label class="provider-api-key-source"><span>Key 来源</span><select name="sub2apiApiKeySource"><option value="remote" ${source === 'remote' ? 'selected' : ''}>远端列表</option><option value="manual" ${source === 'manual' ? 'selected' : ''}>手工配置</option></select></label>
+    <div class="provider-api-key-session-fields" data-sub2api-api-key-remote ${source === 'remote' ? '' : 'hidden'}>${sessionFields}</div>
+    <div data-sub2api-api-key-manual ${source === 'manual' ? '' : 'hidden'}>
+      <div class="provider-api-key-heading"><strong>API Keys</strong><button class="icon-button small" type="button" data-action="add-provider-api-key" title="添加 API Key" aria-label="添加 API Key"><i data-lucide="plus"></i></button></div>
+      <div class="provider-api-key-list" data-provider-api-key-list>${entries.map((entry, index) => providerApiKeyRow(
+      entry,
+      index,
+      { monitored: monitoredIds == null || monitoredIds.has(String(entry.id)) }
+    )).join('')}</div>
+    </div>
+  </div>`;
+  icons();
+}
+
 function renderCredentialFields(adapter, provider = null, authMode = '') {
-  const fields = credentialFieldsFor(adapter, authMode || provider?.auth_mode);
+  const selectedAuthMode = authMode || provider?.auth_mode;
+  if (usesMultipleApiKeyEditor(adapter, selectedAuthMode)) {
+    renderProviderApiKeyEditor(provider);
+    return;
+  }
+  const fields = credentialFieldsFor(adapter, selectedAuthMode);
   $('#credential-fields').innerHTML = fields.map(([name, label, type]) => {
     const existing = provider?.credentialFields?.find((field) => field.name === name);
     return `<label><span>${escapeHtml(label)}</span><input data-credential="${name}" type="${type}" placeholder="${existing ? `已保存 ${existing.masked}，留空不修改` : ''}" autocomplete="off"></label>`;
   }).join('');
+}
+
+function renderMonitoredApiKeyOptions(form, provider = null, { loading = false } = {}) {
+  const fieldset = $('#monitored-api-keys-fieldset');
+  const root = $('#monitored-api-key-options');
+  if (!fieldset || !root) return;
+  const active = formUsesRemoteApiKeySelection(form);
+  fieldset.hidden = !active;
+  if (!active) {
+    root.innerHTML = '';
+    return;
+  }
+  if (loading) {
+    root.innerHTML = '<div class="monitored-api-key-empty"><i class="spin" data-lucide="loader-circle"></i><span>正在读取远端 Key</span></div>';
+    icons();
+    return;
+  }
+
+  const connectionId = provider?.id || form.elements.id.value || 'provider-form-preview';
+  const savedSource = provider?.typeConfig?.apiKeySource ||
+    (provider?.configuredApiKeys?.length ? 'manual' : null);
+  const sourceChanged = form.elements.adapterType.value === 'sub2api' &&
+    form.elements.authMode.value === 'api_key' && savedSource &&
+    selectedSub2ApiKeySource(form) !== savedSource;
+  const configuredIds = !sourceChanged && Array.isArray(provider?.typeConfig?.monitoredKeyIds)
+    ? provider.typeConfig.monitoredKeyIds.map(String)
+    : null;
+  const keys = state.keys.filter((key) =>
+    key.connection_id === connectionId &&
+    (!sourceChanged || key.key_option_source === 'remote')
+  );
+  const keysByRemoteId = new Map(keys.map((key) => [String(key.remote_id), key]));
+  const options = [...keys];
+  for (const remoteId of configuredIds || []) {
+    if (keysByRemoteId.has(remoteId)) continue;
+    options.push({
+      remote_id: remoteId,
+      name: `Key #${remoteId}`,
+      masked_key: '',
+      status: 'missing'
+    });
+  }
+  options.sort((left, right) => {
+    const leftMissing = left.status === 'missing' ? 1 : 0;
+    const rightMissing = right.status === 'missing' ? 1 : 0;
+    return leftMissing - rightMissing || String(left.name).localeCompare(String(right.name), 'zh-CN');
+  });
+  if (options.length === 0) {
+    root.innerHTML = '<div class="monitored-api-key-empty"><i data-lucide="key-round"></i><span>暂无已同步 Key</span></div>';
+    icons();
+    return;
+  }
+  const selected = configuredIds == null
+    ? new Set(options.filter((key) => key.status !== 'missing').map((key) => String(key.remote_id)))
+    : new Set(configuredIds);
+  root.innerHTML = options.map((key) => {
+    const remoteId = String(key.remote_id);
+    return `<label class="monitored-api-key-option">
+      <input type="checkbox" data-monitored-api-key value="${escapeHtml(remoteId)}" ${selected.has(remoteId) ? 'checked' : ''}>
+      <span><strong>${escapeHtml(key.name || `Key #${remoteId}`)}</strong><small>${escapeHtml([key.masked_key, key.status, `#${remoteId}`].filter(Boolean).join(' · '))}</small></span>
+    </label>`;
+  }).join('');
+}
+
+async function loadMonitoredApiKeyOptions(form, provider) {
+  if (!formUsesRemoteApiKeySelection(form)) return;
+  const isSub2ApiRemoteSource = form.elements.adapterType.value === 'sub2api' &&
+    form.elements.authMode.value === 'api_key' && selectedSub2ApiKeySource(form) === 'remote';
+  if (!provider?.id && !isSub2ApiRemoteSource) return;
+  const discoveryCredentials = isSub2ApiRemoteSource
+    ? Object.fromEntries(
+      $$('[data-credential]', form)
+        .filter((input) => input.value)
+        .map((input) => [input.dataset.credential, input.value])
+    )
+    : {};
+  const hasSavedDiscoveryCredentials = provider?.credentialFields?.some((field) =>
+    ['email', 'password', 'accessToken', 'refreshToken'].includes(field.name)
+  );
+  if (
+    isSub2ApiRemoteSource &&
+    Object.keys(discoveryCredentials).length === 0 &&
+    !hasSavedDiscoveryCredentials
+  ) {
+    renderMonitoredApiKeyOptions(form, provider);
+    return;
+  }
+  renderMonitoredApiKeyOptions(form, provider, { loading: true });
+  try {
+    const connectionId = provider?.id || form.elements.id.value || 'provider-form-preview';
+    const result = isSub2ApiRemoteSource
+      ? await api('/api/providers/key-options', {
+        method: 'POST',
+        body: {
+          ...(provider?.id ? { existingProviderId: provider.id } : {}),
+          baseUrl: normalizeProviderBaseUrl(form.elements.baseUrl.value),
+          credentials: discoveryCredentials
+        }
+      })
+      : await api(`/api/providers/${provider.id}/keys`);
+    if ((provider?.id && form.elements.id.value !== provider.id) || !$('#provider-dialog').open) return;
+    state.keys = [
+      ...state.keys.filter((key) => key.connection_id !== connectionId),
+      ...(result.items || []).map((key) => ({
+        ...key,
+        connection_id: connectionId,
+        ...(isSub2ApiRemoteSource ? { key_option_source: 'remote' } : {})
+      }))
+    ];
+    renderMonitoredApiKeyOptions(form, provider);
+  } catch (error) {
+    if ((provider?.id && form.elements.id.value !== provider.id) || !$('#provider-dialog').open) return;
+    const savedSource = provider?.typeConfig?.apiKeySource ||
+      (provider?.configuredApiKeys?.length ? 'manual' : null);
+    if (isSub2ApiRemoteSource && savedSource !== 'remote') {
+      const connectionId = provider?.id || form.elements.id.value || 'provider-form-preview';
+      state.keys = state.keys.filter((key) =>
+        key.connection_id !== connectionId || key.key_option_source !== 'remote'
+      );
+    }
+    renderMonitoredApiKeyOptions(form, provider);
+    toast(error.message, 'error');
+  }
 }
 
 function providerDefaults(adapter) {
@@ -1670,6 +2075,7 @@ function applyProviderAdapter(form, adapterType, { fromDetection = false } = {})
   form.dataset.credentialsTouched = 'false';
   form.dataset.autoDetectedAdapter = fromDetection ? adapterType : '';
   updateDynamicRouteRateFields(form);
+  renderMonitoredApiKeyOptions(form);
 }
 
 function updateDynamicRouteRateFields(form) {
@@ -1812,8 +2218,10 @@ function openProviderDialog(provider = null) {
   $('#provider-form-error').textContent = '';
   renderCredentialFields(form.elements.adapterType.value, provider, form.elements.authMode.value);
   updateDynamicRouteRateFields(form);
+  renderMonitoredApiKeyOptions(form, provider);
   $('#provider-dialog').showModal();
   icons();
+  loadMonitoredApiKeyOptions(form, provider);
 }
 
 function providerBalanceThresholds(form) {
@@ -1834,7 +2242,31 @@ function providerBalanceThresholds(form) {
 
 function providerPayload(form) {
   const credentials = {};
+  const usesApiKeyEditor = usesMultipleApiKeyEditor(
+    form.elements.adapterType.value,
+    form.elements.authMode.value
+  );
+  const configuredApiKeySource = usesApiKeyEditor
+    ? selectedSub2ApiKeySource(form)
+    : null;
+  let configuredApiKeySelection = null;
   $$('[data-credential]', form).forEach((input) => { if (input.value) credentials[input.dataset.credential] = input.value; });
+  if (usesApiKeyEditor && configuredApiKeySource === 'manual') {
+    const rows = $$('[data-provider-api-key-row]', form);
+    if (rows.length === 0) throw new Error('至少配置一个 API Key');
+    configuredApiKeySelection = [];
+    credentials.apiKeys = rows.map((row, index) => {
+      const id = $('[data-api-key-id]', row).value.trim();
+      const name = $('[data-api-key-name]', row).value.trim() || `API Key ${index + 1}`;
+      const keyInput = $('[data-api-key-value]', row);
+      const key = keyInput.value.trim();
+      if (keyInput.required && !key) throw new Error(`请填写 ${name} 的 API Key`);
+      const monitoredInput = $('[data-api-key-monitored]', row);
+      if (!monitoredInput || monitoredInput.checked) configuredApiKeySelection.push(id);
+      return { ...(id ? { id } : {}), name, ...(key ? { key } : {}) };
+    });
+    if (configuredApiKeySelection.length === 0) throw new Error('至少选择一个监控 API Key');
+  }
   let typeConfig;
   try { typeConfig = JSON.parse(form.elements.typeConfig.value || '{}'); } catch { throw new Error('高级配置不是有效 JSON'); }
   typeConfig.dynamicRouteRate = {
@@ -1848,6 +2280,19 @@ function providerPayload(form) {
     ...(typeConfig.rechargeLogin && typeof typeConfig.rechargeLogin === 'object' ? typeConfig.rechargeLogin : {}),
     enabled: form.elements.rechargeLoginMode?.value === 'adapter'
   };
+  if (configuredApiKeySource) typeConfig.apiKeySource = configuredApiKeySource;
+  else delete typeConfig.apiKeySource;
+  if (configuredApiKeySelection) {
+    typeConfig.monitoredKeyIds = configuredApiKeySelection;
+  } else if (formUsesRemoteApiKeySelection(form)) {
+    const options = $$('[data-monitored-api-key]', form);
+    if (usesApiKeyEditor && options.length === 0) throw new Error('请先刷新远端 Key 列表');
+    const monitoredKeyIds = options.filter((input) => input.checked).map((input) => input.value);
+    if (options.length > 0 && monitoredKeyIds.length === 0) throw new Error('至少选择一个监控 API Key');
+    if (options.length > 0) typeConfig.monitoredKeyIds = monitoredKeyIds;
+  } else {
+    delete typeConfig.monitoredKeyIds;
+  }
   const balanceThresholds = providerBalanceThresholds(form);
   return {
     name: form.elements.name.value.trim(), adapterType: form.elements.adapterType.value,
@@ -1955,7 +2400,14 @@ function openAutomation(rule = null) {
   form.elements.id.value = rule?.id || ''; form.elements.name.value = rule?.name || '';
   form.elements.triggerType.value = rule?.trigger_type || 'low_balance'; fillProviderSelect(form.elements.connectionId, rule?.connection_id);
   form.elements.threshold.value = rule?.config?.threshold ?? ''; form.elements.currency.value = rule?.config?.currency || 'USD';
-  form.elements.channelIds.value = (rule?.config?.channelIds || []).join(', '); form.elements.action.value = rule?.config?.action || 'disable_sub2api_channel';
+  form.elements.accountIds.value = (rule?.config?.accountIds || []).join(', ');
+  form.elements.channelIds.value = (rule?.config?.channelIds || []).join(', ');
+  form.elements.action.value = rule?.config?.action || 'disable_sub2api_account';
+  form.elements.scheduleIntervalMinutes.value = rule?.config?.scheduleIntervalMinutes || 1440;
+  form.elements.scheduledConditionType.value = rule?.config?.condition?.type || '';
+  form.elements.scheduledConditionOperator.value = rule?.config?.condition?.operator || 'lt';
+  form.elements.scheduledConditionThreshold.value = rule?.config?.condition?.threshold ?? 0;
+  form.elements.onMatchAction.value = rule?.config?.onMatchAction || 'disable_sub2api_account';
   form.elements.consecutiveMatches.value = rule?.config?.consecutiveMatches || 2;
   form.elements.cooldownMinutes.value = rule?.config?.cooldownMinutes || 60;
   form.elements.dailyMaximumActions.value = rule?.config?.dailyMaximumActions || 10;
@@ -1967,40 +2419,100 @@ function openAutomation(rule = null) {
 }
 
 function automationUsesChannelIds(action) {
-  return action !== 'trigger_recharge_webhook';
+  return ['switch_to_backup', 'remind_credential_rotation', 'create_route_recommendation'].includes(action);
+}
+
+function automationUsesAccountIds(action) {
+  return ['disable_sub2api_account', 'enable_sub2api_account'].includes(action);
 }
 
 function updateAutomationActionFields(form = $('#automation-form')) {
+  const scheduled = form.elements.triggerType.value === 'scheduled';
+  const hasScheduledCondition = scheduled && Boolean(form.elements.scheduledConditionType.value);
+  if (scheduled && form.elements.action.value !== 'rebuild_sub2api_mappings') {
+    form.elements.action.value = 'rebuild_sub2api_mappings';
+  } else if (!scheduled && form.elements.action.value === 'rebuild_sub2api_mappings') {
+    form.elements.action.value = 'disable_sub2api_account';
+  }
+  const usesAccountIds = automationUsesAccountIds(form.elements.action.value);
   const usesChannelIds = automationUsesChannelIds(form.elements.action.value);
   const usesWebhook = form.elements.action.value === 'trigger_recharge_webhook';
+  const accountField = form.querySelector('[data-automation-account-field]');
   const channelField = form.querySelector('[data-automation-channel-field]');
   const webhookField = form.querySelector('[data-automation-webhook-field]');
+  const scheduleField = form.querySelector('[data-automation-schedule-field]');
+  const scheduledConditionSelector = form.querySelector('[data-automation-scheduled-condition-selector]');
+  accountField.hidden = !usesAccountIds;
   channelField.hidden = !usesChannelIds;
   webhookField.hidden = !usesWebhook;
+  scheduleField.hidden = !scheduled;
+  scheduledConditionSelector.hidden = !scheduled;
+  for (const field of form.querySelectorAll('[data-automation-scheduled-condition-field]')) {
+    field.hidden = !hasScheduledCondition;
+  }
+  for (const field of form.querySelectorAll('[data-automation-event-field]')) field.hidden = scheduled;
+  $('#automation-action-label').textContent = scheduled ? '前置动作' : '动作';
+  form.elements.action.disabled = scheduled;
+  form.elements.connectionId.disabled = scheduled;
+  form.elements.threshold.disabled = scheduled;
+  form.elements.currency.disabled = scheduled;
+  form.elements.consecutiveMatches.disabled = scheduled;
+  form.elements.accountIds.required = usesAccountIds;
   form.elements.channelIds.required = usesChannelIds;
   form.elements.webhookUrl.required = usesWebhook;
+  form.elements.scheduleIntervalMinutes.required = scheduled;
+  form.elements.scheduleIntervalMinutes.disabled = !scheduled;
+  form.elements.scheduledConditionType.disabled = !scheduled;
+  form.elements.scheduledConditionOperator.required = hasScheduledCondition;
+  form.elements.scheduledConditionOperator.disabled = !hasScheduledCondition;
+  form.elements.scheduledConditionThreshold.required = hasScheduledCondition;
+  form.elements.scheduledConditionThreshold.disabled = !hasScheduledCondition;
+  form.elements.onMatchAction.required = hasScheduledCondition;
+  form.elements.onMatchAction.disabled = !hasScheduledCondition;
 }
 
 function automationPayload(form) {
+  const scheduled = form.elements.triggerType.value === 'scheduled';
+  const scheduledCondition = scheduled && form.elements.scheduledConditionType.value
+    ? {
+        type: form.elements.scheduledConditionType.value,
+        operator: form.elements.scheduledConditionOperator.value,
+        threshold: Number(form.elements.scheduledConditionThreshold.value)
+      }
+    : null;
+  const accountIds = automationUsesAccountIds(form.elements.action.value)
+    ? form.elements.accountIds.value.split(',').map((value) => Number(value.trim())).filter(Number.isFinite)
+    : [];
   const channelIds = automationUsesChannelIds(form.elements.action.value)
     ? form.elements.channelIds.value.split(',').map((value) => Number(value.trim())).filter(Number.isFinite)
     : [];
   return {
     name: form.elements.name.value,
     triggerType: form.elements.triggerType.value,
-    connectionId: form.elements.connectionId.value || null,
+    connectionId: scheduled ? null : form.elements.connectionId.value || null,
     enabled: form.elements.enabled.checked,
     dryRun: form.elements.dryRun.checked,
     config: {
-      threshold: form.elements.threshold.value === '' ? undefined : Number(form.elements.threshold.value),
-      currency: form.elements.currency.value,
+      ...(scheduled ? {} : {
+        threshold: form.elements.threshold.value === '' ? undefined : Number(form.elements.threshold.value),
+        currency: form.elements.currency.value,
+        consecutiveMatches: Number(form.elements.consecutiveMatches.value)
+      }),
+      ...(automationUsesAccountIds(form.elements.action.value) ? { accountIds } : {}),
       ...(automationUsesChannelIds(form.elements.action.value) ? { channelIds } : {}),
       action: form.elements.action.value,
-      consecutiveMatches: Number(form.elements.consecutiveMatches.value),
+      ...(scheduled ? {
+        scheduleIntervalMinutes: Number(form.elements.scheduleIntervalMinutes.value),
+        ...(scheduledCondition ? {
+          condition: scheduledCondition,
+          onMatchAction: form.elements.onMatchAction.value,
+          targetMode: 'matched_mapping_accounts'
+        } : {})
+      } : {}),
       cooldownMinutes: Number(form.elements.cooldownMinutes.value),
-      dailyMaximumActions: Number(form.elements.dailyMaximumActions.value),
       contractPauseHours: Number(form.elements.contractPauseHours.value),
-      ...(form.elements.webhookUrl.value ? { webhookUrl: form.elements.webhookUrl.value } : {})
+      dailyMaximumActions: Number(form.elements.dailyMaximumActions.value),
+      ...(!scheduled && form.elements.webhookUrl.value ? { webhookUrl: form.elements.webhookUrl.value } : {})
     }
   };
 }
@@ -2125,6 +2637,24 @@ async function handleAction(button) {
     if (action === 'download') await downloadFile(button.dataset.url, button.dataset.filename);
     if (action === 'save-system-settings') await saveSystemSettings($('#system-settings-form'));
     if (action === 'add-provider') openProviderDialog();
+    if (action === 'add-provider-api-key') {
+      const list = $('[data-provider-api-key-list]', $('#provider-form'));
+      if (list) {
+        list.insertAdjacentHTML('beforeend', providerApiKeyRow({}, $$('[data-provider-api-key-row]', list).length));
+        $('#provider-form').dataset.credentialsTouched = 'true';
+        icons();
+      }
+    }
+    if (action === 'remove-provider-api-key') {
+      button.closest('[data-provider-api-key-row]')?.remove();
+      $('#provider-form').dataset.credentialsTouched = 'true';
+    }
+    if (action === 'refresh-provider-key-options') {
+      const form = $('#provider-form');
+      const provider = state.providers.find((item) => item.id === form.elements.id.value) || null;
+      button.disabled = true;
+      try { await loadMonitoredApiKeyOptions(form, provider); } finally { button.disabled = false; }
+    }
     if (action === 'edit-provider') openProviderDialog(state.providers.find((p) => p.id === id));
     if (action === 'delete-provider' && confirm('删除该供应商及其历史快照？')) { await api(`/api/providers/${id}`, { method: 'DELETE' }); toast('供应商已删除'); navigate('providers'); }
     if (action === 'clone-provider') { await api(`/api/providers/${id}/clone`, { method: 'POST', body: {} }); toast('已复制连接，凭据为空且默认停用'); navigate('providers'); }
@@ -2161,14 +2691,14 @@ async function handleAction(button) {
     if (action === 'sort-cost-rate') await cycleCostRateSort(button.dataset.listKey);
     if (action === 'refresh-trends') await loadTrend();
     if (action === 'compare-model') await loadCostComparison();
-    if (action === 'evaluate-alerts') { await api('/api/alerts/evaluate', { method: 'POST' }); toast('告警评估完成'); navigate('alerts'); }
+    if (action === 'evaluate-alerts') { await api('/api/alerts/evaluate', { method: 'POST' }); toast('告警评估完成'); navigate('automation'); }
     if (action === 'add-alert-rule') openAlertRule();
     if (action === 'edit-alert-rule') openAlertRule(state.alertRules.find((r) => r.id === id));
-    if (action === 'delete-alert-rule' && confirm('删除该告警规则？')) { await api(`/api/alert-rules/${id}`, { method: 'DELETE' }); toast('规则已删除'); navigate('alerts'); }
-    if (action === 'ack-alert') { await api(`/api/alerts/${id}/acknowledge`, { method: 'POST' }); toast('告警已确认'); navigate('alerts'); }
+    if (action === 'delete-alert-rule' && confirm('删除该告警规则？')) { await api(`/api/alert-rules/${id}`, { method: 'DELETE' }); toast('规则已删除'); navigate('automation'); }
+    if (action === 'ack-alert') { await api(`/api/alerts/${id}/acknowledge`, { method: 'POST' }); toast('告警已确认'); navigate('automation'); }
     if (action === 'add-channel') openChannel();
     if (action === 'edit-channel') openChannel(state.channels.find((c) => c.id === id));
-    if (action === 'delete-channel' && confirm('删除该通知通道？')) { await api(`/api/notification-channels/${id}`, { method: 'DELETE' }); toast('通道已删除'); navigate('alerts'); }
+    if (action === 'delete-channel' && confirm('删除该通知通道？')) { await api(`/api/notification-channels/${id}`, { method: 'DELETE' }); toast('通道已删除'); navigate('automation'); }
     if (action === 'test-channel') { await api(`/api/notification-channels/${id}/test`, { method: 'POST' }); toast('测试通知已发送'); }
     if (action === 'regenerate-mobile-preview') {
       const form = $('#recharge-alert-test-form');
@@ -2181,8 +2711,22 @@ async function handleAction(button) {
     if (action === 'add-automation') openAutomation();
     if (action === 'edit-automation') openAutomation(state.automationRules.find((r) => r.id === id));
     if (action === 'delete-automation' && confirm('删除该自动化规则？')) { await api(`/api/automation-rules/${id}`, { method: 'DELETE' }); toast('规则已删除'); navigate('automation'); }
-    if (action === 'rollback-automation' && confirm('将 Sub2API 渠道恢复到动作前状态？')) { await api(`/api/automation-actions/${id}/rollback`, { method: 'POST' }); toast('动作已回滚'); navigate('automation'); }
-    if (action === 'dry-run-automation') { const result = await api(`/api/automation/rules/${id}/dry-run`, { method: 'POST', body: {} }); toast(`${result.items.filter((item) => item.matched && item.safety.allowed).length} 个供应商满足执行条件`); }
+    if (action === 'rollback-automation' && confirm('恢复到该动作执行前的状态？')) { await api(`/api/automation-actions/${id}/rollback`, { method: 'POST' }); toast('动作已回滚'); navigate('automation'); }
+    if (action === 'dry-run-automation') {
+      const result = await api(`/api/automation/rules/${id}/dry-run`, { method: 'POST', body: {} });
+      const rule = state.automationRules.find((item) => item.id === id);
+      const matched = result.items.filter((item) => item.matched && item.safety.allowed).length;
+      if (rule?.trigger_type === 'scheduled') {
+        const matchedAccounts = Number(result.items[0]?.conditionMatchedTargets || 0);
+        toast(matched
+          ? rule.config?.condition
+            ? `定时任务已到执行时间，当前 ${matchedAccounts} 个账号命中后续条件`
+            : '定时任务已到执行时间'
+          : '定时任务尚未到执行时间');
+      } else {
+        toast(`${matched} 个供应商满足执行条件`);
+      }
+    }
     if (action === 'auto-map') await openAutoMappingPreview();
     if (action === 'toggle-integration-group') {
       const groupKey = String(button.dataset.groupId);
@@ -2213,7 +2757,11 @@ async function handleAction(button) {
     if (action === 'delete-mapping' && confirm('删除该分组映射及其对账历史？')) { await api(`/api/mappings/${id}`, { method: 'DELETE' }); toast('映射已删除'); navigate('integrations'); }
     if (action === 'reconcile') { const result = await api(`/api/mappings/${id}/reconcile`, { method: 'POST', body: {} }); toast(`对账完成：${result.status}`); navigate('integrations'); }
     if (action === 'activate-backup' && confirm('将该备用映射设为当前主映射？')) { await api(`/api/mappings/${id}/activate-backup`, { method: 'POST' }); toast('备用映射已激活'); navigate('integrations'); }
-    if (action === 'rotate-credential') openCredentialDialog(state.providers.find((provider) => provider.id === id));
+    if (action === 'rotate-credential') {
+      const provider = state.providers.find((item) => item.id === id);
+      if (usesMultipleApiKeyEditor(provider?.adapter_type, provider?.auth_mode)) openProviderDialog(provider);
+      else openCredentialDialog(provider);
+    }
     if (action === 'open-import') openImportDialog();
     if (action === 'change-password') {
       const form = $('#password-form');
@@ -2318,9 +2866,26 @@ document.addEventListener('change', (event) => {
   if (event.target.matches('#provider-form [name="authMode"]')) {
     const form = $('#provider-form');
     renderCredentialFields(form.elements.adapterType.value, null, event.target.value);
+    const provider = state.providers.find((item) => item.id === form.elements.id.value) || null;
+    renderMonitoredApiKeyOptions(form, provider);
+    loadMonitoredApiKeyOptions(form, provider);
     form.dataset.credentialsTouched = 'true';
   }
-  if (event.target.matches('#provider-form [name="dynamicRouteRateEnabled"]')) {
+  if (event.target.matches('#provider-form [name="sub2apiApiKeySource"]')) {
+    const form = $('#provider-form');
+    const source = selectedSub2ApiKeySource(form);
+    const provider = state.providers.find((item) => item.id === form.elements.id.value) || null;
+    const manual = $('[data-sub2api-api-key-manual]', form);
+    const remote = $('[data-sub2api-api-key-remote]', form);
+    if (manual) manual.hidden = source !== 'manual';
+    if (remote) remote.hidden = source !== 'remote';
+    renderMonitoredApiKeyOptions(form, provider);
+    if (source === 'remote') loadMonitoredApiKeyOptions(form, provider);
+    form.dataset.credentialsTouched = 'true';
+  }
+  if (event.target.matches(
+    '#provider-form [name="dynamicRouteRateEnabled"]'
+  )) {
     updateDynamicRouteRateFields(event.target.form);
   }
 });
@@ -2347,7 +2912,7 @@ document.addEventListener('input', (event) => {
   if (event.target.matches('#provider-form [name="baseUrl"]')) {
     scheduleProviderDetection(event.target.form);
   }
-  if (event.target.matches('#provider-form [data-credential]')) {
+  if (event.target.matches('#provider-form [data-credential], #provider-form [data-api-key-name], #provider-form [data-api-key-value], #provider-form [data-api-key-monitored], #provider-form [data-monitored-api-key]')) {
     event.target.form.dataset.credentialsTouched = 'true';
   }
 });
@@ -2373,6 +2938,8 @@ $('#logout-button').addEventListener('click', async () => {
 $('#provider-dialog').addEventListener('close', () => cancelProviderDetection({ clearStatus: true }));
 $('#alert-rule-form')?.elements?.ruleType?.addEventListener('change', (event) => updateAlertRuleFields(event.target.form, { resetValues: true }));
 $('#automation-form')?.elements?.action?.addEventListener('change', (event) => updateAutomationActionFields(event.target.form));
+$('#automation-form')?.elements?.triggerType?.addEventListener('change', (event) => updateAutomationActionFields(event.target.form));
+$('#automation-form')?.elements?.scheduledConditionType?.addEventListener('change', (event) => updateAutomationActionFields(event.target.form));
 
 $('#provider-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const id = form.elements.id.value;
@@ -2386,14 +2953,14 @@ $('#provider-form').addEventListener('submit', async (event) => {
 $('#alert-rule-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const id = form.elements.id.value;
   const payload = alertRulePayload(form);
-  try { await api(id ? `/api/alert-rules/${id}` : '/api/alert-rules', { method: id ? 'PUT' : 'POST', body: payload }); $('#alert-rule-dialog').close(); toast('告警规则已保存'); navigate('alerts'); } catch (error) { toast(error.message, 'error'); }
+  try { await api(id ? `/api/alert-rules/${id}` : '/api/alert-rules', { method: id ? 'PUT' : 'POST', body: payload }); $('#alert-rule-dialog').close(); toast('告警规则已保存'); navigate('automation'); } catch (error) { toast(error.message, 'error'); }
 });
 
 $('#notification-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const id = form.elements.id.value;
   try {
     const payload = { name: form.elements.name.value, type: form.elements.type.value, enabled: form.elements.enabled.checked, config: JSON.parse(form.elements.config.value || '{}'), credentials: JSON.parse(form.elements.credentials.value || '{}') };
-    await api(id ? `/api/notification-channels/${id}` : '/api/notification-channels', { method: id ? 'PUT' : 'POST', body: payload }); $('#notification-dialog').close(); toast('通知通道已保存'); navigate('alerts');
+    await api(id ? `/api/notification-channels/${id}` : '/api/notification-channels', { method: id ? 'PUT' : 'POST', body: payload }); $('#notification-dialog').close(); toast('通知通道已保存'); navigate('automation');
   } catch (error) { toast(error.message, 'error'); }
 });
 

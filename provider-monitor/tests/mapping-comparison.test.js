@@ -154,7 +154,12 @@ test('mapping comparison prefers configured per-key dynamic route rates over nom
     authMode: 'system_token',
     credentials: { systemToken: 'secret', userId: '1' },
     typeConfig: {
-      dynamicRouteRate: { enabled: true, statistic: 'median', lookbackDays: 30, minimumSamples: 3 }
+      dynamicRouteRate: {
+        enabled: true,
+        statistic: 'median',
+        lookbackDays: 30,
+        minimumSamples: 3
+      }
     },
     enabled: true
   });
@@ -184,7 +189,10 @@ test('mapping comparison prefers configured per-key dynamic route rates over nom
   `).run(
     keyId,
     provider.id,
-    JSON.stringify({ latest: { channelName: 'Latest route', model: 'gpt-test' } }),
+    JSON.stringify({
+      priceBasis: 'official_relative',
+      latest: { channelName: 'Latest route', model: 'gpt-test' }
+    }),
     now,
     now,
     now,
@@ -220,10 +228,71 @@ test('mapping comparison prefers configured per-key dynamic route rates over nom
   assert.equal(comparison.details.requestBillingVerified, true);
   assert.ok(Math.abs(comparison.differenceRatio - 4) < 1e-12);
 
+  context.db.prepare(`
+    UPDATE provider_dynamic_route_rates SET summary_json = ? WHERE key_id = ?
+  `).run(JSON.stringify({ latest: { channelName: 'Legacy route', model: 'gpt-test' } }), keyId);
+  const stale = mappings.list()[0];
+  assert.equal(stale.dynamicRoute.status, 'recalculation_required');
+  assert.equal(stale.comparison.status, 'missing_dynamic_route_rate');
+  assert.equal(stale.comparison.providerRate, null);
+
+  context.db.prepare(`
+    UPDATE provider_dynamic_route_rates
+    SET selected_multiplier = NULL, status = 'missing_reference_price',
+      summary_json = ? WHERE key_id = ?
+  `).run(JSON.stringify({
+    priceBasis: 'official_relative',
+    referenceMissingCount: 1,
+    referenceMissingModels: ['supplier-alias']
+  }), keyId);
+  result = await mappings.refreshComparisons({ force: true });
+  comparison = result.items[0].comparison;
+  assert.equal(comparison.status, 'missing_reference_price');
+  assert.equal(comparison.providerRate, null);
+  assert.equal(comparison.compositeRate, null);
+
+  context.db.prepare(`
+    UPDATE provider_dynamic_route_rates
+    SET selected_multiplier = 0.024, status = 'partial_reference_price',
+      summary_json = ? WHERE key_id = ?
+  `).run(JSON.stringify({
+    priceBasis: 'official_relative',
+    totalObservationCount: 3,
+    referenceMissingCount: 2,
+    referenceMissingModels: ['supplier-alias']
+  }), keyId);
+  result = await mappings.refreshComparisons({ force: true });
+  comparison = result.items[0].comparison;
+  assert.equal(comparison.status, 'partial_reference_price');
+  assert.equal(comparison.providerRate, 0.024);
+  assert.equal(comparison.compositeRate, 0.024);
+
+  context.db.prepare(`
+    UPDATE provider_dynamic_route_rates
+    SET selected_multiplier = NULL, status = 'missing_provider_price',
+      summary_json = ? WHERE key_id = ?
+  `).run(JSON.stringify({
+    priceBasis: 'official_relative',
+    providerPriceMissingCount: 1,
+    providerPriceMissingModels: ['supplier-alias']
+  }), keyId);
+  result = await mappings.refreshComparisons({ force: true });
+  comparison = result.items[0].comparison;
+  assert.equal(comparison.status, 'missing_provider_price');
+  assert.equal(comparison.providerRate, null);
+  assert.equal(comparison.compositeRate, null);
+
   context.db.prepare('DELETE FROM provider_dynamic_route_rates WHERE key_id = ?').run(keyId);
   result = await mappings.refreshComparisons({ force: true });
   comparison = result.items[0].comparison;
   assert.equal(comparison.status, 'missing_dynamic_route_rate');
+  assert.equal(comparison.providerRate, null);
+  assert.equal(comparison.compositeRate, null);
+
+  context.db.prepare("UPDATE remote_keys SET status = 'missing' WHERE id = ?").run(keyId);
+  result = await mappings.refreshComparisons({ force: true });
+  comparison = result.items[0].comparison;
+  assert.equal(comparison.status, 'missing_remote_key');
   assert.equal(comparison.providerRate, null);
   assert.equal(comparison.compositeRate, null);
 });

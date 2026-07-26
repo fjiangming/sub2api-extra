@@ -43,9 +43,8 @@
         <button class="module-tab" data-view="trends" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="chart-no-axes-combined"></i><span>趋势</span></button>
         <button class="module-tab" data-view="costs" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="badge-dollar-sign"></i><span>价格比较</span></button>
         <button class="module-tab" data-view="risks" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="shield-alert"></i><span>健康与漂移</span></button>
-        <button class="module-tab" data-view="alerts" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="bell-ring"></i><span>告警</span></button>
         <button class="module-tab" data-view="integrations" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="waypoints"></i><span>Sub2API 联动</span></button>
-        <button class="module-tab" data-view="automation" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="workflow"></i><span>自动化</span></button>
+        <button class="module-tab" data-view="automation" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="workflow"></i><span>规则与自动化</span></button>
         <button class="module-tab" data-view="tests" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="flask-conical"></i><span>测试</span></button>
         <button class="module-tab" data-view="activity" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="scroll-text"></i><span>运行记录</span></button>
         <button class="module-tab" data-view="settings" role="tab" aria-selected="false" aria-controls="main-content" tabindex="-1"><i data-lucide="settings"></i><span>设置与备份</span></button>
@@ -86,9 +85,10 @@
         <label class="toggle-field"><input name="enabled" type="checkbox" checked><span>启用定时检查</span></label>
       </div>
       <fieldset><legend>凭据</legend><div class="form-grid" id="credential-fields"></div></fieldset>
+      <fieldset id="monitored-api-keys-fieldset" hidden><legend>监控 API Keys</legend><div class="monitored-api-key-toolbar"><button class="icon-button small" type="button" data-action="refresh-provider-key-options" title="刷新远端 Key 列表" aria-label="刷新远端 Key 列表"><i data-lucide="refresh-cw"></i></button></div><div class="monitored-api-key-list" id="monitored-api-key-options"></div></fieldset>
       <fieldset id="dynamic-route-rate-fieldset" hidden><legend>动态路由倍率</legend><div class="form-grid">
         <label class="toggle-field span-2"><input name="dynamicRouteRateEnabled" type="checkbox"><span>从历史请求日志查询实际倍率</span></label>
-        <label><span>统计口径</span><select name="dynamicRouteRateStatistic"><option value="median">中位数（P50）</option><option value="p90">P90</option><option value="weighted_average">Token 加权平均</option><option value="latest">最近一次</option></select></label>
+        <label><span>统计口径</span><select name="dynamicRouteRateStatistic"><option value="median">中位数（P50）</option><option value="p90">P90</option><option value="weighted_average">成本加权平均</option><option value="latest">最近一次</option></select></label>
         <label><span>回看天数</span><input name="dynamicRouteRateLookbackDays" type="number" min="1" max="90" value="30"></label>
         <label><span>最少样本数</span><input name="dynamicRouteRateMinimumSamples" type="number" min="1" max="1000" value="3"></label>
       </div></fieldset>
@@ -154,14 +154,20 @@
       <input type="hidden" name="id">
       <div class="form-grid">
         <label class="span-2"><span>名称</span><input name="name" required></label>
-        <label><span>触发条件</span><select name="triggerType"><option value="low_balance">余额低于阈值</option><option value="balance_recovered">余额恢复</option><option value="key_failed">Key 健康失败</option><option value="anomaly_detected">检测到异常</option><option value="contract_changed">接口契约变化</option></select></label>
-        <label><span>供应商</span><select name="connectionId"><option value="">全部</option></select></label>
-        <label><span>阈值</span><input name="threshold" type="number" min="0" step="0.01"></label>
-        <label><span>币种</span><input name="currency" value="USD" required></label>
-        <label class="span-2" data-automation-channel-field><span>Sub2API 渠道 ID（逗号分隔）</span><input name="channelIds" placeholder="1, 2, 3" required></label>
-        <label class="span-2"><span>动作</span><select name="action"><option value="disable_sub2api_channel">停用渠道</option><option value="enable_sub2api_channel">启用渠道</option><option value="switch_to_backup">切换备用映射</option><option value="trigger_recharge_webhook">触发充值工单 Webhook</option><option value="remind_credential_rotation">生成凭据轮换提醒</option><option value="create_route_recommendation">生成路由建议</option></select></label>
-        <label><span>连续命中</span><input name="consecutiveMatches" type="number" min="1" value="2"></label>
-        <label><span>冷却（分钟）</span><input name="cooldownMinutes" type="number" min="1" value="60"></label>
+        <label><span>触发方式</span><select name="triggerType"><option value="low_balance">余额低于阈值</option><option value="balance_recovered">余额恢复</option><option value="key_failed">Key 健康失败</option><option value="anomaly_detected">检测到异常</option><option value="contract_changed">接口契约变化</option><option value="scheduled">按时间运行</option></select></label>
+        <label data-automation-event-field><span>供应商</span><select name="connectionId"><option value="">全部</option></select></label>
+        <label data-automation-event-field><span>阈值</span><input name="threshold" type="number" min="0" step="0.01"></label>
+        <label data-automation-event-field><span>币种</span><input name="currency" value="USD" required></label>
+        <label class="span-2" data-automation-account-field hidden><span>Sub2API 账号 ID（逗号分隔）</span><input name="accountIds" placeholder="1, 2, 3"></label>
+        <label class="span-2" data-automation-channel-field hidden><span>Sub2API 渠道 ID（逗号分隔）</span><input name="channelIds" placeholder="1, 2, 3"></label>
+        <label class="span-2"><span id="automation-action-label">动作</span><select name="action"><option value="disable_sub2api_account">停用账号</option><option value="enable_sub2api_account">启用账号</option><option value="switch_to_backup">切换备用映射</option><option value="trigger_recharge_webhook">触发充值工单 Webhook</option><option value="remind_credential_rotation">生成凭据轮换提醒</option><option value="create_route_recommendation">生成路由建议</option><option value="rebuild_sub2api_mappings">重建全部 Sub2API 映射</option></select></label>
+        <label class="span-2" data-automation-schedule-field hidden><span>执行间隔（分钟）</span><input name="scheduleIntervalMinutes" type="number" min="5" max="10080" value="1440"></label>
+        <label class="span-2" data-automation-scheduled-condition-selector hidden><span>后续条件</span><select name="scheduledConditionType"><option value="">无（仅重建映射）</option><option value="composite_rate_difference">综合倍率偏差</option></select></label>
+        <label data-automation-scheduled-condition-field hidden><span>比较方式</span><select name="scheduledConditionOperator"><option value="lt">小于</option><option value="lte">小于等于</option><option value="gt">大于</option><option value="gte">大于等于</option></select></label>
+        <label data-automation-scheduled-condition-field hidden><span>偏差阈值（%）</span><input name="scheduledConditionThreshold" type="number" step="0.01" value="0"></label>
+        <label class="span-2" data-automation-scheduled-condition-field hidden><span>命中动作</span><select name="onMatchAction"><option value="disable_sub2api_account">停用映射关联账号</option><option value="enable_sub2api_account">启用映射关联账号</option></select></label>
+        <label data-automation-event-field><span>连续命中</span><input name="consecutiveMatches" type="number" min="1" value="2"></label>
+        <label><span>动作冷却（分钟）</span><input name="cooldownMinutes" type="number" min="1" value="60"></label>
         <label><span>每日动作上限</span><input name="dailyMaximumActions" type="number" min="1" value="10"></label>
         <label><span>Contract 暂停（小时）</span><input name="contractPauseHours" type="number" min="1" value="24"></label>
         <label class="span-2" data-automation-webhook-field hidden><span>充值 Webhook</span><input name="webhookUrl" type="url"></label>

@@ -7,6 +7,11 @@ const {
   extractItems
 } = require('./base');
 const { AppError } = require('../errors');
+const {
+  LEGACY_CONFIGURED_API_KEY_ID,
+  cleanApiKey,
+  normalizeConfiguredApiKeys
+} = require('../security/configured-api-keys');
 
 function decodeJwtExpiration(token) {
   try {
@@ -54,9 +59,7 @@ function usesApiKey(connection) {
 }
 
 function configuredApiKey(credentials = {}) {
-  return String(credentials.apiKey || credentials.bearerToken || credentials.token || '')
-    .trim()
-    .replace(/^Bearer\s+/i, '');
+  return normalizeConfiguredApiKeys(credentials)[0]?.key || '';
 }
 
 function rechargeTargetPath(connection, targetUrl) {
@@ -134,6 +137,24 @@ function translateSub2ApiAuthError(error) {
 }
 
 class Sub2ApiAdapter extends ProviderAdapter {
+  constructor(context) {
+    super(context);
+    this.apiKeyEntries = normalizeConfiguredApiKeys(this.credentials, {
+      defaultName: `${this.connection.name} API Key`
+    });
+    const monitoredKeyIds = this.connection.type_config_json?.monitoredKeyIds;
+    if (
+      usesApiKey(this.connection) &&
+      this.connection.type_config_json?.apiKeySource !== 'remote' &&
+      Array.isArray(monitoredKeyIds)
+    ) {
+      const selected = new Set(monitoredKeyIds.map((value) => String(value || '').trim()));
+      this.apiKeyEntries = this.apiKeyEntries.filter((entry) => selected.has(entry.id));
+    }
+    this.apiKeyUsageInfo = new Map();
+    this.apiKeyBillingInfo = new Map();
+  }
+
   capabilities() {
     if (usesApiKey(this.connection)) {
       return {
@@ -172,49 +193,146 @@ class Sub2ApiAdapter extends ProviderAdapter {
     };
   }
 
-  apiKeyHeaders() {
-    const apiKey = configuredApiKey(this.credentials);
-    if (!apiKey) {
+  configuredApiKeys() {
+    if (this.apiKeyEntries.length === 0) {
       throw new AppError('AUTH_EXPIRED', 'Sub2API API Key credentials are missing', {
         status: 401
       });
     }
+    return this.apiKeyEntries;
+  }
+
+  configuredApiKey(entry = null) {
+    return entry || this.configuredApiKeys()[0];
+  }
+
+  async monitoredApiKeyEntries() {
+    if (this.connection.type_config_json?.apiKeySource !== 'remote') {
+      return this.configuredApiKeys();
+    }
+    if (!this.remoteApiKeyEntriesPromise) {
+      this.remoteApiKeyEntriesPromise = this.loadRemoteApiKeyEntries();
+    }
+    return this.remoteApiKeyEntriesPromise;
+  }
+
+  async loadRemoteApiKeyEntries() {
+    const configuredIds = this.connection.type_config_json?.monitoredKeyIds;
+    const selected = Array.isArray(configuredIds)
+      ? new Set(configuredIds.map((value) => String(value || '').trim()).filter(Boolean))
+      : null;
+    const entries = [];
+    const availableIds = new Set();
+    const pageSize = 100;
+    for (let page = 1; page <= 100; page += 1) {
+      const response = await this.authenticatedRequest(
+        `/api/v1/keys?page=${page}&page_size=${pageSize}`
+      );
+      const { items, total } = extractItems(response.data);
+      for (const key of items) {
+        const id = String(key.id ?? '').trim();
+        if (!id) continue;
+        availableIds.add(id);
+        if (selected && !selected.has(id)) continue;
+        const value = cleanApiKey(key.key);
+        if (!value || value.includes('...') || /[*•]/.test(value)) {
+          throw new AppError(
+            'SUB2API_KEY_SECRET_UNAVAILABLE',
+            `Sub2API did not expose the full value for API Key ${key.name || id}`,
+            { status: 409, details: { remoteKeyId: id } }
+          );
+        }
+        entries.push({ id, name: key.name || `Key ${id}`, key: value });
+      }
+      if (items.length < pageSize || entries.length >= total || (selected && entries.length >= selected.size)) break;
+    }
+    const missingIds = selected
+      ? [...selected].filter((id) => !availableIds.has(id))
+      : [];
+    if (missingIds.length > 0) {
+      throw new AppError(
+        'MONITORED_KEY_NOT_FOUND',
+        `${missingIds.length} configured Sub2API API Key(s) were not returned by the provider`,
+        { status: 409, details: { remoteKeyIds: missingIds } }
+      );
+    }
+    if (entries.length === 0) {
+      throw new AppError('AUTH_EXPIRED', 'No Sub2API API Key was selected for monitoring', {
+        status: 401
+      });
+    }
+    return entries;
+  }
+
+  configuredGroupRef(entry, billing = {}) {
+    const billingScope = String(billing.billing_scope || 'token');
+    return entry.id === LEGACY_CONFIGURED_API_KEY_ID
+      ? billingScope
+      : `configured-api-key:${entry.id}`;
+  }
+
+  apiKeyHeaders(entry = null) {
+    const configured = this.configuredApiKey(entry);
     return {
       Accept: 'application/json',
-      Authorization: `Bearer ${apiKey}`
+      Authorization: `Bearer ${configured.key}`
     };
   }
 
-  async getApiKeyUsage() {
-    if (this.apiKeyUsageInfo) return this.apiKeyUsageInfo;
-    const response = await this.http.requestJson(
-      joinUrl(this.connection.base_url, '/v1/usage'),
-      { headers: this.apiKeyHeaders(), retries: 1 }
-    );
-    const data = unwrapEnvelope(response.data, { allowNull: true });
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      throw new AppError('SCHEMA_MISMATCH', 'Sub2API API Key usage response is invalid', {
-        status: 502
-      });
+  async getApiKeyUsage(entry = null) {
+    const configured = this.configuredApiKey(entry);
+    if (!this.apiKeyUsageInfo.has(configured.id)) {
+      this.apiKeyUsageInfo.set(configured.id, (async () => {
+        const response = await this.http.requestJson(
+          joinUrl(this.connection.base_url, '/v1/usage'),
+          { headers: this.apiKeyHeaders(configured), retries: 1 }
+        );
+        const data = unwrapEnvelope(response.data, { allowNull: true });
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+          throw new AppError('SCHEMA_MISMATCH', 'Sub2API API Key usage response is invalid', {
+            status: 502
+          });
+        }
+        return data;
+      })());
     }
-    this.apiKeyUsageInfo = data;
-    return data;
+    return this.apiKeyUsageInfo.get(configured.id);
   }
 
-  async getApiKeyBilling() {
-    if (this.apiKeyBillingInfo) return this.apiKeyBillingInfo;
-    const response = await this.http.requestJson(
-      joinUrl(this.connection.base_url, '/v1/sub2api/billing'),
-      { headers: this.apiKeyHeaders(), retries: 1 }
-    );
-    const data = unwrapEnvelope(response.data, { allowNull: true });
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      throw new AppError('SCHEMA_MISMATCH', 'Sub2API API Key billing response is invalid', {
-        status: 502
-      });
+  async getApiKeyBilling(entry = null) {
+    const configured = this.configuredApiKey(entry);
+    if (!this.apiKeyBillingInfo.has(configured.id)) {
+      this.apiKeyBillingInfo.set(configured.id, (async () => {
+        const response = await this.http.requestJson(
+          joinUrl(this.connection.base_url, '/v1/sub2api/billing'),
+          { headers: this.apiKeyHeaders(configured), retries: 1 }
+        );
+        const data = unwrapEnvelope(response.data, { allowNull: true });
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+          throw new AppError('SCHEMA_MISMATCH', 'Sub2API API Key billing response is invalid', {
+            status: 502
+          });
+        }
+        return data;
+      })());
     }
-    this.apiKeyBillingInfo = data;
-    return data;
+    return this.apiKeyBillingInfo.get(configured.id);
+  }
+
+  async apiKeyResults(loader) {
+    const entries = await this.monitoredApiKeyEntries();
+    const settled = await Promise.allSettled(entries.map((entry) => loader(entry)));
+    return entries.map((entry, index) => ({ entry, result: settled[index] }));
+  }
+
+  firstSuccessfulApiKeyResult(results) {
+    const successful = results.find((item) => item.result.status === 'fulfilled');
+    if (successful) return successful;
+    throw results[0]?.result.reason || new AppError(
+      'AUTH_EXPIRED',
+      'No configured Sub2API API Key could be monitored',
+      { status: 401 }
+    );
   }
 
   async updateTokenPair(data) {
@@ -388,7 +506,9 @@ class Sub2ApiAdapter extends ProviderAdapter {
 
   async getAccount() {
     if (usesApiKey(this.connection)) {
-      const usage = await this.getApiKeyUsage();
+      const results = await this.apiKeyResults((entry) => this.getApiKeyUsage(entry));
+      const { result } = this.firstSuccessfulApiKeyResult(results);
+      const usage = result.value;
       return {
         remoteId: String(
           this.connection.remote_user_id ||
@@ -397,11 +517,15 @@ class Sub2ApiAdapter extends ProviderAdapter {
         ),
         displayName: this.connection.name,
         userGroup: usage.planName || null,
-        status: usage.isValid === false ? 'disabled' : 'active',
+        status: results.some((item) => item.result.status === 'fulfilled' && item.result.value.isValid !== false)
+          ? 'active'
+          : 'disabled',
         metadata: this.safeRaw({
           authMode: 'api_key',
           mode: usage.mode || null,
-          planName: usage.planName || null
+          planName: usage.planName || null,
+          configuredKeyCount: results.length,
+          reachableKeyCount: results.filter((item) => item.result.status === 'fulfilled').length
         })
       };
     }
@@ -422,7 +546,9 @@ class Sub2ApiAdapter extends ProviderAdapter {
 
   async getAccountBalances(account) {
     if (usesApiKey(this.connection)) {
-      const usage = await this.getApiKeyUsage();
+      const results = await this.apiKeyResults((entry) => this.getApiKeyUsage(entry));
+      const { result } = this.firstSuccessfulApiKeyResult(results);
+      const usage = result.value;
       const quota = gatewayQuota(usage);
       return [{
         scope: 'account',
@@ -471,9 +597,15 @@ class Sub2ApiAdapter extends ProviderAdapter {
   async getRechargeQuote() {
     if (usesApiKey(this.connection)) {
       try {
-        const billing = await this.getApiKeyBilling();
+        const results = await this.apiKeyResults((entry) => this.getApiKeyBilling(entry));
+        const available = results
+          .filter((item) => item.result.status === 'fulfilled')
+          .map((item) => item.result.value)
+          .find((billing) => toFiniteNumber(
+            billing.balance_recharge_multiplier ?? billing.recharge_multiplier
+          ) > 0);
         const multiplier = toFiniteNumber(
-          billing.balance_recharge_multiplier ?? billing.recharge_multiplier
+          available?.balance_recharge_multiplier ?? available?.recharge_multiplier
         );
         if (multiplier != null && multiplier > 0) {
           return {
@@ -481,10 +613,10 @@ class Sub2ApiAdapter extends ProviderAdapter {
             multiplier,
             paidAmount: 1,
             creditedAmount: multiplier,
-            paidCurrency: billing.payment_currency || null,
-            balanceCurrency: billing.balance_currency || 'USD',
+            paidCurrency: available.payment_currency || null,
+            balanceCurrency: available.balance_currency || 'USD',
             source: 'provider_billing',
-            metadata: this.safeRaw({ billingScope: billing.billing_scope || null })
+            metadata: this.safeRaw({ billingScope: available.billing_scope || null })
           };
         }
         return {
@@ -552,24 +684,32 @@ class Sub2ApiAdapter extends ProviderAdapter {
 
   async listGroups() {
     if (usesApiKey(this.connection)) {
-      this.groupListComplete = true;
-      const billing = await this.getApiKeyBilling();
-      const remoteId = String(billing.billing_scope || 'token');
-      return [{
-        remoteId,
-        type: 'key_route_group',
-        name: remoteId === 'token' ? 'Current API Key' : remoteId,
-        ratio: toFiniteNumber(
-          billing.effective_rate_multiplier ??
-          billing.resolved_rate_multiplier ??
-          billing.group_rate_multiplier
-        ),
-        status: 'active',
-        metadata: this.safeRaw({
-          source: 'sub2api_key_billing',
-          ...billing
-        })
-      }];
+      const results = await this.apiKeyResults((entry) => this.getApiKeyBilling(entry));
+      this.groupListComplete = results.every((item) => item.result.status === 'fulfilled');
+      const groups = results.flatMap(({ entry, result }) => {
+        if (result.status !== 'fulfilled') return [];
+        const billing = result.value;
+        const billingScope = String(billing.billing_scope || 'token');
+        return [{
+          remoteId: this.configuredGroupRef(entry, billing),
+          type: 'key_route_group',
+          name: `${entry.name} · ${billingScope}`,
+          ratio: toFiniteNumber(
+            billing.effective_rate_multiplier ??
+            billing.resolved_rate_multiplier ??
+            billing.group_rate_multiplier
+          ),
+          status: 'active',
+          metadata: this.safeRaw({
+            source: 'sub2api_key_billing',
+            configuredKeyId: entry.id,
+            billingScope,
+            ...billing
+          })
+        }];
+      });
+      if (groups.length === 0) this.firstSuccessfulApiKeyResult(results);
+      return groups;
     }
     const [groupsResponse, ratesResponse, keysResult] = await Promise.all([
       this.authenticatedRequest('/api/v1/groups/available'),
@@ -628,30 +768,41 @@ class Sub2ApiAdapter extends ProviderAdapter {
 
   async loadKeys() {
     if (usesApiKey(this.connection)) {
-      const [usage, billing] = await Promise.all([
-        this.getApiKeyUsage(),
-        this.getApiKeyBilling()
-      ]);
-      const apiKey = configuredApiKey(this.credentials);
-      const quota = gatewayQuota(usage);
-      return [{
-        remoteId: 'configured-api-key',
-        name: `${this.connection.name} API Key`,
-        maskedKey: this.maskKey(apiKey),
-        status: gatewayKeyStatus(usage),
-        primaryGroupRef: String(billing.billing_scope || 'token'),
-        backupGroupRef: null,
-        additionalGroupRefs: [],
-        quota,
-        expiresAt: toIsoDate(usage.expires_at ?? usage.subscription?.expires_at),
-        lastUsedAt: null,
-        metadata: this.safeRaw({
-          source: 'sub2api_gateway_usage',
-          mode: usage.mode || null,
-          planName: usage.planName || null,
-          daysUntilExpiry: usage.days_until_expiry ?? null
-        })
-      }];
+      const entries = await this.monitoredApiKeyEntries();
+      return Promise.all(entries.map(async (entry) => {
+        const [usageResult, billingResult] = await Promise.allSettled([
+          this.getApiKeyUsage(entry),
+          this.getApiKeyBilling(entry)
+        ]);
+        const usage = usageResult.status === 'fulfilled' ? usageResult.value : null;
+        const billing = billingResult.status === 'fulfilled' ? billingResult.value : null;
+        return {
+          remoteId: entry.id,
+          name: entry.name,
+          maskedKey: this.maskKey(entry.key),
+          status: usage ? gatewayKeyStatus(usage) : 'unknown',
+          primaryGroupRef: billing ? this.configuredGroupRef(entry, billing) : null,
+          backupGroupRef: null,
+          additionalGroupRefs: [],
+          quota: usage ? gatewayQuota(usage) : null,
+          expiresAt: usage ? toIsoDate(usage.expires_at ?? usage.subscription?.expires_at) : null,
+          lastUsedAt: null,
+          metadata: this.safeRaw({
+            source: 'sub2api_gateway_usage',
+            configuredKeyId: entry.id,
+            billingScope: billing?.billing_scope || null,
+            mode: usage?.mode || null,
+            planName: usage?.planName || null,
+            daysUntilExpiry: usage?.days_until_expiry ?? null,
+            usageError: usageResult.status === 'rejected'
+              ? usageResult.reason?.code || 'KEY_USAGE_UNAVAILABLE'
+              : null,
+            billingError: billingResult.status === 'rejected'
+              ? billingResult.reason?.code || 'KEY_BILLING_UNAVAILABLE'
+              : null
+          })
+        };
+      }));
     }
     const result = [];
     const pageSize = 100;
@@ -704,16 +855,21 @@ class Sub2ApiAdapter extends ProviderAdapter {
 
   async getUsage() {
     if (usesApiKey(this.connection)) {
-      const data = await this.getApiKeyUsage();
-      return ['today', 'total']
-        .map((period) => gatewayUsageItem(data, period))
-        .filter(Boolean)
-        .map((item) => ({
-          ...item,
-          scope: 'account',
-          remoteSubjectId: this.connection.remote_user_id || this.connection.id,
-          raw: this.safeRaw(item.raw)
-        }));
+      const results = await this.apiKeyResults((entry) => this.getApiKeyUsage(entry));
+      const usage = results.flatMap(({ entry, result }) => {
+        if (result.status !== 'fulfilled') return [];
+        return ['today', 'total']
+          .map((period) => gatewayUsageItem(result.value, period))
+          .filter(Boolean)
+          .map((item) => ({
+            ...item,
+            scope: 'key',
+            remoteSubjectId: entry.id,
+            raw: this.safeRaw({ ...item.raw, configuredKeyId: entry.id })
+          }));
+      });
+      if (usage.length === 0) this.firstSuccessfulApiKeyResult(results);
+      return usage;
     }
     const response = await this.authenticatedRequest('/api/v1/usage/stats?period=today');
     const data = unwrapEnvelope(response.data);

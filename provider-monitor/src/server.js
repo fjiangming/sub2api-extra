@@ -9,7 +9,7 @@ const { loadConfig } = require('./config');
 const { createDatabase, nowIso, parseJson, stringifyJson } = require('./db');
 const { AppError, errorResponse } = require('./errors');
 const { resolvePagination } = require('./pagination');
-const { redact, redactText } = require('./security/redaction');
+const { maskKey, redact, redactText } = require('./security/redaction');
 const { HttpClient } = require('./http/client');
 const { createAdapter, listAdapterTypes } = require('./adapters/registry');
 const {
@@ -77,6 +77,11 @@ const providerUpdateSchema = providerSchema.partial();
 const providerValidationSchema = providerSchema.extend({
   existingProviderId: z.string().uuid().optional()
 });
+const providerKeyOptionsSchema = z.object({
+  existingProviderId: z.string().uuid().optional(),
+  baseUrl: z.string().url(),
+  credentials: z.record(z.string(), z.any()).optional()
+});
 const alertRuleThresholdTypes = new Set([
   'low_balance', 'runway_below', 'stale_data', 'key_expiry',
   'credential_expiry', 'rate_mismatch'
@@ -131,21 +136,48 @@ const rechargeAlertSimulationSchema = z.object({
     });
   }
 });
+const automationAccountActions = new Set([
+  'disable_sub2api_account',
+  'enable_sub2api_account'
+]);
+const automationChannelActions = new Set([
+  'switch_to_backup',
+  'remind_credential_rotation',
+  'create_route_recommendation'
+]);
+const automationScheduledConditionSchema = z.object({
+  type: z.literal('composite_rate_difference'),
+  operator: z.enum(['lt', 'lte', 'gt', 'gte']),
+  threshold: z.number()
+});
 const automationConfigSchema = z.object({
   currency: z.string().max(12).optional(),
   threshold: z.number().optional(),
+  accountIds: z.array(z.number().int().positive()).optional(),
   channelIds: z.array(z.number().int().positive()).optional(),
   action: z.enum([
-    'disable_sub2api_channel', 'enable_sub2api_channel', 'switch_to_backup',
-    'trigger_recharge_webhook', 'remind_credential_rotation', 'create_route_recommendation'
+    'disable_sub2api_account', 'enable_sub2api_account', 'switch_to_backup',
+    'trigger_recharge_webhook', 'remind_credential_rotation', 'create_route_recommendation',
+    'rebuild_sub2api_mappings'
   ]),
+  condition: automationScheduledConditionSchema.optional(),
+  onMatchAction: z.enum(['disable_sub2api_account', 'enable_sub2api_account']).optional(),
+  targetMode: z.literal('matched_mapping_accounts').optional(),
+  scheduleIntervalMinutes: z.number().int().min(5).max(10080).optional(),
   consecutiveMatches: z.number().int().min(1).max(20).optional(),
   cooldownMinutes: z.number().int().min(1).max(10080).optional(),
   dailyMaximumActions: z.number().int().min(1).max(1000).optional(),
   contractPauseHours: z.number().min(1).max(720).optional(),
   webhookUrl: z.string().url().optional()
 }).passthrough().superRefine((config, context) => {
-  if (config.action !== 'trigger_recharge_webhook' && !config.channelIds?.length) {
+  if (automationAccountActions.has(config.action) && !config.accountIds?.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['accountIds'],
+      message: 'At least one Sub2API account ID is required for this action'
+    });
+  }
+  if (automationChannelActions.has(config.action) && !config.channelIds?.length) {
     context.addIssue({
       code: 'custom',
       path: ['channelIds'],
@@ -159,16 +191,73 @@ const automationConfigSchema = z.object({
       message: 'Recharge webhook URL is required'
     });
   }
+  if (config.action === 'rebuild_sub2api_mappings' && config.scheduleIntervalMinutes == null) {
+    context.addIssue({
+      code: 'custom',
+      path: ['scheduleIntervalMinutes'],
+      message: 'A schedule interval is required for automatic mapping rebuilds'
+    });
+  }
+  if (config.condition && !config.onMatchAction) {
+    context.addIssue({
+      code: 'custom',
+      path: ['onMatchAction'],
+      message: 'An action is required when a scheduled condition is configured'
+    });
+  }
+  if (config.onMatchAction && !config.condition) {
+    context.addIssue({
+      code: 'custom',
+      path: ['condition'],
+      message: 'A scheduled condition is required for an on-match action'
+    });
+  }
+  if (config.condition && config.targetMode !== 'matched_mapping_accounts') {
+    context.addIssue({
+      code: 'custom',
+      path: ['targetMode'],
+      message: 'Scheduled comparison conditions must target their matched mapping accounts'
+    });
+  }
 });
 
-const automationSchema = z.object({
+const automationSchemaBase = z.object({
   name: z.string().trim().min(1).max(120),
   enabled: z.boolean().optional(),
   dryRun: z.boolean().optional(),
-  triggerType: z.enum(['low_balance', 'balance_recovered', 'key_failed', 'anomaly_detected', 'contract_changed']),
+  triggerType: z.enum(['low_balance', 'balance_recovered', 'key_failed', 'anomaly_detected', 'contract_changed', 'scheduled']),
   connectionId: z.string().uuid().optional().nullable(),
   config: automationConfigSchema
 });
+const validateAutomationRule = (input, context) => {
+  if (!input.config || !input.triggerType) return;
+  const rebuildAction = input.config.action === 'rebuild_sub2api_mappings';
+  if (input.triggerType === 'scheduled' && !rebuildAction) {
+    context.addIssue({
+      code: 'custom',
+      path: ['config', 'action'],
+      message: 'Scheduled rules must rebuild Sub2API mappings'
+    });
+  }
+  if (input.triggerType !== 'scheduled' && rebuildAction) {
+    context.addIssue({
+      code: 'custom',
+      path: ['triggerType'],
+      message: 'Sub2API mapping rebuilds require the scheduled trigger'
+    });
+  }
+  if (input.triggerType !== 'scheduled' && (
+    input.config.condition || input.config.onMatchAction || input.config.targetMode
+  )) {
+    context.addIssue({
+      code: 'custom',
+      path: ['config', 'condition'],
+      message: 'Post-rebuild comparison conditions require the scheduled trigger'
+    });
+  }
+};
+const automationSchema = automationSchemaBase.superRefine(validateAutomationRule);
+const automationUpdateSchema = automationSchemaBase.partial().superRefine(validateAutomationRule);
 
 const mappingSchema = z.object({
   connectionId: z.string().uuid(),
@@ -256,6 +345,28 @@ function listResponse(result) {
   return Array.isArray(result) ? { items: result } : result;
 }
 
+async function validateConfiguredApiKeyMonitoring(adapter, adapterType, authMode) {
+  if (adapterType !== 'sub2api' || authMode !== 'api_key') return;
+  const keys = await adapter.listKeys();
+  const failed = keys.filter((key) => key.metadata?.usageError || key.metadata?.billingError);
+  if (failed.length === 0) return;
+  throw new AppError(
+    'CONFIGURED_API_KEY_VALIDATION_FAILED',
+    `${failed.length} 个 API Key 无法完成用量或倍率验证`,
+    {
+      status: 409,
+      details: {
+        keys: failed.map((key) => ({
+          id: key.remoteId,
+          name: key.name,
+          usageError: key.metadata?.usageError || null,
+          billingError: key.metadata?.billingError || null
+        }))
+      }
+    }
+  );
+}
+
 function auditLogList(db, query) {
   if (hasPagination(query)) {
     const total = db.prepare('SELECT COUNT(*) AS total FROM audit_logs').get().total;
@@ -303,12 +414,12 @@ function createApplication(options = {}) {
   const simulations = new SimulationService({ providers, notifications, rechargeLinks });
   const alerts = new AlertService({ db, config, queries, notifications });
   const sub2api = new Sub2ApiAdminClient(config);
-  const automation = new AutomationService({ db, config, sub2api });
+  const mappings = new MappingService({ db, config, sub2api, http });
+  const automation = new AutomationService({ db, config, sub2api, mappings });
   const analysis = new AnalysisService({ db, config });
   const keyHealth = new KeyHealthService({ db, config, providers, http });
   const catalog = new CatalogService({ db, config, providers, http, queries });
   const checkins = new CheckInService({ db, config, providers, http });
-  const mappings = new MappingService({ db, config, sub2api, http });
   const credentials = new CredentialService({ db, config, providers, http });
   const detection = new DetectionService({ http });
   const backups = new BackupService({ db, config, transfers });
@@ -366,6 +477,7 @@ function createApplication(options = {}) {
     manual: Boolean(job.payload.manual)
   }));
   queue.register('alert_evaluation', () => alerts.evaluateAll());
+  queue.register('scheduled_automation', () => automation.evaluateScheduled());
   queue.register('catalog_sync', (job) => catalog.sync(job.connection_id));
   queue.register('key_health', (job) => keyHealth.checkConnection(job.connection_id, job.payload.level || 'metadata'));
   queue.register('provider_checkin', (job) => checkins.run(job.connection_id, { throwOnRetryable: true }));
@@ -600,6 +712,57 @@ function createApplication(options = {}) {
     });
     res.json(result);
   }));
+  api.post('/providers/key-options', asyncRoute(async (req, res) => {
+    const input = validate(providerKeyOptionsSchema, req.body || {});
+    const existing = input.existingProviderId
+      ? providers.get(input.existingProviderId, { forAdapter: true })
+      : null;
+    const storedCredentials = existing ? providers.getCredentials(existing) : {};
+    const submittedCredentials = input.credentials || {};
+    const credentials = mergeProviderCredentials(
+      storedCredentials,
+      submittedCredentials,
+      'sub2api',
+      'account'
+    );
+    const hasAccountCredentials = Boolean(credentials.email && credentials.password);
+    const discoveryConnection = {
+      id: existing?.id || crypto.randomUUID(),
+      name: existing?.name || 'Sub2API Key inventory',
+      adapter_type: 'sub2api',
+      base_url: input.baseUrl.replace(/\/+$/, ''),
+      auth_mode: hasAccountCredentials ? 'account' : 'token_pair',
+      remote_user_id: existing?.remote_user_id || null,
+      account_dedupe_key: existing?.account_dedupe_key || null,
+      type_config_json: {}
+    };
+    const mayPersistRefreshedSession = existing && Object.keys(submittedCredentials).length === 0;
+    const adapter = createAdapter('sub2api', {
+      connection: discoveryConnection,
+      credentials,
+      http,
+      config,
+      onCredentialsUpdated: async (next) => {
+        if (mayPersistRefreshedSession) providers.updateCredentials(existing, next);
+      }
+    });
+    const keys = await adapter.listKeys();
+    const items = keys.map((key) => ({
+      connection_id: existing?.id || '',
+      remote_id: String(key.remoteId),
+      name: key.name || `Key ${key.remoteId}`,
+      masked_key: maskKey(key.maskedKey || ''),
+      status: key.status || 'unknown',
+      primary_group_ref: key.primaryGroupRef == null ? null : String(key.primaryGroupRef),
+      expires_at: key.expiresAt || null,
+      last_used_at: key.lastUsedAt || null
+    }));
+    audit(db, req, 'provider.key_options', 'provider', existing?.id || null, {
+      baseUrl: discoveryConnection.base_url,
+      keyCount: items.length
+    });
+    res.json({ items });
+  }));
   api.post('/providers', asyncRoute(async (req, res) => {
     const input = validate(providerSchema, req.body);
     if (!listAdapterTypes().includes(input.adapterType)) {
@@ -625,7 +788,8 @@ function createApplication(options = {}) {
     const credentials = mergeProviderCredentials(
       storedCredentials,
       submittedCredentials,
-      input.adapterType
+      input.adapterType,
+      input.authMode
     );
     const mayPersistRefreshedSession = existing && Object.keys(submittedCredentials).length === 0;
     const fakeConnection = {
@@ -650,6 +814,7 @@ function createApplication(options = {}) {
     const probe = await adapter.probe();
     const account = await adapter.getAccount();
     const balances = await adapter.getAccountBalances(account);
+    await validateConfiguredApiKeyMonitoring(adapter, input.adapterType, input.authMode);
     const recharge = await adapter.getRechargeQuote();
     res.json({ valid: true, probe, account, balances, recharge });
   }));
@@ -673,7 +838,8 @@ function createApplication(options = {}) {
     const candidate = mergeProviderCredentials(
       providers.getCredentials(connection),
       submittedCredentials,
-      connection.adapter_type
+      connection.adapter_type,
+      connection.auth_mode
     );
     const mayPersistRefreshedSession = Object.keys(submittedCredentials).length === 0;
     const adapter = createAdapter(connection.adapter_type, {
@@ -688,6 +854,11 @@ function createApplication(options = {}) {
     const probe = await adapter.probe();
     const account = await adapter.getAccount();
     const balances = await adapter.getAccountBalances(account);
+    await validateConfiguredApiKeyMonitoring(
+      adapter,
+      connection.adapter_type,
+      connection.auth_mode
+    );
     const recharge = await adapter.getRechargeQuote();
     audit(db, req, 'provider.validate', 'provider', connection.id, { balanceCount: balances.length });
     res.json({ valid: true, probe, account, balances, recharge });
@@ -1009,6 +1180,25 @@ function createApplication(options = {}) {
     res.json(job);
   });
 
+  api.get('/rules', (_req, res) => {
+    const items = [
+      ...alerts.listRules().map((rule) => ({
+        ...rule,
+        kind: 'alert',
+        triggerType: rule.rule_type,
+        actionType: 'create_alert_event',
+        executionMode: 'event'
+      })),
+      ...automation.listRules().map((rule) => ({
+        ...rule,
+        kind: 'automation',
+        triggerType: rule.trigger_type,
+        actionType: rule.config?.action || null,
+        executionMode: rule.dryRun ? 'dry_run' : 'live'
+      }))
+    ].sort((left, right) => left.name.localeCompare(right.name));
+    res.json({ items });
+  });
   api.get('/alert-rules', (_req, res) => res.json({ items: alerts.listRules() }));
   api.post('/alert-rules', (req, res) => {
     const rule = alerts.saveRule(validate(alertRuleSchema, req.body));
@@ -1105,6 +1295,23 @@ function createApplication(options = {}) {
     })
   );
 
+  const updateAutomationRule = (id, body) => {
+    const patch = validate(automationUpdateSchema, body);
+    const existing = automation.listRules().find((rule) => rule.id === id);
+    if (!existing) {
+      throw new AppError('AUTOMATION_RULE_NOT_FOUND', 'Automation rule was not found', { status: 404 });
+    }
+    const input = validate(automationSchema, {
+      name: patch.name ?? existing.name,
+      enabled: patch.enabled ?? existing.enabled,
+      dryRun: patch.dryRun ?? existing.dryRun,
+      triggerType: patch.triggerType ?? existing.trigger_type,
+      connectionId: patch.connectionId === undefined ? existing.connection_id : patch.connectionId,
+      config: patch.config ?? existing.config
+    });
+    return automation.saveRule(input, id);
+  };
+
   api.get('/automation-rules', (_req, res) => res.json({ items: automation.listRules() }));
   api.post('/automation-rules', (req, res) => {
     const rule = automation.saveRule(validate(automationSchema, req.body));
@@ -1112,7 +1319,7 @@ function createApplication(options = {}) {
     res.status(201).json(rule);
   });
   api.put('/automation-rules/:id', (req, res) => {
-    const rule = automation.saveRule(validate(automationSchema.partial(), req.body), req.params.id);
+    const rule = updateAutomationRule(req.params.id, req.body);
     audit(db, req, 'automation_rule.update', 'automation_rule', rule.id, { rule });
     res.json(rule);
   });
@@ -1135,7 +1342,7 @@ function createApplication(options = {}) {
     res.status(201).json(rule);
   });
   api.put('/automation/rules/:id', (req, res) => {
-    const rule = automation.saveRule(validate(automationSchema.partial(), req.body), req.params.id);
+    const rule = updateAutomationRule(req.params.id, req.body);
     audit(db, req, 'automation_rule.update', 'automation_rule', rule.id, { rule });
     res.json(rule);
   });
@@ -1263,8 +1470,45 @@ function createApplication(options = {}) {
 
   api.get('/settings', (_req, res) => res.json(transfers.settings()));
   api.put('/settings', (req, res) => {
+    const previousOfficialPrices = transfers.settings().officialModelPrices;
     const settings = transfers.saveSettings(req.body || {});
-    audit(db, req, 'settings.update', 'settings', null, { keys: Object.keys(req.body || {}) });
+    const officialPricesChanged = Object.prototype.hasOwnProperty.call(req.body || {}, 'officialModelPrices') &&
+      JSON.stringify(previousOfficialPrices) !== JSON.stringify(settings.officialModelPrices);
+    let dynamicRateSyncCount = 0;
+    if (officialPricesChanged) {
+      const dynamicProviders = db.prepare(`
+        SELECT id FROM provider_connections
+        WHERE enabled = 1 AND adapter_type = 'new-api'
+          AND (
+            json_extract(type_config_json, '$.dynamicRouteRate') = 1 OR
+            json_extract(type_config_json, '$.dynamicRouteRate.enabled') = 1
+          )
+      `).all();
+      const updatedAt = nowIso();
+      db.prepare(`
+        UPDATE provider_dynamic_route_rates
+        SET selected_multiplier = NULL, sample_count = 0,
+          min_multiplier = NULL, median_multiplier = NULL, p90_multiplier = NULL,
+          max_multiplier = NULL, weighted_average_multiplier = NULL,
+          latest_multiplier = NULL, status = 'recalculation_required', updated_at = ?
+        WHERE connection_id IN (
+          SELECT id FROM provider_connections
+          WHERE adapter_type = 'new-api'
+            AND (
+              json_extract(type_config_json, '$.dynamicRouteRate') = 1 OR
+              json_extract(type_config_json, '$.dynamicRouteRate.enabled') = 1
+            )
+        )
+      `).run(updatedAt);
+      for (const provider of dynamicProviders) {
+        queue.enqueue('provider_sync', { connectionId: provider.id, priority: 20 });
+      }
+      dynamicRateSyncCount = dynamicProviders.length;
+    }
+    audit(db, req, 'settings.update', 'settings', null, {
+      keys: Object.keys(req.body || {}),
+      dynamicRateSyncCount
+    });
     res.json(settings);
   });
   api.post('/imports/preview', (req, res) => res.json(transfers.previewImport(req.body || {})));
@@ -1395,6 +1639,7 @@ function createApplication(options = {}) {
     backgroundStarted = true;
     queue.start();
     enqueueSub2ApiRefresh();
+    queue.enqueue('scheduled_automation', { priority: -1 });
     cronTasks.push(cron.schedule('* * * * *', () => {
       const due = db.prepare(`
         SELECT id FROM provider_connections
@@ -1402,6 +1647,7 @@ function createApplication(options = {}) {
       `).all(nowIso());
       for (const provider of due) queue.enqueue('provider_sync', { connectionId: provider.id });
       queue.enqueue('alert_evaluation', { priority: -1 });
+      queue.enqueue('scheduled_automation', { priority: -1 });
     }, { timezone: config.timezone }));
     cronTasks.push(cron.schedule('17 3 * * *', () => {
       queue.enqueue('snapshot_retention', { priority: -5 });

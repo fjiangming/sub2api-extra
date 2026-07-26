@@ -414,6 +414,23 @@ test('auto-mapping previews, preserves manual rows, maps one account to multiple
   assert.equal(repeated.summary.created, 0);
   assert.equal(repeated.summary.existing, 2);
   assert.equal(context.db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count, 3);
+
+  const replacementPreview = await mappings.rebuildAutoMappings({ preview: true });
+  assert.equal(replacementPreview.summary.wouldDeleteMappings, 3);
+  assert.equal(replacementPreview.summary.wouldCreateMappings, 2);
+  assert.equal(context.db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count, 3);
+
+  const replacement = await mappings.rebuildAutoMappings();
+  assert.equal(replacement.summary.deletedMappings, 3);
+  assert.equal(replacement.summary.createdMappings, 2);
+  assert.equal(replacement.summary.skipped, 0);
+  const replacedRows = context.db.prepare(`
+    SELECT id, account_id, group_id, config_json FROM sub2api_mappings ORDER BY group_id
+  `).all();
+  assert.deepEqual(replacedRows.map((row) => row.account_id), [501, 501]);
+  assert.deepEqual(replacedRows.map((row) => row.group_id), [101, 102]);
+  assert.equal(replacedRows.some((row) => row.id === 'manual-low'), false);
+  assert.equal(replacedRows.every((row) => JSON.parse(row.config_json).autoMapping), true);
 });
 
 test('auto-mapping reports key fingerprint collisions and performs no write when key export is forbidden', async (t) => {
@@ -612,6 +629,22 @@ test('auto-mapping rolls back every insert when one item fails inside the apply 
     /forced auto-mapping failure/
   );
   assert.equal(context.db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count, 0);
+
+  const now = nowIso();
+  context.db.prepare(`
+    INSERT INTO sub2api_mappings(
+      id, connection_id, key_id, account_id, group_id, role,
+      enabled, models_json, config_json, created_at, updated_at
+    ) VALUES ('existing-before-rebuild', ?, NULL, NULL, 999, 'primary', 1, '[]', '{}', ?, ?)
+  `).run(provider.id, now, now);
+  await assert.rejects(
+    () => mappings.rebuildAutoMappings(),
+    /forced auto-mapping failure/
+  );
+  assert.deepEqual(
+    context.db.prepare('SELECT id FROM sub2api_mappings').all().map((row) => row.id),
+    ['existing-before-rebuild']
+  );
 });
 
 test('highest-composite-rate grouping ignores raw-rate winners, uses stable tie-breakers and excludes invalid rates', () => {

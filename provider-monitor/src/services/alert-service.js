@@ -8,6 +8,10 @@ const ALERT_TERM_LABELS = {
   missing_base_group: '基座分组缺失',
   base_group_unselected: '未选择基座分组',
   missing_provider_group: '供应商分组缺失',
+  missing_reference_price: '日志模型官方价格缺失',
+  partial_reference_price: '部分日志模型官方价格缺失',
+  missing_provider_price: '供应商单价缺失',
+  partial_provider_price: '部分日志供应商单价缺失',
   missing_dynamic_route_rate: '动态路由倍率缺失',
   missing_rate: '倍率缺失',
   invalid_provider_rate: '供应商倍率无效',
@@ -23,7 +27,10 @@ const ALERT_TERM_LABELS = {
   key: 'Key',
   group: '分组',
   provider: '供应商',
-  disable_sub2api_channel: '停用 Sub2API 渠道',
+  disable_sub2api_account: '停用 Sub2API 账号',
+  enable_sub2api_account: '启用 Sub2API 账号',
+  rebuild_sub2api_mappings: '重建 Sub2API 映射',
+  disable_sub2api_channel: '停用 Sub2API 渠道（旧规则）',
   switch_to_backup: '切换到备用渠道'
 };
 

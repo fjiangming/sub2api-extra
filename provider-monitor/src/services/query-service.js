@@ -344,6 +344,7 @@ class QueryService {
       LEFT JOIN sub2api_mapping_states s ON s.mapping_id = m.id
       WHERE m.connection_id = g.connection_id
         AND m.enabled = 1
+        AND (m.key_id IS NULL OR k.status != 'missing')
         AND m.group_id IS NOT NULL
         AND ${mappingProviderRefSql} IN (g.remote_id, g.name, g.id)
     )`;

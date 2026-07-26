@@ -204,6 +204,130 @@ test('Sub2API API Key mode exposes the configured key and its gateway billing gr
   assert.equal(usage[1].totalTokens, 300);
 });
 
+test('Sub2API API Key mode monitors configured keys with independent billing groups and usage', async () => {
+  const requests = [];
+  const keyData = {
+    'sk-primary-12345678': { remaining: 8, used: 2, rate: 0.1 },
+    'sk-backup-12345678': { remaining: 18, used: 7, rate: 0.25 }
+  };
+  const adapter = new Sub2ApiAdapter(context('sub2api', (url, options) => {
+    const token = String(options.headers?.Authorization || '').replace(/^Bearer\s+/, '');
+    const fixture = keyData[token];
+    assert.ok(fixture, `unexpected key ${token}`);
+    requests.push({ path: url.pathname, token });
+    if (url.pathname === '/v1/usage') {
+      return {
+        isValid: true,
+        remaining: fixture.remaining,
+        unit: 'USD',
+        usage: {
+          today: { requests: 1, cost: fixture.used },
+          total: { requests: 3, cost: fixture.used }
+        }
+      };
+    }
+    if (url.pathname === '/v1/sub2api/billing') {
+      return {
+        billing_scope: 'token',
+        effective_rate_multiplier: fixture.rate
+      };
+    }
+    throw new Error(`Unexpected ${url.pathname}`);
+  }, {
+    connection: { auth_mode: 'api_key' },
+    credentials: {
+      apiKeys: [
+        { id: 'primary', name: 'Primary', key: 'sk-primary-12345678' },
+        { id: 'backup', name: 'Backup', key: 'sk-backup-12345678' }
+      ]
+    }
+  }));
+
+  const [account, balances, groups, keys, usage] = await Promise.all([
+    adapter.getAccount(),
+    adapter.getAccountBalances(),
+    adapter.listGroups(),
+    adapter.listKeys(),
+    adapter.getUsage()
+  ]);
+
+  assert.equal(account.metadata.configuredKeyCount, 2);
+  assert.equal(balances[0].available, 8);
+  assert.deepEqual(keys.map((key) => ({
+    id: key.remoteId,
+    group: key.primaryGroupRef,
+    remaining: key.quota.remaining
+  })), [
+    { id: 'primary', group: 'configured-api-key:primary', remaining: 8 },
+    { id: 'backup', group: 'configured-api-key:backup', remaining: 18 }
+  ]);
+  assert.deepEqual(groups.map((group) => ({
+    id: group.remoteId,
+    rate: group.ratio,
+    keyId: group.metadata.configuredKeyId,
+    scope: group.metadata.billingScope
+  })), [
+    { id: 'configured-api-key:primary', rate: 0.1, keyId: 'primary', scope: 'token' },
+    { id: 'configured-api-key:backup', rate: 0.25, keyId: 'backup', scope: 'token' }
+  ]);
+  assert.deepEqual(
+    usage.filter((item) => item.period === 'cumulative').map((item) => [item.remoteSubjectId, item.cost]),
+    [['primary', 2], ['backup', 7]]
+  );
+  assert.deepEqual(requests.sort((left, right) => `${left.token}${left.path}`.localeCompare(`${right.token}${right.path}`)), [
+    { path: '/v1/sub2api/billing', token: 'sk-backup-12345678' },
+    { path: '/v1/usage', token: 'sk-backup-12345678' },
+    { path: '/v1/sub2api/billing', token: 'sk-primary-12345678' },
+    { path: '/v1/usage', token: 'sk-primary-12345678' }
+  ]);
+});
+
+test('Sub2API API Key mode discovers remote keys with a user session and monitors only selections', async () => {
+  const requests = [];
+  const adapter = new Sub2ApiAdapter(context('sub2api', (url, options) => {
+    const token = String(options.headers?.Authorization || '').replace(/^Bearer\s+/, '');
+    requests.push({ path: url.pathname, token });
+    if (url.pathname === '/api/v1/keys') {
+      assert.equal(token, 'session-access');
+      return { code: 0, data: { items: [
+        { id: 1, name: 'Primary', key: 'sk-primary-remote-12345678' },
+        { id: 2, name: 'Backup', key: 'sk-backup-remote-12345678' }
+      ], total: 2 } };
+    }
+    if (url.pathname === '/v1/usage') {
+      assert.equal(token, 'sk-backup-remote-12345678');
+      return { isValid: true, remaining: 12, unit: 'USD', usage: { total: { cost: 3 } } };
+    }
+    if (url.pathname === '/v1/sub2api/billing') {
+      assert.equal(token, 'sk-backup-remote-12345678');
+      return { billing_scope: 'token', effective_rate_multiplier: 0.2 };
+    }
+    throw new Error(`Unexpected ${url.pathname}`);
+  }, {
+    connection: {
+      auth_mode: 'api_key',
+      type_config_json: { apiKeySource: 'remote', monitoredKeyIds: ['2'] }
+    },
+    credentials: { accessToken: 'session-access', tokenExpiresAt: Date.now() + 3600000 }
+  }));
+
+  const account = await adapter.getAccount();
+  const [key] = await adapter.listKeys();
+  const [group] = await adapter.listGroups();
+
+  assert.equal(account.metadata.configuredKeyCount, 1);
+  assert.equal(key.remoteId, '2');
+  assert.equal(key.name, 'Backup');
+  assert.equal(key.quota.remaining, 12);
+  assert.equal(group.remoteId, 'configured-api-key:2');
+  assert.equal(group.ratio, 0.2);
+  assert.deepEqual(requests, [
+    { path: '/api/v1/keys', token: 'session-access' },
+    { path: '/v1/usage', token: 'sk-backup-remote-12345678' },
+    { path: '/v1/sub2api/billing', token: 'sk-backup-remote-12345678' }
+  ]);
+});
+
 test('Sub2API contract returns account balance, keys and group associations', async () => {
   // Source: Wei-Shaw/sub2api user routes and DTOs, verified 2026-07-17.
   let keyRequests = 0;
@@ -360,6 +484,9 @@ test('New API dynamic route rates use successful request billing logs without pa
   const requests = [];
   const adapter = new OneApiFamilyAdapter(context('new-api', (url) => {
     requests.push(url);
+    if (url.pathname === '/api/status') {
+      return { success: true, data: { quota_per_unit: 500000 } };
+    }
     if (url.pathname === '/api/log/self') {
       return {
         success: true,
@@ -399,6 +526,10 @@ test('New API dynamic route rates use successful request billing logs without pa
   const rates = await adapter.getDynamicRouteRates({
     enabled: true,
     statistic: 'median',
+    officialModelPrices: {
+      'model-a': { input: 2 },
+      'model-b': { input: 2 }
+    },
     minimumSamples: 2,
     keys: [{ remoteId: '9', name: 'route-key' }]
   });
@@ -413,8 +544,65 @@ test('New API dynamic route rates use successful request billing logs without pa
   assert.equal(rate.latest.channelName, 'High');
   assert.equal(historical.keyName, 'historical-key');
   assert.equal(historical.selectedMultiplier, 0.07);
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].searchParams.get('type'), '0');
+  assert.equal(requests.length, 2);
+  assert.equal(requests.find((request) => request.pathname === '/api/log/self').searchParams.get('type'), '0');
+});
+
+test('New API dynamic route rates prefer logged unit prices and do not use configured provider fallbacks', async () => {
+  const adapter = new OneApiFamilyAdapter(context('new-api', (url) => {
+    if (url.pathname === '/api/status') {
+      return { success: true, data: { quota_per_unit: 500000 } };
+    }
+    if (url.pathname === '/api/log/self') {
+      return {
+        success: true,
+        data: {
+          total: 2,
+          items: [
+            {
+              created_at: 100, token_id: 9, token_name: 'route-key', model_name: 'route-a',
+              channel: 11, prompt_tokens: 1000, completion_tokens: 10,
+              input_price: 0.04, output_price: 0.24,
+              other: {
+                request_final_status: 'success', model_ratio: 0.018, completion_ratio: 6,
+                upstream_model_name: 'official-a'
+              }
+            },
+            {
+              created_at: 200, token_id: 10, token_name: 'fallback-key', model_name: 'route-b',
+              channel: 12, prompt_tokens: 1000, completion_tokens: 10,
+              other: { request_final_status: 'success' }
+            }
+          ]
+        }
+      };
+    }
+    throw new Error(`Unexpected ${url.pathname}`);
+  }));
+
+  const rates = await adapter.getDynamicRouteRates({
+    enabled: true,
+    statistic: 'latest',
+    minimumSamples: 1,
+    officialModelPrices: {
+      'official-a': { input: 5, output: 30 },
+      'route-b@12': { model: 'official-b', input: 5, output: 30 }
+    },
+    keys: [
+      { remoteId: '9', name: 'route-key' },
+      { remoteId: '10', name: 'fallback-key' }
+    ]
+  });
+  const logged = rates.find((item) => item.remoteKeyId === '9');
+  const missing = rates.find((item) => item.remoteKeyId === '10');
+
+  assert.ok(Math.abs(logged.selectedMultiplier - 0.008) < 1e-12);
+  assert.equal(logged.latest.providerPriceSource, 'log_explicit');
+  assert.equal(logged.latest.officialLookupModel, 'official-a');
+  assert.equal(logged.latest.referenceModel, 'official-a');
+  assert.equal(missing.selectedMultiplier, null);
+  assert.equal(missing.status, 'missing_provider_price');
+  assert.deepEqual(missing.providerPriceMissingModels, ['route-b']);
 });
 
 test('Sub2API account payment config exposes its balance recharge multiplier', async () => {

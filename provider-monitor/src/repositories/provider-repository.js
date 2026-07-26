@@ -2,6 +2,10 @@ const crypto = require('crypto');
 const { AppError } = require('../errors');
 const { encryptJson, decryptJson } = require('../security/encryption');
 const { maskValue } = require('../security/redaction');
+const {
+  configuredApiKeyMetadata,
+  mergeConfiguredApiKeyCredentials
+} = require('../security/configured-api-keys');
 const { nowIso, parseJson, stringifyJson } = require('../db');
 
 function booleanValue(value, fallback = true) {
@@ -91,7 +95,20 @@ function removeRechargeColumns(result) {
   return result;
 }
 
-function mergeProviderCredentials(existing = {}, incoming = {}, adapterType = '') {
+function mergeProviderCredentials(existing = {}, incoming = {}, adapterType = '', authMode = '') {
+  const normalizedAuthMode = String(authMode || '').toLowerCase();
+  if (
+    adapterType === 'sub2api' &&
+    (normalizedAuthMode === 'api_key' || Object.prototype.hasOwnProperty.call(incoming, 'apiKeys'))
+  ) {
+    const merged = mergeConfiguredApiKeyCredentials(existing, incoming);
+    const accountCredentialsChanged = ['email', 'password']
+      .some((field) => Object.prototype.hasOwnProperty.call(incoming, field));
+    if (accountCredentialsChanged) {
+      for (const field of SUB2API_SESSION_CREDENTIAL_FIELDS) delete merged[field];
+    }
+    return merged;
+  }
   const merged = { ...existing, ...incoming };
   if (adapterType !== 'sub2api') return merged;
 
@@ -110,7 +127,7 @@ function mergeProviderCredentials(existing = {}, incoming = {}, adapterType = ''
   return merged;
 }
 
-function publicConnection(row, credentialFields = []) {
+function publicConnection(row, credentialFields = [], configuredApiKeys = []) {
   if (!row) return null;
   return removeRechargeColumns({
     ...row,
@@ -122,6 +139,7 @@ function publicConnection(row, credentialFields = []) {
     rechargeUrl: row.recharge_url || null,
     recharge: rechargeInfo(row),
     credentialFields,
+    configuredApiKeys,
     capabilities_json: undefined,
     fingerprint_json: undefined,
     type_config_json: undefined,
@@ -146,21 +164,32 @@ class ProviderRepository {
     this.config = config;
   }
 
-  #credentialFields(credentialId) {
-    const row = this.db
+  #credentialInfo(connection) {
+    const credentialRow = this.db
       .prepare('SELECT payload FROM encrypted_credentials WHERE id = ?')
-      .get(credentialId);
-    if (!row) return [];
-    return Object.entries(decryptJson(row.payload, this.config.secret))
+      .get(connection.credential_id);
+    if (!credentialRow) return { fields: [], configuredApiKeys: [] };
+    const credentials = decryptJson(credentialRow.payload, this.config.secret);
+    const fields = Object.entries(credentials)
       .filter(([, value]) => value != null && value !== '')
-      .map(([name, value]) => ({ name, masked: maskValue(value) }));
+      .map(([name, value]) => ({
+        name,
+        masked: Array.isArray(value) ? `${value.length} configured` : maskValue(value)
+      }));
+    const configuredApiKeys = connection.adapter_type === 'sub2api' && connection.auth_mode === 'api_key'
+      ? configuredApiKeyMetadata(credentials, maskValue)
+      : [];
+    return { fields, configuredApiKeys };
   }
 
   list() {
     return this.db
       .prepare(`${PROVIDER_SELECT} ORDER BY p.name COLLATE NOCASE`)
       .all()
-      .map((row) => publicConnection(row, this.#credentialFields(row.credential_id)));
+      .map((row) => {
+        const credentialInfo = this.#credentialInfo(row);
+        return publicConnection(row, credentialInfo.fields, credentialInfo.configuredApiKeys);
+      });
   }
 
   get(id, options = {}) {
@@ -172,7 +201,8 @@ class ProviderRepository {
       });
     }
     if (options.forAdapter) return adapterConnection(row);
-    return publicConnection(row, this.#credentialFields(row.credential_id));
+    const credentialInfo = this.#credentialInfo(row);
+    return publicConnection(row, credentialInfo.fields, credentialInfo.configuredApiKeys);
   }
 
   getCredentials(connectionOrId) {
@@ -206,12 +236,16 @@ class ProviderRepository {
       : new Date(Date.now() + refreshMinutes * 60000).toISOString();
     validateBalanceThresholds(input.warningThreshold, input.secondaryWarningThreshold);
 
+    const credentials = input.adapterType === 'sub2api' && (input.authMode || 'api_key') === 'api_key' &&
+      Object.prototype.hasOwnProperty.call(input.credentials || {}, 'apiKeys')
+      ? mergeConfiguredApiKeyCredentials({}, input.credentials || {})
+      : input.credentials || {};
     const insert = this.db.transaction(() => {
       this.db
         .prepare(
           'INSERT INTO encrypted_credentials(id, payload, created_at) VALUES (?, ?, ?)'
         )
-        .run(credentialId, encryptJson(input.credentials || {}, this.config.secret), now);
+        .run(credentialId, encryptJson(credentials, this.config.secret), now);
       this.db.prepare(`
         INSERT INTO provider_connections(
           id, name, adapter_type, base_url, auth_mode, credential_id, remote_user_id,
@@ -286,7 +320,8 @@ class ProviderRepository {
           mergeProviderCredentials(
             this.getCredentials(existing),
             input.credentials,
-            input.adapterType ?? existing.adapter_type
+            input.adapterType ?? existing.adapter_type,
+            input.authMode ?? existing.auth_mode
           )
         );
       }

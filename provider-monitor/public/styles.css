@@ -123,6 +123,7 @@ tbody tr:hover { background: #fafbfa; }
 .numeric { text-align: right; font-variant-numeric: tabular-nums; }
 .primary-cell strong, .primary-cell small { display: block; }
 .primary-cell small { color: var(--muted); margin-top: 3px; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rule-trigger-cell strong { white-space: nowrap; }
 .mono { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; }
 .table-pagination { min-height: 48px; padding: 8px 10px 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); }
 .pagination-summary { font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -130,7 +131,7 @@ tbody tr:hover { background: #fafbfa; }
 .pagination-position { min-width: 64px; text-align: center; color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; }
 .badge { display: inline-flex; align-items: center; min-height: 23px; padding: 0 7px; border-radius: 4px; background: var(--surface-muted); color: #4f5a53; font-size: 11px; font-weight: 700; white-space: nowrap; }
 .badge.healthy, .badge.active, .badge.enabled, .badge.succeeded, .badge.aligned, .badge.created, .badge.highest { color: #0f6b53; background: var(--accent-soft); }
-.badge.warning, .badge.partial, .badge.pending, .badge.pending_create, .badge.running, .badge.dry_run, .badge.rate_mismatch, .badge.base_group_unselected, .badge.missing_provider_group, .badge.missing_dynamic_route_rate, .badge.missing_rate, .badge.invalid_provider_rate, .badge.unmatched, .badge.missing_api_key, .badge.missing_remote_key { color: #95530d; background: var(--warning-soft); }
+.badge.warning, .badge.partial, .badge.pending, .badge.pending_create, .badge.running, .badge.dry_run, .badge.rate_mismatch, .badge.base_group_unselected, .badge.missing_provider_group, .badge.missing_provider_price, .badge.partial_provider_price, .badge.missing_reference_price, .badge.partial_reference_price, .badge.missing_dynamic_route_rate, .badge.missing_rate, .badge.invalid_provider_rate, .badge.unmatched, .badge.missing_api_key, .badge.missing_remote_key { color: #95530d; background: var(--warning-soft); }
 .badge.error, .badge.failed, .badge.disabled, .badge.inactive, .badge.expired, .badge.exhausted, .badge.missing_base_group, .badge.conflict { color: #9e3731; background: var(--danger-soft); }
 .badge.stale, .badge.unknown, .badge.missing, .badge.resolved, .badge.acknowledged, .badge.mapping_disabled, .badge.existing, .badge.info { color: #536b82; background: var(--info-soft); }
 .status-line { display: flex; align-items: center; gap: 8px; }
@@ -239,6 +240,8 @@ tbody tr:hover { background: #fafbfa; }
 .comparison-delta { font-weight: 700; }
 .comparison-delta.warning { color: var(--warning); }
 .integration-table table { min-width: 1460px; }
+.integration-provider-rate-cell { width: 420px; min-width: 360px; }
+.integration-provider-rate-cell > small { max-width: none; overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; line-height: 1.45; }
 .integration-group-row { background: #f8faf8; }
 .integration-group-row td { height: 58px; border-bottom-color: var(--line-strong); }
 .integration-group-row:hover { background: #f3f7f4; }
@@ -291,6 +294,26 @@ label > span, legend { display: block; color: #4f5953; font-size: 12px; font-wei
 .dialog-header .icon-button { margin-left: auto; }
 .form-grid { padding: 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .span-2 { grid-column: span 2; }
+.provider-api-key-editor { min-width: 0; display: grid; gap: 10px; }
+.provider-api-key-source { width: min(260px, 100%); }
+.provider-api-key-session-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.provider-api-key-heading { min-height: 30px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.provider-api-key-heading strong { font-size: 12px; }
+.provider-api-key-list { display: grid; gap: 10px; }
+.provider-api-key-row { min-width: 0; display: grid; grid-template-columns: minmax(120px, .7fr) minmax(190px, 1.3fr) 72px 34px; gap: 10px; align-items: end; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.provider-api-key-row:last-child { padding-bottom: 0; border-bottom: 0; }
+.provider-api-key-row .icon-button { margin-bottom: 1px; }
+.provider-api-key-monitor { justify-content: center; }
+.monitored-api-key-toolbar { min-height: 38px; padding: 4px 18px 0; display: flex; justify-content: flex-end; }
+.monitored-api-key-list { padding: 12px 18px 18px; display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+.monitored-api-key-option { min-width: 0; min-height: 54px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.monitored-api-key-option input { flex: 0 0 17px; width: 17px; height: 17px; min-height: 0; padding: 0; accent-color: var(--accent); }
+.monitored-api-key-option span { min-width: 0; display: grid; gap: 3px; }
+.monitored-api-key-option strong, .monitored-api-key-option small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.monitored-api-key-option strong { font-size: 12px; }
+.monitored-api-key-option small { color: var(--muted); font-size: 11px; }
+.monitored-api-key-empty { grid-column: 1 / -1; min-height: 54px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.monitored-api-key-empty svg { width: 17px; height: 17px; }
 fieldset { border: 0; border-top: 1px solid var(--line); padding: 0; margin: 0; }
 fieldset legend { margin: 0 18px; padding: 0 6px; }
 details { border-top: 1px solid var(--line); }
@@ -367,6 +390,10 @@ details summary { padding: 13px 18px; cursor: pointer; font-weight: 650; font-si
   .asset-filter-bar .search-box, .asset-filter-bar select { width: 100%; }
   .form-grid { grid-template-columns: 1fr; }
   .span-2 { grid-column: span 1; }
+  .provider-api-key-row { grid-template-columns: minmax(0, 1fr) 72px 34px; }
+  .provider-api-key-row label:first-of-type { grid-column: 1 / -1; }
+  .provider-api-key-session-fields { grid-template-columns: 1fr; }
+  .monitored-api-key-list { grid-template-columns: 1fr; }
   .dialog-actions { flex-wrap: wrap; }
   .auto-mapping-preview { max-height: calc(100vh - 250px); padding: 14px; }
   .auto-mapping-preview .status-summary { top: -14px; margin: -14px -14px 12px; padding: 12px 14px; }

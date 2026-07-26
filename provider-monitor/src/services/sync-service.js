@@ -1,10 +1,21 @@
 const crypto = require('crypto');
 const { createAdapter } = require('../adapters/registry');
 const { AppError, asAppError } = require('../errors');
-const { nowIso, stringifyJson } = require('../db');
+const { nowIso, parseJson, stringifyJson } = require('../db');
 const { maskKey, redact, redactText } = require('../security/redaction');
 const { upsertGroups } = require('./group-store');
 const { normalizeDynamicRouteConfig } = require('./dynamic-route-rate');
+
+function monitoredRemoteKeyIds(connection) {
+  const supportsSelection =
+    (connection.adapter_type === 'new-api' && connection.auth_mode === 'api_key') ||
+    (connection.adapter_type === 'sub2api' &&
+      ['account', 'token_pair', 'bearer', 'api_key'].includes(connection.auth_mode));
+  if (!supportsSelection) return null;
+  const configured = connection.type_config_json?.monitoredKeyIds;
+  if (!Array.isArray(configured)) return null;
+  return new Set(configured.map((value) => String(value || '').trim()).filter(Boolean));
+}
 
 function schemaShape(value, depth = 0) {
   if (depth >= 8) return 'depth-limit';
@@ -142,9 +153,31 @@ class SyncService {
       const rechargeResult = probe.capabilities?.rechargeQuote
         ? await this.#optional('getRechargeQuote', () => adapter.getRechargeQuote(), warnings)
         : { ok: true, value: null };
-      const dynamicRouteConfig = normalizeDynamicRouteConfig(
-        connection.type_config_json?.dynamicRouteRate
+      const monitoredKeyIds = monitoredRemoteKeyIds(connection);
+      if (keysResult.ok && monitoredKeyIds) {
+        const availableIds = new Set(keysResult.value.map((key) => String(key.remoteId)));
+        const missingIds = [...monitoredKeyIds].filter((remoteId) => !availableIds.has(remoteId));
+        for (const remoteId of missingIds) {
+          warnings.push({
+            capability: 'configuredApiKey',
+            code: 'MONITORED_KEY_NOT_FOUND',
+            message: `Configured API Key ${remoteId} was not returned by the provider`
+          });
+        }
+        keysResult.value = keysResult.value.filter((key) => monitoredKeyIds.has(String(key.remoteId)));
+      }
+      const providerDynamicRouteConfig = connection.type_config_json?.dynamicRouteRate;
+      const officialModelPrices = parseJson(
+        this.db.prepare(`SELECT value_json FROM settings WHERE key = 'officialModelPrices'`).get()?.value_json,
+        {}
       );
+      const dynamicRouteConfig = normalizeDynamicRouteConfig({
+        ...(providerDynamicRouteConfig === true
+          ? { enabled: true }
+          : providerDynamicRouteConfig || {}),
+        officialModelPrices
+      });
+      dynamicRouteConfig.restrictToKeys = monitoredKeyIds != null;
       let dynamicRouteResult = null;
       if (dynamicRouteConfig.enabled) {
         if (probe.capabilities?.dynamicRouteRates) {
@@ -152,7 +185,8 @@ class SyncService {
             'getDynamicRouteRates',
             () => adapter.getDynamicRouteRates({
               ...dynamicRouteConfig,
-              keys: keysResult.ok ? keysResult.value : []
+              keys: keysResult.ok ? keysResult.value : [],
+              restrictToKeys: dynamicRouteConfig.restrictToKeys
             }),
             warnings
           );
@@ -166,8 +200,18 @@ class SyncService {
         }
       }
       const groupsComplete = groupsResult.ok &&
+        adapter.groupListComplete !== false &&
         (!probe.capabilities?.groupsDerivedFromKeys || keysResult.ok);
       if (keysResult.ok) {
+        for (const key of keysResult.value) {
+          const monitoringErrors = [key.metadata?.usageError, key.metadata?.billingError].filter(Boolean);
+          if (monitoringErrors.length === 0) continue;
+          warnings.push({
+            capability: 'configuredApiKey',
+            code: monitoringErrors[0],
+            message: `Configured API Key ${key.name || key.remoteId} could not be fully monitored`
+          });
+        }
         const knownGroupRefs = new Set(groupsResult.value.map((group) => String(group.remoteId)));
         for (const key of keysResult.value) {
           const refs = [key.primaryGroupRef, key.backupGroupRef, ...(key.additionalGroupRefs || [])];
@@ -417,9 +461,17 @@ class SyncService {
         item.status || 'unknown',
         stringifyJson({
           latest: item.latest || null,
+          latestObserved: item.latestObserved || null,
           models: item.models || [],
           channels: item.channels || [],
           source: 'provider_request_logs',
+          priceBasis: item.priceBasis || config.priceBasis,
+          quotaPerUnit: item.quotaPerUnit || null,
+          totalObservationCount: item.totalObservationCount || 0,
+          providerPriceMissingCount: item.providerPriceMissingCount || 0,
+          providerPriceMissingModels: item.providerPriceMissingModels || [],
+          referenceMissingCount: item.referenceMissingCount || 0,
+          referenceMissingModels: item.referenceMissingModels || [],
           lookbackDays: config.lookbackDays,
           minimumSamples: config.minimumSamples
         }),
@@ -430,6 +482,16 @@ class SyncService {
       );
       count += 1;
     }
+    if (config.restrictToKeys) {
+      this.db.prepare(`
+        UPDATE provider_dynamic_route_rates
+        SET selected_multiplier = NULL, sample_count = 0, status = 'not_monitored',
+          error_code = NULL, checked_at = ?, updated_at = ?
+        WHERE connection_id = ? AND key_id IN (
+          SELECT id FROM remote_keys WHERE connection_id = ? AND status = 'missing'
+        )
+      `).run(capturedAt, capturedAt, connectionId, connectionId);
+    }
     return count;
   }
 
@@ -439,6 +501,14 @@ class SyncService {
 
   #upsertKeys(connectionId, accountId, keys, capturedAt, complete) {
     const seen = [];
+    const existingByRemoteId = this.db.prepare(`
+      SELECT remote_id, status, primary_group_ref, backup_group_ref, unlimited,
+        quota_limit, quota_used, quota_remaining, currency, expires_at, last_used_at
+      FROM remote_keys WHERE connection_id = ?
+    `).all(connectionId).reduce(
+      (map, row) => map.set(String(row.remote_id), row),
+      new Map()
+    );
     const statement = this.db.prepare(`
       INSERT INTO remote_keys(
         id, connection_id, remote_account_id, remote_id, name, masked_key, status,
@@ -458,6 +528,9 @@ class SyncService {
     `);
     for (const key of keys) {
       const remoteId = String(key.remoteId);
+      const existing = existingByRemoteId.get(remoteId);
+      const preserveUsage = Boolean(key.metadata?.usageError && existing);
+      const preserveBilling = Boolean(key.metadata?.billingError && existing);
       seen.push(remoteId);
       statement.run(
         crypto.randomUUID(),
@@ -466,16 +539,20 @@ class SyncService {
         remoteId,
         key.name || remoteId,
         maskKey(key.maskedKey || ''),
-        key.status || 'unknown',
-        key.primaryGroupRef == null ? null : String(key.primaryGroupRef),
-        key.backupGroupRef == null ? null : String(key.backupGroupRef),
-        key.quota?.unlimited ? 1 : 0,
-        key.quota?.limit ?? null,
-        key.quota?.used ?? null,
-        key.quota?.remaining ?? null,
-        key.quota?.currency || null,
-        key.expiresAt || null,
-        key.lastUsedAt || null,
+        preserveUsage ? existing.status : key.status || 'unknown',
+        preserveBilling
+          ? existing.primary_group_ref
+          : key.primaryGroupRef == null ? null : String(key.primaryGroupRef),
+        preserveBilling
+          ? existing.backup_group_ref
+          : key.backupGroupRef == null ? null : String(key.backupGroupRef),
+        preserveUsage ? existing.unlimited : key.quota?.unlimited ? 1 : 0,
+        preserveUsage ? existing.quota_limit : key.quota?.limit ?? null,
+        preserveUsage ? existing.quota_used : key.quota?.used ?? null,
+        preserveUsage ? existing.quota_remaining : key.quota?.remaining ?? null,
+        preserveUsage ? existing.currency : key.quota?.currency || null,
+        preserveUsage ? existing.expires_at : key.expiresAt || null,
+        preserveUsage ? existing.last_used_at : key.lastUsedAt || null,
         stringifyJson(key.metadata || {}),
         capturedAt,
         capturedAt
@@ -617,11 +694,22 @@ class SyncService {
         input_tokens, output_tokens, total_tokens, model, period, raw_json, captured_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
+    const keyIdByRemoteId = this.db.prepare(`
+      SELECT id, remote_id FROM remote_keys WHERE connection_id = ?
+    `).all(connectionId).reduce(
+      (map, row) => map.set(String(row.remote_id), row.id),
+      new Map()
+    );
     for (const item of usage) {
+      const subjectId = item.scope === 'account'
+        ? accountId
+        : item.scope === 'key'
+          ? keyIdByRemoteId.get(String(item.remoteSubjectId)) || item.remoteSubjectId || null
+          : item.remoteSubjectId || null;
       insert.run(
         connectionId,
         item.scope || 'account',
-        item.scope === 'account' ? accountId : item.remoteSubjectId || null,
+        subjectId,
         item.currency || 'USD',
         item.cost ?? null,
         item.requests ?? null,

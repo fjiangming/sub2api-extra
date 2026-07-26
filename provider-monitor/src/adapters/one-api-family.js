@@ -10,7 +10,10 @@ const { AppError } = require('../errors');
 const {
   finiteNonnegative,
   finitePositive,
+  extractLoggedProviderPrices,
   normalizeDynamicRouteConfig,
+  officialRelativeObservation,
+  referencePriceFor,
   summarizeDynamicRouteObservations
 } = require('../services/dynamic-route-rate');
 
@@ -436,8 +439,11 @@ class OneApiFamilyAdapter extends ProviderAdapter {
   async getDynamicRouteRates(options = {}) {
     const config = normalizeDynamicRouteConfig(options);
     if (this.type !== 'new-api' || !config.enabled) return [];
+    const status = await this.ensureStatus();
+    const quotaPerUnit = toFiniteNumber(status?.quota_per_unit, 500000) || 500000;
 
     const knownKeys = Array.isArray(options.keys) ? options.keys : [];
+    const restrictToKeys = options.restrictToKeys === true;
     const keysById = new Map(knownKeys.map((key) => [String(key.remoteId), key]));
     const keysByName = new Map();
     for (const key of knownKeys) {
@@ -478,29 +484,58 @@ class OneApiFamilyAdapter extends ProviderAdapter {
       if (other.request_final_status && other.request_final_status !== 'success') continue;
       const modelRatio = finitePositive(row.model_ratio ?? other.model_ratio);
       const groupRatio = finitePositive(row.group_ratio ?? other.group_ratio) ?? 1;
-      if (modelRatio == null) continue;
 
       const tokenId = row.token_id == null ? null : String(row.token_id);
       const tokenName = String(row.token_name || '').trim();
       const knownKey = (tokenId && keysById.get(tokenId)) || keysByName.get(tokenName) || null;
+      if (restrictToKeys && !knownKey) continue;
       const remoteKeyId = String(knownKey?.remoteId ?? tokenId ?? tokenName);
       if (!remoteKeyId) continue;
       if (!observationsByKey.has(remoteKeyId)) observationsByKey.set(remoteKeyId, []);
-      observationsByKey.get(remoteKeyId).push({
+      const baseObservation = {
         keyName: knownKey?.name || tokenName || remoteKeyId,
         requestAt: toIsoDate(row.created_at),
-        model: row.model_name || null,
-        channelId: other.actual_channel_id ?? row.channel ?? null,
+        model: row.model_name || row.model || null,
+        officialLookupModel: row.upstream_model_name ?? other.upstream_model_name ??
+          row.upstreamModelName ?? other.upstreamModelName ??
+          row.actual_model_name ?? other.actual_model_name ??
+          row.actual_model ?? other.actual_model ?? null,
+        channelId: other.actual_channel_id ?? row.channel_id ?? row.channel ?? null,
         channelName: row.channel_name || null,
-        multiplier: modelRatio * groupRatio,
         modelRatio,
         groupRatio,
-        completionRatio: finitePositive(other.completion_ratio) ?? 1,
-        cacheRatio: finiteNonnegative(other.cache_ratio) ?? 1,
+        completionRatio: finitePositive(row.completion_ratio ?? other.completion_ratio),
+        cacheRatio: finiteNonnegative(row.cache_ratio ?? other.cache_ratio),
+        quotaPerUnit: finitePositive(row.quota_per_unit ?? other.quota_per_unit),
+        loggedProviderPrices: extractLoggedProviderPrices(row, other),
         promptTokens: toFiniteNumber(row.prompt_tokens, 0) || 0,
         completionTokens: toFiniteNumber(row.completion_tokens, 0) || 0,
-        cacheTokens: toFiniteNumber(other.cache_tokens, 0) || 0
-      });
+        cacheTokens: toFiniteNumber(other.cache_tokens, 0) || 0,
+        quota: toFiniteNumber(row.quota)
+      };
+      const officialPrice = referencePriceFor(
+        config.officialModelPrices,
+        baseObservation.officialLookupModel || baseObservation.model,
+        baseObservation.channelId,
+        baseObservation.channelName,
+        this.connection.id,
+        this.connection.name
+      ) || (baseObservation.officialLookupModel && baseObservation.officialLookupModel !== baseObservation.model
+        ? referencePriceFor(
+            config.officialModelPrices,
+            baseObservation.model,
+            baseObservation.channelId,
+            baseObservation.channelName,
+            this.connection.id,
+            this.connection.name
+          )
+        : null);
+      const observation = officialRelativeObservation(
+        baseObservation,
+        officialPrice,
+        quotaPerUnit
+      );
+      if (observation) observationsByKey.get(remoteKeyId).push(observation);
     }
 
     const allKeysById = new Map(knownKeys.map((key) => [String(key.remoteId), key]));
@@ -516,6 +551,7 @@ class OneApiFamilyAdapter extends ProviderAdapter {
     return allKeys.map((key) => ({
       remoteKeyId: String(key.remoteId),
       keyName: key.name || String(key.remoteId),
+      quotaPerUnit,
       ...summarizeDynamicRouteObservations(
         observationsByKey.get(String(key.remoteId)) || [],
         config

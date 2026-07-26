@@ -50,20 +50,27 @@ function rechargeFromRow(row) {
 function dynamicRouteFromRow(row) {
   const providerConfig = parseJson(row.provider_type_config_json, {});
   const config = normalizeDynamicRouteConfig(providerConfig.dynamicRouteRate);
+  const summary = parseJson(row.dynamic_route_summary_json, {});
+  const storedPriceBasis = summary.priceBasis || null;
+  const priceBasisMatches = storedPriceBasis === config.priceBasis;
   return {
     enabled: config.enabled,
     statistic: row.dynamic_route_statistic || config.statistic,
-    multiplier: finite(row.dynamic_route_selected_multiplier),
-    sampleCount: Number(row.dynamic_route_sample_count || 0),
-    minMultiplier: finite(row.dynamic_route_min_multiplier),
-    medianMultiplier: finite(row.dynamic_route_median_multiplier),
-    p90Multiplier: finite(row.dynamic_route_p90_multiplier),
-    maxMultiplier: finite(row.dynamic_route_max_multiplier),
-    weightedAverageMultiplier: finite(row.dynamic_route_weighted_average_multiplier),
-    latestMultiplier: finite(row.dynamic_route_latest_multiplier),
-    status: row.dynamic_route_status || (config.enabled ? 'not_checked' : 'disabled'),
+    priceBasis: config.priceBasis,
+    storedPriceBasis,
+    multiplier: priceBasisMatches ? finite(row.dynamic_route_selected_multiplier) : null,
+    sampleCount: priceBasisMatches ? Number(row.dynamic_route_sample_count || 0) : 0,
+    minMultiplier: priceBasisMatches ? finite(row.dynamic_route_min_multiplier) : null,
+    medianMultiplier: priceBasisMatches ? finite(row.dynamic_route_median_multiplier) : null,
+    p90Multiplier: priceBasisMatches ? finite(row.dynamic_route_p90_multiplier) : null,
+    maxMultiplier: priceBasisMatches ? finite(row.dynamic_route_max_multiplier) : null,
+    weightedAverageMultiplier: priceBasisMatches ? finite(row.dynamic_route_weighted_average_multiplier) : null,
+    latestMultiplier: priceBasisMatches ? finite(row.dynamic_route_latest_multiplier) : null,
+    status: priceBasisMatches
+      ? row.dynamic_route_status || (config.enabled ? 'not_checked' : 'disabled')
+      : 'recalculation_required',
     errorCode: row.dynamic_route_error_code || null,
-    summary: parseJson(row.dynamic_route_summary_json, {}),
+    summary,
     observedFrom: row.dynamic_route_observed_from || null,
     observedTo: row.dynamic_route_observed_to || null,
     checkedAt: row.dynamic_route_checked_at || null
@@ -277,6 +284,20 @@ function autoMappingSummary(items) {
   return summary;
 }
 
+function autoMappingConfig(item, createdAt) {
+  return {
+    autoMapping: {
+      source: item.keyMatch === 'verified_gateway_billing'
+        ? 'provider_account_name_gateway_billing'
+        : 'provider_account_name_api_key',
+      accountMatch: item.accountMatch,
+      keyMatch: item.keyMatch || 'fingerprint',
+      billingScope: item.verifiedBillingScope || null,
+      createdAt
+    }
+  };
+}
+
 function comparisonSummary(items) {
   const summary = { total: items.length, aligned: 0, warning: 0, error: 0, disabled: 0, unchecked: 0 };
   for (const item of items) {
@@ -312,7 +333,7 @@ class MappingService {
     return this.db.prepare(`
       SELECT m.*, p.name AS provider_name, p.adapter_type AS provider_adapter_type,
         p.type_config_json AS provider_type_config_json,
-        k.name AS key_name, k.masked_key,
+        k.name AS key_name, k.masked_key, k.status AS key_status,
         rr.detected_multiplier AS recharge_detected_multiplier,
         rr.manual_multiplier AS recharge_manual_multiplier,
         rr.paid_currency AS recharge_paid_currency,
@@ -358,23 +379,46 @@ class MappingService {
     `).all(...params).map((row) => {
       const recharge = rechargeFromRow(row);
       const dynamicRoute = dynamicRouteFromRow(row);
+      const dynamicStatusOverride = row.key_status === 'missing'
+        ? 'missing_remote_key'
+        : !dynamicRoute.enabled
+        ? null
+        : dynamicRoute.status === 'missing_provider_price'
+          ? 'missing_provider_price'
+          : dynamicRoute.status === 'partial_provider_price'
+            ? 'partial_provider_price'
+            : dynamicRoute.status === 'missing_reference_price'
+              ? 'missing_reference_price'
+              : dynamicRoute.status === 'partial_reference_price'
+                ? 'partial_reference_price'
+            : dynamicRoute.multiplier == null ? 'missing_dynamic_route_rate' : null;
+      const comparisonProviderRate = dynamicRoute.enabled && dynamicRoute.multiplier == null
+        ? null
+        : row.comparison_provider_rate;
+      const comparisonDetails = parseJson(row.comparison_details_json, {});
       const comparison = row.comparison_status ? {
-        status: row.comparison_status,
+        status: dynamicStatusOverride || row.comparison_status,
         providerGroupRef: row.comparison_provider_group_ref,
         providerGroupName: row.comparison_provider_group_name,
-        providerRate: row.comparison_provider_rate,
+        providerRate: comparisonProviderRate,
         baseGroupId: row.comparison_base_group_id,
         baseGroupName: row.comparison_base_group_name,
         baseGroupRate: row.comparison_base_group_rate,
         rechargeMultiplier: recharge.multiplier,
         rechargeSource: recharge.source,
         rechargeStatus: recharge.status,
-        compositeRate: row.comparison_provider_rate != null && recharge.multiplier != null
-          ? Number(row.comparison_provider_rate) / recharge.multiplier
+        compositeRate: comparisonProviderRate != null && recharge.multiplier != null
+          ? Number(comparisonProviderRate) / recharge.multiplier
           : null,
-        differenceRatio: row.comparison_difference_ratio,
+        differenceRatio: dynamicStatusOverride ? null : row.comparison_difference_ratio,
         toleranceRatio: row.comparison_tolerance_ratio,
-        details: parseJson(row.comparison_details_json, {}),
+        details: dynamicRoute.enabled
+          ? {
+              ...comparisonDetails,
+              providerRateBasis: dynamicRoute.priceBasis,
+              dynamicRouteRate: dynamicRoute
+            }
+          : comparisonDetails,
         checkedAt: row.comparison_checked_at
       } : null;
       const result = {
@@ -553,7 +597,7 @@ class MappingService {
     };
   }
 
-  async refreshComparisons({ connectionId = null, force = true, catalog = null } = {}) {
+  async refreshComparisons({ connectionId = null, force = true, catalog = null, accountCatalog = null } = {}) {
     const baseCatalog = catalog || await this.#baseCatalog({ force });
     const mappings = this.list({ connectionId });
     const states = mappings.map((mapping) => this.#compareMapping(mapping, baseCatalog));
@@ -588,7 +632,7 @@ class MappingService {
         );
       }
     })();
-    return this.comparisons({ connectionId, catalog: baseCatalog, force });
+    return this.comparisons({ connectionId, catalog: baseCatalog, accountCatalog, force });
   }
 
   async autoMappings({ mode = 'preview' } = {}, { accessToken = null } = {}) {
@@ -619,17 +663,7 @@ class MappingService {
       for (const item of discovery.items) {
         if (item.status !== 'pending_create') continue;
         const mappingId = crypto.randomUUID();
-        const config = {
-          autoMapping: {
-            source: item.keyMatch === 'verified_gateway_billing'
-              ? 'provider_account_name_gateway_billing'
-              : 'provider_account_name_api_key',
-            accountMatch: item.accountMatch,
-            keyMatch: item.keyMatch || 'fingerprint',
-            billingScope: item.verifiedBillingScope || null,
-            createdAt
-          }
-        };
+        const config = autoMappingConfig(item, createdAt);
         const result = insert.run(
           mappingId, item.providerId, item.keyId, item.accountId,
           item.groupId, stringifyJson(config), createdAt, createdAt
@@ -646,10 +680,79 @@ class MappingService {
       }
     })();
 
-    const comparisons = await this.refreshComparisons({ force: false, catalog: discovery.catalog });
+    const comparisons = await this.refreshComparisons({
+      force: false,
+      catalog: discovery.catalog,
+      accountCatalog: discovery.accountCatalog
+    });
     return {
       mode,
       summary: autoMappingSummary(discovery.items),
+      items: discovery.items,
+      comparisons
+    };
+  }
+
+  async rebuildAutoMappings({ preview = false, accessToken = null } = {}) {
+    const discovery = await this.#discoverAutoMappings({ accessToken });
+    const candidates = discovery.items.filter((item) =>
+      item.status === 'pending_create' || item.status === 'existing'
+    );
+    const current = {
+      mappings: this.db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count,
+      comparisonStates: this.db.prepare('SELECT COUNT(*) count FROM sub2api_mapping_states').get().count,
+      reconciliations: this.db.prepare('SELECT COUNT(*) count FROM reconciliation_runs').get().count
+    };
+    const discoverySummary = autoMappingSummary(discovery.items);
+
+    if (preview) {
+      return {
+        mode: 'replace_preview',
+        summary: {
+          ...discoverySummary,
+          wouldDeleteMappings: current.mappings,
+          wouldCreateMappings: candidates.length
+        },
+        items: discovery.items
+      };
+    }
+
+    const createdAt = nowIso();
+    const insert = this.db.prepare(`
+      INSERT INTO sub2api_mappings(
+        id, connection_id, key_id, account_id, group_id, role,
+        enabled, models_json, config_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'primary', 1, '[]', ?, ?, ?)
+    `);
+    const replacement = this.db.transaction(() => {
+      const deletedMappings = this.db.prepare('DELETE FROM sub2api_mappings').run().changes;
+      let createdMappings = 0;
+      for (const item of candidates) {
+        const mappingId = crypto.randomUUID();
+        insert.run(
+          mappingId, item.providerId, item.keyId, item.accountId,
+          item.groupId, stringifyJson(autoMappingConfig(item, createdAt)), createdAt, createdAt
+        );
+        item.status = 'created';
+        item.mappingId = mappingId;
+        createdMappings += 1;
+      }
+      return { deletedMappings, createdMappings };
+    })();
+
+    const comparisons = await this.refreshComparisons({
+      force: false,
+      catalog: discovery.catalog,
+      accountCatalog: discovery.accountCatalog
+    });
+    return {
+      mode: 'replace',
+      summary: {
+        ...autoMappingSummary(discovery.items),
+        ...replacement,
+        deletedComparisonStates: current.comparisonStates,
+        deletedReconciliations: current.reconciliations
+      },
       items: discovery.items,
       comparisons
     };
@@ -706,11 +809,14 @@ class MappingService {
         ORDER BY k.name COLLATE NOCASE, k.id
       `).all(provider.id);
       const remoteGroups = this.db.prepare(`
-        SELECT id, remote_id, name, ratio, status
+        SELECT id, remote_id, name, ratio, status, metadata_json
         FROM remote_groups
         WHERE connection_id = ? AND status != 'missing'
         ORDER BY name COLLATE NOCASE, id
-      `).all(provider.id);
+      `).all(provider.id).map((group) => ({
+        ...group,
+        metadata: parseJson(group.metadata_json, {})
+      }));
       providerAssets.set(provider.id, { remoteKeys, remoteGroups });
 
       for (const account of accountMatch.accounts) {
@@ -889,7 +995,7 @@ class MappingService {
         mappingId: mapped?.id || null
       });
     }
-    return { catalog, items };
+    return { catalog, accountCatalog, items };
   }
 
   async #verifyGatewayKeyMatch(provider, accountKey, assets) {
@@ -897,7 +1003,6 @@ class MappingService {
     if (!this.http || provider.adapter_type !== 'sub2api' || provider.auth_mode !== 'api_key') {
       return rejected('gateway_verification_not_supported');
     }
-    if (assets.remoteKeys.length !== 1) return rejected('gateway_remote_key_ambiguous');
 
     const providerBaseUrl = normalizeGatewayBaseUrl(provider.base_url);
     const accountBaseUrl = normalizeGatewayBaseUrl(accountKey.baseUrl);
@@ -931,20 +1036,27 @@ class MappingService {
       billing.group_rate_multiplier
     );
     if (!billingScope) return rejected('gateway_billing_scope_missing');
-    const providerGroup = assets.remoteGroups.find((group) =>
-      [group.id, group.remote_id, group.name].some((value) => String(value) === billingScope)
-    );
-    if (!providerGroup) return rejected('gateway_billing_group_mismatch');
-    if (!equivalentRates(providerGroup.ratio, billingRate)) {
-      return rejected('gateway_billing_rate_mismatch');
+    const scopedGroups = assets.remoteGroups.filter((group) => {
+      const savedBillingScope = String(group.metadata?.billingScope || '').trim();
+      return savedBillingScope
+        ? savedBillingScope === billingScope
+        : [group.id, group.remote_id, group.name].some((value) => String(value) === billingScope);
+    });
+    if (scopedGroups.length === 0) return rejected('gateway_billing_group_mismatch');
+    const matchingGroups = scopedGroups.filter((group) => equivalentRates(group.ratio, billingRate));
+    if (matchingGroups.length === 0) return rejected('gateway_billing_rate_mismatch');
+    const candidates = [];
+    for (const providerGroup of matchingGroups) {
+      const matchingKeys = assets.remoteKeys.filter((key) => {
+        const providerRef = String(key.primary_group_ref || '').trim();
+        return providerRef && [providerGroup.id, providerGroup.remote_id, providerGroup.name]
+          .some((value) => String(value) === providerRef);
+      });
+      for (const key of matchingKeys) candidates.push({ key, providerGroup });
     }
-
-    const key = assets.remoteKeys[0];
-    const providerRef = String(key.primary_group_ref || '').trim();
-    if (providerRef && ![providerGroup.id, providerGroup.remote_id, providerGroup.name]
-      .some((value) => String(value) === providerRef)) {
-      return rejected('gateway_primary_group_mismatch');
-    }
+    if (candidates.length === 0) return rejected('gateway_primary_group_mismatch');
+    if (candidates.length > 1) return rejected('gateway_remote_key_ambiguous');
+    const { key, providerGroup } = candidates[0];
     return {
       matched: true,
       key,
@@ -1051,7 +1163,8 @@ class MappingService {
     `).all(mapping.connection_id).map((row) => ({ ...row, metadata: parseJson(row.metadata_json, {}) }));
     const key = mapping.key_id
       ? this.db.prepare(`
-          SELECT k.primary_group_ref, k.backup_group_ref, a.user_group AS account_user_group
+          SELECT k.primary_group_ref, k.backup_group_ref, k.status,
+            a.user_group AS account_user_group
           FROM remote_keys k
           LEFT JOIN remote_accounts a ON a.id = k.remote_account_id
           WHERE k.id = ?
@@ -1087,9 +1200,11 @@ class MappingService {
     const storedTolerance = parseJson(this.db.prepare(`SELECT value_json FROM settings WHERE key = 'sub2apiRateToleranceRatio'`).get()?.value_json, 0.05);
     const toleranceRatio = Math.max(0, finite(config.rateToleranceRatio) ?? finite(storedTolerance) ?? 0.05);
     const providerGroupRate = finite(providerGroup?.ratio);
+    const keyMissing = Boolean(mapping.key_id && (!key || key.status === 'missing'));
     const dynamicRouteEnabled = mapping.dynamicRoute?.enabled === true;
     const dynamicRouteRate = finite(mapping.dynamicRoute?.multiplier);
-    const providerRate = dynamicRouteEnabled ? dynamicRouteRate : providerGroupRate;
+    const dynamicRateStatus = mapping.dynamicRoute?.status;
+    const providerRate = keyMissing ? null : dynamicRouteEnabled ? dynamicRouteRate : providerGroupRate;
     const baseGroupRate = finite(baseGroup?.effectiveRate ?? baseGroup?.defaultRate);
     const rechargeMultiplier = finite(mapping.recharge?.multiplier);
     const compositeRate = providerRate != null && rechargeMultiplier != null && rechargeMultiplier > 0
@@ -1100,9 +1215,14 @@ class MappingService {
       : null;
     let status = 'aligned';
     if (!mapping.enabled) status = 'mapping_disabled';
+    else if (keyMissing) status = 'missing_remote_key';
     else if (baseGroupId == null) status = 'base_group_unselected';
     else if (!baseGroup) status = 'missing_base_group';
     else if (!providerGroup) status = 'missing_provider_group';
+    else if (dynamicRouteEnabled && dynamicRateStatus === 'missing_provider_price') status = 'missing_provider_price';
+    else if (dynamicRouteEnabled && dynamicRateStatus === 'partial_provider_price') status = 'partial_provider_price';
+    else if (dynamicRouteEnabled && dynamicRateStatus === 'missing_reference_price') status = 'missing_reference_price';
+    else if (dynamicRouteEnabled && dynamicRateStatus === 'partial_reference_price') status = 'partial_reference_price';
     else if (dynamicRouteEnabled && dynamicRouteRate == null) status = 'missing_dynamic_route_rate';
     else if (providerRate == null || baseGroupRate == null || compositeRate == null) status = 'missing_rate';
     else if (providerRate <= 0 || compositeRate <= 0) status = 'invalid_provider_rate';
@@ -1127,8 +1247,10 @@ class MappingService {
         baseGroupPlatform: baseGroup?.platform || '',
         providerGroupStatus: providerGroup?.status || null,
         providerGroupSource,
+        keyStatus: key?.status || null,
         providerGroupRate,
         providerRateScope: dynamicRouteEnabled ? 'dynamic_route_history' : 'group_multiplier',
+        providerRateBasis: dynamicRouteEnabled ? mapping.dynamicRoute?.priceBasis || null : 'group_multiplier',
         dynamicRouteRate: dynamicRouteEnabled ? mapping.dynamicRoute : null,
         rechargeMultiplier,
         rechargeSource: mapping.recharge?.source || null,

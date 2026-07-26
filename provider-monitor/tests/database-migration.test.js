@@ -6,7 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
-test('schema v15 migration preserves mappings and adds recharge access tickets', (t) => {
+test('schema v16 migration preserves mappings and disables legacy channel-account rules', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
   let db = createDatabase(databasePath);
@@ -46,6 +46,17 @@ test('schema v15 migration preserves mappings and adds recharge access tickets',
       id, mapping_id, status, period_start, period_end, details_json, created_at
     ) VALUES ('reconciliation', 'mapping', 'succeeded', ?, ?, '{}', ?)
   `).run(now, now, now);
+  db.prepare(`
+    INSERT INTO automation_rules(
+      id, name, enabled, dry_run, trigger_type, connection_id,
+      config_json, created_at, updated_at
+    ) VALUES ('legacy-channel-rule', 'Legacy channel rule', 1, 0, 'low_balance', 'provider', ?, ?, ?)
+  `).run(JSON.stringify({
+    action: 'disable_sub2api_channel',
+    channelIds: [11],
+    threshold: 5,
+    currency: 'USD'
+  }), now, now);
 
   db.pragma('foreign_keys = OFF');
   db.exec(`
@@ -85,7 +96,7 @@ test('schema v15 migration preserves mappings and adds recharge access tickets',
   db.close();
 
   db = createDatabase(databasePath);
-  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 15').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 16').get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());
   assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'recharge_url'));
@@ -96,6 +107,13 @@ test('schema v15 migration preserves mappings and adds recharge access tickets',
   assert.equal(db.prepare('SELECT status FROM sub2api_mapping_states WHERE mapping_id = ?').get('mapping').status, 'aligned');
   assert.equal(db.prepare('SELECT status FROM reconciliation_runs WHERE mapping_id = ?').get('mapping').status, 'succeeded');
   assert.equal(db.prepare('SELECT mapping_id FROM reconciliation_runs WHERE id = ?').get('duplicate-reconciliation').mapping_id, 'mapping');
+  const migratedRule = db.prepare('SELECT enabled, config_json FROM automation_rules WHERE id = ?').get('legacy-channel-rule');
+  const migratedConfig = JSON.parse(migratedRule.config_json);
+  assert.equal(migratedRule.enabled, 0);
+  assert.equal(migratedConfig.action, 'disable_sub2api_account');
+  assert.deepEqual(migratedConfig.accountIds, []);
+  assert.deepEqual(migratedConfig.legacyChannelIds, [11]);
+  assert.equal(migratedConfig.migrationNotice, 'account_targets_required');
   assert.deepEqual(db.pragma('foreign_key_check'), []);
 
   db.prepare(`

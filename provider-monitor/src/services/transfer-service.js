@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { parse: parseCsv } = require('csv-parse/sync');
 const { AppError } = require('../errors');
+const { normalizeConfiguredApiKeys } = require('../security/configured-api-keys');
 const { encryptJson, decryptJson } = require('../security/encryption');
 const { redact, redactText } = require('../security/redaction');
 const { nowIso, parseJson, stringifyJson } = require('../db');
@@ -13,6 +14,7 @@ const SETTING_DEFAULTS = {
   forecastMinSpanHours: 12,
   reconciliationToleranceRatio: 0.05,
   sub2apiRateToleranceRatio: 0.05,
+  officialModelPrices: {},
   anomalyDropPercent: 20,
   anomalySpikeMultiplier: 3,
   keyHealthLevel: 'metadata',
@@ -75,7 +77,63 @@ function normalizeStringList(value) {
   return [...new Set(values.map((item) => String(item).trim()).filter(Boolean))];
 }
 
+function normalizeOfficialModelPrices(value, { fallback = {}, strict = false } = {}) {
+  const invalid = (message) => {
+    if (strict) throw new AppError('SETTING_INVALID', message, { status: 400 });
+    return null;
+  };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    invalid('officialModelPrices must be a model-to-price JSON object');
+    return fallback;
+  }
+  const result = {};
+  for (const [rawKey, rawEntry] of Object.entries(value)) {
+    const key = String(rawKey || '').trim().toLowerCase();
+    if (!key || !rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) {
+      invalid(`Official model price ${rawKey || '(empty)'} must be an object`);
+      continue;
+    }
+    const rawInput = rawEntry.inputPerMillion ?? rawEntry.input;
+    const rawOutput = rawEntry.outputPerMillion ?? rawEntry.output;
+    const rawCache = rawEntry.cacheReadPerMillion ?? rawEntry.cachedInputPerMillion ??
+      rawEntry.cacheRead ?? rawEntry.cachedInput;
+    const input = rawInput == null || rawInput === '' ? null : Number(rawInput);
+    const output = rawOutput == null || rawOutput === '' ? null : Number(rawOutput);
+    const cachedInput = rawCache == null || rawCache === '' ? null : Number(rawCache);
+    if (
+      (input != null && (!Number.isFinite(input) || input <= 0)) ||
+      (output != null && (!Number.isFinite(output) || output <= 0)) ||
+      (cachedInput != null && (!Number.isFinite(cachedInput) || cachedInput < 0))
+    ) {
+      invalid(`Official model price ${rawKey} contains an invalid USD / 1M value`);
+      if (!strict) continue;
+    }
+    const model = String(rawEntry.model || rawEntry.officialModel || '').trim();
+    if (input == null && output == null && cachedInput == null && !model) {
+      invalid(`Official model price ${rawKey} needs a price or model alias`);
+      if (!strict) continue;
+    }
+    result[key] = {
+      ...(model ? { model } : {}),
+      ...(input != null ? { input } : {}),
+      ...(output != null ? { output } : {}),
+      ...(cachedInput != null ? { cachedInput } : {})
+    };
+  }
+  for (const [key, entry] of Object.entries(result)) {
+    const hasPrice = entry.input != null || entry.output != null || entry.cachedInput != null;
+    if (!hasPrice && !result[String(entry.model || '').trim().toLowerCase()]) {
+      invalid(`Official model alias ${key} points to missing model ${entry.model}`);
+      if (!strict) delete result[key];
+    }
+  }
+  return result;
+}
+
 function normalizeSettingValue(key, value, fallback) {
+  if (key === 'officialModelPrices') {
+    return normalizeOfficialModelPrices(value, { fallback });
+  }
   if (BOOLEAN_SETTINGS.has(key)) {
     if (typeof value === 'string') return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
     return Boolean(value);
@@ -203,7 +261,8 @@ function hasUsableProviderCredentials(provider, credentials) {
 
   if (adapterType === 'sub2api') {
     if (authMode === 'api_key') {
-      return hasCredentialValue(credentials, 'apiKey');
+      return hasCredentialValue(credentials, 'apiKey') ||
+        normalizeConfiguredApiKeys(credentials).length > 0;
     }
     if (['bearer', 'token_pair'].includes(authMode)) {
       return hasCredentialValue(credentials, 'accessToken', 'refreshToken');
@@ -248,6 +307,10 @@ class TransferService {
     for (const key of RUNTIME_SETTING_KEYS) {
       merged[key] = normalizeSettingValue(key, merged[key], this.defaults[key]);
     }
+    merged.officialModelPrices = normalizeOfficialModelPrices(
+      merged.officialModelPrices,
+      { fallback: this.defaults.officialModelPrices }
+    );
     return merged;
   }
 
@@ -256,6 +319,12 @@ class TransferService {
   }
 
   saveSettings(input) {
+    if (Object.prototype.hasOwnProperty.call(input, 'officialModelPrices')) {
+      input = {
+        ...input,
+        officialModelPrices: normalizeOfficialModelPrices(input.officialModelPrices, { strict: true })
+      };
+    }
     const unknown = Object.keys(input).filter((key) => !Object.prototype.hasOwnProperty.call(this.defaults, key));
     if (unknown.length) throw new AppError('SETTING_UNKNOWN', `Unknown settings: ${unknown.join(', ')}`, { status: 400 });
     for (const key of URL_SETTINGS) {
@@ -818,8 +887,26 @@ class TransferService {
   }
 
   credentialProfiles({ includeSecrets = false } = {}) {
-    return this.providers.list().map((provider) => {
+    return this.providers.list().flatMap((provider) => {
       const credentials = this.providers.getCredentials(provider.id);
+      const configuredKeys = provider.adapter_type === 'sub2api' && provider.auth_mode === 'api_key'
+        ? normalizeConfiguredApiKeys(credentials)
+        : [];
+      const models = this.db.prepare(
+        'SELECT name FROM remote_models WHERE connection_id = ? ORDER BY name LIMIT 200'
+      ).all(provider.id).map((row) => row.name);
+      if (configuredKeys.length > 0) {
+        return configuredKeys.map((entry) => ({
+          name: configuredKeys.length === 1 ? provider.name : `${provider.name} / ${entry.name}`,
+          provider: provider.adapter_type,
+          baseUrl: provider.base_url,
+          apiKey: includeSecrets ? entry.key : '***',
+          credentialReference: `provider-monitor://${provider.id}/keys/${encodeURIComponent(entry.id)}`,
+          keyId: entry.id,
+          keyName: entry.name,
+          models
+        }));
+      }
       const secret = firstValue(
         credentials.runtimeApiKey,
         credentials.modelApiKey,
@@ -831,14 +918,14 @@ class TransferService {
         credentials.bearerToken,
         credentials.token
       );
-      return {
+      return [{
         name: provider.name,
         provider: provider.adapter_type,
         baseUrl: provider.base_url,
         apiKey: includeSecrets ? secret || null : secret ? '***' : null,
         credentialReference: `provider-monitor://${provider.id}`,
-        models: this.db.prepare('SELECT name FROM remote_models WHERE connection_id = ? ORDER BY name LIMIT 200').all(provider.id).map((row) => row.name)
-      };
+        models
+      }];
     });
   }
 
@@ -868,6 +955,7 @@ module.exports = {
   SETTING_DEFAULTS,
   RUNTIME_SETTING_KEYS,
   applyRuntimeSettings,
+  normalizeOfficialModelPrices,
   normalizeStringList,
   csvEscape,
   normalizeAdapter

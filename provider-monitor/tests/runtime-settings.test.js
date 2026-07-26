@@ -82,10 +82,18 @@ test('system settings persist runtime policy and update the shared config object
     auditRetentionDays: 500,
     notificationRetentionDays: 200,
     providerMonitorPublicUrl: 'https://monitor.example.com/',
-    rechargeLinkTtlMinutes: 30
+    rechargeLinkTtlMinutes: 30,
+    officialModelPrices: {
+      'GPT-5.6-SOL': { input: '5', output: 30, cachedInput: 0 },
+      'a6api/codex-auto-review@1164': { model: 'gpt-5.6-sol' }
+    }
   });
 
   assert.equal(settings.automationEnabled, true);
+  assert.deepEqual(settings.officialModelPrices, {
+    'gpt-5.6-sol': { input: 5, output: 30, cachedInput: 0 },
+    'a6api/codex-auto-review@1164': { model: 'gpt-5.6-sol' }
+  });
   assert.deepEqual(settings.allowedOrigins, ['https://console.example']);
   assert.deepEqual(settings.allowedHosts, ['supplier.internal', '10.0.0.8']);
   assert.equal(context.config.automationEnabled, true);
@@ -124,6 +132,25 @@ test('system settings reject a non-HTTP Provider Monitor public URL', (t) => {
   });
   assert.throws(
     () => transfers.saveSettings({ providerMonitorPublicUrl: 'javascript:alert(1)' }),
+    (error) => error.code === 'SETTING_INVALID'
+  );
+});
+
+test('system settings reject invalid official model prices and unresolved aliases', (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const transfers = new TransferService({
+    db: context.db,
+    config: context.config,
+    providers: new ProviderRepository(context.db, context.config)
+  });
+
+  assert.throws(
+    () => transfers.saveSettings({ officialModelPrices: { 'model-a': { input: 0 } } }),
+    (error) => error.code === 'SETTING_INVALID'
+  );
+  assert.throws(
+    () => transfers.saveSettings({ officialModelPrices: { 'route-a': { model: 'missing-model' } } }),
     (error) => error.code === 'SETTING_INVALID'
   );
 });

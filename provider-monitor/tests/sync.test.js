@@ -6,12 +6,20 @@ const { ProviderRepository } = require('../src/repositories/provider-repository'
 const { HttpClient } = require('../src/http/client');
 const { SyncService } = require('../src/services/sync-service');
 const { QueryService } = require('../src/services/query-service');
+const { MappingService } = require('../src/services/mapping-service');
 const { AppError } = require('../src/errors');
 const { nowIso } = require('../src/db');
 
 function json(res, body) {
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
+}
+
+function setOfficialModelPrices(db, prices) {
+  db.prepare(`
+    INSERT INTO settings(key, value_json, updated_at) VALUES ('officialModelPrices', ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
+  `).run(JSON.stringify(prices), nowIso());
 }
 
 test('New API sync persists account balance, key quota and key groups', async (t) => {
@@ -42,6 +50,9 @@ test('New API sync persists account balance, key quota and key groups', async (t
 
   const context = createTestContext();
   t.after(() => context.cleanup());
+  setOfficialModelPrices(context.db, {
+    'model-a': { model: 'official-model-a', input: 2 }
+  });
   const providers = new ProviderRepository(context.db, context.config);
   const provider = providers.create({
     name: 'Local New API',
@@ -54,7 +65,12 @@ test('New API sync persists account balance, key quota and key groups', async (t
     warningThreshold: 5,
     thresholdCurrency: 'USD',
     typeConfig: {
-      dynamicRouteRate: { enabled: true, statistic: 'latest', lookbackDays: 30, minimumSamples: 1 }
+      dynamicRouteRate: {
+        enabled: true,
+        statistic: 'latest',
+        lookbackDays: 30,
+        minimumSamples: 1
+      }
     }
   });
   const sync = new SyncService({
@@ -91,6 +107,7 @@ test('New API sync persists account balance, key quota and key groups', async (t
   assert.equal(dynamicRate.sample_count, 1);
   assert.equal(dynamicRate.status, 'detected');
   assert.equal(JSON.parse(dynamicRate.summary_json).latest.channelName, 'Low route');
+  assert.equal(JSON.parse(dynamicRate.summary_json).priceBasis, 'official_relative');
   dynamicRouteFailure = true;
   const partial = await sync.run(provider.id);
   assert.equal(partial.status, 'partial');
@@ -104,6 +121,173 @@ test('New API sync persists account balance, key quota and key groups', async (t
   assert.equal(Boolean(cachedDynamicRate.error_code), true);
   context.db.prepare("UPDATE provider_connections SET last_error_code = 'REMOTE_SERVER_ERROR' WHERE id = ?").run(provider.id);
   assert.equal(queries.summary().accounts[0].status, 'error');
+});
+
+test('New API API Key mode monitors only the selected remote keys and their logs', async (t) => {
+  const server = http.createServer((req, res) => {
+    if (req.url === '/api/status') return json(res, { success: true, data: { quota_per_unit: 500000 } });
+    if (req.url === '/api/user/self') {
+      return json(res, { success: true, data: { id: 2160, username: 'a6-user', quota: 1000000, used_quota: 1000, status: 1 } });
+    }
+    if (req.url === '/api/user/self/groups') {
+      return json(res, { success: true, data: [
+        { id: 'cheap', name: 'Cheap', ratio: 0.1 },
+        { id: 'stable', name: 'Stable', ratio: 0.2 },
+        { id: 'unused', name: 'Unused', ratio: 0.3 }
+      ] });
+    }
+    if (req.url.startsWith('/api/token/')) {
+      return json(res, { success: true, data: { total: 3, items: [
+        { id: 1, name: 'cheap-key', key: 'sk-cheap-secret', status: 1, group: 'cheap', unlimited_quota: true },
+        { id: 2, name: 'stable-key', key: 'sk-stable-secret', status: 1, group: 'stable', unlimited_quota: true },
+        { id: 3, name: 'unused-key', key: 'sk-unused-secret', status: 1, group: 'unused', unlimited_quota: true }
+      ] } });
+    }
+    if (req.url.startsWith('/api/log/self/stat')) {
+      return json(res, { success: true, data: { quota: 1000 } });
+    }
+    if (req.url.startsWith('/api/log/self?')) {
+      return json(res, { success: true, data: { total: 3, items: [
+        { created_at: 100, token_id: 1, token_name: 'cheap-key', model_name: 'model-a', prompt_tokens: 10, completion_tokens: 0, other: { request_final_status: 'success', model_ratio: 0.1, group_ratio: 1 } },
+        { created_at: 200, token_id: 2, token_name: 'stable-key', model_name: 'model-a', prompt_tokens: 10, completion_tokens: 0, other: { request_final_status: 'success', model_ratio: 0.2, group_ratio: 1 } },
+        { created_at: 300, token_id: 3, token_name: 'unused-key', model_name: 'model-a', prompt_tokens: 10, completion_tokens: 0, other: { request_final_status: 'success', model_ratio: 0.3, group_ratio: 1 } }
+      ] } });
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ message: 'not found' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  setOfficialModelPrices(context.db, { 'model-a': { input: 2 } });
+  const providers = new ProviderRepository(context.db, context.config);
+  const dynamicRouteRate = {
+    enabled: true,
+    statistic: 'latest',
+    lookbackDays: 30,
+    minimumSamples: 1
+  };
+  const provider = providers.create({
+    name: 'a6api', adapterType: 'new-api',
+    baseUrl: `http://127.0.0.1:${server.address().port}`,
+    authMode: 'api_key', remoteUserId: '2160',
+    credentials: { systemToken: 'system-token', userId: '2160' },
+    typeConfig: { dynamicRouteRate }, enabled: true
+  });
+  const sync = new SyncService({
+    db: context.db, config: context.config, providers,
+    http: new HttpClient(context.config), metrics: null
+  });
+  const initial = await sync.run(provider.id);
+  assert.equal(initial.keyCount, 3);
+  assert.equal(initial.dynamicRouteKeyCount, 3);
+
+  providers.update(provider.id, {
+    typeConfig: { dynamicRouteRate, monitoredKeyIds: ['1', '2'] }
+  });
+  const selected = await sync.run(provider.id);
+  assert.equal(selected.status, 'succeeded');
+  assert.equal(selected.keyCount, 2);
+  assert.equal(selected.dynamicRouteKeyCount, 2);
+  const keys = context.db.prepare(`
+    SELECT remote_id, status FROM remote_keys WHERE connection_id = ? ORDER BY remote_id
+  `).all(provider.id);
+  assert.deepEqual(keys, [
+    { remote_id: '1', status: 'enabled' },
+    { remote_id: '2', status: 'enabled' },
+    { remote_id: '3', status: 'missing' }
+  ]);
+  const rates = context.db.prepare(`
+    SELECT k.remote_id, dr.selected_multiplier, dr.status
+    FROM provider_dynamic_route_rates dr JOIN remote_keys k ON k.id = dr.key_id
+    WHERE dr.connection_id = ? ORDER BY k.remote_id
+  `).all(provider.id);
+  assert.deepEqual(rates, [
+    { remote_id: '1', selected_multiplier: 0.1, status: 'detected' },
+    { remote_id: '2', selected_multiplier: 0.2, status: 'detected' },
+    { remote_id: '3', selected_multiplier: null, status: 'not_monitored' }
+  ]);
+});
+
+test('Sub2API account modes monitor only the selected remote keys', async (t) => {
+  const server = http.createServer((req, res) => {
+    if (req.url === '/api/v1/user/profile') {
+      return json(res, { code: 0, data: { id: 7, username: 'sub2-user', balance: 20 } });
+    }
+    if (req.url === '/api/v1/groups/available') {
+      return json(res, { code: 0, data: [
+        { id: 10, name: 'Cheap', rate_multiplier: 0.1, status: 'active' },
+        { id: 20, name: 'Stable', rate_multiplier: 0.2, status: 'active' },
+        { id: 30, name: 'Unused', rate_multiplier: 0.3, status: 'active' }
+      ] });
+    }
+    if (req.url === '/api/v1/groups/rates') {
+      return json(res, { code: 0, data: { 10: 0.1, 20: 0.2, 30: 0.3 } });
+    }
+    if (req.url.startsWith('/api/v1/keys?')) {
+      return json(res, { code: 0, data: { total: 3, items: [
+        { id: 1, name: 'cheap-key', key: 'sk-cheap-secret', group_id: 10, status: 'active', quota: 0, quota_used: 1 },
+        { id: 2, name: 'stable-key', key: 'sk-stable-secret', group_id: 20, status: 'active', quota: 0, quota_used: 2 },
+        { id: 3, name: 'unused-key', key: 'sk-unused-secret', group_id: 30, status: 'active', quota: 0, quota_used: 3 }
+      ] } });
+    }
+    if (req.url.startsWith('/api/v1/usage/stats')) {
+      return json(res, { code: 0, data: { total_cost: 6, total_requests: 3 } });
+    }
+    if (req.url === '/api/v1/payment/checkout-info') {
+      return json(res, { code: 0, data: {} });
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ message: 'not found' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Selectable Sub2API',
+    adapterType: 'sub2api',
+    baseUrl: `http://127.0.0.1:${server.address().port}`,
+    authMode: 'token_pair',
+    credentials: { accessToken: 'access-token', tokenExpiresAt: Date.now() + 3600000 },
+    enabled: true
+  });
+  const sync = new SyncService({
+    db: context.db,
+    config: context.config,
+    providers,
+    http: new HttpClient(context.config),
+    metrics: null
+  });
+
+  const initial = await sync.run(provider.id);
+  assert.equal(initial.keyCount, 3);
+  providers.update(provider.id, { typeConfig: { monitoredKeyIds: ['1', '2'] } });
+
+  const selected = await sync.run(provider.id);
+  assert.equal(selected.status, 'succeeded');
+  assert.equal(selected.keyCount, 2);
+  assert.deepEqual(context.db.prepare(`
+    SELECT remote_id, status FROM remote_keys WHERE connection_id = ? ORDER BY remote_id
+  `).all(provider.id), [
+    { remote_id: '1', status: 'active' },
+    { remote_id: '2', status: 'active' },
+    { remote_id: '3', status: 'missing' }
+  ]);
+  assert.deepEqual(context.db.prepare(`
+    SELECT k.remote_id, g.remote_id AS group_id
+    FROM remote_key_groups r
+    JOIN remote_keys k ON k.id = r.key_id
+    JOIN remote_groups g ON g.id = r.group_id
+    WHERE k.connection_id = ? ORDER BY k.remote_id
+  `).all(provider.id), [
+    { remote_id: '1', group_id: '10' },
+    { remote_id: '2', group_id: '20' }
+  ]);
 });
 
 test('Sub2API sync recovers a key-bound private group omitted from the available catalog', async (t) => {
@@ -181,6 +365,162 @@ test('Sub2API sync recovers a key-bound private group omitted from the available
     WHERE connection_id = ? AND remote_id = '40'
   `).get(provider.id);
   assert.deepEqual(preserved, { name: 'Private Campaign', ratio: 0.5, status: 'inactive' });
+});
+
+test('Sub2API API Key sync keeps per-key rates, usage and mapping comparisons independent', async (t) => {
+  let failedBillingToken = null;
+  const requestedTokens = [];
+  const fixtures = {
+    'sk-low-12345678': { remaining: 9, used: 1, rate: 0.1 },
+    'sk-high-12345678': { remaining: 17, used: 3, rate: 0.25 }
+  };
+  const server = http.createServer((req, res) => {
+    const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    const fixture = fixtures[token];
+    if (!fixture) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ message: 'invalid key' }));
+    }
+    requestedTokens.push(token);
+    if (req.url === '/v1/usage') {
+      return json(res, {
+        isValid: true,
+        remaining: fixture.remaining,
+        unit: 'USD',
+        usage: {
+          today: { requests: 1, cost: fixture.used },
+          total: { requests: 4, cost: fixture.used }
+        }
+      });
+    }
+    if (req.url === '/v1/sub2api/billing') {
+      if (token === failedBillingToken) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ message: 'temporary billing failure' }));
+      }
+      return json(res, {
+        billing_scope: 'token',
+        effective_rate_multiplier: fixture.rate
+      });
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ message: 'not found' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Multi-key gateway',
+    adapterType: 'sub2api',
+    baseUrl: `http://127.0.0.1:${server.address().port}`,
+    authMode: 'api_key',
+    credentials: {
+      apiKeys: [
+        { id: 'low', name: 'Low route', key: 'sk-low-12345678' },
+        { id: 'high', name: 'High route', key: 'sk-high-12345678' }
+      ]
+    },
+    enabled: true
+  });
+  assert.deepEqual(provider.configuredApiKeys.map((entry) => entry.id), ['low', 'high']);
+
+  const sync = new SyncService({
+    db: context.db,
+    config: context.config,
+    providers,
+    http: new HttpClient(context.config),
+    metrics: null
+  });
+  const result = await sync.run(provider.id);
+  assert.equal(result.status, 'succeeded');
+  assert.equal(result.keyCount, 2);
+  assert.equal(result.groupCount, 2);
+  assert.equal(result.usageCount, 4);
+
+  const keys = context.db.prepare(`
+    SELECT id, remote_id, primary_group_ref, quota_remaining
+    FROM remote_keys WHERE connection_id = ? ORDER BY remote_id
+  `).all(provider.id);
+  assert.deepEqual(keys.map((key) => [key.remote_id, key.primary_group_ref, key.quota_remaining]), [
+    ['high', 'configured-api-key:high', 17],
+    ['low', 'configured-api-key:low', 9]
+  ]);
+  const groups = context.db.prepare(`
+    SELECT remote_id, ratio FROM remote_groups
+    WHERE connection_id = ? AND status != 'missing' ORDER BY remote_id
+  `).all(provider.id);
+  assert.deepEqual(groups, [
+    { remote_id: 'configured-api-key:high', ratio: 0.25 },
+    { remote_id: 'configured-api-key:low', ratio: 0.1 }
+  ]);
+  const usageSubjects = context.db.prepare(`
+    SELECT DISTINCT subject_id FROM usage_snapshots
+    WHERE connection_id = ? AND subject_type = 'key' ORDER BY subject_id
+  `).all(provider.id).map((row) => row.subject_id);
+  assert.deepEqual(usageSubjects, keys.map((key) => key.id).sort());
+
+  failedBillingToken = 'sk-high-12345678';
+  const partial = await sync.run(provider.id);
+  assert.equal(partial.status, 'partial');
+  assert.equal(partial.warnings.some((warning) => warning.capability === 'configuredApiKey'), true);
+  const preservedHighKey = context.db.prepare(`
+    SELECT primary_group_ref FROM remote_keys
+    WHERE connection_id = ? AND remote_id = 'high'
+  `).get(provider.id);
+  assert.equal(preservedHighKey.primary_group_ref, 'configured-api-key:high');
+  assert.equal(context.db.prepare(`
+    SELECT status FROM remote_groups
+    WHERE connection_id = ? AND remote_id = 'configured-api-key:high'
+  `).get(provider.id).status, 'active');
+
+  const sub2api = {
+    authenticationStatus: () => ({ available: true, source: 'test' }),
+    async data(endpoint) {
+      if (endpoint === '/api/v1/admin/groups/all') {
+        return [
+          { id: 7, name: 'Low target', status: 'active', rate_multiplier: 0.1 },
+          { id: 8, name: 'High target', status: 'active', rate_multiplier: 0.25 }
+        ];
+      }
+      if (endpoint === '/api/v1/groups/rates') return { 7: 0.1, 8: 0.25 };
+      throw new Error(`Unexpected endpoint ${endpoint}`);
+    }
+  };
+  const mappings = new MappingService({ db: context.db, config: context.config, sub2api });
+  mappings.save({ connectionId: provider.id, keyId: keys.find((key) => key.remote_id === 'low').id, groupId: 7 });
+  mappings.save({ connectionId: provider.id, keyId: keys.find((key) => key.remote_id === 'high').id, groupId: 8 });
+  const comparison = await mappings.refreshComparisons();
+  assert.deepEqual(comparison.items.map((item) => [
+    item.key_name,
+    item.comparison.providerGroupRef,
+    item.comparison.providerRate,
+    item.comparison.status
+  ]).sort((left, right) => left[0].localeCompare(right[0])), [
+    ['High route', 'configured-api-key:high', 0.25, 'aligned'],
+    ['Low route', 'configured-api-key:low', 0.1, 'aligned']
+  ]);
+
+  failedBillingToken = null;
+  requestedTokens.length = 0;
+  providers.update(provider.id, { typeConfig: { monitoredKeyIds: ['low'] } });
+  const selected = await sync.run(provider.id);
+  assert.equal(selected.status, 'succeeded');
+  assert.equal(selected.keyCount, 1);
+  assert.equal(selected.groupCount, 1);
+  assert.deepEqual([...new Set(requestedTokens)], ['sk-low-12345678']);
+  assert.deepEqual(context.db.prepare(`
+    SELECT remote_id, status FROM remote_keys WHERE connection_id = ? ORDER BY remote_id
+  `).all(provider.id), [
+    { remote_id: 'high', status: 'missing' },
+    { remote_id: 'low', status: 'active' }
+  ]);
+  const selectedComparison = await mappings.refreshComparisons();
+  const missingHigh = selectedComparison.items.find((item) => item.key_name === 'High route');
+  assert.equal(missingHigh.comparison.status, 'missing_remote_key');
+  assert.equal(missingHigh.comparison.providerRate, null);
 });
 
 test('missing optional group endpoint produces a partial sync without losing balance', async (t) => {

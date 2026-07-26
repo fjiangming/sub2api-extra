@@ -308,9 +308,38 @@ test('integration recharge and composite columns use the documented multiplier d
     details: {
       providerRateScope: 'dynamic_route_history',
       dynamicRouteRate: {
-        statistic: 'median', sampleCount: 57, minMultiplier: 0.0102,
+        statistic: 'median', priceBasis: 'official_relative', sampleCount: 57, minMultiplier: 0.0102,
         maxMultiplier: 0.0534, status: 'detected',
-        summary: { latest: { channelName: 'Latest route' } }
+        summary: { latest: {
+          channelName: 'Latest route', providerPriceSource: 'log_ratio', providerInputPerMillion: 0.036,
+          providerOutputPerMillion: 0.216, referenceInputPerMillion: 5,
+          referenceOutputPerMillion: 30
+        } }
+      }
+    }
+  })`, context);
+  const missingDynamicRate = vm.runInContext(`integrationProviderRate({
+    providerRate: null,
+    details: {
+      providerRateScope: 'dynamic_route_history',
+      dynamicRouteRate: {
+        statistic: 'latest', sampleCount: 0, status: 'missing_reference_price',
+        summary: { totalObservationCount: 2, referenceMissingModels: ['gpt-test'] }
+      }
+    }
+  })`, context);
+  const partialDynamicRate = vm.runInContext(`integrationProviderRate({
+    providerRate: 0.0061768,
+    details: {
+      providerRateScope: 'dynamic_route_history',
+      dynamicRouteRate: {
+        statistic: 'latest', sampleCount: 1, status: 'partial_reference_price',
+        minMultiplier: 0.0061768, maxMultiplier: 0.0061768,
+        summary: {
+          totalObservationCount: 3,
+          referenceMissingModels: ['codex-auto-review'],
+          latest: { channelName: 'codex-route', providerPriceSource: 'log_ratio' }
+        }
       }
     }
   })`, context);
@@ -320,9 +349,19 @@ test('integration recharge and composite columns use the documented multiplier d
   assert.match(defaultRate, /默认/);
   assert.match(cachedRate, /1:1/);
   assert.match(cachedRate, /缓存/);
-  assert.match(dynamicRate, /动态实测 P50/);
+  assert.match(dynamicRate, /日志价÷官方价 P50/);
   assert.match(dynamicRate, /57 次/);
   assert.match(dynamicRate, /Latest route/);
+  assert.match(dynamicRate, /日志倍率换算/);
+  assert.match(dynamicRate, /\$0\.036\/\$0\.216÷\$5\/\$30/);
+  assert.match(missingDynamicRate, /2 条日志\/0 条可计算/);
+  assert.match(missingDynamicRate, /缺官方价\/别名 gpt-test/);
+  assert.match(partialDynamicRate, /日志价÷官方价 最近可计算/);
+  assert.match(partialDynamicRate, /3 条日志\/1 条可计算/);
+  assert.match(partialDynamicRate, /×0\.006177/);
+  assert.match(partialDynamicRate, /缺官方价\/别名 codex-auto-review/);
+  assert.doesNotMatch(partialDynamicRate, /范围/);
+  assert.equal(vm.runInContext("badge('partial_reference_price')", context).includes('部分日志模型缺价'), true);
   assert.equal(composite, '×0.08');
   assert.match(source, /充值倍率/);
   assert.match(source, /综合倍率/);
@@ -449,8 +488,75 @@ test('alert rule form only enables fields used by the selected type', () => {
   assert.match(index, /name="cooldownMinutes"[^>]+required/);
 });
 
-test('recharge automation payload does not include Sub2API channel IDs', () => {
+test('alert and execution rules share one rules and automation workspace', () => {
+  const { context, source } = createBrowserContext();
+  const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  context.testAlertRule = {
+    id: 'alert-1',
+    name: 'Low balance warning',
+    enabled: true,
+    rule_type: 'low_balance',
+    scope: 'account',
+    threshold: 20,
+    currency: 'USD',
+    consecutive_matches: 2,
+    connection_id: null
+  };
+  context.testAutomationRule = {
+    id: 'automation-1',
+    name: 'Daily mapping rebuild',
+    enabled: true,
+    dryRun: true,
+    trigger_type: 'scheduled',
+    connection_id: null,
+    config: {
+      action: 'rebuild_sub2api_mappings',
+      scheduleIntervalMinutes: 1440,
+      condition: { type: 'composite_rate_difference', operator: 'lt', threshold: 0 },
+      onMatchAction: 'disable_sub2api_account',
+      targetMode: 'matched_mapping_accounts'
+    }
+  };
+
+  const normalizedRules = JSON.parse(vm.runInContext(
+    'JSON.stringify(normalizeUnifiedRules([testAlertRule], [testAutomationRule]))',
+    context
+  ));
+  const normalizedAlertRule = normalizedRules.find((rule) => rule.kind === 'alert');
+  const normalizedAutomationRule = normalizedRules.find((rule) => rule.kind === 'automation');
+  context.normalizedAlertRule = normalizedAlertRule;
+  context.normalizedAutomationRule = normalizedAutomationRule;
+  const alertRow = vm.runInContext('unifiedRuleRow(normalizedAlertRule)', context);
+  const automationRow = vm.runInContext('unifiedRuleRow(normalizedAutomationRule)', context);
+
+  assert.match(index, /data-view="automation"[\s\S]*?<span>规则与自动化<\/span>/);
+  assert.doesNotMatch(index, /data-view="alerts"/);
+  assert.match(source, /view = view === 'alerts' \? 'automation' : view/);
+  assert.match(source, /api\('\/api\/alert-rules'\)/);
+  assert.match(source, /api\('\/api\/automation-rules'\)/);
+  assert.doesNotMatch(source, /api\('\/api\/rules'\)/);
+  assert.match(source, /normalizeUnifiedRules\(alertRules\.items, automationRules\.items\)/);
+  assert.match(source, /rule\.kind === 'alert'/);
+  assert.match(source, /rule\.kind === 'automation'/);
+  assert.equal(normalizedAlertRule.actionType, 'create_alert_event');
+  assert.equal(normalizedAlertRule.executionMode, 'event');
+  assert.equal(normalizedAutomationRule.actionType, 'rebuild_sub2api_mappings');
+  assert.equal(normalizedAutomationRule.executionMode, 'dry_run');
+  assert.match(alertRow, /告警规则/);
+  assert.match(alertRow, /创建告警事件/);
+  assert.match(alertRow, /连续 2 次/);
+  assert.match(alertRow, /data-action="edit-alert-rule"/);
+  assert.match(automationRow, /自动化规则/);
+  assert.match(automationRow, /每 1 天/);
+  assert.match(automationRow, /综合倍率偏差 &lt; 0\.00%/);
+  assert.match(automationRow, /重建全部 Sub2API 映射/);
+  assert.match(automationRow, /命中后停用 Sub2API 账号/);
+  assert.match(automationRow, /data-action="dry-run-automation"/);
+});
+
+test('automation payload separates account targets and builds scheduled mapping condition workflows', () => {
   const { context } = createBrowserContext();
+  const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
   const elements = {
     name: { value: 'Recharge account' },
     triggerType: { value: 'low_balance' },
@@ -459,12 +565,18 @@ test('recharge automation payload does not include Sub2API channel IDs', () => {
     dryRun: { checked: true },
     threshold: { value: '20' },
     currency: { value: 'USD' },
+    accountIds: { value: '17, 18' },
     channelIds: { value: '7, 8' },
     action: { value: 'trigger_recharge_webhook' },
     consecutiveMatches: { value: '2' },
     cooldownMinutes: { value: '360' },
     dailyMaximumActions: { value: '1' },
     contractPauseHours: { value: '24' },
+    scheduleIntervalMinutes: { value: '1440' },
+    scheduledConditionType: { value: '' },
+    scheduledConditionOperator: { value: 'lt' },
+    scheduledConditionThreshold: { value: '0' },
+    onMatchAction: { value: 'disable_sub2api_account' },
     webhookUrl: { value: 'https://recharge.example/hook' }
   };
   context.automationForm = { elements };
@@ -472,9 +584,36 @@ test('recharge automation payload does not include Sub2API channel IDs', () => {
   const payload = JSON.parse(vm.runInContext('JSON.stringify(automationPayload(automationForm))', context));
 
   assert.equal(Object.hasOwn(payload.config, 'channelIds'), false);
+  assert.equal(Object.hasOwn(payload.config, 'accountIds'), false);
   assert.equal(payload.config.webhookUrl, elements.webhookUrl.value);
   assert.equal(vm.runInContext("automationUsesChannelIds('trigger_recharge_webhook')", context), false);
-  assert.equal(vm.runInContext("automationUsesChannelIds('disable_sub2api_channel')", context), true);
+  assert.equal(vm.runInContext("automationUsesChannelIds('disable_sub2api_account')", context), false);
+  assert.equal(vm.runInContext("automationUsesAccountIds('disable_sub2api_account')", context), true);
+
+  elements.action.value = 'disable_sub2api_account';
+  const accountPayload = JSON.parse(vm.runInContext('JSON.stringify(automationPayload(automationForm))', context));
+  assert.deepEqual(accountPayload.config.accountIds, [17, 18]);
+  assert.equal(Object.hasOwn(accountPayload.config, 'channelIds'), false);
+
+  elements.triggerType.value = 'scheduled';
+  elements.action.value = 'rebuild_sub2api_mappings';
+  elements.scheduledConditionType.value = 'composite_rate_difference';
+  const scheduledPayload = JSON.parse(vm.runInContext('JSON.stringify(automationPayload(automationForm))', context));
+  assert.equal(scheduledPayload.connectionId, null);
+  assert.equal(scheduledPayload.config.scheduleIntervalMinutes, 1440);
+  assert.equal(Object.hasOwn(scheduledPayload.config, 'threshold'), false);
+  assert.deepEqual(scheduledPayload.config.condition, {
+    type: 'composite_rate_difference', operator: 'lt', threshold: 0
+  });
+  assert.equal(scheduledPayload.config.onMatchAction, 'disable_sub2api_account');
+  assert.equal(scheduledPayload.config.targetMode, 'matched_mapping_accounts');
+  assert.equal(scheduledPayload.config.cooldownMinutes, 360);
+  assert.equal(scheduledPayload.config.contractPauseHours, 24);
+  assert.match(index, /name="scheduledConditionType"/);
+  assert.match(index, /name="scheduledConditionOperator"/);
+  assert.match(index, /name="scheduledConditionThreshold"/);
+  assert.match(index, /name="onMatchAction"/);
+  assert.match(index, /停用映射关联账号/);
 });
 
 test('embedded SSO failures are actionable and do not request autofocus', () => {
@@ -545,6 +684,165 @@ test('Sub2API provider validation keeps the edited provider identity and separat
   );
 });
 
+test('Sub2API API Key provider payload submits multiple named keys and preserves stored rows', () => {
+  const { context, source } = createBrowserContext();
+  const keyRows = [
+    {
+      querySelector(selector) {
+        return {
+          '[data-api-key-id]': { value: 'primary' },
+          '[data-api-key-name]': { value: 'Primary renamed' },
+          '[data-api-key-value]': { value: '', required: false },
+          '[data-api-key-monitored]': { checked: true }
+        }[selector];
+      }
+    },
+    {
+      querySelector(selector) {
+        return {
+          '[data-api-key-id]': { value: 'backup' },
+          '[data-api-key-name]': { value: 'Backup' },
+          '[data-api-key-value]': { value: 'sk-backup-12345678', required: true },
+          '[data-api-key-monitored]': { checked: false }
+        }[selector];
+      }
+    }
+  ];
+  const form = {
+    elements: {
+      id: { value: '11111111-1111-4111-8111-111111111111' },
+      name: { value: 'Multi-key gateway' }, adapterType: { value: 'sub2api' },
+      baseUrl: { value: 'https://gateway.example' }, authMode: { value: 'api_key' },
+      remoteUserId: { value: '' }, enabled: { checked: true },
+      refreshIntervalMinutes: { value: '15' }, warningThreshold: { value: '' },
+      secondaryWarningThreshold: { value: '' }, thresholdCurrency: { value: 'USD' },
+      rechargeMultiplier: { value: '' }, rechargeUrl: { value: '' },
+      rechargeLoginMode: { value: 'direct' }, dynamicRouteRateEnabled: { checked: false },
+      dynamicRouteRateStatistic: { value: 'median' },
+      dynamicRouteRateLookbackDays: { value: '30' }, dynamicRouteRateMinimumSamples: { value: '3' },
+      typeConfig: { value: '{}' }, tags: { value: '' }, note: { value: '' },
+      accountDedupeKey: { value: '' }
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-provider-api-key-row]') return keyRows;
+      return [];
+    }
+  };
+  context.multiKeyProviderForm = form;
+
+  const payload = JSON.parse(vm.runInContext(
+    'JSON.stringify(providerPayload(multiKeyProviderForm))',
+    context
+  ));
+  assert.deepEqual(payload.credentials.apiKeys, [
+    { id: 'primary', name: 'Primary renamed' },
+    { id: 'backup', name: 'Backup', key: 'sk-backup-12345678' }
+  ]);
+  assert.deepEqual(payload.typeConfig.monitoredKeyIds, ['primary']);
+  assert.equal(payload.typeConfig.apiKeySource, 'manual');
+  assert.equal(
+    vm.runInContext("usesMultipleApiKeyEditor('sub2api', 'api_key')", context),
+    true
+  );
+  const newRow = vm.runInContext("providerApiKeyRow({}, 0)", context);
+  assert.match(newRow, /data-api-key-id value="api-key-[^"]+"/);
+  assert.match(newRow, /data-api-key-monitored checked/);
+  assert.match(source, /data-action="add-provider-api-key"/);
+  assert.match(source, /data-action="remove-provider-api-key"/);
+  assert.match(source, /data-api-key-monitored/);
+});
+
+test('Sub2API API Key remote source submits session credentials and selected remote keys', () => {
+  const { context, source } = createBrowserContext();
+  const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const credentials = [{ dataset: { credential: 'accessToken' }, value: 'session-access-token' }];
+  const monitoredKeys = [
+    { value: '281', checked: true },
+    { value: '727', checked: false }
+  ];
+  const form = {
+    elements: {
+      id: { value: '11111111-1111-4111-8111-111111111111' },
+      name: { value: 'Remote Sub2API keys' }, adapterType: { value: 'sub2api' },
+      baseUrl: { value: 'https://sub2api.example' }, authMode: { value: 'api_key' },
+      sub2apiApiKeySource: { value: 'remote' }, remoteUserId: { value: '' },
+      enabled: { checked: true }, refreshIntervalMinutes: { value: '15' },
+      warningThreshold: { value: '' }, secondaryWarningThreshold: { value: '' },
+      thresholdCurrency: { value: 'USD' }, rechargeMultiplier: { value: '' },
+      rechargeUrl: { value: '' }, rechargeLoginMode: { value: 'direct' },
+      dynamicRouteRateEnabled: { checked: false }, dynamicRouteRateStatistic: { value: 'median' },
+      dynamicRouteRateLookbackDays: { value: '30' }, dynamicRouteRateMinimumSamples: { value: '3' },
+      typeConfig: { value: '{}' }, tags: { value: '' }, note: { value: '' },
+      accountDedupeKey: { value: '' }
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-credential]') return credentials;
+      if (selector === '[data-monitored-api-key]') return monitoredKeys;
+      return [];
+    }
+  };
+  context.remoteSub2ApiKeyForm = form;
+
+  const payload = JSON.parse(vm.runInContext(
+    'JSON.stringify(providerPayload(remoteSub2ApiKeyForm))',
+    context
+  ));
+  assert.deepEqual(payload.credentials, { accessToken: 'session-access-token' });
+  assert.equal(payload.typeConfig.apiKeySource, 'remote');
+  assert.deepEqual(payload.typeConfig.monitoredKeyIds, ['281']);
+  assert.equal(vm.runInContext(
+    "usesRemoteApiKeySelection('sub2api', 'api_key', 'remote')",
+    context
+  ), true);
+  assert.match(source, /name="sub2apiApiKeySource"/);
+  assert.match(index, /data-action="refresh-provider-key-options"/);
+});
+
+test('New API API Key mode submits every selected remote monitoring key', () => {
+  const { context, source } = createBrowserContext();
+  const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const monitoredKeys = [
+    { value: '14998', checked: true },
+    { value: '14999', checked: true },
+    { value: '15000', checked: false }
+  ];
+  const form = {
+    elements: {
+      id: { value: '11111111-1111-4111-8111-111111111111' },
+      name: { value: 'a6api' }, adapterType: { value: 'new-api' },
+      baseUrl: { value: 'https://a6api.example' }, authMode: { value: 'api_key' },
+      remoteUserId: { value: '2160' }, enabled: { checked: true },
+      refreshIntervalMinutes: { value: '15' }, warningThreshold: { value: '' },
+      secondaryWarningThreshold: { value: '' }, thresholdCurrency: { value: 'USD' },
+      rechargeMultiplier: { value: '' }, rechargeUrl: { value: '' },
+      rechargeLoginMode: { value: 'direct' }, dynamicRouteRateEnabled: { checked: true },
+      dynamicRouteRateStatistic: { value: 'latest' },
+      dynamicRouteRateLookbackDays: { value: '30' }, dynamicRouteRateMinimumSamples: { value: '1' },
+      typeConfig: { value: '{}' }, tags: { value: '' }, note: { value: '' },
+      accountDedupeKey: { value: '' }
+    },
+    querySelectorAll(selector) {
+      if (selector === '[data-monitored-api-key]') return monitoredKeys;
+      return [];
+    }
+  };
+  context.newApiKeySelectionForm = form;
+
+  const payload = JSON.parse(vm.runInContext(
+    'JSON.stringify(providerPayload(newApiKeySelectionForm))',
+    context
+  ));
+  assert.deepEqual(payload.typeConfig.monitoredKeyIds, ['14998', '14999']);
+  assert.equal(vm.runInContext("usesRemoteApiKeySelection('new-api', 'api_key')", context), true);
+  assert.equal(vm.runInContext("usesRemoteApiKeySelection('new-api', 'system_token')", context), false);
+  assert.equal(vm.runInContext("usesRemoteApiKeySelection('sub2api', 'account')", context), true);
+  assert.equal(vm.runInContext("usesRemoteApiKeySelection('sub2api', 'token_pair')", context), true);
+  assert.equal(vm.runInContext("usesRemoteApiKeySelection('sub2api', 'bearer')", context), true);
+  assert.equal(vm.runInContext("usesRemoteApiKeySelection('sub2api', 'api_key')", context), false);
+  assert.match(index, /id="monitored-api-keys-fieldset"/);
+  assert.match(source, /data-monitored-api-key/);
+});
+
 test('provider payload exposes dynamic route rate controls for New API', () => {
   const { context, source } = createBrowserContext();
   const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
@@ -570,7 +868,10 @@ test('provider payload exposes dynamic route rate controls for New API', () => {
   context.dynamicProviderForm = form;
   const payload = JSON.parse(vm.runInContext('JSON.stringify(providerPayload(dynamicProviderForm))', context));
   assert.deepEqual(payload.typeConfig.dynamicRouteRate, {
-    enabled: true, statistic: 'p90', lookbackDays: 14, minimumSamples: 5
+    enabled: true,
+    statistic: 'p90',
+    lookbackDays: 14,
+    minimumSamples: 5
   });
   assert.equal(payload.typeConfig.rechargeLogin.enabled, true);
   assert.equal(payload.typeConfig.preserved, true);
@@ -580,11 +881,33 @@ test('provider payload exposes dynamic route rate controls for New API', () => {
   );
   assert.match(source, /dynamicRouteRateEnabled/);
   assert.match(index, /name="dynamicRouteRateEnabled"/);
+  assert.doesNotMatch(index, /name="dynamicRouteRatePriceBasis"/);
+  assert.doesNotMatch(index, /name="dynamicRouteReferencePrices"/);
+  assert.doesNotMatch(index, /name="dynamicRouteProviderPrices"/);
+  assert.match(source, /name="officialModelPrices"/);
+  assert.match(source, /parseOfficialModelPrices/);
   assert.match(index, /name="rechargeUrl" type="url"/);
   assert.match(index, /name="rechargeLoginMode"/);
   assert.match(index, /name="secondaryWarningThreshold"/);
   assert.match(index, /value="serverchan">Server酱（个人微信）/);
-  assert.match(index, /Token 加权平均/);
+  assert.match(index, /成本加权平均/);
+});
+
+test('official model prices accept global model entries and route aliases', () => {
+  const { context } = createBrowserContext();
+  const parsed = JSON.parse(vm.runInContext(`JSON.stringify(parseOfficialModelPrices(JSON.stringify({
+    'gpt-test': { input: 5, output: 30, cachedInput: 0.5 },
+    'a6api/route-a@7': { model: 'gpt-test' }
+  })))`, context));
+
+  assert.deepEqual(parsed, {
+    'gpt-test': { input: 5, output: 30, cachedInput: 0.5 },
+    'a6api/route-a@7': { model: 'gpt-test' }
+  });
+  assert.throws(() => vm.runInContext(
+    `parseOfficialModelPrices('{"gpt-test":{"input":0}}')`,
+    context
+  ));
 });
 
 test('provider balance alert levels require the secondary threshold to be lower', () => {
@@ -633,6 +956,9 @@ test('effective rates use at most three decimal places without trailing zeroes',
   assert.equal(vm.runInContext('formatEffectiveRate(0.125)', context), '×0.125');
   assert.equal(vm.runInContext('formatEffectiveRate(1.2349)', context), '×1.235');
   assert.equal(vm.runInContext('formatEffectiveRate(null)', context), '-');
+  assert.equal(vm.runInContext('integrationMeasuredRate(0.00576)', context), '×0.00576');
+  assert.equal(vm.runInContext('integrationMeasuredRate(0.0061768029)', context), '×0.006177');
+  assert.equal(vm.runInContext('integrationMeasuredValue(0.0288)', context), '0.0288');
   assert.equal(vm.runInContext('integrationDelta({ differenceRatio: 0.2 })', context), '+20%');
   assert.equal(vm.runInContext('integrationDelta({ differenceRatio: -0.266666 })', context), '-26.667%');
   assert.equal(vm.runInContext('integrationDelta({ differenceRatio: 0 })', context), '0%');
@@ -642,6 +968,7 @@ test('effective rates use at most three decimal places without trailing zeroes',
 
 test('integration groups render the highest-composite winner and mark exactly one detail', () => {
   const { context, source } = createBrowserContext();
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
   const group = {
     groupId: 101,
     groupName: 'Retail',
@@ -704,6 +1031,8 @@ test('integration groups render the highest-composite winner and mark exactly on
   assert.match(source, /最高综合倍率供应商/);
   assert.match(source, /综合倍率差/);
   assert.match(source, /（基座倍率 - 综合倍率）÷ 综合倍率/);
+  assert.match(collapsed, /integration-provider-rate-cell/);
+  assert.match(styles, /\.integration-provider-rate-cell > small \{[^}]+white-space: normal;/);
   assert.equal((collapsed.match(/data-integration-parent="101" hidden/g) || []).length, 2);
   assert.match(collapsed, /badge inactive/);
   assert.match(collapsed, /继承账号/);

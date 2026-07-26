@@ -13,11 +13,51 @@ function unwrap(payload) {
   return Object.prototype.hasOwnProperty.call(payload || {}, 'data') ? payload.data : payload;
 }
 
+const ACCOUNT_ACTIONS = new Set([
+  'disable_sub2api_account',
+  'enable_sub2api_account'
+]);
+const TARGETLESS_ACTIONS = new Set([
+  'trigger_recharge_webhook',
+  'rebuild_sub2api_mappings'
+]);
+const SUPPORTED_ACTIONS = new Set([
+  ...ACCOUNT_ACTIONS,
+  'switch_to_backup',
+  'trigger_recharge_webhook',
+  'remind_credential_rotation',
+  'create_route_recommendation',
+  'rebuild_sub2api_mappings'
+]);
+
+function actionTargets(config) {
+  if (TARGETLESS_ACTIONS.has(config.action)) return [null];
+  if (ACCOUNT_ACTIONS.has(config.action)) return config.accountIds || [];
+  return config.channelIds || [];
+}
+
+function actionTargetDetails(actionType, targetId) {
+  if (targetId == null) return {};
+  return ACCOUNT_ACTIONS.has(actionType)
+    ? { targetId, accountId: targetId }
+    : { targetId, channelId: targetId };
+}
+
+function comparisonConditionMatches(value, operator, threshold) {
+  if (!Number.isFinite(value) || !Number.isFinite(threshold)) return false;
+  if (operator === 'lt') return value < threshold;
+  if (operator === 'lte') return value <= threshold;
+  if (operator === 'gt') return value > threshold;
+  if (operator === 'gte') return value >= threshold;
+  return false;
+}
+
 class AutomationService {
-  constructor({ db, config, sub2api }) {
+  constructor({ db, config, sub2api, mappings = null }) {
     this.db = db;
     this.config = config;
     this.sub2api = sub2api;
+    this.mappings = mappings;
   }
 
   listRules() {
@@ -93,20 +133,56 @@ class AutomationService {
   async evaluateConnection(connectionId) {
     const rules = this.db.prepare(`
       SELECT * FROM automation_rules
-      WHERE enabled = 1 AND (connection_id IS NULL OR connection_id = ?)
+      WHERE enabled = 1 AND trigger_type != 'scheduled'
+        AND (connection_id IS NULL OR connection_id = ?)
     `).all(connectionId);
     const actions = [];
     for (const rule of rules) {
       const config = parseJson(rule.config_json, {});
       const safety = this.#safetyState(rule, connectionId, config);
       if (!safety.allowed || !this.#matches(connectionId, rule.trigger_type, config)) continue;
-      const targetChannelIds = config.action === 'trigger_recharge_webhook'
-        ? [null]
-        : config.channelIds || [];
-      for (const channelId of targetChannelIds) {
-        const normalizedChannelId = channelId == null ? null : Number(channelId);
-        if (this.#deduplicated(rule, connectionId, config, normalizedChannelId)) continue;
-        actions.push(await this.#execute(rule, connectionId, normalizedChannelId, config.action));
+      for (const targetId of actionTargets(config)) {
+        const normalizedTargetId = targetId == null ? null : Number(targetId);
+        if (this.#deduplicated(rule, connectionId, config, normalizedTargetId)) continue;
+        actions.push(await this.#execute(rule, connectionId, normalizedTargetId, config.action));
+      }
+    }
+    return actions;
+  }
+
+  async evaluateScheduled(at = new Date()) {
+    const rules = this.db.prepare(`
+      SELECT * FROM automation_rules
+      WHERE enabled = 1 AND trigger_type = 'scheduled'
+      ORDER BY created_at, id
+    `).all();
+    const actions = [];
+    for (const rule of rules) {
+      const config = parseJson(rule.config_json, {});
+      const safety = this.#safetyState(rule, null, config, config.action);
+      if (!safety.allowed || !this.#scheduleDue(rule, config, at)) continue;
+      actions.push(await this.#execute(rule, null, null, config.action));
+      if (!config.condition || !config.onMatchAction) continue;
+      for (const target of this.#scheduledConditionTargets(config)) {
+        const targetSafety = this.#safetyState(rule, target.connectionId, config, config.onMatchAction);
+        if (!targetSafety.allowed) {
+          if (targetSafety.reason === 'daily_action_limit') break;
+          continue;
+        }
+        if (this.#deduplicated(
+          rule,
+          target.connectionId,
+          config,
+          target.targetId,
+          config.onMatchAction
+        )) continue;
+        actions.push(await this.#execute(
+          rule,
+          target.connectionId,
+          target.targetId,
+          config.onMatchAction,
+          { condition: target.condition }
+        ));
       }
     }
     return actions;
@@ -121,34 +197,70 @@ class AutomationService {
         ? [rule.connection_id]
         : this.db.prepare('SELECT id FROM provider_connections WHERE enabled = 1').all().map((row) => row.id);
     const config = parseJson(rule.config_json, {});
+    if (rule.trigger_type === 'scheduled') {
+      const safety = this.#safetyState(rule, null, config, config.action);
+      const due = this.#scheduleDue(rule, config, new Date());
+      const conditionTargets = config.condition && config.onMatchAction
+        ? this.#scheduledConditionTargets(config)
+        : [];
+      return [{
+        connectionId: null,
+        matched: due,
+        safety,
+        conditionMatchedTargets: conditionTargets.length,
+        proposedActions: [{
+          action: config.action,
+          intervalMinutes: Number(config.scheduleIntervalMinutes),
+          deduplicated: !due
+        }, ...conditionTargets.map((target) => ({
+          action: config.onMatchAction,
+          connectionId: target.connectionId,
+          ...actionTargetDetails(config.onMatchAction, target.targetId),
+          condition: target.condition,
+          safety: this.#safetyState(rule, target.connectionId, config, config.onMatchAction),
+          deduplicated: this.#deduplicated(
+            rule,
+            target.connectionId,
+            config,
+            target.targetId,
+            config.onMatchAction
+          )
+        }))]
+      }];
+    }
     return ids.map((id) => {
       const safety = this.#safetyState(rule, id, config);
       return {
         connectionId: id,
         matched: this.#matches(id, rule.trigger_type, config),
         safety,
-        proposedActions: (config.action === 'trigger_recharge_webhook' ? [null] : config.channelIds || [])
-          .map((channelId) => ({
+        proposedActions: actionTargets(config)
+          .map((targetId) => ({
             action: config.action,
-            ...(channelId == null ? {} : { channelId: Number(channelId) }),
-            deduplicated: this.#deduplicated(rule, id, config, channelId == null ? null : Number(channelId))
+            ...actionTargetDetails(config.action, targetId == null ? null : Number(targetId)),
+            deduplicated: this.#deduplicated(rule, id, config, targetId == null ? null : Number(targetId))
           }))
       };
     });
   }
 
-  #safetyState(rule, connectionId, config) {
+  #safetyState(rule, connectionId, config, actionType = config.action) {
     const contractPauseHours = Math.max(1, Number(config.contractPauseHours || 24));
     const contractChange = this.db.prepare(`
       SELECT id, detected_at FROM asset_change_events
       WHERE connection_id = ? AND change_type = 'contract_changed' AND detected_at >= ?
       ORDER BY detected_at DESC LIMIT 1
     `).get(connectionId, new Date(Date.now() - contractPauseHours * 3600000).toISOString());
-    const highRiskAction = ['disable_sub2api_channel', 'enable_sub2api_channel', 'switch_to_backup'].includes(config.action);
+    const highRiskAction = [
+      'disable_sub2api_account', 'enable_sub2api_account',
+      'switch_to_backup', 'rebuild_sub2api_mappings'
+    ].includes(actionType);
     if (contractChange && highRiskAction && config.allowDuringContractChange !== true) {
       return { allowed: false, reason: 'contract_change_pause', contractChange };
     }
-    const dailyMaximum = Math.max(1, Number(config.dailyMaximumActions || 10));
+    const scheduledDefault = Math.ceil(1440 / Math.max(1, Number(config.scheduleIntervalMinutes || 1440))) + 1;
+    const defaultDailyMaximum = rule.trigger_type === 'scheduled' ? scheduledDefault : 10;
+    const dailyMaximum = Math.max(1, Number(config.dailyMaximumActions || defaultDailyMaximum));
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
     const dailyCount = this.db.prepare(`
@@ -159,14 +271,16 @@ class AutomationService {
     return { allowed: true, dailyCount, dailyMaximum };
   }
 
-  #deduplicated(rule, connectionId, config, channelId) {
+  #deduplicated(rule, connectionId, config, targetId, actionType = config.action) {
     const cooldownMinutes = Math.max(1, Number(config.cooldownMinutes || 60));
     return Boolean(this.db.prepare(`
       SELECT id FROM automation_actions
-      WHERE rule_id = ? AND connection_id = ? AND action_type = ?
+      WHERE rule_id = ?
+        AND ((? IS NULL AND connection_id IS NULL) OR connection_id = ?)
+        AND action_type = ?
         AND (
-          (? IS NULL AND json_type(after_json, '$.channelId') IS NULL)
-          OR json_extract(after_json, '$.channelId') = ?
+          (? IS NULL AND json_type(after_json, '$.targetId') IS NULL)
+          OR json_extract(after_json, '$.targetId') = ?
         )
         AND status IN ('succeeded', 'dry_run') AND rolled_back_at IS NULL
         AND created_at >= ?
@@ -174,11 +288,77 @@ class AutomationService {
     `).get(
       rule.id,
       connectionId,
-      config.action,
-      channelId,
-      channelId,
+      connectionId,
+      actionType,
+      targetId,
+      targetId,
       new Date(Date.now() - cooldownMinutes * 60000).toISOString()
     ));
+  }
+
+  #scheduleDue(rule, config, at) {
+    const intervalMinutes = Math.max(1, Number(config.scheduleIntervalMinutes || 1440));
+    const last = this.db.prepare(`
+      SELECT created_at FROM automation_actions
+      WHERE rule_id = ? AND action_type = ?
+      ORDER BY created_at DESC LIMIT 1
+    `).get(rule.id, config.action);
+    if (!last?.created_at) return true;
+    const elapsed = at.getTime() - Date.parse(last.created_at);
+    return !Number.isFinite(elapsed) || elapsed >= intervalMinutes * 60000;
+  }
+
+  #scheduledConditionTargets(config) {
+    const condition = config.condition || {};
+    if (
+      condition.type !== 'composite_rate_difference' ||
+      config.targetMode !== 'matched_mapping_accounts'
+    ) return [];
+    const threshold = Number(condition.threshold);
+    const rows = this.db.prepare(`
+      SELECT m.id AS mapping_id, m.connection_id, m.account_id, m.group_id,
+        s.difference_ratio, s.checked_at
+      FROM sub2api_mappings m
+      JOIN sub2api_mapping_states s ON s.mapping_id = m.id
+      WHERE m.enabled = 1 AND m.account_id IS NOT NULL AND s.difference_ratio IS NOT NULL
+      ORDER BY m.account_id, m.connection_id, m.group_id, m.id
+    `).all().filter((row) => comparisonConditionMatches(
+      Number(row.difference_ratio) * 100,
+      condition.operator,
+      threshold
+    ));
+    const targets = new Map();
+    for (const row of rows) {
+      const targetId = Number(row.account_id);
+      if (!targets.has(targetId)) {
+        targets.set(targetId, {
+          targetId,
+          connectionId: row.connection_id,
+          connectionIds: [],
+          matches: []
+        });
+      }
+      const target = targets.get(targetId);
+      if (!target.connectionIds.includes(row.connection_id)) target.connectionIds.push(row.connection_id);
+      target.matches.push({
+        mappingId: row.mapping_id,
+        groupId: row.group_id,
+        differencePercent: Number(row.difference_ratio) * 100,
+        checkedAt: row.checked_at
+      });
+    }
+    return [...targets.values()].map((target) => ({
+      targetId: target.targetId,
+      connectionId: target.connectionId,
+      condition: {
+        type: condition.type,
+        operator: condition.operator,
+        threshold,
+        unit: 'percent',
+        connectionIds: target.connectionIds,
+        matchedMappings: target.matches
+      }
+    }));
   }
 
   #matches(connectionId, triggerType, config) {
@@ -219,20 +399,25 @@ class AutomationService {
     return false;
   }
 
-  async #execute(rule, connectionId, channelId, actionType) {
-    const supported = new Set([
-      'disable_sub2api_channel', 'enable_sub2api_channel', 'switch_to_backup',
-      'trigger_recharge_webhook', 'remind_credential_rotation', 'create_route_recommendation'
-    ]);
-    if (!supported.has(actionType)) {
+  async #execute(rule, connectionId, targetId, actionType, workflowContext = null) {
+    if (!SUPPORTED_ACTIONS.has(actionType)) {
       throw new AppError('AUTOMATION_ACTION_UNSUPPORTED', `Unsupported action: ${actionType}`, { status: 400 });
     }
     const id = crypto.randomUUID();
     const dryRun = Boolean(rule.dry_run) || !this.config.automationEnabled;
-    const desiredStatus = actionType === 'disable_sub2api_channel' ? 'disabled'
-      : actionType === 'enable_sub2api_channel' ? 'active' : null;
-    let before = channelId == null ? {} : { channelId, status: null };
-    let after = channelId == null ? {} : { channelId, status: desiredStatus };
+    const desiredAccountStatus = actionType === 'disable_sub2api_account' ? 'inactive'
+      : actionType === 'enable_sub2api_account' ? 'active' : null;
+    const contextDetails = workflowContext ? { workflowContext } : {};
+    let before = {
+      ...actionTargetDetails(actionType, targetId),
+      ...(targetId == null ? {} : { status: null }),
+      ...contextDetails
+    };
+    let after = {
+      ...actionTargetDetails(actionType, targetId),
+      ...(desiredAccountStatus ? { status: desiredAccountStatus } : {}),
+      ...contextDetails
+    };
     this.db.prepare(`
       INSERT INTO automation_actions(
         id, rule_id, connection_id, action_type, status, dry_run,
@@ -240,28 +425,71 @@ class AutomationService {
       ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)
     `).run(id, rule.id, connectionId, actionType, dryRun ? 1 : 0, stringifyJson(before), stringifyJson(after), nowIso());
     try {
-      if (!dryRun) {
-        if (desiredStatus) {
-          const channel = await this.sub2api.data(`/api/v1/admin/channels/${channelId}`);
-          before = { channelId, status: channel.status, name: channel.name };
-          const updated = await this.sub2api.data(`/api/v1/admin/channels/${channelId}`, {
-            method: 'PUT', body: { status: desiredStatus }
+      if (actionType === 'rebuild_sub2api_mappings') {
+        if (!this.mappings) {
+          throw new AppError('MAPPING_SERVICE_UNAVAILABLE', 'Sub2API mapping service is unavailable', { status: 503 });
+        }
+        before = {
+          mappingCount: this.db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count,
+          ...contextDetails
+        };
+        const result = await this.mappings.rebuildAutoMappings({ preview: dryRun });
+        after = dryRun
+          ? {
+              replacementPreview: true,
+              wouldDeleteMappings: result.summary.wouldDeleteMappings,
+              wouldCreateMappings: result.summary.wouldCreateMappings,
+              skipped: result.summary.skipped,
+              ...contextDetails
+            }
+          : {
+              replaced: true,
+              deletedMappings: result.summary.deletedMappings,
+              createdMappings: result.summary.createdMappings,
+              skipped: result.summary.skipped,
+              ...contextDetails
+            };
+      } else if (!dryRun) {
+        if (desiredAccountStatus) {
+          const accountPayload = await this.sub2api.data(`/api/v1/admin/accounts/${targetId}`);
+          const account = accountPayload?.account ?? accountPayload;
+          if (!['active', 'inactive', 'error'].includes(account?.status)) {
+            throw new AppError(
+              'SUB2API_ACCOUNT_STATUS_INVALID',
+              'Sub2API account response did not contain a supported status',
+              { status: 502 }
+            );
+          }
+          before = {
+            ...actionTargetDetails(actionType, targetId),
+            status: account.status,
+            name: account.name,
+            ...contextDetails
+          };
+          const updatedPayload = await this.sub2api.data(`/api/v1/admin/accounts/${targetId}`, {
+            method: 'PUT', body: { status: desiredAccountStatus }
           });
-          after = { channelId, status: updated.status, name: updated.name };
+          const updated = updatedPayload?.account ?? updatedPayload;
+          after = {
+            ...actionTargetDetails(actionType, targetId),
+            status: updated?.status || desiredAccountStatus,
+            name: updated?.name || account.name,
+            ...contextDetails
+          };
         } else if (actionType === 'switch_to_backup') {
-          const mappings = this.db.prepare(`SELECT * FROM sub2api_mappings WHERE channel_id = ? ORDER BY role`).all(channelId);
+          const mappings = this.db.prepare(`SELECT * FROM sub2api_mappings WHERE channel_id = ? ORDER BY role`).all(targetId);
           const backup = mappings.find((mapping) => mapping.role === 'backup');
           if (!backup) throw new AppError('BACKUP_MAPPING_NOT_FOUND', 'No backup provider mapping is configured', { status: 409 });
-          before = { channelId, mappings: mappings.map((mapping) => ({ id: mapping.id, role: mapping.role, enabled: Boolean(mapping.enabled) })) };
+          before = { ...actionTargetDetails(actionType, targetId), mappings: mappings.map((mapping) => ({ id: mapping.id, role: mapping.role, enabled: Boolean(mapping.enabled) })), ...contextDetails };
           this.db.transaction(() => {
-            this.db.prepare(`UPDATE sub2api_mappings SET enabled = 0, updated_at = ? WHERE channel_id = ?`).run(nowIso(), channelId);
+            this.db.prepare(`UPDATE sub2api_mappings SET enabled = 0, updated_at = ? WHERE channel_id = ?`).run(nowIso(), targetId);
             this.db.prepare(`
               UPDATE sub2api_mappings SET role = 'backup', updated_at = ?
               WHERE channel_id = ? AND role = 'primary' AND id != ?
-            `).run(nowIso(), channelId, backup.id);
+            `).run(nowIso(), targetId, backup.id);
             this.db.prepare(`UPDATE sub2api_mappings SET enabled = 1, role = 'primary', updated_at = ? WHERE id = ?`).run(nowIso(), backup.id);
           })();
-          after = { channelId, activeMappingId: backup.id };
+          after = { ...actionTargetDetails(actionType, targetId), activeMappingId: backup.id, ...contextDetails };
         } else if (actionType === 'trigger_recharge_webhook') {
           const config = parseJson(rule.config_json, {});
           if (!config.webhookUrl) throw new AppError('WEBHOOK_URL_REQUIRED', 'Recharge webhook URL is required', { status: 400 });
@@ -270,16 +498,16 @@ class AutomationService {
             body: JSON.stringify({ event: 'provider_monitor.recharge_required', connectionId, ruleId: rule.id })
           });
           if (!response.ok) throw new AppError('WEBHOOK_FAILED', `Recharge webhook returned HTTP ${response.status}`, { status: 502 });
-          after = { delivered: true };
+          after = { delivered: true, ...contextDetails };
         } else {
-          after = { channelId, recommendation: actionType, connectionId, createdAt: nowIso() };
+          after = { ...actionTargetDetails(actionType, targetId), recommendation: actionType, connectionId, createdAt: nowIso(), ...contextDetails };
         }
       }
       this.db.prepare(`
         UPDATE automation_actions SET status = ?, before_json = ?, after_json = ?,
           completed_at = ? WHERE id = ?
       `).run(dryRun ? 'dry_run' : 'succeeded', stringifyJson(before), stringifyJson(after), nowIso(), id);
-      return { id, status: dryRun ? 'dry_run' : 'succeeded', dryRun, before, after };
+      return { id, actionType, status: dryRun ? 'dry_run' : 'succeeded', dryRun, before, after };
     } catch (error) {
       this.db.prepare(`
         UPDATE automation_actions SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?
@@ -294,7 +522,11 @@ class AutomationService {
     if (action.dry_run) throw new AppError('AUTOMATION_DRY_RUN', 'Dry-run actions do not require rollback', { status: 409 });
     if (action.rolled_back_at) throw new AppError('AUTOMATION_ALREADY_ROLLED_BACK', 'Action was already rolled back', { status: 409 });
     const before = parseJson(action.before_json, {});
-    if (['disable_sub2api_channel', 'enable_sub2api_channel'].includes(action.action_type)) {
+    if (['disable_sub2api_account', 'enable_sub2api_account'].includes(action.action_type)) {
+      await this.sub2api.data(`/api/v1/admin/accounts/${before.accountId}`, {
+        method: 'PUT', body: { status: before.status }
+      });
+    } else if (['disable_sub2api_channel', 'enable_sub2api_channel'].includes(action.action_type)) {
       await this.sub2api.data(`/api/v1/admin/channels/${before.channelId}`, {
         method: 'PUT', body: { status: before.status }
       });

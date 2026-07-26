@@ -4,6 +4,7 @@ const { joinUrl } = require('../adapters/base');
 const { redactText } = require('../security/redaction');
 const { nowIso, parseJson, stringifyJson } = require('../db');
 const { resolvePagination } = require('../pagination');
+const { configuredApiKeyById } = require('../security/configured-api-keys');
 
 class KeyHealthService {
   constructor({ db, config, providers, http }) {
@@ -120,6 +121,9 @@ class KeyHealthService {
     const credentials = this.providers.getCredentials(key.connection_id);
     if (credentials.runtimeApiKey) return credentials.runtimeApiKey;
     if (credentials.modelApiKey) return credentials.modelApiKey;
+    if (key.adapter_type === 'sub2api') {
+      return configuredApiKeyById(credentials, key.remote_id)?.key || null;
+    }
     if (['deepseek', 'openrouter'].includes(key.adapter_type)) return credentials.apiKey || credentials.managementKey;
     return null;
   }

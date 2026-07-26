@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 15;
+const SCHEMA_VERSION = 16;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -728,6 +728,33 @@ function migrateSecondaryWarningThresholdV13(db) {
   }
 }
 
+function migrateAutomationAccountActionsV16(db) {
+  const replacements = new Map([
+    ['disable_sub2api_channel', 'disable_sub2api_account'],
+    ['enable_sub2api_channel', 'enable_sub2api_account']
+  ]);
+  const rows = db.prepare('SELECT id, config_json FROM automation_rules').all();
+  const update = db.prepare(`
+    UPDATE automation_rules
+    SET enabled = 0, config_json = ?, updated_at = ?
+    WHERE id = ?
+  `);
+  db.transaction(() => {
+    for (const row of rows) {
+      const config = parseJson(row.config_json, {});
+      const replacement = replacements.get(config.action);
+      if (!replacement) continue;
+      config.legacyChannelAction = config.action;
+      config.legacyChannelIds = Array.isArray(config.channelIds) ? config.channelIds : [];
+      config.action = replacement;
+      config.accountIds = [];
+      config.migrationNotice = 'account_targets_required';
+      delete config.channelIds;
+      update.run(stringifyJson(config), nowIso(), row.id);
+    }
+  })();
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -739,6 +766,7 @@ function createDatabase(databasePath) {
     migrateSub2ApiMappingsV9(db);
     migrateProviderRechargeUrlV12(db);
     migrateSecondaryWarningThresholdV13(db);
+    migrateAutomationAccountActionsV16(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

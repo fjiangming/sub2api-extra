@@ -240,7 +240,7 @@ test('low balance alert sends the configured recharge link to personal WeChat th
   await assert.rejects(notifications.test(channel.id), /Server酱 rejected the notification: rejected/);
 });
 
-test('automation defaults to dry run and deduplicates repeated channel actions', async (t) => {
+test('automation defaults to dry run and deduplicates repeated account actions', async (t) => {
   const context = createTestContext({ PROVIDER_MONITOR_AUTOMATION_ENABLED: 'false' });
   t.after(() => context.cleanup());
   const providers = new ProviderRepository(context.db, context.config);
@@ -251,16 +251,200 @@ test('automation defaults to dry run and deduplicates repeated channel actions',
   insertSnapshot(context.db, provider.id, 1);
   const automation = new AutomationService({ db: context.db, config: context.config });
   automation.saveRule({
-    name: 'Disable channel', enabled: true, dryRun: false, triggerType: 'low_balance',
+    name: 'Disable account', enabled: true, dryRun: false, triggerType: 'low_balance',
     connectionId: provider.id,
-    config: { currency: 'USD', threshold: 2, channelIds: [7], action: 'disable_sub2api_channel' }
+    config: { currency: 'USD', threshold: 2, accountIds: [7], action: 'disable_sub2api_account' }
   });
   const first = await automation.evaluateConnection(provider.id);
   const second = await automation.evaluateConnection(provider.id);
   assert.equal(first.length, 1);
   assert.equal(first[0].status, 'dry_run');
+  assert.equal(first[0].after.accountId, 7);
+  assert.equal(first[0].after.status, 'inactive');
   assert.equal(second.length, 0);
   assert.equal(automation.listActions().length, 1);
+});
+
+test('real account automation updates the Sub2API account and rollback restores its status', async (t) => {
+  const context = createTestContext({ PROVIDER_MONITOR_AUTOMATION_ENABLED: 'true' });
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Recovered Provider', adapterType: 'custom', baseUrl: 'https://recovered.example.com',
+    authMode: 'api_key', credentials: { apiKey: 'secret' }
+  });
+  insertSnapshot(context.db, provider.id, 10);
+  let account = { id: 17, name: 'Sub2API upstream', status: 'error' };
+  const requests = [];
+  const sub2api = {
+    async data(endpoint, options = {}) {
+      requests.push({ endpoint, method: options.method || 'GET', body: options.body || null });
+      if (endpoint !== '/api/v1/admin/accounts/17') throw new Error(`Unexpected endpoint: ${endpoint}`);
+      if (options.method === 'PUT') account = { ...account, status: options.body.status };
+      return { ...account };
+    }
+  };
+  const automation = new AutomationService({ db: context.db, config: context.config, sub2api });
+  automation.saveRule({
+    name: 'Enable account', enabled: true, dryRun: false, triggerType: 'balance_recovered',
+    connectionId: provider.id,
+    config: { currency: 'USD', threshold: 5, accountIds: [17], action: 'enable_sub2api_account' }
+  });
+
+  const [action] = await automation.evaluateConnection(provider.id);
+  assert.equal(account.status, 'active');
+  assert.deepEqual(requests.slice(0, 2), [
+    { endpoint: '/api/v1/admin/accounts/17', method: 'GET', body: null },
+    { endpoint: '/api/v1/admin/accounts/17', method: 'PUT', body: { status: 'active' } }
+  ]);
+  assert.equal(action.before.status, 'error');
+  assert.equal(action.after.accountId, 17);
+
+  await automation.rollback(action.id);
+  assert.equal(account.status, 'error');
+});
+
+test('scheduled automation rebuilds all mappings once per configured interval', async (t) => {
+  const context = createTestContext({ PROVIDER_MONITOR_AUTOMATION_ENABLED: 'true' });
+  t.after(() => context.cleanup());
+  const calls = [];
+  const mappings = {
+    async rebuildAutoMappings(options) {
+      calls.push(options);
+      return {
+        summary: { deletedMappings: 3, createdMappings: 2, skipped: 1 }
+      };
+    }
+  };
+  const automation = new AutomationService({
+    db: context.db,
+    config: context.config,
+    sub2api: {},
+    mappings
+  });
+  const rule = automation.saveRule({
+    name: 'Refresh mappings', enabled: true, dryRun: false, triggerType: 'scheduled',
+    connectionId: null,
+    config: {
+      action: 'rebuild_sub2api_mappings',
+      scheduleIntervalMinutes: 60,
+      dailyMaximumActions: 24
+    }
+  });
+
+  const first = await automation.evaluateScheduled();
+  const second = await automation.evaluateScheduled();
+  assert.equal(first.length, 1);
+  assert.equal(first[0].status, 'succeeded');
+  assert.deepEqual(first[0].before, { mappingCount: 0 });
+  assert.deepEqual(first[0].after, {
+    replaced: true,
+    deletedMappings: 3,
+    createdMappings: 2,
+    skipped: 1
+  });
+  assert.deepEqual(calls, [{ preview: false }]);
+  assert.equal(second.length, 0);
+
+  context.db.prepare(`UPDATE automation_actions SET created_at = ? WHERE rule_id = ?`)
+    .run(new Date(Date.now() - 61 * 60000).toISOString(), rule.id);
+  assert.equal((await automation.evaluateScheduled()).length, 1);
+  assert.equal(calls.length, 2);
+});
+
+test('scheduled mapping workflow disables each account whose refreshed composite-rate difference is below zero', async (t) => {
+  const context = createTestContext({ PROVIDER_MONITOR_AUTOMATION_ENABLED: 'true' });
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Rate Provider', adapterType: 'custom', baseUrl: 'https://rate.example.com',
+    authMode: 'api_key', credentials: { apiKey: 'secret' }
+  });
+  const accountStates = new Map([
+    [17, { id: 17, name: 'Negative account', status: 'active' }],
+    [18, { id: 18, name: 'Positive account', status: 'active' }]
+  ]);
+  const requests = [];
+  const sub2api = {
+    async data(endpoint, options = {}) {
+      const accountId = Number(endpoint.split('/').pop());
+      requests.push({ endpoint, method: options.method || 'GET', body: options.body || null });
+      const account = accountStates.get(accountId);
+      if (!account) throw new Error(`Unexpected account: ${accountId}`);
+      if (options.method === 'PUT') Object.assign(account, { status: options.body.status });
+      return { ...account };
+    }
+  };
+  const mappings = {
+    async rebuildAutoMappings({ preview }) {
+      assert.equal(preview, false);
+      const now = new Date().toISOString();
+      const insertMapping = context.db.prepare(`
+        INSERT INTO sub2api_mappings(
+          id, connection_id, account_id, group_id, role, enabled,
+          models_json, config_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'primary', 1, '[]', '{}', ?, ?)
+      `);
+      const insertState = context.db.prepare(`
+        INSERT INTO sub2api_mapping_states(
+          mapping_id, status, difference_ratio, tolerance_ratio, details_json, checked_at
+        ) VALUES (?, 'rate_mismatch', ?, 0.05, '{}', ?)
+      `);
+      context.db.transaction(() => {
+        insertMapping.run('negative-a', provider.id, 17, 7, now, now);
+        insertState.run('negative-a', -0.1, now);
+        insertMapping.run('negative-b', provider.id, 17, 8, now, now);
+        insertState.run('negative-b', -0.02, now);
+        insertMapping.run('positive', provider.id, 18, 9, now, now);
+        insertState.run('positive', 0.25, now);
+      })();
+      return { summary: { deletedMappings: 0, createdMappings: 3, skipped: 0 } };
+    }
+  };
+  const automation = new AutomationService({
+    db: context.db,
+    config: context.config,
+    sub2api,
+    mappings
+  });
+  const rule = automation.saveRule({
+    name: 'Disable negative composite accounts',
+    enabled: true,
+    dryRun: false,
+    triggerType: 'scheduled',
+    connectionId: null,
+    config: {
+      action: 'rebuild_sub2api_mappings',
+      scheduleIntervalMinutes: 60,
+      condition: { type: 'composite_rate_difference', operator: 'lt', threshold: 0 },
+      onMatchAction: 'disable_sub2api_account',
+      targetMode: 'matched_mapping_accounts',
+      cooldownMinutes: 60,
+      dailyMaximumActions: 10,
+      contractPauseHours: 24
+    }
+  });
+
+  const actions = await automation.evaluateScheduled();
+  assert.deepEqual(actions.map((action) => action.actionType), [
+    'rebuild_sub2api_mappings',
+    'disable_sub2api_account'
+  ]);
+  assert.equal(accountStates.get(17).status, 'inactive');
+  assert.equal(accountStates.get(18).status, 'active');
+  assert.deepEqual(requests, [
+    { endpoint: '/api/v1/admin/accounts/17', method: 'GET', body: null },
+    { endpoint: '/api/v1/admin/accounts/17', method: 'PUT', body: { status: 'inactive' } }
+  ]);
+  const accountAction = automation.listActions().find((action) => action.action_type === 'disable_sub2api_account');
+  assert.equal(accountAction.after.accountId, 17);
+  assert.deepEqual(
+    accountAction.after.workflowContext.condition.matchedMappings.map((mapping) => mapping.mappingId),
+    ['negative-a', 'negative-b']
+  );
+  assert.equal(accountAction.after.workflowContext.condition.threshold, 0);
+  assert.equal((await automation.evaluateScheduled()).length, 0);
+  assert.equal(automation.previewRule(rule.id)[0].conditionMatchedTargets, 1);
 });
 
 test('recharge webhook runs once per provider without a Sub2API channel ID', async (t) => {
