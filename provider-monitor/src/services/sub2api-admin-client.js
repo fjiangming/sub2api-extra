@@ -50,12 +50,21 @@ function unwrapSub2Api(payload) {
 class Sub2ApiAdminClient {
   constructor(config) {
     this.config = config;
+    this.adminApiKey = String(config.sub2apiAdminApiKey || '').trim();
     this.cachedToken = null;
     this.runtimeToken = null;
     this.pendingLogin = null;
     this.pendingStepUpToken = null;
     this.tokenPromise = null;
     this.configuredTokenRejected = false;
+    this.configuredAdminApiKeyRejected = false;
+    this.adminApiKeyExportCapability = null;
+  }
+
+  setAdminApiKey(value, exportCapability = null) {
+    this.adminApiKey = String(value || '').trim();
+    this.configuredAdminApiKeyRejected = false;
+    this.adminApiKeyExportCapability = exportCapability;
   }
 
   setRuntimeToken(token, expiresAt = null) {
@@ -74,6 +83,13 @@ class Sub2ApiAdminClient {
   }
 
   authenticationStatus() {
+    if (this.adminApiKey && !this.configuredAdminApiKeyRejected) {
+      return {
+        available: true,
+        source: 'admin_api_key',
+        accountKeyExport: this.adminApiKeyExportCapability
+      };
+    }
     if (this.runtimeToken?.expiresAt > Date.now() + 1000) {
       return {
         available: true,
@@ -98,7 +114,19 @@ class Sub2ApiAdminClient {
     if (this.cachedToken?.refreshToken) return { available: true, source: 'configured_credentials' };
     if (this.config.adminEmail && this.config.adminPassword) return { available: true, source: 'configured_credentials' };
     if (this.configuredTokenRejected) return { available: false, source: 'configured_token', error: 'invalid' };
+    if (this.configuredAdminApiKeyRejected) {
+      return { available: false, source: 'admin_api_key', error: 'invalid' };
+    }
     return { available: false, source: 'missing' };
+  }
+
+  #adminApiKeyFor(endpoint, options, authenticated) {
+    if (!authenticated || String(options.accessToken || '').trim()) return null;
+    const explicit = String(options.adminApiKey || '').trim();
+    if (explicit) return explicit;
+    if (!String(endpoint || '').startsWith('/api/v1/admin/')) return null;
+    if (this.configuredAdminApiKeyRejected) return null;
+    return this.adminApiKey || null;
   }
 
   async adminToken(force = false) {
@@ -208,7 +236,8 @@ class Sub2ApiAdminClient {
     }
     const authenticated = options.authenticated !== false;
     const explicitAccessToken = String(options.accessToken || '').trim() || null;
-    const token = authenticated
+    const adminApiKey = this.#adminApiKeyFor(endpoint, options, authenticated);
+    const token = authenticated && !adminApiKey
       ? explicitAccessToken || await this.adminToken(Boolean(options.forceTokenRefresh))
       : null;
     const controller = new AbortController();
@@ -219,6 +248,7 @@ class Sub2ApiAdminClient {
         headers: {
           Accept: 'application/json',
           ...(options.body == null ? {} : { 'Content-Type': 'application/json' }),
+          ...(adminApiKey ? { 'x-api-key': adminApiKey } : {}),
           ...(token ? { Authorization: `Bearer ${token}` } : {})
         },
         body: options.body == null ? undefined : JSON.stringify(options.body),
@@ -239,6 +269,18 @@ class Sub2ApiAdminClient {
         };
       }
       if (!response.ok) {
+        if (
+          remoteErrorCode(payload) === 'STEP_UP_ADMIN_API_KEY_FORBIDDEN' &&
+          adminApiKey
+        ) {
+          this.adminApiKeyExportCapability = 'blocked_by_step_up';
+        }
+        if (
+          response.status === 401 && adminApiKey &&
+          adminApiKey === this.adminApiKey
+        ) {
+          this.configuredAdminApiKeyRejected = true;
+        }
         if (response.status === 401 && token && this.runtimeToken?.value === token) {
           this.clearRuntimeToken(token);
         }
@@ -252,7 +294,7 @@ class Sub2ApiAdminClient {
             expiresAt: 0
           };
         }
-        if (response.status === 401 && authenticated && !explicitAccessToken && !options.forceTokenRefresh) {
+        if (response.status === 401 && authenticated && !adminApiKey && !explicitAccessToken && !options.forceTokenRefresh) {
           if (this.cachedToken?.refreshToken || (this.config.adminEmail && this.config.adminPassword)) {
             return this.request(endpoint, { ...options, forceTokenRefresh: true });
           }
@@ -265,6 +307,9 @@ class Sub2ApiAdminClient {
             remoteCode: remoteErrorCode(payload)
           }
         });
+      }
+      if (adminApiKey && endpoint === '/api/v1/admin/accounts/data') {
+        this.adminApiKeyExportCapability = 'verified';
       }
       return payload;
     } catch (error) {
@@ -280,8 +325,233 @@ class Sub2ApiAdminClient {
     }
   }
 
+  async sse(endpoint, options = {}) {
+    const url = new URL(endpoint, `${this.config.sub2apiBaseUrl}/`);
+    for (const [key, value] of Object.entries(options.query || {})) {
+      if (value != null && value !== '') url.searchParams.set(key, String(value));
+    }
+    const explicitAccessToken = String(options.accessToken || '').trim() || null;
+    const authenticated = options.authenticated !== false;
+    const adminApiKey = this.#adminApiKeyFor(endpoint, options, authenticated);
+    const token = authenticated && !adminApiKey
+      ? explicitAccessToken || await this.adminToken(Boolean(options.forceTokenRefresh))
+      : null;
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      options.timeoutMs || Math.max(this.config.queryTimeoutMs, 120000)
+    );
+    try {
+      const response = await fetch(url, {
+        method: options.method || 'GET',
+        headers: {
+          Accept: 'text/event-stream',
+          ...(options.body == null ? {} : { 'Content-Type': 'application/json' }),
+          ...(adminApiKey ? { 'x-api-key': adminApiKey } : {}),
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: options.body == null ? undefined : JSON.stringify(options.body),
+        redirect: 'error',
+        signal: controller.signal
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        let payload = null;
+        try {
+          payload = text ? JSON.parse(text) : null;
+        } catch {
+          payload = null;
+        }
+        if (
+          remoteErrorCode(payload) === 'STEP_UP_ADMIN_API_KEY_FORBIDDEN' &&
+          adminApiKey
+        ) {
+          this.adminApiKeyExportCapability = 'blocked_by_step_up';
+        }
+        if (
+          response.status === 401 && adminApiKey &&
+          adminApiKey === this.adminApiKey
+        ) {
+          this.configuredAdminApiKeyRejected = true;
+        }
+        if (response.status === 401 && token && this.runtimeToken?.value === token) {
+          this.clearRuntimeToken(token);
+        }
+        if (response.status === 401 && token && token === this.config.sub2apiAdminToken) {
+          this.configuredTokenRejected = true;
+        }
+        if (response.status === 401 && token && this.cachedToken?.value === token) {
+          this.cachedToken = { ...this.cachedToken, value: null, expiresAt: 0 };
+        }
+        if (response.status === 401 && authenticated && !adminApiKey && !explicitAccessToken && !options.forceTokenRefresh) {
+          if (this.cachedToken?.refreshToken || (this.config.adminEmail && this.config.adminPassword)) {
+            return this.sse(endpoint, { ...options, forceTokenRefresh: true });
+          }
+        }
+        throw new AppError(
+          'SUB2API_REQUEST_FAILED',
+          remoteErrorMessage(payload, `Sub2API returned HTTP ${response.status}`),
+          {
+            status: response.status >= 500 ? 502 : response.status,
+            retryable: response.status === 429 || response.status >= 500,
+            details: {
+              remoteStatus: response.status,
+              remoteCode: remoteErrorCode(payload)
+            }
+          }
+        );
+      }
+      if (!response.body) {
+        throw new AppError('SCHEMA_MISMATCH', 'Sub2API did not return an SSE response body', {
+          status: 502
+        });
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let dataLines = [];
+      let totalBytes = 0;
+      let eventCount = 0;
+      const dispatch = async () => {
+        if (dataLines.length === 0) return;
+        const raw = dataLines.join('\n');
+        dataLines = [];
+        if (!raw || raw === '[DONE]') return;
+        let event;
+        try {
+          event = JSON.parse(raw);
+        } catch {
+          throw new AppError('SCHEMA_MISMATCH', 'Sub2API returned invalid SSE event data', {
+            status: 502
+          });
+        }
+        eventCount += 1;
+        if (options.onEvent) await options.onEvent(event);
+      };
+      const processLine = async (line) => {
+        const normalized = line.endsWith('\r') ? line.slice(0, -1) : line;
+        if (normalized === '') return dispatch();
+        if (normalized.startsWith('data:')) {
+          dataLines.push(normalized.slice(5).replace(/^\s/, ''));
+        }
+      };
+
+      for await (const chunk of response.body) {
+        totalBytes += chunk.byteLength;
+        if (totalBytes > this.config.maxResponseBytes) {
+          throw new AppError('RESPONSE_TOO_LARGE', 'Sub2API SSE response exceeded the configured size limit', {
+            status: 502
+          });
+        }
+        buffer += decoder.decode(chunk, { stream: true });
+        let newline = buffer.indexOf('\n');
+        while (newline >= 0) {
+          await processLine(buffer.slice(0, newline));
+          buffer = buffer.slice(newline + 1);
+          newline = buffer.indexOf('\n');
+        }
+      }
+      buffer += decoder.decode();
+      if (buffer) await processLine(buffer);
+      await dispatch();
+      return { eventCount, bytes: totalBytes };
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw new AppError('TIMEOUT', 'Sub2API SSE request timed out', {
+          status: 504,
+          retryable: true
+        });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   async data(endpoint, options = {}) {
     return unwrapSub2Api(await this.request(endpoint, options));
+  }
+
+  async verifyAdminApiKey(value) {
+    const adminApiKey = String(value || '').trim();
+    if (!adminApiKey) {
+      throw new AppError(
+        'SUB2API_ADMIN_API_KEY_REQUIRED',
+        'Sub2API administrator API Key is required',
+        { status: 400 }
+      );
+    }
+    try {
+      const groupsPayload = await this.data('/api/v1/admin/groups/all', {
+        query: { include_inactive: true },
+        adminApiKey
+      });
+      const groups = Array.isArray(groupsPayload)
+        ? groupsPayload
+        : groupsPayload?.items || groupsPayload?.groups;
+      if (!Array.isArray(groups)) {
+        throw new AppError('SCHEMA_MISMATCH', 'Sub2API group response did not contain an array', {
+          status: 502,
+          details: { endpoint: '/api/v1/admin/groups/all' }
+        });
+      }
+
+      const accountResult = await this.listAll('/api/v1/admin/accounts', {}, {
+        pageSize: 1,
+        maxItems: 1,
+        adminApiKey
+      });
+      const accountId = accountResult.items[0]?.id ?? accountResult.items[0]?.account_id ?? null;
+      const exportPayload = await this.data('/api/v1/admin/accounts/data', {
+        query: accountId == null
+          ? {
+              include_proxies: false,
+              search: '__provider_monitor_admin_api_key_capability_probe__'
+            }
+          : { include_proxies: false, ids: accountId },
+        adminApiKey
+      });
+      const exportedAccounts = Array.isArray(exportPayload)
+        ? exportPayload
+        : exportPayload?.accounts;
+      if (!Array.isArray(exportedAccounts)) {
+        throw new AppError('SCHEMA_MISMATCH', 'Sub2API account export did not contain an accounts array', {
+          status: 502,
+          details: { endpoint: '/api/v1/admin/accounts/data' }
+        });
+      }
+      this.adminApiKeyExportCapability = 'verified';
+      return {
+        verified: true,
+        verifiedAt: new Date().toISOString(),
+        capabilities: {
+          adminGroups: true,
+          adminAccounts: true,
+          accountKeyExport: true
+        },
+        groupCount: groups.length,
+        sampledAccount: accountId != null
+      };
+    } catch (error) {
+      const remoteCode = String(error?.details?.remoteCode || '');
+      if (remoteCode === 'STEP_UP_ADMIN_API_KEY_FORBIDDEN') {
+        this.adminApiKeyExportCapability = 'blocked_by_step_up';
+        throw new AppError(
+          'SUB2API_ADMIN_API_KEY_EXPORT_FORBIDDEN',
+          'Sub2API blocks administrator API Keys from account Key export while sensitive-operation step-up 2FA is enabled',
+          {
+            status: 409,
+            details: {
+              endpoint: '/api/v1/admin/accounts/data',
+              remoteCode,
+              prerequisite: 'disable_sub2api_step_up_enabled_with_a_totp_verified_admin_session'
+            },
+            cause: error
+          }
+        );
+      }
+      throw error;
+    }
   }
 
   async verifyStepUp(accessToken, code) {
@@ -382,7 +652,8 @@ class Sub2ApiAdminClient {
     while (items.length < maxItems) {
       const data = await this.data(endpoint, {
         query: { ...query, page, page_size: pageSize },
-        ...(options.accessToken ? { accessToken: options.accessToken } : {})
+        ...(options.accessToken ? { accessToken: options.accessToken } : {}),
+        ...(options.adminApiKey ? { adminApiKey: options.adminApiKey } : {})
       });
       if (!Array.isArray(data) && !Array.isArray(data?.items)) {
         throw new AppError('SCHEMA_MISMATCH', 'Sub2API list response did not contain an items array', {

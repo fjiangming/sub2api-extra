@@ -7,6 +7,7 @@ const { QueryService } = require('../src/services/query-service');
 const { AlertService, localizeLegacyAlertMessage } = require('../src/services/alert-service');
 const { NotificationService } = require('../src/services/notification-service');
 const { AutomationService } = require('../src/services/automation-service');
+const { AppError } = require('../src/errors');
 
 function insertSnapshot(db, connectionId, available, capturedAt = new Date().toISOString()) {
   db.prepare(`
@@ -82,7 +83,7 @@ test('alert remains acknowledged while matched and resolves after balance recove
   assert.equal(event.acknowledged_at, null);
 });
 
-test('provider balance thresholds create and recover independent built-in alerts', async (t) => {
+test('provider balance thresholds create, deduplicate, and recover independent built-in alerts', async (t) => {
   const context = createTestContext();
   t.after(() => context.cleanup());
   const providers = new ProviderRepository(context.db, context.config);
@@ -111,6 +112,10 @@ test('provider balance thresholds create and recover independent built-in alerts
   assert.equal(events[0].severity, 'warning');
   assert.equal(events[0].rule_id, null);
   assert.match(events[0].message, /触发1级余额告警/);
+  context.db.prepare("UPDATE alert_events SET triggered_at = ? WHERE connection_id = ? AND status = 'active'")
+    .run(new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(), provider.id);
+  await alerts.evaluateConnection(provider.id);
+  assert.equal(delivered.length, 1);
   assert.equal(queries.summary().accounts.find((account) => account.connectionId === provider.id).status, 'warning');
 
   insertSnapshot(context.db, provider.id, 2, new Date(capturedAt + 1000).toISOString());
@@ -120,6 +125,10 @@ test('provider balance thresholds create and recover independent built-in alerts
   assert.deepEqual(events.map((event) => event.details.alertLevel).sort(), [1, 2]);
   assert.equal(events.find((event) => event.details.alertLevel === 2).severity, 'error');
   assert.match(events.find((event) => event.details.alertLevel === 2).message, /触发2级余额告警/);
+  assert.equal(delivered.length, 2);
+  context.db.prepare("UPDATE alert_events SET triggered_at = ? WHERE connection_id = ? AND status = 'active'")
+    .run(new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(), provider.id);
+  await alerts.evaluateConnection(provider.id);
   assert.equal(delivered.length, 2);
   assert.equal(queries.summary().accounts.find((account) => account.connectionId === provider.id).status, 'error');
 
@@ -350,6 +359,56 @@ test('scheduled automation rebuilds all mappings once per configured interval', 
     .run(new Date(Date.now() - 61 * 60000).toISOString(), rule.id);
   assert.equal((await automation.evaluateScheduled()).length, 1);
   assert.equal(calls.length, 2);
+});
+
+test('failed mapping automation records a structured and redacted failure detail', async (t) => {
+  const context = createTestContext({ PROVIDER_MONITOR_AUTOMATION_ENABLED: 'true' });
+  t.after(() => context.cleanup());
+  const automation = new AutomationService({
+    db: context.db,
+    config: context.config,
+    sub2api: {},
+    mappings: {
+      async rebuildAutoMappings() {
+        throw new AppError(
+          'SUB2API_STEP_UP_REQUIRED',
+          'Sub2API requires recent TOTP verification',
+          {
+            status: 403,
+            details: {
+              operation: 'rebuild_auto_mappings',
+              stage: 'discover_candidates',
+              endpoint: '/api/v1/admin/accounts/data',
+              remoteCode: 'STEP_UP_REQUIRED',
+              accessToken: 'session-secret-that-must-not-leak'
+            }
+          }
+        );
+      }
+    }
+  });
+  automation.saveRule({
+    name: 'Refresh mappings', enabled: true, dryRun: false, triggerType: 'scheduled',
+    connectionId: null,
+    config: { action: 'rebuild_sub2api_mappings', scheduleIntervalMinutes: 60 }
+  });
+
+  await assert.rejects(
+    () => automation.evaluateScheduled(),
+    (error) => error.code === 'SUB2API_STEP_UP_REQUIRED'
+  );
+  const [action] = automation.listActions();
+  assert.equal(action.status, 'failed');
+  assert.equal(action.before.mappingCount, 0);
+  assert.equal(action.error.code, 'SUB2API_STEP_UP_REQUIRED');
+  assert.equal(action.error.stage, 'discover_candidates');
+  assert.equal(action.error.status, 403);
+  assert.equal(action.error.retryable, false);
+  assert.equal(action.error.details.endpoint, '/api/v1/admin/accounts/data');
+  assert.equal(action.error.details.remoteCode, 'STEP_UP_REQUIRED');
+  assert.equal(action.error.details.accessToken, 'sess...leak');
+  assert.equal(action.errorMessage, 'Sub2API requires recent TOTP verification');
+  assert.equal(action.error_details_json, undefined);
 });
 
 test('scheduled mapping workflow disables each account whose refreshed composite-rate difference is below zero', async (t) => {

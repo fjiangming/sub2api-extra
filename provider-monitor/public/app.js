@@ -49,6 +49,13 @@ const state = {
   sub2apiGroups: [],
   sub2apiMonitors: [],
   sub2apiStatus: null,
+  accountMonitor: null,
+  accountMonitorDetail: null,
+  accountMonitorSelected: new Set(),
+  accountMonitorFilters: {
+    platform: '', status: '', search: '', days: '7', page: 1,
+    pageSize: 50, sortBy: 'qualityScore', order: 'desc'
+  },
   integrationGroups: [],
   integrationExpandedGroups: new Set(),
   autoMappingPreview: null,
@@ -76,6 +83,7 @@ const VIEW_META = {
   trends: ['余额趋势', '历史快照、消耗速度与可用天数'],
   costs: ['价格比较', '模型价格、分组倍率与供应商推荐'],
   risks: ['健康与漂移', 'Key 检测、资产变化与异常识别'],
+  'account-monitor': ['账号质量', '真实请求性能、缓存效率与主动能力检测'],
   integrations: ['Sub2API 联动', '分组映射、签到、对账与健康联动'],
   automation: ['规则与自动化', '告警事件、通知与受控动作'],
   tests: ['测试中心', '模拟通知、充值入口与移动端跳转'],
@@ -519,6 +527,7 @@ async function navigate(view) {
     if (view === 'trends') await renderTrends();
     if (view === 'costs') await renderCosts();
     if (view === 'risks') await renderRisks();
+    if (view === 'account-monitor') await renderAccountMonitor();
     if (view === 'integrations') await renderIntegrations();
     if (view === 'automation') await renderAutomation();
     if (view === 'tests') await renderTests();
@@ -860,6 +869,401 @@ function paintRiskHealth() {
   icons();
 }
 
+function accountMonitorPlatformLabel(platform) {
+  return ({
+    openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', grok: 'Grok',
+    antigravity: 'Antigravity'
+  })[platform] || platform || '未知';
+}
+
+function accountMonitorStatusLabel(status) {
+  return ({
+    active: '活动', error: '错误', rate_limited: '限流', disabled: '停用',
+    inactive: '停用', unknown: '未知'
+  })[status] || status || '未知';
+}
+
+function accountProbeSuiteLabel(suite) {
+  return ({
+    capability_v1: '能力题集 v1',
+    capability_v2: '动态能力题集 v2',
+    capability_v2_unexecuted: '能力题未执行',
+    connectivity_v1: '连通性'
+  })[suite] || suite || '未知检测';
+}
+
+function formatMilliseconds(value) {
+  const number = Number(value);
+  if (value == null || !Number.isFinite(number)) return '-';
+  if (number < 1000) return `${formatNumber(number, 0)} ms`;
+  return `${formatNumber(number / 1000, number < 10000 ? 2 : 1)} s`;
+}
+
+function formatPercent(value) {
+  return value == null || !Number.isFinite(Number(value))
+    ? '-'
+    : `${formatNumber(value, 1)}%`;
+}
+
+function formatPreciseMoney(value, currency = 'USD') {
+  const number = Number(value);
+  if (value == null || !Number.isFinite(number)) return '-';
+  try {
+    return new Intl.NumberFormat('zh-CN', {
+      style: 'currency',
+      currency: currency || 'USD',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 6
+    }).format(number);
+  } catch {
+    return `${formatNumber(number, 6)} ${currency || ''}`.trim();
+  }
+}
+
+function accountUpstreamSourceLabel(source) {
+  return ({
+    provider_request_logs: '逐请求日志',
+    provider_usage_snapshots: '累计用量',
+    provider_key_snapshots: 'Key 快照',
+    unavailable: '暂无指标'
+  })[source] || source || '暂无指标';
+}
+
+function accountComparisonReasonLabel(reason) {
+  return ({
+    no_enabled_mapping: '未映射供应商',
+    multiple_upstreams: '多个上游，需分别核算',
+    mapping_key_missing: '映射未绑定 Key',
+    provider_cost_unavailable: '供应商未提供费用数据',
+    provider_counter_unchanged: '上游计数器未变化',
+    shared_provider_key: 'Key 被多个账号共享',
+    currency_mismatch: '币种不一致',
+    sub2api_cost_unavailable: '基座日志缺少费用',
+    request_logs_truncated: '上游日志采集不完整'
+  })[reason] || reason || '暂不可比';
+}
+
+function accountComparisonMetric(baseValue, upstreamValue, formatter, options = {}) {
+  const base = formatter(baseValue);
+  const upstream = formatter(upstreamValue);
+  const upstreamTitle = options.upstreamTitle || (upstream === '-' ? '供应商未提供该指标' : '供应商上游');
+  return `<div class="account-comparison-metric"><span><small class="source-base">基座</small><strong>${escapeHtml(base)}</strong></span><span title="${escapeHtml(upstreamTitle)}"><small class="source-upstream">上游</small><strong class="${upstream === '-' ? 'metric-empty' : ''}">${escapeHtml(upstream)}</strong></span></div>`;
+}
+
+function accountTtftComparison(base, upstream) {
+  const line = (metrics, source, className) => {
+    const p50 = formatMilliseconds(metrics?.ttftP50Ms);
+    const p95 = formatMilliseconds(metrics?.ttftP95Ms);
+    return `<span><small class="${className}">${source}</small><strong>${escapeHtml(p95)}</strong><em>P50 ${escapeHtml(p50)}</em></span>`;
+  };
+  return `<div class="account-comparison-metric account-ttft-comparison">${line(base, '基座', 'source-base')}${line(upstream, '上游', 'source-upstream')}</div>`;
+}
+
+function accountProviderMarkup(comparison = {}) {
+  if (comparison.status === 'unmapped') {
+    return `<div class="account-provider-cell">${badge('info', '未映射')}<small>Sub2API 联动中配置</small></div>`;
+  }
+  if (comparison.status === 'multiple_upstreams') {
+    return `<div class="account-provider-cell">${badge('warning', `${comparison.targets?.length || 0} 个上游`)}<small>费用需分别核算</small></div>`;
+  }
+  const provider = comparison.provider || {};
+  const source = accountUpstreamSourceLabel(comparison.source);
+  const sourceStatus = comparison.coverage?.stale ? 'stale' : comparison.source === 'unavailable' ? 'info' : 'enabled';
+  return `<div class="account-provider-cell"><strong>${escapeHtml(provider.name || '-')}</strong><small>${escapeHtml(provider.keyName || '未绑定 Key')}</small>${badge(sourceStatus, source)}</div>`;
+}
+
+function accountCostMarkup(metrics, comparison = {}) {
+  const cost = comparison.cost || {};
+  const currency = cost.currency || 'USD';
+  const baseCost = cost.baseCost == null ? metrics.actualCost : cost.baseCost;
+  const upstreamCost = cost.upstreamCost;
+  let delta = `<span class="metric-empty">${escapeHtml(accountComparisonReasonLabel(cost.reason))}</span>`;
+  if (cost.comparable) {
+    const difference = Math.abs(Number(cost.differenceAmount));
+    const ratio = cost.differenceRatio == null ? '' : ` · ${formatNumber(Math.abs(cost.differenceRatio) * 100, 1)}%`;
+    const label = cost.moreExpensive === 'same'
+      ? '费用一致'
+      : cost.moreExpensive === 'sub2api' ? '基座更贵' : '上游更贵';
+    const tone = cost.moreExpensive === 'same' ? 'healthy' : 'warning';
+    delta = `<span class="cost-delta ${tone}">${escapeHtml(label)} ${escapeHtml(formatPreciseMoney(difference, currency))}${escapeHtml(ratio)}</span>`;
+  }
+  return `<div class="account-cost-cell"><div class="account-comparison-metric"><span><small class="source-base">基座</small><strong>${escapeHtml(formatPreciseMoney(baseCost, currency))}</strong></span><span><small class="source-upstream">上游</small><strong class="${upstreamCost == null ? 'metric-empty' : ''}">${escapeHtml(formatPreciseMoney(upstreamCost, currency))}</strong></span></div>${delta}</div>`;
+}
+
+function accountProbeTransportLabel(details = {}) {
+  return details.transport === 'direct_api_key' ? '直连上游' : 'Sub2API 检测';
+}
+
+function accountMetricDelta(baseValue, upstreamValue, formatter) {
+  const base = Number(baseValue);
+  const upstream = Number(upstreamValue);
+  if (baseValue == null || upstreamValue == null || !Number.isFinite(base) || !Number.isFinite(upstream)) return '-';
+  const difference = upstream - base;
+  if (Math.abs(difference) < 1e-9) return '一致';
+  return `${difference > 0 ? '+' : '-'}${formatter(Math.abs(difference))}`;
+}
+
+function accountMetricRuleHeader(label, rule, title) {
+  return `<span class="metric-rule-trigger"><span>${escapeHtml(label)}</span><button class="metric-rule-icon" type="button" data-action="open-account-metric-rules" data-rule-target="metric-rule-${escapeHtml(rule)}" title="${escapeHtml(title)}" aria-label="查看${escapeHtml(label)}计算规则"><i data-lucide="circle-help"></i></button></span>`;
+}
+
+function accountQualityMarkup(score, quality = {}) {
+  if (score == null) return '<span class="metric-empty">-</span>';
+  const status = score >= 85 ? 'healthy' : score >= 65 ? 'warning' : 'failed';
+  const scoreBand = Math.max(0, Math.min(100, Math.round(Number(score) / 10) * 10));
+  const coverage = (quality.coverage || []).map((item) => ({
+    latency: '延迟', reliability: '可用性', capability: '能力'
+  })[item] || item).join('、');
+  return `<div class="quality-score" title="已计入：${escapeHtml(coverage || '暂无')}"><strong class="${status}">${formatNumber(score, 0)}</strong><span class="quality-score-track"><span class="${status} score-width-${scoreBand}"></span></span></div>`;
+}
+
+function accountMonitorQuery() {
+  const filters = state.accountMonitorFilters;
+  return new URLSearchParams(Object.entries({
+    platform: filters.platform,
+    status: filters.status,
+    search: filters.search,
+    days: filters.days,
+    page: filters.page,
+    pageSize: filters.pageSize,
+    sortBy: filters.sortBy,
+    order: filters.order
+  }).filter(([, value]) => value !== '' && value != null));
+}
+
+function accountMonitorPagination(pagination) {
+  if (!pagination || pagination.total <= 0) return '';
+  const start = (pagination.page - 1) * pagination.pageSize + 1;
+  const end = Math.min(pagination.total, pagination.page * pagination.pageSize);
+  return `<footer class="table-pagination"><span class="pagination-summary">第 ${start}–${end} 条，共 ${pagination.total} 条</span><div class="pagination-actions"><button class="icon-button small" data-action="account-monitor-page" data-page="${pagination.page - 1}" title="上一页" aria-label="上一页" ${pagination.page <= 1 ? 'disabled' : ''}><i data-lucide="chevron-left"></i></button><span class="pagination-position">${pagination.page} / ${pagination.totalPages}</span><button class="icon-button small" data-action="account-monitor-page" data-page="${pagination.page + 1}" title="下一页" aria-label="下一页" ${pagination.page >= pagination.totalPages ? 'disabled' : ''}><i data-lucide="chevron-right"></i></button></div></footer>`;
+}
+
+function updateAccountMonitorSelectionAction() {
+  const button = $('[data-action="detect-selected-accounts"]');
+  if (!button) return;
+  const count = state.accountMonitorSelected.size;
+  button.disabled = count === 0;
+  const label = $('span', button);
+  if (label) label.textContent = count ? `检测所选 ${count}` : '检测所选';
+  const pageSelection = $('#account-monitor-select-page');
+  const visible = $$('[data-account-monitor-select]');
+  if (pageSelection && visible.length > 0) {
+    const checked = visible.filter((item) => item.checked).length;
+    pageSelection.checked = checked === visible.length;
+    pageSelection.indeterminate = checked > 0 && checked < visible.length;
+  }
+}
+
+async function renderAccountMonitor() {
+  const result = await api(`/api/account-monitor/accounts?${accountMonitorQuery()}`);
+  state.accountMonitor = result;
+  state.accountMonitorFilters.page = result.pagination.page;
+  const visibleIds = new Set(result.items.map((item) => String(item.accountId)));
+  const filters = state.accountMonitorFilters;
+  setTopActions('<button class="button" data-action="open-account-metric-rules" title="查看指标计算规则" aria-label="查看指标计算规则"><i data-lucide="circle-help"></i><span>指标口径</span></button><button class="button" data-action="open-account-monitor-settings" title="检测设置" aria-label="检测设置"><i data-lucide="settings-2"></i><span>检测设置</span></button><button class="button" data-action="sync-account-monitor" title="同步基座和供应商日志" aria-label="同步基座和供应商日志"><i data-lucide="refresh-cw"></i><span>同步双源</span></button><button class="button primary" data-action="detect-selected-accounts" title="检测所选账号" aria-label="检测所选账号" disabled><i data-lucide="flask-conical"></i><span>检测所选</span></button>');
+  const platformOptions = (result.platforms || []).map((platform) =>
+    `<option value="${escapeHtml(platform)}" ${filters.platform === platform ? 'selected' : ''}>${escapeHtml(accountMonitorPlatformLabel(platform))}</option>`
+  ).join('');
+  const rows = result.items.map((item) => {
+    const metrics = item.metrics;
+    const comparison = item.comparison || {};
+    const upstream = comparison.upstream;
+    const selected = state.accountMonitorSelected.has(String(item.accountId));
+    const probeStatus = metrics.lastProbeStatus
+      ? `${badge(metrics.lastProbeStatus)}<small>${escapeHtml(timeAgo(metrics.lastProbeAt))}</small>`
+      : '<span class="metric-empty">-</span>';
+    const capability = metrics.intelligenceScore == null
+      ? '<span class="metric-empty" title="暂无有效能力题结果：平台不支持，或当前 Sub2API 基座未转发自定义题目">未覆盖</span>'
+      : `<strong>${formatNumber(metrics.intelligenceScore, 0)}</strong><small class="table-metric-note">遵循 ${formatNumber(metrics.instructionScore, 0)}</small>`;
+    return `<tr data-account-monitor-row="${escapeHtml(item.accountId)}">
+      <td class="selection-cell"><input type="checkbox" data-account-monitor-select="${escapeHtml(item.accountId)}" aria-label="选择 ${escapeHtml(item.name)}" ${selected ? 'checked' : ''}></td>
+      <td class="primary-cell"><strong>${escapeHtml(item.name)}</strong><small>#${escapeHtml(item.accountId)} · ${escapeHtml(item.accountType)}</small></td>
+      <td>${badge(item.status, accountMonitorStatusLabel(item.status))}</td>
+      <td>${escapeHtml(accountMonitorPlatformLabel(item.platform))}</td>
+      <td>${accountProviderMarkup(comparison)}</td>
+      <td class="numeric">${accountComparisonMetric(metrics.requestCount, upstream?.requestCount, (value) => formatNumber(value, 0))}</td>
+      <td class="numeric">${accountComparisonMetric(metrics.cacheRate, upstream?.cacheRate, formatPercent)}</td>
+      <td class="numeric">${accountTtftComparison(metrics, upstream)}</td>
+      <td class="numeric">${accountComparisonMetric(metrics.durationP95Ms, upstream?.durationP95Ms, formatMilliseconds)}</td>
+      <td class="numeric">${accountComparisonMetric(metrics.outputTokensPerSecond, upstream?.outputTokensPerSecond, (value) => value == null ? '-' : `${formatNumber(value, 1)} tok/s`)}</td>
+      <td class="numeric">${accountCostMarkup(metrics, comparison)}</td>
+      <td class="numeric"><strong>${formatPercent(metrics.probeSuccessRate)}</strong><small class="table-metric-note">${formatNumber(metrics.probeCount, 0)} 次</small></td>
+      <td class="numeric">${capability}</td>
+      <td class="numeric">${accountQualityMarkup(metrics.qualityScore, metrics.quality)}</td>
+      <td class="probe-status-cell">${probeStatus}</td>
+      <td class="actions-cell"><button class="icon-button small" data-action="view-account-quality" data-id="${escapeHtml(item.accountId)}" title="查看趋势" aria-label="查看趋势"><i data-lucide="chart-no-axes-combined"></i></button><button class="icon-button small" data-action="detect-account" data-id="${escapeHtml(item.accountId)}" title="立即检测" aria-label="立即检测"><i data-lucide="flask-conical"></i></button></td>
+    </tr>`;
+  }).join('');
+  const summary = result.summary;
+  const monitorState = result.state || {};
+  const tableContent = rows
+    ? `<table><thead><tr><th class="selection-cell"><input type="checkbox" id="account-monitor-select-page" aria-label="选择当前页全部账号"></th><th>账号</th><th>状态</th><th>平台</th><th>供应商上游</th><th class="numeric">${accountMetricRuleHeader('请求数', 'requests', '基座日志与供应商上游日志或累计用量的请求数')}</th><th class="numeric">${accountMetricRuleHeader('缓存读取率', 'cache', '基座与供应商各自日志中的缓存读取 Token 比例')}</th><th class="numeric">${accountMetricRuleHeader('首字 P95', 'ttft', '基座与供应商有效流式首字样本的 95 分位数')}</th><th class="numeric">总耗时 P95</th><th class="numeric">输出速度</th><th class="numeric">${accountMetricRuleHeader('费用对比', 'cost', '同一映射 Key、币种与快照时间段内的基座和供应商费用')}</th><th class="numeric">${accountMetricRuleHeader('检测通过率', 'probe', '成功主动检测占最近检测样本的比例')}</th><th class="numeric">${accountMetricRuleHeader('能力分 / 遵循', 'capability', '动态五维能力题集与格式遵循得分')}</th><th class="numeric">${accountMetricRuleHeader('质量分', 'quality', '延迟、检测通过率与能力分的加权结果')}</th><th>最近检测</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    : emptyState('brain-circuit', '暂无账号质量数据', '同步 Sub2API 账号与请求日志后显示');
+  $('#main-content').innerHTML = `
+      <section class="base-instance-bar account-monitor-source"><div><span class="status-dot ${monitorState.lastSyncStatus === 'failed' ? 'error' : monitorState.lastLogSyncAt ? 'healthy' : 'warning'}"></span><strong>Sub2API 基座 / 供应商上游</strong><small>基座 ${escapeHtml(timeAgo(monitorState.lastLogSyncAt))} · 上游 ${escapeHtml(timeAgo(summary.supplierLastSyncAt))}${monitorState.lastSyncSummary?.usageTruncated ? ' · 基座部分日期达到采集上限' : ''}</small></div><div class="status-summary">${badge(result.settings.syncEnabled ? 'enabled' : 'info', result.settings.syncEnabled ? result.settings.syncIntervalMinutes + ' 分钟双源同步' : '仅手动同步')}${badge(result.settings.probeEnabled ? 'enabled' : 'info', result.settings.probeEnabled ? result.settings.probeIntervalMinutes + ' 分钟检测' : '定时检测关闭')}</div></section>
+    <div class="stats-grid account-quality-stats">
+      <div class="stat"><span class="stat-label"><i data-lucide="users-round"></i>账号映射</span><strong class="stat-value">${formatNumber(summary.mappedAccountCount, 0)} / ${formatNumber(summary.accountCount, 0)}</strong><span class="stat-detail">${summary.platformCount} 个平台</span></div>
+      <div class="stat"><span class="stat-label"><i data-lucide="radio-tower"></i>基座请求</span><strong class="stat-value">${formatNumber(summary.requestCount, 0)}</strong><span class="stat-detail">缓存读取 ${formatPercent(summary.cacheRate)} · ${summary.days} 天</span></div>
+      <div class="stat"><span class="stat-label"><i data-lucide="database-zap"></i>上游逐请求覆盖</span><strong class="stat-value">${formatNumber(summary.supplierLogAccountCount, 0)}</strong><span class="stat-detail">其余账号使用累计用量或 Key 快照</span></div>
+      <div class="stat"><span class="stat-label"><i data-lucide="scale"></i>费用可比账号</span><strong class="stat-value">${formatNumber(summary.comparableCostAccountCount, 0)}</strong><span class="stat-detail">主动检测通过 ${formatPercent(summary.probeSuccessRate)}</span></div>
+    </div>
+    <section class="section">
+      <div class="filter-bar account-monitor-filters">
+        <label class="search-box"><i data-lucide="search"></i><input id="account-monitor-search" type="search" value="${escapeHtml(filters.search)}" placeholder="搜索账号名称或 ID" aria-label="搜索账号"></label>
+        <select id="account-monitor-platform" aria-label="平台"><option value="">全部平台</option>${platformOptions}</select>
+        <select id="account-monitor-status" aria-label="账号状态"><option value="">全部状态</option><option value="active" ${filters.status === 'active' ? 'selected' : ''}>活动</option><option value="error" ${filters.status === 'error' ? 'selected' : ''}>错误</option><option value="rate_limited" ${filters.status === 'rate_limited' ? 'selected' : ''}>限流</option></select>
+        <select id="account-monitor-days" aria-label="观察窗口"><option value="1" ${filters.days === '1' ? 'selected' : ''}>24 小时</option><option value="7" ${filters.days === '7' ? 'selected' : ''}>7 天</option><option value="30" ${filters.days === '30' ? 'selected' : ''}>30 天</option><option value="90" ${filters.days === '90' ? 'selected' : ''}>90 天</option></select>
+        <select id="account-monitor-sort" aria-label="排序"><option value="qualityScore" ${filters.sortBy === 'qualityScore' ? 'selected' : ''}>质量分</option><option value="costDifference" ${filters.sortBy === 'costDifference' ? 'selected' : ''}>费用差额</option><option value="ttftP95Ms" ${filters.sortBy === 'ttftP95Ms' ? 'selected' : ''}>首字 P95</option><option value="cacheRate" ${filters.sortBy === 'cacheRate' ? 'selected' : ''}>缓存读取率</option><option value="probeSuccessRate" ${filters.sortBy === 'probeSuccessRate' ? 'selected' : ''}>检测通过率</option><option value="intelligenceScore" ${filters.sortBy === 'intelligenceScore' ? 'selected' : ''}>能力分</option><option value="requestCount" ${filters.sortBy === 'requestCount' ? 'selected' : ''}>请求数</option></select>
+      </div>
+      <div class="table-wrap account-quality-table">${tableContent}</div>
+      ${accountMonitorPagination(result.pagination)}
+    </section>
+    <section class="section" id="account-monitor-detail"></section>`;
+  updateAccountMonitorSelectionAction();
+  if (state.accountMonitorDetail && visibleIds.has(String(state.accountMonitorDetail.account.accountId))) {
+    paintAccountMonitorDetail(state.accountMonitorDetail);
+  }
+  icons();
+}
+
+async function loadAccountMonitorDetail(accountId) {
+  const detail = await api(`/api/account-monitor/accounts/${encodeURIComponent(accountId)}?days=${encodeURIComponent(state.accountMonitorFilters.days)}`);
+  state.accountMonitorDetail = detail;
+  paintAccountMonitorDetail(detail);
+}
+
+function paintAccountMonitorDetail(detail) {
+  const root = $('#account-monitor-detail');
+  if (!root || !detail) return;
+  const metrics = detail.metrics;
+  const comparison = detail.comparison || {};
+  const upstream = comparison.upstream || {};
+  const cost = comparison.cost || {};
+  const comparisonRows = [
+    ['请求数', formatNumber(metrics.requestCount, 0), formatNumber(upstream.requestCount, 0), accountMetricDelta(metrics.requestCount, upstream.requestCount, (value) => formatNumber(value, 0))],
+    ['缓存读取率', formatPercent(metrics.cacheRate), formatPercent(upstream.cacheRate), accountMetricDelta(metrics.cacheRate, upstream.cacheRate, (value) => `${formatNumber(value, 1)} 个百分点`)],
+    ['首字 P95', formatMilliseconds(metrics.ttftP95Ms), formatMilliseconds(upstream.ttftP95Ms), accountMetricDelta(metrics.ttftP95Ms, upstream.ttftP95Ms, formatMilliseconds)],
+    ['总耗时 P95', formatMilliseconds(metrics.durationP95Ms), formatMilliseconds(upstream.durationP95Ms), accountMetricDelta(metrics.durationP95Ms, upstream.durationP95Ms, formatMilliseconds)],
+    ['输出速度', metrics.outputTokensPerSecond == null ? '-' : `${formatNumber(metrics.outputTokensPerSecond, 1)} tok/s`, upstream.outputTokensPerSecond == null ? '-' : `${formatNumber(upstream.outputTokensPerSecond, 1)} tok/s`, accountMetricDelta(metrics.outputTokensPerSecond, upstream.outputTokensPerSecond, (value) => `${formatNumber(value, 1)} tok/s`)]
+  ].map(([label, base, provider, delta]) => `<tr><td><strong>${escapeHtml(label)}</strong></td><td class="numeric">${escapeHtml(base)}</td><td class="numeric">${escapeHtml(provider)}</td><td class="numeric">${escapeHtml(delta)}</td></tr>`).join('');
+  const costCurrency = cost.currency || 'USD';
+  const costDelta = cost.comparable
+    ? cost.moreExpensive === 'same'
+      ? '一致'
+      : `${cost.moreExpensive === 'sub2api' ? '基座贵' : '上游贵'} ${formatPreciseMoney(Math.abs(cost.differenceAmount), costCurrency)}`
+    : accountComparisonReasonLabel(cost.reason);
+  const providerHeading = comparison.provider
+    ? `${escapeHtml(comparison.provider.name)} · ${escapeHtml(comparison.provider.keyName || '未绑定 Key')}`
+    : comparison.status === 'multiple_upstreams' ? `${comparison.targets?.length || 0} 个供应商上游` : '未映射供应商上游';
+  const coverageText = comparison.coverage?.from && comparison.coverage?.to
+    ? `${formatDate(comparison.coverage.from)} 至 ${formatDate(comparison.coverage.to)}`
+    : '暂无上游覆盖窗口';
+  const probeRows = detail.probes.slice(0, 12).map((probe) =>
+    `<tr><td>${badge(probe.status)}</td><td>${escapeHtml(accountProbeSuiteLabel(probe.suite))}</td><td>${badge(probe.details?.transport === 'direct_api_key' ? 'enabled' : 'info', accountProbeTransportLabel(probe.details))}</td><td>${escapeHtml(probe.model || '-')}</td><td class="numeric">${formatMilliseconds(probe.firstTokenMs)}</td><td class="numeric">${formatMilliseconds(probe.durationMs)}</td><td class="numeric">${probe.intelligenceScore == null ? '-' : formatNumber(probe.intelligenceScore, 0)}</td><td class="primary-cell"><strong>${escapeHtml(probe.responseExcerpt || probe.errorMessage || '-')}</strong><small>${formatDate(probe.completedAt)}</small></td></tr>`
+  ).join('');
+  const probeTable = probeRows
+    ? `<table><thead><tr><th>结果</th><th>检测</th><th>路径</th><th>模型</th><th class="numeric">首字</th><th class="numeric">总耗时</th><th class="numeric">能力</th><th>响应 / 错误</th></tr></thead><tbody>${probeRows}</tbody></table>`
+    : emptyState('flask-conical', '暂无主动检测', '选择该账号并执行检测');
+  root.innerHTML = `<div class="section-header"><h2>${escapeHtml(detail.account.name)}</h2><p>#${escapeHtml(detail.account.accountId)} · ${escapeHtml(accountMonitorPlatformLabel(detail.account.platform))} · 最近 ${detail.days} 天</p><div class="section-actions"><button class="icon-button small" data-action="close-account-quality" title="关闭详情" aria-label="关闭详情"><i data-lucide="x"></i></button></div></div>
+    <div class="account-detail-metrics"><div><span>质量分</span><strong>${metrics.qualityScore == null ? '-' : formatNumber(metrics.qualityScore, 0)}</strong></div><div><span>首字 P95</span><strong>${formatMilliseconds(metrics.ttftP95Ms)}</strong></div><div><span>缓存读取率</span><strong>${formatPercent(metrics.cacheRate)}</strong></div><div><span>输出速度</span><strong>${metrics.outputTokensPerSecond == null ? '-' : formatNumber(metrics.outputTokensPerSecond, 1) + ' tok/s'}</strong></div><div><span>检测通过率</span><strong>${formatPercent(metrics.probeSuccessRate)}</strong></div><div><span>能力得分</span><strong>${metrics.intelligenceScore == null ? '未覆盖' : formatNumber(metrics.intelligenceScore, 0)}</strong></div></div>
+    <section class="section account-comparison-detail"><div class="section-header"><div><h2>基座 / 上游对比</h2><p>${providerHeading} · ${escapeHtml(accountUpstreamSourceLabel(comparison.source))} · ${escapeHtml(coverageText)}</p></div>${comparison.coverage?.stale ? badge('stale', '上游数据陈旧') : comparison.status === 'mapped' ? badge('enabled', '已映射') : badge('warning', '不可归因')}</div><div class="table-wrap"><table><thead><tr><th>指标</th><th class="numeric">Sub2API 基座</th><th class="numeric">供应商上游</th><th class="numeric">上游 - 基座</th></tr></thead><tbody>${comparisonRows}<tr class="cost-comparison-row"><td><strong>消耗费用</strong><small>${escapeHtml(cost.source ? accountUpstreamSourceLabel(cost.source) : '暂无费用来源')}</small></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(cost.baseCost == null ? metrics.actualCost : cost.baseCost, costCurrency))}</strong></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(cost.upstreamCost, costCurrency))}</strong></td><td class="numeric"><strong>${escapeHtml(costDelta)}</strong></td></tr></tbody></table></div></section>
+    <div class="panel account-quality-chart-panel"><div class="panel-header"><h3>日趋势</h3></div><div class="chart" id="account-quality-chart"></div></div>
+    <section class="section"><div class="section-header"><h2>最近主动检测</h2></div><div class="table-wrap">${probeTable}</div></section>`;
+  state.chart?.dispose?.();
+  const chartRoot = $('#account-quality-chart');
+  if (chartRoot && window.echarts) {
+    const days = [...new Set([
+      ...detail.trends.map((item) => item.day),
+      ...(detail.upstreamTrends || []).map((item) => item.day)
+    ])].sort();
+    const baseByDay = new Map(detail.trends.map((item) => [item.day, item]));
+    const upstreamByDay = new Map((detail.upstreamTrends || []).map((item) => [item.day, item]));
+    const hasUpstreamTrends = upstreamByDay.size > 0;
+    const series = [
+      { name: '基座首字', type: 'line', showSymbol: false, data: days.map((day) => baseByDay.get(day)?.ttftMs ?? null) },
+      { name: '基座耗时', type: 'line', showSymbol: false, data: days.map((day) => baseByDay.get(day)?.durationMs ?? null) },
+      { name: '基座缓存', type: 'line', yAxisIndex: 1, showSymbol: false, data: days.map((day) => baseByDay.get(day)?.cacheRate ?? null) }
+    ];
+    if (hasUpstreamTrends) {
+      series.push(
+        { name: '上游首字', type: 'line', showSymbol: false, lineStyle: { type: 'dashed' }, data: days.map((day) => upstreamByDay.get(day)?.ttftMs ?? null) },
+        { name: '上游耗时', type: 'line', showSymbol: false, lineStyle: { type: 'dashed' }, data: days.map((day) => upstreamByDay.get(day)?.durationMs ?? null) },
+        { name: '上游缓存', type: 'line', yAxisIndex: 1, showSymbol: false, lineStyle: { type: 'dashed' }, data: days.map((day) => upstreamByDay.get(day)?.cacheRate ?? null) }
+      );
+    }
+    state.chart = echarts.init(chartRoot);
+    state.chart.setOption({
+      animationDuration: 250,
+      color: ['#147d64', '#2f6fba', '#b66a16', '#45a284', '#6794c8', '#d49a50'],
+      tooltip: { trigger: 'axis' },
+      legend: { top: 12, data: series.map((item) => item.name) },
+      grid: { left: 58, right: 58, top: 54, bottom: 42 },
+      xAxis: { type: 'category', data: days, boundaryGap: false },
+      yAxis: [
+        { type: 'value', name: 'ms', min: 0 },
+        { type: 'value', name: '%', min: 0, max: 100 }
+      ],
+      series
+    });
+  }
+  root.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  icons();
+}
+
+function openAccountMonitorSettings() {
+  const dialog = $('#account-monitor-settings-dialog');
+  const form = $('#account-monitor-settings-form');
+  const settings = state.accountMonitor?.settings;
+  if (!settings) return;
+  form.elements.syncEnabled.checked = settings.syncEnabled;
+  form.elements.syncIntervalMinutes.value = settings.syncIntervalMinutes;
+  form.elements.lookbackDays.value = settings.lookbackDays;
+  form.elements.sampleRetentionDays.value = settings.sampleRetentionDays;
+  form.elements.probeEnabled.checked = settings.probeEnabled;
+  form.elements.probeIntervalMinutes.value = settings.probeIntervalMinutes;
+  form.elements.probeConcurrency.value = settings.probeConcurrency;
+  const platforms = [...new Set([
+    ...(state.accountMonitor.platforms || []),
+    ...(settings.probePlatforms || []),
+    ...Object.keys(settings.probeModels || {})
+  ])].sort();
+  const selected = new Set(settings.probePlatforms?.length ? settings.probePlatforms : platforms);
+  const rows = platforms.map((platform) => `<div class="account-platform-setting"><label class="toggle-field"><input type="checkbox" data-probe-platform="${escapeHtml(platform)}" ${selected.has(platform) ? 'checked' : ''}><span>${escapeHtml(accountMonitorPlatformLabel(platform))}</span></label><label><span>检测模型</span><input data-probe-model="${escapeHtml(platform)}" value="${escapeHtml(settings.probeModels?.[platform] || '')}" placeholder="使用基座默认模型"></label></div>`).join('');
+  $('#account-monitor-platform-settings').innerHTML = `<span class="field-group-label">定时检测平台与模型</span><div class="account-platform-setting-list">${rows || '<span class="stat-detail">同步账号后显示平台</span>'}</div>`;
+  $('#account-monitor-settings-error').textContent = '';
+  dialog.showModal();
+  icons();
+}
+
+function openAccountMetricRules(targetId = '') {
+  const dialog = $('#account-metric-rules-dialog');
+  if (!dialog) return;
+  dialog.showModal();
+  const target = targetId ? document.getElementById(targetId) : null;
+  if (target) {
+    requestAnimationFrame(() => {
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    });
+  }
+  icons();
+}
+
+async function trackAccountMonitorJob(jobId, label) {
+  toast(`${label}已加入队列`);
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const job = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
+    if (job.status === 'failed') throw new Error(job.last_error || `${label}失败`);
+    if (job.status === 'succeeded') {
+      toast(`${label}完成`);
+      if (state.view === 'account-monitor') await renderAccountMonitor();
+      return;
+    }
+  }
+  toast(`${label}仍在后台运行`);
+}
+
 function integrationDelta(comparison = {}) {
   const percent = Number(comparison.differenceRatio) * 100;
   if (comparison.differenceRatio == null || !Number.isFinite(percent)) return '-';
@@ -1093,6 +1497,7 @@ function autoMappingVerificationLabel(item) {
 }
 
 function autoMappingErrorMessage(error) {
+  if (error.code === 'SUB2API_ADMIN_API_KEY_EXPORT_FORBIDDEN') return 'Sub2API 已开启敏感操作 step-up 2FA，管理员 API Key 无法导出账号 Key。请先用完成 TOTP 验证的 Sub2API 管理员会话关闭该开关。';
   if (error.code === 'SUB2API_STEP_UP_REQUIRED') return '当前 Sub2API 管理员会话尚未获得账号 Key 读取授权，请完成 TOTP 二次验证。';
   if (error.code === 'SUB2API_LOGIN_2FA_REQUIRED') return '配置的 Sub2API 管理员账号需要 TOTP 二次验证，请完成登录。';
   if (error.code === 'SUB2API_TOTP_NOT_ENABLED') return '当前 Sub2API 管理员未启用 TOTP，请先在 Sub2API 安全设置中启用。';
@@ -1219,9 +1624,10 @@ async function renderIntegrations() {
 }
 
 async function renderSettings() {
-  const [settings, backups, lifecycle, targets, remoteRuns, sub2apiStatus] = await Promise.all([
+  const [settings, backups, lifecycle, targets, remoteRuns, sub2apiStatus, adminApiKeyStatus] = await Promise.all([
     api('/api/settings'), api('/api/backups'), api('/api/credentials/lifecycle'),
-    api('/api/backup-targets'), api('/api/backup-runs?limit=100'), api('/api/sub2api/status')
+    api('/api/backup-targets'), api('/api/backup-runs?limit=100'), api('/api/sub2api/status'),
+    api('/api/sub2api/admin-api-key')
   ]);
   state.settings = settings;
   state.backupTargets = targets.items;
@@ -1234,6 +1640,17 @@ async function renderSettings() {
   const securityPanel = state.authentication?.passwordChangeSupported
     ? `<div class="section-header"><h2>管理员安全</h2></div><div class="panel"><div class="panel-body security-setting-row"><div class="security-setting-copy"><strong>本地管理员密码</strong><small>${escapeHtml(state.user?.name || 'admin')} · ${state.authentication.passwordChangedAt ? `最近修改 ${escapeHtml(formatDate(state.authentication.passwordChangedAt))}` : '尚未在网页中修改'}</small></div><button class="button" type="button" data-action="change-password"><i data-lucide="key-round"></i><span>修改密码</span></button></div></div>`
     : '';
+  const adminKeySource = adminApiKeyStatus.source === 'stored'
+    ? '数据库加密存储'
+    : adminApiKeyStatus.source === 'environment'
+      ? '环境变量'
+      : '未配置';
+  const adminKeyCapability = adminApiKeyStatus.capabilities?.accountKeyExport === true
+    ? `账号 Key 导出已验证${adminApiKeyStatus.verifiedAt ? ` · ${escapeHtml(formatDate(adminApiKeyStatus.verifiedAt))}` : ''}`
+    : adminApiKeyStatus.configured
+      ? '尚未验证账号 Key 导出'
+      : '定时重建将使用交互式管理员会话';
+  const adminApiKeyPanel = `<div class="section-header ${securityPanel ? 'section' : ''}"><h2>Sub2API 管理员 API Key</h2></div><form class="panel" id="sub2api-admin-api-key-form"><div class="panel-header"><div class="primary-cell"><strong>${escapeHtml(adminKeySource)}</strong><small>${escapeHtml(adminApiKeyStatus.maskedKey || '未保存')} · ${adminKeyCapability}</small></div>${badge(adminApiKeyStatus.capabilities?.accountKeyExport === true ? 'healthy' : adminApiKeyStatus.configured ? 'warning' : 'unknown', adminApiKeyStatus.capabilities?.accountKeyExport === true ? '可用于重建' : adminApiKeyStatus.configured ? '待验证' : '未配置')}</div><div class="panel-body"><div class="form-grid"><label class="span-2"><span>管理员 API Key</span><input name="adminApiKey" type="password" minlength="16" maxlength="4096" autocomplete="new-password" placeholder="${adminApiKeyStatus.configured ? '输入新 Key 以替换当前配置' : 'admin-...'}"></label></div><p class="form-hint">Sub2API 必须关闭“敏感操作 step-up 2FA”；该开关已开启时，只能由完成 TOTP 验证的管理员会话关闭。</p><p class="form-error" id="sub2api-admin-api-key-error" role="alert"></p></div><footer class="dialog-actions">${adminApiKeyStatus.source === 'stored' ? '<button class="button danger" type="button" data-action="delete-sub2api-admin-api-key"><i data-lucide="trash-2"></i><span>删除</span></button>' : '<span class="action-spacer"></span>'}<span class="action-spacer"></span><button class="button primary" type="submit"><i data-lucide="shield-check"></i><span>保存并验证</span></button></footer></form>`;
   const systemSettingsPanel = `<section class="section"><form class="panel" id="system-settings-form"><div class="panel-header"><h2>系统参数</h2></div><div class="panel-body"><div class="form-grid">
     <label class="toggle-field"><input name="automationEnabled" type="checkbox" ${settings.automationEnabled ? 'checked' : ''}><span>允许真实自动化</span></label>
     <label class="toggle-field"><input name="allowPrivateNetworks" type="checkbox" ${settings.allowPrivateNetworks ? 'checked' : ''}><span>忽略私网主机限制</span></label>
@@ -1254,9 +1671,10 @@ async function renderSettings() {
     <label><span>通知记录保留（天）</span><input name="notificationRetentionDays" type="number" min="1" max="3650" value="${settings.notificationRetentionDays}"></label>
     <label><span>配置漂移保留（天）</span><input name="assetChangeRetentionDays" type="number" min="1" max="3650" value="${settings.assetChangeRetentionDays}"></label>
   </div></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="button" data-action="save-system-settings"><i data-lucide="save"></i><span>保存系统参数</span></button></footer></form></section>`;
-  $('#main-content').innerHTML = `<section class="base-instance-bar"><div><span class="status-dot ${sub2apiStatus.authentication?.available ? 'healthy' : 'warning'}"></span><strong>基座 Sub2API</strong><small>${escapeHtml(sub2apiStatus.publicUrl || sub2apiStatus.baseUrl || '未配置')} · 最近检查 ${escapeHtml(timeAgo(sub2apiStatus.lastCheckedAt))}</small></div><div>${authStatus}</div></section><div class="split-layout"><form class="panel" id="settings-form"><div class="panel-header"><h2>运行设置</h2></div><div class="form-grid"><label><span>显示币种</span><input name="displayCurrency" value="${escapeHtml(settings.displayCurrency)}"></label><label><span>预测最短跨度（小时）</span><input name="forecastMinSpanHours" type="number" min="1" value="${settings.forecastMinSpanHours}"></label><label><span>对账容差</span><input name="reconciliationToleranceRatio" type="number" min="0" step="0.01" value="${settings.reconciliationToleranceRatio}"></label><label><span>综合倍率偏差容差</span><input name="sub2apiRateToleranceRatio" type="number" min="0" step="0.01" value="${settings.sub2apiRateToleranceRatio}"></label><label><span>价格刷新（小时）</span><input name="catalogRefreshHours" type="number" min="1" value="${settings.catalogRefreshHours}"></label><label><span>异常跌幅（%）</span><input name="anomalyDropPercent" type="number" min="1" value="${settings.anomalyDropPercent}"></label><label><span>异常突增倍数</span><input name="anomalySpikeMultiplier" type="number" min="1" step="0.1" value="${settings.anomalySpikeMultiplier}"></label><label class="span-2"><span>汇率（JSON）</span><textarea name="currencyRates" rows="4">${escapeHtml(JSON.stringify(settings.currencyRates, null, 2))}</textarea></label><label class="span-2"><span>官方模型单价（USD / 1M，JSON）</span><textarea name="officialModelPrices" rows="10">${escapeHtml(JSON.stringify(settings.officialModelPrices || {}, null, 2))}</textarea></label></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存设置</span></button></footer></form><div>${securityPanel}<div class="section-header ${securityPanel ? 'section' : ''}"><h2>数据导出</h2></div><div class="panel"><div class="panel-body action-grid"><button class="button" data-action="download" data-url="/api/exports/balances.csv" data-filename="provider-monitor-balances.csv"><i data-lucide="wallet-cards"></i><span>余额 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/usage.csv" data-filename="provider-monitor-usage.csv"><i data-lucide="activity"></i><span>用量 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/alerts.csv" data-filename="provider-monitor-alerts.csv"><i data-lucide="bell"></i><span>告警 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/env" data-filename="provider-monitor-import.env"><i data-lucide="file-code-2"></i><span>环境变量模板</span></button><button class="button" data-action="export-disaster"><i data-lucide="lock-keyhole"></i><span>加密灾备包</span></button></div></div><div class="section-header section"><h2>SQLite 备份</h2></div><div class="table-wrap">${backupRows ? `<table><thead><tr><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${backupRows}</tbody></table>` : emptyState('database-backup', '暂无备份', '创建在线一致性备份')}</div></div></div><section class="section"><div class="section-header"><h2>远端备份目标</h2><div class="section-actions"><button class="button small" data-action="run-remote-backups"><i data-lucide="cloud-upload"></i><span>立即备份</span></button><button class="button small primary" data-action="add-backup-target"><i data-lucide="plus"></i><span>添加目标</span></button></div></div><div class="table-wrap">${targetRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>最近结果</th><th>最近备份</th><th></th></tr></thead><tbody>${targetRows}</tbody></table>` : emptyState('cloud-upload', '暂无远端目标', '添加本地目录、WebDAV 或 S3 兼容目标')}</div></section><section class="section"><div class="section-header"><h2>远端备份记录</h2></div><div class="table-wrap">${remoteRunRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${remoteRunRows}</tbody></table>` : emptyState('history', '暂无远端备份记录', '执行远端备份后显示')}</div></section><section class="section"><div class="section-header"><h2>凭据生命周期</h2></div><div class="table-wrap">${lifecycleRows ? `<table><thead><tr><th>供应商 / 字段</th><th>到期状态</th><th>最近轮换</th><th>凭据到期</th><th></th></tr></thead><tbody>${lifecycleRows}</tbody></table>` : emptyState('key-round', '暂无凭据', '添加供应商后显示')}</div></section>`;
+  $('#main-content').innerHTML = `<section class="base-instance-bar"><div><span class="status-dot ${sub2apiStatus.authentication?.available ? 'healthy' : 'warning'}"></span><strong>基座 Sub2API</strong><small>${escapeHtml(sub2apiStatus.publicUrl || sub2apiStatus.baseUrl || '未配置')} · 最近检查 ${escapeHtml(timeAgo(sub2apiStatus.lastCheckedAt))}</small></div><div>${authStatus}</div></section><div class="split-layout"><form class="panel" id="settings-form"><div class="panel-header"><h2>运行设置</h2></div><div class="form-grid"><label><span>显示币种</span><input name="displayCurrency" value="${escapeHtml(settings.displayCurrency)}"></label><label><span>预测最短跨度（小时）</span><input name="forecastMinSpanHours" type="number" min="1" value="${settings.forecastMinSpanHours}"></label><label><span>对账容差</span><input name="reconciliationToleranceRatio" type="number" min="0" step="0.01" value="${settings.reconciliationToleranceRatio}"></label><label><span>综合倍率偏差容差</span><input name="sub2apiRateToleranceRatio" type="number" min="0" step="0.01" value="${settings.sub2apiRateToleranceRatio}"></label><label><span>价格刷新（小时）</span><input name="catalogRefreshHours" type="number" min="1" value="${settings.catalogRefreshHours}"></label><label><span>异常跌幅（%）</span><input name="anomalyDropPercent" type="number" min="1" value="${settings.anomalyDropPercent}"></label><label><span>异常突增倍数</span><input name="anomalySpikeMultiplier" type="number" min="1" step="0.1" value="${settings.anomalySpikeMultiplier}"></label><label class="span-2"><span>汇率（JSON）</span><textarea name="currencyRates" rows="4">${escapeHtml(JSON.stringify(settings.currencyRates, null, 2))}</textarea></label><label class="span-2"><span>官方模型单价（USD / 1M，JSON）</span><textarea name="officialModelPrices" rows="10">${escapeHtml(JSON.stringify(settings.officialModelPrices || {}, null, 2))}</textarea></label></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存设置</span></button></footer></form><div>${securityPanel}${adminApiKeyPanel}<div class="section-header section"><h2>数据导出</h2></div><div class="panel"><div class="panel-body action-grid"><button class="button" data-action="download" data-url="/api/exports/balances.csv" data-filename="provider-monitor-balances.csv"><i data-lucide="wallet-cards"></i><span>余额 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/usage.csv" data-filename="provider-monitor-usage.csv"><i data-lucide="activity"></i><span>用量 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/alerts.csv" data-filename="provider-monitor-alerts.csv"><i data-lucide="bell"></i><span>告警 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/env" data-filename="provider-monitor-import.env"><i data-lucide="file-code-2"></i><span>环境变量模板</span></button><button class="button" data-action="export-disaster"><i data-lucide="lock-keyhole"></i><span>加密灾备包</span></button></div></div><div class="section-header section"><h2>SQLite 备份</h2></div><div class="table-wrap">${backupRows ? `<table><thead><tr><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${backupRows}</tbody></table>` : emptyState('database-backup', '暂无备份', '创建在线一致性备份')}</div></div></div><section class="section"><div class="section-header"><h2>远端备份目标</h2><div class="section-actions"><button class="button small" data-action="run-remote-backups"><i data-lucide="cloud-upload"></i><span>立即备份</span></button><button class="button small primary" data-action="add-backup-target"><i data-lucide="plus"></i><span>添加目标</span></button></div></div><div class="table-wrap">${targetRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>最近结果</th><th>最近备份</th><th></th></tr></thead><tbody>${targetRows}</tbody></table>` : emptyState('cloud-upload', '暂无远端目标', '添加本地目录、WebDAV 或 S3 兼容目标')}</div></section><section class="section"><div class="section-header"><h2>远端备份记录</h2></div><div class="table-wrap">${remoteRunRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${remoteRunRows}</tbody></table>` : emptyState('history', '暂无远端备份记录', '执行远端备份后显示')}</div></section><section class="section"><div class="section-header"><h2>凭据生命周期</h2></div><div class="table-wrap">${lifecycleRows ? `<table><thead><tr><th>供应商 / 字段</th><th>到期状态</th><th>最近轮换</th><th>凭据到期</th><th></th></tr></thead><tbody>${lifecycleRows}</tbody></table>` : emptyState('key-round', '暂无凭据', '添加供应商后显示')}</div></section>`;
   $('.split-layout', $('#main-content')).insertAdjacentHTML('afterend', systemSettingsPanel);
   $('#settings-form').addEventListener('submit', saveSettings);
+  $('#sub2api-admin-api-key-form').addEventListener('submit', saveSub2ApiAdminApiKey);
   $('#system-settings-form').addEventListener('submit', saveSystemSettings);
 }
 
@@ -1317,6 +1735,39 @@ async function saveSettings(event) {
     state.settings = settings;
     toast('设置已保存');
   } catch (error) { toast(error.message, 'error'); }
+}
+
+function sub2apiAdminApiKeyErrorMessage(error) {
+  if (error?.code === 'SUB2API_ADMIN_API_KEY_EXPORT_FORBIDDEN') {
+    return 'Sub2API 已开启敏感操作 step-up 2FA，管理员 API Key 被禁止导出账号 Key。请先用完成 TOTP 验证的 Sub2API 管理员会话关闭该开关。';
+  }
+  if (error?.code === 'SUB2API_REQUEST_FAILED' && error?.details?.remoteCode === 'INVALID_ADMIN_KEY') {
+    return '管理员 API Key 无效或已被重新生成。';
+  }
+  return error.message;
+}
+
+async function saveSub2ApiAdminApiKey(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const errorElement = $('#sub2api-admin-api-key-error');
+  errorElement.textContent = '';
+  try {
+    const adminApiKey = form.elements.adminApiKey.value.trim();
+    if (!adminApiKey) throw new Error('请输入管理员 API Key');
+    await ensureReauth();
+    const result = await api('/api/sub2api/admin-api-key', {
+      method: 'PUT',
+      body: { adminApiKey }
+    });
+    form.reset();
+    toast(`管理员 API Key 已保存，已验证 ${result.verification?.groupCount || 0} 个 Sub2API 分组`);
+    await navigate('settings');
+  } catch (error) {
+    const message = sub2apiAdminApiKeyErrorMessage(error);
+    errorElement.textContent = message;
+    toast(message, 'error');
+  }
 }
 
 function parseSettingsList(value) {
@@ -1405,7 +1856,14 @@ async function renderAutomation() {
   const ruleRows = rules.map(unifiedRuleRow).join('');
   const eventList = state.alerts.map((event) => `<div class="alert-item"><span class="alert-symbol ${event.severity === 'error' ? 'error' : ''}"><i data-lucide="${event.severity === 'error' ? 'octagon-alert' : 'triangle-alert'}"></i></span><div><p>${escapeHtml(event.message)}</p><small>${formatDate(event.triggered_at)} · ${escapeHtml(alertSeverityLabel(event.severity))}</small></div><div>${badge(event.status)}${event.status === 'active' ? `<button class="icon-button small" data-action="ack-alert" data-id="${event.id}" title="确认告警" aria-label="确认告警"><i data-lucide="check"></i></button>` : ''}</div></div>`).join('');
   const channelRows = state.channels.map((channel) => `<tr><td class="primary-cell"><strong>${escapeHtml(channel.name)}</strong><small>${escapeHtml(channel.type)}</small></td><td>${channel.enabled ? badge('enabled') : badge('disabled')}</td><td>${channel.credentialFields.map((field) => escapeHtml(field.name)).join(', ') || '-'}</td><td class="actions-cell"><button class="icon-button small" data-action="test-channel" data-id="${channel.id}" title="测试" aria-label="测试"><i data-lucide="send"></i></button><button class="icon-button small" data-action="edit-channel" data-id="${channel.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-channel" data-id="${channel.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></td></tr>`).join('');
-  const actionRows = state.automationActions.map((action) => `<tr><td>${escapeHtml(automationActionLabel(action.action_type))}</td><td>${badge(action.status)}</td><td>${action.dryRun ? '是' : '否'}</td><td>${escapeHtml(automationActionTarget(action))}</td><td>${formatDate(action.created_at)}</td><td class="actions-cell">${action.status === 'succeeded' && !action.rolled_back_at && automationActionCanRollback(action.action_type) ? `<button class="button small" data-action="rollback-automation" data-id="${action.id}"><i data-lucide="undo-2"></i><span>回滚</span></button>` : ''}</td></tr>`).join('');
+  const actionRows = state.automationActions.map((action) => {
+    const rollback = action.status === 'succeeded' && !action.rolled_back_at &&
+      automationActionCanRollback(action.action_type)
+      ? `<button class="button small" data-action="rollback-automation" data-id="${action.id}"><i data-lucide="undo-2"></i><span>回滚</span></button>`
+      : '';
+    const detailIcon = action.status === 'failed' ? 'circle-alert' : 'info';
+    return `<tr><td>${escapeHtml(automationActionLabel(action.action_type))}</td><td>${badge(action.status)}</td><td>${action.dryRun ? '是' : '否'}</td><td>${automationActionResultHtml(action)}</td><td>${formatDate(action.created_at)}</td><td class="actions-cell"><button class="icon-button small ${action.status === 'failed' ? 'danger' : ''}" data-action="view-automation-action" data-id="${action.id}" title="查看执行详情" aria-label="查看执行详情"><i data-lucide="${detailIcon}"></i></button>${rollback}</td></tr>`;
+  }).join('');
   const activeAlerts = state.alerts.filter((event) => event.status === 'active').length;
   const failedActions = state.automationActions.filter((action) => action.status === 'failed').length;
   $('#main-content').innerHTML = `<div class="status-summary" aria-label="规则与自动化摘要">${badge('info', `告警规则 ${state.alertRules.length}`)}${badge('enabled', `自动化规则 ${state.automationRules.length}`)}${badge(activeAlerts ? 'warning' : 'healthy', `活动告警 ${activeAlerts}`)}${badge(failedActions ? 'failed' : 'healthy', `失败动作 ${failedActions}`)}</div><div class="section-header"><h2>规则</h2></div><div class="table-wrap">${ruleRows ? `<table><thead><tr><th>规则</th><th>触发条件</th><th>动作</th><th>范围</th><th>模式</th><th>状态</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table>` : emptyState('workflow', '暂无规则', '添加告警规则或自动化规则')}</div><section class="section split-layout"><div class="panel"><div class="panel-header"><h2>告警事件</h2></div><div class="alert-list">${eventList || emptyState('bell-off', '暂无告警', '当前没有触发中的风险事件')}</div></div><div class="panel"><div class="panel-header"><h2>通知通道</h2><div class="panel-actions"><button class="icon-button small" data-action="add-channel" title="添加通知通道" aria-label="添加通知通道"><i data-lucide="plus"></i></button></div></div>${channelRows ? `<div class="table-wrap"><table><thead><tr><th>通道</th><th>状态</th><th>凭据</th><th></th></tr></thead><tbody>${channelRows}</tbody></table></div>` : emptyState('send', '暂无通知通道', '添加 Webhook、Telegram、Gotify、Bark 或邮件')}</div></section><section class="section"><div class="section-header"><h2>动作记录</h2></div><div class="table-wrap">${actionRows ? `<table><thead><tr><th>动作</th><th>结果</th><th>演练</th><th>目标 / 结果</th><th>时间</th><th></th></tr></thead><tbody>${actionRows}</tbody></table>` : emptyState('history', '暂无动作', '触发自动化规则后将在此记录')}</div></section>`;
@@ -1549,6 +2007,105 @@ function automationActionTarget(action) {
 function automationActionCanRollback(actionType) {
   return ['disable_sub2api_account', 'enable_sub2api_account', 'switch_to_backup',
     'disable_sub2api_channel', 'enable_sub2api_channel'].includes(actionType);
+}
+
+const AUTOMATION_FAILURE_STAGE_LABELS = {
+  record_action: '记录动作',
+  prepare_mapping_rebuild: '读取当前映射',
+  rebuild_mappings: '执行映射重建',
+  refresh_provider_snapshots: '刷新供应商映射快照',
+  discover_candidates: '发现并校验候选映射',
+  replace_mappings: '替换映射事务',
+  refresh_comparisons: '刷新综合倍率比较',
+  read_sub2api_account: '读取 Sub2API 账号',
+  update_sub2api_account: '更新 Sub2API 账号',
+  switch_backup_mapping: '切换备用映射',
+  deliver_recharge_webhook: '发送充值 Webhook',
+  record_result: '保存执行结果',
+  execute_action: '执行动作'
+};
+
+const AUTOMATION_ERROR_GUIDANCE = {
+  SUB2API_STEP_UP_REQUIRED: '当前管理员的 Sub2API 二次认证已过期。可在“设置与备份”配置并验证管理员 API Key；若 Sub2API 已开启敏感操作 step-up 2FA，则需先用完成 TOTP 验证的管理员会话关闭该开关。',
+  SUB2API_ADMIN_API_KEY_EXPORT_FORBIDDEN: 'Sub2API 已开启敏感操作 step-up 2FA，管理员 API Key 被禁止导出账号 Key。请用完成 TOTP 验证的 Sub2API 管理员会话关闭该开关，再回到“设置与备份”重新保存并验证 Key。',
+  SUB2API_KEY_EXPORT_FORBIDDEN: 'Sub2API 拒绝导出账号 Key。请检查管理员认证权限，或在“设置与备份”重新验证管理员 API Key。',
+  SUB2API_GROUP_RATE_INCOMPLETE: 'Sub2API 最新分组中存在缺失或无效倍率，系统已保留旧映射；请修正详情中的分组倍率后重试。',
+  MAPPING_PROVIDER_SNAPSHOT_INCOMPLETE: '匹配供应商的分组、Key、充值倍率或动态倍率未完整刷新，系统已保留旧映射；请按详情中的供应商和警告码排查。',
+  MAPPING_RATE_SNAPSHOT_INCOMPLETE: '候选映射无法计算完整综合倍率，系统已回滚整个替换事务；请按详情检查供应商分组倍率、充值倍率和 Sub2API 分组倍率。',
+  MAPPING_REBUILD_IN_PROGRESS: '已有一次映射重建正在执行，请等待该动作完成后重试。',
+  SUB2API_SSO_REQUIRED: '此操作必须使用 Sub2API 管理员 SSO 会话；请重新登录并完成二次认证。',
+  SUB2API_TOTP_NOT_ENABLED: '当前 Sub2API 管理员未启用 TOTP，需先在 Sub2API 中启用后才能读取账号 Key。',
+  SUB2API_ADMIN_CREDENTIALS_REQUIRED: 'Provider Monitor 没有可用的 Sub2API 管理员会话或凭据，请检查部署配置并重新登录。',
+  SUB2API_ADMIN_SESSION_REQUIRED: 'Sub2API 管理员会话已经失效，请重新登录后重试。',
+  SUB2API_LOGIN_2FA_REQUIRED: '配置的管理员账号登录需要 TOTP，请先完成登录二次认证。',
+  TIMEOUT: '请求 Sub2API 超时，请检查基座地址、容器网络和服务负载。',
+  NETWORK_UNREACHABLE: '无法连接 Sub2API，请检查 SUB2API_BASE_URL、容器网络和 DNS。',
+  SCHEMA_MISMATCH: 'Sub2API 返回结构与当前版本不兼容，请结合下方端点和响应计数检查基座版本。',
+  SQLITE_BUSY: 'SQLite 正被其他任务或实例占用，请确认仅运行一个 Provider Monitor 实例后重试。',
+  SQLITE_LOCKED: 'SQLite 表被并发任务锁定，请确认仅运行一个 Provider Monitor 实例后重试。'
+};
+
+function automationActionFailure(action) {
+  if (action.error) return action.error;
+  if (!action.error_message && !action.errorMessage) return null;
+  return {
+    code: action.error_code || action.errorCode || 'AUTOMATION_ACTION_FAILED',
+    message: action.error_message || action.errorMessage,
+    stage: action.failure_stage || action.failureStage || null,
+    retryable: Boolean(action.errorDetails?.retryable),
+    status: action.errorDetails?.status ?? null,
+    details: action.errorDetails?.details || action.errorDetails || {}
+  };
+}
+
+function automationFailureStageLabel(stage) {
+  return AUTOMATION_FAILURE_STAGE_LABELS[stage] || stage || '执行动作';
+}
+
+function automationActionResultHtml(action) {
+  const failure = automationActionFailure(action);
+  if (!failure) return escapeHtml(automationActionTarget(action));
+  return `<div class="automation-action-result failed"><strong>${escapeHtml(automationFailureStageLabel(failure.stage))}</strong><small title="${escapeHtml(failure.message)}">${escapeHtml(failure.message || '未记录失败原因')}</small></div>`;
+}
+
+function automationActionJson(value) {
+  try { return JSON.stringify(value == null ? {} : value, null, 2); } catch { return '{}'; }
+}
+
+function openAutomationActionDetail(actionId) {
+  const action = state.automationActions.find((item) => item.id === actionId);
+  if (!action) return;
+  const dialog = $('#automation-action-detail-dialog');
+  const root = $('#automation-action-detail');
+  const failure = automationActionFailure(action);
+  const guidance = failure ? AUTOMATION_ERROR_GUIDANCE[failure.code] || '' : '';
+  $('#automation-action-detail-title').textContent = automationActionLabel(action.action_type);
+  $('#automation-action-detail-subtitle').textContent = action.rule_name
+    ? `规则：${action.rule_name}`
+    : '规则已删除或不可用';
+  root.innerHTML = `
+    <div class="automation-action-detail-grid">
+      <div><span>结果</span>${badge(action.status)}</div>
+      <div><span>模式</span><strong>${action.dryRun ? '演练' : '实执行'}</strong></div>
+      <div><span>开始时间</span><strong>${escapeHtml(formatDate(action.created_at))}</strong></div>
+      <div><span>完成时间</span><strong>${escapeHtml(formatDate(action.completed_at))}</strong></div>
+    </div>
+    ${failure ? `<section class="automation-failure-detail">
+      <div class="automation-failure-heading"><i data-lucide="circle-alert"></i><div><strong>${escapeHtml(failure.message || '执行失败')}</strong><small>${escapeHtml(automationFailureStageLabel(failure.stage))}</small></div></div>
+      <dl>
+        <div><dt>错误码</dt><dd><code>${escapeHtml(failure.code || 'AUTOMATION_ACTION_FAILED')}</code></dd></div>
+        <div><dt>HTTP 状态</dt><dd>${failure.status == null ? '-' : escapeHtml(failure.status)}</dd></div>
+        <div><dt>可重试</dt><dd>${failure.retryable ? '是' : '否'}</dd></div>
+      </dl>
+      ${guidance ? `<p class="automation-failure-guidance">${escapeHtml(guidance)}</p>` : ''}
+      <details><summary>技术详情</summary><pre>${escapeHtml(automationActionJson(failure.details))}</pre></details>
+    </section>` : ''}
+    <div class="automation-action-payloads">
+      <section><h3>执行前</h3><pre>${escapeHtml(automationActionJson(action.before))}</pre></section>
+      <section><h3>${action.status === 'failed' ? '失败时计划结果' : '执行后'}</h3><pre>${escapeHtml(automationActionJson(action.after))}</pre></section>
+    </div>`;
+  dialog.showModal();
+  icons();
 }
 
 const RECHARGE_TEST_REASON_LABELS = {
@@ -1956,10 +2513,9 @@ function renderMonitoredApiKeyOptions(form, provider = null, { loading = false }
 
 async function loadMonitoredApiKeyOptions(form, provider) {
   if (!formUsesRemoteApiKeySelection(form)) return;
-  const isSub2ApiRemoteSource = form.elements.adapterType.value === 'sub2api' &&
-    form.elements.authMode.value === 'api_key' && selectedSub2ApiKeySource(form) === 'remote';
-  if (!provider?.id && !isSub2ApiRemoteSource) return;
-  const discoveryCredentials = isSub2ApiRemoteSource
+  const usesLiveSub2ApiDiscovery = form.elements.adapterType.value === 'sub2api';
+  if (!provider?.id && !usesLiveSub2ApiDiscovery) return;
+  const discoveryCredentials = usesLiveSub2ApiDiscovery
     ? Object.fromEntries(
       $$('[data-credential]', form)
         .filter((input) => input.value)
@@ -1970,7 +2526,7 @@ async function loadMonitoredApiKeyOptions(form, provider) {
     ['email', 'password', 'accessToken', 'refreshToken'].includes(field.name)
   );
   if (
-    isSub2ApiRemoteSource &&
+    usesLiveSub2ApiDiscovery &&
     Object.keys(discoveryCredentials).length === 0 &&
     !hasSavedDiscoveryCredentials
   ) {
@@ -1980,7 +2536,7 @@ async function loadMonitoredApiKeyOptions(form, provider) {
   renderMonitoredApiKeyOptions(form, provider, { loading: true });
   try {
     const connectionId = provider?.id || form.elements.id.value || 'provider-form-preview';
-    const result = isSub2ApiRemoteSource
+    const result = usesLiveSub2ApiDiscovery
       ? await api('/api/providers/key-options', {
         method: 'POST',
         body: {
@@ -1996,7 +2552,7 @@ async function loadMonitoredApiKeyOptions(form, provider) {
       ...(result.items || []).map((key) => ({
         ...key,
         connection_id: connectionId,
-        ...(isSub2ApiRemoteSource ? { key_option_source: 'remote' } : {})
+        ...(usesLiveSub2ApiDiscovery ? { key_option_source: 'remote' } : {})
       }))
     ];
     renderMonitoredApiKeyOptions(form, provider);
@@ -2004,7 +2560,11 @@ async function loadMonitoredApiKeyOptions(form, provider) {
     if ((provider?.id && form.elements.id.value !== provider.id) || !$('#provider-dialog').open) return;
     const savedSource = provider?.typeConfig?.apiKeySource ||
       (provider?.configuredApiKeys?.length ? 'manual' : null);
-    if (isSub2ApiRemoteSource && savedSource !== 'remote') {
+    if (
+      usesLiveSub2ApiDiscovery &&
+      form.elements.authMode.value === 'api_key' &&
+      savedSource !== 'remote'
+    ) {
       const connectionId = provider?.id || form.elements.id.value || 'provider-form-preview';
       state.keys = state.keys.filter((key) =>
         key.connection_id !== connectionId || key.key_option_source !== 'remote'
@@ -2638,6 +3198,37 @@ async function handleAction(button) {
   const { action, id } = button.dataset;
   if (!action) return;
   try {
+    if (action === 'open-account-monitor-settings') openAccountMonitorSettings();
+    if (action === 'open-account-metric-rules') openAccountMetricRules(button.dataset.ruleTarget);
+    if (action === 'sync-account-monitor') {
+      const result = await withSub2ApiTwoFactor(() => api('/api/account-monitor/sync', { method: 'POST', body: {} }));
+      trackAccountMonitorJob(result.jobId, '账号日志同步').catch((error) => toast(error.message, 'error'));
+    }
+    if (action === 'detect-account' || action === 'detect-selected-accounts') {
+      const accountIds = action === 'detect-account'
+        ? [String(id)]
+        : [...state.accountMonitorSelected];
+      if (accountIds.length === 0) return toast('请先选择需要检测的账号', 'error');
+      if (accountIds.length > 20 && !confirm(`本次将主动检测 ${accountIds.length} 个账号并产生上游请求，确认继续？`)) return;
+      const result = await withSub2ApiTwoFactor(() => api('/api/account-monitor/probes', {
+        method: 'POST',
+        body: { accountIds }
+      }));
+      trackAccountMonitorJob(result.jobId, '账号主动检测').catch((error) => toast(error.message, 'error'));
+    }
+    if (action === 'view-account-quality') await loadAccountMonitorDetail(id);
+    if (action === 'close-account-quality') {
+      state.accountMonitorDetail = null;
+      state.chart?.dispose?.();
+      state.chart = null;
+      const root = $('#account-monitor-detail');
+      if (root) root.innerHTML = '';
+    }
+    if (action === 'account-monitor-page') {
+      state.accountMonitorFilters.page = Number(button.dataset.page) || 1;
+      await renderAccountMonitor();
+      window.scrollTo({ top: 0, behavior: 'auto' });
+    }
     if (action === 'download') await downloadFile(button.dataset.url, button.dataset.filename);
     if (action === 'save-system-settings') await saveSystemSettings($('#system-settings-form'));
     if (action === 'add-provider') openProviderDialog();
@@ -2715,6 +3306,7 @@ async function handleAction(button) {
     if (action === 'add-automation') openAutomation();
     if (action === 'edit-automation') openAutomation(state.automationRules.find((r) => r.id === id));
     if (action === 'delete-automation' && confirm('删除该自动化规则？')) { await api(`/api/automation-rules/${id}`, { method: 'DELETE' }); toast('规则已删除'); navigate('automation'); }
+    if (action === 'view-automation-action') openAutomationActionDetail(id);
     if (action === 'rollback-automation' && confirm('恢复到该动作执行前的状态？')) { await api(`/api/automation-actions/${id}/rollback`, { method: 'POST' }); toast('动作已回滚'); navigate('automation'); }
     if (action === 'dry-run-automation') {
       const result = await api(`/api/automation/rules/${id}/dry-run`, { method: 'POST', body: {} });
@@ -2774,6 +3366,12 @@ async function handleAction(button) {
       $('#password-dialog').showModal();
       form.elements.currentPassword.focus();
       icons();
+    }
+    if (action === 'delete-sub2api-admin-api-key' && confirm('删除数据库中保存的 Sub2API 管理员 API Key？')) {
+      await ensureReauth();
+      await api('/api/sub2api/admin-api-key', { method: 'DELETE' });
+      toast('数据库中的管理员 API Key 已删除');
+      await navigate('settings');
     }
     if (action === 'preview-import') {
       const form = $('#import-form');
@@ -2846,6 +3444,35 @@ document.addEventListener('keydown', (event) => {
 });
 
 document.addEventListener('change', (event) => {
+  if (event.target.matches('[data-account-monitor-select]')) {
+    const accountId = String(event.target.dataset.accountMonitorSelect);
+    if (event.target.checked) state.accountMonitorSelected.add(accountId);
+    else state.accountMonitorSelected.delete(accountId);
+    updateAccountMonitorSelectionAction();
+  }
+  if (event.target.matches('#account-monitor-select-page')) {
+    $$('[data-account-monitor-select]').forEach((input) => {
+      input.checked = event.target.checked;
+      const accountId = String(input.dataset.accountMonitorSelect);
+      if (event.target.checked) state.accountMonitorSelected.add(accountId);
+      else state.accountMonitorSelected.delete(accountId);
+    });
+    updateAccountMonitorSelectionAction();
+  }
+  if (event.target.matches('#account-monitor-platform, #account-monitor-status, #account-monitor-days, #account-monitor-sort')) {
+    const field = ({
+      'account-monitor-platform': 'platform',
+      'account-monitor-status': 'status',
+      'account-monitor-days': 'days',
+      'account-monitor-sort': 'sortBy'
+    })[event.target.id];
+    state.accountMonitorFilters[field] = event.target.value;
+    state.accountMonitorFilters.order = event.target.id === 'account-monitor-sort' && event.target.value === 'ttftP95Ms'
+      ? 'asc'
+      : 'desc';
+    state.accountMonitorFilters.page = 1;
+    renderAccountMonitor().catch((error) => toast(error.message, 'error'));
+  }
   if (event.target.matches('#trend-provider, #trend-days, #trend-currency')) loadTrend().catch((e) => toast(e.message, 'error'));
   if (event.target.matches('#asset-status')) filterAssets().catch((e) => toast(e.message, 'error'));
   if (event.target.matches('[data-cost-filter]')) {
@@ -2897,7 +3524,17 @@ document.addEventListener('change', (event) => {
 let searchTimer;
 let costModelSearchTimer;
 let costGroupNameFilterTimer;
+let accountMonitorSearchTimer;
 document.addEventListener('input', (event) => {
+  if (event.target.matches('#account-monitor-search')) {
+    clearTimeout(accountMonitorSearchTimer);
+    const value = event.target.value;
+    accountMonitorSearchTimer = setTimeout(() => {
+      state.accountMonitorFilters.search = value.trim();
+      state.accountMonitorFilters.page = 1;
+      renderAccountMonitor().catch((error) => toast(error.message, 'error'));
+    }, 300);
+  }
   if (event.target.matches('#asset-search')) {
     clearTimeout(searchTimer); searchTimer = setTimeout(() => filterAssets().catch((e) => toast(e.message, 'error')), 250);
   }
@@ -2952,6 +3589,39 @@ $('#provider-form').addEventListener('submit', async (event) => {
     await api(id ? `/api/providers/${id}` : '/api/providers', { method: id ? 'PUT' : 'POST', body: payload });
     $('#provider-dialog').close(); toast(id ? '供应商已更新' : '供应商已创建，首次同步已排队'); navigate('providers');
   } catch (error) { $('#provider-form-error').textContent = error.message; }
+});
+
+$('#account-monitor-settings-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const probePlatforms = $$('[data-probe-platform]', form)
+    .filter((input) => input.checked)
+    .map((input) => input.dataset.probePlatform);
+  const probeModels = Object.fromEntries($$('[data-probe-model]', form)
+    .map((input) => [input.dataset.probeModel, input.value.trim()])
+    .filter(([, value]) => value));
+  try {
+    const result = await api('/api/account-monitor/config', {
+      method: 'PUT',
+      body: {
+        syncEnabled: form.elements.syncEnabled.checked,
+        syncIntervalMinutes: Number(form.elements.syncIntervalMinutes.value),
+        lookbackDays: Number(form.elements.lookbackDays.value),
+        sampleRetentionDays: Number(form.elements.sampleRetentionDays.value),
+        probeEnabled: form.elements.probeEnabled.checked,
+        probeIntervalMinutes: Number(form.elements.probeIntervalMinutes.value),
+        probeConcurrency: Number(form.elements.probeConcurrency.value),
+        probePlatforms,
+        probeModels
+      }
+    });
+    state.accountMonitor.settings = result.settings;
+    $('#account-monitor-settings-dialog').close();
+    toast('账号检测设置已保存');
+    await renderAccountMonitor();
+  } catch (error) {
+    $('#account-monitor-settings-error').textContent = error.message;
+  }
 });
 
 $('#alert-rule-form').addEventListener('submit', async (event) => {

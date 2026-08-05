@@ -761,6 +761,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
         default_rate_multiplier: defaultRateMultiplier,
         effective_rate_multiplier: effectiveRateMultiplier,
         personalized_rate: effectiveRateMultiplier !== defaultRateMultiplier,
+        selectable: !derivedFromKey,
         ...(derivedFromKey ? { derivedFromKey: true } : {})
       })
     };

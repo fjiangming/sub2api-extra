@@ -31,7 +31,7 @@ function maskKey(key) {
 function redactText(value) {
   return String(value || '')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
-    .replace(/\b(sk|sess|key|token)-[A-Za-z0-9_-]{12,}\b/gi, '$1-[REDACTED]')
+    .replace(/\b(admin|sk|sess|key|token)-[A-Za-z0-9_-]{12,}\b/gi, '$1-[REDACTED]')
     .replace(/([?&](?:token|key|api_key|secret)=)[^&\s]+/gi, '$1[REDACTED]')
     .replace(/("(?:password|secret|token|api[_-]?key|authorization)"\s*:\s*")[^"]*(")/gi, '$1[REDACTED]$2');
 }

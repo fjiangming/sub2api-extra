@@ -157,6 +157,136 @@ test('Sub2API paginated reads reject malformed collection responses', async (t) 
   );
 });
 
+test('administrator API Key uses x-api-key and verifies account Key export capability', async (t) => {
+  const originalFetch = global.fetch;
+  const requests = [];
+  const adminApiKey = 'admin-provider-monitor-integration-1234567890';
+  global.fetch = async (input, options = {}) => {
+    const url = new URL(input);
+    requests.push({
+      path: url.pathname,
+      query: Object.fromEntries(url.searchParams),
+      adminApiKey: options.headers?.['x-api-key'] || null,
+      authorization: options.headers?.Authorization || null
+    });
+    if (url.pathname === '/api/v1/admin/groups/all') {
+      return new Response(JSON.stringify({
+        code: 0,
+        data: [{ id: 1, name: 'Default', rate_multiplier: 1 }]
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url.pathname === '/api/v1/admin/accounts') {
+      return new Response(JSON.stringify({
+        code: 0,
+        data: { items: [{ id: 7, name: 'Supplier' }], total: 1, pages: 1 }
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (url.pathname === '/api/v1/admin/accounts/data') {
+      return new Response(JSON.stringify({
+        code: 0,
+        data: {
+          exported_at: new Date().toISOString(),
+          proxies: [],
+          accounts: [{ name: 'Supplier', credentials: { api_key: 'sk-upstream-secret' } }]
+        }
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    throw new Error(`Unexpected request: ${url.pathname}`);
+  };
+  t.after(() => { global.fetch = originalFetch; });
+
+  const client = new Sub2ApiAdminClient({
+    sub2apiBaseUrl: 'https://sub2api.example',
+    sub2apiAdminApiKey: adminApiKey,
+    sub2apiAdminToken: '',
+    adminEmail: '',
+    adminPassword: '',
+    queryTimeoutMs: 1000,
+    maxResponseBytes: 1024
+  });
+  const result = await client.verifyAdminApiKey(adminApiKey);
+
+  assert.equal(result.verified, true);
+  assert.equal(result.capabilities.accountKeyExport, true);
+  assert.equal(result.groupCount, 1);
+  assert.equal(JSON.stringify(result).includes('sk-upstream-secret'), false);
+  assert.equal(requests.length, 3);
+  assert.ok(requests.every((request) => request.adminApiKey === adminApiKey));
+  assert.ok(requests.every((request) => request.authorization === null));
+  assert.equal(requests[2].query.ids, '7');
+  assert.equal(requests[2].query.include_proxies, 'false');
+  assert.deepEqual(client.authenticationStatus(), {
+    available: true,
+    source: 'admin_api_key',
+    accountKeyExport: 'verified'
+  });
+});
+
+test('administrator API Key verification reports the Sub2API step-up policy boundary', async (t) => {
+  const originalFetch = global.fetch;
+  global.fetch = async (input) => {
+    const url = new URL(input);
+    if (url.pathname === '/api/v1/admin/groups/all') {
+      return new Response(JSON.stringify({ code: 0, data: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    if (url.pathname === '/api/v1/admin/accounts') {
+      return new Response(JSON.stringify({ code: 0, data: { items: [], total: 0 } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+    if (url.pathname === '/api/v1/admin/accounts/data') {
+      return new Response(JSON.stringify({
+        code: 403,
+        reason: 'STEP_UP_ADMIN_API_KEY_FORBIDDEN',
+        message: 'Admin API key cannot access this endpoint'
+      }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+    }
+    throw new Error(`Unexpected request: ${url.pathname}`);
+  };
+  t.after(() => { global.fetch = originalFetch; });
+  const client = new Sub2ApiAdminClient({
+    sub2apiBaseUrl: 'https://sub2api.example',
+    sub2apiAdminApiKey: '',
+    sub2apiAdminToken: '',
+    adminEmail: '',
+    adminPassword: '',
+    queryTimeoutMs: 1000,
+    maxResponseBytes: 1024
+  });
+
+  await assert.rejects(
+    () => client.verifyAdminApiKey('admin-provider-monitor-integration-1234567890'),
+    (error) => error.code === 'SUB2API_ADMIN_API_KEY_EXPORT_FORBIDDEN' &&
+      error.details?.remoteCode === 'STEP_UP_ADMIN_API_KEY_FORBIDDEN'
+  );
+});
+
+test('runtime administrator API Key replacement does not mutate deployment configuration', () => {
+  const config = {
+    sub2apiBaseUrl: 'https://sub2api.example',
+    sub2apiAdminApiKey: 'admin-environment-key-1234567890',
+    sub2apiAdminToken: '',
+    adminEmail: '',
+    adminPassword: '',
+    queryTimeoutMs: 1000,
+    maxResponseBytes: 1024
+  };
+  const client = new Sub2ApiAdminClient(config);
+
+  client.setAdminApiKey('admin-stored-key-0987654321', 'verified');
+
+  assert.equal(config.sub2apiAdminApiKey, 'admin-environment-key-1234567890');
+  assert.deepEqual(client.authenticationStatus(), {
+    available: true,
+    source: 'admin_api_key',
+    accountKeyExport: 'verified'
+  });
+});
+
 test('local authentication completes configured Sub2API administrator 2FA without an SSO session', async (t) => {
   const context = createTestContext({
     PROVIDER_MONITOR_AUTH_MODE: 'local',

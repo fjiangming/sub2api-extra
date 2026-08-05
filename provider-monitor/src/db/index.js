@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 16;
+const SCHEMA_VERSION = 19;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -381,7 +381,10 @@ CREATE TABLE IF NOT EXISTS automation_actions (
   dry_run INTEGER NOT NULL DEFAULT 1,
   before_json TEXT NOT NULL DEFAULT '{}',
   after_json TEXT NOT NULL DEFAULT '{}',
+  error_code TEXT,
   error_message TEXT,
+  failure_stage TEXT,
+  error_details_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL,
   completed_at TEXT,
   rolled_back_at TEXT
@@ -519,6 +522,151 @@ CREATE TABLE IF NOT EXISTS checkin_records (
 
 CREATE INDEX IF NOT EXISTS checkin_lookup
   ON checkin_records(connection_id, checked_at DESC);
+
+CREATE TABLE IF NOT EXISTS sub2api_account_monitor_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  sync_enabled INTEGER NOT NULL DEFAULT 1,
+  sync_interval_minutes INTEGER NOT NULL DEFAULT 15,
+  lookback_days INTEGER NOT NULL DEFAULT 7,
+  sample_retention_days INTEGER NOT NULL DEFAULT 30,
+  probe_enabled INTEGER NOT NULL DEFAULT 0,
+  probe_interval_minutes INTEGER NOT NULL DEFAULT 360,
+  probe_platforms_json TEXT NOT NULL DEFAULT '[]',
+  probe_models_json TEXT NOT NULL DEFAULT '{}',
+  probe_concurrency INTEGER NOT NULL DEFAULT 3,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sub2api_monitored_accounts (
+  account_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  platform TEXT NOT NULL,
+  account_type TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'unknown',
+  schedulable INTEGER NOT NULL DEFAULT 0,
+  priority INTEGER,
+  concurrency INTEGER,
+  rate_multiplier REAL,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  missing_since TEXT
+);
+
+CREATE INDEX IF NOT EXISTS sub2api_monitored_account_lookup
+  ON sub2api_monitored_accounts(platform, status, name);
+
+CREATE TABLE IF NOT EXISTS sub2api_account_request_samples (
+  source_log_id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES sub2api_monitored_accounts(account_id) ON DELETE CASCADE,
+  request_id TEXT,
+  model TEXT,
+  upstream_model TEXT,
+  model_mapping_chain TEXT,
+  request_type TEXT,
+  stream INTEGER NOT NULL DEFAULT 0,
+  duration_ms INTEGER,
+  first_token_ms INTEGER,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  actual_cost REAL,
+  created_at TEXT NOT NULL,
+  ingested_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS sub2api_account_sample_lookup
+  ON sub2api_account_request_samples(account_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS sub2api_account_sample_created
+  ON sub2api_account_request_samples(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS provider_request_samples (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
+  key_id TEXT REFERENCES remote_keys(id) ON DELETE SET NULL,
+  source_log_id TEXT NOT NULL,
+  request_id TEXT,
+  model TEXT,
+  upstream_model TEXT,
+  stream INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'unknown',
+  duration_ms INTEGER,
+  first_token_ms INTEGER,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  actual_cost REAL,
+  currency TEXT NOT NULL DEFAULT 'USD',
+  created_at TEXT NOT NULL,
+  ingested_at TEXT NOT NULL,
+  UNIQUE(connection_id, source_log_id)
+);
+
+CREATE INDEX IF NOT EXISTS provider_request_sample_key_lookup
+  ON provider_request_samples(key_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS provider_request_sample_request_lookup
+  ON provider_request_samples(request_id, connection_id)
+  WHERE request_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS provider_request_log_sync_state (
+  connection_id TEXT PRIMARY KEY REFERENCES provider_connections(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'unknown',
+  coverage_from TEXT,
+  coverage_to TEXT,
+  truncated INTEGER NOT NULL DEFAULT 0,
+  total_count INTEGER,
+  last_error_code TEXT,
+  last_error_message TEXT,
+  last_synced_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sub2api_account_probe_runs (
+  id TEXT PRIMARY KEY,
+  batch_id TEXT NOT NULL,
+  account_id TEXT NOT NULL REFERENCES sub2api_monitored_accounts(account_id) ON DELETE CASCADE,
+  trigger_type TEXT NOT NULL,
+  suite TEXT NOT NULL,
+  model TEXT,
+  status TEXT NOT NULL,
+  intelligence_score REAL,
+  instruction_score REAL,
+  first_token_ms INTEGER,
+  duration_ms INTEGER,
+  response_excerpt TEXT,
+  error_code TEXT,
+  error_message TEXT,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  started_at TEXT NOT NULL,
+  completed_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS sub2api_account_probe_lookup
+  ON sub2api_account_probe_runs(account_id, completed_at DESC);
+
+CREATE INDEX IF NOT EXISTS sub2api_account_probe_batch
+  ON sub2api_account_probe_runs(batch_id, completed_at DESC);
+
+CREATE TABLE IF NOT EXISTS sub2api_account_monitor_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  last_account_sync_at TEXT,
+  last_log_sync_at TEXT,
+  last_probe_at TEXT,
+  last_sync_status TEXT,
+  last_sync_error TEXT,
+  last_sync_summary_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO sub2api_account_monitor_settings(id, updated_at)
+VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+
+INSERT OR IGNORE INTO sub2api_account_monitor_state(id, updated_at)
+VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 CREATE TABLE IF NOT EXISTS sub2api_mappings (
   id TEXT PRIMARY KEY,
@@ -755,6 +903,56 @@ function migrateAutomationAccountActionsV16(db) {
   })();
 }
 
+function migrateUnexecutedCapabilityProbesV18(db) {
+  const greeting = /^(?:hi|hello|hey)[!. ,]*(?:how can i (?:help|assist)(?: you)?(?: today)?|what would you like help with)\??[!.]?$/i;
+  const rows = db.prepare(`
+    SELECT id, response_excerpt, details_json
+    FROM sub2api_account_probe_runs
+    WHERE suite = 'capability_v2' AND intelligence_score = 0 AND instruction_score = 0
+  `).all();
+  const update = db.prepare(`
+    UPDATE sub2api_account_probe_runs
+    SET suite = 'capability_v2_unexecuted', intelligence_score = NULL,
+      instruction_score = NULL, details_json = ?
+    WHERE id = ?
+  `);
+  db.transaction(() => {
+    for (const row of rows) {
+      const excerpt = String(row.response_excerpt || '').replace(/\s+/g, ' ').trim();
+      const details = parseJson(row.details_json, {});
+      const answers = details.challengeAnswers;
+      const answerValues = answers && typeof answers === 'object' ? Object.values(answers) : [];
+      if (
+        !greeting.test(excerpt) ||
+        Number(details.challengeVersion) !== 2 ||
+        answerValues.length === 0 ||
+        !answerValues.every((value) => value === false)
+      ) continue;
+      update.run(stringifyJson({
+        ...details,
+        challengeAnswers: null,
+        challengeExecuted: false,
+        unscoredReason: 'sub2api_prompt_not_forwarded'
+      }), row.id);
+    }
+  })();
+}
+
+function migrateAutomationActionFailureDetailsV19(db) {
+  const columns = new Set(
+    db.prepare('PRAGMA table_info(automation_actions)').all().map((column) => column.name)
+  );
+  if (!columns.has('error_code')) {
+    db.exec('ALTER TABLE automation_actions ADD COLUMN error_code TEXT');
+  }
+  if (!columns.has('failure_stage')) {
+    db.exec('ALTER TABLE automation_actions ADD COLUMN failure_stage TEXT');
+  }
+  if (!columns.has('error_details_json')) {
+    db.exec("ALTER TABLE automation_actions ADD COLUMN error_details_json TEXT NOT NULL DEFAULT '{}'");
+  }
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -767,6 +965,8 @@ function createDatabase(databasePath) {
     migrateProviderRechargeUrlV12(db);
     migrateSecondaryWarningThresholdV13(db);
     migrateAutomationAccountActionsV16(db);
+    migrateUnexecutedCapabilityProbesV18(db);
+    migrateAutomationActionFailureDetailsV19(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

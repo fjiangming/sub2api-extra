@@ -226,6 +226,7 @@ class AlertService {
       threshold: definition.threshold,
       consecutive_matches: 1,
       cooldown_minutes: 60,
+      renotify_while_active: false,
       config_json: stringifyJson({
         implicitBalanceLevel: definition.level,
         severity: definition.severity
@@ -576,9 +577,11 @@ class AlertService {
 
     const now = nowIso();
     const eventId = existing?.id || crypto.randomUUID();
-    const cooldownElapsed = existing?.status === 'active' && Date.now() - Date.parse(existing.triggered_at) >= Number(rule.cooldown_minutes || 60) * 60000;
     const config = parseJson(rule.config_json, {});
-    const escalationDue = existing?.status === 'active' && config.escalateAfterMinutes &&
+    const renotifyWhileActive = rule.renotify_while_active !== false;
+    const cooldownElapsed = renotifyWhileActive && existing?.status === 'active' &&
+      Date.now() - Date.parse(existing.triggered_at) >= Number(rule.cooldown_minutes || 60) * 60000;
+    const escalationDue = renotifyWhileActive && existing?.status === 'active' && config.escalateAfterMinutes &&
       Date.now() - Date.parse(existing.triggered_at) >= Number(config.escalateAfterMinutes) * 60000;
     const shouldNotify = !existing || existing.status === 'resolved' || cooldownElapsed || escalationDue;
     if (escalationDue && config.escalationSeverity) evaluation.severity = config.escalationSeverity;

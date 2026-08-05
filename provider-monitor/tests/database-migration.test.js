@@ -6,7 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
-test('schema v16 migration preserves mappings and disables legacy channel-account rules', (t) => {
+test('schema v19 migration preserves mappings and adds provider request samples', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
   let db = createDatabase(databasePath);
@@ -57,6 +57,29 @@ test('schema v16 migration preserves mappings and disables legacy channel-accoun
     threshold: 5,
     currency: 'USD'
   }), now, now);
+  db.prepare(`
+    INSERT INTO sub2api_monitored_accounts(
+      account_id, name, platform, account_type, status, schedulable,
+      metadata_json, first_seen_at, last_seen_at
+    ) VALUES ('probe-account', 'Probe account', 'openai', 'oauth', 'active', 1, '{}', ?, ?)
+  `).run(now, now);
+  db.prepare(`
+    INSERT INTO sub2api_account_probe_runs(
+      id, batch_id, account_id, trigger_type, suite, model, status,
+      intelligence_score, instruction_score, response_excerpt, details_json,
+      started_at, completed_at
+    ) VALUES ('unexecuted-probe', 'batch', 'probe-account', 'manual', 'capability_v2',
+      'gpt-test', 'succeeded', 0, 0, 'Hi! How can I help?', ?, ?, ?)
+  `).run(JSON.stringify({
+    challengeVersion: 2,
+    challengeAnswers: {
+      arithmetic: false,
+      logic: false,
+      sequence: false,
+      sorted: false,
+      checksum: false
+    }
+  }), now, now);
 
   db.pragma('foreign_keys = OFF');
   db.exec(`
@@ -96,12 +119,20 @@ test('schema v16 migration preserves mappings and disables legacy channel-accoun
   db.close();
 
   db = createDatabase(databasePath);
-  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 16').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 19').get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());
   assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'recharge_url'));
   assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'secondary_warning_threshold'));
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recharge_access_tickets'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_monitored_accounts'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_account_probe_runs'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_request_samples'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_request_log_sync_state'").get());
+  const actionColumns = new Set(db.prepare('PRAGMA table_info(automation_actions)').all().map((column) => column.name));
+  assert.equal(actionColumns.has('error_code'), true);
+  assert.equal(actionColumns.has('failure_stage'), true);
+  assert.equal(actionColumns.has('error_details_json'), true);
   assert.equal(db.prepare('PRAGMA table_info(sub2api_mappings)').all().find((column) => column.name === 'channel_id').notnull, 0);
   assert.equal(db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count, 1);
   assert.equal(db.prepare('SELECT status FROM sub2api_mapping_states WHERE mapping_id = ?').get('mapping').status, 'aligned');
@@ -115,6 +146,14 @@ test('schema v16 migration preserves mappings and disables legacy channel-accoun
   assert.deepEqual(migratedConfig.legacyChannelIds, [11]);
   assert.equal(migratedConfig.migrationNotice, 'account_targets_required');
   assert.deepEqual(db.pragma('foreign_key_check'), []);
+  const migratedProbe = db.prepare(`
+    SELECT suite, intelligence_score, instruction_score, details_json
+    FROM sub2api_account_probe_runs WHERE id = 'unexecuted-probe'
+  `).get();
+  assert.equal(migratedProbe.suite, 'capability_v2_unexecuted');
+  assert.equal(migratedProbe.intelligence_score, null);
+  assert.equal(migratedProbe.instruction_score, null);
+  assert.equal(JSON.parse(migratedProbe.details_json).challengeExecuted, false);
 
   db.prepare(`
     INSERT INTO sub2api_mappings(

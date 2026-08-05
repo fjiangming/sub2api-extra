@@ -3,6 +3,7 @@ const { createAdapter } = require('../adapters/registry');
 const { nowIso, parseJson, stringifyJson } = require('../db');
 const { AppError } = require('../errors');
 const { resolvePagination } = require('../pagination');
+const { availablePriceGroupSql } = require('./group-availability');
 const { upsertGroups } = require('./group-store');
 
 function normalizeRateSort(value) {
@@ -83,7 +84,7 @@ class CatalogService {
   }
 
   prices({ connectionId, model, platform, rateSort, limit = 5000, page, pageSize } = {}) {
-    const clauses = ['row_number = 1'];
+    const clauses = ['row_number = 1', 'group_available = 1'];
     const params = [];
     if (connectionId) { clauses.push('connection_id = ?'); params.push(connectionId); }
     if (model) { clauses.push('model_id LIKE ?'); params.push(`%${model}%`); }
@@ -128,7 +129,8 @@ class CatalogService {
             ELSE 'default'
           END AS recharge_status,
           rr.paid_currency AS recharge_paid_currency,
-          rr.balance_currency AS recharge_balance_currency
+          rr.balance_currency AS recharge_balance_currency,
+          ${availablePriceGroupSql('mp')} AS group_available
         FROM model_prices mp JOIN provider_connections p ON p.id = mp.connection_id
         LEFT JOIN remote_models rm
           ON rm.connection_id = mp.connection_id AND rm.remote_id = mp.model_id
@@ -155,7 +157,7 @@ class CatalogService {
     let summary;
     let filterOptions;
     if (paginated) {
-      const optionClauses = ['row_number = 1'];
+      const optionClauses = ['row_number = 1', 'group_available = 1'];
       const optionParams = [];
       if (model) { optionClauses.push('model_id LIKE ?'); optionParams.push(`%${model}%`); }
       filterOptions = {
@@ -225,6 +227,7 @@ class CatalogService {
         recharge_status: undefined,
         recharge_paid_currency: undefined,
         recharge_balance_currency: undefined,
+        group_available: undefined,
         row_number: undefined
       };
     });

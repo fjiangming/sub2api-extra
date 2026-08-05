@@ -34,6 +34,7 @@ const { DetectionService } = require('./services/detection-service');
 const { BackupService } = require('./services/backup-service');
 const { RetentionService } = require('./services/retention-service');
 const { SimulationService } = require('./services/simulation-service');
+const { AccountMonitorService } = require('./services/account-monitor-service');
 const {
   RechargeLinkService,
   pageHeaders,
@@ -74,6 +75,38 @@ const providerSchema = z.object({
 });
 
 const providerUpdateSchema = providerSchema.partial();
+const accountMonitorSettingsSchema = z.object({
+  syncEnabled: z.boolean().optional(),
+  syncIntervalMinutes: z.number().int().min(5).max(1440).optional(),
+  lookbackDays: z.number().int().min(1).max(90).optional(),
+  sampleRetentionDays: z.number().int().min(1).max(3650).optional(),
+  probeEnabled: z.boolean().optional(),
+  probeIntervalMinutes: z.number().int().min(15).max(10080).optional(),
+  probePlatforms: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
+  probeModels: z.record(z.string(), z.string().max(200)).optional(),
+  probeConcurrency: z.number().int().min(1).max(10).optional()
+});
+const accountMonitorSyncSchema = z.object({
+  platform: z.string().trim().min(1).max(40).optional(),
+  lookbackDays: z.number().int().min(1).max(90).optional()
+});
+const accountProbeSchema = z.object({
+  accountIds: z.array(z.union([z.string().trim().min(1).max(40), z.number().int().nonnegative()])).max(5000).optional(),
+  platforms: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
+  model: z.string().trim().max(200).optional(),
+  concurrency: z.number().int().min(1).max(10).optional()
+}).superRefine((input, context) => {
+  if (!input.accountIds?.length && !input.platforms?.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['accountIds'],
+      message: 'Select at least one account or platform for a manual probe'
+    });
+  }
+});
+const sub2apiAdminApiKeySchema = z.object({
+  adminApiKey: z.string().trim().min(16).max(4096)
+});
 const providerValidationSchema = providerSchema.extend({
   existingProviderId: z.string().uuid().optional()
 });
@@ -408,13 +441,19 @@ function createApplication(options = {}) {
   const providers = new ProviderRepository(db, config);
   const transfers = new TransferService({ db, config, providers });
   transfers.applyRuntimeSettings();
-  const http = new HttpClient(config);
+  const adminApiKeyStatus = transfers.sub2apiAdminApiKeyStatus();
+  const http = options.http || new HttpClient(config);
   const queries = new QueryService(db, config);
   const rechargeLinks = new RechargeLinkService({ db, config, providers, http });
   const notifications = new NotificationService({ db, config, rechargeLinks });
   const simulations = new SimulationService({ providers, notifications, rechargeLinks });
   const alerts = new AlertService({ db, config, queries, notifications });
-  const sub2api = new Sub2ApiAdminClient(config);
+  const sub2api = options.sub2api || new Sub2ApiAdminClient(config);
+  sub2api.setAdminApiKey?.(
+    transfers.sub2apiAdminApiKey(),
+    adminApiKeyStatus.capabilities?.accountKeyExport === true ? 'verified' : null
+  );
+  const accountMonitor = new AccountMonitorService({ db, config, sub2api, http });
   const mappings = new MappingService({ db, config, sub2api, http });
   const automation = new AutomationService({ db, config, sub2api, mappings, notifications });
   const analysis = new AnalysisService({ db, config });
@@ -473,6 +512,49 @@ function createApplication(options = {}) {
       }
     }
   });
+  mappings.setProviderSync((connectionId, syncOptions) => sync.run(connectionId, syncOptions));
+  const syncAccountMonitorData = async (payload = {}) => {
+    const { providerManual = false, ...input } = payload;
+    const base = await accountMonitor.sync(input);
+    const connectionIds = accountMonitor.mappedConnectionIds();
+    const results = new Array(connectionIds.length);
+    let cursor = 0;
+    const workers = Array.from(
+      { length: Math.min(config.globalConcurrency, connectionIds.length) },
+      async () => {
+        while (cursor < connectionIds.length) {
+          const index = cursor;
+          cursor += 1;
+          const connectionId = connectionIds[index];
+          try {
+            const result = await sync.run(connectionId, {
+              jobType: 'account_monitor_supplier_sync',
+              manual: Boolean(providerManual)
+            });
+            results[index] = { connectionId, status: result.status };
+          } catch (error) {
+            results[index] = {
+              connectionId,
+              status: 'failed',
+              errorCode: error?.code || 'PROVIDER_SYNC_FAILED',
+              errorMessage: redactText(error?.message || error).slice(0, 500)
+            };
+          }
+        }
+      }
+    );
+    await Promise.all(workers);
+    return {
+      ...base,
+      supplierSync: {
+        connectionCount: connectionIds.length,
+        succeeded: results.filter((item) => item?.status === 'succeeded').length,
+        partial: results.filter((item) => item?.status === 'partial').length,
+        failed: results.filter((item) => item?.status === 'failed').length,
+        results
+      }
+    };
+  };
   queue.register('provider_sync', (job) => sync.run(job.connection_id, {
     jobType: job.type,
     manual: Boolean(job.payload.manual)
@@ -488,8 +570,19 @@ function createApplication(options = {}) {
     await alerts.evaluateAll();
     return result;
   });
-  queue.register('snapshot_retention', () => retention.run());
+  queue.register('snapshot_retention', () => ({
+    snapshots: retention.run(),
+    accountMonitor: accountMonitor.cleanup()
+  }));
   queue.register('remote_backup', (job) => backups.runAll(job.payload.targetIds || null, job.payload.label || 'scheduled'));
+  queue.register('account_monitor_sync', (job) => syncAccountMonitorData(job.payload || {}));
+  queue.register('account_monitor_probe', async (job) => {
+    const activeAccounts = db.prepare(`
+      SELECT COUNT(*) AS count FROM sub2api_monitored_accounts WHERE missing_since IS NULL
+    `).get().count;
+    if (activeAccounts === 0) await accountMonitor.sync({ lookbackDays: 1 });
+    return accountMonitor.probe(job.payload || {});
+  });
 
   const app = express();
   app.disable('x-powered-by');
@@ -1395,9 +1488,111 @@ function createApplication(options = {}) {
     audit(db, req, 'mapping.activate_backup', 'mapping', mapping.id, { groupId: mapping.group_id });
     res.json(mapping);
   });
+
+  api.get('/account-monitor/config', (_req, res) => res.json({
+    settings: accountMonitor.settings(),
+    state: accountMonitor.state(),
+    authentication: sub2api.authenticationStatus()
+  }));
+  api.put('/account-monitor/config', (req, res) => {
+    const settings = accountMonitor.saveSettings(validate(accountMonitorSettingsSchema, req.body || {}));
+    audit(db, req, 'account_monitor.settings_update', 'account_monitor', null, { settings });
+    res.json({ settings, state: accountMonitor.state() });
+  });
+  api.get('/account-monitor/accounts', (req, res) => res.json(accountMonitor.accounts({
+    platform: req.query.platform || null,
+    status: req.query.status || null,
+    search: req.query.search || null,
+    days: req.query.days,
+    page: req.query.page,
+    pageSize: req.query.pageSize || req.query.page_size,
+    sortBy: req.query.sortBy || req.query.sort_by,
+    order: req.query.order || req.query.sort_order
+  })));
+  api.get('/account-monitor/accounts/:id', (req, res) => res.json(accountMonitor.account(
+    req.params.id,
+    { days: req.query.days }
+  )));
+  api.get('/account-monitor/probes', (req, res) => res.json(accountMonitor.runs({
+    accountId: req.query.accountId || req.query.account_id,
+    batchId: req.query.batchId || req.query.batch_id,
+    limit: req.query.limit
+  })));
+  api.post('/account-monitor/sync', asyncRoute(async (req, res) => {
+    const input = validate(accountMonitorSyncSchema, req.body || {});
+    await sub2api.adminToken();
+    if (req.query.wait === 'true') {
+      const result = await syncAccountMonitorData({ ...input, providerManual: true });
+      audit(db, req, 'account_monitor.sync', 'account_monitor', null, result);
+      return res.json(result);
+    }
+    const jobId = queue.enqueue('account_monitor_sync', {
+      payload: { ...input, providerManual: true },
+      priority: 15
+    });
+    audit(db, req, 'account_monitor.sync_enqueue', 'account_monitor', null, { jobId, ...input });
+    return res.status(202).json({ jobId });
+  }));
+  api.post('/account-monitor/probes', asyncRoute(async (req, res) => {
+    const input = validate(accountProbeSchema, req.body || {});
+    await sub2api.adminToken();
+    if (db.prepare('SELECT COUNT(*) AS count FROM sub2api_monitored_accounts WHERE missing_since IS NULL').get().count === 0) {
+      await accountMonitor.sync({ lookbackDays: 1 });
+    }
+    const payload = await accountMonitor.prepareProbe({ ...input, triggerType: 'manual' });
+    if (req.query.wait === 'true') {
+      const result = await accountMonitor.probe(payload);
+      audit(db, req, 'account_monitor.probe', 'account_monitor', result.batchId, {
+        accountCount: result.accountCount,
+        succeeded: result.succeeded,
+        failed: result.failed
+      });
+      return res.json(result);
+    }
+    const jobId = queue.enqueue('account_monitor_probe', {
+      payload,
+      priority: 20,
+      dedupe: false
+    });
+    audit(db, req, 'account_monitor.probe_enqueue', 'account_monitor', null, {
+      jobId,
+      accountCount: input.accountIds?.length || null,
+      platforms: input.platforms || []
+    });
+    return res.status(202).json({ jobId });
+  }));
+
   api.get('/sub2api/channels', asyncRoute(async (_req, res) => res.json(await mappings.channels())));
   api.get('/sub2api/groups', asyncRoute(async (_req, res) => res.json(await mappings.groups())));
   api.get('/sub2api/status', (_req, res) => res.json(mappings.status()));
+  api.get('/sub2api/admin-api-key', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(transfers.sub2apiAdminApiKeyStatus());
+  });
+  api.put('/sub2api/admin-api-key', auth.requireRecentReauth(), asyncRoute(async (req, res) => {
+    const input = validate(sub2apiAdminApiKeySchema, req.body || {});
+    const verification = await sub2api.verifyAdminApiKey(input.adminApiKey);
+    const status = transfers.saveSub2ApiAdminApiKey(input.adminApiKey, verification);
+    sub2api.setAdminApiKey?.(input.adminApiKey, 'verified');
+    audit(db, req, 'sub2api.admin_api_key.update', 'sub2api', null, {
+      source: status.source,
+      verifiedAt: verification.verifiedAt,
+      capabilities: verification.capabilities
+    });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ ...status, verification });
+  }));
+  api.delete('/sub2api/admin-api-key', auth.requireRecentReauth(), (req, res) => {
+    const result = transfers.deleteSub2ApiAdminApiKey();
+    const fallbackKey = transfers.sub2apiAdminApiKey();
+    sub2api.setAdminApiKey?.(fallbackKey);
+    audit(db, req, 'sub2api.admin_api_key.delete', 'sub2api', null, {
+      deletedStoredKey: result.deleted,
+      fallbackSource: result.status.source
+    });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(result.status);
+  });
   api.get('/sub2api/comparisons', asyncRoute(async (req, res) => res.json(await mappings.comparisons({
     connectionId: req.query.connectionId || null
   }))));
@@ -1559,6 +1754,7 @@ function createApplication(options = {}) {
     const result = transfers.applyImport({ format: 'provider-monitor', content: decoded });
     if (decoded.settings) transfers.saveSettings(decoded.settings);
     const restored = transfers.restoreDisasterConfiguration(decoded, result);
+    sub2api.setAdminApiKey?.(transfers.sub2apiAdminApiKey());
     for (const item of result.results || []) {
       if (item.providerId && providers.get(item.providerId).enabled) queue.enqueue('provider_sync', { connectionId: item.providerId, priority: 5 });
     }
@@ -1641,6 +1837,15 @@ function createApplication(options = {}) {
     queue.start();
     enqueueSub2ApiRefresh();
     queue.enqueue('scheduled_automation', { priority: -1 });
+    if (accountMonitor.syncDue()) {
+      queue.enqueue('account_monitor_sync', { priority: -2 });
+    }
+    if (accountMonitor.probeDue()) {
+      queue.enqueue('account_monitor_probe', {
+        payload: { triggerType: 'scheduled' },
+        priority: -3
+      });
+    }
     cronTasks.push(cron.schedule('* * * * *', () => {
       const due = db.prepare(`
         SELECT id FROM provider_connections
@@ -1649,6 +1854,15 @@ function createApplication(options = {}) {
       for (const provider of due) queue.enqueue('provider_sync', { connectionId: provider.id });
       queue.enqueue('alert_evaluation', { priority: -1 });
       queue.enqueue('scheduled_automation', { priority: -1 });
+      if (accountMonitor.syncDue()) {
+        queue.enqueue('account_monitor_sync', { priority: -2 });
+      }
+      if (accountMonitor.probeDue()) {
+        queue.enqueue('account_monitor_probe', {
+          payload: { triggerType: 'scheduled' },
+          priority: -3
+        });
+      }
     }, { timezone: config.timezone }));
     cronTasks.push(cron.schedule('17 3 * * *', () => {
       queue.enqueue('snapshot_retention', { priority: -5 });
@@ -1696,7 +1910,7 @@ function createApplication(options = {}) {
     config, db, providers, queries, notifications, alerts, automation, analysis,
     keyHealth, catalog, checkins, mappings, credentials, transfers, sub2api,
     metrics, auth, queue, sync, detection, backups, retention, rechargeLinks,
-    simulations
+    simulations, accountMonitor
   };
   app.locals.startBackground = startBackground;
   app.locals.close = close;

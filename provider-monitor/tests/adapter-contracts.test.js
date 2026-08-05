@@ -371,10 +371,12 @@ test('Sub2API contract returns account balance, keys and group associations', as
   assert.equal(group.metadata.default_rate_multiplier, 1.2);
   assert.equal(group.metadata.effective_rate_multiplier, 0.9);
   assert.equal(group.metadata.derivedFromKey, undefined);
+  assert.equal(group.metadata.selectable, true);
   assert.equal(privateGroup.name, 'Private Campaign');
   assert.equal(privateGroup.ratio, 0.5);
   assert.equal(privateGroup.status, 'inactive');
   assert.equal(privateGroup.metadata.derivedFromKey, true);
+  assert.equal(privateGroup.metadata.selectable, false);
   assert.equal(unpricedGroup.ratio, null);
   assert.equal(unpricedGroup.metadata.derivedFromKey, true);
   assert.equal(keys[1].groupSnapshots[0].remoteId, '40');

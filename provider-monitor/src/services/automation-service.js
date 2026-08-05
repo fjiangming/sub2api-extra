@@ -1,7 +1,7 @@
 const crypto = require('crypto');
-const { AppError } = require('../errors');
+const { AppError, asAppError } = require('../errors');
 const { safeFetch } = require('../http/safe-fetch');
-const { redactText } = require('../security/redaction');
+const { redact, redactText } = require('../security/redaction');
 const { nowIso, parseJson, stringifyJson } = require('../db');
 
 function unwrap(payload) {
@@ -68,6 +68,22 @@ function comparisonConditionMatches(value, operator, threshold) {
   if (operator === 'gt') return value > threshold;
   if (operator === 'gte') return value >= threshold;
   return false;
+}
+
+function actionFailure(error, stage) {
+  const fallbackCode = typeof error?.code === 'string' && error.code
+    ? error.code
+    : 'AUTOMATION_ACTION_FAILED';
+  const appError = asAppError(error, fallbackCode);
+  const status = Number(appError.status);
+  return {
+    code: appError.code || fallbackCode,
+    message: redactText(appError.message || error || 'Automation action failed').slice(0, 1000),
+    stage: String(appError.details?.stage || stage || 'execute_action'),
+    retryable: Boolean(appError.retryable),
+    status: Number.isFinite(status) ? status : null,
+    details: redact(appError.details || {})
+  };
 }
 
 class AutomationService {
@@ -137,16 +153,38 @@ class AutomationService {
 
   listActions(limit = 200) {
     return this.db.prepare(`
-      SELECT * FROM automation_actions ORDER BY created_at DESC LIMIT ?
-    `).all(Math.min(500, Math.max(1, Number(limit) || 200))).map((row) => ({
-      ...row,
-      dryRun: Boolean(row.dry_run),
-      before: parseJson(row.before_json, {}),
-      after: parseJson(row.after_json, {}),
-      dry_run: undefined,
-      before_json: undefined,
-      after_json: undefined
-    }));
+      SELECT a.*, r.name AS rule_name
+      FROM automation_actions a
+      LEFT JOIN automation_rules r ON r.id = a.rule_id
+      ORDER BY a.created_at DESC LIMIT ?
+    `).all(Math.min(500, Math.max(1, Number(limit) || 200))).map((row) => {
+      const errorDetails = parseJson(row.error_details_json, {});
+      const error = row.error_message
+        ? {
+            code: row.error_code || 'AUTOMATION_ACTION_FAILED',
+            message: row.error_message,
+            stage: row.failure_stage || null,
+            retryable: Boolean(errorDetails.retryable),
+            status: errorDetails.status ?? null,
+            details: errorDetails.details || errorDetails
+          }
+        : null;
+      return {
+        ...row,
+        dryRun: Boolean(row.dry_run),
+        before: parseJson(row.before_json, {}),
+        after: parseJson(row.after_json, {}),
+        error,
+        errorCode: row.error_code || null,
+        errorMessage: row.error_message || null,
+        failureStage: row.failure_stage || null,
+        errorDetails: error?.details || {},
+        dry_run: undefined,
+        before_json: undefined,
+        after_json: undefined,
+        error_details_json: undefined
+      };
+    });
   }
 
   async evaluateConnection(connectionId) {
@@ -437,6 +475,7 @@ class AutomationService {
       ...(desiredAccountStatus ? { status: desiredAccountStatus } : {}),
       ...contextDetails
     };
+    let failureStage = 'record_action';
     this.db.prepare(`
       INSERT INTO automation_actions(
         id, rule_id, connection_id, action_type, status, dry_run,
@@ -445,6 +484,7 @@ class AutomationService {
     `).run(id, rule.id, connectionId, actionType, dryRun ? 1 : 0, stringifyJson(before), stringifyJson(after), nowIso());
     try {
       if (actionType === 'rebuild_sub2api_mappings') {
+        failureStage = 'prepare_mapping_rebuild';
         if (!this.mappings) {
           throw new AppError('MAPPING_SERVICE_UNAVAILABLE', 'Sub2API mapping service is unavailable', { status: 503 });
         }
@@ -452,6 +492,7 @@ class AutomationService {
           mappingCount: this.db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count,
           ...contextDetails
         };
+        failureStage = 'rebuild_mappings';
         const result = await this.mappings.rebuildAutoMappings({ preview: dryRun });
         after = dryRun
           ? {
@@ -470,6 +511,7 @@ class AutomationService {
             };
       } else if (!dryRun) {
         if (desiredAccountStatus) {
+          failureStage = 'read_sub2api_account';
           const accountPayload = await this.sub2api.data(`/api/v1/admin/accounts/${targetId}`);
           const account = accountPayload?.account ?? accountPayload;
           if (!['active', 'inactive', 'error'].includes(account?.status)) {
@@ -485,6 +527,7 @@ class AutomationService {
             name: account.name,
             ...contextDetails
           };
+          failureStage = 'update_sub2api_account';
           const updatedPayload = await this.sub2api.data(`/api/v1/admin/accounts/${targetId}`, {
             method: 'PUT', body: { status: desiredAccountStatus }
           });
@@ -496,6 +539,7 @@ class AutomationService {
             ...contextDetails
           };
         } else if (actionType === 'switch_to_backup') {
+          failureStage = 'switch_backup_mapping';
           const mappings = this.db.prepare(`SELECT * FROM sub2api_mappings WHERE channel_id = ? ORDER BY role`).all(targetId);
           const backup = mappings.find((mapping) => mapping.role === 'backup');
           if (!backup) throw new AppError('BACKUP_MAPPING_NOT_FOUND', 'No backup provider mapping is configured', { status: 409 });
@@ -510,6 +554,7 @@ class AutomationService {
           })();
           after = { ...actionTargetDetails(actionType, targetId), activeMappingId: backup.id, ...contextDetails };
         } else if (actionType === 'trigger_recharge_webhook') {
+          failureStage = 'deliver_recharge_webhook';
           const config = parseJson(rule.config_json, {});
           if (!config.webhookUrl) throw new AppError('WEBHOOK_URL_REQUIRED', 'Recharge webhook URL is required', { status: 400 });
           const response = await safeFetch(config.webhookUrl, this.config, {
@@ -522,6 +567,7 @@ class AutomationService {
           after = { ...actionTargetDetails(actionType, targetId), recommendation: actionType, connectionId, createdAt: nowIso(), ...contextDetails };
         }
       }
+      failureStage = 'record_result';
       this.db.prepare(`
         UPDATE automation_actions SET status = ?, before_json = ?, after_json = ?,
           completed_at = ? WHERE id = ?
@@ -531,9 +577,25 @@ class AutomationService {
       });
       return { id, actionType, status: dryRun ? 'dry_run' : 'succeeded', dryRun, before, after };
     } catch (error) {
+      const failure = actionFailure(error, failureStage);
       this.db.prepare(`
-        UPDATE automation_actions SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?
-      `).run(redactText(error?.message || error).slice(0, 1000), nowIso(), id);
+        UPDATE automation_actions SET status = 'failed', before_json = ?, after_json = ?,
+          error_code = ?, error_message = ?, failure_stage = ?, error_details_json = ?,
+          completed_at = ? WHERE id = ?
+      `).run(
+        stringifyJson(before),
+        stringifyJson(after),
+        failure.code,
+        failure.message,
+        failure.stage,
+        stringifyJson({
+          retryable: failure.retryable,
+          status: failure.status,
+          details: failure.details
+        }),
+        nowIso(),
+        id
+      );
       throw error;
     }
   }

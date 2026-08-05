@@ -62,8 +62,12 @@ function sub2apiFixture({
       if (endpoint === '/api/v1/admin/accounts/data') {
         onExport?.(options.query, options);
         if (exportError) throw exportError;
-        if (exportPayload) return exportPayload;
         const ids = String(options.query?.ids || '').split(',').filter(Boolean).map(Number);
+        if (exportPayload) {
+          return typeof exportPayload === 'function'
+            ? exportPayload(ids, options)
+            : exportPayload;
+        }
         return {
           accounts: ids.map((id) => {
             const account = accounts.find((item) => Number(item.id) === id);
@@ -486,6 +490,24 @@ test('auto-mapping reports key fingerprint collisions and performs no write when
       error.details?.remoteCode === 'STEP_UP_REQUIRED'
   );
 
+  const adminApiKeyBlockedService = new MappingService({
+    db: context.db, config: context.config,
+    sub2api: sub2apiFixture({
+      channels, groups, accounts, apiKeys: {},
+      exportError: new AppError('SUB2API_REQUEST_FAILED', 'Admin API key is blocked', {
+        status: 403,
+        details: { remoteCode: 'STEP_UP_ADMIN_API_KEY_FORBIDDEN', remoteStatus: 403 }
+      })
+    })
+  });
+  await assert.rejects(
+    () => adminApiKeyBlockedService.autoMappings({ mode: 'preview' }),
+    (error) => error.code === 'SUB2API_ADMIN_API_KEY_EXPORT_FORBIDDEN' &&
+      error.details?.remoteCode === 'STEP_UP_ADMIN_API_KEY_FORBIDDEN' &&
+      error.details?.prerequisite ===
+        'disable_sub2api_step_up_enabled_with_a_totp_verified_admin_session'
+  );
+
   const unsupportedService = new MappingService({
     db: context.db, config: context.config,
     sub2api: sub2apiFixture({
@@ -592,6 +614,62 @@ test('auto-mapping exports only name-matched accounts and distinguishes key outc
   );
 });
 
+test('auto-mapping matches unordered account exports and rechecks duplicate names by ID', async (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Duplicate', adapterType: 'new-api', baseUrl: 'https://duplicates.example',
+    authMode: 'system_token', credentials: { systemToken: 'secret', userId: '1' }, enabled: true
+  });
+  insertGroup(context.db, provider.id, { remoteId: 'default', name: 'Default', ratio: 1 });
+  const apiKeys = {
+    901: 'sk-duplicate-first-12345678',
+    902: 'sk-duplicate-second-87654321'
+  };
+  const keyIds = {
+    901: insertKey(context.db, provider.id, {
+      remoteId: 'first', name: 'First', apiKey: apiKeys[901], primaryGroupRef: 'default'
+    }),
+    902: insertKey(context.db, provider.id, {
+      remoteId: 'second', name: 'Second', apiKey: apiKeys[902], primaryGroupRef: 'default'
+    })
+  };
+  const accounts = [901, 902].map((id) => ({
+    id,
+    name: 'Duplicate',
+    type: 'api_key',
+    group_ids: [501],
+    credentials_status: { has_api_key: true }
+  }));
+  const exportCalls = [];
+  const mappings = new MappingService({
+    db: context.db,
+    config: context.config,
+    sub2api: sub2apiFixture({
+      channels: [],
+      groups: [{ id: 501, name: 'Default', status: 'active', rate_multiplier: 1 }],
+      accounts,
+      apiKeys: {},
+      onExport: (query) => exportCalls.push(String(query.ids).split(',').map(Number)),
+      exportPayload: (ids) => ({
+        accounts: [...ids].reverse().map((id) => ({
+          name: 'Duplicate',
+          credentials: { api_key: apiKeys[id] }
+        }))
+      })
+    })
+  });
+
+  const preview = await mappings.autoMappings({ mode: 'preview' });
+  assert.equal(preview.summary.pendingCreate, 2);
+  assert.deepEqual(
+    preview.items.map((item) => [item.accountId, item.keyId]).sort((left, right) => left[0] - right[0]),
+    [[901, keyIds[901]], [902, keyIds[902]]]
+  );
+  assert.deepEqual(exportCalls.map((ids) => ids.length), [2, 1, 1]);
+});
+
 test('auto-mapping rolls back every insert when one item fails inside the apply transaction', async (t) => {
   const context = createTestContext();
   t.after(() => context.cleanup());
@@ -639,11 +717,195 @@ test('auto-mapping rolls back every insert when one item fails inside the apply 
   `).run(provider.id, now, now);
   await assert.rejects(
     () => mappings.rebuildAutoMappings(),
-    /forced auto-mapping failure/
+    (error) => /forced auto-mapping failure/.test(error.message) &&
+      error.details?.stage === 'replace_mappings' &&
+      error.details?.replacementCommitted === false
   );
   assert.deepEqual(
     context.db.prepare('SELECT id FROM sub2api_mappings').all().map((row) => row.id),
     ['existing-before-rebuild']
+  );
+});
+
+test('mapping rebuild refreshes matching suppliers and uses the final live Sub2API groups and composite rate', async (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Fresh Supplier', adapterType: 'new-api', baseUrl: 'https://fresh.example',
+    authMode: 'system_token', credentials: { systemToken: 'secret', userId: '1' },
+    rechargeMultiplier: 2, enabled: true
+  });
+  insertGroup(context.db, provider.id, { remoteId: 'current', name: 'Current', ratio: 1 });
+  const apiKey = 'sk-fresh-supplier-1234567890';
+  insertKey(context.db, provider.id, {
+    remoteId: 'fresh-key', name: 'Fresh key', apiKey, primaryGroupRef: 'current'
+  });
+  const account = {
+    id: 911,
+    name: 'Fresh Supplier',
+    type: 'api_key',
+    group_ids: [701],
+    credentials_status: { has_api_key: true }
+  };
+  const groups = [
+    { id: 701, name: 'Previous', status: 'active', rate_multiplier: 1 },
+    { id: 702, name: 'Current', status: 'active', rate_multiplier: 1.2 }
+  ];
+  const syncCalls = [];
+  const mappings = new MappingService({
+    db: context.db,
+    config: context.config,
+    sub2api: sub2apiFixture({
+      channels: [], groups, accounts: [account], apiKeys: { 911: apiKey }
+    })
+  });
+  mappings.setProviderSync(async (connectionId, options) => {
+    syncCalls.push({ connectionId, options });
+    context.db.prepare('UPDATE remote_groups SET ratio = ?, last_seen_at = ? WHERE connection_id = ?')
+      .run(2.4, nowIso(), connectionId);
+    account.group_ids = [702];
+    return {
+      status: 'succeeded',
+      mappingSnapshot: { ready: true, capturedAt: nowIso() },
+      warnings: []
+    };
+  });
+
+  const rebuilt = await mappings.rebuildAutoMappings();
+
+  assert.deepEqual(syncCalls, [{
+    connectionId: provider.id,
+    options: { jobType: 'mapping_rebuild_sync', manual: true }
+  }]);
+  assert.equal(rebuilt.summary.providerSnapshots.refreshed, 1);
+  assert.deepEqual(
+    context.db.prepare('SELECT group_id FROM sub2api_mappings').all().map((row) => row.group_id),
+    [702]
+  );
+  const comparison = rebuilt.comparisons.items[0].comparison;
+  assert.equal(comparison.providerRate, 2.4);
+  assert.equal(comparison.rechargeMultiplier, 2);
+  assert.equal(comparison.compositeRate, 1.2);
+  const state = context.db.prepare(`
+    SELECT status, provider_rate, base_group_rate FROM sub2api_mapping_states
+  `).get();
+  assert.equal(state.status, 'aligned');
+  assert.equal(state.provider_rate, 2.4);
+  assert.equal(state.base_group_rate, 1.2);
+});
+
+test('mapping rebuild preserves existing mappings when a supplier snapshot is incomplete', async (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Incomplete Supplier', adapterType: 'new-api', baseUrl: 'https://incomplete.example',
+    authMode: 'system_token', credentials: { systemToken: 'secret', userId: '1' }, enabled: true
+  });
+  insertGroup(context.db, provider.id, { remoteId: 'default', name: 'Default', ratio: 1 });
+  const apiKey = 'sk-incomplete-supplier-1234567890';
+  const keyId = insertKey(context.db, provider.id, {
+    remoteId: 'key', name: 'Key', apiKey, primaryGroupRef: 'default'
+  });
+  const now = nowIso();
+  context.db.prepare(`
+    INSERT INTO sub2api_mappings(
+      id, connection_id, key_id, account_id, group_id, role,
+      enabled, models_json, config_json, created_at, updated_at
+    ) VALUES ('mapping-before-incomplete-sync', ?, ?, 921, 801, 'primary', 1, '[]', '{}', ?, ?)
+  `).run(provider.id, keyId, now, now);
+  const mappings = new MappingService({
+    db: context.db,
+    config: context.config,
+    sub2api: sub2apiFixture({
+      channels: [],
+      groups: [{ id: 801, name: 'Default', status: 'active', rate_multiplier: 1 }],
+      accounts: [{
+        id: 921, name: 'Incomplete Supplier', type: 'api_key', group_ids: [801],
+        credentials_status: { has_api_key: true }
+      }],
+      apiKeys: { 921: apiKey }
+    })
+  });
+  mappings.setProviderSync(async () => ({
+    status: 'partial',
+    mappingSnapshot: {
+      ready: false,
+      capturedAt: nowIso(),
+      groupsComplete: false,
+      keysComplete: true
+    },
+    warnings: [{ capability: 'listGroups', code: 'TIMEOUT', message: 'Timed out' }]
+  }));
+
+  await assert.rejects(
+    () => mappings.rebuildAutoMappings(),
+    (error) => error.code === 'MAPPING_PROVIDER_SNAPSHOT_INCOMPLETE' &&
+      error.details?.stage === 'refresh_provider_snapshots' &&
+      error.retryable === true
+  );
+  assert.deepEqual(
+    context.db.prepare('SELECT id FROM sub2api_mappings').all().map((row) => row.id),
+    ['mapping-before-incomplete-sync']
+  );
+});
+
+test('mapping rebuild rolls back mappings and comparison states when a composite rate is incomplete', async (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Missing Rate', adapterType: 'new-api', baseUrl: 'https://missing-rate.example',
+    authMode: 'system_token', credentials: { systemToken: 'secret', userId: '1' }, enabled: true
+  });
+  insertGroup(context.db, provider.id, { remoteId: 'default', name: 'Default', ratio: null });
+  const apiKey = 'sk-missing-rate-1234567890';
+  insertKey(context.db, provider.id, {
+    remoteId: 'key', name: 'Key', apiKey, primaryGroupRef: 'default'
+  });
+  const now = nowIso();
+  context.db.prepare(`
+    INSERT INTO sub2api_mappings(
+      id, connection_id, key_id, account_id, group_id, role,
+      enabled, models_json, config_json, created_at, updated_at
+    ) VALUES ('mapping-before-rate-failure', ?, NULL, NULL, 999, 'primary', 1, '[]', '{}', ?, ?)
+  `).run(provider.id, now, now);
+  context.db.prepare(`
+    INSERT INTO sub2api_mapping_states(
+      mapping_id, status, tolerance_ratio, details_json, checked_at
+    ) VALUES ('mapping-before-rate-failure', 'aligned', 0.05, '{}', ?)
+  `).run(now);
+  const mappings = new MappingService({
+    db: context.db,
+    config: context.config,
+    sub2api: sub2apiFixture({
+      channels: [],
+      groups: [{ id: 901, name: 'Default', status: 'active', rate_multiplier: 1 }],
+      accounts: [{
+        id: 931, name: 'Missing Rate', type: 'api_key', group_ids: [901],
+        credentials_status: { has_api_key: true }
+      }],
+      apiKeys: { 931: apiKey }
+    })
+  });
+  mappings.setProviderSync(async () => ({
+    status: 'succeeded', mappingSnapshot: { ready: true, capturedAt: nowIso() }, warnings: []
+  }));
+
+  await assert.rejects(
+    () => mappings.rebuildAutoMappings(),
+    (error) => error.code === 'MAPPING_RATE_SNAPSHOT_INCOMPLETE' &&
+      error.details?.stage === 'replace_mappings' &&
+      error.details?.replacementCommitted === false
+  );
+  assert.deepEqual(
+    context.db.prepare('SELECT id FROM sub2api_mappings').all().map((row) => row.id),
+    ['mapping-before-rate-failure']
+  );
+  assert.deepEqual(
+    context.db.prepare('SELECT mapping_id FROM sub2api_mapping_states').all().map((row) => row.mapping_id),
+    ['mapping-before-rate-failure']
   );
 });
 

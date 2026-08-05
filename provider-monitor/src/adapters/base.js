@@ -90,6 +90,7 @@ class ProviderAdapter {
       backupGroup: false,
       groupsDerivedFromKeys: false,
       usageHistory: false,
+      requestLogs: false,
       priceCatalog: false,
       rechargeQuote: false,
       rechargeLogin: false,
@@ -138,6 +139,16 @@ class ProviderAdapter {
 
   async getUsage() {
     return [];
+  }
+
+  async getRequestLogs() {
+    return {
+      items: [],
+      total: 0,
+      truncated: false,
+      coverageFrom: null,
+      coverageTo: null
+    };
   }
 
   async getDynamicRouteRates() {

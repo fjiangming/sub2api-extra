@@ -10,6 +10,7 @@ Provider Monitor 是 Sub2API Extra 的供应商资产、余额、密钥分组和
 | **余额与密钥** | 账户余额、多币种余额、密钥额度、到期时间和路由分组 |
 | **趋势分析** | SQLite 历史快照、小时/日降采样、余额趋势、日均消耗与可用天数预测 |
 | **异常检测** | 余额/用量异常、Key 健康、资产与分组漂移、价格目录和模型推荐 |
+| **账号质量** | 按平台同步 Sub2API 全量账号与真实请求日志，比较缓存读取率、首字/总耗时分位数、输出速度、主动检测通过率和动态题集能力分；支持手动与定时检测 |
 | **签到与对账** | 自动签到、Sub2API 分组映射、用量对账和 Channel Monitor 健康联动 |
 | **倍率对照** | 基座 Sub2API 渠道/分组目录、供应商上游分组倍率、充值倍率、综合倍率和偏差预警 |
 | **规则与自动化** | 统一管理告警规则与执行型自动化；告警规则创建可确认、可恢复的事件，执行规则支持 Sub2API 账号启停、备用映射切换与定时重建映射、演练、动作限额和回滚 |
@@ -43,6 +44,65 @@ Provider Monitor 是 Sub2API Extra 的供应商资产、余额、密钥分组和
 Sub2API 会同步普通用户可见的默认倍率和用户有效倍率，并保留峰值倍率、图片固定价等分组计价信息。站点启用用户侧 `channels/available` 功能时，还会同步渠道模型价格并按有效分组倍率计算实际价格；未启用时目录同步会明确标记为"仅倍率"。
 
 不同分支可能关闭或改写密钥、分组端点。同步会把这类情况标记为"部分成功"，并继续保存已经确认的余额，不会伪造缺失能力。
+
+## Sub2API 账号质量监控
+
+“账号质量”视图把真实业务请求与主动检测分开保存和展示。实现参考了 [禾维 AI](https://www.hvoy.ai/) 公开展示的在线率、模型一致性信号、延迟、样本量和风险提示思路，但检测对象是 Sub2API 基座中的具体上游账号，而不是中转站域名。
+
+### 数据来源
+
+| 来源 | 接口或数据 | 保存内容 |
+|---|---|---|
+| 账号目录 | `GET /api/v1/admin/accounts?platform=...` | 账号 ID、名称、平台、类型、状态、调度状态、优先级和并发 |
+| Sub2API 基座真实请求 | `GET /api/v1/admin/usage` | 请求模型、上游模型、首字/总耗时、输入/输出/缓存 Token、费用和时间 |
+| 供应商上游真实请求 | New API 的 `GET /api/log/self`（逐请求能力） | 按映射 Key 归属的请求模型、首字/总耗时、输入/输出/缓存 Token、费用和时间 |
+| 供应商累计数据 | 供应商 usage 快照或 Key 已用额度快照 | 同一映射 Key 的窗口起止费用、请求数和 Token 增量；不支持逐请求日志的供应商仍可参与费用对比 |
+| 主动检测 | 基座账号测试接口；手动检测可对无代理 OpenAI API Key 账号直连上游 | 检测结果、首字/总耗时、动态题集得分和最长 500 字符的检测响应摘要 |
+
+真实请求采集不会保存提示词、正常业务响应、用户、API Key、IP 或 Sub2API 账号凭据。主动检测只发送本地生成的无敏感动态题目；响应摘要用于复核评分。手动直测通过 Sub2API TOTP 保护的账号导出接口临时读取所选 API Key，凭据只保存在进程内存中的短期票据里，不写入数据库或任务载荷；账号配置了代理时仍使用基座检测路径，避免绕过真实代理。
+
+首次同步读取默认观察窗口内的基座日志；供应商同步按映射连接读取上游日志或累计快照。基座日志从最近样本的前一天增量回读，并按 Sub2API usage log ID 幂等更新；供应商逐请求日志按供应商日志 ID 幂等更新。基座日志按自然日分页、每天最多读取 50,000 条，供应商日志默认最多读取 10,000 条；达到上限时对应来源会显示截断状态，不会生成费用高低结论。
+
+### 指标口径
+
+| 指标 | 口径 |
+|---|---|
+| 请求数 | 基座为观察窗口内 Sub2API 成功 usage 记录数；上游为供应商逐请求日志成功记录数，或累计请求数差值 |
+| 缓存读取率 | 基座和上游分别计算：`cache_read_tokens / (input_tokens + cache_creation_tokens + cache_read_tokens)` |
+| 缓存命中请求占比 | `cache_read_tokens > 0` 的请求数占比 |
+| 首字 P50 / P95 | 基座和上游分别对真实流式请求 `first_token_ms` 计算中位数和 95 分位数；每侧使用最近最多 500 个样本 |
+| 总耗时 P95 | 基座和上游分别对真实请求 `duration_ms` 计算 95 分位数，每侧最多 500 个样本 |
+| 输出速度 | 基座和上游分别计算 `sum(output_tokens) / sum(duration_ms - first_token_ms)`，仅统计有效流式样本 |
+| 费用对比 | `同窗 Sub2API actual_cost - 同窗供应商 Key 消耗增量`；优先使用供应商累计 usage，其次 Key 快照，最后使用完整逐请求账单日志 |
+| 主动检测通过率 | 当前观察窗口内成功检测数占比 |
+| 能力分 | `capability_v2` 按账号和批次动态生成算术、逻辑、数列、排序变换和校验码五类题，每类占 20%；指令遵循分独立显示 |
+| 质量分 | 首字延迟 40%、检测通过率 40%、能力分 20%；缺少某一维度时对已有维度重新归一化 |
+
+缓存读取率受请求内容和客户端缓存策略影响，因此只展示，不进入质量分。费用比较只对单一、非共享映射 Key、同币种且覆盖窗口有效的数据计算；供应商没有返回的指标显示“未提供”，不会按 0 计算。若基座有费用但供应商累计计数器和请求日志均未变化，会显示“计数器未变化”而不误判为基座更贵。Sub2API usage 接口记录成功计费请求，不能据此推导请求错误率；可用性统一来自主动检测，避免把“有日志”误当成“100% 在线”。
+
+Gemini 账号测试接口可以转发自定义提示词。部分 Sub2API 版本的 OpenAI Responses/OAuth 测试路径会忽略传入题目并固定发送 `hi`：监控端会把这种问候响应标记为“能力题未执行 / 未覆盖”，不会误算为 0 分。手动检测无代理的 OpenAI API Key 账号时，监控端在管理员完成 TOTP 后直接请求其 Responses 或 Chat Completions 上游；OAuth、配置代理的 API Key、Anthropic、Grok 等账号继续使用基座路径。定时检测若使用的基座尚未支持 OpenAI 自定义题目，会保留连通性结果但不生成能力分。该分数是可重复的能力代理指标，不是绝对智商结论。
+
+禾维官方文档明确说明当前[不提供外部检测调用的公开 API](https://docs.hvoy.ai/en/docs/hvoyai/verify)，其[内部质量分](https://docs.hvoy.ai/en/docs/hvoyai/rank)还包含未公开的模型不匹配、异常结果、价格、用户行为等信号。因此本模块不会抓取禾维私有接口，也不会把 Sub2API API Key 或账号凭据发送给第三方。`capability_v2` 是依据其公开的可用性、响应质量、延迟和历史一致性维度实现的本地可审计兼容套件，不冒充禾维原始算法。
+
+### 手动与定时检测
+
+- 顶部“同步双源”手动刷新账号目录、Sub2API 基座日志和已映射供应商上游数据。
+- 勾选账号后使用“检测所选”，或使用行尾烧瓶按钮检测单个账号。
+- “检测设置”分别控制日志同步和主动检测；日志同步默认每 15 分钟启用，主动检测默认关闭，避免未经确认产生 Token 成本。
+- 定时检测可选择平台、为每个平台指定模型，并设置 1 到 10 的并发。模型留空时使用 Sub2API 基座默认测试模型。
+- 样本默认保留 30 天，可在检测设置中调整为 1 到 3650 天。
+
+定时任务需要可持续使用的 Sub2API 管理员认证。配置账号启用 TOTP 时，服务重启后必须先在界面完成一次二次验证；也可以配置有效的 `SUB2API_ADMIN_TOKEN`。
+
+### API
+
+- `GET /api/account-monitor/config`
+- `PUT /api/account-monitor/config`
+- `GET /api/account-monitor/accounts`
+- `GET /api/account-monitor/accounts/:id`
+- `POST /api/account-monitor/sync`
+- `GET /api/account-monitor/probes`
+- `POST /api/account-monitor/probes`
 
 ### Sub2API 供应商认证
 
@@ -146,6 +206,7 @@ SUB2API_BASE_URL=http://host.docker.internal:8080
 SUB2API_PUBLIC_URL=https://sub2api.example.com
 
 # 联动使用的 Sub2API 管理员凭据，local 模式下同样生效
+SUB2API_ADMIN_API_KEY=
 SUB2API_ADMIN_TOKEN=
 ADMIN_EMAIL=admin@example.com
 ADMIN_PASSWORD=<Sub2API 管理员密码>
@@ -294,6 +355,7 @@ SUB2API_BASE_URL=http://host.docker.internal:8080
 # 管理员浏览器实际访问的地址，用于 iframe 来源白名单和返回链接
 SUB2API_PUBLIC_URL=https://sub2api.example.com
 
+SUB2API_ADMIN_API_KEY=
 SUB2API_ADMIN_TOKEN=
 ADMIN_EMAIL=admin@example.com
 ADMIN_PASSWORD=<Sub2API 管理员密码>
@@ -354,9 +416,15 @@ New API 供应商可在编辑页面启用“动态路由倍率”。同步任务
 
 “缓存”表示远端本次检查失败，但本地保存过此前成功获取的倍率，因此继续使用最后成功值，避免一次网络故障使综合倍率突然消失。缓存值不是默认值；远端恢复后会在下一次同步时自动更新。
 
-自动映射查找名称中包含供应商名的 Sub2API API Key 账号，直接为账号关联的每个 Sub2API 分组匹配供应商 Key，不要求分组与渠道建立关系。系统使用脱敏 Key 指纹确认上游 Key；多 Key 供应商会映射到指纹对应的具体 Key，价格比较再读取该 Key 的分组倍率或该 Key 的动态日志倍率。读取账号 Key 需要可执行敏感操作的 Sub2API 管理员会话；当配置账号启用登录 TOTP 或 Sub2API 要求敏感操作 step-up 时，Provider Monitor 会弹出 TOTP 验证框，完成验证后自动重试。配置账号取得的访问/刷新 Token 只保存在内存中并自动轮换；服务重启后可能需要重新完成登录 TOTP。管理员 API Key 不能代替敏感操作 step-up。
+自动映射查找名称中包含供应商名的 Sub2API API Key 账号，直接为账号关联的每个 Sub2API 分组匹配供应商 Key，不要求分组与渠道建立关系。系统使用脱敏 Key 指纹确认上游 Key；多 Key 供应商会映射到指纹对应的具体 Key，价格比较再读取该 Key 的分组倍率或该 Key 的动态日志倍率。
 
-自动化规则可选择“按时间运行 / 重建全部 Sub2API 映射”。每次执行先完整发现并校验候选关系，再在同一个 SQLite 事务中删除全部旧映射并写入新映射；远端发现失败或映射写入失败时保留原映射。成功替换会同时清理旧映射的比较状态和对账历史。
+推荐在“设置与备份 -> Sub2API 管理员 API Key”中配置 Key。保存时系统使用 `x-api-key` 依次实时验证管理员分组、账号列表和 `/api/v1/admin/accounts/data` 账号 Key 导出能力，只有三项全部成功才会加密写入 SQLite。输入框不会回显明文；普通配置导出不包含该 Key，SQLite 备份保留密文，只有带密码加密的灾难恢复包会包含可迁移的凭据。也可通过 `SUB2API_ADMIN_API_KEY` 提供只读的部署回退值。
+
+该方案受 Sub2API 自身安全策略约束：`step_up_enabled=false` 时管理员 API Key 可以访问账号 Key 导出接口，可用于服务重启后的无人值守重建；`step_up_enabled=true` 时 Sub2API 会返回 `STEP_UP_ADMIN_API_KEY_FORBIDDEN`。管理员 API Key 不能修改这个开关，必须先用完成 TOTP step-up 的 Sub2API 管理员会话关闭一次，再回到 Provider Monitor 保存并验证 Key。若保留该开关，只能继续使用短期管理员会话并在过期后重新完成 TOTP，无法保证每次定时重建成功。
+
+自动化规则可选择“按时间运行 / 重建全部 Sub2API 映射”。每次执行先实时读取 Sub2API 账号以确定匹配供应商，强制同步这些供应商的分组、Key、充值倍率和已启用的动态日志倍率；任一映射关键快照不完整都会中止。同步完成后系统再次强制读取最新 Sub2API 分组、分组倍率、账号分组关系和账号 Key，再发现候选并计算 `供应商倍率 / 充值倍率` 综合倍率。只有所有新映射都得到有效综合倍率时，才会在同一个 SQLite 事务中替换映射和比较状态；任一远端读取、同步、校验或写入失败都完整保留旧映射及旧比较状态。
+
+动作记录会保存失败阶段、错误码、HTTP 状态、可重试标志和脱敏后的上游详情，并在“规则与自动化”页面直接显示失败摘要。管理员 Key 被 step-up 策略阻止时会记录 `SUB2API_ADMIN_API_KEY_EXPORT_FORBIDDEN` 和上游 `STEP_UP_ADMIN_API_KEY_FORBIDDEN`；供应商快照或倍率不完整时分别记录 `MAPPING_PROVIDER_SNAPSHOT_INCOMPLETE` 或 `MAPPING_RATE_SNAPSHOT_INCOMPLETE`，便于直接定位失败对象而不破坏现有映射。
 
 定时重建可以继续配置后续条件和命中动作。重建成功后系统使用刚刷新的比较状态，按百分比判断综合倍率偏差，支持 `<`、`<=`、`>`、`>=`；命中映射会按 `account_id` 自动归并，并对每个关联账号执行一次停用或启用。配置“综合倍率偏差 `< 0%` / 停用映射关联账号”即可实现重建后自动停用负偏差账号。演练模式只预览重建与账号动作，不修改映射或账号；未配置后续条件的旧规则仍只执行映射重建。
 
@@ -422,7 +490,7 @@ npm start
 
 | 调度时间 | 任务 |
 |---|---|
-| 每分钟 | 检查到期的供应商并入队同步、告警评估、检查定时自动化规则 |
+| 每分钟 | 检查到期的供应商、账号日志同步与主动账号检测并入队，执行告警评估和定时自动化规则 |
 | 每 5 分钟 | 刷新 Sub2API 映射比较 |
 | 每天 02:25 | 价格目录同步 |
 | 每天 03:17 | 快照数据保留清理 |
@@ -562,7 +630,7 @@ PROVIDER_MONITOR_RECHARGE_LINK_TTL_MINUTES=60
 
 1. "设置与备份 -> 系统参数"中的"允许真实自动化"已开启
 2. 规则的"演练模式"已关闭
-3. 当前存在有效的管理员 SSO 会话，或配置了 `SUB2API_ADMIN_TOKEN`，或可用的 `ADMIN_EMAIL` / `ADMIN_PASSWORD`
+3. 当前存在有效的管理员 SSO 会话，或配置了 `SUB2API_ADMIN_TOKEN`，或可用的 `ADMIN_EMAIL` / `ADMIN_PASSWORD`；重建映射也可使用已验证且未被 step-up 策略阻止的管理员 API Key
 
 账号启停动作保存变更前后的账号状态并支持回滚。服务端强制执行连续命中、冷却、每日动作上限和 Contract 变化暂停；备用映射切换同样支持回滚。定时重建映射属于整体替换，不提供动作回滚。
 
@@ -578,7 +646,7 @@ PROVIDER_MONITOR_RECHARGE_LINK_TTL_MINUTES=60
 
 Webhook 仅负责通知外部系统，Provider Monitor 不保存支付凭据，也不直接调用供应商充值或支付接口。
 
-SSO Token 和配置账号取得的 Token 都只保存在内存中，刷新 Token 会按 Sub2API 协议轮换。需要无人值守地持续执行倍率检查、告警或自动化时，建议配置具备所需权限的 `SUB2API_ADMIN_TOKEN`；也可以使用管理员邮箱密码，启用 TOTP 时需在服务重启后完成一次交互验证。
+SSO Token 和配置账号取得的 Token 都只保存在内存中，刷新 Token 会按 Sub2API 协议轮换。需要无人值守地持续重建映射时，优先在“设置与备份”配置并验证管理员 API Key，同时确认 Sub2API 的 `step_up_enabled=false`。其他依赖用户级接口或敏感 step-up 的功能仍可配置 `SUB2API_ADMIN_TOKEN` 或管理员邮箱密码；启用登录 TOTP 时，服务重启后可能仍需完成一次交互验证。
 
 邮件通知的 SMTP `host`、`port`、`secure`、`user` 和 `from` 写入邮件通知通道的配置 JSON，密码写入同一通道的凭据 JSON。旧版 `PROVIDER_MONITOR_SMTP_*` 环境变量仍可作为兼容回退，但新部署不再需要配置。
 
@@ -630,7 +698,7 @@ provider-monitor/
 │   │   ├── voapi-v2.js         # VoAPI v2
 │   │   └── custom.js           # 自定义适配器
 │   ├── db/
-│   │   └── index.js            # SQLite Schema（版本 16）与迁移
+│   │   └── index.js            # SQLite Schema（版本 17）与迁移
 │   ├── http/
 │   │   ├── client.js           # 带 SSRF 防护的 HTTP 客户端
 │   │   ├── safe-fetch.js       # 安全请求封装
@@ -661,6 +729,7 @@ provider-monitor/
 │       ├── retention-service.js # 数据保留与清理
 │       ├── detection-service.js # 供应商类型探测
 │       ├── sub2api-admin-client.js  # Sub2API 管理 API 客户端
+│       ├── account-monitor-service.js # 基座账号日志聚合、质量评分与主动检测
 │       ├── job-queue.js        # 并发任务队列
 │       └── group-store.js      # 分组缓存
 └── tests/                      # Node.js 内置测试运行器

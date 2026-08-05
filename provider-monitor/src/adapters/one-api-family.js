@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const {
   ProviderAdapter,
   joinUrl,
@@ -81,6 +82,7 @@ class OneApiFamilyAdapter extends ProviderAdapter {
       backupGroup: this.family.backupGroup,
       groupsDerivedFromKeys: ['one-hub', 'done-hub'].includes(this.type),
       usageHistory: true,
+      requestLogs: this.type === 'new-api',
       priceCatalog: ['new-api', 'veloera'].includes(this.type),
       rechargeQuote: true,
       rechargeLogin: true,
@@ -436,12 +438,10 @@ class OneApiFamilyAdapter extends ProviderAdapter {
     }];
   }
 
-  async getDynamicRouteRates(options = {}) {
-    const config = normalizeDynamicRouteConfig(options);
-    if (this.type !== 'new-api' || !config.enabled) return [];
-    const status = await this.ensureStatus();
-    const quotaPerUnit = toFiniteNumber(status?.quota_per_unit, 500000) || 500000;
-
+  async getRequestLogs(options = {}) {
+    if (this.type !== 'new-api') return super.getRequestLogs(options);
+    const lookbackDays = Math.min(90, Math.max(1, Number(options.lookbackDays) || 30));
+    const maxRecords = Math.min(10000, Math.max(100, Number(options.maxRecords) || 5000));
     const knownKeys = Array.isArray(options.keys) ? options.keys : [];
     const restrictToKeys = options.restrictToKeys === true;
     const keysById = new Map(knownKeys.map((key) => [String(key.remoteId), key]));
@@ -453,11 +453,15 @@ class OneApiFamilyAdapter extends ProviderAdapter {
       else keysByName.set(name, key);
     }
 
+    const status = await this.ensureStatus();
+    const quotaPerUnit = toFiniteNumber(status?.quota_per_unit, 500000) || 500000;
     const endTimestamp = Math.floor(Date.now() / 1000);
-    const startTimestamp = endTimestamp - config.lookbackDays * 86400;
+    const startTimestamp = endTimestamp - lookbackDays * 86400;
     const pageSize = 100;
     const rows = [];
-    for (let page = 1; rows.length < config.maxRecords; page += 1) {
+    let total = null;
+    let hasTotal = false;
+    for (let page = 1; rows.length < maxRecords; page += 1) {
       const query = new URLSearchParams({
         p: String(page),
         page_size: String(pageSize),
@@ -469,49 +473,135 @@ class OneApiFamilyAdapter extends ProviderAdapter {
         joinUrl(this.connection.base_url, `/api/log/self?${query.toString()}`),
         { headers: this.headers(), retries: 1 }
       );
-      const { items, total, hasTotal } = extractItems(response.data);
-      rows.push(...items.slice(0, config.maxRecords - rows.length));
-      if (items.length === 0 || (hasTotal && rows.length >= total) || items.length < pageSize) break;
+      const extracted = extractItems(response.data);
+      total = extracted.hasTotal ? extracted.total : total;
+      hasTotal = hasTotal || extracted.hasTotal;
+      rows.push(...extracted.items.slice(0, maxRecords - rows.length));
+      if (
+        extracted.items.length === 0 ||
+        (extracted.hasTotal && rows.length >= extracted.total) ||
+        extracted.items.length < pageSize
+      ) break;
     }
 
-    const observationsByKey = new Map(knownKeys.map((key) => [String(key.remoteId), []]));
+    const items = [];
     for (const row of rows) {
       let other = row.other || {};
       if (typeof other === 'string') {
         try { other = JSON.parse(other); } catch { other = {}; }
       }
       if (!other || typeof other !== 'object' || Array.isArray(other)) other = {};
-      if (other.request_final_status && other.request_final_status !== 'success') continue;
-      const modelRatio = finitePositive(row.model_ratio ?? other.model_ratio);
-      const groupRatio = finitePositive(row.group_ratio ?? other.group_ratio) ?? 1;
-
       const tokenId = row.token_id == null ? null : String(row.token_id);
       const tokenName = String(row.token_name || '').trim();
       const knownKey = (tokenId && keysById.get(tokenId)) || keysByName.get(tokenName) || null;
       if (restrictToKeys && !knownKey) continue;
       const remoteKeyId = String(knownKey?.remoteId ?? tokenId ?? tokenName);
-      if (!remoteKeyId) continue;
-      if (!observationsByKey.has(remoteKeyId)) observationsByKey.set(remoteKeyId, []);
-      const baseObservation = {
+      const createdAt = toIsoDate(row.created_at);
+      if (!remoteKeyId || !createdAt) continue;
+      const promptTokens = Math.max(0, toFiniteNumber(row.prompt_tokens, 0) || 0);
+      const cacheReadTokens = Math.min(
+        promptTokens,
+        Math.max(0, toFiniteNumber(other.cache_tokens, 0) || 0)
+      );
+      const durationMs = finiteNonnegative(
+        other.smart_route_total_duration_ms ?? row.duration_ms
+      ) ?? (finiteNonnegative(row.use_time) == null ? null : Number(row.use_time) * 1000);
+      const firstTokenMs = row.is_stream
+        ? finitePositive(other.frt ?? other.first_token_ms ?? row.first_token_ms)
+        : null;
+      const sourceLogId = row.id != null
+        ? String(row.id)
+        : row.request_id
+          ? `request:${String(row.request_id)}`
+          : `derived:${crypto.createHash('sha256').update(JSON.stringify([
+              row.created_at, remoteKeyId, row.model_name || row.model,
+              row.quota, promptTokens, row.completion_tokens
+            ])).digest('hex')}`;
+      const loggedProviderPrices = extractLoggedProviderPrices(row, other);
+      items.push({
+        sourceLogId,
+        remoteKeyId,
         keyName: knownKey?.name || tokenName || remoteKeyId,
-        requestAt: toIsoDate(row.created_at),
+        requestId: row.request_id == null ? null : String(row.request_id),
         model: row.model_name || row.model || null,
-        officialLookupModel: row.upstream_model_name ?? other.upstream_model_name ??
+        upstreamModel: row.upstream_model_name ?? other.upstream_model_name ??
           row.upstreamModelName ?? other.upstreamModelName ??
           row.actual_model_name ?? other.actual_model_name ??
           row.actual_model ?? other.actual_model ?? null,
-        channelId: other.actual_channel_id ?? row.channel_id ?? row.channel ?? null,
-        channelName: row.channel_name || null,
-        modelRatio,
-        groupRatio,
-        completionRatio: finitePositive(row.completion_ratio ?? other.completion_ratio),
-        cacheRatio: finiteNonnegative(row.cache_ratio ?? other.cache_ratio),
-        quotaPerUnit: finitePositive(row.quota_per_unit ?? other.quota_per_unit),
-        loggedProviderPrices: extractLoggedProviderPrices(row, other),
-        promptTokens: toFiniteNumber(row.prompt_tokens, 0) || 0,
-        completionTokens: toFiniteNumber(row.completion_tokens, 0) || 0,
-        cacheTokens: toFiniteNumber(other.cache_tokens, 0) || 0,
-        quota: toFiniteNumber(row.quota)
+        stream: Boolean(row.is_stream),
+        status: String(other.request_final_status || 'success').toLowerCase(),
+        durationMs: durationMs == null ? null : Math.round(durationMs),
+        firstTokenMs: firstTokenMs == null ? null : Math.round(firstTokenMs),
+        inputTokens: Math.max(0, promptTokens - cacheReadTokens),
+        outputTokens: Math.max(0, toFiniteNumber(row.completion_tokens, 0) || 0),
+        cacheCreationTokens: 0,
+        cacheReadTokens,
+        actualCost: finiteNonnegative(row.quota) == null ? null : Number(row.quota) / quotaPerUnit,
+        currency: 'USD',
+        createdAt,
+        billing: {
+          channelId: other.actual_channel_id ?? row.channel_id ?? row.channel ?? null,
+          channelName: row.channel_name || null,
+          modelRatio: finitePositive(row.model_ratio ?? other.model_ratio),
+          groupRatio: finitePositive(row.group_ratio ?? other.group_ratio) ?? 1,
+          completionRatio: finitePositive(row.completion_ratio ?? other.completion_ratio),
+          cacheRatio: finiteNonnegative(row.cache_ratio ?? other.cache_ratio),
+          quotaPerUnit: finitePositive(row.quota_per_unit ?? other.quota_per_unit) ?? quotaPerUnit,
+          loggedProviderPrices,
+          promptTokens,
+          completionTokens: Math.max(0, toFiniteNumber(row.completion_tokens, 0) || 0),
+          cacheTokens: cacheReadTokens
+        }
+      });
+    }
+    return {
+      items,
+      total: hasTotal ? total : rows.length,
+      truncated: rows.length >= maxRecords && (!hasTotal || Number(total) > rows.length),
+      coverageFrom: new Date(startTimestamp * 1000).toISOString(),
+      coverageTo: new Date(endTimestamp * 1000).toISOString()
+    };
+  }
+
+  async getDynamicRouteRates(options = {}) {
+    const config = normalizeDynamicRouteConfig(options);
+    if (this.type !== 'new-api' || !config.enabled) return [];
+    const status = await this.ensureStatus();
+    const quotaPerUnit = toFiniteNumber(status?.quota_per_unit, 500000) || 500000;
+
+    const knownKeys = Array.isArray(options.keys) ? options.keys : [];
+    const restrictToKeys = options.restrictToKeys === true;
+    const requestLogs = options.requestLogs || await this.getRequestLogs({
+      ...config,
+      keys: knownKeys,
+      restrictToKeys
+    });
+    const rows = Array.isArray(requestLogs) ? requestLogs : requestLogs.items || [];
+
+    const observationsByKey = new Map(knownKeys.map((key) => [String(key.remoteId), []]));
+    for (const row of rows) {
+      if (row.status && row.status !== 'success') continue;
+      const remoteKeyId = String(row.remoteKeyId || '');
+      if (!remoteKeyId) continue;
+      if (!observationsByKey.has(remoteKeyId)) observationsByKey.set(remoteKeyId, []);
+      const billing = row.billing || {};
+      const baseObservation = {
+        keyName: row.keyName || remoteKeyId,
+        requestAt: row.createdAt,
+        model: row.model || null,
+        officialLookupModel: row.upstreamModel || null,
+        channelId: billing.channelId ?? null,
+        channelName: billing.channelName || null,
+        modelRatio: billing.modelRatio,
+        groupRatio: billing.groupRatio,
+        completionRatio: billing.completionRatio,
+        cacheRatio: billing.cacheRatio,
+        quotaPerUnit: billing.quotaPerUnit,
+        loggedProviderPrices: billing.loggedProviderPrices,
+        promptTokens: billing.promptTokens ?? row.inputTokens + row.cacheReadTokens,
+        completionTokens: billing.completionTokens ?? row.outputTokens,
+        cacheTokens: billing.cacheTokens ?? row.cacheReadTokens,
+        quota: row.actualCost == null ? null : row.actualCost * quotaPerUnit
       };
       const officialPrice = referencePriceFor(
         config.officialModelPrices,

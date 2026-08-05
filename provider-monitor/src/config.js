@@ -56,6 +56,7 @@ function loadConfig(env = process.env) {
     adminEmail: String(env.ADMIN_EMAIL || ''),
     adminPassword: String(env.ADMIN_PASSWORD || ''),
     sub2apiAdminToken: String(env.SUB2API_ADMIN_TOKEN || ''),
+    sub2apiAdminApiKey: String(env.SUB2API_ADMIN_API_KEY || ''),
     localAdminUsername: String(env.PROVIDER_MONITOR_LOCAL_ADMIN_USER || 'admin'),
     localAdminPassword: String(env.PROVIDER_MONITOR_LOCAL_ADMIN_PASSWORD || ''),
     localAdminPasswordHash: String(env.PROVIDER_MONITOR_LOCAL_ADMIN_PASSWORD_HASH || ''),

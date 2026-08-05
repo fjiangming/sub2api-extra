@@ -5,7 +5,7 @@ const { parse: parseCsv } = require('csv-parse/sync');
 const { AppError } = require('../errors');
 const { normalizeConfiguredApiKeys } = require('../security/configured-api-keys');
 const { encryptJson, decryptJson } = require('../security/encryption');
-const { redact, redactText } = require('../security/redaction');
+const { maskKey, redact, redactText } = require('../security/redaction');
 const { nowIso, parseJson, stringifyJson } = require('../db');
 
 const SETTING_DEFAULTS = {
@@ -74,6 +74,7 @@ const NOTIFICATION_TYPES = new Set([
 ]);
 const SENSITIVE_NOTIFICATION_URL_TYPES = new Set(['webhook', 'wecom', 'dingtalk', 'feishu']);
 const SENSITIVE_CREDENTIAL_FIELD = /password|secret|token|api[_-]?key|authorization|cookie|credential|(?:master|management|device|send|access)[_-]?key|webhook/i;
+const SUB2API_ADMIN_API_KEY_CREDENTIAL_ID = 'integration:sub2api-admin-api-key';
 
 function normalizeStringList(value) {
   const values = Array.isArray(value) ? value : String(value || '').split(',');
@@ -302,6 +303,7 @@ class TransferService {
     this.db = db;
     this.config = config;
     this.providers = providers;
+    this.environmentSub2ApiAdminApiKey = String(config.sub2apiAdminApiKey || '').trim();
     this.defaults = { ...SETTING_DEFAULTS, ...runtimeDefaults(config) };
   }
 
@@ -320,6 +322,75 @@ class TransferService {
 
   applyRuntimeSettings() {
     return applyRuntimeSettings(this.config, this.settings());
+  }
+
+  #storedSub2ApiAdminApiKey() {
+    const row = this.db.prepare(
+      'SELECT payload, created_at, rotated_at FROM encrypted_credentials WHERE id = ?'
+    ).get(SUB2API_ADMIN_API_KEY_CREDENTIAL_ID);
+    if (!row) return null;
+    const credentials = decryptJson(row.payload, this.config.secret);
+    const adminApiKey = String(credentials?.adminApiKey || '').trim();
+    if (!adminApiKey) return null;
+    return {
+      adminApiKey,
+      verifiedAt: credentials.verifiedAt || null,
+      capabilities: credentials.capabilities || null,
+      createdAt: row.created_at,
+      rotatedAt: row.rotated_at || null
+    };
+  }
+
+  sub2apiAdminApiKey() {
+    return this.#storedSub2ApiAdminApiKey()?.adminApiKey ||
+      this.environmentSub2ApiAdminApiKey;
+  }
+
+  sub2apiAdminApiKeyStatus() {
+    const stored = this.#storedSub2ApiAdminApiKey();
+    const adminApiKey = stored?.adminApiKey || this.environmentSub2ApiAdminApiKey;
+    return {
+      configured: Boolean(adminApiKey),
+      source: stored ? 'stored' : adminApiKey ? 'environment' : 'missing',
+      maskedKey: adminApiKey ? maskKey(adminApiKey) : null,
+      verifiedAt: stored?.verifiedAt || null,
+      capabilities: stored?.capabilities || null
+    };
+  }
+
+  saveSub2ApiAdminApiKey(value, verification = {}) {
+    const adminApiKey = String(value || '').trim();
+    if (!adminApiKey) {
+      throw new AppError('SUB2API_ADMIN_API_KEY_REQUIRED', 'Sub2API administrator API Key is required', {
+        status: 400
+      });
+    }
+    const now = nowIso();
+    const existing = this.db.prepare(
+      'SELECT created_at FROM encrypted_credentials WHERE id = ?'
+    ).get(SUB2API_ADMIN_API_KEY_CREDENTIAL_ID);
+    this.db.prepare(`
+      INSERT INTO encrypted_credentials(id, payload, created_at, rotated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, rotated_at = excluded.rotated_at
+    `).run(
+      SUB2API_ADMIN_API_KEY_CREDENTIAL_ID,
+      encryptJson({
+        adminApiKey,
+        verifiedAt: verification.verifiedAt || null,
+        capabilities: verification.capabilities || null
+      }, this.config.secret),
+      existing?.created_at || now,
+      now
+    );
+    return this.sub2apiAdminApiKeyStatus();
+  }
+
+  deleteSub2ApiAdminApiKey() {
+    const deleted = this.db.prepare(
+      'DELETE FROM encrypted_credentials WHERE id = ?'
+    ).run(SUB2API_ADMIN_API_KEY_CREDENTIAL_ID).changes;
+    return { deleted: Boolean(deleted), status: this.sub2apiAdminApiKeyStatus() };
   }
 
   saveSettings(input) {
@@ -482,7 +553,10 @@ class TransferService {
       ...configuration,
       schema: 'provider-monitor/disaster-v1',
       providers,
-      notificationChannels: this.#exportNotificationChannels(true)
+      notificationChannels: this.#exportNotificationChannels(true),
+      integrationCredentials: {
+        sub2apiAdminApiKey: this.sub2apiAdminApiKey() || null
+      }
     };
     return {
       schema: 'provider-monitor/encrypted-bundle-v1',
@@ -519,6 +593,7 @@ class TransferService {
     const restore = this.db.transaction(() => {
       let restoredAlertRules = 0;
       let restoredNotificationChannels = 0;
+      let restoredSub2ApiAdminApiKey = false;
       const upsertRule = this.db.prepare(`
         INSERT INTO alert_rules(
           id, name, enabled, connection_id, rule_type, scope, currency, threshold,
@@ -632,9 +707,17 @@ class TransferService {
         );
         restoredNotificationChannels += 1;
       }
+      const restoredAdminApiKey = String(
+        decoded?.integrationCredentials?.sub2apiAdminApiKey || ''
+      ).trim();
+      if (restoredAdminApiKey) {
+        this.saveSub2ApiAdminApiKey(restoredAdminApiKey);
+        restoredSub2ApiAdminApiKey = true;
+      }
       return {
         alertRules: restoredAlertRules,
-        notificationChannels: restoredNotificationChannels
+        notificationChannels: restoredNotificationChannels,
+        ...(restoredSub2ApiAdminApiKey ? { sub2apiAdminApiKey: true } : {})
       };
     });
     return restore();

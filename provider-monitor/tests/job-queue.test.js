@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const Database = require('better-sqlite3');
 const { createTestContext } = require('./helpers');
 const { ProviderRepository } = require('../src/repositories/provider-repository');
 const { JobQueue } = require('../src/services/job-queue');
@@ -52,4 +54,44 @@ test('job queue enforces per-provider concurrency while allowing different provi
   await waitFor(() => ids.every((id) => queue.get(id)?.status === 'succeeded'));
   assert.equal(maximum.get(firstProvider.id), 1);
   assert.ok(globalMaximum >= 2);
+});
+
+test('job queue survives a competing SQLite writer and resumes polling', async (t) => {
+  const context = createTestContext();
+  context.db.pragma('busy_timeout = 25');
+  const queue = new JobQueue({
+    db: context.db,
+    concurrency: 1,
+    perConnectionConcurrency: 1,
+    pollIntervalMs: 10
+  });
+  let handled = 0;
+  queue.register('lock-test', async () => {
+    handled += 1;
+  });
+  queue.start();
+
+  const jobId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  context.db.prepare(`
+    INSERT INTO jobs(
+      id, type, payload_json, status, priority, run_after, created_at, updated_at
+    ) VALUES (?, 'lock-test', '{}', 'pending', 0, ?, ?, ?)
+  `).run(jobId, new Date(Date.now() + 80).toISOString(), now, now);
+
+  const competingDb = new Database(context.config.databasePath);
+  competingDb.exec('BEGIN IMMEDIATE');
+  let locked = true;
+  t.after(async () => {
+    await queue.stop();
+    if (locked) competingDb.exec('ROLLBACK');
+    competingDb.close();
+    context.cleanup();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  competingDb.exec('ROLLBACK');
+  locked = false;
+
+  await waitFor(() => queue.get(jobId)?.status === 'succeeded');
+  assert.equal(handled, 1);
 });

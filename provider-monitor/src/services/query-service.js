@@ -1,5 +1,6 @@
 const { parseJson } = require('../db');
 const { resolvePagination } = require('../pagination');
+const { availableGroupSql } = require('./group-availability');
 
 function nullableNumber(value) {
   return value == null ? null : Number(value);
@@ -291,7 +292,7 @@ class QueryService {
     if (excludeUnresolved) {
       clauses.push("NOT (g.ratio IS NULL AND COALESCE(json_extract(g.metadata_json, '$.derivedFromKey'), 0) = 1)");
     }
-    if (requireRatio) clauses.push('g.ratio IS NOT NULL');
+    if (requireRatio) clauses.push('g.ratio IS NOT NULL', availableGroupSql('g'));
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     return this.db.prepare(`
       SELECT g.*, p.name AS provider_name, COUNT(DISTINCT kg.key_id) AS key_count
@@ -361,11 +362,11 @@ class QueryService {
       params.push(...nameTerms);
     }
     if (excludeMissing) clauses.push("g.status != 'missing'");
-    if (requireRatio) clauses.push('g.ratio IS NOT NULL');
+    if (requireRatio) clauses.push('g.ratio IS NOT NULL', availableGroupSql('g'));
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const optionClauses = [];
     if (excludeMissing) optionClauses.push("g.status != 'missing'");
-    if (requireRatio) optionClauses.push('g.ratio IS NOT NULL');
+    if (requireRatio) optionClauses.push('g.ratio IS NOT NULL', availableGroupSql('g'));
     const optionWhere = optionClauses.length ? `WHERE ${optionClauses.join(' AND ')}` : '';
     const filterOptions = {
       providers: this.db.prepare(`

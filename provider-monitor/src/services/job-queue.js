@@ -3,6 +3,14 @@ const { nowIso, parseJson, stringifyJson } = require('../db');
 const { resolvePagination } = require('../pagination');
 const { redactText } = require('../security/redaction');
 
+function isSqliteContention(error) {
+  return error?.code === 'SQLITE_BUSY' || error?.code === 'SQLITE_LOCKED';
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 class JobQueue {
   constructor({ db, concurrency = 5, perConnectionConcurrency = 2, pollIntervalMs = 750 }) {
     this.db = db;
@@ -14,6 +22,7 @@ class JobQueue {
     this.active = new Map();
     this.activeConnections = new Map();
     this.timer = null;
+    this.soonTimer = null;
   }
 
   register(type, handler) {
@@ -69,6 +78,8 @@ class JobQueue {
   async stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.soonTimer) clearTimeout(this.soonTimer);
+    this.soonTimer = null;
     await Promise.allSettled(this.active.values());
   }
 
@@ -108,7 +119,12 @@ class JobQueue {
   }
 
   #scheduleSoon() {
-    setTimeout(() => this.#poll(), 0).unref?.();
+    if (!this.timer || this.soonTimer) return;
+    this.soonTimer = setTimeout(() => {
+      this.soonTimer = null;
+      if (this.timer) this.#poll();
+    }, 0);
+    this.soonTimer.unref?.();
   }
 
   #claim() {
@@ -133,7 +149,14 @@ class JobQueue {
 
   #poll() {
     while (this.active.size < this.concurrency) {
-      const job = this.#claim();
+      let job;
+      try {
+        job = this.#claim();
+      } catch (error) {
+        // Another Provider Monitor process may briefly own SQLite's write lock.
+        if (isSqliteContention(error)) return;
+        throw error;
+      }
       if (!job) break;
       if (job.connection_id) {
         this.activeConnections.set(
@@ -141,7 +164,34 @@ class JobQueue {
           (this.activeConnections.get(job.connection_id) || 0) + 1
         );
       }
-      const promise = this.#run(job).finally(() => {
+      const promise = this.#run(job).catch(async (error) => {
+        console.error(JSON.stringify({
+          level: 'error',
+          component: 'job_queue',
+          jobId: job.id,
+          message: redactText(error?.message || error)
+        }));
+        try {
+          await this.#writeWithRetry(() => this.db.prepare(`
+            UPDATE jobs SET status = 'pending', run_after = ?, locked_at = NULL,
+              locked_by = NULL, last_error = ?, updated_at = ?
+            WHERE id = ? AND status = 'running' AND locked_by = ?
+          `).run(
+            new Date(Date.now() + 2000).toISOString(),
+            redactText(error?.message || error).slice(0, 1000),
+            nowIso(),
+            job.id,
+            this.workerId
+          ));
+        } catch (recoveryError) {
+          console.error(JSON.stringify({
+            level: 'error',
+            component: 'job_queue_recovery',
+            jobId: job.id,
+            message: redactText(recoveryError?.message || recoveryError)
+          }));
+        }
+      }).finally(() => {
         this.active.delete(job.id);
         if (job.connection_id) {
           const remaining = (this.activeConnections.get(job.connection_id) || 1) - 1;
@@ -154,34 +204,53 @@ class JobQueue {
     }
   }
 
+  async #writeWithRetry(operation, attempts = 3) {
+    let lastError;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        return operation();
+      } catch (error) {
+        if (!isSqliteContention(error)) throw error;
+        lastError = error;
+        if (attempt < attempts - 1) await delay(50 * 2 ** attempt);
+      }
+    }
+    throw lastError;
+  }
+
   async #run(job) {
     const handler = this.handlers.get(job.type);
     if (!handler) {
-      this.db.prepare(`
+      await this.#writeWithRetry(() => this.db.prepare(`
         UPDATE jobs SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?
-      `).run(`No handler registered for ${job.type}`, nowIso(), job.id);
+      `).run(`No handler registered for ${job.type}`, nowIso(), job.id));
       return;
     }
+    let handlerError = null;
     try {
       await handler(job);
-      this.db.prepare(`
+    } catch (error) {
+      handlerError = error;
+    }
+    if (!handlerError) {
+      await this.#writeWithRetry(() => this.db.prepare(`
         UPDATE jobs SET status = 'succeeded', locked_at = NULL, locked_by = NULL,
           updated_at = ? WHERE id = ?
-      `).run(nowIso(), job.id);
-    } catch (error) {
-      const retryable = Boolean(error?.retryable) && job.attempt < 3;
-      const delayMs = Math.min(60000, 2000 * 2 ** Math.max(0, job.attempt - 1));
-      this.db.prepare(`
-        UPDATE jobs SET status = ?, run_after = ?, locked_at = NULL, locked_by = NULL,
-          last_error = ?, updated_at = ? WHERE id = ?
-      `).run(
-        retryable ? 'pending' : 'failed',
-        retryable ? new Date(Date.now() + delayMs).toISOString() : nowIso(),
-        redactText(error?.message || error).slice(0, 1000),
-        nowIso(),
-        job.id
-      );
+      `).run(nowIso(), job.id));
+      return;
     }
+    const retryable = Boolean(handlerError?.retryable) && job.attempt < 3;
+    const delayMs = Math.min(60000, 2000 * 2 ** Math.max(0, job.attempt - 1));
+    await this.#writeWithRetry(() => this.db.prepare(`
+      UPDATE jobs SET status = ?, run_after = ?, locked_at = NULL, locked_by = NULL,
+        last_error = ?, updated_at = ? WHERE id = ?
+    `).run(
+      retryable ? 'pending' : 'failed',
+      retryable ? new Date(Date.now() + delayMs).toISOString() : nowIso(),
+      redactText(handlerError?.message || handlerError).slice(0, 1000),
+      nowIso(),
+      job.id
+    ));
   }
 }
 

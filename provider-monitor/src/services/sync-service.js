@@ -166,6 +166,15 @@ class SyncService {
         }
         keysResult.value = keysResult.value.filter((key) => monitoredKeyIds.has(String(key.remoteId)));
       }
+      const requestLogOptions = connection.type_config_json?.requestLogs || {};
+      const requestLogResult = probe.capabilities?.requestLogs
+        ? await this.#optional('getRequestLogs', () => adapter.getRequestLogs({
+            lookbackDays: requestLogOptions.lookbackDays || 30,
+            maxRecords: requestLogOptions.maxRecords || 10000,
+            keys: keysResult.ok ? keysResult.value : [],
+            restrictToKeys: monitoredKeyIds != null
+          }), warnings)
+        : null;
       const providerDynamicRouteConfig = connection.type_config_json?.dynamicRouteRate;
       const officialModelPrices = parseJson(
         this.db.prepare(`SELECT value_json FROM settings WHERE key = 'officialModelPrices'`).get()?.value_json,
@@ -186,7 +195,8 @@ class SyncService {
             () => adapter.getDynamicRouteRates({
               ...dynamicRouteConfig,
               keys: keysResult.ok ? keysResult.value : [],
-              restrictToKeys: dynamicRouteConfig.restrictToKeys
+              restrictToKeys: dynamicRouteConfig.restrictToKeys,
+              requestLogs: requestLogResult?.ok ? requestLogResult.value : undefined
             }),
             warnings
           );
@@ -224,12 +234,27 @@ class SyncService {
               name: String(ref),
               ratio: null,
               status: 'active',
-              metadata: { derivedFromKey: true }
+              metadata: { derivedFromKey: true, selectable: false }
             });
           }
         }
       }
       const capturedAt = nowIso();
+      const mappingSnapshot = {
+        capturedAt,
+        groupsComplete,
+        keysComplete: keysResult.ok,
+        rechargeRequired: Boolean(probe.capabilities?.rechargeQuote),
+        rechargeComplete: !probe.capabilities?.rechargeQuote || rechargeResult.ok,
+        dynamicRouteRequired: Boolean(dynamicRouteConfig.enabled),
+        dynamicRouteComplete: !dynamicRouteConfig.enabled || Boolean(dynamicRouteResult?.ok),
+        configuredKeysComplete: !warnings.some((warning) => warning.capability === 'configuredApiKey')
+      };
+      mappingSnapshot.ready = mappingSnapshot.groupsComplete &&
+        mappingSnapshot.keysComplete &&
+        mappingSnapshot.rechargeComplete &&
+        mappingSnapshot.dynamicRouteComplete &&
+        mappingSnapshot.configuredKeysComplete;
       const previousSchemas = connection.fingerprint?.schemas || {};
       const schemas = {
         probe: schemaComponent(probe, previousSchemas.probe),
@@ -244,6 +269,9 @@ class SyncService {
         usage: usageResult.ok
           ? schemaComponent(usageResult.value, previousSchemas.usage)
           : previousSchemas.usage || ['unknown'],
+        requestLogs: requestLogResult?.ok
+          ? schemaComponent(requestLogResult.value?.items || [], previousSchemas.requestLogs)
+          : previousSchemas.requestLogs || ['unknown'],
         recharge: rechargeResult.ok
           ? schemaComponent(rechargeResult.value, previousSchemas.recharge)
           : previousSchemas.recharge || ['unknown'],
@@ -266,9 +294,11 @@ class SyncService {
         keys: keysResult.value,
         keysComplete: keysResult.ok,
         usage: usageResult.value,
+        requestLogs: requestLogResult,
         recharge: rechargeResult.ok ? rechargeResult.value : null,
         dynamicRoute: dynamicRouteResult,
         dynamicRouteConfig,
+        mappingSnapshot,
         capturedAt,
         warnings
       });
@@ -337,6 +367,11 @@ class SyncService {
       if (data.keysComplete) this.#replaceKeyGroupRelations(connection.id, data.keys);
       this.#insertSnapshots(connection.id, accountId, data.balances, data.groups, data.keys, data.capturedAt);
       this.#insertUsage(connection.id, accountId, data.usage || [], data.capturedAt);
+      const requestLogCount = this.#insertRequestLogs(
+        connection.id,
+        data.requestLogs,
+        data.capturedAt
+      );
       if (data.recharge) this.providers.recordRecharge(connection.id, data.recharge, data.capturedAt);
       const dynamicRouteKeyCount = this.#recordDynamicRouteRates(
         connection.id,
@@ -367,7 +402,9 @@ class SyncService {
         groupCount: data.groups.length,
         keyCount: data.keys.length,
         usageCount: (data.usage || []).length,
+        requestLogCount,
         dynamicRouteKeyCount,
+        mappingSnapshot: data.mappingSnapshot,
         capturedAt: data.capturedAt
       };
     });
@@ -722,6 +759,108 @@ class SyncService {
         capturedAt
       );
     }
+  }
+
+  #insertRequestLogs(connectionId, result, capturedAt) {
+    if (!result) return 0;
+    if (!result.ok) {
+      this.db.prepare(`
+        INSERT INTO provider_request_log_sync_state(
+          connection_id, status, last_error_code, last_error_message, updated_at
+        ) VALUES (?, 'unavailable', ?, ?, ?)
+        ON CONFLICT(connection_id) DO UPDATE SET
+          status = excluded.status,
+          last_error_code = excluded.last_error_code,
+          last_error_message = excluded.last_error_message,
+          updated_at = excluded.updated_at
+      `).run(
+        connectionId,
+        result.error?.code || 'REQUEST_LOG_UNAVAILABLE',
+        redactText(result.error?.message || 'Provider request logs are unavailable').slice(0, 1000),
+        capturedAt
+      );
+      return 0;
+    }
+
+    const keyIdByRemoteId = this.db.prepare(`
+      SELECT id, remote_id FROM remote_keys WHERE connection_id = ?
+    `).all(connectionId).reduce(
+      (map, row) => map.set(String(row.remote_id), row.id),
+      new Map()
+    );
+    const insert = this.db.prepare(`
+      INSERT INTO provider_request_samples(
+        connection_id, key_id, source_log_id, request_id, model, upstream_model,
+        stream, status, duration_ms, first_token_ms, input_tokens, output_tokens,
+        cache_creation_tokens, cache_read_tokens, actual_cost, currency,
+        created_at, ingested_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(connection_id, source_log_id) DO UPDATE SET
+        key_id = excluded.key_id,
+        request_id = excluded.request_id,
+        model = excluded.model,
+        upstream_model = excluded.upstream_model,
+        stream = excluded.stream,
+        status = excluded.status,
+        duration_ms = excluded.duration_ms,
+        first_token_ms = excluded.first_token_ms,
+        input_tokens = excluded.input_tokens,
+        output_tokens = excluded.output_tokens,
+        cache_creation_tokens = excluded.cache_creation_tokens,
+        cache_read_tokens = excluded.cache_read_tokens,
+        actual_cost = excluded.actual_cost,
+        currency = excluded.currency,
+        created_at = excluded.created_at,
+        ingested_at = excluded.ingested_at
+    `);
+    const items = Array.isArray(result.value?.items) ? result.value.items : [];
+    for (const item of items) {
+      insert.run(
+        connectionId,
+        keyIdByRemoteId.get(String(item.remoteKeyId)) || null,
+        String(item.sourceLogId),
+        item.requestId || null,
+        item.model || null,
+        item.upstreamModel || null,
+        item.stream ? 1 : 0,
+        item.status || 'unknown',
+        item.durationMs ?? null,
+        item.firstTokenMs ?? null,
+        item.inputTokens || 0,
+        item.outputTokens || 0,
+        item.cacheCreationTokens || 0,
+        item.cacheReadTokens || 0,
+        item.actualCost ?? null,
+        item.currency || 'USD',
+        item.createdAt,
+        capturedAt
+      );
+    }
+    this.db.prepare(`
+      INSERT INTO provider_request_log_sync_state(
+        connection_id, status, coverage_from, coverage_to, truncated,
+        total_count, last_error_code, last_error_message, last_synced_at, updated_at
+      ) VALUES (?, 'succeeded', ?, ?, ?, ?, NULL, NULL, ?, ?)
+      ON CONFLICT(connection_id) DO UPDATE SET
+        status = excluded.status,
+        coverage_from = excluded.coverage_from,
+        coverage_to = excluded.coverage_to,
+        truncated = excluded.truncated,
+        total_count = excluded.total_count,
+        last_error_code = NULL,
+        last_error_message = NULL,
+        last_synced_at = excluded.last_synced_at,
+        updated_at = excluded.updated_at
+    `).run(
+      connectionId,
+      result.value?.coverageFrom || null,
+      result.value?.coverageTo || capturedAt,
+      result.value?.truncated ? 1 : 0,
+      result.value?.total ?? items.length,
+      capturedAt,
+      capturedAt
+    );
+    return items.length;
   }
 }
 

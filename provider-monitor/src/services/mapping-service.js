@@ -193,6 +193,43 @@ function normalizeBaseAccount(account) {
   };
 }
 
+function accountExportId(account) {
+  const value = account?.id ?? account?.account_id ?? account?.accountId;
+  return value == null || String(value).trim() === '' ? null : String(value);
+}
+
+function accountExportSignature(account) {
+  return normalizeName(account?.name);
+}
+
+function groupBy(items, keyFor) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = keyFor(item);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  return groups;
+}
+
+function mappingRebuildError(error, stage, details = {}) {
+  const fallbackCode = typeof error?.code === 'string' && error.code
+    ? error.code
+    : 'MAPPING_REBUILD_FAILED';
+  const appError = asAppError(error, fallbackCode);
+  return new AppError(appError.code || fallbackCode, appError.message, {
+    status: appError.status,
+    retryable: appError.retryable,
+    cause: appError,
+    details: {
+      ...(appError.details || {}),
+      operation: 'rebuild_auto_mappings',
+      stage,
+      ...details
+    }
+  });
+}
+
 function mappingIdentity(mapping) {
   return [
     mapping.connection_id ?? mapping.connectionId,
@@ -267,6 +304,7 @@ const AUTO_MAPPING_STATUSES = [
   'pending_create', 'created', 'existing', 'unmatched', 'conflict',
   'missing_api_key', 'missing_remote_key', 'missing_provider_group'
 ];
+const COMPLETE_REBUILD_COMPARISON_STATUSES = new Set(['aligned', 'rate_mismatch']);
 
 function autoMappingSummary(items) {
   const summary = {
@@ -312,7 +350,7 @@ function comparisonSummary(items) {
 }
 
 class MappingService {
-  constructor({ db, config, sub2api, http = null }) {
+  constructor({ db, config, sub2api, http = null, providerSync = null }) {
     this.db = db;
     this.config = config;
     this.sub2api = sub2api;
@@ -323,6 +361,12 @@ class MappingService {
     this.baseAccountsRequest = null;
     this.baseAccountCache = new Map();
     this.baseAccountRequests = new Map();
+    this.providerSync = providerSync;
+    this.rebuildInFlight = null;
+  }
+
+  setProviderSync(providerSync) {
+    this.providerSync = typeof providerSync === 'function' ? providerSync : null;
   }
 
   list({ connectionId } = {}) {
@@ -580,15 +624,19 @@ class MappingService {
   }
 
   async comparisons({ connectionId = null, catalog = null, accountCatalog = null, force = false, accessToken = null } = {}) {
-    const listedItems = this.list({ connectionId });
-    const accountIds = [...new Set(listedItems
+    const currentItems = this.list({ connectionId });
+    const accountIds = [...new Set(currentItems
       .map((item) => finite(item.account_id))
       .filter((accountId) => accountId != null))];
     const [baseCatalog, baseAccounts] = await Promise.all([
       catalog || this.#baseCatalog({ force, accessToken }),
       accountCatalog || this.#mappedBaseAccounts(accountIds, { force, accessToken })
     ]);
-    const items = attachBaseAccounts(listedItems, baseAccounts.accounts);
+    return this.#comparisonPayload({ connectionId, baseCatalog, baseAccounts });
+  }
+
+  #comparisonPayload({ connectionId = null, baseCatalog, baseAccounts }) {
+    const items = attachBaseAccounts(this.list({ connectionId }), baseAccounts.accounts);
     return {
       status: this.status(),
       summary: comparisonSummary(items),
@@ -597,10 +645,7 @@ class MappingService {
     };
   }
 
-  async refreshComparisons({ connectionId = null, force = true, catalog = null, accountCatalog = null } = {}) {
-    const baseCatalog = catalog || await this.#baseCatalog({ force });
-    const mappings = this.list({ connectionId });
-    const states = mappings.map((mapping) => this.#compareMapping(mapping, baseCatalog));
+  #writeComparisonStates(states) {
     const upsert = this.db.prepare(`
       INSERT INTO sub2api_mapping_states(
         mapping_id, status, provider_group_ref, provider_group_name, provider_rate,
@@ -622,16 +667,21 @@ class MappingService {
         details_json = excluded.details_json,
         checked_at = excluded.checked_at
     `);
-    this.db.transaction(() => {
-      for (const state of states) {
-        upsert.run(
-          state.mappingId, state.status, state.providerGroupRef, state.providerGroupName,
-          state.providerRate, state.baseGroupId, state.baseGroupName,
-          state.baseGroupRate, state.differenceRatio,
-          state.toleranceRatio, stringifyJson(state.details), state.checkedAt
-        );
-      }
-    })();
+    for (const state of states) {
+      upsert.run(
+        state.mappingId, state.status, state.providerGroupRef, state.providerGroupName,
+        state.providerRate, state.baseGroupId, state.baseGroupName,
+        state.baseGroupRate, state.differenceRatio,
+        state.toleranceRatio, stringifyJson(state.details), state.checkedAt
+      );
+    }
+  }
+
+  async refreshComparisons({ connectionId = null, force = true, catalog = null, accountCatalog = null } = {}) {
+    const baseCatalog = catalog || await this.#baseCatalog({ force });
+    const mappings = this.list({ connectionId });
+    const states = mappings.map((mapping) => this.#compareMapping(mapping, baseCatalog));
+    this.db.transaction(() => this.#writeComparisonStates(states))();
     return this.comparisons({ connectionId, catalog: baseCatalog, accountCatalog, force });
   }
 
@@ -693,8 +743,111 @@ class MappingService {
     };
   }
 
-  async rebuildAutoMappings({ preview = false, accessToken = null } = {}) {
-    const discovery = await this.#discoverAutoMappings({ accessToken });
+  #providersMatchingAccounts(accounts) {
+    return this.db.prepare(`
+      SELECT id, name, adapter_type FROM provider_connections
+      WHERE enabled = 1 ORDER BY name COLLATE NOCASE, id
+    `).all().filter((provider) => matchProviderAccounts(provider.name, accounts).status === 'matched');
+  }
+
+  async #refreshProviderSnapshots(accountCatalog) {
+    const providers = this.#providersMatchingAccounts(accountCatalog.accounts);
+    if (!this.providerSync || providers.length === 0) {
+      return {
+        required: providers.length,
+        refreshed: 0,
+        skipped: providers.length,
+        capturedAt: nowIso(),
+        items: []
+      };
+    }
+
+    const results = new Array(providers.length);
+    let cursor = 0;
+    const concurrency = Math.min(
+      Math.max(1, Number(this.config.globalConcurrency) || 1),
+      providers.length
+    );
+    const workers = Array.from({ length: concurrency }, async () => {
+      while (cursor < providers.length) {
+        const index = cursor;
+        cursor += 1;
+        const provider = providers[index];
+        const result = await this.providerSync(provider.id, {
+          jobType: 'mapping_rebuild_sync',
+          manual: true
+        });
+        const snapshot = result?.mappingSnapshot;
+        if (!snapshot || snapshot.ready !== true) {
+          throw new AppError(
+            'MAPPING_PROVIDER_SNAPSHOT_INCOMPLETE',
+            `Supplier ${provider.name} did not return a complete mapping snapshot`,
+            {
+              status: 409,
+              retryable: Boolean(result?.warnings?.some((warning) =>
+                ['TIMEOUT', 'RATE_LIMITED', 'NETWORK_ERROR'].includes(warning.code)
+              )),
+              details: {
+                connectionId: provider.id,
+                providerName: provider.name,
+                syncStatus: result?.status || null,
+                mappingSnapshot: snapshot || null,
+                warnings: result?.warnings || []
+              }
+            }
+          );
+        }
+        results[index] = {
+          connectionId: provider.id,
+          providerName: provider.name,
+          status: result.status,
+          capturedAt: snapshot.capturedAt,
+          warningCount: result.warnings?.length || 0
+        };
+      }
+    });
+    await Promise.all(workers);
+    return {
+      required: providers.length,
+      refreshed: results.length,
+      skipped: 0,
+      capturedAt: nowIso(),
+      items: results
+    };
+  }
+
+  async rebuildAutoMappings(options = {}) {
+    if (this.rebuildInFlight) {
+      throw new AppError(
+        'MAPPING_REBUILD_IN_PROGRESS',
+        'A Sub2API mapping rebuild is already in progress',
+        { status: 409, retryable: true }
+      );
+    }
+    const operation = this.#rebuildAutoMappings(options);
+    this.rebuildInFlight = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.rebuildInFlight === operation) this.rebuildInFlight = null;
+    }
+  }
+
+  async #rebuildAutoMappings({ preview = false, accessToken = null } = {}) {
+    let providerSnapshots;
+    try {
+      const initialAccounts = await this.#baseAccounts({ force: true, accessToken });
+      providerSnapshots = await this.#refreshProviderSnapshots(initialAccounts);
+    } catch (error) {
+      throw mappingRebuildError(error, 'refresh_provider_snapshots', { preview: Boolean(preview) });
+    }
+
+    let discovery;
+    try {
+      discovery = await this.#discoverAutoMappings({ accessToken, strictRates: true });
+    } catch (error) {
+      throw mappingRebuildError(error, 'discover_candidates', { preview: Boolean(preview) });
+    }
     const candidates = discovery.items.filter((item) =>
       item.status === 'pending_create' || item.status === 'existing'
     );
@@ -711,7 +864,8 @@ class MappingService {
         summary: {
           ...discoverySummary,
           wouldDeleteMappings: current.mappings,
-          wouldCreateMappings: candidates.length
+          wouldCreateMappings: candidates.length,
+          providerSnapshots
         },
         items: discovery.items
       };
@@ -724,32 +878,70 @@ class MappingService {
         enabled, models_json, config_json, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, 'primary', 1, '[]', ?, ?, ?)
     `);
-    const replacement = this.db.transaction(() => {
-      const deletedMappings = this.db.prepare('DELETE FROM sub2api_mappings').run().changes;
-      let createdMappings = 0;
-      for (const item of candidates) {
-        const mappingId = crypto.randomUUID();
-        insert.run(
-          mappingId, item.providerId, item.keyId, item.accountId,
-          item.groupId, stringifyJson(autoMappingConfig(item, createdAt)), createdAt, createdAt
+    let replacement;
+    try {
+      replacement = this.db.transaction(() => {
+        const deletedMappings = this.db.prepare('DELETE FROM sub2api_mappings').run().changes;
+        let createdMappings = 0;
+        for (const item of candidates) {
+          const mappingId = crypto.randomUUID();
+          insert.run(
+            mappingId, item.providerId, item.keyId, item.accountId,
+            item.groupId, stringifyJson(autoMappingConfig(item, createdAt)), createdAt, createdAt
+          );
+          item.status = 'created';
+          item.mappingId = mappingId;
+          createdMappings += 1;
+        }
+        const mappings = this.list();
+        const states = mappings.map((mapping) => this.#compareMapping(mapping, discovery.catalog));
+        const incomplete = states.filter((state) =>
+          !COMPLETE_REBUILD_COMPARISON_STATUSES.has(state.status)
         );
-        item.status = 'created';
-        item.mappingId = mappingId;
-        createdMappings += 1;
-      }
-      return { deletedMappings, createdMappings };
-    })();
+        if (incomplete.length > 0) {
+          throw new AppError(
+            'MAPPING_RATE_SNAPSHOT_INCOMPLETE',
+            'One or more rebuilt mappings could not calculate a complete composite rate',
+            {
+              status: 409,
+              details: {
+                mappings: incomplete.slice(0, 50).map((state) => ({
+                  mappingId: state.mappingId,
+                  status: state.status,
+                  providerGroupRef: state.providerGroupRef,
+                  baseGroupId: state.baseGroupId,
+                  providerRate: state.providerRate,
+                  baseGroupRate: state.baseGroupRate,
+                  rechargeMultiplier: state.details?.rechargeMultiplier ?? null
+                })),
+                omitted: Math.max(0, incomplete.length - 50)
+              }
+            }
+          );
+        }
+        this.#writeComparisonStates(states);
+        const comparisons = this.#comparisonPayload({
+          baseCatalog: discovery.catalog,
+          baseAccounts: discovery.accountCatalog
+        });
+        return { deletedMappings, createdMappings, comparisons };
+      })();
+    } catch (error) {
+      throw mappingRebuildError(error, 'replace_mappings', {
+        preview: false,
+        existingMappings: current.mappings,
+        candidateMappings: candidates.length,
+        replacementCommitted: false
+      });
+    }
 
-    const comparisons = await this.refreshComparisons({
-      force: false,
-      catalog: discovery.catalog,
-      accountCatalog: discovery.accountCatalog
-    });
+    const { comparisons, ...replacementSummary } = replacement;
     return {
       mode: 'replace',
       summary: {
         ...autoMappingSummary(discovery.items),
-        ...replacement,
+        ...replacementSummary,
+        providerSnapshots,
         deletedComparisonStates: current.comparisonStates,
         deletedReconciliations: current.reconciliations
       },
@@ -758,9 +950,9 @@ class MappingService {
     };
   }
 
-  async #discoverAutoMappings({ accessToken = null } = {}) {
+  async #discoverAutoMappings({ accessToken = null, strictRates = false } = {}) {
     const [catalog, accountCatalog] = await Promise.all([
-      this.#baseCatalog({ force: true, accessToken }),
+      this.#baseCatalog({ force: true, accessToken, strictRates }),
       this.#baseAccounts({ force: true, accessToken })
     ]);
     const accounts = accountCatalog.accounts;
@@ -1066,90 +1258,147 @@ class MappingService {
     };
   }
 
+  #translateAccountKeyExportError(error) {
+    const remoteCode = String(error?.details?.remoteCode || '');
+    const remoteStatus = Number(error?.details?.remoteStatus || error?.status) || null;
+    const endpoint = '/api/v1/admin/accounts/data';
+    if (remoteCode === 'STEP_UP_REQUIRED') {
+      return new AppError(
+        'SUB2API_STEP_UP_REQUIRED',
+        'Sub2API requires recent TOTP verification for the current administrator session',
+        { status: 403, details: { endpoint, remoteCode, remoteStatus: remoteStatus || 403 } }
+      );
+    }
+    if (['STEP_UP_TOTP_NOT_ENABLED', 'TOTP_NOT_SETUP'].includes(remoteCode)) {
+      return new AppError(
+        'SUB2API_TOTP_NOT_ENABLED',
+        'TOTP must be enabled for the current Sub2API administrator before account keys can be read',
+        { status: 409, details: { endpoint, remoteCode, remoteStatus: remoteStatus || 403 } }
+      );
+    }
+    if (remoteCode === 'STEP_UP_ADMIN_API_KEY_FORBIDDEN') {
+      return new AppError(
+        'SUB2API_ADMIN_API_KEY_EXPORT_FORBIDDEN',
+        'Sub2API blocks administrator API Keys from account Key export while sensitive-operation step-up 2FA is enabled',
+        {
+          status: 409,
+          details: {
+            endpoint,
+            remoteCode,
+            remoteStatus: remoteStatus || 403,
+            prerequisite: 'disable_sub2api_step_up_enabled_with_a_totp_verified_admin_session'
+          }
+        }
+      );
+    }
+    if (remoteCode === 'STEP_UP_UNAVAILABLE') {
+      return new AppError(
+        'SUB2API_STEP_UP_UNAVAILABLE',
+        'Sub2API step-up verification is temporarily unavailable',
+        { status: 503, retryable: true, details: { endpoint, remoteCode, remoteStatus: remoteStatus || 503 } }
+      );
+    }
+    if (Number(error?.status) === 403) {
+      return new AppError(
+        'SUB2API_KEY_EXPORT_FORBIDDEN',
+        'Sub2API requires a recent two-factor verified administrator session to read account API keys',
+        { status: 403, details: { endpoint, remoteStatus: 403 } }
+      );
+    }
+    if ([404, 405, 501].includes(Number(error?.status))) {
+      return new AppError(
+        'SUB2API_KEY_EXPORT_UNSUPPORTED',
+        'This Sub2API version does not expose the administrator account export endpoint',
+        { status: 409, details: { endpoint, remoteStatus: Number(error?.status) } }
+      );
+    }
+    return error;
+  }
+
+  async #requestAccountKeyExport(accounts, { accessToken = null } = {}) {
+    let payload;
+    try {
+      payload = await this.sub2api.data('/api/v1/admin/accounts/data', {
+        query: { ids: accounts.map((account) => account.id).join(','), include_proxies: false },
+        ...(accessToken ? { accessToken } : {})
+      });
+    } catch (error) {
+      throw this.#translateAccountKeyExportError(error);
+    }
+    const exported = payload?.accounts;
+    if (!Array.isArray(exported) || exported.length !== accounts.length) {
+      throw new AppError('SCHEMA_MISMATCH', 'Sub2API account export did not preserve the requested account set', {
+        status: 502,
+        details: {
+          endpoint: '/api/v1/admin/accounts/data',
+          requested: accounts.length,
+          received: Array.isArray(exported) ? exported.length : null
+        }
+      });
+    }
+    payload = null;
+    return exported;
+  }
+
+  #captureAccountKeyDetail(details, source, exported) {
+    const exportedId = accountExportId(exported);
+    if (
+      (exportedId != null && exportedId !== String(source.id)) ||
+      accountExportSignature(exported) !== accountExportSignature(source)
+    ) {
+      throw new AppError('SCHEMA_MISMATCH', 'Sub2API account export did not match the requested account', {
+        status: 502,
+        details: { endpoint: '/api/v1/admin/accounts/data', accountId: source.id }
+      });
+    }
+    const credentials = exported?.credentials;
+    const apiKey = String(credentials?.api_key || '').trim();
+    if (!apiKey) return;
+    const fingerprints = apiKeyFingerprintVariants(apiKey);
+    details.set(source.id, {
+      apiKey,
+      fingerprint: fingerprints[0],
+      fingerprints,
+      baseUrl: String(credentials?.base_url || '').trim()
+    });
+  }
+
   async #accountKeyDetails(accounts, { accessToken = null } = {}) {
     const details = new Map();
     for (let offset = 0; offset < accounts.length; offset += 50) {
       const batch = accounts.slice(offset, offset + 50);
-      let payload;
-      try {
-        payload = await this.sub2api.data('/api/v1/admin/accounts/data', {
-          query: { ids: batch.map((account) => account.id).join(','), include_proxies: false },
-          ...(accessToken ? { accessToken } : {})
-        });
-      } catch (error) {
-        const remoteCode = String(error?.details?.remoteCode || '');
-        const remoteStatus = Number(error?.details?.remoteStatus || error?.status) || null;
-        if (remoteCode === 'STEP_UP_REQUIRED') {
-          throw new AppError(
-            'SUB2API_STEP_UP_REQUIRED',
-            'Sub2API requires recent TOTP verification for the current administrator session',
-            { status: 403, details: { remoteCode, remoteStatus: remoteStatus || 403 } }
-          );
-        }
-        if (['STEP_UP_TOTP_NOT_ENABLED', 'TOTP_NOT_SETUP'].includes(remoteCode)) {
-          throw new AppError(
-            'SUB2API_TOTP_NOT_ENABLED',
-            'TOTP must be enabled for the current Sub2API administrator before account keys can be read',
-            { status: 409, details: { remoteCode, remoteStatus: remoteStatus || 403 } }
-          );
-        }
-        if (remoteCode === 'STEP_UP_ADMIN_API_KEY_FORBIDDEN') {
-          throw new AppError(
-            'SUB2API_SSO_REQUIRED',
-            'A Sub2API administrator SSO session is required to read account keys',
-            { status: 409, details: { remoteCode, remoteStatus: remoteStatus || 403 } }
-          );
-        }
-        if (remoteCode === 'STEP_UP_UNAVAILABLE') {
-          throw new AppError(
-            'SUB2API_STEP_UP_UNAVAILABLE',
-            'Sub2API step-up verification is temporarily unavailable',
-            { status: 503, retryable: true, details: { remoteCode, remoteStatus: remoteStatus || 503 } }
-          );
-        }
-        if (Number(error?.status) === 403) {
-          throw new AppError(
-            'SUB2API_KEY_EXPORT_FORBIDDEN',
-            'Sub2API requires a recent two-factor verified administrator session to read account API keys',
-            { status: 403, details: { remoteStatus: 403 } }
-          );
-        }
-        if ([404, 405, 501].includes(Number(error?.status))) {
-          throw new AppError(
-            'SUB2API_KEY_EXPORT_UNSUPPORTED',
-            'This Sub2API version does not expose the administrator account export endpoint',
-            { status: 409, details: { remoteStatus: Number(error?.status) } }
-          );
-        }
-        throw error;
+      const exported = await this.#requestAccountKeyExport(batch, { accessToken });
+      const matchedAccountIds = new Set();
+      const matchedExports = new Set();
+      const exportsById = groupBy(
+        exported.filter((item) => accountExportId(item) != null),
+        accountExportId
+      );
+
+      for (const source of batch) {
+        const items = exportsById.get(String(source.id)) || [];
+        if (items.length !== 1) continue;
+        this.#captureAccountKeyDetail(details, source, items[0]);
+        matchedAccountIds.add(String(source.id));
+        matchedExports.add(items[0]);
       }
-      const exported = payload?.accounts;
-      if (!Array.isArray(exported) || exported.length !== batch.length) {
-        throw new AppError('SCHEMA_MISMATCH', 'Sub2API account export did not preserve the requested account set', {
-          status: 502,
-          details: { requested: batch.length, received: Array.isArray(exported) ? exported.length : null }
-        });
+
+      const remainingSources = batch.filter((source) => !matchedAccountIds.has(String(source.id)));
+      const remainingExports = exported.filter((item) => !matchedExports.has(item));
+      const sourceGroups = groupBy(remainingSources, accountExportSignature);
+      const exportGroups = groupBy(remainingExports, accountExportSignature);
+      for (const [signature, sources] of sourceGroups) {
+        const items = exportGroups.get(signature) || [];
+        if (sources.length !== 1 || items.length !== 1) continue;
+        this.#captureAccountKeyDetail(details, sources[0], items[0]);
+        matchedAccountIds.add(String(sources[0].id));
       }
-      for (let index = 0; index < batch.length; index += 1) {
-        if (String(exported[index]?.name || '') !== batch[index].name) {
-          throw new AppError('SCHEMA_MISMATCH', 'Sub2API account export order did not match the requested account IDs', {
-            status: 502,
-            details: { accountId: batch[index].id }
-          });
-        }
-        const credentials = exported[index]?.credentials;
-        const apiKey = String(credentials?.api_key || '').trim();
-        if (apiKey) {
-          const fingerprints = apiKeyFingerprintVariants(apiKey);
-          details.set(batch[index].id, {
-            apiKey,
-            fingerprint: fingerprints[0],
-            fingerprints,
-            baseUrl: String(credentials?.base_url || '').trim()
-          });
-        }
+
+      for (const source of batch) {
+        if (matchedAccountIds.has(String(source.id))) continue;
+        const exact = await this.#requestAccountKeyExport([source], { accessToken });
+        this.#captureAccountKeyDetail(details, source, exact[0]);
       }
-      payload = null;
     }
     return details;
   }
@@ -1265,7 +1514,7 @@ class MappingService {
     };
   }
 
-  async #baseCatalog({ force = false, accessToken = null } = {}) {
+  async #baseCatalog({ force = false, accessToken = null, strictRates = false } = {}) {
     if (!force && this.baseCatalogCache?.expiresAt > Date.now()) return this.baseCatalogCache.value;
     if (!force && this.baseCatalogRequest) return this.baseCatalogRequest;
     const request = (async () => {
@@ -1295,7 +1544,10 @@ class MappingService {
         rates = groupRateMap(await this.sub2api.data('/api/v1/groups/rates', {
           ...(accessToken ? { accessToken } : {})
         }));
-      } catch {}
+      } catch (error) {
+        const authSource = this.sub2api.authenticationStatus?.().source || null;
+        if (strictRates && (accessToken || authSource !== 'admin_api_key')) throw error;
+      }
       const capturedAt = nowIso();
       const normalizedGroups = groups.map((group) => normalizeBaseGroup(group, rates)).filter((item) => item.id != null);
       if (normalizedGroups.length !== groups.length) {
@@ -1303,6 +1555,26 @@ class MappingService {
           status: 502,
           details: { endpoint: '/api/v1/admin/groups/all' }
         });
+      }
+      if (strictRates) {
+        const invalidRates = normalizedGroups.filter((group) =>
+          finite(group.effectiveRate ?? group.defaultRate) == null ||
+          Number(group.effectiveRate ?? group.defaultRate) <= 0
+        );
+        if (invalidRates.length > 0) {
+          throw new AppError(
+            'SUB2API_GROUP_RATE_INCOMPLETE',
+            'Sub2API returned one or more groups without a valid rate multiplier',
+            {
+              status: 409,
+              details: {
+                groupIds: invalidRates.slice(0, 100).map((group) => group.id),
+                omitted: Math.max(0, invalidRates.length - 100),
+                endpoint: '/api/v1/admin/groups/all'
+              }
+            }
+          );
+        }
       }
       const value = {
         groups: normalizedGroups,

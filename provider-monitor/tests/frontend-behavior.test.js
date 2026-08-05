@@ -90,6 +90,34 @@ test('all retention inputs allow a one-day minimum', () => {
   }
 });
 
+test('account quality exposes metric and dual-source comparison rules from the dashboard', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const rules = [
+    ['quality', '质量分'],
+    ['source', '双源数据'],
+    ['cost', '费用对比'],
+    ['ttft', '首字 P95'],
+    ['cache', '缓存读取率'],
+    ['probe', '检测通过率'],
+    ['capability', '能力分'],
+    ['requests', '请求数']
+  ];
+
+  assert.match(html, /id="account-metric-rules-dialog"/);
+  for (const [key, label] of rules) {
+    assert.match(html, new RegExp(`id="metric-rule-${key}"[\\s\\S]*?<dt>${label}<\\/dt>`));
+  }
+  assert.match(html, /延迟分 × 40% \+ 检测通过率 × 40% \+ 能力分 × 20%/);
+  assert.match(html, /ceil\(样本数 × 0\.95\)/);
+  assert.match(html, /来源日志 ID 去重/);
+  assert.match(html, /费用差额 = 同窗 Sub2API actual_cost 合计 - 同窗供应商 Key 消耗增量/);
+  assert.match(app, /Sub2API 基座/);
+  assert.match(app, /供应商上游/);
+  assert.match(app, /data-action="open-account-metric-rules"/);
+  assert.match(app, /openAccountMetricRules\(button\.dataset\.ruleTarget\)/);
+});
+
 test('a local AUTH_REQUIRED response still clears the expired session', async () => {
   const { context, removedSessionKeys } = createBrowserContext();
   context.fetch = async () => errorResponse('AUTH_REQUIRED', 'Administrator login is required');
@@ -127,6 +155,17 @@ test('Sub2API integrations expose a confirmed bulk mapping delete action', () =>
   assert.match(source, /确定删除全部.*条映射关系及其对账历史？此操作不可撤销。/);
   assert.match(source, /api\('\/api\/mappings', \{ method: 'DELETE' \}\)/);
   assert.match(source, /result\.deletedMappings/);
+});
+
+test('settings expose encrypted Sub2API administrator API Key verification controls and policy guidance', () => {
+  const { source } = createBrowserContext();
+  assert.match(source, /id="sub2api-admin-api-key-form"/);
+  assert.match(source, /name="adminApiKey" type="password"/);
+  assert.match(source, /autocomplete="new-password"/);
+  assert.match(source, /api\('\/api\/sub2api\/admin-api-key'/);
+  assert.match(source, /SUB2API_ADMIN_API_KEY_EXPORT_FORBIDDEN/);
+  assert.match(source, /敏感操作 step-up 2FA/);
+  assert.match(source, /delete-sub2api-admin-api-key/);
 });
 
 test('cost table filters stay combined across pagination and remain visible for empty results', async () => {
@@ -570,6 +609,42 @@ test('alert and execution rules share one rules and automation workspace', () =>
   assert.match(automationRow, /data-action="dry-run-automation"/);
 });
 
+test('failed automation actions expose an inline reason and structured detail dialog', () => {
+  const { context, source } = createBrowserContext();
+  const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  context.failedAction = {
+    id: 'failed-action',
+    status: 'failed',
+    action_type: 'rebuild_sub2api_mappings',
+    error: {
+      code: 'SUB2API_STEP_UP_REQUIRED',
+      message: 'TOTP expired <retry>',
+      stage: 'discover_candidates',
+      status: 403,
+      retryable: false,
+      details: { endpoint: '/api/v1/admin/accounts/data' }
+    },
+    before: { mappingCount: 13 },
+    after: {},
+    created_at: '2026-08-05T11:00:00.000Z',
+    completed_at: '2026-08-05T11:00:01.000Z'
+  };
+
+  const result = vm.runInContext('automationActionResultHtml(failedAction)', context);
+  assert.match(result, /发现并校验候选映射/);
+  assert.match(result, /TOTP expired &lt;retry&gt;/);
+  assert.doesNotMatch(result, /TOTP expired <retry>/);
+  assert.match(source, /data-action="view-automation-action"/);
+  assert.match(source, /SUB2API_STEP_UP_REQUIRED/);
+  assert.match(source, /SUB2API_ADMIN_API_KEY_EXPORT_FORBIDDEN/);
+  assert.match(source, /完成 TOTP 验证的 Sub2API 管理员会话关闭该开关/);
+  assert.match(source, /refresh_provider_snapshots: '刷新供应商映射快照'/);
+  assert.match(source, /MAPPING_PROVIDER_SNAPSHOT_INCOMPLETE/);
+  assert.match(source, /MAPPING_RATE_SNAPSHOT_INCOMPLETE/);
+  assert.match(index, /id="automation-action-detail-dialog"/);
+  assert.match(index, /id="automation-action-detail"/);
+});
+
 test('automation payload separates account targets and builds scheduled mapping condition workflows', () => {
   const { context } = createBrowserContext();
   const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
@@ -818,6 +893,59 @@ test('Sub2API API Key remote source submits session credentials and selected rem
   ), true);
   assert.match(source, /name="sub2apiApiKeySource"/);
   assert.match(index, /data-action="refresh-provider-key-options"/);
+});
+
+test('Sub2API account key options are discovered live instead of reloading filtered inventory', async () => {
+  const { context } = createBrowserContext();
+  const requests = [];
+  const form = {
+    elements: {
+      id: { value: '11111111-1111-4111-8111-111111111111' },
+      adapterType: { value: 'sub2api' }, authMode: { value: 'account' },
+      baseUrl: { value: 'https://sub2api.example' }
+    },
+    querySelectorAll() { return []; }
+  };
+  const provider = {
+    id: form.elements.id.value,
+    credentialFields: [{ name: 'email', masked: 'a***@example.com' }],
+    typeConfig: { monitoredKeyIds: ['41'] }
+  };
+  context.document.querySelector = (selector) => {
+    if (selector === '#provider-dialog') return { open: true };
+    return createElement();
+  };
+  context.fetch = async (input, options) => {
+    requests.push({ input: String(input), options });
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { items: [{ remote_id: '42', name: 'New remote key', status: 'active' }] };
+      }
+    };
+  };
+  context.providerKeyForm = form;
+  context.providerForKeyDiscovery = provider;
+
+  await vm.runInContext(
+    'loadMonitoredApiKeyOptions(providerKeyForm, providerForKeyDiscovery)',
+    context
+  );
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].input, '/api/providers/key-options');
+  assert.equal(requests[0].options.method, 'POST');
+  assert.deepEqual(JSON.parse(requests[0].options.body), {
+    existingProviderId: provider.id,
+    baseUrl: 'https://sub2api.example',
+    credentials: {}
+  });
+  const discoveredIds = JSON.parse(vm.runInContext(
+    'JSON.stringify(state.keys.map((key) => key.remote_id))',
+    context
+  ));
+  assert.deepEqual(discoveredIds, ['42']);
 });
 
 test('New API API Key mode submits every selected remote monitoring key', () => {

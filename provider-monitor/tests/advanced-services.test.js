@@ -405,6 +405,83 @@ test('transfer preview/import, secret-free export and SQLite backup work togethe
   }
 });
 
+test('Sub2API administrator API Key is encrypted, omitted from plain exports and restored from disaster bundles', () => {
+  const source = createTestContext();
+  const target = createTestContext({
+    PROVIDER_MONITOR_SECRET: 'different-target-secret-0123456789abcdef0123456789'
+  });
+  try {
+    const adminApiKey = 'admin-disaster-integration-secret-1234567890';
+    const sourceTransfers = new TransferService({
+      db: source.db,
+      config: source.config,
+      providers: new ProviderRepository(source.db, source.config)
+    });
+    const status = sourceTransfers.saveSub2ApiAdminApiKey(adminApiKey, {
+      verifiedAt: '2026-08-05T12:00:00.000Z',
+      capabilities: { adminGroups: true, adminAccounts: true, accountKeyExport: true }
+    });
+
+    assert.equal(status.configured, true);
+    assert.equal(status.source, 'stored');
+    assert.equal(status.capabilities.accountKeyExport, true);
+    assert.equal(status.maskedKey.includes(adminApiKey), false);
+    const encrypted = source.db.prepare(`
+      SELECT payload FROM encrypted_credentials WHERE id = 'integration:sub2api-admin-api-key'
+    `).get().payload;
+    assert.equal(encrypted.includes(adminApiKey), false);
+    assert.equal(JSON.stringify(sourceTransfers.exportConfiguration()).includes(adminApiKey), false);
+
+    const bundle = sourceTransfers.exportDisasterBundle('twelve-char-password');
+    const decoded = sourceTransfers.decodeDisasterBundle(bundle, 'twelve-char-password');
+    assert.equal(decoded.integrationCredentials.sub2apiAdminApiKey, adminApiKey);
+
+    const targetTransfers = new TransferService({
+      db: target.db,
+      config: target.config,
+      providers: new ProviderRepository(target.db, target.config)
+    });
+    const restored = targetTransfers.restoreDisasterConfiguration(decoded, { results: [] });
+    assert.equal(restored.sub2apiAdminApiKey, true);
+    assert.equal(targetTransfers.sub2apiAdminApiKey(), adminApiKey);
+    const targetEncrypted = target.db.prepare(`
+      SELECT payload FROM encrypted_credentials WHERE id = 'integration:sub2api-admin-api-key'
+    `).get().payload;
+    assert.equal(targetEncrypted.includes(adminApiKey), false);
+    assert.doesNotThrow(() => decryptJson(targetEncrypted, target.config.secret));
+  } finally {
+    source.cleanup();
+    target.cleanup();
+  }
+});
+
+test('deleting a stored Sub2API administrator API Key restores only the original environment fallback', () => {
+  const environmentKey = 'admin-environment-fallback-1234567890';
+  const storedKey = 'admin-database-override-0987654321';
+  const context = createTestContext({ SUB2API_ADMIN_API_KEY: environmentKey });
+  try {
+    const transfers = new TransferService({
+      db: context.db,
+      config: context.config,
+      providers: new ProviderRepository(context.db, context.config)
+    });
+    transfers.saveSub2ApiAdminApiKey(storedKey, {
+      verifiedAt: '2026-08-05T12:00:00.000Z',
+      capabilities: { accountKeyExport: true }
+    });
+    context.config.sub2apiAdminApiKey = storedKey;
+
+    const deleted = transfers.deleteSub2ApiAdminApiKey();
+
+    assert.equal(deleted.deleted, true);
+    assert.equal(deleted.status.source, 'environment');
+    assert.equal(transfers.sub2apiAdminApiKey(), environmentKey);
+    assert.equal(deleted.status.maskedKey.includes(storedKey), false);
+  } finally {
+    context.cleanup();
+  }
+});
+
 test('secret-free configuration restores provider shells disabled until credentials are supplied', () => {
   const source = createTestContext();
   const target = createTestContext();
