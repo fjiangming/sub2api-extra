@@ -2,6 +2,11 @@ const crypto = require('crypto');
 const { AppError, asAppError } = require('../errors');
 const { nowIso, parseJson, stringifyJson } = require('../db');
 const { maskKey } = require('../security/redaction');
+const { decryptJson } = require('../security/encryption');
+const {
+  apiKeyIdentityHash,
+  normalizeConfiguredApiKeys
+} = require('../security/configured-api-keys');
 const { normalizeDynamicRouteConfig } = require('./dynamic-route-rate');
 
 const ROUTED_GROUP_RATE_ADAPTERS = new Set([
@@ -325,9 +330,11 @@ function autoMappingSummary(items) {
 function autoMappingConfig(item, createdAt) {
   return {
     autoMapping: {
-      source: item.keyMatch === 'verified_gateway_billing'
-        ? 'provider_account_name_gateway_billing'
-        : 'provider_account_name_api_key',
+      source: item.keyMatch === 'exact_configured_secret'
+        ? 'provider_account_name_exact_api_key'
+        : item.keyMatch === 'verified_gateway_billing'
+          ? 'provider_account_name_gateway_billing'
+          : 'provider_account_name_api_key',
       accountMatch: item.accountMatch,
       keyMatch: item.keyMatch || 'fingerprint',
       billingScope: item.verifiedBillingScope || null,
@@ -957,7 +964,7 @@ class MappingService {
     ]);
     const accounts = accountCatalog.accounts;
     const providers = this.db.prepare(`
-      SELECT p.id, p.name, p.adapter_type, p.auth_mode, p.base_url
+      SELECT p.id, p.name, p.adapter_type, p.auth_mode, p.base_url, p.type_config_json
       FROM provider_connections p
       WHERE p.enabled = 1 AND EXISTS (
         SELECT 1 FROM remote_keys k
@@ -993,13 +1000,17 @@ class MappingService {
       }
 
       const remoteKeys = this.db.prepare(`
-        SELECT k.id, k.name, k.masked_key, k.primary_group_ref, k.status,
+        SELECT k.id, k.remote_id, k.name, k.masked_key, k.primary_group_ref, k.status,
+          k.metadata_json,
           a.user_group AS account_user_group
         FROM remote_keys k
         LEFT JOIN remote_accounts a ON a.id = k.remote_account_id
         WHERE k.connection_id = ? AND k.status != 'missing'
         ORDER BY k.name COLLATE NOCASE, k.id
-      `).all(provider.id);
+      `).all(provider.id).map((key) => ({
+        ...key,
+        metadata: parseJson(key.metadata_json, {})
+      }));
       const remoteGroups = this.db.prepare(`
         SELECT id, remote_id, name, ratio, status, metadata_json
         FROM remote_groups
@@ -1081,22 +1092,38 @@ class MappingService {
         continue;
       }
       const assets = providerAssets.get(provider.id);
-      let keyMatches = assets.remoteKeys.filter((key) =>
-        key.masked_key && fingerprints.includes(key.masked_key)
-      );
-      const normalizedFingerprintMatch = keyMatches.length > 0 &&
-        keyMatches.every((key) => key.masked_key !== fingerprint);
+      const requiresConfiguredSecretMatch = provider.adapter_type === 'sub2api' &&
+        provider.auth_mode === 'api_key';
+      let keyMatches = [];
+      let normalizedFingerprintMatch = false;
       let gatewayMatch = null;
-      if (keyMatches.length === 0) {
+      if (requiresConfiguredSecretMatch) {
         const cacheKey = `${provider.id}|${account.id}`;
         if (!gatewayKeyMatches.has(cacheKey)) {
           gatewayKeyMatches.set(
             cacheKey,
-            await this.#verifyGatewayKeyMatch(provider, accountKey, assets)
+            this.#verifyConfiguredApiKeyMatch(provider, accountKey, assets)
           );
         }
         gatewayMatch = gatewayKeyMatches.get(cacheKey);
         if (gatewayMatch.matched) keyMatches = [gatewayMatch.key];
+      } else {
+        keyMatches = assets.remoteKeys.filter((key) =>
+          key.masked_key && fingerprints.includes(key.masked_key)
+        );
+        normalizedFingerprintMatch = keyMatches.length > 0 &&
+          keyMatches.every((key) => key.masked_key !== fingerprint);
+        if (keyMatches.length === 0) {
+          const cacheKey = `${provider.id}|${account.id}`;
+          if (!gatewayKeyMatches.has(cacheKey)) {
+            gatewayKeyMatches.set(
+              cacheKey,
+              await this.#verifyGatewayKeyMatch(provider, accountKey, assets)
+            );
+          }
+          gatewayMatch = gatewayKeyMatches.get(cacheKey);
+          if (gatewayMatch.matched) keyMatches = [gatewayMatch.key];
+        }
       }
       if (keyMatches.length === 0) {
         items.push({
@@ -1132,14 +1159,14 @@ class MappingService {
         : accountProviderRef
           ? 'account_inherited'
           : null;
-      let providerGroup = gatewayMatch?.matched
-        ? gatewayMatch.providerGroup
-        : providerRef
+      let providerGroup = gatewayMatch?.providerGroup || (providerRef
           ? assets.remoteGroups.find((group) =>
             [group.id, group.remote_id, group.name].some((value) => String(value) === providerRef)
           )
-          : null;
-      if (gatewayMatch?.matched) providerGroupSource = 'gateway_verified';
+          : null);
+      if (gatewayMatch?.matched) {
+        providerGroupSource = gatewayMatch.groupSource || 'gateway_verified';
+      }
       if (!providerGroup && !providerRef && assets.remoteGroups.length === 1) {
         providerGroup = assets.remoteGroups[0];
         providerGroupSource = 'sole_group_inferred';
@@ -1152,11 +1179,12 @@ class MappingService {
         baseMaskedKey: fingerprint,
         providerMaskedKey: key.masked_key,
         keyMatch: gatewayMatch?.matched
-          ? 'verified_gateway_billing'
+          ? gatewayMatch.matchType || 'verified_gateway_billing'
           : normalizedFingerprintMatch
             ? 'normalized_fingerprint'
             : 'fingerprint',
-        keyVerification: normalizedFingerprintMatch ? 'api_key_prefix_normalized' : null,
+        keyVerification: gatewayMatch?.verification ||
+          (normalizedFingerprintMatch ? 'api_key_prefix_normalized' : null),
         verifiedBillingScope: gatewayMatch?.billingScope || null,
         providerGroupRef: providerGroup?.remote_id || providerRef || null,
         providerGroupName: providerGroup?.name || null,
@@ -1188,6 +1216,64 @@ class MappingService {
       });
     }
     return { catalog, accountCatalog, items };
+  }
+
+  #verifyConfiguredApiKeyMatch(provider, accountKey, assets) {
+    const rejected = (reason) => ({ matched: false, reason });
+    const providerBaseUrl = normalizeGatewayBaseUrl(provider.base_url);
+    const accountBaseUrl = normalizeGatewayBaseUrl(accountKey.baseUrl);
+    if (!providerBaseUrl || !accountBaseUrl) return rejected('gateway_base_url_missing');
+    if (providerBaseUrl !== accountBaseUrl) return rejected('gateway_base_url_mismatch');
+
+    const expectedIdentity = apiKeyIdentityHash(accountKey.apiKey, this.config.secret);
+    if (!expectedIdentity) return rejected('configured_api_key_identity_unavailable');
+    const identityMatches = assets.remoteKeys.filter((candidate) =>
+      candidate.metadata?.identityAlgorithm === 'hmac-sha256-v1' &&
+      candidate.metadata?.identityHash === expectedIdentity
+    );
+    if (identityMatches.length > 1) return rejected('configured_api_key_identity_collision');
+    let key = identityMatches[0] || null;
+
+    if (!key) {
+      const row = this.db.prepare(`
+        SELECT credentials.payload
+        FROM provider_connections connection
+        JOIN encrypted_credentials credentials ON credentials.id = connection.credential_id
+        WHERE connection.id = ?
+      `).get(provider.id);
+      if (!row?.payload) return rejected('configured_api_key_credentials_missing');
+
+      let credentials;
+      try {
+        credentials = decryptJson(row.payload, this.config.secret);
+      } catch {
+        return rejected('configured_api_key_credentials_invalid');
+      }
+      const configuredEntry = normalizeConfiguredApiKeys(credentials).find((entry) =>
+        apiKeyIdentityHash(entry.key, this.config.secret) === expectedIdentity
+      );
+      if (!configuredEntry) return rejected('configured_api_key_secret_mismatch');
+      key = assets.remoteKeys.find((candidate) =>
+        String(candidate.remote_id) === String(configuredEntry.id)
+      );
+      if (!key) return rejected('configured_api_key_not_synchronized');
+    }
+    const providerRef = String(key.primary_group_ref || '').trim();
+    const providerGroup = providerRef
+      ? assets.remoteGroups.find((group) =>
+          [group.id, group.remote_id, group.name].some((value) => String(value) === providerRef)
+        ) || null
+      : null;
+    return {
+      matched: true,
+      key,
+      providerGroup,
+      groupSource: 'configured_secret_verified',
+      matchType: 'exact_configured_secret',
+      verification: 'api_key_secret_exact',
+      billingScope: providerGroup?.metadata?.billingScope || providerGroup?.remote_id || null,
+      billingRate: finite(providerGroup?.ratio)
+    };
   }
 
   async #verifyGatewayKeyMatch(provider, accountKey, assets) {

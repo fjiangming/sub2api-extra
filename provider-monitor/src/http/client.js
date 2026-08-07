@@ -195,6 +195,9 @@ class HttpClient {
           try {
             body = JSON.parse(rawText);
           } catch (error) {
+            if (!response.ok) {
+              throw classifyHttpError(response.status, null, response.headers);
+            }
             throw new AppError('SCHEMA_MISMATCH', 'Provider response is not valid JSON', {
               status: 502,
               details: { contentType: response.headers.get('content-type') },

@@ -112,6 +112,7 @@ test('account quality exposes metric and dual-source comparison rules from the d
   assert.match(html, /ceil\((?:样本数|n) × 0\.95\)/);
   assert.match(html, /来源日志 ID 去重/);
   assert.match(html, /Key 总账毛差 = Σ基座 actual_cost ÷ 基座充值倍率 - Σ上游 actual_cost ÷ 上游充值倍率/);
+  assert.match(app, /provider_daily_usage: '逐日用量'/);
   assert.match(html, /实际窗口 = 所选窗口 ∩ 基座精确日志覆盖窗口 ∩ 上游日志覆盖窗口/);
   assert.match(html, /actual_cost \/ total_actual_cost 表示实际扣除/);
   assert.match(html, /exact_total=true/);

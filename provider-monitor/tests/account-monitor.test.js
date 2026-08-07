@@ -8,7 +8,9 @@ const { ProviderRepository } = require('../src/repositories/provider-repository'
 const {
   AccountMonitorService,
   CHALLENGE_EXPECTED,
+  accountMonitorWindow,
   createCapabilityChallenge,
+  requestPairingTrust,
   scoreCapabilityChallenge,
   scoreChallenge
 } = require('../src/services/account-monitor-service');
@@ -332,7 +334,7 @@ test('account quality compares mapped provider logs and same-window upstream cos
   const item = monitor.accounts({ search: 'Mapped account', days: 7 }).items[0];
   assert.equal(item.comparison.status, 'mapped');
   assert.equal(item.comparison.source, 'provider_request_logs');
-  assert.equal(item.comparison.metricReason, null);
+  assert.equal(item.comparison.metricReason, 'request_pairing_insufficient');
   assert.equal(item.comparison.provider.name, 'Mapped New API');
   assert.equal(item.comparison.provider.remoteKeyId, '77');
   assert.deepEqual(item.comparison.attribution, {
@@ -347,33 +349,37 @@ test('account quality compares mapped provider logs and same-window upstream cos
   });
   assert.equal(item.comparison.coverage.syncScope, 'key');
   assert.equal(item.metrics.requestCount, 3);
-  assert.equal(item.comparison.upstream.requestCount, 2);
-  assert.equal(item.comparison.upstream.ttftP95Ms, 1000);
-  assert.equal(item.comparison.upstream.cacheRate, 33.3);
+  assert.equal(item.comparison.upstream.requestCount, 3);
+  assert.equal(item.comparison.upstream.ttftP95Ms, 1400);
+  assert.equal(item.comparison.upstream.cacheRate, 7.7);
   assert.equal(item.comparison.base.requestCount, 2);
   assert.equal(item.comparison.windowTotals.base.requestCount, 2);
   assert.equal(item.comparison.windowTotals.upstream.requestCount, 3);
   assert.equal(item.comparison.pairing.matchedCount, 2);
+  assert.equal(item.comparison.pairing.trusted, false);
+  assert.equal(item.comparison.pairing.minimumSampleCount, 30);
+  assert.equal(item.comparison.pairing.minimumMatchRate, 95);
   assert.deepEqual(item.comparison.pairing.matchedBy, { requestId: 1, fingerprint: 1 });
-  assert.equal(item.comparison.pairing.upstreamExtraCount, 1);
-  assert.equal(item.comparison.overhead.ttftP95Ms, 200);
-  assert.equal(item.comparison.cost.comparable, true);
+  assert.equal(item.comparison.pairing.upstreamExtraCount, null);
+  assert.equal(item.comparison.pairing.observedUpstreamUnmatchedCount, 1);
+  assert.equal(item.comparison.overhead, null);
+  assert.equal(item.comparison.cost.comparable, false);
   assert.equal(item.comparison.cost.source, 'provider_request_logs');
-  assert.equal(item.comparison.cost.scope, 'paired_requests');
+  assert.equal(item.comparison.cost.scope, 'key_window');
   assert.ok(Math.abs(item.comparison.cost.baseCost - 0.04) < 1e-8);
-  assert.ok(Math.abs(item.comparison.cost.upstreamCost - 0.03) < 1e-8);
+  assert.ok(Math.abs(item.comparison.cost.upstreamCost - 0.08) < 1e-8);
   assert.ok(Math.abs(item.comparison.cost.baseCashEquivalent - 0.02) < 1e-8);
-  assert.ok(Math.abs(item.comparison.cost.upstreamCashEquivalent - 0.015) < 1e-8);
-  assert.ok(Math.abs(item.comparison.cost.differenceAmount - 0.005) < 1e-8);
+  assert.ok(Math.abs(item.comparison.cost.upstreamCashEquivalent - 0.04) < 1e-8);
+  assert.equal(item.comparison.cost.differenceAmount, null);
   assert.ok(Math.abs(item.comparison.cost.keyTotalUpstreamCost - 0.08) < 1e-8);
   assert.equal(item.comparison.cost.windowComparable, true);
   assert.ok(Math.abs(item.comparison.cost.baseWindowCashEquivalent - 0.02) < 1e-8);
   assert.ok(Math.abs(item.comparison.cost.keyTotalUpstreamCashEquivalent - 0.04) < 1e-8);
   assert.ok(Math.abs(item.comparison.cost.windowDifferenceAmount + 0.02) < 1e-8);
   assert.equal(item.comparison.cost.windowProfitStatus, 'loss');
-  assert.ok(Math.abs(item.comparison.cost.extraUpstreamCost - 0.05) < 1e-8);
-  assert.equal(item.comparison.cost.moreExpensive, 'sub2api');
-  assert.equal(item.comparison.cost.profitStatus, 'profit');
+  assert.equal(item.comparison.cost.extraUpstreamCost, null);
+  assert.equal(item.comparison.cost.moreExpensive, null);
+  assert.equal(item.comparison.cost.profitStatus, null);
   context.db.prepare(`
     UPDATE sub2api_account_monitor_state SET last_sync_summary_json = '{}'
     WHERE id = 1
@@ -396,8 +402,8 @@ test('account quality compares mapped provider logs and same-window upstream cos
   assert.equal(retained.comparison.metricReason, 'request_logs_stale');
   assert.equal(retained.comparison.coverage.stale, true);
   assert.equal(retained.comparison.coverage.errorCode, 'NETWORK_UNREACHABLE');
-  assert.equal(retained.comparison.upstream.requestCount, 2);
-  assert.equal(retained.comparison.upstream.ttftP95Ms, 1000);
+  assert.equal(retained.comparison.upstream.requestCount, 3);
+  assert.equal(retained.comparison.upstream.ttftP95Ms, 1400);
   context.db.prepare(`
     UPDATE provider_request_key_sync_state
     SET status = 'succeeded', last_error_code = NULL, last_error_message = NULL,
@@ -412,7 +418,7 @@ test('account quality compares mapped provider logs and same-window upstream cos
     WHERE connection_id = ? AND subject_id = 'mapped-key' AND captured_at = ?
   `).run(provider.id, iso(10));
   const stagnant = monitor.account('501', { days: 7 }).comparison.cost;
-  assert.equal(stagnant.comparable, true);
+  assert.equal(stagnant.comparable, false);
   assert.equal(stagnant.source, 'provider_request_logs');
   context.db.prepare(`
     UPDATE provider_request_samples SET created_at = ? WHERE key_id = 'mapped-key'
@@ -426,6 +432,226 @@ test('account quality compares mapped provider logs and same-window upstream cos
   assert.equal(unverified.comparison.source, 'unavailable');
   assert.equal(unverified.comparison.metricReason, 'request_logs_key_unverified');
   assert.equal(unverified.comparison.upstream, null);
+});
+
+test('request pairing requires at least 30 samples and 95 percent coverage', () => {
+  assert.deepEqual(requestPairingTrust({
+    matchedCount: 29,
+    baseMatchRate: 100,
+    upstreamMatchRate: 100
+  }, { baseCoverageComplete: true }), {
+    trusted: false,
+    reason: 'request_pairing_insufficient'
+  });
+  assert.deepEqual(requestPairingTrust({
+    matchedCount: 30,
+    baseMatchRate: 95,
+    upstreamMatchRate: 95
+  }, { baseCoverageComplete: true }), {
+    trusted: true,
+    reason: null
+  });
+  assert.deepEqual(requestPairingTrust({
+    matchedCount: 30,
+    baseMatchRate: 94.9,
+    upstreamMatchRate: 100
+  }, { baseCoverageComplete: true }), {
+    trusted: false,
+    reason: 'request_pairing_partial'
+  });
+});
+
+test('seven-day account windows use seven local calendar dates including today', () => {
+  assert.deepEqual(
+    accountMonitorWindow(7, 'Asia/Shanghai', new Date('2026-08-07T16:30:00.000Z')),
+    {
+      from: '2026-08-01T16:00:00.000Z',
+      to: '2026-08-07T16:30:00.000Z',
+      startDate: '2026-08-02',
+      endDate: '2026-08-08',
+      days: 7
+    }
+  );
+});
+
+test('daily API Key usage wins over a cumulative counter from a rotated credential', (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Daily Sub2API',
+    adapterType: 'sub2api',
+    baseUrl: 'https://daily.example',
+    authMode: 'api_key',
+    credentials: { apiKey: 'sk-daily-secret-12345678' },
+    rechargeMultiplier: 10
+  });
+  const window = accountMonitorWindow(7, context.config.timezone);
+  const capturedAt = window.to;
+  insertMonitoredAccount(context.db, {
+    id: 778,
+    name: 'Daily account',
+    platform: 'openai',
+    type: 'apikey'
+  });
+  context.db.prepare(`
+    INSERT INTO remote_keys(
+      id, connection_id, remote_id, name, masked_key, status, currency,
+      unlimited, metadata_json, first_seen_at, last_seen_at
+    ) VALUES ('daily-key', ?, 'configured-api-key', 'Daily key', 'sk-d...5678',
+      'active', 'USD', 0, ?, ?, ?)
+  `).run(provider.id, JSON.stringify({
+    identityHash: 'current-credential',
+    identityAlgorithm: 'hmac-sha256-v1'
+  }), window.from, capturedAt);
+  context.db.prepare(`
+    INSERT INTO sub2api_mappings(
+      id, connection_id, key_id, account_id, group_id, role, enabled,
+      models_json, config_json, created_at, updated_at
+    ) VALUES ('daily-mapping', ?, 'daily-key', 778, 1, 'primary', 1,
+      '[]', ?, ?, ?)
+  `).run(provider.id, JSON.stringify({
+    autoMapping: { keyMatch: 'exact_configured_secret' }
+  }), window.from, capturedAt);
+  context.db.prepare(`
+    UPDATE sub2api_account_monitor_settings SET base_recharge_multiplier = 2 WHERE id = 1
+  `).run();
+  setBaseLogCoverage(context.db, window.from, capturedAt);
+  context.db.prepare(`
+    INSERT INTO sub2api_account_request_samples(
+      source_log_id, account_id, request_id, model, stream, input_tokens,
+      output_tokens, cache_creation_tokens, cache_read_tokens, actual_cost,
+      created_at, ingested_at
+    ) VALUES ('daily-base', '778', 'daily-request', 'gpt-test', 1, 42163123,
+      1983263, 0, 507104128, 50.5436770158, ?, ?)
+  `).run(new Date(Date.parse(capturedAt) - 60000).toISOString(), capturedAt);
+  const insertUsage = context.db.prepare(`
+    INSERT INTO usage_snapshots(
+      connection_id, subject_type, subject_id, currency, cost, requests,
+      input_tokens, output_tokens, total_tokens, model, period, raw_json, captured_at
+    ) VALUES (?, 'key', 'daily-key', 'USD', ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+  `);
+  insertUsage.run(provider.id, 0.0014645, 3, 1645, 22, 13187, 'cumulative', JSON.stringify({
+    monitorMetrics: { credentialIdentity: 'previous-credential', actualCost: 0.0014645 }
+  }), new Date(Date.parse(window.from) - 60000).toISOString());
+  insertUsage.run(provider.id, 92.801603073, 7807, 78907951, 4624790, 996481861,
+    'cumulative', JSON.stringify({
+      monitorMetrics: { credentialIdentity: 'current-credential', actualCost: 92.801603073 }
+    }), capturedAt);
+  insertUsage.run(provider.id, 46.91940238, 4061, 42190000, 1980000, 551390000,
+    `day:${window.endDate}`, JSON.stringify({
+      monitorMetrics: {
+        credentialIdentity: 'current-credential',
+        actualCost: 46.91940238,
+        cacheCreationCount: 0,
+        cacheReadCount: 507210000,
+        usageDate: window.endDate,
+        dailyHistoryComplete: true,
+        dailyCoverageStart: window.startDate,
+        dailyCoverageEnd: window.endDate,
+        timezone: context.config.timezone
+      }
+    }), capturedAt);
+
+  const monitor = new AccountMonitorService({ db: context.db, config: context.config, sub2api: {} });
+  const comparison = monitor.account('778', { days: 7 }).comparison;
+  assert.equal(comparison.source, 'provider_daily_usage');
+  assert.equal(comparison.window.source, 'daily_usage');
+  assert.equal(comparison.window.complete, true);
+  assert.equal(comparison.upstream.requestCount, 4061);
+  assert.equal(comparison.upstream.actualCost, 46.91940238);
+  assert.equal(comparison.base.actualCost, 50.54367702);
+  assert.equal(comparison.cost.baseWindowCashEquivalent, 25.27183851);
+  assert.equal(comparison.cost.keyTotalUpstreamCashEquivalent, 4.69194024);
+  assert.equal(comparison.cost.windowComparable, true);
+  assert.equal(comparison.cost.windowDifferenceAmount, 20.57989827);
+  assert.equal(comparison.cost.windowProfitStatus, 'profit');
+});
+
+test('API Key snapshot comparison restores actual cost and cache counters from raw usage', (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Snapshot Sub2API',
+    adapterType: 'sub2api',
+    baseUrl: 'https://snapshot.example',
+    authMode: 'api_key',
+    credentials: { apiKey: 'sk-snapshot-secret-12345678' }
+  });
+  const now = Date.now();
+  const iso = (minutesAgo) => new Date(now - minutesAgo * 60000).toISOString();
+  insertMonitoredAccount(context.db, {
+    id: 777,
+    name: 'Snapshot account',
+    platform: 'openai',
+    type: 'apikey'
+  });
+  context.db.prepare(`
+    INSERT INTO remote_keys(
+      id, connection_id, remote_id, name, masked_key, status, currency,
+      unlimited, metadata_json, first_seen_at, last_seen_at
+    ) VALUES ('snapshot-key', ?, 'configured-api-key', 'Snapshot key', 'sk-s...5678',
+      'active', 'USD', 0, '{}', ?, ?)
+  `).run(provider.id, iso(8 * 24 * 60), iso(1));
+  context.db.prepare(`
+    INSERT INTO sub2api_mappings(
+      id, connection_id, key_id, account_id, group_id, role, enabled,
+      models_json, config_json, created_at, updated_at
+    ) VALUES ('snapshot-mapping', ?, 'snapshot-key', 777, 1, 'primary', 1,
+      '[]', ?, ?, ?)
+  `).run(provider.id, JSON.stringify({
+    autoMapping: { keyMatch: 'exact_configured_secret' }
+  }), iso(8 * 24 * 60), iso(1));
+  const insertUsage = context.db.prepare(`
+    INSERT INTO usage_snapshots(
+      connection_id, subject_type, subject_id, currency, cost, requests,
+      input_tokens, output_tokens, total_tokens, model, period, raw_json, captured_at
+    ) VALUES (?, 'key', 'snapshot-key', 'USD', ?, ?, ?, ?, ?, NULL,
+      'cumulative', ?, ?)
+  `);
+  insertUsage.run(provider.id, 1.5, 10, 100, 20, 170, JSON.stringify({
+    cost: 1.5,
+    actual_cost: 0.15,
+    cache_creation_tokens: 0,
+    cache_read_tokens: 50
+  }), iso(7 * 24 * 60 + 10));
+  insertUsage.run(provider.id, 2.5, 20, 200, 40, 400, JSON.stringify({
+    cost: 2.5,
+    actual_cost: 9.99,
+    cache_creation_tokens: '***',
+    cache_read_tokens: '***',
+    monitorMetrics: {
+      actualCost: 0.25,
+      cacheCreationCount: 10,
+      cacheReadCount: 150
+    }
+  }), iso(10));
+
+  const monitor = new AccountMonitorService({
+    db: context.db,
+    config: context.config,
+    sub2api: {}
+  });
+  const comparison = monitor.account('777', { days: 7 }).comparison;
+  assert.equal(comparison.status, 'mapped');
+  assert.equal(comparison.source, 'provider_usage_snapshots');
+  assert.equal(comparison.upstream.requestCount, 10);
+  assert.equal(comparison.upstream.cacheCreationTokens, 10);
+  assert.equal(comparison.upstream.cacheReadTokens, 100);
+  assert.equal(comparison.upstream.cacheRate, 47.6);
+  assert.ok(Math.abs(comparison.upstream.actualCost - 0.1) < 1e-8);
+
+  context.db.prepare(`
+    UPDATE sub2api_mappings SET config_json = ? WHERE id = 'snapshot-mapping'
+  `).run(JSON.stringify({ autoMapping: { keyMatch: 'verified_gateway_billing' } }));
+  context.db.prepare(`
+    UPDATE provider_connections SET auth_mode = 'token_pair' WHERE id = ?
+  `).run(provider.id);
+  const blocked = monitor.account('777', { days: 7 }).comparison;
+  assert.equal(blocked.status, 'mapping_unverified');
+  assert.equal(blocked.source, 'unavailable');
+  assert.equal(blocked.metricReason, 'mapping_key_unverified');
 });
 
 test('account monitor HTTP API supports manual sync, filtering and probes', async (t) => {

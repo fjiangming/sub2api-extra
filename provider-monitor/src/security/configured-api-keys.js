@@ -14,6 +14,12 @@ function cleanEntryName(value) {
   return String(value || '').trim().slice(0, 120);
 }
 
+function apiKeyIdentityHash(value, secret) {
+  const key = cleanApiKey(value);
+  if (!key || !secret) return null;
+  return crypto.createHmac('sha256', String(secret)).update(key).digest('hex');
+}
+
 function rawApiKeyEntries(credentials = {}) {
   const entries = [];
   if (Array.isArray(credentials.apiKeys)) entries.push(...credentials.apiKeys);
@@ -97,6 +103,7 @@ function configuredApiKeyById(credentials = {}, id) {
 
 module.exports = {
   LEGACY_CONFIGURED_API_KEY_ID,
+  apiKeyIdentityHash,
   cleanApiKey,
   configuredApiKeyById,
   configuredApiKeyMetadata,

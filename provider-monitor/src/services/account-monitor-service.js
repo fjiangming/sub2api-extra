@@ -22,6 +22,8 @@ const PROBE_SAMPLE_LIMIT = 200;
 const PROBE_CREDENTIAL_TTL_MS = 10 * 60 * 1000;
 const REQUEST_PAIR_TIME_TOLERANCE_MS = 5000;
 const REQUEST_ID_TIME_TOLERANCE_MS = 60000;
+const REQUEST_PAIR_MIN_SAMPLES = 30;
+const REQUEST_PAIR_MIN_MATCH_RATE = 95;
 
 function finite(value) {
   if (value == null || value === '') return null;
@@ -361,6 +363,25 @@ function pairRequestRows(baseRows, upstreamRows, toleranceMs = REQUEST_PAIR_TIME
   };
 }
 
+function requestPairingTrust(pairing, { baseCoverageComplete = false } = {}) {
+  if (!baseCoverageComplete) {
+    return { trusted: false, reason: 'base_request_logs_incomplete' };
+  }
+  if (pairing.matchedCount === 0) {
+    return { trusted: false, reason: 'request_pairing_unavailable' };
+  }
+  if (pairing.matchedCount < REQUEST_PAIR_MIN_SAMPLES) {
+    return { trusted: false, reason: 'request_pairing_insufficient' };
+  }
+  if (
+    pairing.baseMatchRate < REQUEST_PAIR_MIN_MATCH_RATE ||
+    pairing.upstreamMatchRate < REQUEST_PAIR_MIN_MATCH_RATE
+  ) {
+    return { trusted: false, reason: 'request_pairing_partial' };
+  }
+  return { trusted: true, reason: null };
+}
+
 function latestIso(values) {
   return values.filter(Boolean).sort((left, right) => Date.parse(right) - Date.parse(left))[0] || null;
 }
@@ -597,6 +618,64 @@ function dateInTimezone(value, timezone) {
   }).formatToParts(value);
   const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${map.year}-${map.month}-${map.day}`;
+}
+
+function shiftDateKey(value, days) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ''));
+  if (!match) return value;
+  return new Date(Date.UTC(
+    Number(match[1]),
+    Number(match[2]) - 1,
+    Number(match[3]) + days
+  )).toISOString().slice(0, 10);
+}
+
+function startOfDateInTimezone(value, timezone) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ''));
+  if (!match) return null;
+  const target = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  let timestamp = target;
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const instant = new Date(timestamp);
+    const parts = Object.fromEntries(
+      formatter.formatToParts(instant).map((part) => [part.type, part.value])
+    );
+    const represented = Date.UTC(
+      Number(parts.year),
+      Number(parts.month) - 1,
+      Number(parts.day),
+      Number(parts.hour),
+      Number(parts.minute),
+      Number(parts.second)
+    );
+    const offset = represented - Math.floor(timestamp / 1000) * 1000;
+    timestamp = target - offset;
+  }
+  return new Date(timestamp);
+}
+
+function accountMonitorWindow(days, timezone, current = new Date()) {
+  const safeDays = clamp(integer(days, 7), 1, 90);
+  const endDate = dateInTimezone(current, timezone);
+  const startDate = shiftDateKey(endDate, -(safeDays - 1));
+  const start = startOfDateInTimezone(startDate, timezone);
+  return {
+    from: (start || new Date(current.getTime() - safeDays * 86400000)).toISOString(),
+    to: current.toISOString(),
+    startDate,
+    endDate,
+    days: safeDays
+  };
 }
 
 function dateKeysBetween(startDate, endDate) {
@@ -1082,7 +1161,8 @@ class AccountMonitorService {
       const placeholders = batch.map(() => '?').join(',');
       rows.push(...this.db.prepare(`
         SELECT CAST(m.account_id AS TEXT) AS account_id, m.id AS mapping_id,
-          m.connection_id, m.key_id, m.role, m.updated_at AS mapping_updated_at,
+          m.connection_id, m.key_id, m.role, m.config_json AS mapping_config_json,
+          m.updated_at AS mapping_updated_at,
           c.name AS provider_name, c.adapter_type, c.auth_mode, c.last_success_at,
            c.last_error_code, k.name AS key_name, k.remote_id AS remote_key_id,
            k.currency, k.status AS key_status,
@@ -1201,12 +1281,22 @@ class AccountMonitorService {
 
   #snapshotDeltas(keyIds, since, until) {
     const usageRows = [];
+    const dailyRows = [];
     const balanceRows = [];
+    const currentIdentityByKey = new Map();
+    const startDate = dateInTimezone(new Date(since), this.config.timezone);
+    const endDate = dateInTimezone(new Date(until), this.config.timezone);
     for (const batch of chunks(keyIds)) {
       const placeholders = batch.map(() => '?').join(',');
+      for (const row of this.db.prepare(`
+        SELECT id, metadata_json FROM remote_keys WHERE id IN (${placeholders})
+      `).all(...batch)) {
+        const metadata = parseJson(row.metadata_json, {});
+        currentIdentityByKey.set(String(row.id), metadata.identityHash || null);
+      }
       usageRows.push(...this.db.prepare(`
         SELECT subject_id AS key_id, currency, cost, requests, input_tokens,
-          output_tokens, total_tokens, captured_at
+          output_tokens, total_tokens, raw_json, captured_at
         FROM usage_snapshots current
         WHERE subject_type = 'key' AND subject_id IN (${placeholders})
           AND period = 'cumulative' AND model IS NULL
@@ -1226,8 +1316,27 @@ class AccountMonitorService {
           )
         ORDER BY subject_id, currency, captured_at
       `).all(...batch, until, since, since));
+      dailyRows.push(...this.db.prepare(`
+        SELECT subject_id AS key_id, currency, cost, requests, input_tokens,
+          output_tokens, total_tokens, period, raw_json, captured_at
+        FROM usage_snapshots current
+        WHERE subject_type = 'key' AND subject_id IN (${placeholders})
+          AND period >= ? AND period <= ? AND period LIKE 'day:%'
+          AND model IS NULL AND captured_at <= ?
+          AND captured_at = (
+            SELECT MAX(previous.captured_at)
+            FROM usage_snapshots previous
+            WHERE previous.subject_type = 'key'
+              AND previous.subject_id = current.subject_id
+              AND previous.currency = current.currency
+              AND previous.period = current.period
+              AND previous.model IS NULL
+              AND previous.captured_at <= ?
+          )
+        ORDER BY subject_id, currency, period
+      `).all(...batch, `day:${startDate}`, `day:${endDate}`, until, until));
       balanceRows.push(...this.db.prepare(`
-        SELECT subject_id AS key_id, currency, used, captured_at
+        SELECT subject_id AS key_id, currency, used, raw_json, captured_at
         FROM balance_snapshots current
         WHERE subject_type = 'key' AND subject_id IN (${placeholders})
           AND captured_at <= ? AND used IS NOT NULL
@@ -1247,11 +1356,48 @@ class AccountMonitorService {
       `).all(...batch, until, since, since));
     }
 
+    const normalizeUsageRow = (row) => {
+      const raw = parseJson(row.raw_json, {});
+      const monitorMetrics = raw.monitorMetrics && typeof raw.monitorMetrics === 'object'
+        ? raw.monitorMetrics
+        : {};
+      return {
+        ...row,
+        cost: finite(monitorMetrics.actualCost) ?? finite(raw.actual_cost) ?? row.cost,
+        cache_creation_tokens: finite(monitorMetrics.cacheCreationCount) ??
+          finite(raw.cache_creation_tokens),
+        cache_read_tokens: finite(monitorMetrics.cacheReadCount) ?? finite(raw.cache_read_tokens),
+        credential_identity: monitorMetrics.credentialIdentity || null,
+        usage_date: monitorMetrics.usageDate || String(row.period || '').replace(/^day:/, '') || null,
+        daily_history_complete: monitorMetrics.dailyHistoryComplete === true,
+        daily_coverage_start: monitorMetrics.dailyCoverageStart || null,
+        daily_coverage_end: monitorMetrics.dailyCoverageEnd || null
+      };
+    };
+    const normalizedUsageRows = usageRows.map(normalizeUsageRow);
+    const normalizedDailyRows = dailyRows.map(normalizeUsageRow);
+    const normalizedBalanceRows = balanceRows.map((row) => {
+      const raw = parseJson(row.raw_json, {});
+      return {
+        ...row,
+        credential_identity: raw.monitorMetrics?.credentialIdentity || null
+      };
+    });
+
+    const matchesCurrentIdentity = (row) => {
+      const expected = currentIdentityByKey.get(String(row.key_id));
+      return !expected || row.credential_identity === expected;
+    };
+
     const reduceRows = (rows, type) => {
-      const byKeyAndCurrency = groupBy(rows, (row) => `${row.key_id}\u0000${row.currency}`);
+      const currentRows = rows.filter(matchesCurrentIdentity);
+      const byKeyAndCurrency = groupBy(currentRows, (row) => (
+        `${row.key_id}\u0000${row.currency}\u0000${row.credential_identity || 'legacy'}`
+      ));
       const candidates = new Map();
       for (const entries of byKeyAndCurrency.values()) {
         if (entries.length < 2) continue;
+        entries.sort((left, right) => String(left.captured_at).localeCompare(String(right.captured_at)));
         const keyId = String(entries[0].key_id);
         const value = type === 'usage'
           ? {
@@ -1262,10 +1408,14 @@ class AccountMonitorService {
               requestCount: cumulativeDelta(entries, 'requests'),
               inputTokens: cumulativeDelta(entries, 'input_tokens'),
               outputTokens: cumulativeDelta(entries, 'output_tokens'),
+              cacheCreationTokens: cumulativeDelta(entries, 'cache_creation_tokens'),
+              cacheReadTokens: cumulativeDelta(entries, 'cache_read_tokens'),
               totalTokens: cumulativeDelta(entries, 'total_tokens'),
               from: entries[0].captured_at,
               to: entries.at(-1).captured_at,
-              sampleCount: entries.length
+              sampleCount: entries.length,
+              exactWindow: false,
+              snapshotKind: 'cumulative_delta'
             }
           : {
               source: 'provider_key_snapshots',
@@ -1278,16 +1428,71 @@ class AccountMonitorService {
               totalTokens: null,
               from: entries[0].captured_at,
               to: entries.at(-1).captured_at,
-              sampleCount: entries.length
+              sampleCount: entries.length,
+              exactWindow: false,
+              snapshotKind: 'balance_delta'
             };
         const current = candidates.get(keyId);
-        if (!current || value.sampleCount > current.sampleCount) candidates.set(keyId, value);
+        if (
+          !current ||
+          Date.parse(value.to) > Date.parse(current.to) ||
+          (value.to === current.to && value.sampleCount > current.sampleCount)
+        ) candidates.set(keyId, value);
       }
       return candidates;
     };
+
+    const reduceDailyRows = () => {
+      const currentRows = normalizedDailyRows.filter(matchesCurrentIdentity);
+      const grouped = groupBy(currentRows, (row) => (
+        `${row.key_id}\u0000${row.currency}\u0000${row.credential_identity || 'legacy'}`
+      ));
+      const candidates = new Map();
+      for (const entries of grouped.values()) {
+        if (entries.length === 0) continue;
+        entries.sort((left, right) => String(left.period).localeCompare(String(right.period)));
+        const metadata = entries.at(-1);
+        const coverageComplete = metadata.daily_history_complete || (
+          metadata.daily_coverage_start && metadata.daily_coverage_start <= startDate &&
+          metadata.daily_coverage_end && metadata.daily_coverage_end >= endDate
+        );
+        if (!coverageComplete) continue;
+        const sum = (field) => entries.reduce(
+          (total, row) => total + Number(finite(row[field]) || 0),
+          0
+        );
+        const keyId = String(entries[0].key_id);
+        const capturedAt = entries.reduce(
+          (latest, row) => Date.parse(row.captured_at) > Date.parse(latest) ? row.captured_at : latest,
+          entries[0].captured_at
+        );
+        const value = {
+          source: 'provider_usage_snapshots',
+          keyId,
+          currency: entries[0].currency || 'USD',
+          cost: round(sum('cost'), 8),
+          requestCount: Math.round(sum('requests')),
+          inputTokens: Math.round(sum('input_tokens')),
+          outputTokens: Math.round(sum('output_tokens')),
+          cacheCreationTokens: Math.round(sum('cache_creation_tokens')),
+          cacheReadTokens: Math.round(sum('cache_read_tokens')),
+          totalTokens: Math.round(sum('total_tokens')),
+          from: startOfDateInTimezone(startDate, this.config.timezone).toISOString(),
+          to: capturedAt,
+          sampleCount: entries.length,
+          exactWindow: true,
+          snapshotKind: 'daily_usage'
+        };
+        const current = candidates.get(keyId);
+        if (!current || Date.parse(value.to) > Date.parse(current.to)) candidates.set(keyId, value);
+      }
+      return candidates;
+    };
+    const usage = reduceRows(normalizedUsageRows, 'usage');
+    for (const [keyId, daily] of reduceDailyRows()) usage.set(keyId, daily);
     return {
-      usage: reduceRows(usageRows, 'usage'),
-      balance: reduceRows(balanceRows, 'balance')
+      usage,
+      balance: reduceRows(normalizedBalanceRows, 'balance')
     };
   }
 
@@ -1358,7 +1563,7 @@ class AccountMonitorService {
     let candidate = null;
 
     if (logContext) {
-      const paired = logContext.pairing.matchedCount > 0;
+      const paired = logContext.pairing.trusted === true;
       const baseMetrics = paired ? logContext.pairedBase : logContext.windowBase;
       const upstreamMetrics = paired ? logContext.pairedUpstream : logContext.windowUpstream;
       const hasLogCost = upstreamMetrics.actualCostSampleCount > 0 ||
@@ -1415,7 +1620,8 @@ class AccountMonitorService {
         pairedBaseCost: null,
         pairedUpstreamCost: null,
         requestCount: snapshotCandidate.requestCount,
-        pairing: null
+        pairing: null,
+        exactWindow: snapshotCandidate.exactWindow === true
       };
     }
 
@@ -1513,7 +1719,7 @@ class AccountMonitorService {
     const upstreamCashCurrency = providerRecharge.paidCurrency || candidate.currency || 'USD';
     cost.cashCurrency = String(upstreamCashCurrency).toUpperCase();
 
-    if (candidate.source !== 'provider_request_logs') {
+    if (candidate.source !== 'provider_request_logs' && !candidate.exactWindow) {
       cost.windowReason = 'request_logs_unavailable';
     } else if (!candidate.baseCoverageComplete) {
       cost.windowReason = 'base_request_logs_incomplete';
@@ -1669,6 +1875,30 @@ class AccountMonitorService {
         lastErrorCode: target.last_error_code,
         recharge: this.#providerRecharge(target)
       };
+      const mappingConfig = parseJson(target.mapping_config_json, {});
+      const automaticKeyMatch = mappingConfig.autoMapping?.keyMatch || null;
+      const unverifiedAutomaticApiKey = target.adapter_type === 'sub2api' &&
+        automaticKeyMatch && (
+          automaticKeyMatch === 'verified_gateway_billing' ||
+          (target.auth_mode === 'api_key' && automaticKeyMatch !== 'exact_configured_secret')
+        );
+      if (unverifiedAutomaticApiKey) {
+        const previous = comparisonByAccount.get(accountId);
+        comparisonByAccount.set(accountId, {
+          ...previous,
+          status: 'mapping_unverified',
+          provider,
+          targets: publicTargets,
+          metricReason: 'mapping_key_unverified',
+          attribution: {
+            base: { scope: 'account_id', accountId },
+            upstream: null,
+            mappingId: target.mapping_id
+          },
+          cost: { ...previous.cost, reason: 'mapping_key_unverified' }
+        });
+        continue;
+      }
       if (!target.key_id || target.key_status === 'missing') {
         comparisonByAccount.set(accountId, {
           ...comparisonByAccount.get(accountId),
@@ -1739,35 +1969,40 @@ class AccountMonitorService {
         const windowBase = requestMetricsFromRows(baseRows, 'USD');
         const windowUpstream = requestMetricsFromRows(upstreamRows, target.currency || 'USD');
         const paired = pairRequestRows(baseRows, upstreamRows);
+        const pairingTrust = requestPairingTrust(paired, { baseCoverageComplete });
+        const usePairedMetrics = pairingTrust.trusted;
         const pairedBase = requestMetricsFromRows(paired.pairs.map((item) => item.base), 'USD');
         const pairedUpstream = requestMetricsFromRows(
           paired.pairs.map((item) => item.upstream),
           target.currency || 'USD'
         );
         pairing = {
-          mode: paired.matchedCount > 0 ? 'paired_requests' : 'window_aggregate',
+          mode: usePairedMetrics ? 'paired_requests' : 'window_aggregate',
+          trusted: usePairedMetrics,
+          trustReason: pairingTrust.reason,
+          minimumSampleCount: REQUEST_PAIR_MIN_SAMPLES,
+          minimumMatchRate: REQUEST_PAIR_MIN_MATCH_RATE,
           matchedCount: paired.matchedCount,
           matchedBy: paired.matchedBy,
           baseRequestCount: paired.baseRequestCount,
           upstreamRequestCount: paired.upstreamRequestCount,
           baseUnmatchedCount: paired.baseUnmatchedCount,
-          upstreamExtraCount: baseCoverageComplete ? paired.upstreamExtraCount : null,
+          upstreamExtraCount: baseCoverageComplete && usePairedMetrics
+            ? paired.upstreamExtraCount
+            : null,
           observedUpstreamUnmatchedCount: paired.upstreamExtraCount,
-          extraCountTrusted: baseCoverageComplete,
+          extraCountTrusted: baseCoverageComplete && usePairedMetrics,
           baseMatchRate: paired.baseMatchRate,
           upstreamMatchRate: baseCoverageComplete ? paired.upstreamMatchRate : null,
           cacheMismatchCount: paired.cacheMismatchCount,
           toleranceMs: REQUEST_PAIR_TIME_TOLERANCE_MS,
-          reason: paired.matchedCount === 0 && baseRows.length > 0 && upstreamRows.length > 0
-            ? 'request_pairing_unavailable'
-            : paired.baseUnmatchedCount > 0
-              ? 'request_pairing_partial'
-              : paired.cacheMismatchCount > 0 ? 'cache_token_mismatch' : null
+          reason: pairingTrust.reason ||
+            (paired.cacheMismatchCount > 0 ? 'cache_token_mismatch' : null)
         };
-        base = paired.matchedCount > 0 ? pairedBase : windowBase;
-        upstream = paired.matchedCount > 0 ? pairedUpstream : windowUpstream;
+        base = usePairedMetrics ? pairedBase : windowBase;
+        upstream = usePairedMetrics ? pairedUpstream : windowUpstream;
         windowTotals = { base: windowBase, upstream: windowUpstream };
-        overhead = paired.overhead;
+        overhead = usePairedMetrics ? paired.overhead : null;
         logContext = {
           window,
           windowBase,
@@ -1804,15 +2039,19 @@ class AccountMonitorService {
               ? 'no_successful_requests'
               : pairing.reason;
       } else if (usageDelta) {
-        source = 'provider_usage_snapshots';
+        source = usageDelta.snapshotKind === 'daily_usage'
+          ? 'provider_daily_usage'
+          : 'provider_usage_snapshots';
         window = {
           requestedFrom: since,
           requestedTo: until,
           from: usageDelta.from,
           to: usageDelta.to,
-          source: 'snapshot_delta',
-          complete: Date.parse(usageDelta.from) <= Date.parse(since) &&
+          source: usageDelta.snapshotKind === 'daily_usage' ? 'daily_usage' : 'snapshot_delta',
+          complete: usageDelta.exactWindow === true || (
+            Date.parse(usageDelta.from) <= Date.parse(since) &&
             Date.parse(usageDelta.to) >= Date.parse(until)
+          )
         };
         base = requestMetricsFromRows(
           this.#baseRequestRows(accountId, usageDelta.from, usageDelta.to),
@@ -1823,6 +2062,20 @@ class AccountMonitorService {
           requestCount: usageDelta.requestCount == null ? null : Math.round(usageDelta.requestCount),
           inputTokens: usageDelta.inputTokens == null ? null : Math.round(usageDelta.inputTokens),
           outputTokens: usageDelta.outputTokens == null ? null : Math.round(usageDelta.outputTokens),
+          cacheCreationTokens: usageDelta.cacheCreationTokens == null
+            ? null
+            : Math.round(usageDelta.cacheCreationTokens),
+          cacheReadTokens: usageDelta.cacheReadTokens == null
+            ? null
+            : Math.round(usageDelta.cacheReadTokens),
+          cacheRate: (() => {
+            const promptTokens = Number(usageDelta.inputTokens || 0) +
+              Number(usageDelta.cacheCreationTokens || 0) +
+              Number(usageDelta.cacheReadTokens || 0);
+            return promptTokens > 0
+              ? round(Number(usageDelta.cacheReadTokens || 0) / promptTokens * 100, 1)
+              : null;
+          })(),
           actualCost: usageDelta.cost
         };
         windowTotals = { base, upstream };
@@ -1841,8 +2094,10 @@ class AccountMonitorService {
         coverage = {
           from: usageDelta.from,
           to: usageDelta.to,
-          complete: Date.parse(usageDelta.from) <= Date.parse(since) &&
-            Date.parse(usageDelta.to) >= Date.parse(until),
+          complete: usageDelta.exactWindow === true || (
+            Date.parse(usageDelta.from) <= Date.parse(since) &&
+            Date.parse(usageDelta.to) >= Date.parse(until)
+          ),
           truncated: false,
           status: 'succeeded',
           syncedAt: target.last_success_at,
@@ -1937,8 +2192,8 @@ class AccountMonitorService {
 
   accounts(filters = {}) {
     const days = clamp(integer(filters.days, this.settings().lookbackDays), 1, 90);
-    const until = nowIso();
-    const since = new Date(Date.parse(until) - days * 86400000).toISOString();
+    const requestedWindow = accountMonitorWindow(days, this.config.timezone);
+    const { from: since, to: until } = requestedWindow;
     const rows = this.#accountRows(filters);
     const accountIds = rows.map((row) => row.account_id);
     const metricMap = this.#metrics(accountIds, since, until);
@@ -2047,8 +2302,8 @@ class AccountMonitorService {
     ).get(String(accountId));
     if (!row) throw new AppError('ACCOUNT_NOT_FOUND', 'Sub2API account was not found', { status: 404 });
     const days = clamp(integer(options.days, this.settings().lookbackDays), 1, 90);
-    const until = nowIso();
-    const since = new Date(Date.parse(until) - days * 86400000).toISOString();
+    const requestedWindow = accountMonitorWindow(days, this.config.timezone);
+    const { from: since, to: until } = requestedWindow;
     const metrics = this.#metrics([String(accountId)], since, until).get(String(accountId));
     const comparison = this.#comparisons([String(accountId)], since, until).get(String(accountId));
     const quality = qualityScore(metrics);
@@ -2596,6 +2851,8 @@ module.exports = {
   scoreCapabilityChallenge,
   normalizeAccount,
   normalizeUsageSample,
+  accountMonitorWindow,
+  requestPairingTrust,
   scoreChallenge,
   qualityScore
 };

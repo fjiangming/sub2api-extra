@@ -22,6 +22,23 @@ function setOfficialModelPrices(db, prices) {
   `).run(JSON.stringify(prices), nowIso());
 }
 
+test('HTTP client classifies a plain-text 404 before requiring JSON', async (t) => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('404 page not found');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+
+  const client = new HttpClient(context.config);
+  await assert.rejects(
+    client.requestJson(`http://127.0.0.1:${server.address().port}/missing`, { retries: 0 }),
+    (error) => error.code === 'CAPABILITY_UNSUPPORTED' && error.status === 404
+  );
+});
+
 test('New API sync persists account balance, key quota and key groups', async (t) => {
   let dynamicRouteFailure = false;
   const server = http.createServer((req, res) => {
@@ -464,8 +481,20 @@ test('Sub2API API Key sync keeps per-key rates, usage and mapping comparisons in
         remaining: fixture.remaining,
         unit: 'USD',
         usage: {
-          today: { requests: 1, cost: fixture.used },
-          total: { requests: 4, cost: fixture.used }
+          today: {
+            requests: 1,
+            cost: fixture.used,
+            actual_cost: fixture.used / 10,
+            cache_creation_tokens: 2,
+            cache_read_tokens: 8
+          },
+          total: {
+            requests: 4,
+            cost: fixture.used,
+            actual_cost: fixture.used / 10,
+            cache_creation_tokens: 5,
+            cache_read_tokens: 20
+          }
         }
       });
     }
@@ -537,6 +566,19 @@ test('Sub2API API Key sync keeps per-key rates, usage and mapping comparisons in
     WHERE connection_id = ? AND subject_type = 'key' ORDER BY subject_id
   `).all(provider.id).map((row) => row.subject_id);
   assert.deepEqual(usageSubjects, keys.map((key) => key.id).sort());
+  const storedUsage = context.db.prepare(`
+    SELECT cost, raw_json FROM usage_snapshots
+    WHERE connection_id = ? AND subject_id = ? AND period = 'cumulative'
+    ORDER BY captured_at DESC LIMIT 1
+  `).get(provider.id, keys.find((key) => key.remote_id === 'low').id);
+  const storedRaw = JSON.parse(storedUsage.raw_json);
+  assert.equal(storedUsage.cost, 0.1);
+  assert.equal(storedRaw.cache_read_tokens, '***');
+  assert.equal(storedRaw.monitorMetrics.actualCost, 0.1);
+  assert.equal(storedRaw.monitorMetrics.cacheCreationCount, 5);
+  assert.equal(storedRaw.monitorMetrics.cacheReadCount, 20);
+  assert.equal(storedRaw.monitorMetrics.averageDurationMs, null);
+  assert.match(storedRaw.monitorMetrics.credentialIdentity, /^[a-f0-9]{64}$/);
 
   failedBillingToken = 'sk-high-12345678';
   const partial = await sync.run(provider.id);

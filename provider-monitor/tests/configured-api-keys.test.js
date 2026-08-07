@@ -2,6 +2,16 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createTestContext } = require('./helpers');
 const { ProviderRepository } = require('../src/repositories/provider-repository');
+const { apiKeyIdentityHash } = require('../src/security/configured-api-keys');
+
+test('API Key identity hashes are stable, keyed and do not reveal the key', () => {
+  const key = 'sk-identity-secret-1234';
+  const first = apiKeyIdentityHash(key, 'first-master-secret');
+  assert.equal(first, apiKeyIdentityHash(`Bearer ${key}`, 'first-master-secret'));
+  assert.notEqual(first, apiKeyIdentityHash(key, 'second-master-secret'));
+  assert.match(first, /^[a-f0-9]{64}$/);
+  assert.equal(first.includes('identity-secret'), false);
+});
 
 test('provider credentials preserve, rename, add and remove configured API Keys by stable ID', (t) => {
   const context = createTestContext();

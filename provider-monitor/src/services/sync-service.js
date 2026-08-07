@@ -747,7 +747,13 @@ class SyncService {
         null,
         key.quota.unlimited ? 1 : 0,
         'key.quota.remaining',
-        stringifyJson({ resetAt: key.quota.resetAt, resetInterval: key.quota.resetInterval }),
+        stringifyJson({
+          resetAt: key.quota.resetAt,
+          resetInterval: key.quota.resetInterval,
+          monitorMetrics: {
+            credentialIdentity: key.metadata?.identityHash || null
+          }
+        }),
         capturedAt
       );
     }

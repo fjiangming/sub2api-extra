@@ -923,6 +923,7 @@ function formatPreciseMoney(value, currency = 'USD') {
 function accountUpstreamSourceLabel(source) {
   return ({
     provider_request_logs: '逐请求日志',
+    provider_daily_usage: '逐日用量',
     provider_usage_snapshots: '累计用量',
     provider_key_snapshots: 'Key 快照',
     unavailable: '暂无指标'
@@ -934,6 +935,7 @@ function accountComparisonReasonLabel(reason) {
     no_enabled_mapping: '未映射供应商',
     multiple_upstreams: '多个上游，需分别核算',
     mapping_key_missing: '映射未绑定 Key',
+    mapping_key_unverified: '自动映射未通过同一 Key 精确验证',
     provider_cost_unavailable: '供应商未提供费用数据',
     provider_counter_unchanged: '上游计数器未变化',
     provider_recharge_multiplier_missing: '上游充值倍率未确认',
@@ -946,6 +948,7 @@ function accountComparisonReasonLabel(reason) {
     request_logs_stale: '最近一次日志同步失败，展示最近成功数据',
     request_logs_key_unverified: '上游日志未确认覆盖该 Key',
     request_pairing_unavailable: '同窗请求无法可靠配对',
+    request_pairing_insufficient: '配对样本不足 30 条，改用窗口聚合指标',
     request_pairing_partial: '仅部分基座请求完成配对',
     cache_token_mismatch: '配对请求的缓存 Token 不一致',
     provider_sync_unavailable: '上游同步失败或尚未成功',
@@ -999,8 +1002,7 @@ function accountCostMarkup(_metrics, comparison = {}) {
   const cost = comparison.cost || {};
   const rawCurrency = cost.currency || 'USD';
   const cashCurrency = cost.cashCurrency || rawCurrency;
-  const useWindowLedger = cost.source === 'provider_request_logs' &&
-    (cost.baseWindowCost != null || cost.keyTotalUpstreamCost != null);
+  const useWindowLedger = cost.baseWindowCost != null || cost.keyTotalUpstreamCost != null;
   const usesCash = useWindowLedger
     ? cost.baseWindowCashEquivalent != null && cost.keyTotalUpstreamCashEquivalent != null
     : cost.baseCashEquivalent != null && cost.upstreamCashEquivalent != null;
@@ -1035,7 +1037,12 @@ function accountCostMarkup(_metrics, comparison = {}) {
       ? ' · 额外请求待基座回补核实'
       : '';
   const scopeText = useWindowLedger ? '统一窗口 Key 总账' : pairingText;
-  return `<div class="account-cost-cell"><div class="account-comparison-metric"><span><small class="source-base">基座${usesCash ? '收入' : '扣费'}</small><strong>${escapeHtml(formatPreciseMoney(baseDisplay, displayCurrency))}</strong></span><span><small class="source-upstream">上游${usesCash ? '支出' : '扣费'}</small><strong class="${upstreamDisplay == null ? 'metric-empty' : ''}">${escapeHtml(formatPreciseMoney(upstreamDisplay, displayCurrency))}</strong></span></div>${delta}${scopeText || pairingText || extraText ? `<small class="table-metric-note">${escapeHtml([scopeText, useWindowLedger ? pairingText : '', extraText.replace(/^ · /, '')].filter(Boolean).join(' · '))}</small>` : ''}</div>`;
+  const rawBase = useWindowLedger ? cost.baseWindowCost : cost.baseCost;
+  const rawUpstream = useWindowLedger ? cost.keyTotalUpstreamCost : cost.upstreamCost;
+  const rawCostText = usesCash
+    ? `余额消费 ${formatPreciseMoney(rawBase, rawCurrency)} / ${formatPreciseMoney(rawUpstream, rawCurrency)}`
+    : '';
+  return `<div class="account-cost-cell"><div class="account-comparison-metric"><span><small class="source-base">基座${usesCash ? '收入' : '扣费'}</small><strong>${escapeHtml(formatPreciseMoney(baseDisplay, displayCurrency))}</strong></span><span><small class="source-upstream">上游${usesCash ? '支出' : '扣费'}</small><strong class="${upstreamDisplay == null ? 'metric-empty' : ''}">${escapeHtml(formatPreciseMoney(upstreamDisplay, displayCurrency))}</strong></span></div>${delta}${scopeText || pairingText || extraText || rawCostText ? `<small class="table-metric-note">${escapeHtml([scopeText, useWindowLedger ? pairingText : '', extraText.replace(/^ · /, ''), rawCostText].filter(Boolean).join(' · '))}</small>` : ''}</div>`;
 }
 
 function accountProbeTransportLabel(details = {}) {
@@ -1259,7 +1266,7 @@ function paintAccountMonitorDetail(detail) {
     : emptyState('flask-conical', '暂无主动检测', '选择该账号并执行检测');
   root.innerHTML = `<div class="section-header"><h2>${escapeHtml(detail.account.name)}</h2><p>#${escapeHtml(detail.account.accountId)} · ${escapeHtml(accountMonitorPlatformLabel(detail.account.platform))} · 最近 ${detail.days} 天</p><div class="section-actions"><button class="icon-button small" data-action="close-account-quality" title="关闭详情" aria-label="关闭详情"><i data-lucide="x"></i></button></div></div>
     <div class="account-detail-metrics"><div><span>质量分</span><strong>${metrics.qualityScore == null ? '-' : formatNumber(metrics.qualityScore, 0)}</strong></div><div><span>首字 P95</span><strong>${formatMilliseconds(metrics.ttftP95Ms)}</strong></div><div><span>缓存读取率</span><strong>${formatPercent(metrics.cacheRate)}</strong></div><div><span>输出速度</span><strong>${metrics.outputTokensPerSecond == null ? '-' : formatNumber(metrics.outputTokensPerSecond, 1) + ' tok/s'}</strong></div><div><span>检测通过率</span><strong>${formatPercent(metrics.probeSuccessRate)}</strong></div><div><span>能力得分</span><strong>${metrics.intelligenceScore == null ? '未覆盖' : formatNumber(metrics.intelligenceScore, 0)}</strong></div></div>
-    <section class="section account-comparison-detail"><div class="section-header"><div><h2>基座 / 上游对比</h2><p>${providerHeading} · ${escapeHtml(accountUpstreamSourceLabel(comparison.source))} · ${escapeHtml(coverageText + pairingText)}${escapeHtml(metricReasonText)}</p></div>${comparison.coverage?.stale ? badge('stale', '上游数据陈旧') : comparison.status === 'mapped' ? badge('enabled', '已映射') : badge('warning', '不可归因')}</div><div class="table-wrap"><table><thead><tr><th>指标</th><th class="numeric">Sub2API 基座</th><th class="numeric">供应商上游</th><th class="numeric">差值</th></tr></thead><tbody>${comparisonRows}<tr class="cost-comparison-row"><td><strong>统一窗口 Key 总账${windowUsesCash ? '（现金等值）' : '（余额单位）'}</strong><small>基座 actual_cost 实际收入 / 上游 actual_cost 实际支出 · ${escapeHtml(cost.source ? `${formatDate(cost.from)} 至 ${formatDate(cost.to)}` : '暂无费用来源')}</small></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(displayedBaseWindowCost, windowCostCurrency))}</strong><small>充值倍率 ${escapeHtml(formatEffectiveRate(cost.baseRechargeMultiplier))}</small></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(displayedUpstreamWindowCost, windowCostCurrency))}</strong><small>充值倍率 ${escapeHtml(formatEffectiveRate(cost.providerRecharge?.multiplier))}</small></td><td class="numeric"><strong>${escapeHtml(windowCostDelta)}</strong>${cost.windowGrossMarginRatio == null ? '' : `<small>总账毛利率 ${escapeHtml(formatPercent(cost.windowGrossMarginRatio * 100))}</small>`}</td></tr><tr><td><strong>配对请求可归因收支${pairedUsesCash ? '（现金等值）' : '（余额单位）'}</strong><small>仅比较成功一一配对的 ${escapeHtml(formatNumber(cost.requestCount, 0))} 次请求；上游未归因流量不混入</small></td><td class="numeric">${escapeHtml(formatPreciseMoney(displayedBaseCost, pairedCostCurrency))}</td><td class="numeric">${escapeHtml(formatPreciseMoney(displayedUpstreamCost, pairedCostCurrency))}</td><td class="numeric"><strong>${escapeHtml(pairedCostDelta)}</strong>${cost.grossMarginRatio == null ? '' : `<small>配对毛利率 ${escapeHtml(formatPercent(cost.grossMarginRatio * 100))}</small>`}</td></tr></tbody></table></div></section>
+    <section class="section account-comparison-detail"><div class="section-header"><div><h2>基座 / 上游对比</h2><p>${providerHeading} · ${escapeHtml(accountUpstreamSourceLabel(comparison.source))} · ${escapeHtml(coverageText + pairingText)}${escapeHtml(metricReasonText)}</p></div>${comparison.coverage?.stale ? badge('stale', '上游数据陈旧') : comparison.status === 'mapped' ? badge('enabled', '已映射') : badge('warning', '不可归因')}</div><div class="table-wrap"><table><thead><tr><th>指标</th><th class="numeric">Sub2API 基座</th><th class="numeric">供应商上游</th><th class="numeric">差值</th></tr></thead><tbody>${comparisonRows}<tr class="cost-comparison-row"><td><strong>统一窗口 Key 总账${windowUsesCash ? '（现金等值）' : '（余额单位）'}</strong><small>基座 actual_cost 实际收入 / 上游 actual_cost 实际支出 · ${escapeHtml(cost.source ? `${formatDate(cost.from)} 至 ${formatDate(cost.to)}` : '暂无费用来源')}</small></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(displayedBaseWindowCost, windowCostCurrency))}</strong><small>${windowUsesCash ? `余额消费 ${escapeHtml(formatPreciseMoney(cost.baseWindowCost, rawCostCurrency))} · ` : ''}充值倍率 ${escapeHtml(formatEffectiveRate(cost.baseRechargeMultiplier))}</small></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(displayedUpstreamWindowCost, windowCostCurrency))}</strong><small>${windowUsesCash ? `余额消费 ${escapeHtml(formatPreciseMoney(cost.keyTotalUpstreamCost, rawCostCurrency))} · ` : ''}充值倍率 ${escapeHtml(formatEffectiveRate(cost.providerRecharge?.multiplier))}</small></td><td class="numeric"><strong>${escapeHtml(windowCostDelta)}</strong>${cost.windowGrossMarginRatio == null ? '' : `<small>总账毛利率 ${escapeHtml(formatPercent(cost.windowGrossMarginRatio * 100))}</small>`}</td></tr><tr><td><strong>配对请求可归因收支${pairedUsesCash ? '（现金等值）' : '（余额单位）'}</strong><small>仅比较成功一一配对的 ${escapeHtml(formatNumber(cost.requestCount, 0))} 次请求；上游未归因流量不混入</small></td><td class="numeric">${escapeHtml(formatPreciseMoney(displayedBaseCost, pairedCostCurrency))}</td><td class="numeric">${escapeHtml(formatPreciseMoney(displayedUpstreamCost, pairedCostCurrency))}</td><td class="numeric"><strong>${escapeHtml(pairedCostDelta)}</strong>${cost.grossMarginRatio == null ? '' : `<small>配对毛利率 ${escapeHtml(formatPercent(cost.grossMarginRatio * 100))}</small>`}</td></tr></tbody></table></div></section>
     <div class="panel account-quality-chart-panel"><div class="panel-header"><h3>统一窗口日趋势</h3><span class="stat-detail">趋势按窗口总请求聚合；表格性能优先使用配对请求</span></div><div class="chart" id="account-quality-chart"></div></div>
     <section class="section"><div class="section-header"><h2>最近主动检测</h2></div><div class="table-wrap">${probeTable}</div></section>`;
   state.chart?.dispose?.();
@@ -1567,6 +1574,7 @@ const AUTO_MAPPING_REASON_LABELS = {
   mapping_exists: '映射已经存在'
 };
 const AUTO_MAPPING_KEY_VERIFICATION_LABELS = {
+  api_key_secret_exact: '已确认基座与供应商配置为同一 API Key',
   verified_gateway_billing: 'Key 不同，已通过同源计费验证',
   api_key_prefix_normalized: '已按 sk- 前缀规范化匹配',
   gateway_verification_not_supported: '该供应商类型不支持跨 Key 验证',
@@ -1577,10 +1585,19 @@ const AUTO_MAPPING_KEY_VERIFICATION_LABELS = {
   gateway_billing_scope_missing: '供应商计费接口未返回 billing scope',
   gateway_billing_group_mismatch: '两枚 Key 的 billing scope 不一致',
   gateway_billing_rate_mismatch: '两枚 Key 的计费倍率不一致',
-  gateway_primary_group_mismatch: '已同步 Key 的主分组与计费结果不一致'
+  gateway_primary_group_mismatch: '已同步 Key 的主分组与计费结果不一致',
+  configured_api_key_secret_mismatch: '基座账号 Key 与供应商配置的 Key 不一致',
+  configured_api_key_not_synchronized: '匹配的供应商配置 Key 尚未完成同步',
+  configured_api_key_credentials_missing: '供应商连接缺少 API Key 凭据',
+  configured_api_key_credentials_invalid: '供应商 API Key 凭据无法解密',
+  configured_api_key_identity_unavailable: '无法生成 API Key 安全标识',
+  configured_api_key_identity_collision: '多个供应商 Key 具有相同安全标识'
 };
 
 function autoMappingVerificationLabel(item) {
+  if (item.keyMatch === 'exact_configured_secret') {
+    return AUTO_MAPPING_KEY_VERIFICATION_LABELS.api_key_secret_exact;
+  }
   if (item.keyMatch === 'verified_gateway_billing') {
     return AUTO_MAPPING_KEY_VERIFICATION_LABELS.verified_gateway_billing;
   }

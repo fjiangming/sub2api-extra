@@ -9,6 +9,7 @@ const {
 const { AppError } = require('../errors');
 const {
   LEGACY_CONFIGURED_API_KEY_ID,
+  apiKeyIdentityHash,
   cleanApiKey,
   normalizeConfiguredApiKeys
 } = require('../security/configured-api-keys');
@@ -76,7 +77,9 @@ function rechargeTargetPath(connection, targetUrl) {
 function gatewayQuota(data = {}) {
   const quota = data.quota && typeof data.quota === 'object' ? data.quota : {};
   const limit = toFiniteNumber(quota.limit);
-  const used = toFiniteNumber(quota.used ?? data.usage?.total?.cost);
+  const used = toFiniteNumber(
+    data.usage?.total?.actual_cost ?? quota.used ?? data.usage?.total?.cost
+  );
   let remaining = toFiniteNumber(quota.remaining ?? data.remaining ?? data.balance);
   const unlimited = remaining === -1;
   if (unlimited) remaining = null;
@@ -104,17 +107,82 @@ function gatewayUsageItem(data, period) {
   if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
   const inputTokens = toFiniteNumber(item.input_tokens, 0);
   const outputTokens = toFiniteNumber(item.output_tokens, 0);
+  const cacheCreationTokens = toFiniteNumber(item.cache_creation_tokens, 0);
+  const cacheReadTokens = toFiniteNumber(item.cache_read_tokens, 0);
   return {
     currency: String(data.unit || data.quota?.unit || 'USD'),
-    cost: toFiniteNumber(item.cost ?? item.actual_cost),
+    cost: toFiniteNumber(item.actual_cost ?? item.cost),
     requests: toFiniteNumber(item.requests),
     inputTokens,
     outputTokens,
-    totalTokens: toFiniteNumber(item.total_tokens, inputTokens + outputTokens),
+    cacheCreationTokens,
+    cacheReadTokens,
+    averageDurationMs: toFiniteNumber(item.average_duration_ms),
+    totalTokens: toFiniteNumber(
+      item.total_tokens,
+      inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens
+    ),
     model: null,
     period: period === 'total' ? 'cumulative' : period,
     raw: item
   };
+}
+
+function gatewayDailyUsageItems(data) {
+  const rows = Array.isArray(data?.daily_usage)
+    ? data.daily_usage.filter((item) => (
+        item && typeof item === 'object' && !Array.isArray(item) &&
+        /^\d{4}-\d{2}-\d{2}$/.test(String(item.date || ''))
+      ))
+    : [];
+  if (rows.length === 0) return [];
+
+  const items = rows.map((item) => {
+    const inputTokens = toFiniteNumber(item.input_tokens, 0);
+    const outputTokens = toFiniteNumber(item.output_tokens, 0);
+    const cacheCreationTokens = toFiniteNumber(
+      item.cache_creation_tokens ?? item.cache_write_tokens,
+      0
+    );
+    const cacheReadTokens = toFiniteNumber(item.cache_read_tokens, 0);
+    return {
+      currency: String(data.unit || data.quota?.unit || 'USD'),
+      cost: toFiniteNumber(item.actual_cost ?? item.cost),
+      requests: toFiniteNumber(item.requests, 0),
+      inputTokens,
+      outputTokens,
+      cacheCreationTokens,
+      cacheReadTokens,
+      averageDurationMs: null,
+      totalTokens: toFiniteNumber(
+        item.total_tokens,
+        inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens
+      ),
+      model: null,
+      period: `day:${item.date}`,
+      usageDate: String(item.date),
+      raw: item
+    };
+  });
+  const total = gatewayUsageItem(data, 'total');
+  const sums = items.reduce((result, item) => ({
+    requests: result.requests + Number(item.requests || 0),
+    totalTokens: result.totalTokens + Number(item.totalTokens || 0),
+    cost: result.cost + Number(item.cost || 0)
+  }), { requests: 0, totalTokens: 0, cost: 0 });
+  const near = (left, right) => Math.abs(Number(left) - Number(right)) <=
+    Math.max(1e-8, Math.abs(Number(right)) * 1e-9);
+  const historyComplete = Boolean(total) &&
+    sums.requests === Number(total.requests || 0) &&
+    sums.totalTokens === Number(total.totalTokens || 0) &&
+    near(sums.cost, Number(total.cost || 0));
+  const dates = items.map((item) => item.usageDate).sort();
+  return items.map((item) => ({
+    ...item,
+    dailyHistoryComplete: historyComplete,
+    dailyCoverageStart: dates[0],
+    dailyCoverageEnd: dates.at(-1)
+  }));
 }
 
 function boundedInteger(value, fallback, minimum, maximum) {
@@ -139,18 +207,33 @@ function dateKey(value, timeZone) {
   }
 }
 
+function nextDateKey(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ''));
+  if (!match) return value;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]) + 1));
+  return date.toISOString().slice(0, 10);
+}
+
+function usesGatewayApiKeyUsageLogs(connection) {
+  return usesApiKey(connection) && connection.type_config_json?.apiKeySource !== 'remote';
+}
+
 function supportsUserUsageLogs(connection, credentials = {}) {
   if (!usesApiKey(connection)) return true;
-  if (connection.type_config_json?.apiKeySource !== 'remote') return false;
+  if (usesGatewayApiKeyUsageLogs(connection)) return false;
   return Boolean(
     credentials.accessToken || credentials.refreshToken ||
     (credentials.email && credentials.password)
   );
 }
 
-function normalizeRequestLog(row, expectedKey) {
+function normalizeRequestLog(row, expectedKey, options = {}) {
   const remoteKeyId = String(expectedKey.remoteId);
-  if (row?.api_key_id != null && String(row.api_key_id) !== remoteKeyId) {
+  if (
+    options.validateRemoteKeyId !== false &&
+    row?.api_key_id != null &&
+    String(row.api_key_id) !== remoteKeyId
+  ) {
     throw new AppError(
       'SUB2API_USAGE_KEY_MISMATCH',
       `Sub2API returned usage for API Key ${row.api_key_id} while querying ${remoteKeyId}`,
@@ -219,6 +302,8 @@ class Sub2ApiAdapter extends ProviderAdapter {
     }
     this.apiKeyUsageInfo = new Map();
     this.apiKeyBillingInfo = new Map();
+    this.gatewayRequestLogsSupported = null;
+    this.gatewayRequestLogsProbe = null;
   }
 
   capabilities() {
@@ -231,7 +316,8 @@ class Sub2ApiAdapter extends ProviderAdapter {
         listGroups: true,
         keyGroup: true,
         usageHistory: true,
-        requestLogs: supportsUserUsageLogs(this.connection, this.credentials),
+        requestLogs: supportsUserUsageLogs(this.connection, this.credentials) ||
+          (usesGatewayApiKeyUsageLogs(this.connection) && this.gatewayRequestLogsSupported === true),
         rechargeQuote: true
       };
     }
@@ -253,12 +339,55 @@ class Sub2ApiAdapter extends ProviderAdapter {
   }
 
   async probe() {
+    if (usesGatewayApiKeyUsageLogs(this.connection)) {
+      await this.detectGatewayRequestLogs();
+    }
     return {
       adapterType: this.type,
       detectedFamily: 'sub2api',
       version: null,
       capabilities: this.capabilities()
     };
+  }
+
+  async detectGatewayRequestLogs() {
+    if (!usesGatewayApiKeyUsageLogs(this.connection)) return false;
+    if (this.gatewayRequestLogsSupported != null) return this.gatewayRequestLogsSupported;
+    if (!this.gatewayRequestLogsProbe) {
+      this.gatewayRequestLogsProbe = (async () => {
+        const [entry] = await this.monitoredApiKeyEntries();
+        if (!entry) return false;
+        try {
+          const query = new URLSearchParams({ page: '1', page_size: '1' });
+          const response = await this.http.requestJson(
+            joinUrl(this.connection.base_url, `/v1/usage/logs?${query.toString()}`),
+            { headers: this.apiKeyHeaders(entry), retries: 0 }
+          );
+          const payload = unwrapEnvelope(response.data, { allowNull: true });
+          const valid = Array.isArray(payload) || Boolean(
+            payload && typeof payload === 'object' && !Array.isArray(payload) &&
+            ['items', 'list', 'records', 'data'].some((field) => Array.isArray(payload[field]))
+          );
+          if (!valid) {
+            throw new AppError(
+              'SCHEMA_MISMATCH',
+              'Sub2API API Key request-log response is invalid',
+              { status: 502 }
+            );
+          }
+          return true;
+        } catch (error) {
+          if (error?.code === 'CAPABILITY_UNSUPPORTED') return false;
+          throw error;
+        }
+      })();
+    }
+    try {
+      this.gatewayRequestLogsSupported = await this.gatewayRequestLogsProbe;
+      return this.gatewayRequestLogsSupported;
+    } finally {
+      this.gatewayRequestLogsProbe = null;
+    }
   }
 
   configuredApiKeys() {
@@ -845,6 +974,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
         ]);
         const usage = usageResult.status === 'fulfilled' ? usageResult.value : null;
         const billing = billingResult.status === 'fulfilled' ? billingResult.value : null;
+        const identityHash = apiKeyIdentityHash(entry.key, this.config.secret);
         return {
           remoteId: entry.id,
           name: entry.name,
@@ -859,6 +989,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
           metadata: this.safeRaw({
             source: 'sub2api_gateway_usage',
             configuredKeyId: entry.id,
+            ...(identityHash ? { identityHash, identityAlgorithm: 'hmac-sha256-v1' } : {}),
             billingScope: billing?.billing_scope || null,
             mode: usage?.mode || null,
             planName: usage?.planName || null,
@@ -927,14 +1058,31 @@ class Sub2ApiAdapter extends ProviderAdapter {
       const results = await this.apiKeyResults((entry) => this.getApiKeyUsage(entry));
       const usage = results.flatMap(({ entry, result }) => {
         if (result.status !== 'fulfilled') return [];
-        return ['today', 'total']
-          .map((period) => gatewayUsageItem(result.value, period))
+        const credentialIdentity = apiKeyIdentityHash(entry.key, this.config.secret);
+        return [
+          ...['today', 'total'].map((period) => gatewayUsageItem(result.value, period)),
+          ...gatewayDailyUsageItems(result.value)
+        ]
           .filter(Boolean)
           .map((item) => ({
             ...item,
             scope: 'key',
             remoteSubjectId: entry.id,
-            raw: this.safeRaw({ ...item.raw, configuredKeyId: entry.id })
+            raw: {
+              ...this.safeRaw({ ...item.raw, configuredKeyId: entry.id }),
+              monitorMetrics: {
+                actualCost: item.cost,
+                cacheCreationCount: item.cacheCreationTokens,
+                cacheReadCount: item.cacheReadTokens,
+                averageDurationMs: item.averageDurationMs,
+                credentialIdentity,
+                usageDate: item.usageDate || null,
+                dailyHistoryComplete: item.dailyHistoryComplete ?? null,
+                dailyCoverageStart: item.dailyCoverageStart || null,
+                dailyCoverageEnd: item.dailyCoverageEnd || null,
+                timezone: this.config.timezone || 'UTC'
+              }
+            }
           }));
       });
       if (usage.length === 0) this.firstSuccessfulApiKeyResult(results);
@@ -960,7 +1108,15 @@ class Sub2ApiAdapter extends ProviderAdapter {
   }
 
   async getRequestLogs(options = {}) {
-    if (!supportsUserUsageLogs(this.connection, this.credentials)) {
+    const gatewayApiKeyLogs = usesGatewayApiKeyUsageLogs(this.connection);
+    if (gatewayApiKeyLogs && !(await this.detectGatewayRequestLogs())) {
+      throw new AppError(
+        'CAPABILITY_UNSUPPORTED',
+        'Sub2API has not enabled API Key request-log access at /v1/usage/logs',
+        { status: 404, details: { endpoint: '/v1/usage/logs' } }
+      );
+    }
+    if (!gatewayApiKeyLogs && !supportsUserUsageLogs(this.connection, this.credentials)) {
       return super.getRequestLogs(options);
     }
 
@@ -974,6 +1130,11 @@ class Sub2ApiAdapter extends ProviderAdapter {
     const coverageFrom = startAt.toISOString();
     const coverageTo = endAt.toISOString();
     const timeZone = this.config.timezone || 'UTC';
+    const endDate = nextDateKey(dateKey(endAt, timeZone));
+    const configuredEntries = gatewayApiKeyLogs ? await this.monitoredApiKeyEntries() : [];
+    const configuredEntriesById = new Map(
+      configuredEntries.map((entry) => [String(entry.id), entry])
+    );
 
     if (requestedKeys.length === 0) {
       return {
@@ -1001,7 +1162,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
         const key = queryableKeys[index];
         const remoteKeyId = String(key.remoteId);
         try {
-          if (!/^\d+$/.test(remoteKeyId)) {
+          if (!gatewayApiKeyLogs && !/^\d+$/.test(remoteKeyId)) {
             throw new AppError(
               'SUB2API_USAGE_KEY_ID_INVALID',
               `Sub2API request logs require a numeric remote API Key ID, received ${remoteKeyId}`,
@@ -1011,21 +1172,37 @@ class Sub2ApiAdapter extends ProviderAdapter {
           const rows = [];
           let total = null;
           let hasTotal = false;
+          const configuredEntry = gatewayApiKeyLogs
+            ? configuredEntriesById.get(remoteKeyId)
+            : null;
+          if (gatewayApiKeyLogs && !configuredEntry) {
+            throw new AppError(
+              'SUB2API_CONFIGURED_KEY_NOT_FOUND',
+              `Sub2API configured API Key ${remoteKeyId} is unavailable`,
+              { status: 409, details: { remoteKeyId } }
+            );
+          }
           for (let page = 1; rows.length < perKeyLimit; page += 1) {
             const pageSize = Math.min(100, perKeyLimit - rows.length);
             const query = new URLSearchParams({
-              api_key_id: remoteKeyId,
               start_date: dateKey(startAt, timeZone),
-              end_date: dateKey(endAt, timeZone),
+              end_date: endDate,
               timezone: timeZone,
               page: String(page),
-              page_size: String(pageSize),
-              sort_by: 'created_at',
-              sort_order: 'desc'
+              page_size: String(pageSize)
             });
-            const response = await this.authenticatedRequest(`/api/v1/usage?${query.toString()}`, {
-              retries: 1
-            });
+            if (!gatewayApiKeyLogs) {
+              query.set('api_key_id', remoteKeyId);
+              query.set('sort_by', 'created_at');
+              query.set('sort_order', 'desc');
+            }
+            const endpoint = gatewayApiKeyLogs ? '/v1/usage/logs' : '/api/v1/usage';
+            const response = gatewayApiKeyLogs
+              ? await this.http.requestJson(
+                  joinUrl(this.connection.base_url, `${endpoint}?${query.toString()}`),
+                  { headers: this.apiKeyHeaders(configuredEntry), retries: 1 }
+                )
+              : await this.authenticatedRequest(`${endpoint}?${query.toString()}`, { retries: 1 });
             const extracted = extractItems(response.data);
             if (extracted.hasTotal) {
               total = extracted.total;
@@ -1038,7 +1215,9 @@ class Sub2ApiAdapter extends ProviderAdapter {
               (extracted.hasTotal && rows.length >= extracted.total)
             ) break;
           }
-          const items = rows.map((row) => normalizeRequestLog(row, key)).filter(Boolean);
+          const items = rows.map((row) => normalizeRequestLog(row, key, {
+            validateRemoteKeyId: !gatewayApiKeyLogs
+          })).filter(Boolean);
           const truncated = rows.length >= perKeyLimit && (!hasTotal || Number(total) > rows.length);
           results[index] = {
             ok: true,

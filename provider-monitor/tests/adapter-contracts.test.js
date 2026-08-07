@@ -17,7 +17,10 @@ function context(type, responder, extra = {}) {
       auth_mode: 'system_token', type_config_json: {}, ...extra.connection
     },
     credentials: { systemToken: 'system-token', userId: '7', ...extra.credentials },
-    config: { maxResponseBytes: 1024 * 1024 },
+    config: {
+      maxResponseBytes: 1024 * 1024,
+      secret: 'adapter-contract-secret-with-32-bytes'
+    },
     onCredentialsUpdated: extra.onCredentialsUpdated || (async () => {}),
     http: {
       async requestJson(input, options) {
@@ -143,20 +146,49 @@ test('Sub2API API Key mode exposes the configured key and its gateway billing gr
         remaining: 12.5,
         balance: 12.5,
         unit: 'USD',
+        daily_usage: [
+          {
+            date: '2026-08-04',
+            requests: 7,
+            input_tokens: 90,
+            output_tokens: 180,
+            cache_write_tokens: 50,
+            cache_read_tokens: 120,
+            total_tokens: 440,
+            cost: 1.1,
+            actual_cost: 0.11
+          },
+          {
+            date: '2026-08-05',
+            requests: 2,
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_write_tokens: 0,
+            cache_read_tokens: 30,
+            total_tokens: 60,
+            cost: 0.4,
+            actual_cost: 0.04
+          }
+        ],
         usage: {
           today: {
             requests: 2,
             input_tokens: 10,
             output_tokens: 20,
-            total_tokens: 30,
-            cost: 0.4
+            cache_read_tokens: 30,
+            total_tokens: 60,
+            cost: 0.4,
+            actual_cost: 0.04
           },
           total: {
             requests: 9,
             input_tokens: 100,
             output_tokens: 200,
-            total_tokens: 300,
-            cost: 1.5
+            cache_creation_tokens: 50,
+            cache_read_tokens: 150,
+            total_tokens: 500,
+            cost: 1.5,
+            actual_cost: 0.15
           }
         }
       };
@@ -192,17 +224,27 @@ test('Sub2API API Key mode exposes the configured key and its gateway billing gr
   assert.equal(adapter.capabilities().requestLogs, false);
   assert.equal(balance.available, 12.5);
   assert.equal(adapter.capabilities().groupsDerivedFromKeys, false);
-  assert.equal(balance.used, 1.5);
+  assert.equal(balance.used, 0.15);
   assert.equal(group.remoteId, 'token');
   assert.equal(group.ratio, 0.1);
   assert.equal(key.remoteId, 'configured-api-key');
   assert.equal(key.maskedKey, 'sk-a...5678');
+  assert.match(key.metadata.identityHash, /^[a-f0-9]{64}$/);
+  assert.equal(key.metadata.identityAlgorithm, 'hmac-sha256-v1');
   assert.equal(key.primaryGroupRef, 'token');
   assert.equal(key.quota.remaining, 12.5);
-  assert.equal(usage.length, 2);
+  assert.equal(usage.length, 4);
   assert.equal(usage[0].period, 'today');
   assert.equal(usage[1].period, 'cumulative');
-  assert.equal(usage[1].totalTokens, 300);
+  assert.equal(usage[1].cost, 0.15);
+  assert.equal(usage[1].cacheCreationTokens, 50);
+  assert.equal(usage[1].cacheReadTokens, 150);
+  assert.equal(usage[1].totalTokens, 500);
+  assert.equal(usage[2].period, 'day:2026-08-04');
+  assert.equal(usage[2].cost, 0.11);
+  assert.equal(usage[2].cacheCreationTokens, 50);
+  assert.equal(usage[2].dailyHistoryComplete, true);
+  assert.match(usage[2].raw.monitorMetrics.credentialIdentity, /^[a-f0-9]{64}$/);
 });
 
 test('Sub2API API Key mode monitors configured keys with independent billing groups and usage', async () => {
@@ -461,6 +503,83 @@ test('Sub2API user session reads request logs separately for each remote API Key
     ['10', 'succeeded', 0],
     ['9', 'succeeded', 1]
   ]);
+});
+
+test('Sub2API API Key mode detects and reads self-scoped request logs', async () => {
+  const requests = [];
+  const adapter = new Sub2ApiAdapter(context('sub2api', (url, options) => {
+    const token = String(options.headers?.Authorization || '').replace(/^Bearer\s+/, '');
+    requests.push({ token, query: Object.fromEntries(url.searchParams) });
+    if (url.pathname !== '/v1/usage/logs') throw new Error(`Unexpected ${url.pathname}`);
+    if (!url.searchParams.has('start_date')) {
+      return { code: 0, data: { items: [], total: 0 } };
+    }
+    if (token === 'sk-backup-self-12345678') {
+      return { code: 0, data: { items: [], total: 0 } };
+    }
+    return { code: 0, data: { items: [{
+      id: 701,
+      api_key_id: 9988,
+      request_id: 'self-request-701',
+      model: 'gpt-test',
+      stream: true,
+      duration_ms: 1800,
+      first_token_ms: 500,
+      input_tokens: 100,
+      output_tokens: 25,
+      cache_creation_tokens: 10,
+      cache_read_tokens: 40,
+      actual_cost: 0.0042,
+      created_at: '2026-08-06T12:00:00.000Z'
+    }], total: 1 } };
+  }, {
+    connection: { auth_mode: 'api_key' },
+    credentials: {
+      apiKeys: [
+        { id: 'primary', name: 'Primary', key: 'sk-primary-self-12345678' },
+        { id: 'backup', name: 'Backup', key: 'sk-backup-self-12345678' }
+      ]
+    }
+  }));
+
+  const probe = await adapter.probe();
+  assert.equal(probe.capabilities.requestLogs, true);
+  const result = await adapter.getRequestLogs({
+    lookbackDays: 7,
+    maxRecords: 100,
+    keys: [
+      { remoteId: 'primary', name: 'Primary' },
+      { remoteId: 'backup', name: 'Backup' }
+    ]
+  });
+
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].remoteKeyId, 'primary');
+  assert.equal(result.items[0].actualCost, 0.0042);
+  assert.equal(result.items[0].cacheReadTokens, 40);
+  assert.deepEqual(result.keyCoverage.map((item) => [item.remoteKeyId, item.status]).sort(), [
+    ['backup', 'succeeded'],
+    ['primary', 'succeeded']
+  ]);
+  assert.equal(requests[0].token, 'sk-primary-self-12345678');
+  assert.equal(requests.filter((item) => item.query.start_date).length, 2);
+  assert.equal(requests.some((item) => Object.hasOwn(item.query, 'api_key_id')), false);
+});
+
+test('Sub2API API Key mode reports an unavailable self-log endpoint as unsupported', async () => {
+  const adapter = new Sub2ApiAdapter(context('sub2api', () => {
+    throw new AppError('CAPABILITY_UNSUPPORTED', 'Provider returned HTTP 404', { status: 404 });
+  }, {
+    connection: { auth_mode: 'api_key' },
+    credentials: { apiKey: 'sk-no-self-logs-12345678' }
+  }));
+
+  const probe = await adapter.probe();
+  assert.equal(probe.capabilities.requestLogs, false);
+  await assert.rejects(
+    adapter.getRequestLogs({ keys: [{ remoteId: 'configured-api-key', name: 'API Key' }] }),
+    (error) => error.code === 'CAPABILITY_UNSUPPORTED' && error.status === 404
+  );
 });
 
 test('Sub2API request-log query rejects records attributed to a different API Key', async () => {

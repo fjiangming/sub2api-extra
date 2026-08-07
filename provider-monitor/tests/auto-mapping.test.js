@@ -223,7 +223,7 @@ test('auto-mapping normalizes an sk prefix and resolves an inherited sole provid
   ).get().key_id, keyId);
 });
 
-test('auto-mapping verifies a different key when the gateway URL, billing scope and rate match', async (t) => {
+test('auto-mapping requires the exact configured Sub2API API Key', async (t) => {
   const context = createTestContext();
   t.after(() => context.cleanup());
   const providers = new ProviderRepository(context.db, context.config);
@@ -238,8 +238,8 @@ test('auto-mapping verifies a different key when the gateway URL, billing scope 
     apiKey: 'sk-monitor-key-88888888',
     primaryGroupRef: 'token'
   });
-  const baseKey = 'sk-base-account-22222222';
-  const fixture = sub2apiFixture({
+  const differentKey = 'sk-base-account-22222222';
+  const mismatchedFixture = sub2apiFixture({
     channels: [],
     groups: [{ id: 91, name: 'Codex', status: 'active', rate_multiplier: 0.1 }],
     accounts: [{
@@ -249,57 +249,50 @@ test('auto-mapping verifies a different key when the gateway URL, billing scope 
       group_ids: [91],
       credentials_status: { has_api_key: true }
     }],
-    apiKeys: { 901: baseKey },
+    apiKeys: { 901: differentKey },
     accountCredentials: { 901: { base_url: 'https://api.aijws.example/v1/' } }
   });
-  const requests = [];
-  const http = {
-    async requestJson(input, options) {
-      requests.push({ path: new URL(input).pathname, authorization: options.headers.Authorization });
-      return {
-        data: {
-          billing_scope: 'token',
-          effective_rate_multiplier: 0.1
-        }
-      };
-    }
-  };
   const rejected = new MappingService({
     db: context.db,
     config: context.config,
-    sub2api: fixture,
-    http: {
-      async requestJson() {
-        return { data: { billing_scope: 'token', effective_rate_multiplier: 0.2 } };
-      }
-    }
+    sub2api: mismatchedFixture
   });
   const rejectedPreview = await rejected.autoMappings({ mode: 'preview' });
   assert.equal(rejectedPreview.summary.missingRemoteKey, 1);
-  assert.equal(rejectedPreview.items[0].keyVerification, 'gateway_billing_rate_mismatch');
+  assert.equal(rejectedPreview.items[0].keyVerification, 'configured_api_key_secret_mismatch');
   assert.equal(context.db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count, 0);
 
-  const mappings = new MappingService({ db: context.db, config: context.config, sub2api: fixture, http });
+  const exactFixture = sub2apiFixture({
+    channels: [],
+    groups: [{ id: 91, name: 'Codex', status: 'active', rate_multiplier: 0.1 }],
+    accounts: [{
+      id: 901,
+      name: 'aijws',
+      type: 'upstream',
+      group_ids: [91],
+      credentials_status: { has_api_key: true }
+    }],
+    apiKeys: { 901: 'sk-monitor-key-88888888' },
+    accountCredentials: { 901: { base_url: 'https://api.aijws.example/v1/' } }
+  });
+  const mappings = new MappingService({ db: context.db, config: context.config, sub2api: exactFixture });
   const preview = await mappings.autoMappings({ mode: 'preview' });
   const item = preview.items[0];
   assert.equal(preview.summary.pendingCreate, 1);
   assert.equal(item.keyId, keyId);
-  assert.equal(item.keyMatch, 'verified_gateway_billing');
+  assert.equal(item.keyMatch, 'exact_configured_secret');
+  assert.equal(item.keyVerification, 'api_key_secret_exact');
   assert.equal(item.verifiedBillingScope, 'token');
-  assert.notEqual(item.baseMaskedKey, item.providerMaskedKey);
+  assert.equal(item.baseMaskedKey, item.providerMaskedKey);
   assert.doesNotMatch(JSON.stringify(preview), /sk-(?:base-account|monitor-key)-/);
-  assert.deepEqual(requests[0], {
-    path: '/v1/sub2api/billing',
-    authorization: `Bearer ${baseKey}`
-  });
 
   const applied = await mappings.autoMappings({ mode: 'apply' });
   assert.equal(applied.summary.created, 1);
   const config = JSON.parse(context.db.prepare(
     'SELECT config_json FROM sub2api_mappings WHERE account_id = 901'
   ).get().config_json);
-  assert.equal(config.autoMapping.source, 'provider_account_name_gateway_billing');
-  assert.equal(config.autoMapping.keyMatch, 'verified_gateway_billing');
+  assert.equal(config.autoMapping.source, 'provider_account_name_exact_api_key');
+  assert.equal(config.autoMapping.keyMatch, 'exact_configured_secret');
   assert.equal(config.autoMapping.billingScope, 'token');
 });
 
