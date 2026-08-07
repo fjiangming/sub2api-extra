@@ -109,13 +109,36 @@ test('account quality exposes metric and dual-source comparison rules from the d
     assert.match(html, new RegExp(`id="metric-rule-${key}"[\\s\\S]*?<dt>${label}<\\/dt>`));
   }
   assert.match(html, /延迟分 × 40% \+ 检测通过率 × 40% \+ 能力分 × 20%/);
-  assert.match(html, /ceil\(样本数 × 0\.95\)/);
+  assert.match(html, /ceil\((?:样本数|n) × 0\.95\)/);
   assert.match(html, /来源日志 ID 去重/);
-  assert.match(html, /费用差额 = 同窗 Sub2API actual_cost 合计 - 同窗供应商 Key 消耗增量/);
+  assert.match(html, /Key 总账毛差 = Σ基座 actual_cost ÷ 基座充值倍率 - Σ上游 actual_cost ÷ 上游充值倍率/);
+  assert.match(html, /实际窗口 = 所选窗口 ∩ 基座精确日志覆盖窗口 ∩ 上游日志覆盖窗口/);
+  assert.match(html, /actual_cost \/ total_actual_cost 表示实际扣除/);
+  assert.match(html, /exact_total=true/);
+  assert.match(html, /5 秒时间容差配对/);
   assert.match(app, /Sub2API 基座/);
   assert.match(app, /供应商上游/);
+  assert.match(app, /统一窗口 Key 总账/);
   assert.match(app, /data-action="open-account-metric-rules"/);
   assert.match(app, /openAccountMetricRules\(button\.dataset\.ruleTarget\)/);
+});
+
+test('account quality list fits its container and keeps every metric in the responsive layout', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+
+  assert.match(css, /\.account-quality-table \{ overflow-x: hidden; \}/);
+  assert.match(css, /\.account-quality-table table \{ min-width: 0; table-layout: fixed; \}/);
+  assert.doesNotMatch(css, /\.account-quality-table table \{ min-width: (?:1710|1960)px; \}/);
+  assert.match(css, /@media \(max-width: 1180px\)[\s\S]*?\.account-quality-table tbody tr \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(app, /<colgroup><col class="account-col-select"/);
+  assert.match(app, /class="primary-cell account-identity-cell"/);
+  assert.match(app, /class="numeric account-probe-cell"/);
+  assert.doesNotMatch(app, /<th>状态<\/th><th>平台<\/th>/);
+
+  for (const label of ['请求数', '缓存读取率', '首字 P95', '总耗时 P95', '输出速度', '费用对比', '检测通过率', '能力分 / 遵循', '质量分']) {
+    assert.match(app, new RegExp(`data-label="${label.replace('/', '\\/')}"`));
+  }
 });
 
 test('a local AUTH_REQUIRED response still clears the expired session', async () => {

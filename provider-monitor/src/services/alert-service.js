@@ -227,6 +227,7 @@ class AlertService {
       consecutive_matches: 1,
       cooldown_minutes: 60,
       renotify_while_active: false,
+      notify_on_recovery: false,
       config_json: stringifyJson({
         implicitBalanceLevel: definition.level,
         severity: definition.severity
@@ -561,7 +562,7 @@ class AlertService {
         this.db.prepare(`
           UPDATE alert_events SET status = 'resolved', resolved_at = ? WHERE id = ?
         `).run(nowIso(), existing.id);
-        if (!this.#maintenanceActive(provider.id)) {
+        if (rule.notify_on_recovery !== false && !this.#maintenanceActive(provider.id)) {
           await this.notifications.dispatch({
             id: existing.id,
             severity: 'info',

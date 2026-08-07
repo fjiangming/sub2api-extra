@@ -117,6 +117,72 @@ function gatewayUsageItem(data, period) {
   };
 }
 
+function boundedInteger(value, fallback, minimum, maximum) {
+  const parsed = Math.trunc(Number(value));
+  return Number.isFinite(parsed)
+    ? Math.min(maximum, Math.max(minimum, parsed))
+    : fallback;
+}
+
+function dateKey(value, timeZone) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    }).formatToParts(value);
+    const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+    return `${byType.year}-${byType.month}-${byType.day}`;
+  } catch {
+    return value.toISOString().slice(0, 10);
+  }
+}
+
+function supportsUserUsageLogs(connection, credentials = {}) {
+  if (!usesApiKey(connection)) return true;
+  if (connection.type_config_json?.apiKeySource !== 'remote') return false;
+  return Boolean(
+    credentials.accessToken || credentials.refreshToken ||
+    (credentials.email && credentials.password)
+  );
+}
+
+function normalizeRequestLog(row, expectedKey) {
+  const remoteKeyId = String(expectedKey.remoteId);
+  if (row?.api_key_id != null && String(row.api_key_id) !== remoteKeyId) {
+    throw new AppError(
+      'SUB2API_USAGE_KEY_MISMATCH',
+      `Sub2API returned usage for API Key ${row.api_key_id} while querying ${remoteKeyId}`,
+      { status: 502, details: { expectedKeyId: remoteKeyId, actualKeyId: String(row.api_key_id) } }
+    );
+  }
+  const sourceLogId = row?.id ?? row?.usage_id;
+  const createdAt = toIsoDate(row?.created_at ?? row?.timestamp);
+  if (sourceLogId == null || !createdAt) return null;
+  const durationMs = toFiniteNumber(row.duration_ms);
+  const firstTokenMs = toFiniteNumber(row.first_token_ms);
+  return {
+    sourceLogId: String(sourceLogId),
+    remoteKeyId,
+    keyName: expectedKey.name || remoteKeyId,
+    requestId: row.request_id == null ? null : String(row.request_id),
+    model: row.model || row.requested_model || null,
+    upstreamModel: row.upstream_model || null,
+    stream: row.stream === true || row.stream === 1,
+    status: 'success',
+    durationMs: durationMs == null || durationMs < 0 ? null : Math.round(durationMs),
+    firstTokenMs: firstTokenMs == null || firstTokenMs <= 0 ? null : Math.round(firstTokenMs),
+    inputTokens: Math.max(0, Math.round(toFiniteNumber(row.input_tokens, 0))),
+    outputTokens: Math.max(0, Math.round(toFiniteNumber(row.output_tokens, 0))),
+    cacheCreationTokens: Math.max(0, Math.round(toFiniteNumber(row.cache_creation_tokens, 0))),
+    cacheReadTokens: Math.max(0, Math.round(toFiniteNumber(row.cache_read_tokens, 0))),
+    actualCost: toFiniteNumber(row.actual_cost ?? row.total_cost),
+    currency: 'USD',
+    createdAt
+  };
+}
+
 function translateSub2ApiAuthError(error) {
   const remoteCode = String(error?.details?.remoteCode || '');
   if (remoteCode === 'SESSION_BINDING_MISMATCH') {
@@ -165,6 +231,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
         listGroups: true,
         keyGroup: true,
         usageHistory: true,
+        requestLogs: supportsUserUsageLogs(this.connection, this.credentials),
         rechargeQuote: true
       };
     }
@@ -177,6 +244,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
       keyGroup: true,
       groupsDerivedFromKeys: true,
       usageHistory: true,
+      requestLogs: true,
       priceCatalog: true,
       rechargeQuote: true,
       rechargeLogin: true,
@@ -889,6 +957,159 @@ class Sub2ApiAdapter extends ProviderAdapter {
       period: 'today',
       raw: this.safeRaw(data)
     }];
+  }
+
+  async getRequestLogs(options = {}) {
+    if (!supportsUserUsageLogs(this.connection, this.credentials)) {
+      return super.getRequestLogs(options);
+    }
+
+    const lookbackDays = boundedInteger(options.lookbackDays, 30, 1, 90);
+    const maxRecords = boundedInteger(options.maxRecords, 5000, 100, 10000);
+    const suppliedKeys = Array.isArray(options.keys) ? options.keys : [];
+    const knownKeys = suppliedKeys.length > 0 ? suppliedKeys : await this.listKeys();
+    const requestedKeys = knownKeys.filter((key) => key?.remoteId != null);
+    const endAt = new Date();
+    const startAt = new Date(endAt.getTime() - lookbackDays * 86400000);
+    const coverageFrom = startAt.toISOString();
+    const coverageTo = endAt.toISOString();
+    const timeZone = this.config.timezone || 'UTC';
+
+    if (requestedKeys.length === 0) {
+      return {
+        items: [],
+        total: 0,
+        truncated: false,
+        coverageFrom,
+        coverageTo,
+        keyCoverage: []
+      };
+    }
+
+    const queryableKeys = requestedKeys.slice(0, maxRecords);
+    const perKeyLimit = Math.max(1, Math.floor(maxRecords / queryableKeys.length));
+    const results = new Array(queryableKeys.length);
+    let cursor = 0;
+    const workerCount = Math.min(
+      boundedInteger(options.concurrency, 4, 1, 10),
+      queryableKeys.length
+    );
+    const workers = Array.from({ length: workerCount }, async () => {
+      while (cursor < queryableKeys.length) {
+        const index = cursor;
+        cursor += 1;
+        const key = queryableKeys[index];
+        const remoteKeyId = String(key.remoteId);
+        try {
+          if (!/^\d+$/.test(remoteKeyId)) {
+            throw new AppError(
+              'SUB2API_USAGE_KEY_ID_INVALID',
+              `Sub2API request logs require a numeric remote API Key ID, received ${remoteKeyId}`,
+              { status: 409, details: { remoteKeyId } }
+            );
+          }
+          const rows = [];
+          let total = null;
+          let hasTotal = false;
+          for (let page = 1; rows.length < perKeyLimit; page += 1) {
+            const pageSize = Math.min(100, perKeyLimit - rows.length);
+            const query = new URLSearchParams({
+              api_key_id: remoteKeyId,
+              start_date: dateKey(startAt, timeZone),
+              end_date: dateKey(endAt, timeZone),
+              timezone: timeZone,
+              page: String(page),
+              page_size: String(pageSize),
+              sort_by: 'created_at',
+              sort_order: 'desc'
+            });
+            const response = await this.authenticatedRequest(`/api/v1/usage?${query.toString()}`, {
+              retries: 1
+            });
+            const extracted = extractItems(response.data);
+            if (extracted.hasTotal) {
+              total = extracted.total;
+              hasTotal = true;
+            }
+            rows.push(...extracted.items.slice(0, perKeyLimit - rows.length));
+            if (
+              extracted.items.length === 0 ||
+              extracted.items.length < pageSize ||
+              (extracted.hasTotal && rows.length >= extracted.total)
+            ) break;
+          }
+          const items = rows.map((row) => normalizeRequestLog(row, key)).filter(Boolean);
+          const truncated = rows.length >= perKeyLimit && (!hasTotal || Number(total) > rows.length);
+          results[index] = {
+            ok: true,
+            items,
+            coverage: {
+              remoteKeyId,
+              status: 'succeeded',
+              coverageFrom,
+              coverageTo,
+              truncated,
+              total: hasTotal ? total : rows.length,
+              errorCode: null,
+              errorMessage: null
+            }
+          };
+        } catch (error) {
+          results[index] = {
+            ok: false,
+            error,
+            items: [],
+            coverage: {
+              remoteKeyId,
+              status: 'unavailable',
+              coverageFrom: null,
+              coverageTo: null,
+              truncated: false,
+              total: null,
+              errorCode: error?.code || 'REQUEST_LOG_UNAVAILABLE',
+              errorMessage: String(error?.message || 'Sub2API request logs are unavailable')
+            }
+          };
+        }
+      }
+    });
+    await Promise.all(workers);
+
+    for (const key of requestedKeys.slice(queryableKeys.length)) {
+      results.push({
+        ok: false,
+        items: [],
+        coverage: {
+          remoteKeyId: String(key.remoteId),
+          status: 'unavailable',
+          coverageFrom: null,
+          coverageTo: null,
+          truncated: false,
+          total: null,
+          errorCode: 'REQUEST_LOG_KEY_LIMIT',
+          errorMessage: 'The configured request-log record limit is lower than the number of monitored keys'
+        }
+      });
+    }
+
+    const successful = results.filter((result) => result?.ok);
+    if (successful.length === 0) {
+      throw results.find((result) => result?.error)?.error || new AppError(
+        'REQUEST_LOG_UNAVAILABLE',
+        'Sub2API request logs are unavailable for every monitored API Key',
+        { status: 502 }
+      );
+    }
+    const items = successful.flatMap((result) => result.items);
+    const keyCoverage = results.map((result) => result.coverage);
+    return {
+      items,
+      total: keyCoverage.reduce((sum, item) => sum + (Number(item.total) || 0), 0),
+      truncated: keyCoverage.some((item) => item.truncated || item.status !== 'succeeded'),
+      coverageFrom,
+      coverageTo,
+      keyCoverage
+    };
   }
 
   async getPriceCatalog() {

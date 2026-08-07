@@ -20,6 +20,8 @@ const ACCOUNT_LIMIT = 5000;
 const DISTRIBUTION_SAMPLE_LIMIT = 500;
 const PROBE_SAMPLE_LIMIT = 200;
 const PROBE_CREDENTIAL_TTL_MS = 10 * 60 * 1000;
+const REQUEST_PAIR_TIME_TOLERANCE_MS = 5000;
+const REQUEST_ID_TIME_TOLERANCE_MS = 60000;
 
 function finite(value) {
   if (value == null || value === '') return null;
@@ -151,6 +153,212 @@ function cumulativeDelta(rows, field) {
     total += difference >= 0 ? difference : Math.max(0, current);
   }
   return observed ? total : null;
+}
+
+function rowNumber(row, camelName, snakeName = camelName) {
+  return finite(row?.[camelName] ?? row?.[snakeName]);
+}
+
+function rowInteger(row, camelName, snakeName = camelName) {
+  return Math.max(0, integer(row?.[camelName] ?? row?.[snakeName]));
+}
+
+function rowTimestamp(row) {
+  const value = row?.createdAt ?? row?.created_at;
+  const timestamp = Date.parse(value || '');
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function rowModels(row) {
+  return [...new Set([
+    row?.upstreamModel ?? row?.upstream_model,
+    row?.model
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean))];
+}
+
+function requestFingerprintKeys(row) {
+  const usage = [
+    rowInteger(row, 'inputTokens', 'input_tokens'),
+    rowInteger(row, 'outputTokens', 'output_tokens'),
+    rowInteger(row, 'cacheCreationTokens', 'cache_creation_tokens'),
+    rowInteger(row, 'cacheReadTokens', 'cache_read_tokens'),
+    (row?.stream === true || row?.stream === 1) ? 1 : 0
+  ].join(':');
+  const models = rowModels(row);
+  return (models.length > 0 ? models : ['']).map((model) => `${model}\u0000${usage}`);
+}
+
+function requestMetricsFromRows(rows, currencyFallback = 'USD') {
+  const item = emptyUpstreamMetrics(true);
+  const ordered = [...rows].filter((row) => rowTimestamp(row) != null)
+    .sort((left, right) => rowTimestamp(left) - rowTimestamp(right));
+  item.requestCount = ordered.length;
+  item.inputTokens = ordered.reduce((sum, row) => sum + rowInteger(row, 'inputTokens', 'input_tokens'), 0);
+  item.outputTokens = ordered.reduce((sum, row) => sum + rowInteger(row, 'outputTokens', 'output_tokens'), 0);
+  item.cacheCreationTokens = ordered.reduce(
+    (sum, row) => sum + rowInteger(row, 'cacheCreationTokens', 'cache_creation_tokens'),
+    0
+  );
+  item.cacheReadTokens = ordered.reduce(
+    (sum, row) => sum + rowInteger(row, 'cacheReadTokens', 'cache_read_tokens'),
+    0
+  );
+  const costSamples = ordered.map((row) => rowNumber(row, 'actualCost', 'actual_cost'))
+    .filter((value) => value != null);
+  item.actualCostSampleCount = costSamples.length;
+  item.actualCost = ordered.length === 0
+    ? 0
+    : costSamples.length > 0
+      ? round(costSamples.reduce((sum, value) => sum + value, 0), 8)
+      : null;
+  const promptTokens = item.inputTokens + item.cacheCreationTokens + item.cacheReadTokens;
+  item.cacheRate = promptTokens > 0 ? round(item.cacheReadTokens / promptTokens * 100, 1) : null;
+  item.cacheHitRequestRate = ordered.length > 0
+    ? round(ordered.filter((row) => rowInteger(row, 'cacheReadTokens', 'cache_read_tokens') > 0).length /
+      ordered.length * 100, 1)
+    : null;
+
+  const recent = [...ordered].sort((left, right) => rowTimestamp(right) - rowTimestamp(left))
+    .slice(0, DISTRIBUTION_SAMPLE_LIMIT);
+  const ttft = recent.filter((row) => row?.stream === true || row?.stream === 1)
+    .map((row) => rowNumber(row, 'firstTokenMs', 'first_token_ms'))
+    .filter((value) => value != null && value > 0);
+  const duration = recent.map((row) => rowNumber(row, 'durationMs', 'duration_ms'))
+    .filter((value) => value != null);
+  item.ttftAverageMs = ttft.length > 0
+    ? round(ttft.reduce((sum, value) => sum + value, 0) / ttft.length, 0)
+    : null;
+  item.ttftP50Ms = percentile(ttft, 0.5);
+  item.ttftP95Ms = percentile(ttft, 0.95);
+  item.ttftSampleCount = ttft.length;
+  item.durationAverageMs = duration.length > 0
+    ? round(duration.reduce((sum, value) => sum + value, 0) / duration.length, 0)
+    : null;
+  item.durationP95Ms = percentile(duration, 0.95);
+  item.durationSampleCount = duration.length;
+
+  let throughputTokens = 0;
+  let generationMs = 0;
+  for (const row of ordered) {
+    if (!(row?.stream === true || row?.stream === 1)) continue;
+    const firstTokenMs = rowNumber(row, 'firstTokenMs', 'first_token_ms');
+    const durationMs = rowNumber(row, 'durationMs', 'duration_ms');
+    if (!(firstTokenMs > 0) || !(durationMs > firstTokenMs)) continue;
+    throughputTokens += rowInteger(row, 'outputTokens', 'output_tokens');
+    generationMs += durationMs - firstTokenMs;
+  }
+  item.outputTokensPerSecond = generationMs > 0
+    ? round(throughputTokens * 1000 / generationMs, 1)
+    : null;
+  item.firstSampleAt = ordered[0]?.created_at ?? ordered[0]?.createdAt ?? null;
+  item.lastSampleAt = ordered.at(-1)?.created_at ?? ordered.at(-1)?.createdAt ?? null;
+  const currencies = [...new Set(ordered.map((row) => row?.currency).filter(Boolean))];
+  item.currency = currencies.length === 1 ? currencies[0] : currencies.length === 0 ? currencyFallback : null;
+  return item;
+}
+
+function pairRequestRows(baseRows, upstreamRows, toleranceMs = REQUEST_PAIR_TIME_TOLERANCE_MS) {
+  const bases = [...baseRows].sort((left, right) => rowTimestamp(left) - rowTimestamp(right));
+  const upstreams = [...upstreamRows].sort((left, right) => rowTimestamp(left) - rowTimestamp(right));
+  const unused = new Set(upstreams.map((_, index) => index));
+  const pairs = [];
+  const matchedBy = { requestId: 0, fingerprint: 0 };
+
+  const pickNearest = (base, candidates, maximumDifference) => {
+    const baseTime = rowTimestamp(base);
+    if (baseTime == null) return null;
+    let selected = null;
+    let selectedDifference = Number.POSITIVE_INFINITY;
+    for (const index of candidates) {
+      if (!unused.has(index)) continue;
+      const difference = Math.abs(rowTimestamp(upstreams[index]) - baseTime);
+      if (difference <= maximumDifference && difference < selectedDifference) {
+        selected = index;
+        selectedDifference = difference;
+      }
+    }
+    return selected;
+  };
+
+  const byRequestId = new Map();
+  upstreams.forEach((row, index) => {
+    const requestId = String(row.request_id ?? row.requestId ?? '').trim();
+    if (!requestId) return;
+    const candidates = byRequestId.get(requestId) || [];
+    candidates.push(index);
+    byRequestId.set(requestId, candidates);
+  });
+  const unmatchedBases = [];
+  for (const base of bases) {
+    const requestId = String(base.request_id ?? base.requestId ?? '').trim();
+    const index = requestId
+      ? pickNearest(base, byRequestId.get(requestId) || [], REQUEST_ID_TIME_TOLERANCE_MS)
+      : null;
+    if (index == null) {
+      unmatchedBases.push(base);
+      continue;
+    }
+    unused.delete(index);
+    matchedBy.requestId += 1;
+    pairs.push({ base, upstream: upstreams[index], method: 'request_id' });
+  }
+
+  const byFingerprint = new Map();
+  for (const index of unused) {
+    for (const key of requestFingerprintKeys(upstreams[index])) {
+      const candidates = byFingerprint.get(key) || [];
+      candidates.push(index);
+      byFingerprint.set(key, candidates);
+    }
+  }
+  for (const base of unmatchedBases) {
+    const candidateSet = new Set(requestFingerprintKeys(base)
+      .flatMap((key) => byFingerprint.get(key) || []));
+    const index = pickNearest(base, candidateSet, toleranceMs);
+    if (index == null) continue;
+    unused.delete(index);
+    matchedBy.fingerprint += 1;
+    pairs.push({ base, upstream: upstreams[index], method: 'fingerprint' });
+  }
+  pairs.sort((left, right) => rowTimestamp(left.base) - rowTimestamp(right.base));
+
+  const cacheMismatchCount = pairs.filter(({ base, upstream }) =>
+    rowInteger(base, 'cacheReadTokens', 'cache_read_tokens') !==
+      rowInteger(upstream, 'cacheReadTokens', 'cache_read_tokens') ||
+    rowInteger(base, 'cacheCreationTokens', 'cache_creation_tokens') !==
+      rowInteger(upstream, 'cacheCreationTokens', 'cache_creation_tokens')
+  ).length;
+  const ttftOverheads = pairs.map(({ base, upstream }) => {
+    const baseValue = rowNumber(base, 'firstTokenMs', 'first_token_ms');
+    const upstreamValue = rowNumber(upstream, 'firstTokenMs', 'first_token_ms');
+    return baseValue > 0 && upstreamValue > 0 ? baseValue - upstreamValue : null;
+  }).filter((value) => value != null);
+  const durationOverheads = pairs.map(({ base, upstream }) => {
+    const baseValue = rowNumber(base, 'durationMs', 'duration_ms');
+    const upstreamValue = rowNumber(upstream, 'durationMs', 'duration_ms');
+    return baseValue != null && upstreamValue != null ? baseValue - upstreamValue : null;
+  }).filter((value) => value != null);
+
+  return {
+    pairs,
+    matchedBy,
+    matchedCount: pairs.length,
+    baseRequestCount: bases.length,
+    upstreamRequestCount: upstreams.length,
+    baseUnmatchedCount: Math.max(0, bases.length - pairs.length),
+    upstreamExtraCount: Math.max(0, upstreams.length - pairs.length),
+    baseMatchRate: bases.length > 0 ? round(pairs.length / bases.length * 100, 1) : null,
+    upstreamMatchRate: upstreams.length > 0 ? round(pairs.length / upstreams.length * 100, 1) : null,
+    cacheMismatchCount,
+    overhead: {
+      ttftP50Ms: percentile(ttftOverheads, 0.5),
+      ttftP95Ms: percentile(ttftOverheads, 0.95),
+      ttftSampleCount: ttftOverheads.length,
+      durationP50Ms: percentile(durationOverheads, 0.5),
+      durationP95Ms: percentile(durationOverheads, 0.95),
+      durationSampleCount: durationOverheads.length
+    }
+  };
 }
 
 function latestIso(values) {
@@ -424,6 +632,7 @@ class AccountMonitorService {
       syncIntervalMinutes: row.sync_interval_minutes,
       lookbackDays: row.lookback_days,
       sampleRetentionDays: row.sample_retention_days,
+      baseRechargeMultiplier: finite(row.base_recharge_multiplier) || 1,
       probeEnabled: Boolean(row.probe_enabled),
       probeIntervalMinutes: row.probe_interval_minutes,
       probePlatforms: parseJson(row.probe_platforms_json, []),
@@ -454,7 +663,8 @@ class AccountMonitorService {
     this.db.prepare(`
       UPDATE sub2api_account_monitor_settings SET
         sync_enabled = ?, sync_interval_minutes = ?, lookback_days = ?,
-        sample_retention_days = ?, probe_enabled = ?, probe_interval_minutes = ?,
+        sample_retention_days = ?, base_recharge_multiplier = ?,
+        probe_enabled = ?, probe_interval_minutes = ?,
         probe_platforms_json = ?, probe_models_json = ?, probe_concurrency = ?, updated_at = ?
       WHERE id = 1
     `).run(
@@ -462,6 +672,7 @@ class AccountMonitorService {
       integer(next.syncIntervalMinutes, 15),
       integer(next.lookbackDays, 7),
       integer(next.sampleRetentionDays, 30),
+      finite(next.baseRechargeMultiplier) || 1,
       next.probeEnabled ? 1 : 0,
       integer(next.probeIntervalMinutes, 360),
       stringifyJson(next.probePlatforms, []),
@@ -482,6 +693,26 @@ class AccountMonitorService {
       lastSyncError: row.last_sync_error,
       lastSyncSummary: parseJson(row.last_sync_summary_json, {}),
       updatedAt: row.updated_at
+    };
+  }
+
+  #baseLogCoverage() {
+    const state = this.state();
+    const summary = state.lastSyncSummary || {};
+    const from = summary.usageCoverageFrom || null;
+    const to = summary.usageCoverageTo || state.lastLogSyncAt || null;
+    return {
+      from,
+      to,
+      exact: summary.usageExactTotal === true,
+      truncated: Boolean(summary.usageTruncated),
+      verified: Boolean(
+        from && to && summary.usageExactTotal === true && !summary.usageTruncated
+      ),
+      fullBackfill: Boolean(summary.usageFullBackfill),
+      status: state.lastSyncStatus,
+      lastSyncedAt: state.lastLogSyncAt,
+      error: state.lastSyncError || null
     };
   }
 
@@ -561,10 +792,20 @@ class AccountMonitorService {
       })();
 
       const lookbackDays = clamp(integer(options.lookbackDays, settings.lookbackDays), 1, 90);
-      const oldestAllowed = Date.now() - lookbackDays * 86400000;
+      const usageCoverageTo = nowIso();
+      const oldestAllowed = Date.parse(usageCoverageTo) - lookbackDays * 86400000;
+      const previousSummary = this.state().lastSyncSummary || {};
+      const previousCoverageFrom = Date.parse(previousSummary.usageCoverageFrom || '');
+      const previousCoverageVerified = previousSummary.usageExactTotal === true &&
+        !previousSummary.usageTruncated && Number.isFinite(previousCoverageFrom) &&
+        previousCoverageFrom <= oldestAllowed;
       const latest = this.db.prepare('SELECT MAX(created_at) AS value FROM sub2api_account_request_samples').get()?.value;
       const incrementalStart = latest ? Date.parse(latest) - 86400000 : oldestAllowed;
-      const startAt = new Date(Math.max(oldestAllowed, Number.isFinite(incrementalStart) ? incrementalStart : oldestAllowed));
+      const usageFullBackfill = !previousCoverageVerified;
+      const startAt = new Date(usageFullBackfill
+        ? oldestAllowed
+        : Math.max(oldestAllowed, Number.isFinite(incrementalStart) ? incrementalStart : oldestAllowed));
+      const guaranteedCoverageFrom = usageFullBackfill ? oldestAllowed : previousCoverageFrom;
       const ensureAccount = this.db.prepare(`
         INSERT OR IGNORE INTO sub2api_monitored_accounts(
           account_id, name, platform, account_type, status, schedulable,
@@ -593,12 +834,13 @@ class AccountMonitorService {
       let insertedSamples = 0;
       const truncatedDates = [];
       const startDate = dateInTimezone(startAt, this.config.timezone);
-      const endDate = dateInTimezone(new Date(), this.config.timezone);
+      const endDate = dateInTimezone(new Date(usageCoverageTo), this.config.timezone);
       for (const date of dateKeysBetween(startDate, endDate)) {
         const usageResult = await this.sub2api.listAll('/api/v1/admin/usage', {
           start_date: date,
           end_date: date,
           timezone: this.config.timezone,
+          exact_total: true,
           sort_by: 'created_at',
           sort_order: 'desc'
         }, { maxItems: 50000 });
@@ -627,11 +869,19 @@ class AccountMonitorService {
       }
       const cleanup = this.cleanup();
       const completedAt = nowIso();
+      const retainedCoverageFrom = new Date(Math.max(
+        guaranteedCoverageFrom,
+        Date.parse(cleanup.before)
+      )).toISOString();
       const summary = {
         accountCount: accounts.length,
         accountCatalogTruncated: Boolean(accountResult.truncated),
         fetchedSampleCount,
         storedSampleChanges: insertedSamples,
+        usageExactTotal: true,
+        usageFullBackfill,
+        usageCoverageFrom: retainedCoverageFrom,
+        usageCoverageTo,
         usageTruncated: truncatedDates.length > 0,
         truncatedDates,
         deletedSamples: cleanup.samples,
@@ -681,7 +931,7 @@ class AccountMonitorService {
     `).all(...params);
   }
 
-  #metrics(accountIds, since) {
+  #metrics(accountIds, since, until = nowIso()) {
     const metrics = new Map(accountIds.map((accountId) => [String(accountId), {
       requestCount: 0,
       inputTokens: 0,
@@ -724,9 +974,9 @@ class AccountMonitorService {
             THEN duration_ms - first_token_ms ELSE 0 END) AS generation_ms,
           SUM(CASE WHEN cache_read_tokens > 0 THEN 1 ELSE 0 END) AS cache_hit_requests
         FROM sub2api_account_request_samples
-        WHERE account_id IN (${placeholders}) AND created_at >= ?
+        WHERE account_id IN (${placeholders}) AND created_at >= ? AND created_at <= ?
         GROUP BY account_id
-      `).all(...batch, since);
+      `).all(...batch, since, until);
       for (const row of aggregateRows) {
         const item = metrics.get(String(row.account_id));
         item.requestCount = integer(row.request_count);
@@ -752,11 +1002,11 @@ class AccountMonitorService {
           SELECT account_id, stream, first_token_ms, duration_ms,
             ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY created_at DESC) AS row_number
           FROM sub2api_account_request_samples
-          WHERE account_id IN (${placeholders}) AND created_at >= ?
+          WHERE account_id IN (${placeholders}) AND created_at >= ? AND created_at <= ?
         )
         SELECT account_id, stream, first_token_ms, duration_ms FROM recent
         WHERE row_number <= ${DISTRIBUTION_SAMPLE_LIMIT}
-      `).all(...batch, since);
+      `).all(...batch, since, until);
       const byAccount = new Map();
       for (const row of distributions) {
         const item = byAccount.get(String(row.account_id)) || { ttft: [], duration: [] };
@@ -781,11 +1031,11 @@ class AccountMonitorService {
             PARTITION BY account_id ORDER BY completed_at DESC, id DESC
           ) AS row_number
           FROM sub2api_account_probe_runs
-          WHERE account_id IN (${placeholders}) AND completed_at >= ?
+          WHERE account_id IN (${placeholders}) AND completed_at >= ? AND completed_at <= ?
         )
         SELECT * FROM recent WHERE row_number <= ${PROBE_SAMPLE_LIMIT}
         ORDER BY completed_at DESC
-      `).all(...batch, since);
+      `).all(...batch, since, until);
       const probeGroups = new Map();
       for (const row of probes) {
         const accountId = String(row.account_id);
@@ -833,21 +1083,34 @@ class AccountMonitorService {
       rows.push(...this.db.prepare(`
         SELECT CAST(m.account_id AS TEXT) AS account_id, m.id AS mapping_id,
           m.connection_id, m.key_id, m.role, m.updated_at AS mapping_updated_at,
-          c.name AS provider_name, c.adapter_type, c.last_success_at,
-          c.last_error_code, k.name AS key_name, k.remote_id AS remote_key_id,
-          k.currency, k.status AS key_status,
+          c.name AS provider_name, c.adapter_type, c.auth_mode, c.last_success_at,
+           c.last_error_code, k.name AS key_name, k.remote_id AS remote_key_id,
+           k.currency, k.status AS key_status,
+           rr.detected_multiplier AS recharge_detected_multiplier,
+           rr.manual_multiplier AS recharge_manual_multiplier,
+           rr.paid_currency AS recharge_paid_currency,
+           rr.balance_currency AS recharge_balance_currency,
+           rr.detection_source AS recharge_detection_source,
+           rr.status AS recharge_status,
+           rr.checked_at AS recharge_checked_at,
           (SELECT COUNT(DISTINCT CAST(shared.account_id AS TEXT))
             FROM sub2api_mappings shared
             WHERE shared.enabled = 1 AND shared.key_id = m.key_id
           ) AS shared_account_count,
-          s.status AS request_log_status, s.coverage_from, s.coverage_to,
-          s.truncated AS request_log_truncated, s.total_count AS request_log_total,
-          s.last_error_code AS request_log_error_code,
-          s.last_synced_at AS request_log_synced_at
+          COALESCE(ks.status, s.status) AS request_log_status,
+          COALESCE(ks.coverage_from, s.coverage_from) AS coverage_from,
+          COALESCE(ks.coverage_to, s.coverage_to) AS coverage_to,
+          COALESCE(ks.truncated, s.truncated) AS request_log_truncated,
+          COALESCE(ks.total_count, s.total_count) AS request_log_total,
+          COALESCE(ks.last_error_code, s.last_error_code) AS request_log_error_code,
+          COALESCE(ks.last_synced_at, s.last_synced_at) AS request_log_synced_at,
+          CASE WHEN ks.key_id IS NULL THEN 'connection' ELSE 'key' END AS request_log_scope
         FROM sub2api_mappings m
-        JOIN provider_connections c ON c.id = m.connection_id
-        LEFT JOIN remote_keys k ON k.id = m.key_id
+         JOIN provider_connections c ON c.id = m.connection_id
+         LEFT JOIN remote_keys k ON k.id = m.key_id
+         LEFT JOIN provider_recharge_rates rr ON rr.connection_id = m.connection_id
         LEFT JOIN provider_request_log_sync_state s ON s.connection_id = m.connection_id
+        LEFT JOIN provider_request_key_sync_state ks ON ks.key_id = m.key_id
         WHERE m.enabled = 1 AND CAST(m.account_id AS TEXT) IN (${placeholders})
         ORDER BY CASE m.role WHEN 'primary' THEN 0 ELSE 1 END, m.updated_at DESC
       `).all(...batch));
@@ -1043,14 +1306,293 @@ class AccountMonitorService {
     };
   }
 
+  #baseRequestRows(accountId, from, to) {
+    return this.db.prepare(`
+      SELECT source_log_id, request_id, model, upstream_model, stream,
+        duration_ms, first_token_ms, input_tokens, output_tokens,
+        cache_creation_tokens, cache_read_tokens, actual_cost,
+        'USD' AS currency, created_at
+      FROM sub2api_account_request_samples
+      WHERE account_id = ? AND created_at >= ? AND created_at <= ?
+      ORDER BY created_at
+    `).all(String(accountId), from, to);
+  }
+
+  #providerRequestRows(keyId, from, to) {
+    return this.db.prepare(`
+      SELECT source_log_id, request_id, model, upstream_model, stream,
+        duration_ms, first_token_ms, input_tokens, output_tokens,
+        cache_creation_tokens, cache_read_tokens, actual_cost,
+        currency, created_at
+      FROM provider_request_samples
+      WHERE key_id = ? AND created_at >= ? AND created_at <= ? AND status = 'success'
+      ORDER BY created_at
+    `).all(String(keyId), from, to);
+  }
+
+  #providerRecharge(target) {
+    const manual = finite(target.recharge_manual_multiplier);
+    const detected = finite(target.recharge_detected_multiplier);
+    const multiplier = manual > 0 ? manual : detected > 0 ? detected : null;
+    return {
+      multiplier,
+      source: manual > 0
+        ? 'manual'
+        : detected > 0 ? target.recharge_detection_source || 'detected' : null,
+      status: target.recharge_status || 'unknown',
+      paidCurrency: target.recharge_paid_currency || null,
+      balanceCurrency: target.recharge_balance_currency || null,
+      checkedAt: target.recharge_checked_at || null,
+      confirmed: multiplier != null
+    };
+  }
+
+  #costComparison({
+    accountId, target, requestedWindow, logContext, baseLogCoverage, usageDelta, balanceDelta
+  }) {
+    const hasActivity = (delta, fields) => delta && fields.some((field) => Number(delta[field]) > 0);
+    const usageHasActivity = hasActivity(usageDelta, [
+      'cost', 'requestCount', 'inputTokens', 'outputTokens', 'totalTokens'
+    ]);
+    const balanceHasActivity = hasActivity(balanceDelta, ['cost']);
+    let candidate = null;
+
+    if (logContext) {
+      const paired = logContext.pairing.matchedCount > 0;
+      const baseMetrics = paired ? logContext.pairedBase : logContext.windowBase;
+      const upstreamMetrics = paired ? logContext.pairedUpstream : logContext.windowUpstream;
+      const hasLogCost = upstreamMetrics.actualCostSampleCount > 0 ||
+        logContext.windowUpstream.actualCostSampleCount > 0;
+      if (hasLogCost) {
+        candidate = {
+          source: 'provider_request_logs',
+          scope: paired ? 'paired_requests' : 'key_window',
+          from: logContext.window.from,
+          to: logContext.window.to,
+          currency: upstreamMetrics.currency || target.currency || 'USD',
+          baseMetrics,
+          upstreamMetrics,
+          windowBaseMetrics: logContext.windowBase,
+          windowUpstreamMetrics: logContext.windowUpstream,
+          baseCoverageComplete: logContext.baseCoverageComplete,
+          baseCost: baseMetrics.actualCost,
+          upstreamCost: upstreamMetrics.actualCost,
+          baseWindowCost: logContext.windowBase.actualCost,
+          keyTotalUpstreamCost: logContext.windowUpstream.actualCost,
+          pairedBaseCost: paired ? logContext.pairedBase.actualCost : null,
+          pairedUpstreamCost: paired ? logContext.pairedUpstream.actualCost : null,
+          requestCount: paired ? logContext.pairing.matchedCount : null,
+          pairing: logContext.pairing
+        };
+      }
+    }
+
+    const snapshotCandidate = !candidate && usageHasActivity
+      ? usageDelta
+      : !candidate && balanceHasActivity ? balanceDelta : null;
+    if (snapshotCandidate) {
+      const baseRows = this.#baseRequestRows(accountId, snapshotCandidate.from, snapshotCandidate.to);
+      const baseMetrics = requestMetricsFromRows(baseRows, 'USD');
+      candidate = {
+        source: snapshotCandidate.source,
+        scope: 'snapshot_window',
+        from: snapshotCandidate.from,
+        to: snapshotCandidate.to,
+        currency: snapshotCandidate.currency || target.currency || 'USD',
+        baseMetrics,
+        upstreamMetrics: null,
+        windowBaseMetrics: baseMetrics,
+        windowUpstreamMetrics: null,
+        baseCoverageComplete: Boolean(
+          baseLogCoverage?.verified &&
+          Date.parse(baseLogCoverage.from) <= Date.parse(snapshotCandidate.from) &&
+          Date.parse(baseLogCoverage.to) >= Date.parse(snapshotCandidate.to)
+        ),
+        baseCost: baseMetrics.actualCost,
+        upstreamCost: snapshotCandidate.cost,
+        baseWindowCost: baseMetrics.actualCost,
+        keyTotalUpstreamCost: snapshotCandidate.cost,
+        pairedBaseCost: null,
+        pairedUpstreamCost: null,
+        requestCount: snapshotCandidate.requestCount,
+        pairing: null
+      };
+    }
+
+    const providerRecharge = this.#providerRecharge(target);
+    const baseRechargeMultiplier = finite(this.settings().baseRechargeMultiplier) || 1;
+    const cost = {
+      comparable: false,
+      rawComparable: false,
+      scope: candidate?.scope || null,
+      baseCost: candidate?.baseCost ?? null,
+      upstreamCost: candidate?.upstreamCost ?? null,
+      baseWindowCost: candidate?.baseWindowCost ?? null,
+      keyTotalUpstreamCost: candidate?.keyTotalUpstreamCost ?? null,
+      baseWindowCashEquivalent: null,
+      keyTotalUpstreamCashEquivalent: null,
+      windowComparable: false,
+      windowDifferenceAmount: null,
+      windowGrossMarginRatio: null,
+      windowProfitStatus: null,
+      windowReason: candidate ? null : 'provider_cost_unavailable',
+      pairedBaseCost: candidate?.pairedBaseCost ?? null,
+      pairedUpstreamCost: candidate?.pairedUpstreamCost ?? null,
+      extraUpstreamCost: null,
+      baseCashEquivalent: null,
+      upstreamCashEquivalent: null,
+      extraUpstreamCashEquivalent: null,
+      differenceAmount: null,
+      differenceRatio: null,
+      grossMarginRatio: null,
+      moreExpensive: null,
+      profitStatus: null,
+      currency: candidate?.currency || target.currency || null,
+      cashCurrency: null,
+      source: candidate?.source || null,
+      from: candidate?.from || null,
+      to: candidate?.to || null,
+      requestCount: candidate?.requestCount ?? null,
+      baseRechargeMultiplier,
+      providerRecharge,
+      reason: candidate ? null : 'provider_cost_unavailable',
+      requestedFrom: requestedWindow.from,
+      requestedTo: requestedWindow.to
+    };
+    if (!candidate) {
+      if ((usageDelta?.cost === 0 || balanceDelta?.cost === 0) &&
+        this.#baseRequestRows(accountId, requestedWindow.from, requestedWindow.to)
+          .some((row) => Number(row.actual_cost) > 0)) {
+        cost.reason = 'provider_counter_unchanged';
+      }
+      return cost;
+    }
+
+    if (
+      candidate.scope === 'paired_requests' &&
+      candidate.baseCoverageComplete &&
+      finite(candidate.keyTotalUpstreamCost) != null &&
+      finite(candidate.pairedUpstreamCost) != null
+    ) {
+      cost.extraUpstreamCost = round(Math.max(
+        0,
+        Number(candidate.keyTotalUpstreamCost) - Number(candidate.pairedUpstreamCost)
+      ), 8);
+    }
+    const baseCostAvailable = finite(candidate.baseCost) != null &&
+      candidate.baseMetrics?.actualCostSampleCount === candidate.baseMetrics?.requestCount;
+    const upstreamCostAvailable = finite(candidate.upstreamCost) != null && (
+      candidate.scope === 'snapshot_window' ||
+      candidate.upstreamMetrics?.actualCostSampleCount === candidate.upstreamMetrics?.requestCount
+    );
+    const baseWindowCostAvailable = finite(candidate.baseWindowCost) != null &&
+      candidate.windowBaseMetrics?.actualCostSampleCount === candidate.windowBaseMetrics?.requestCount;
+    const upstreamWindowCostAvailable = finite(candidate.keyTotalUpstreamCost) != null && (
+      candidate.scope === 'snapshot_window' ||
+      candidate.windowUpstreamMetrics?.actualCostSampleCount ===
+        candidate.windowUpstreamMetrics?.requestCount
+    );
+    const sameRawCurrency = String(candidate.currency || 'USD').toUpperCase() === 'USD';
+    cost.rawComparable = candidate.scope === 'paired_requests' && baseCostAvailable &&
+      upstreamCostAvailable && sameRawCurrency;
+    cost.baseCashEquivalent = baseCostAvailable
+      ? round(Number(candidate.baseCost) / baseRechargeMultiplier, 8)
+      : null;
+    cost.upstreamCashEquivalent = upstreamCostAvailable && providerRecharge.multiplier
+      ? round(Number(candidate.upstreamCost) / providerRecharge.multiplier, 8)
+      : null;
+    cost.baseWindowCashEquivalent = baseWindowCostAvailable
+      ? round(Number(candidate.baseWindowCost) / baseRechargeMultiplier, 8)
+      : null;
+    cost.keyTotalUpstreamCashEquivalent = upstreamWindowCostAvailable && providerRecharge.multiplier
+      ? round(Number(candidate.keyTotalUpstreamCost) / providerRecharge.multiplier, 8)
+      : null;
+    cost.extraUpstreamCashEquivalent = finite(cost.extraUpstreamCost) != null && providerRecharge.multiplier
+      ? round(Number(cost.extraUpstreamCost) / providerRecharge.multiplier, 8)
+      : null;
+    const upstreamCashCurrency = providerRecharge.paidCurrency || candidate.currency || 'USD';
+    cost.cashCurrency = String(upstreamCashCurrency).toUpperCase();
+
+    if (candidate.source !== 'provider_request_logs') {
+      cost.windowReason = 'request_logs_unavailable';
+    } else if (!candidate.baseCoverageComplete) {
+      cost.windowReason = 'base_request_logs_incomplete';
+    } else if (Number(target.shared_account_count) > 1) {
+      cost.windowReason = 'shared_provider_key';
+    } else if (!baseWindowCostAvailable) {
+      cost.windowReason = 'sub2api_cost_unavailable';
+    } else if (!upstreamWindowCostAvailable) {
+      cost.windowReason = 'provider_cost_unavailable';
+    } else if (!sameRawCurrency || cost.cashCurrency !== 'USD') {
+      cost.windowReason = 'currency_mismatch';
+    } else if (!providerRecharge.confirmed) {
+      cost.windowReason = 'provider_recharge_multiplier_missing';
+    } else {
+      cost.windowComparable = true;
+      cost.windowReason = null;
+      cost.windowDifferenceAmount = round(
+        cost.baseWindowCashEquivalent - cost.keyTotalUpstreamCashEquivalent,
+        8
+      );
+      cost.windowGrossMarginRatio = cost.baseWindowCashEquivalent > 0
+        ? round(cost.windowDifferenceAmount / cost.baseWindowCashEquivalent, 6)
+        : null;
+      cost.windowProfitStatus = Math.abs(cost.windowDifferenceAmount) < 1e-8
+        ? 'break_even'
+        : cost.windowDifferenceAmount > 0 ? 'profit' : 'loss';
+    }
+
+    if (candidate.scope !== 'paired_requests') {
+      cost.reason = Number(target.shared_account_count) > 1
+        ? 'shared_provider_key'
+        : 'request_pairing_unavailable';
+    } else if (!baseCostAvailable) {
+      cost.reason = 'sub2api_cost_unavailable';
+    } else if (!upstreamCostAvailable) {
+      cost.reason = 'provider_cost_unavailable';
+    } else if (!sameRawCurrency || cost.cashCurrency !== 'USD') {
+      cost.reason = 'currency_mismatch';
+    } else if (!providerRecharge.confirmed) {
+      cost.reason = 'provider_recharge_multiplier_missing';
+    } else {
+      cost.comparable = true;
+      cost.reason = null;
+      cost.differenceAmount = round(cost.baseCashEquivalent - cost.upstreamCashEquivalent, 8);
+      cost.differenceRatio = cost.upstreamCashEquivalent > 0
+        ? round(cost.differenceAmount / cost.upstreamCashEquivalent, 6)
+        : null;
+      cost.grossMarginRatio = cost.baseCashEquivalent > 0
+        ? round(cost.differenceAmount / cost.baseCashEquivalent, 6)
+        : null;
+      cost.moreExpensive = Math.abs(cost.differenceAmount) < 1e-8
+        ? 'same'
+        : cost.differenceAmount > 0 ? 'sub2api' : 'upstream';
+      cost.profitStatus = Math.abs(cost.differenceAmount) < 1e-8
+        ? 'break_even'
+        : cost.differenceAmount > 0 ? 'profit' : 'loss';
+    }
+    return cost;
+  }
+
   #comparisons(accountIds, since, until = nowIso()) {
     const comparisonByAccount = new Map(accountIds.map((accountId) => [String(accountId), {
       status: 'unmapped',
       source: 'unavailable',
       provider: null,
       targets: [],
+      base: null,
       upstream: null,
+      windowTotals: null,
+      window: { requestedFrom: since, requestedTo: until, from: null, to: null },
+      pairing: null,
+      overhead: null,
       coverage: null,
+      metricReason: 'no_enabled_mapping',
+      attribution: {
+        base: { scope: 'account_id', accountId: String(accountId) },
+        upstream: null,
+        mappingId: null
+      },
       cost: {
         comparable: false,
         baseCost: null,
@@ -1082,9 +1624,9 @@ class AccountMonitorService {
       for (const target of targets) if (target.key_id) keyIds.add(String(target.key_id));
     }
     const ids = [...keyIds];
-    const requestMetrics = this.#providerRequestMetrics(ids, since, until);
     const snapshots = this.#snapshotDeltas(ids, since, until);
     const staleBefore = Date.now() - Number(this.config.staleAfterMinutes || 60) * 60000;
+    const baseLogCoverage = this.#baseLogCoverage();
 
     for (const accountId of accountIds.map(String)) {
       const targets = targetsByAccount.get(accountId) || [];
@@ -1093,7 +1635,9 @@ class AccountMonitorService {
         connectionId: target.connection_id,
         providerName: target.provider_name,
         adapterType: target.adapter_type,
+        authMode: target.auth_mode,
         keyId: target.key_id,
+        remoteKeyId: target.remote_key_id,
         keyName: target.key_name,
         role: target.role
       }));
@@ -1105,7 +1649,8 @@ class AccountMonitorService {
           cost: {
             ...comparisonByAccount.get(accountId).cost,
             reason: 'multiple_upstreams'
-          }
+          },
+          metricReason: 'multiple_upstreams'
         });
         continue;
       }
@@ -1115,48 +1660,164 @@ class AccountMonitorService {
         connectionId: target.connection_id,
         name: target.provider_name,
         adapterType: target.adapter_type,
+        authMode: target.auth_mode,
         keyId: target.key_id,
+        remoteKeyId: target.remote_key_id,
         keyName: target.key_name,
         keyStatus: target.key_status,
         lastSyncAt: target.last_success_at,
-        lastErrorCode: target.last_error_code
+        lastErrorCode: target.last_error_code,
+        recharge: this.#providerRecharge(target)
       };
-      if (!target.key_id) {
+      if (!target.key_id || target.key_status === 'missing') {
         comparisonByAccount.set(accountId, {
           ...comparisonByAccount.get(accountId),
           status: 'missing_key',
           provider,
           targets: publicTargets,
+          metricReason: 'mapping_key_missing',
           cost: { ...comparisonByAccount.get(accountId).cost, reason: 'mapping_key_missing' }
         });
         continue;
       }
 
       const keyId = String(target.key_id);
-      const logMetrics = requestMetrics.get(keyId) || null;
-      const hasLogCoverage = Boolean(target.coverage_from && target.coverage_to);
+      const hasCoverageWindow = Boolean(target.coverage_from && target.coverage_to);
+      const hasLogCoverage = target.request_log_status === 'succeeded' && hasCoverageWindow;
+      const hasRetainedKeyLogCoverage = target.request_log_status !== 'succeeded' &&
+        hasCoverageWindow && Boolean(target.request_log_synced_at) &&
+        target.request_log_scope === 'key';
+      const hasKeyLogCoverage = (hasLogCoverage &&
+        target.request_log_scope === 'key') || hasRetainedKeyLogCoverage;
       const usageDelta = snapshots.usage.get(keyId) || null;
       const balanceDelta = snapshots.balance.get(keyId) || null;
       let source = 'unavailable';
+      let base = null;
       let upstream = null;
+      let windowTotals = null;
+      let window = { requestedFrom: since, requestedTo: until, from: null, to: null, source: null };
+      let pairing = null;
+      let overhead = null;
+      let logContext = null;
       let coverage = null;
-      if (hasLogCoverage) {
+      let metricReason = null;
+      if (hasKeyLogCoverage) {
         source = 'provider_request_logs';
-        upstream = logMetrics || emptyUpstreamMetrics(true);
+        const baseCoverageFrom = baseLogCoverage.verified ? Date.parse(baseLogCoverage.from) : null;
+        const baseCoverageTo = baseLogCoverage.verified ? Date.parse(baseLogCoverage.to) : null;
+        const windowFrom = new Date(Math.max(
+          Date.parse(since),
+          Date.parse(target.coverage_from),
+          Number.isFinite(baseCoverageFrom) ? baseCoverageFrom : Number.NEGATIVE_INFINITY
+        )).toISOString();
+        const windowTo = new Date(Math.min(
+          Date.parse(until),
+          Date.parse(target.coverage_to),
+          Number.isFinite(baseCoverageTo) ? baseCoverageTo : Number.POSITIVE_INFINITY
+        )).toISOString();
+        const baseCoverageComplete = baseLogCoverage.verified &&
+          Date.parse(baseLogCoverage.from) <= Date.parse(windowFrom) &&
+          Date.parse(baseLogCoverage.to) >= Date.parse(windowTo);
+        const baseRequestedCoverageComplete = baseLogCoverage.verified &&
+          Date.parse(baseLogCoverage.from) <= Date.parse(since);
+        window = {
+          requestedFrom: since,
+          requestedTo: until,
+          from: windowFrom,
+          to: windowTo,
+          source: 'request_log_intersection',
+          complete: Date.parse(windowFrom) <= Date.parse(since) &&
+            Date.parse(windowTo) >= Date.parse(until) && !Boolean(target.request_log_truncated) &&
+            baseRequestedCoverageComplete
+        };
+        const baseRows = Date.parse(windowTo) > Date.parse(windowFrom)
+          ? this.#baseRequestRows(accountId, windowFrom, windowTo)
+          : [];
+        const upstreamRows = Date.parse(windowTo) > Date.parse(windowFrom)
+          ? this.#providerRequestRows(keyId, windowFrom, windowTo)
+          : [];
+        const windowBase = requestMetricsFromRows(baseRows, 'USD');
+        const windowUpstream = requestMetricsFromRows(upstreamRows, target.currency || 'USD');
+        const paired = pairRequestRows(baseRows, upstreamRows);
+        const pairedBase = requestMetricsFromRows(paired.pairs.map((item) => item.base), 'USD');
+        const pairedUpstream = requestMetricsFromRows(
+          paired.pairs.map((item) => item.upstream),
+          target.currency || 'USD'
+        );
+        pairing = {
+          mode: paired.matchedCount > 0 ? 'paired_requests' : 'window_aggregate',
+          matchedCount: paired.matchedCount,
+          matchedBy: paired.matchedBy,
+          baseRequestCount: paired.baseRequestCount,
+          upstreamRequestCount: paired.upstreamRequestCount,
+          baseUnmatchedCount: paired.baseUnmatchedCount,
+          upstreamExtraCount: baseCoverageComplete ? paired.upstreamExtraCount : null,
+          observedUpstreamUnmatchedCount: paired.upstreamExtraCount,
+          extraCountTrusted: baseCoverageComplete,
+          baseMatchRate: paired.baseMatchRate,
+          upstreamMatchRate: baseCoverageComplete ? paired.upstreamMatchRate : null,
+          cacheMismatchCount: paired.cacheMismatchCount,
+          toleranceMs: REQUEST_PAIR_TIME_TOLERANCE_MS,
+          reason: paired.matchedCount === 0 && baseRows.length > 0 && upstreamRows.length > 0
+            ? 'request_pairing_unavailable'
+            : paired.baseUnmatchedCount > 0
+              ? 'request_pairing_partial'
+              : paired.cacheMismatchCount > 0 ? 'cache_token_mismatch' : null
+        };
+        base = paired.matchedCount > 0 ? pairedBase : windowBase;
+        upstream = paired.matchedCount > 0 ? pairedUpstream : windowUpstream;
+        windowTotals = { base: windowBase, upstream: windowUpstream };
+        overhead = paired.overhead;
+        logContext = {
+          window,
+          windowBase,
+          windowUpstream,
+          pairedBase,
+          pairedUpstream,
+          pairing,
+          baseCoverageComplete
+        };
         coverage = {
           from: target.coverage_from,
           to: target.coverage_to,
           complete: Date.parse(target.coverage_from) <= Date.parse(since) &&
+            Date.parse(target.coverage_to) >= Date.parse(until) &&
             !Boolean(target.request_log_truncated) && target.request_log_status === 'succeeded',
           truncated: Boolean(target.request_log_truncated),
           status: target.request_log_status,
           errorCode: target.request_log_error_code,
           syncedAt: target.request_log_synced_at,
-          stale: !target.last_success_at || Date.parse(target.last_success_at) < staleBefore,
-          attribution: 'mapped_key'
+          stale: target.request_log_status !== 'succeeded' || !target.request_log_synced_at ||
+            Date.parse(target.request_log_synced_at) < staleBefore,
+          attribution: 'mapped_key',
+          syncScope: target.request_log_scope
         };
+        metricReason = !baseLogCoverage.verified || !baseRequestedCoverageComplete
+          ? 'base_request_logs_incomplete'
+          : hasRetainedKeyLogCoverage
+          ? 'request_logs_stale'
+          : Boolean(target.request_log_truncated)
+          ? 'request_logs_truncated'
+          : Date.parse(target.coverage_from) > Date.parse(since)
+            ? 'request_logs_incomplete'
+            : windowUpstream.requestCount === 0
+              ? 'no_successful_requests'
+              : pairing.reason;
       } else if (usageDelta) {
         source = 'provider_usage_snapshots';
+        window = {
+          requestedFrom: since,
+          requestedTo: until,
+          from: usageDelta.from,
+          to: usageDelta.to,
+          source: 'snapshot_delta',
+          complete: Date.parse(usageDelta.from) <= Date.parse(since) &&
+            Date.parse(usageDelta.to) >= Date.parse(until)
+        };
+        base = requestMetricsFromRows(
+          this.#baseRequestRows(accountId, usageDelta.from, usageDelta.to),
+          'USD'
+        );
         upstream = {
           ...emptyUpstreamMetrics(false),
           requestCount: usageDelta.requestCount == null ? null : Math.round(usageDelta.requestCount),
@@ -1164,92 +1825,89 @@ class AccountMonitorService {
           outputTokens: usageDelta.outputTokens == null ? null : Math.round(usageDelta.outputTokens),
           actualCost: usageDelta.cost
         };
+        windowTotals = { base, upstream };
+        pairing = {
+          mode: 'window_aggregate',
+          matchedCount: 0,
+          baseRequestCount: base.requestCount,
+          upstreamRequestCount: upstream.requestCount,
+          baseUnmatchedCount: base.requestCount,
+          upstreamExtraCount: null,
+          baseMatchRate: null,
+          upstreamMatchRate: null,
+          cacheMismatchCount: 0,
+          reason: 'request_logs_unavailable'
+        };
         coverage = {
           from: usageDelta.from,
           to: usageDelta.to,
-          complete: Date.parse(usageDelta.from) <= Date.parse(since),
+          complete: Date.parse(usageDelta.from) <= Date.parse(since) &&
+            Date.parse(usageDelta.to) >= Date.parse(until),
           truncated: false,
           status: 'succeeded',
           syncedAt: target.last_success_at,
           stale: !target.last_success_at || Date.parse(target.last_success_at) < staleBefore,
           attribution: 'mapped_key'
         };
+        metricReason = usageDelta.requestCount == null
+          ? 'provider_performance_unavailable'
+          : usageDelta.requestCount > 0
+            ? 'provider_latency_unavailable'
+            : 'provider_counter_unchanged';
+      } else if (target.last_error_code || target.request_log_error_code ||
+        ['failed', 'unavailable', 'partial'].includes(target.request_log_status)) {
+        metricReason = 'provider_sync_unavailable';
+      } else if (hasLogCoverage) {
+        metricReason = 'request_logs_key_unverified';
+      } else if (['account', 'bearer', 'token_pair'].includes(String(target.auth_mode || '').toLowerCase())) {
+        metricReason = 'account_usage_not_attributable';
+      } else if (balanceDelta) {
+        metricReason = 'provider_performance_unavailable';
+      } else {
+        metricReason = 'provider_performance_unavailable';
       }
 
-      const costCandidate = usageDelta?.cost != null
-        ? usageDelta
-        : balanceDelta?.cost != null
-          ? balanceDelta
-          : hasLogCoverage && target.request_log_status === 'succeeded' &&
-            !Boolean(target.request_log_truncated) && logMetrics?.actualCost != null
-            ? {
-                source: 'provider_request_logs',
-                currency: logMetrics.currency || 'USD',
-                cost: logMetrics.actualCost,
-                from: new Date(Math.max(Date.parse(since), Date.parse(target.coverage_from))).toISOString(),
-                to: new Date(Math.min(Date.parse(until), Date.parse(target.coverage_to))).toISOString()
-              }
-            : null;
-      const cost = {
-        comparable: false,
-        baseCost: null,
-        upstreamCost: costCandidate?.cost ?? null,
-        differenceAmount: null,
-        differenceRatio: null,
-        moreExpensive: null,
-        currency: costCandidate?.currency || target.currency || null,
-        source: costCandidate?.source || null,
-        from: costCandidate?.from || null,
-        to: costCandidate?.to || null,
-        reason: costCandidate ? null : 'provider_cost_unavailable'
-      };
-      if (Number(target.shared_account_count) > 1) {
-        cost.reason = 'shared_provider_key';
-      } else if (costCandidate && cost.currency !== 'USD') {
-        cost.reason = 'currency_mismatch';
-      } else if (costCandidate && Date.parse(costCandidate.to) > Date.parse(costCandidate.from)) {
-        const base = this.#baseCost(accountId, costCandidate.from, costCandidate.to);
-        cost.baseCost = base.cost;
-        if (base.requestCount > 0 && base.costSampleCount === 0) {
-          cost.reason = 'sub2api_cost_unavailable';
-        } else if (
-          base.cost > 0 && Number(costCandidate.cost) === 0 &&
-          (
-            costCandidate.source === 'provider_key_snapshots' ||
-            (costCandidate.source === 'provider_usage_snapshots' &&
-              !(Number(usageDelta?.requestCount) > 0)) ||
-            (costCandidate.source === 'provider_request_logs' &&
-              !(Number(logMetrics?.requestCount) > 0))
-          )
-        ) {
-          cost.reason = 'provider_counter_unchanged';
-        } else {
-          cost.comparable = true;
-          cost.reason = null;
-          cost.differenceAmount = round(base.cost - costCandidate.cost, 8);
-          cost.differenceRatio = Number(costCandidate.cost) > 0
-            ? round(cost.differenceAmount / Number(costCandidate.cost), 6)
-            : null;
-          cost.moreExpensive = Math.abs(cost.differenceAmount) < 1e-8
-            ? 'same'
-            : cost.differenceAmount > 0 ? 'sub2api' : 'upstream';
-        }
-      }
+      const cost = this.#costComparison({
+        accountId,
+        target,
+        requestedWindow: { from: since, to: until },
+        logContext,
+        baseLogCoverage,
+        usageDelta,
+        balanceDelta
+      });
 
       comparisonByAccount.set(accountId, {
         status: 'mapped',
         source,
         provider,
         targets: publicTargets,
+        base,
         upstream,
+        windowTotals,
+        window,
+        pairing,
+        overhead,
         coverage,
+        baseCoverage: baseLogCoverage,
+        metricReason,
+        attribution: {
+          base: { scope: 'account_id', accountId },
+          upstream: {
+            scope: 'api_key_id',
+            connectionId: target.connection_id,
+            keyId: target.key_id,
+            remoteKeyId: target.remote_key_id
+          },
+          mappingId: target.mapping_id
+        },
         cost
       });
     }
     return comparisonByAccount;
   }
 
-  #upstreamTrends(comparison, since) {
+  #upstreamTrends(comparison, since, until) {
     if (comparison?.source !== 'provider_request_logs' || !comparison.provider?.keyId) return [];
     return this.db.prepare(`
       SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS requests,
@@ -1260,10 +1918,10 @@ class AccountMonitorService {
         SUM(cache_read_tokens) AS cache_read_tokens,
         SUM(COALESCE(actual_cost, 0)) AS cost
       FROM provider_request_samples
-      WHERE key_id = ? AND created_at >= ? AND status = 'success'
+      WHERE key_id = ? AND created_at >= ? AND created_at <= ? AND status = 'success'
       GROUP BY substr(created_at, 1, 10)
       ORDER BY day
-    `).all(comparison.provider.keyId, since).map((item) => {
+    `).all(comparison.provider.keyId, since, until).map((item) => {
       const promptTokens = integer(item.input_tokens) + integer(item.cache_creation_tokens) +
         integer(item.cache_read_tokens);
       return {
@@ -1279,11 +1937,12 @@ class AccountMonitorService {
 
   accounts(filters = {}) {
     const days = clamp(integer(filters.days, this.settings().lookbackDays), 1, 90);
-    const since = new Date(Date.now() - days * 86400000).toISOString();
+    const until = nowIso();
+    const since = new Date(Date.parse(until) - days * 86400000).toISOString();
     const rows = this.#accountRows(filters);
     const accountIds = rows.map((row) => row.account_id);
-    const metricMap = this.#metrics(accountIds, since);
-    const comparisonMap = this.#comparisons(accountIds, since);
+    const metricMap = this.#metrics(accountIds, since, until);
+    const comparisonMap = this.#comparisons(accountIds, since, until);
     const decorated = rows.map((row) => {
       const metrics = metricMap.get(String(row.account_id));
       const quality = qualityScore(metrics);
@@ -1310,16 +1969,22 @@ class AccountMonitorService {
     ].includes(filters.sortBy) ? filters.sortBy : 'qualityScore';
     const order = filters.order === 'asc' ? 1 : -1;
     decorated.sort((left, right) => {
+      const leftComparisonMetric = sortBy === 'requestCount'
+        ? left.comparison?.windowTotals?.base?.requestCount
+        : left.comparison?.base?.[sortBy];
+      const rightComparisonMetric = sortBy === 'requestCount'
+        ? right.comparison?.windowTotals?.base?.requestCount
+        : right.comparison?.base?.[sortBy];
       const leftValue = ['name', 'platform', 'status'].includes(sortBy)
         ? left[sortBy]
         : sortBy === 'costDifference'
           ? left.comparison?.cost?.differenceAmount
-          : left.metrics[sortBy];
+          : leftComparisonMetric ?? left.metrics[sortBy];
       const rightValue = ['name', 'platform', 'status'].includes(sortBy)
         ? right[sortBy]
         : sortBy === 'costDifference'
           ? right.comparison?.cost?.differenceAmount
-          : right.metrics[sortBy];
+          : rightComparisonMetric ?? right.metrics[sortBy];
       if (leftValue == null && rightValue == null) return left.name.localeCompare(right.name);
       if (leftValue == null) return 1;
       if (rightValue == null) return -1;
@@ -1341,7 +2006,8 @@ class AccountMonitorService {
     const capabilityItems = decorated.filter((item) => item.metrics.intelligenceScore != null);
     const mappedItems = decorated.filter((item) => item.comparison?.status === 'mapped');
     const supplierLogItems = mappedItems.filter((item) => item.comparison.source === 'provider_request_logs');
-    const comparableCostItems = mappedItems.filter((item) => item.comparison.cost?.comparable);
+    const pairedItems = supplierLogItems.filter((item) => item.comparison.pairing?.matchedCount > 0);
+    const comparableCostItems = mappedItems.filter((item) => item.comparison.cost?.windowComparable);
     return {
       items: decorated.slice(offset, offset + pageSize),
       pagination: { page, pageSize, total, totalPages },
@@ -1357,6 +2023,11 @@ class AccountMonitorService {
         capabilityAccountCount: capabilityItems.length,
         mappedAccountCount: mappedItems.length,
         supplierLogAccountCount: supplierLogItems.length,
+        pairedAccountCount: pairedItems.length,
+        upstreamExtraRequestCount: pairedItems.reduce(
+          (sum, item) => sum + Number(item.comparison.pairing?.upstreamExtraCount || 0),
+          0
+        ),
         comparableCostAccountCount: comparableCostItems.length,
         supplierLastSyncAt: latestIso(mappedItems.map((item) => item.comparison.provider?.lastSyncAt)),
         days
@@ -1376,10 +2047,13 @@ class AccountMonitorService {
     ).get(String(accountId));
     if (!row) throw new AppError('ACCOUNT_NOT_FOUND', 'Sub2API account was not found', { status: 404 });
     const days = clamp(integer(options.days, this.settings().lookbackDays), 1, 90);
-    const since = new Date(Date.now() - days * 86400000).toISOString();
-    const metrics = this.#metrics([String(accountId)], since).get(String(accountId));
-    const comparison = this.#comparisons([String(accountId)], since).get(String(accountId));
+    const until = nowIso();
+    const since = new Date(Date.parse(until) - days * 86400000).toISOString();
+    const metrics = this.#metrics([String(accountId)], since, until).get(String(accountId));
+    const comparison = this.#comparisons([String(accountId)], since, until).get(String(accountId));
     const quality = qualityScore(metrics);
+    const trendFrom = comparison?.window?.from || since;
+    const trendTo = comparison?.window?.to || until;
     const trends = this.db.prepare(`
       SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS requests,
         AVG(CASE WHEN stream = 1 AND first_token_ms > 0 THEN first_token_ms END) AS ttft_ms,
@@ -1389,10 +2063,10 @@ class AccountMonitorService {
         SUM(cache_read_tokens) AS cache_read_tokens,
         SUM(COALESCE(actual_cost, 0)) AS cost
       FROM sub2api_account_request_samples
-      WHERE account_id = ? AND created_at >= ?
+      WHERE account_id = ? AND created_at >= ? AND created_at <= ?
       GROUP BY substr(created_at, 1, 10)
       ORDER BY day
-    `).all(String(accountId), since).map((item) => {
+    `).all(String(accountId), trendFrom, trendTo).map((item) => {
       const promptTokens = integer(item.input_tokens) + integer(item.cache_creation_tokens) + integer(item.cache_read_tokens);
       return {
         day: item.day,
@@ -1421,9 +2095,11 @@ class AccountMonitorService {
       metrics: { ...metrics, qualityScore: quality.score, quality },
       comparison,
       trends,
-      upstreamTrends: this.#upstreamTrends(comparison, since),
+      upstreamTrends: this.#upstreamTrends(comparison, trendFrom, trendTo),
       probes,
-      days
+      days,
+      requestedWindow: { from: since, to: until },
+      comparisonWindow: { from: trendFrom, to: trendTo }
     };
   }
 

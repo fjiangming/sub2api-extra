@@ -6,7 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
-test('schema v19 migration preserves mappings and adds provider request samples', (t) => {
+test('schema v21 migration preserves mappings and adds account comparison settings', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
   let db = createDatabase(databasePath);
@@ -119,7 +119,7 @@ test('schema v19 migration preserves mappings and adds provider request samples'
   db.close();
 
   db = createDatabase(databasePath);
-  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 19').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 21').get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());
   assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'recharge_url'));
@@ -129,6 +129,16 @@ test('schema v19 migration preserves mappings and adds provider request samples'
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_account_probe_runs'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_request_samples'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_request_log_sync_state'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_request_key_sync_state'").get());
+  const accountMonitorColumns = new Set(
+    db.prepare('PRAGMA table_info(sub2api_account_monitor_settings)').all().map((column) => column.name)
+  );
+  assert.equal(accountMonitorColumns.has('base_recharge_multiplier'), true);
+  assert.equal(
+    db.prepare('SELECT base_recharge_multiplier FROM sub2api_account_monitor_settings WHERE id = 1').get()
+      .base_recharge_multiplier,
+    1
+  );
   const actionColumns = new Set(db.prepare('PRAGMA table_info(automation_actions)').all().map((column) => column.name));
   assert.equal(actionColumns.has('error_code'), true);
   assert.equal(actionColumns.has('failure_stage'), true);

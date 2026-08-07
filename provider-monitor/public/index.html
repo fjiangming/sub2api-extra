@@ -226,6 +226,7 @@
         <label><span>日志同步间隔（分钟）</span><input name="syncIntervalMinutes" type="number" min="5" max="1440" required></label>
         <label><span>默认观察窗口（天）</span><input name="lookbackDays" type="number" min="1" max="90" required></label>
         <label><span>样本保留（天）</span><input name="sampleRetentionDays" type="number" min="1" max="3650" required></label>
+        <label><span>基座充值倍率</span><input name="baseRechargeMultiplier" type="number" min="0.000001" max="1000000" step="0.000001" required></label>
         <label class="toggle-field"><input name="probeEnabled" type="checkbox"><span>定时执行主动检测</span></label>
         <label><span>主动检测间隔（分钟）</span><input name="probeIntervalMinutes" type="number" min="15" max="10080" required></label>
         <label><span>检测并发</span><input name="probeConcurrency" type="number" min="1" max="10" required></label>
@@ -242,13 +243,13 @@
       <div class="metric-rules-body">
         <dl class="metric-rules-list">
           <div id="metric-rule-quality" tabindex="-1"><dt>质量分</dt><dd><code>（延迟分 × 40% + 检测通过率 × 40% + 能力分 × 20%）÷ 可用权重之和</code><p>缺少某一维度时，只对已有维度重新归一化。延迟分由首字 P95 换算：1.5 秒及以内为 100 分，3/6/12/30 秒分别为 85/65/40/10 分，区间内线性插值，超过 30 秒为 0 分。</p></dd></div>
-          <div id="metric-rule-source" tabindex="-1"><dt>双源数据</dt><dd><code>基座 = Sub2API admin usage；上游 = 映射供应商 Key 的请求日志或累计快照</code><p>New API 类供应商可提供逐请求性能数据；其他供应商按能力使用累计 usage 或 Key 已用额度。供应商没有返回的指标显示“未提供”，不会按 0 计算。</p></dd></div>
-          <div id="metric-rule-cost" tabindex="-1"><dt>费用对比</dt><dd><code>费用差额 = 同窗 Sub2API actual_cost 合计 - 同窗供应商 Key 消耗增量</code><p>优先使用供应商累计 usage 的首末差值，其次使用 Key 已用额度快照，最后使用完整的逐请求账单日志。仅当映射到单一非共享 Key、币种一致且起止快照有效时计算高低；若基座有费用但上游累计费用和请求均未变化，则标记为计数器未变化而不下结论。百分比以供应商费用为分母。</p></dd></div>
-          <div id="metric-rule-ttft" tabindex="-1"><dt>首字 P95</dt><dd><code>排序后的有效首字样本 [ceil(样本数 × 0.95)]</code><p>基座和上游分别计算。只统计流式请求、首字时间大于 0 的样本；每侧每个账号采用观察窗口内最近最多 500 个请求样本，单位为毫秒。</p></dd></div>
-          <div id="metric-rule-cache" tabindex="-1"><dt>缓存读取率</dt><dd><code>Σ 缓存读取 Token ÷ Σ（输入 Token + 缓存写入 Token + 缓存读取 Token）× 100%</code><p>基座和上游分别按各自已采集请求汇总。该指标受请求内容和客户端缓存策略影响，不进入质量分。</p></dd></div>
+          <div id="metric-rule-source" tabindex="-1"><dt>双源数据</dt><dd><code>基座 = Sub2API account_id；上游 = 映射供应商 api_key_id；实际窗口 = 所选窗口 ∩ 基座精确日志覆盖窗口 ∩ 上游日志覆盖窗口</code><p>一次列表查询固定同一个结束时间。基座管理用量接口使用 exact_total 精确分页并回补整个配置窗口；未完成精确回补时不判断 Key 总账盈亏，也不把未匹配的上游请求认定为额外流量。逐请求日志先按 request_id 一对一匹配，无法直接匹配时，再按模型、输入/输出/缓存 Token 和 5 秒时间容差配对。</p></dd></div>
+          <div id="metric-rule-cost" tabindex="-1"><dt>费用对比</dt><dd><code>Key 总账毛差 = Σ基座 actual_cost ÷ 基座充值倍率 - Σ上游 actual_cost ÷ 上游充值倍率</code><p>列表优先展示统一窗口内整个映射 Key 的实际收入、实际支出和总账毛差；详情另行展示成功配对请求的可归因收支。Sub2API 的 actual_cost / total_actual_cost 表示实际扣除，对应界面绿色“总消费”；total_cost 表示标准价，account_stats_cost / total_account_cost 表示按账号倍率计算的账号口径成本，后二者不作为真实收支比较。只有基座精确分页完成、费用样本完整、Key 未被多个账号共享、币种一致且充值倍率明确时才判断总账盈亏。</p></dd></div>
+          <div id="metric-rule-ttft" tabindex="-1"><dt>首字 P95</dt><dd><code>首字 P95 = 排序样本 [ceil(n × 0.95)]；基座额外 P95 = percentile(base_ttft - upstream_ttft, 95%)</code><p>基座和上游只使用同一窗口内已配对、流式且首字时间大于 0 的请求，每侧最多采用最近 500 个样本。差值先逐请求相减再取分位数，不再用两个独立 P95 直接相减。</p></dd></div>
+          <div id="metric-rule-cache" tabindex="-1"><dt>缓存读取率</dt><dd><code>Σ 缓存读取 Token ÷ Σ（输入 Token + 缓存写入 Token + 缓存读取 Token）× 100%</code><p>两侧均基于同一窗口内的同一批配对请求汇总。若同一配对请求的缓存读取或写入 Token 不一致，页面会标记异常；该指标不进入质量分。</p></dd></div>
           <div id="metric-rule-probe" tabindex="-1"><dt>检测通过率</dt><dd><code>成功完成的主动检测数 ÷ 主动检测总数 × 100%</code><p>每个账号采用观察窗口内最近最多 200 次主动检测；连通失败、超时或测试未正常结束均计为失败。</p></dd></div>
           <div id="metric-rule-capability" tabindex="-1"><dt>能力分</dt><dd><code>（算术 + 逻辑 + 数列 + 排序变换 + 校验码的正确项数）÷ 5 × 100</code><p>每次检测按账号和批次动态生成题目，降低固定答案记忆的影响。账号能力分是观察窗口内已覆盖检测的平均值，最多采用最近 200 次。当前仅 OpenAI 和 Gemini 支持自定义题集；指令遵循分单独展示且不进入质量分。若基座只返回固定问候语，记录为“能力题未执行 / 未覆盖”，不会误算为 0 分。</p></dd></div>
-          <div id="metric-rule-requests" tabindex="-1"><dt>请求数</dt><dd><code>基座 COUNT（Sub2API usage log ID）；上游 COUNT（供应商 log ID）或累计请求差值</code><p>逐请求数据均按来源日志 ID 去重并只统计成功记录；只有累计用量的供应商使用观察窗口内首末快照差值。两侧数据覆盖时间不同可能产生数量差异。</p></dd></div>
+          <div id="metric-rule-requests" tabindex="-1"><dt>请求数</dt><dd><code>统一实际窗口内：基座 COUNT（Sub2API usage log ID）；上游 COUNT（供应商成功 log ID）</code><p>逐请求数据按来源日志 ID 去重，基座分页使用 exact_total=true。请求数展示同一时间窗口内各侧总量；只有基座与上游日志覆盖均完整时，未配对的上游请求才标记为“上游未归因”。只有累计用量的供应商使用相同快照起止时间的请求差值。</p></dd></div>
         </dl>
       </div>
       <footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="button" data-dialog-close>关闭</button></footer>

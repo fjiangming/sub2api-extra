@@ -80,6 +80,7 @@ const accountMonitorSettingsSchema = z.object({
   syncIntervalMinutes: z.number().int().min(5).max(1440).optional(),
   lookbackDays: z.number().int().min(1).max(90).optional(),
   sampleRetentionDays: z.number().int().min(1).max(3650).optional(),
+  baseRechargeMultiplier: z.number().positive().max(1000000).optional(),
   probeEnabled: z.boolean().optional(),
   probeIntervalMinutes: z.number().int().min(15).max(10080).optional(),
   probePlatforms: z.array(z.string().trim().min(1).max(40)).max(20).optional(),

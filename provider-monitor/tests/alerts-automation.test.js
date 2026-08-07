@@ -83,7 +83,7 @@ test('alert remains acknowledged while matched and resolves after balance recove
   assert.equal(event.acknowledged_at, null);
 });
 
-test('provider balance thresholds create, deduplicate, and recover independent built-in alerts', async (t) => {
+test('provider balance thresholds deduplicate alerts and suppress recovery notifications', async (t) => {
   const context = createTestContext();
   t.after(() => context.cleanup());
   const providers = new ProviderRepository(context.db, context.config);
@@ -137,17 +137,24 @@ test('provider balance thresholds create, deduplicate, and recover independent b
   events = alerts.listEvents();
   assert.equal(events.find((event) => event.details.alertLevel === 1).status, 'active');
   assert.equal(events.find((event) => event.details.alertLevel === 2).status, 'resolved');
-  assert.equal(delivered.length, 3);
+  assert.equal(delivered.length, 2);
   assert.equal(queries.summary().accounts.find((account) => account.connectionId === provider.id).status, 'warning');
 
   insertSnapshot(context.db, provider.id, 2, new Date(capturedAt + 3000).toISOString());
   await alerts.evaluateConnection(provider.id);
   assert.equal(alerts.listEvents().find((event) => event.details.alertLevel === 2).status, 'active');
-  assert.equal(delivered.length, 4);
+  assert.equal(delivered.length, 3);
   providers.update(provider.id, { secondaryWarningThreshold: null });
   await alerts.evaluateConnection(provider.id);
   assert.equal(alerts.listEvents().find((event) => event.details.alertLevel === 2).status, 'resolved');
-  assert.equal(delivered.length, 5);
+  assert.equal(delivered.length, 3);
+
+  insertSnapshot(context.db, provider.id, 20, new Date(capturedAt + 4000).toISOString());
+  await alerts.evaluateConnection(provider.id);
+  assert.equal(alerts.listEvents().find((event) => event.details.alertLevel === 1).status, 'resolved');
+  assert.equal(delivered.length, 3);
+  assert.equal(delivered.some((event) => event.severity === 'info'), false);
+  assert.equal(queries.summary().accounts.find((account) => account.connectionId === provider.id).status, 'healthy');
 });
 
 test('low balance alert sends the configured recharge link to WeCom', async (t) => {

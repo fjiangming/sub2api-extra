@@ -236,45 +236,72 @@ tbody tr:hover { background: #fafbfa; }
 .account-monitor-filters { align-items: stretch; }
 .account-monitor-filters .search-box { flex: 1 1 260px; }
 .account-monitor-filters select { width: auto; min-width: 128px; }
-.account-quality-table table { min-width: 1710px; }
-.account-quality-table th, .account-quality-table td { height: 54px; }
+.account-quality-table { overflow-x: hidden; }
+.account-quality-table table { min-width: 0; table-layout: fixed; }
+.account-quality-table col.account-col-select { width: 2.5%; }
+.account-quality-table col.account-col-identity { width: 15%; }
+.account-quality-table col.account-col-provider { width: 10.5%; }
+.account-quality-table col.account-col-requests, .account-quality-table col.account-col-cache { width: 7%; }
+.account-quality-table col.account-col-ttft, .account-quality-table col.account-col-duration, .account-quality-table col.account-col-speed { width: 8%; }
+.account-quality-table col.account-col-cost { width: 12%; }
+.account-quality-table col.account-col-probe { width: 7%; }
+.account-quality-table col.account-col-capability { width: 6%; }
+.account-quality-table col.account-col-quality, .account-quality-table col.account-col-actions { width: 4.5%; }
+.account-quality-table th, .account-quality-table td { height: 62px; padding: 7px 6px; overflow: hidden; }
+.account-quality-table th { font-size: 10px; line-height: 1.25; white-space: normal; }
+.account-quality-table .metric-rule-trigger { min-width: 0; gap: 2px; white-space: normal; }
+.account-quality-table .metric-rule-icon { flex: 0 0 18px; width: 18px; height: 18px; min-height: 18px; }
+.account-quality-table .metric-rule-icon svg { width: 12px; height: 12px; }
 .metric-rule-trigger { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; white-space: nowrap; }
 .metric-rule-icon { width: 22px; height: 22px; min-height: 22px; padding: 0; border: 0; border-radius: 50%; display: inline-grid; place-items: center; color: var(--muted); background: transparent; cursor: pointer; }
 .metric-rule-icon:hover, .metric-rule-icon:focus-visible { color: var(--accent); background: var(--accent-soft); outline: none; }
 .metric-rule-icon svg { width: 14px; height: 14px; }
-.selection-cell { width: 42px; min-width: 42px; padding-left: 12px; padding-right: 6px; text-align: center; }
+.selection-cell { width: auto; min-width: 0; padding-left: 6px; padding-right: 4px; text-align: center; }
 .selection-cell input { width: 16px; height: 16px; min-height: 0; padding: 0; accent-color: var(--accent); }
-.table-metric-note, .probe-status-cell small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.table-metric-note, .probe-status-cell small { display: block; max-width: 100%; margin-top: 3px; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .metric-empty { color: var(--muted); font-size: 11px; }
 .probe-status-cell { min-width: 96px; }
-.account-quality-table table { min-width: 1960px; }
-.account-provider-cell { min-width: 140px; display: grid; justify-items: start; gap: 4px; }
-.account-provider-cell strong { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.account-provider-cell small { max-width: 160px; color: var(--muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.account-comparison-metric { min-width: 116px; display: grid; gap: 4px; }
-.account-comparison-metric > span { min-height: 20px; display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 6px; }
+.account-identity-cell { min-width: 0; }
+.account-identity-main { min-width: 0; display: flex; align-items: center; gap: 5px; }
+.account-identity-main strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-identity-main .badge { flex: 0 0 auto; min-height: 19px; padding: 0 5px; font-size: 9px; }
+.account-identity-cell > small { max-width: 100%; }
+.account-provider-cell { min-width: 0; display: grid; justify-items: start; gap: 3px; overflow: hidden; }
+.account-provider-cell strong, .account-provider-cell small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-provider-cell strong { font-size: 11px; }
+.account-provider-cell small { color: var(--muted); font-size: 9px; }
+.account-provider-cell .badge { min-height: 19px; max-width: 100%; padding: 0 5px; overflow: hidden; font-size: 9px; text-overflow: ellipsis; }
+.account-comparison-metric { width: 100%; min-width: 0; display: grid; gap: 3px; overflow: hidden; }
+.account-comparison-metric > span { min-width: 0; min-height: 18px; display: grid; grid-template-columns: 28px minmax(0, 1fr); align-items: center; gap: 3px; }
 .account-comparison-metric small { margin: 0; font-size: 9px; font-weight: 700; line-height: 1.2; text-align: left; }
-.account-comparison-metric strong { min-width: 0; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.account-comparison-metric strong { min-width: 0; overflow: hidden; font-size: 10px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .account-comparison-metric .source-base { color: #2f6fba; }
 .account-comparison-metric .source-upstream { color: #147d64; }
-.account-comparison-metric em { grid-column: 2; color: var(--muted); font-size: 9px; font-style: normal; line-height: 1.2; white-space: nowrap; }
-.account-ttft-comparison { min-width: 140px; }
-.account-cost-cell { min-width: 172px; display: grid; justify-items: end; gap: 5px; }
-.cost-delta { font-size: 10px; font-weight: 700; white-space: nowrap; }
+.account-comparison-metric em { grid-column: 2; overflow: hidden; color: var(--muted); font-size: 8px; font-style: normal; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+.account-ttft-comparison { min-width: 0; }
+.account-cost-cell { width: 100%; min-width: 0; display: grid; justify-items: end; gap: 3px; overflow: hidden; }
+.account-cost-cell .account-comparison-metric > span { grid-template-columns: 38px minmax(0, 1fr); }
+.cost-delta { max-width: 100%; overflow: hidden; font-size: 9px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .cost-delta.healthy { color: var(--accent); }
 .cost-delta.warning { color: var(--warning); }
+.account-probe-cell > strong, .account-capability-cell > strong { font-size: 11px; }
+.account-probe-latest { max-width: 100%; margin-top: 4px; display: grid; justify-items: end; gap: 2px; overflow: hidden; }
+.account-probe-latest .badge { min-height: 19px; max-width: 100%; padding: 0 5px; overflow: hidden; font-size: 9px; text-overflow: ellipsis; }
+.account-probe-latest small { max-width: 100%; overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.account-quality-table .actions-cell { min-width: 0; padding-left: 2px; padding-right: 2px; gap: 3px; overflow: visible; }
+.account-quality-table .actions-cell .icon-button.small { width: 27px; height: 27px; }
 .account-comparison-detail .section-header { align-items: center; }
 .account-comparison-detail .section-header .badge { flex: 0 0 auto; }
 .account-comparison-detail table { min-width: 720px; }
 .account-comparison-detail td, .account-comparison-detail th { height: 46px; }
 .cost-comparison-row { background: #f7faf8; }
 .cost-comparison-row td:first-child small { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
-.quality-score { width: 64px; margin-left: auto; display: grid; justify-items: end; gap: 4px; }
+.quality-score { width: min(64px, 100%); margin-left: auto; display: grid; justify-items: end; gap: 4px; }
 .quality-score strong { font-size: 14px; font-variant-numeric: tabular-nums; }
 .quality-score strong.healthy { color: var(--accent); }
 .quality-score strong.warning { color: var(--warning); }
 .quality-score strong.failed { color: var(--danger); }
-.quality-score-track { width: 64px; height: 4px; border-radius: 2px; overflow: hidden; background: var(--surface-muted); }
+.quality-score-track { width: 100%; height: 4px; border-radius: 2px; overflow: hidden; background: var(--surface-muted); }
 .quality-score-track > span { display: block; height: 100%; }
 .quality-score-track > span.healthy { background: var(--accent); }
 .quality-score-track > span.warning { background: var(--warning); }
@@ -463,6 +490,29 @@ details summary { padding: 13px 18px; cursor: pointer; font-weight: 650; font-si
 .recharge-entry-panel form { margin: 0; }
 .recharge-entry-panel .button { width: 100%; justify-content: center; }
 
+@media (max-width: 1180px) {
+  .account-quality-table { border: 0; overflow: visible; background: transparent; }
+  .account-quality-table table, .account-quality-table tbody { width: 100%; display: block; }
+  .account-quality-table colgroup { display: none; }
+  .account-quality-table thead { width: 1px; height: 1px; position: absolute; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; clip-path: inset(50%); }
+  .account-quality-table tbody { display: grid; gap: 10px; }
+  .account-quality-table tbody tr { position: relative; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: var(--line); }
+  .account-quality-table tbody td { width: auto; min-width: 0; min-height: 64px; height: auto; padding: 10px 12px; border: 0; display: grid; grid-template-columns: minmax(84px, .75fr) minmax(0, 1.25fr); align-content: center; align-items: start; gap: 10px; overflow: visible; background: var(--surface); text-align: right; }
+  .account-quality-table tbody td:not(.selection-cell):not(.actions-cell)::before { content: attr(data-label); color: var(--muted); font-size: 10px; font-weight: 700; line-height: 1.35; text-align: left; }
+  .account-quality-table tbody .account-identity-cell { min-height: 72px; padding: 13px 84px 13px 48px; grid-column: 1 / -1; display: block; text-align: left; }
+  .account-quality-table tbody .account-identity-cell::before { display: none; }
+  .account-quality-table .account-identity-main strong { font-size: 13px; }
+  .account-quality-table tbody .selection-cell { width: 24px; min-height: 24px; position: absolute; z-index: 1; top: 23px; left: 12px; padding: 4px; display: grid; place-items: center; background: transparent; }
+  .account-quality-table tbody .actions-cell { width: auto; min-height: 30px; position: absolute; z-index: 1; top: 20px; right: 12px; padding: 0; display: flex; background: transparent; }
+  .account-quality-table tbody .account-provider-column, .account-quality-table tbody .account-speed-cell, .account-quality-table tbody .account-cost-column, .account-quality-table tbody .account-quality-cell { grid-column: 1 / -1; }
+  .account-quality-table tbody .account-provider-cell { justify-items: end; }
+  .account-quality-table tbody .account-comparison-metric, .account-quality-table tbody .account-cost-cell { grid-column: 2; }
+  .account-quality-table tbody .account-cost-cell { justify-items: end; }
+  .account-quality-table tbody .account-probe-latest { grid-column: 2; }
+  .account-quality-table tbody .table-metric-note { grid-column: 2; }
+  .account-quality-table tbody .quality-score { grid-column: 2; width: min(64px, 100%); }
+}
+
 @media (max-width: 1050px) {
   .stats-grid { grid-template-columns: 1fr 1fr; }
   .stat:nth-child(2) { border-right: 0; }
@@ -474,6 +524,9 @@ details summary { padding: 13px 18px; cursor: pointer; font-weight: 650; font-si
 }
 
 @media (max-width: 720px) {
+  .account-quality-table tbody tr { grid-template-columns: minmax(0, 1fr); }
+  .account-quality-table tbody .account-identity-cell, .account-quality-table tbody .account-provider-column, .account-quality-table tbody .account-speed-cell, .account-quality-table tbody .account-cost-column, .account-quality-table tbody .account-quality-cell { grid-column: 1; }
+  .account-quality-table tbody td { grid-template-columns: minmax(94px, .8fr) minmax(0, 1.2fr); }
   .base-instance-bar { align-items: flex-start; flex-direction: column; }
   .base-instance-bar .status-summary { width: 100%; justify-content: flex-start; }
   .security-setting-row { align-items: stretch; flex-direction: column; }

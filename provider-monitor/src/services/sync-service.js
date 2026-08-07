@@ -166,15 +166,42 @@ class SyncService {
         }
         keysResult.value = keysResult.value.filter((key) => monitoredKeyIds.has(String(key.remoteId)));
       }
+      const mappedRemoteKeyIds = connection.adapter_type === 'sub2api'
+        ? new Set(this.db.prepare(`
+            SELECT DISTINCT k.remote_id
+            FROM sub2api_mappings m
+            JOIN remote_keys k ON k.id = m.key_id
+            WHERE m.connection_id = ? AND m.enabled = 1 AND k.status != 'missing'
+          `).all(connectionId).map((row) => String(row.remote_id)))
+        : null;
+      const requestLogKeys = keysResult.ok
+        ? connection.adapter_type === 'sub2api' && monitoredKeyIds == null
+          ? keysResult.value.filter((key) => mappedRemoteKeyIds.has(String(key.remoteId)))
+          : keysResult.value
+        : [];
       const requestLogOptions = connection.type_config_json?.requestLogs || {};
-      const requestLogResult = probe.capabilities?.requestLogs
+      const shouldLoadRequestLogs = probe.capabilities?.requestLogs &&
+        (connection.adapter_type !== 'sub2api' || requestLogKeys.length > 0);
+      const requestLogResult = shouldLoadRequestLogs
         ? await this.#optional('getRequestLogs', () => adapter.getRequestLogs({
             lookbackDays: requestLogOptions.lookbackDays || 30,
             maxRecords: requestLogOptions.maxRecords || 10000,
-            keys: keysResult.ok ? keysResult.value : [],
-            restrictToKeys: monitoredKeyIds != null
+            keys: requestLogKeys,
+            restrictToKeys: monitoredKeyIds != null || mappedRemoteKeyIds?.size > 0
           }), warnings)
         : null;
+      if (requestLogResult?.ok && Array.isArray(requestLogResult.value?.keyCoverage)) {
+        const unavailableKeys = requestLogResult.value.keyCoverage.filter(
+          (item) => item.status !== 'succeeded'
+        );
+        if (unavailableKeys.length > 0) {
+          warnings.push({
+            capability: 'getRequestLogs',
+            code: 'REQUEST_LOG_KEYS_PARTIAL',
+            message: `${unavailableKeys.length} monitored API Key(s) did not return request logs`
+          });
+        }
+      }
       const providerDynamicRouteConfig = connection.type_config_json?.dynamicRouteRate;
       const officialModelPrices = parseJson(
         this.db.prepare(`SELECT value_json FROM settings WHERE key = 'officialModelPrices'`).get()?.value_json,
@@ -295,6 +322,7 @@ class SyncService {
         keysComplete: keysResult.ok,
         usage: usageResult.value,
         requestLogs: requestLogResult,
+        requestLogKeys,
         recharge: rechargeResult.ok ? rechargeResult.value : null,
         dynamicRoute: dynamicRouteResult,
         dynamicRouteConfig,
@@ -370,7 +398,8 @@ class SyncService {
       const requestLogCount = this.#insertRequestLogs(
         connection.id,
         data.requestLogs,
-        data.capturedAt
+        data.capturedAt,
+        data.requestLogKeys || data.keys
       );
       if (data.recharge) this.providers.recordRecharge(connection.id, data.recharge, data.capturedAt);
       const dynamicRouteKeyCount = this.#recordDynamicRouteRates(
@@ -761,9 +790,29 @@ class SyncService {
     }
   }
 
-  #insertRequestLogs(connectionId, result, capturedAt) {
+  #insertRequestLogs(connectionId, result, capturedAt, keys = []) {
     if (!result) return 0;
+    const keyIdByRemoteId = this.db.prepare(`
+      SELECT id, remote_id FROM remote_keys WHERE connection_id = ?
+    `).all(connectionId).reduce(
+      (map, row) => map.set(String(row.remote_id), row.id),
+      new Map()
+    );
+    const markKeyUnavailable = this.db.prepare(`
+      INSERT INTO provider_request_key_sync_state(
+        key_id, connection_id, status, last_error_code, last_error_message, updated_at
+      ) VALUES (?, ?, 'unavailable', ?, ?, ?)
+      ON CONFLICT(key_id) DO UPDATE SET
+        status = excluded.status,
+        last_error_code = excluded.last_error_code,
+        last_error_message = excluded.last_error_message,
+        updated_at = excluded.updated_at
+    `);
     if (!result.ok) {
+      const errorCode = result.error?.code || 'REQUEST_LOG_UNAVAILABLE';
+      const errorMessage = redactText(
+        result.error?.message || 'Provider request logs are unavailable'
+      ).slice(0, 1000);
       this.db.prepare(`
         INSERT INTO provider_request_log_sync_state(
           connection_id, status, last_error_code, last_error_message, updated_at
@@ -775,19 +824,17 @@ class SyncService {
           updated_at = excluded.updated_at
       `).run(
         connectionId,
-        result.error?.code || 'REQUEST_LOG_UNAVAILABLE',
-        redactText(result.error?.message || 'Provider request logs are unavailable').slice(0, 1000),
+        errorCode,
+        errorMessage,
         capturedAt
       );
+      for (const key of keys) {
+        const keyId = keyIdByRemoteId.get(String(key.remoteId));
+        if (keyId) markKeyUnavailable.run(keyId, connectionId, errorCode, errorMessage, capturedAt);
+      }
       return 0;
     }
 
-    const keyIdByRemoteId = this.db.prepare(`
-      SELECT id, remote_id FROM remote_keys WHERE connection_id = ?
-    `).all(connectionId).reduce(
-      (map, row) => map.set(String(row.remote_id), row.id),
-      new Map()
-    );
     const insert = this.db.prepare(`
       INSERT INTO provider_request_samples(
         connection_id, key_id, source_log_id, request_id, model, upstream_model,
@@ -836,11 +883,62 @@ class SyncService {
         capturedAt
       );
     }
+    const suppliedCoverage = Array.isArray(result.value?.keyCoverage)
+      ? result.value.keyCoverage
+      : [];
+    const keyCoverage = suppliedCoverage.length > 0
+      ? suppliedCoverage
+      : keys.map((key) => ({
+          remoteKeyId: String(key.remoteId),
+          status: 'succeeded',
+          coverageFrom: result.value?.coverageFrom || null,
+          coverageTo: result.value?.coverageTo || capturedAt,
+          truncated: Boolean(result.value?.truncated),
+          total: null,
+          errorCode: null,
+          errorMessage: null
+        }));
+    const upsertKeyState = this.db.prepare(`
+      INSERT INTO provider_request_key_sync_state(
+        key_id, connection_id, status, coverage_from, coverage_to, truncated,
+        total_count, last_error_code, last_error_message, last_synced_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(key_id) DO UPDATE SET
+        connection_id = excluded.connection_id,
+        status = excluded.status,
+        coverage_from = COALESCE(excluded.coverage_from, provider_request_key_sync_state.coverage_from),
+        coverage_to = COALESCE(excluded.coverage_to, provider_request_key_sync_state.coverage_to),
+        truncated = excluded.truncated,
+        total_count = excluded.total_count,
+        last_error_code = excluded.last_error_code,
+        last_error_message = excluded.last_error_message,
+        last_synced_at = COALESCE(excluded.last_synced_at, provider_request_key_sync_state.last_synced_at),
+        updated_at = excluded.updated_at
+    `);
+    for (const coverage of keyCoverage) {
+      const keyId = keyIdByRemoteId.get(String(coverage.remoteKeyId));
+      if (!keyId) continue;
+      const succeeded = coverage.status === 'succeeded';
+      upsertKeyState.run(
+        keyId,
+        connectionId,
+        coverage.status || 'unknown',
+        coverage.coverageFrom || null,
+        coverage.coverageTo || null,
+        coverage.truncated ? 1 : 0,
+        coverage.total ?? null,
+        succeeded ? null : coverage.errorCode || 'REQUEST_LOG_UNAVAILABLE',
+        succeeded ? null : redactText(coverage.errorMessage || 'Provider request logs are unavailable').slice(0, 1000),
+        succeeded ? capturedAt : null,
+        capturedAt
+      );
+    }
+    const partial = keyCoverage.some((coverage) => coverage.status !== 'succeeded');
     this.db.prepare(`
       INSERT INTO provider_request_log_sync_state(
         connection_id, status, coverage_from, coverage_to, truncated,
         total_count, last_error_code, last_error_message, last_synced_at, updated_at
-      ) VALUES (?, 'succeeded', ?, ?, ?, ?, NULL, NULL, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
       ON CONFLICT(connection_id) DO UPDATE SET
         status = excluded.status,
         coverage_from = excluded.coverage_from,
@@ -853,6 +951,7 @@ class SyncService {
         updated_at = excluded.updated_at
     `).run(
       connectionId,
+      partial ? 'partial' : 'succeeded',
       result.value?.coverageFrom || null,
       result.value?.coverageTo || capturedAt,
       result.value?.truncated ? 1 : 0,

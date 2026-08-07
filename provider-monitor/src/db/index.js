@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 19;
+const SCHEMA_VERSION = 21;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -529,6 +529,7 @@ CREATE TABLE IF NOT EXISTS sub2api_account_monitor_settings (
   sync_interval_minutes INTEGER NOT NULL DEFAULT 15,
   lookback_days INTEGER NOT NULL DEFAULT 7,
   sample_retention_days INTEGER NOT NULL DEFAULT 30,
+  base_recharge_multiplier REAL NOT NULL DEFAULT 1 CHECK (base_recharge_multiplier > 0),
   probe_enabled INTEGER NOT NULL DEFAULT 0,
   probe_interval_minutes INTEGER NOT NULL DEFAULT 360,
   probe_platforms_json TEXT NOT NULL DEFAULT '[]',
@@ -624,6 +625,23 @@ CREATE TABLE IF NOT EXISTS provider_request_log_sync_state (
   last_synced_at TEXT,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS provider_request_key_sync_state (
+  key_id TEXT PRIMARY KEY REFERENCES remote_keys(id) ON DELETE CASCADE,
+  connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'unknown',
+  coverage_from TEXT,
+  coverage_to TEXT,
+  truncated INTEGER NOT NULL DEFAULT 0,
+  total_count INTEGER,
+  last_error_code TEXT,
+  last_error_message TEXT,
+  last_synced_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS provider_request_key_sync_connection
+  ON provider_request_key_sync_state(connection_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS sub2api_account_probe_runs (
   id TEXT PRIMARY KEY,
@@ -953,6 +971,19 @@ function migrateAutomationActionFailureDetailsV19(db) {
   }
 }
 
+function migrateAccountMonitorBaseRechargeMultiplierV21(db) {
+  const columns = new Set(
+    db.prepare('PRAGMA table_info(sub2api_account_monitor_settings)').all().map((column) => column.name)
+  );
+  if (!columns.has('base_recharge_multiplier')) {
+    db.exec(`
+      ALTER TABLE sub2api_account_monitor_settings
+      ADD COLUMN base_recharge_multiplier REAL NOT NULL DEFAULT 1
+      CHECK (base_recharge_multiplier > 0)
+    `);
+  }
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -967,6 +998,7 @@ function createDatabase(databasePath) {
     migrateAutomationAccountActionsV16(db);
     migrateUnexecutedCapabilityProbesV18(db);
     migrateAutomationActionFailureDetailsV19(db);
+    migrateAccountMonitorBaseRechargeMultiplierV21(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

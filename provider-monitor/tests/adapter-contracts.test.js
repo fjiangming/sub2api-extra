@@ -189,6 +189,7 @@ test('Sub2API API Key mode exposes the configured key and its gateway billing gr
   assert.equal(adapter.capabilities().listKeys, true);
   assert.equal(adapter.capabilities().keyGroup, true);
   assert.equal(adapter.capabilities().priceCatalog, false);
+  assert.equal(adapter.capabilities().requestLogs, false);
   assert.equal(balance.available, 12.5);
   assert.equal(adapter.capabilities().groupsDerivedFromKeys, false);
   assert.equal(balance.used, 1.5);
@@ -395,6 +396,86 @@ test('Sub2API contract returns account balance, keys and group associations', as
   assert.equal(catalog.prices[0].raw.groupRatio, 0.9);
   assert.equal(catalog.groups.some((item) => item.remoteId === '40' && item.ratio === 0.5), true);
   assert.equal(keyRequests, 1);
+});
+
+test('Sub2API user session reads request logs separately for each remote API Key', async () => {
+  const requestedKeyIds = [];
+  const adapter = new Sub2ApiAdapter(context('sub2api', (url) => {
+    if (url.pathname !== '/api/v1/usage') throw new Error(`Unexpected ${url.pathname}`);
+    const keyId = url.searchParams.get('api_key_id');
+    requestedKeyIds.push(keyId);
+    if (keyId === '10') return { code: 0, data: { items: [], total: 0 } };
+    return { code: 0, data: { items: [{
+      id: 501,
+      api_key_id: 9,
+      request_id: 'request-501',
+      model: 'claude-test',
+      stream: true,
+      duration_ms: 2400,
+      first_token_ms: 650,
+      input_tokens: 80,
+      output_tokens: 20,
+      cache_creation_tokens: 10,
+      cache_read_tokens: 40,
+      actual_cost: 0.0123,
+      created_at: '2026-08-05T12:00:00.000Z'
+    }], total: 1 } };
+  }, { credentials: { accessToken: 'access-token', tokenExpiresAt: Date.now() + 3600000 } }));
+
+  const result = await adapter.getRequestLogs({
+    lookbackDays: 7,
+    maxRecords: 100,
+    keys: [
+      { remoteId: '9', name: 'Primary' },
+      { remoteId: '10', name: 'Idle' }
+    ]
+  });
+
+  assert.equal(adapter.capabilities().requestLogs, true);
+  assert.deepEqual(requestedKeyIds.sort(), ['10', '9']);
+  assert.equal(result.items.length, 1);
+  assert.deepEqual(result.items[0], {
+    sourceLogId: '501',
+    remoteKeyId: '9',
+    keyName: 'Primary',
+    requestId: 'request-501',
+    model: 'claude-test',
+    upstreamModel: null,
+    stream: true,
+    status: 'success',
+    durationMs: 2400,
+    firstTokenMs: 650,
+    inputTokens: 80,
+    outputTokens: 20,
+    cacheCreationTokens: 10,
+    cacheReadTokens: 40,
+    actualCost: 0.0123,
+    currency: 'USD',
+    createdAt: '2026-08-05T12:00:00.000Z'
+  });
+  assert.deepEqual(result.keyCoverage.map((item) => [
+    item.remoteKeyId,
+    item.status,
+    item.total
+  ]).sort(), [
+    ['10', 'succeeded', 0],
+    ['9', 'succeeded', 1]
+  ]);
+});
+
+test('Sub2API request-log query rejects records attributed to a different API Key', async () => {
+  const adapter = new Sub2ApiAdapter(context('sub2api', () => ({
+    code: 0,
+    data: {
+      items: [{ id: 1, api_key_id: 99, created_at: '2026-08-05T12:00:00.000Z' }],
+      total: 1
+    }
+  }), { credentials: { accessToken: 'access-token', tokenExpiresAt: Date.now() + 3600000 } }));
+
+  await assert.rejects(
+    adapter.getRequestLogs({ keys: [{ remoteId: '9', name: 'Expected' }] }),
+    (error) => error.code === 'SUB2API_USAGE_KEY_MISMATCH'
+  );
 });
 
 test('Sub2API catalog keeps group rates when channel pricing is not exposed', async () => {

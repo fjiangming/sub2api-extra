@@ -212,6 +212,8 @@ test('New API API Key mode monitors only the selected remote keys and their logs
 });
 
 test('Sub2API account modes monitor only the selected remote keys', async (t) => {
+  let failedUsageKeyId = null;
+  const requestedUsageKeyIds = [];
   const server = http.createServer((req, res) => {
     if (req.url === '/api/v1/user/profile') {
       return json(res, { code: 0, data: { id: 7, username: 'sub2-user', balance: 20 } });
@@ -232,6 +234,29 @@ test('Sub2API account modes monitor only the selected remote keys', async (t) =>
         { id: 2, name: 'stable-key', key: 'sk-stable-secret', group_id: 20, status: 'active', quota: 0, quota_used: 2 },
         { id: 3, name: 'unused-key', key: 'sk-unused-secret', group_id: 30, status: 'active', quota: 0, quota_used: 3 }
       ] } });
+    }
+    if (req.url.startsWith('/api/v1/usage?')) {
+      const url = new URL(req.url, 'http://provider.test');
+      const keyId = url.searchParams.get('api_key_id');
+      requestedUsageKeyIds.push(keyId);
+      if (keyId === failedUsageKeyId) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ message: 'temporary usage failure' }));
+      }
+      return json(res, { code: 0, data: { total: keyId === '1' ? 1 : 0, items: keyId === '1' ? [{
+        id: 1001,
+        api_key_id: 1,
+        request_id: 'request-1001',
+        model: 'claude-test',
+        stream: true,
+        duration_ms: 1200,
+        first_token_ms: 300,
+        input_tokens: 20,
+        output_tokens: 10,
+        cache_read_tokens: 5,
+        actual_cost: 0.01,
+        created_at: new Date().toISOString()
+      }] : [] } });
     }
     if (req.url.startsWith('/api/v1/usage/stats')) {
       return json(res, { code: 0, data: { total_cost: 6, total_requests: 3 } });
@@ -266,6 +291,30 @@ test('Sub2API account modes monitor only the selected remote keys', async (t) =>
 
   const initial = await sync.run(provider.id);
   assert.equal(initial.keyCount, 3);
+  const mappedKeys = context.db.prepare(`
+    SELECT id, remote_id FROM remote_keys WHERE connection_id = ? AND remote_id IN ('1', '2')
+  `).all(provider.id);
+  const insertMapping = context.db.prepare(`
+    INSERT INTO sub2api_mappings(
+      id, connection_id, key_id, account_id, group_id, role, enabled,
+      models_json, config_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, 'primary', 1, '[]', '{}', ?, ?)
+  `);
+  for (const key of mappedKeys) {
+    insertMapping.run(
+      `mapping-${key.remote_id}`,
+      provider.id,
+      key.id,
+      9000 + Number(key.remote_id),
+      Number(key.remote_id) * 10,
+      new Date().toISOString(),
+      new Date().toISOString()
+    );
+  }
+  const mappedOnly = await sync.run(provider.id);
+  assert.equal(mappedOnly.keyCount, 3);
+  assert.deepEqual([...new Set(requestedUsageKeyIds)].sort(), ['1', '2']);
+  requestedUsageKeyIds.length = 0;
   providers.update(provider.id, { typeConfig: { monitoredKeyIds: ['1', '2'] } });
 
   const selected = await sync.run(provider.id);
@@ -287,6 +336,30 @@ test('Sub2API account modes monitor only the selected remote keys', async (t) =>
   `).all(provider.id), [
     { remote_id: '1', group_id: '10' },
     { remote_id: '2', group_id: '20' }
+  ]);
+  assert.deepEqual(context.db.prepare(`
+    SELECT k.remote_id, s.status, s.total_count
+    FROM provider_request_key_sync_state s
+    JOIN remote_keys k ON k.id = s.key_id
+    WHERE k.connection_id = ? AND k.remote_id IN ('1', '2')
+    ORDER BY k.remote_id
+  `).all(provider.id), [
+    { remote_id: '1', status: 'succeeded', total_count: 1 },
+    { remote_id: '2', status: 'succeeded', total_count: 0 }
+  ]);
+  failedUsageKeyId = '2';
+  const partial = await sync.run(provider.id, { manual: true });
+  assert.equal(partial.status, 'partial');
+  assert.equal(partial.warnings.some((warning) => warning.code === 'REQUEST_LOG_KEYS_PARTIAL'), true);
+  assert.deepEqual(context.db.prepare(`
+    SELECT k.remote_id, s.status
+    FROM provider_request_key_sync_state s
+    JOIN remote_keys k ON k.id = s.key_id
+    WHERE k.connection_id = ? AND k.remote_id IN ('1', '2')
+    ORDER BY k.remote_id
+  `).all(provider.id), [
+    { remote_id: '1', status: 'succeeded' },
+    { remote_id: '2', status: 'unavailable' }
   ]);
 });
 
@@ -333,6 +406,9 @@ test('Sub2API sync recovers a key-bound private group omitted from the available
         }
         if (url.pathname === '/api/v1/usage/stats') {
           return { data: { code: 0, data: { total_cost: 0, total_requests: 0 } } };
+        }
+        if (url.pathname === '/api/v1/usage') {
+          return { data: { code: 0, data: { items: [], total: 0 } } };
         }
         if (url.pathname === '/api/v1/payment/checkout-info') {
           return { data: { code: 0, data: { balance_recharge_multiplier: 10 } } };

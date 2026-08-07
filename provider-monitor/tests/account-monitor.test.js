@@ -41,6 +41,21 @@ function insertMonitoredAccount(db, account) {
   `).run(String(account.id), account.name, account.platform, account.type, now, now);
 }
 
+function setBaseLogCoverage(db, from, to) {
+  db.prepare(`
+    UPDATE sub2api_account_monitor_state SET
+      last_log_sync_at = ?, last_sync_status = 'succeeded', last_sync_error = NULL,
+      last_sync_summary_json = ?, updated_at = ?
+    WHERE id = 1
+  `).run(to, JSON.stringify({
+    usageExactTotal: true,
+    usageFullBackfill: true,
+    usageCoverageFrom: from,
+    usageCoverageTo: to,
+    usageTruncated: false
+  }), to);
+}
+
 function createSub2ApiMock() {
   const calls = [];
   let usageReturned = false;
@@ -166,6 +181,17 @@ test('account monitor syncs redacted metrics and scores dynamic capability probe
   const usageCalls = sub2api.calls.filter((call) => call.endpoint === '/api/v1/admin/usage');
   assert.ok(usageCalls.length > 1);
   assert.ok(usageCalls.every((call) => call.query.start_date === call.query.end_date));
+  assert.ok(usageCalls.every((call) => call.query.exact_total === true));
+  assert.equal(sync.usageExactTotal, true);
+  assert.equal(sync.usageFullBackfill, true);
+  assert.ok(Date.parse(sync.usageCoverageFrom) < Date.parse(sync.usageCoverageTo));
+  const callsBeforeExpandedBackfill = sub2api.calls.length;
+  const expandedSync = await monitor.sync({ lookbackDays: 14 });
+  const expandedUsageCalls = sub2api.calls.slice(callsBeforeExpandedBackfill)
+    .filter((call) => call.endpoint === '/api/v1/admin/usage');
+  assert.equal(expandedSync.usageFullBackfill, true);
+  assert.ok(expandedUsageCalls.length >= 14);
+  assert.ok(expandedUsageCalls.every((call) => call.query.exact_total === true));
   assert.doesNotMatch(
     context.db.prepare('SELECT metadata_json FROM sub2api_monitored_accounts WHERE account_id = ?').get('11').metadata_json,
     /must-not-be-stored/
@@ -180,6 +206,7 @@ test('account monitor syncs redacted metrics and scores dynamic capability probe
   assert.equal(listing.items[0].metrics.ttftP95Ms, 1800);
   assert.equal(listing.items[0].metrics.ttftSampleCount, 2);
   assert.ok(listing.items[0].metrics.outputTokensPerSecond >= 100);
+  assert.equal(monitor.accounts({ platform: 'anthropic', days: 7 }).items[0].comparison.metricReason, 'no_enabled_mapping');
 
   const probe = await monitor.probe({ accountIds: ['11', '12'], triggerType: 'manual' });
   assert.equal(probe.accountCount, 2);
@@ -245,6 +272,21 @@ test('account quality compares mapped provider logs and same-window upstream cos
       total_count, last_synced_at, updated_at
     ) VALUES (?, 'succeeded', ?, ?, 0, 2, ?, ?)
   `).run(provider.id, iso(7 * 24 * 60), iso(1), iso(1), iso(1));
+  context.db.prepare(`
+    INSERT INTO provider_request_key_sync_state(
+      key_id, connection_id, status, coverage_from, coverage_to, truncated,
+      total_count, last_synced_at, updated_at
+    ) VALUES ('mapped-key', ?, 'succeeded', ?, ?, 0, 3, ?, ?)
+  `).run(provider.id, iso(7 * 24 * 60), iso(1), iso(1), iso(1));
+  context.db.prepare(`
+    INSERT INTO provider_recharge_rates(
+      connection_id, manual_multiplier, status, metadata_json, updated_at
+    ) VALUES (?, 2, 'manual', '{}', ?)
+  `).run(provider.id, iso(1));
+  context.db.prepare(`
+    UPDATE sub2api_account_monitor_settings SET base_recharge_multiplier = 2 WHERE id = 1
+  `).run();
+  setBaseLogCoverage(context.db, iso(7 * 24 * 60), iso(1));
 
   const insertBase = context.db.prepare(`
     INSERT INTO sub2api_account_request_samples(
@@ -255,6 +297,7 @@ test('account quality compares mapped provider logs and same-window upstream cos
   `);
   insertBase.run('base-1', 'request-1', 2200, 800, 100, 100, 100, 0.02, iso(40), iso(1));
   insertBase.run('base-2', 'request-2', 2800, 1200, 100, 120, 0, 0.02, iso(20), iso(1));
+  insertBase.run('base-after-coverage', 'request-after-coverage', 900, 300, 50, 50, 0, 0.1, iso(0.5), iso(0.1));
   const insertUpstream = context.db.prepare(`
     INSERT INTO provider_request_samples(
       connection_id, key_id, source_log_id, request_id, model, stream, status,
@@ -264,7 +307,8 @@ test('account quality compares mapped provider logs and same-window upstream cos
     ) VALUES (?, 'mapped-key', ?, ?, 'gpt-test', 1, 'success', ?, ?, ?, ?, 0, ?, ?, 'USD', ?, ?)
   `);
   insertUpstream.run(provider.id, 'provider-1', 'request-1', 1800, 700, 100, 100, 100, 0.01, iso(40), iso(1));
-  insertUpstream.run(provider.id, 'provider-2', 'request-2', 2300, 1000, 100, 120, 0, 0.02, iso(20), iso(1));
+  insertUpstream.run(provider.id, 'provider-2', 'different-request-id', 2300, 1000, 100, 120, 0, 0.02, iso(20), iso(1));
+  insertUpstream.run(provider.id, 'provider-extra', 'direct-request', 3100, 1400, 999, 50, 0, 0.05, iso(10), iso(1));
   const insertUsage = context.db.prepare(`
     INSERT INTO usage_snapshots(
       connection_id, subject_type, subject_id, currency, cost, requests,
@@ -273,6 +317,12 @@ test('account quality compares mapped provider logs and same-window upstream cos
   `);
   insertUsage.run(provider.id, 1, 10, 1000, 100, 1100, iso(7 * 24 * 60 + 10));
   insertUsage.run(provider.id, 1.03, 12, 1200, 320, 1520, iso(10));
+  context.db.prepare(`
+    INSERT INTO balance_snapshots(
+      connection_id, subject_type, subject_id, currency, used, raw_json, captured_at
+    ) VALUES (?, 'key', 'mapped-key', 'USD', 0, '{}', ?),
+      (?, 'key', 'mapped-key', 'USD', 0, '{}', ?)
+  `).run(provider.id, iso(7 * 24 * 60 + 10), provider.id, iso(10));
 
   const monitor = new AccountMonitorService({
     db: context.db,
@@ -282,25 +332,100 @@ test('account quality compares mapped provider logs and same-window upstream cos
   const item = monitor.accounts({ search: 'Mapped account', days: 7 }).items[0];
   assert.equal(item.comparison.status, 'mapped');
   assert.equal(item.comparison.source, 'provider_request_logs');
+  assert.equal(item.comparison.metricReason, null);
   assert.equal(item.comparison.provider.name, 'Mapped New API');
+  assert.equal(item.comparison.provider.remoteKeyId, '77');
+  assert.deepEqual(item.comparison.attribution, {
+    base: { scope: 'account_id', accountId: '501' },
+    upstream: {
+      scope: 'api_key_id',
+      connectionId: provider.id,
+      keyId: 'mapped-key',
+      remoteKeyId: '77'
+    },
+    mappingId: 'mapped-account-link'
+  });
+  assert.equal(item.comparison.coverage.syncScope, 'key');
+  assert.equal(item.metrics.requestCount, 3);
   assert.equal(item.comparison.upstream.requestCount, 2);
   assert.equal(item.comparison.upstream.ttftP95Ms, 1000);
   assert.equal(item.comparison.upstream.cacheRate, 33.3);
+  assert.equal(item.comparison.base.requestCount, 2);
+  assert.equal(item.comparison.windowTotals.base.requestCount, 2);
+  assert.equal(item.comparison.windowTotals.upstream.requestCount, 3);
+  assert.equal(item.comparison.pairing.matchedCount, 2);
+  assert.deepEqual(item.comparison.pairing.matchedBy, { requestId: 1, fingerprint: 1 });
+  assert.equal(item.comparison.pairing.upstreamExtraCount, 1);
+  assert.equal(item.comparison.overhead.ttftP95Ms, 200);
   assert.equal(item.comparison.cost.comparable, true);
+  assert.equal(item.comparison.cost.source, 'provider_request_logs');
+  assert.equal(item.comparison.cost.scope, 'paired_requests');
   assert.ok(Math.abs(item.comparison.cost.baseCost - 0.04) < 1e-8);
   assert.ok(Math.abs(item.comparison.cost.upstreamCost - 0.03) < 1e-8);
-  assert.ok(Math.abs(item.comparison.cost.differenceAmount - 0.01) < 1e-8);
+  assert.ok(Math.abs(item.comparison.cost.baseCashEquivalent - 0.02) < 1e-8);
+  assert.ok(Math.abs(item.comparison.cost.upstreamCashEquivalent - 0.015) < 1e-8);
+  assert.ok(Math.abs(item.comparison.cost.differenceAmount - 0.005) < 1e-8);
+  assert.ok(Math.abs(item.comparison.cost.keyTotalUpstreamCost - 0.08) < 1e-8);
+  assert.equal(item.comparison.cost.windowComparable, true);
+  assert.ok(Math.abs(item.comparison.cost.baseWindowCashEquivalent - 0.02) < 1e-8);
+  assert.ok(Math.abs(item.comparison.cost.keyTotalUpstreamCashEquivalent - 0.04) < 1e-8);
+  assert.ok(Math.abs(item.comparison.cost.windowDifferenceAmount + 0.02) < 1e-8);
+  assert.equal(item.comparison.cost.windowProfitStatus, 'loss');
+  assert.ok(Math.abs(item.comparison.cost.extraUpstreamCost - 0.05) < 1e-8);
   assert.equal(item.comparison.cost.moreExpensive, 'sub2api');
+  assert.equal(item.comparison.cost.profitStatus, 'profit');
+  context.db.prepare(`
+    UPDATE sub2api_account_monitor_state SET last_sync_summary_json = '{}'
+    WHERE id = 1
+  `).run();
+  const incompleteBase = monitor.account('501', { days: 7 });
+  assert.equal(incompleteBase.comparison.metricReason, 'base_request_logs_incomplete');
+  assert.equal(incompleteBase.comparison.pairing.upstreamExtraCount, null);
+  assert.equal(incompleteBase.comparison.pairing.observedUpstreamUnmatchedCount, 1);
+  assert.equal(incompleteBase.comparison.cost.windowComparable, false);
+  assert.equal(incompleteBase.comparison.cost.windowReason, 'base_request_logs_incomplete');
+  setBaseLogCoverage(context.db, iso(7 * 24 * 60), iso(1));
+  context.db.prepare(`
+    UPDATE provider_request_key_sync_state
+    SET status = 'unavailable', last_error_code = 'NETWORK_UNREACHABLE',
+      last_error_message = 'fetch failed', updated_at = ?
+    WHERE key_id = 'mapped-key'
+  `).run(iso(0));
+  const retained = monitor.account('501', { days: 7 });
+  assert.equal(retained.comparison.source, 'provider_request_logs');
+  assert.equal(retained.comparison.metricReason, 'request_logs_stale');
+  assert.equal(retained.comparison.coverage.stale, true);
+  assert.equal(retained.comparison.coverage.errorCode, 'NETWORK_UNREACHABLE');
+  assert.equal(retained.comparison.upstream.requestCount, 2);
+  assert.equal(retained.comparison.upstream.ttftP95Ms, 1000);
+  context.db.prepare(`
+    UPDATE provider_request_key_sync_state
+    SET status = 'succeeded', last_error_code = NULL, last_error_message = NULL,
+      updated_at = ?
+    WHERE key_id = 'mapped-key'
+  `).run(iso(0));
   const detail = monitor.account('501', { days: 7 });
   assert.equal(detail.upstreamTrends.length, 1);
-  assert.equal(detail.comparison.cost.source, 'provider_usage_snapshots');
+  assert.equal(detail.comparison.cost.source, 'provider_request_logs');
   context.db.prepare(`
     UPDATE usage_snapshots SET cost = 1, requests = 10
     WHERE connection_id = ? AND subject_id = 'mapped-key' AND captured_at = ?
   `).run(provider.id, iso(10));
   const stagnant = monitor.account('501', { days: 7 }).comparison.cost;
-  assert.equal(stagnant.comparable, false);
-  assert.equal(stagnant.reason, 'provider_counter_unchanged');
+  assert.equal(stagnant.comparable, true);
+  assert.equal(stagnant.source, 'provider_request_logs');
+  context.db.prepare(`
+    UPDATE provider_request_samples SET created_at = ? WHERE key_id = 'mapped-key'
+  `).run(iso(8 * 24 * 60));
+  const noTraffic = monitor.account('501', { days: 7 });
+  assert.equal(noTraffic.comparison.metricReason, 'no_successful_requests');
+  assert.equal(noTraffic.comparison.upstream.requestCount, 0);
+  context.db.prepare("DELETE FROM provider_request_key_sync_state WHERE key_id = 'mapped-key'").run();
+  context.db.prepare("DELETE FROM usage_snapshots WHERE subject_id = 'mapped-key'").run();
+  const unverified = monitor.account('501', { days: 7 });
+  assert.equal(unverified.comparison.source, 'unavailable');
+  assert.equal(unverified.comparison.metricReason, 'request_logs_key_unverified');
+  assert.equal(unverified.comparison.upstream, null);
 });
 
 test('account monitor HTTP API supports manual sync, filtering and probes', async (t) => {

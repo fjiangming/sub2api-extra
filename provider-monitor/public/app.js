@@ -936,10 +936,24 @@ function accountComparisonReasonLabel(reason) {
     mapping_key_missing: '映射未绑定 Key',
     provider_cost_unavailable: '供应商未提供费用数据',
     provider_counter_unchanged: '上游计数器未变化',
+    provider_recharge_multiplier_missing: '上游充值倍率未确认',
     shared_provider_key: 'Key 被多个账号共享',
     currency_mismatch: '币种不一致',
     sub2api_cost_unavailable: '基座日志缺少费用',
-    request_logs_truncated: '上游日志采集不完整'
+    base_request_logs_incomplete: '基座日志尚未完成精确分页回补',
+    request_logs_truncated: '上游日志采集不完整',
+    request_logs_incomplete: '上游日志未覆盖完整观察窗口',
+    request_logs_stale: '最近一次日志同步失败，展示最近成功数据',
+    request_logs_key_unverified: '上游日志未确认覆盖该 Key',
+    request_pairing_unavailable: '同窗请求无法可靠配对',
+    request_pairing_partial: '仅部分基座请求完成配对',
+    cache_token_mismatch: '配对请求的缓存 Token 不一致',
+    provider_sync_unavailable: '上游同步失败或尚未成功',
+    request_logs_unavailable: '上游请求日志不可用',
+    no_successful_requests: '观察窗口内没有成功请求',
+    account_usage_not_attributable: '供应商仅返回账号汇总，无法按 Key 归因',
+    provider_latency_unavailable: '上游仅提供累计用量，未提供延迟字段',
+    provider_performance_unavailable: '上游未提供可归因性能数据'
   })[reason] || reason || '暂不可比';
 }
 
@@ -947,7 +961,8 @@ function accountComparisonMetric(baseValue, upstreamValue, formatter, options = 
   const base = formatter(baseValue);
   const upstream = formatter(upstreamValue);
   const upstreamTitle = options.upstreamTitle || (upstream === '-' ? '供应商未提供该指标' : '供应商上游');
-  return `<div class="account-comparison-metric"><span><small class="source-base">基座</small><strong>${escapeHtml(base)}</strong></span><span title="${escapeHtml(upstreamTitle)}"><small class="source-upstream">上游</small><strong class="${upstream === '-' ? 'metric-empty' : ''}">${escapeHtml(upstream)}</strong></span></div>`;
+  const note = options.note ? `<small class="table-metric-note">${escapeHtml(options.note)}</small>` : '';
+  return `<div class="account-comparison-metric"><span><small class="source-base">基座</small><strong>${escapeHtml(base)}</strong></span><span title="${escapeHtml(upstreamTitle)}"><small class="source-upstream">上游</small><strong class="${upstream === '-' ? 'metric-empty' : ''}">${escapeHtml(upstream)}</strong></span></div>${note}`;
 }
 
 function accountTtftComparison(base, upstream) {
@@ -969,25 +984,58 @@ function accountProviderMarkup(comparison = {}) {
   const provider = comparison.provider || {};
   const source = accountUpstreamSourceLabel(comparison.source);
   const sourceStatus = comparison.coverage?.stale ? 'stale' : comparison.source === 'unavailable' ? 'info' : 'enabled';
-  return `<div class="account-provider-cell"><strong>${escapeHtml(provider.name || '-')}</strong><small>${escapeHtml(provider.keyName || '未绑定 Key')}</small>${badge(sourceStatus, source)}</div>`;
+  const reasonText = comparison.metricReason ? accountComparisonReasonLabel(comparison.metricReason) : '';
+  const reason = reasonText
+    ? `<small class="account-provider-reason" title="${escapeHtml(reasonText)}">${escapeHtml(reasonText)}</small>`
+    : '';
+  const pairing = comparison.pairing;
+  const pairingText = pairing?.matchedCount > 0
+    ? `配对 ${formatNumber(pairing.matchedCount, 0)} / ${formatNumber(pairing.baseRequestCount, 0)}${pairing.upstreamExtraCount > 0 ? ` · 上游未归因 ${formatNumber(pairing.upstreamExtraCount, 0)}` : pairing.extraCountTrusted === false ? ' · 额外请求待回补核实' : ''}`
+    : '';
+  return `<div class="account-provider-cell"><strong>${escapeHtml(provider.name || '-')}</strong><small>${escapeHtml(provider.keyName || '未绑定 Key')}</small>${badge(sourceStatus, source)}${pairingText ? `<small>${escapeHtml(pairingText)}</small>` : ''}${reason}</div>`;
 }
 
-function accountCostMarkup(metrics, comparison = {}) {
+function accountCostMarkup(_metrics, comparison = {}) {
   const cost = comparison.cost || {};
-  const currency = cost.currency || 'USD';
-  const baseCost = cost.baseCost == null ? metrics.actualCost : cost.baseCost;
-  const upstreamCost = cost.upstreamCost;
-  let delta = `<span class="metric-empty">${escapeHtml(accountComparisonReasonLabel(cost.reason))}</span>`;
-  if (cost.comparable) {
-    const difference = Math.abs(Number(cost.differenceAmount));
-    const ratio = cost.differenceRatio == null ? '' : ` · ${formatNumber(Math.abs(cost.differenceRatio) * 100, 1)}%`;
-    const label = cost.moreExpensive === 'same'
-      ? '费用一致'
-      : cost.moreExpensive === 'sub2api' ? '基座更贵' : '上游更贵';
-    const tone = cost.moreExpensive === 'same' ? 'healthy' : 'warning';
-    delta = `<span class="cost-delta ${tone}">${escapeHtml(label)} ${escapeHtml(formatPreciseMoney(difference, currency))}${escapeHtml(ratio)}</span>`;
+  const rawCurrency = cost.currency || 'USD';
+  const cashCurrency = cost.cashCurrency || rawCurrency;
+  const useWindowLedger = cost.source === 'provider_request_logs' &&
+    (cost.baseWindowCost != null || cost.keyTotalUpstreamCost != null);
+  const usesCash = useWindowLedger
+    ? cost.baseWindowCashEquivalent != null && cost.keyTotalUpstreamCashEquivalent != null
+    : cost.baseCashEquivalent != null && cost.upstreamCashEquivalent != null;
+  const baseDisplay = useWindowLedger
+    ? usesCash ? cost.baseWindowCashEquivalent : cost.baseWindowCost
+    : usesCash ? cost.baseCashEquivalent : cost.baseCost;
+  const upstreamDisplay = useWindowLedger
+    ? usesCash ? cost.keyTotalUpstreamCashEquivalent : cost.keyTotalUpstreamCost
+    : usesCash ? cost.upstreamCashEquivalent : cost.upstreamCost;
+  const displayCurrency = usesCash ? cashCurrency : rawCurrency;
+  const comparable = useWindowLedger ? cost.windowComparable : cost.comparable;
+  const reason = useWindowLedger ? cost.windowReason : cost.reason;
+  const differenceAmount = useWindowLedger ? cost.windowDifferenceAmount : cost.differenceAmount;
+  const grossMarginRatio = useWindowLedger ? cost.windowGrossMarginRatio : cost.grossMarginRatio;
+  const profitStatus = useWindowLedger ? cost.windowProfitStatus : cost.profitStatus;
+  let delta = `<span class="metric-empty">${escapeHtml(accountComparisonReasonLabel(reason))}</span>`;
+  if (comparable) {
+    const difference = Math.abs(Number(differenceAmount));
+    const margin = grossMarginRatio == null ? '' : ` · ${formatNumber(Math.abs(grossMarginRatio) * 100, 1)}%`;
+    const label = profitStatus === 'break_even'
+      ? '收支平衡'
+      : profitStatus === 'profit' ? '总账毛差' : '总账倒挂';
+    const sign = profitStatus === 'profit' ? '+' : profitStatus === 'loss' ? '-' : '';
+    const tone = profitStatus === 'loss' ? 'warning' : 'healthy';
+    delta = `<span class="cost-delta ${tone}">${escapeHtml(label)} ${sign}${escapeHtml(formatPreciseMoney(difference, cashCurrency))}${escapeHtml(margin)}</span>`;
   }
-  return `<div class="account-cost-cell"><div class="account-comparison-metric"><span><small class="source-base">基座</small><strong>${escapeHtml(formatPreciseMoney(baseCost, currency))}</strong></span><span><small class="source-upstream">上游</small><strong class="${upstreamCost == null ? 'metric-empty' : ''}">${escapeHtml(formatPreciseMoney(upstreamCost, currency))}</strong></span></div>${delta}</div>`;
+  const pairing = comparison.pairing || {};
+  const pairingText = pairing.matchedCount > 0 ? `配对 ${formatNumber(pairing.matchedCount, 0)} 次` : '';
+  const extraText = pairing.upstreamExtraCount > 0
+    ? ` · 上游未归因 ${formatNumber(pairing.upstreamExtraCount, 0)} 次`
+    : pairing.extraCountTrusted === false && pairing.observedUpstreamUnmatchedCount > 0
+      ? ' · 额外请求待基座回补核实'
+      : '';
+  const scopeText = useWindowLedger ? '统一窗口 Key 总账' : pairingText;
+  return `<div class="account-cost-cell"><div class="account-comparison-metric"><span><small class="source-base">基座${usesCash ? '收入' : '扣费'}</small><strong>${escapeHtml(formatPreciseMoney(baseDisplay, displayCurrency))}</strong></span><span><small class="source-upstream">上游${usesCash ? '支出' : '扣费'}</small><strong class="${upstreamDisplay == null ? 'metric-empty' : ''}">${escapeHtml(formatPreciseMoney(upstreamDisplay, displayCurrency))}</strong></span></div>${delta}${scopeText || pairingText || extraText ? `<small class="table-metric-note">${escapeHtml([scopeText, useWindowLedger ? pairingText : '', extraText.replace(/^ · /, '')].filter(Boolean).join(' · '))}</small>` : ''}</div>`;
 }
 
 function accountProbeTransportLabel(details = {}) {
@@ -1067,44 +1115,56 @@ async function renderAccountMonitor() {
   const rows = result.items.map((item) => {
     const metrics = item.metrics;
     const comparison = item.comparison || {};
+    const comparisonBase = comparison.base || metrics;
     const upstream = comparison.upstream;
+    const windowBase = comparison.windowTotals?.base || comparisonBase;
+    const windowUpstream = comparison.windowTotals?.upstream || upstream;
+    const pairingNote = comparison.pairing?.matchedCount > 0
+      ? `性能按 ${formatNumber(comparison.pairing.matchedCount, 0)} 个配对请求${comparison.pairing.upstreamExtraCount > 0 ? `；同窗上游未归因 ${formatNumber(comparison.pairing.upstreamExtraCount, 0)} 个` : comparison.pairing.extraCountTrusted === false ? '；额外请求待基座回补核实' : ''}`
+      : '';
     const selected = state.accountMonitorSelected.has(String(item.accountId));
     const probeStatus = metrics.lastProbeStatus
-      ? `${badge(metrics.lastProbeStatus)}<small>${escapeHtml(timeAgo(metrics.lastProbeAt))}</small>`
-      : '<span class="metric-empty">-</span>';
+      ? `<span class="account-probe-latest">${badge(metrics.lastProbeStatus)}<small>${escapeHtml(timeAgo(metrics.lastProbeAt))}</small></span>`
+      : '<span class="account-probe-latest"><span class="metric-empty">暂无最近检测</span></span>';
     const capability = metrics.intelligenceScore == null
       ? '<span class="metric-empty" title="暂无有效能力题结果：平台不支持，或当前 Sub2API 基座未转发自定义题目">未覆盖</span>'
       : `<strong>${formatNumber(metrics.intelligenceScore, 0)}</strong><small class="table-metric-note">遵循 ${formatNumber(metrics.instructionScore, 0)}</small>`;
     return `<tr data-account-monitor-row="${escapeHtml(item.accountId)}">
       <td class="selection-cell"><input type="checkbox" data-account-monitor-select="${escapeHtml(item.accountId)}" aria-label="选择 ${escapeHtml(item.name)}" ${selected ? 'checked' : ''}></td>
-      <td class="primary-cell"><strong>${escapeHtml(item.name)}</strong><small>#${escapeHtml(item.accountId)} · ${escapeHtml(item.accountType)}</small></td>
-      <td>${badge(item.status, accountMonitorStatusLabel(item.status))}</td>
-      <td>${escapeHtml(accountMonitorPlatformLabel(item.platform))}</td>
-      <td>${accountProviderMarkup(comparison)}</td>
-      <td class="numeric">${accountComparisonMetric(metrics.requestCount, upstream?.requestCount, (value) => formatNumber(value, 0))}</td>
-      <td class="numeric">${accountComparisonMetric(metrics.cacheRate, upstream?.cacheRate, formatPercent)}</td>
-      <td class="numeric">${accountTtftComparison(metrics, upstream)}</td>
-      <td class="numeric">${accountComparisonMetric(metrics.durationP95Ms, upstream?.durationP95Ms, formatMilliseconds)}</td>
-      <td class="numeric">${accountComparisonMetric(metrics.outputTokensPerSecond, upstream?.outputTokensPerSecond, (value) => value == null ? '-' : `${formatNumber(value, 1)} tok/s`)}</td>
-      <td class="numeric">${accountCostMarkup(metrics, comparison)}</td>
-      <td class="numeric"><strong>${formatPercent(metrics.probeSuccessRate)}</strong><small class="table-metric-note">${formatNumber(metrics.probeCount, 0)} 次</small></td>
-      <td class="numeric">${capability}</td>
-      <td class="numeric">${accountQualityMarkup(metrics.qualityScore, metrics.quality)}</td>
-      <td class="probe-status-cell">${probeStatus}</td>
+      <td class="primary-cell account-identity-cell" data-label="账号">
+        <div class="account-identity-main"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong>${badge(item.status, accountMonitorStatusLabel(item.status))}</div>
+        <small title="#${escapeHtml(item.accountId)} · ${escapeHtml(item.accountType)} · ${escapeHtml(accountMonitorPlatformLabel(item.platform))}">#${escapeHtml(item.accountId)} · ${escapeHtml(item.accountType)} · ${escapeHtml(accountMonitorPlatformLabel(item.platform))}</small>
+      </td>
+      <td class="account-provider-column" data-label="供应商上游">${accountProviderMarkup(comparison)}</td>
+      <td class="numeric account-metric-column" data-label="请求数">${accountComparisonMetric(windowBase?.requestCount, windowUpstream?.requestCount, (value) => formatNumber(value, 0), { note: pairingNote })}</td>
+      <td class="numeric account-metric-column" data-label="缓存读取率">${accountComparisonMetric(comparisonBase.cacheRate, upstream?.cacheRate, formatPercent)}</td>
+      <td class="numeric account-metric-column" data-label="首字 P95">${accountTtftComparison(comparisonBase, upstream)}</td>
+      <td class="numeric account-metric-column" data-label="总耗时 P95">${accountComparisonMetric(comparisonBase.durationP95Ms, upstream?.durationP95Ms, formatMilliseconds)}</td>
+      <td class="numeric account-metric-column account-speed-cell" data-label="输出速度">${accountComparisonMetric(comparisonBase.outputTokensPerSecond, upstream?.outputTokensPerSecond, (value) => value == null ? '-' : `${formatNumber(value, 1)} tok/s`)}</td>
+      <td class="numeric account-cost-column" data-label="费用对比">${accountCostMarkup(metrics, comparison)}</td>
+      <td class="numeric account-probe-cell" data-label="检测通过率"><strong>${formatPercent(metrics.probeSuccessRate)}</strong><small class="table-metric-note">${formatNumber(metrics.probeCount, 0)} 次</small>${probeStatus}</td>
+      <td class="numeric account-capability-cell" data-label="能力分 / 遵循">${capability}</td>
+      <td class="numeric account-quality-cell" data-label="质量分">${accountQualityMarkup(metrics.qualityScore, metrics.quality)}</td>
       <td class="actions-cell"><button class="icon-button small" data-action="view-account-quality" data-id="${escapeHtml(item.accountId)}" title="查看趋势" aria-label="查看趋势"><i data-lucide="chart-no-axes-combined"></i></button><button class="icon-button small" data-action="detect-account" data-id="${escapeHtml(item.accountId)}" title="立即检测" aria-label="立即检测"><i data-lucide="flask-conical"></i></button></td>
     </tr>`;
   }).join('');
   const summary = result.summary;
   const monitorState = result.state || {};
+  const baseSyncSummary = monitorState.lastSyncSummary || {};
+  const baseSyncNote = baseSyncSummary.usageTruncated
+    ? ' · 基座部分日期达到采集上限'
+    : baseSyncSummary.usageExactTotal !== true
+      ? ' · 基座待精确分页回补'
+      : '';
   const tableContent = rows
-    ? `<table><thead><tr><th class="selection-cell"><input type="checkbox" id="account-monitor-select-page" aria-label="选择当前页全部账号"></th><th>账号</th><th>状态</th><th>平台</th><th>供应商上游</th><th class="numeric">${accountMetricRuleHeader('请求数', 'requests', '基座日志与供应商上游日志或累计用量的请求数')}</th><th class="numeric">${accountMetricRuleHeader('缓存读取率', 'cache', '基座与供应商各自日志中的缓存读取 Token 比例')}</th><th class="numeric">${accountMetricRuleHeader('首字 P95', 'ttft', '基座与供应商有效流式首字样本的 95 分位数')}</th><th class="numeric">总耗时 P95</th><th class="numeric">输出速度</th><th class="numeric">${accountMetricRuleHeader('费用对比', 'cost', '同一映射 Key、币种与快照时间段内的基座和供应商费用')}</th><th class="numeric">${accountMetricRuleHeader('检测通过率', 'probe', '成功主动检测占最近检测样本的比例')}</th><th class="numeric">${accountMetricRuleHeader('能力分 / 遵循', 'capability', '动态五维能力题集与格式遵循得分')}</th><th class="numeric">${accountMetricRuleHeader('质量分', 'quality', '延迟、检测通过率与能力分的加权结果')}</th><th>最近检测</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    ? `<table><colgroup><col class="account-col-select"><col class="account-col-identity"><col class="account-col-provider"><col class="account-col-requests"><col class="account-col-cache"><col class="account-col-ttft"><col class="account-col-duration"><col class="account-col-speed"><col class="account-col-cost"><col class="account-col-probe"><col class="account-col-capability"><col class="account-col-quality"><col class="account-col-actions"></colgroup><thead><tr><th class="selection-cell"><input type="checkbox" id="account-monitor-select-page" aria-label="选择当前页全部账号"></th><th>账号 / 状态</th><th>供应商上游</th><th class="numeric">${accountMetricRuleHeader('请求数', 'requests', '基座与上游在同一实际覆盖窗口内的请求总数')}</th><th class="numeric">${accountMetricRuleHeader('缓存读取率', 'cache', '同一窗口内已配对请求的缓存读取 Token 比例')}</th><th class="numeric">${accountMetricRuleHeader('首字 P95', 'ttft', '同一窗口内已配对流式请求的首字 95 分位数')}</th><th class="numeric">总耗时 P95</th><th class="numeric">输出速度</th><th class="numeric">${accountMetricRuleHeader('费用对比', 'cost', '统一窗口 Key 总账收入与支出；详情同时展示配对请求可归因收支')}</th><th class="numeric">${accountMetricRuleHeader('检测通过率', 'probe', '成功主动检测占最近检测样本的比例，并展示最近一次检测状态')}</th><th class="numeric">${accountMetricRuleHeader('能力分 / 遵循', 'capability', '动态五维能力题集与格式遵循得分')}</th><th class="numeric">${accountMetricRuleHeader('质量分', 'quality', '延迟、检测通过率与能力分的加权结果')}</th><th aria-label="操作"></th></tr></thead><tbody>${rows}</tbody></table>`
     : emptyState('brain-circuit', '暂无账号质量数据', '同步 Sub2API 账号与请求日志后显示');
   $('#main-content').innerHTML = `
-      <section class="base-instance-bar account-monitor-source"><div><span class="status-dot ${monitorState.lastSyncStatus === 'failed' ? 'error' : monitorState.lastLogSyncAt ? 'healthy' : 'warning'}"></span><strong>Sub2API 基座 / 供应商上游</strong><small>基座 ${escapeHtml(timeAgo(monitorState.lastLogSyncAt))} · 上游 ${escapeHtml(timeAgo(summary.supplierLastSyncAt))}${monitorState.lastSyncSummary?.usageTruncated ? ' · 基座部分日期达到采集上限' : ''}</small></div><div class="status-summary">${badge(result.settings.syncEnabled ? 'enabled' : 'info', result.settings.syncEnabled ? result.settings.syncIntervalMinutes + ' 分钟双源同步' : '仅手动同步')}${badge(result.settings.probeEnabled ? 'enabled' : 'info', result.settings.probeEnabled ? result.settings.probeIntervalMinutes + ' 分钟检测' : '定时检测关闭')}</div></section>
+      <section class="base-instance-bar account-monitor-source"><div><span class="status-dot ${monitorState.lastSyncStatus === 'failed' ? 'error' : monitorState.lastLogSyncAt ? 'healthy' : 'warning'}"></span><strong>Sub2API 基座 / 供应商上游</strong><small>基座 ${escapeHtml(timeAgo(monitorState.lastLogSyncAt))} · 上游 ${escapeHtml(timeAgo(summary.supplierLastSyncAt))}${baseSyncNote}</small></div><div class="status-summary">${badge(result.settings.syncEnabled ? 'enabled' : 'info', result.settings.syncEnabled ? result.settings.syncIntervalMinutes + ' 分钟双源同步' : '仅手动同步')}${badge(result.settings.probeEnabled ? 'enabled' : 'info', result.settings.probeEnabled ? result.settings.probeIntervalMinutes + ' 分钟检测' : '定时检测关闭')}</div></section>
     <div class="stats-grid account-quality-stats">
       <div class="stat"><span class="stat-label"><i data-lucide="users-round"></i>账号映射</span><strong class="stat-value">${formatNumber(summary.mappedAccountCount, 0)} / ${formatNumber(summary.accountCount, 0)}</strong><span class="stat-detail">${summary.platformCount} 个平台</span></div>
       <div class="stat"><span class="stat-label"><i data-lucide="radio-tower"></i>基座请求</span><strong class="stat-value">${formatNumber(summary.requestCount, 0)}</strong><span class="stat-detail">缓存读取 ${formatPercent(summary.cacheRate)} · ${summary.days} 天</span></div>
-      <div class="stat"><span class="stat-label"><i data-lucide="database-zap"></i>上游逐请求覆盖</span><strong class="stat-value">${formatNumber(summary.supplierLogAccountCount, 0)}</strong><span class="stat-detail">其余账号使用累计用量或 Key 快照</span></div>
+      <div class="stat"><span class="stat-label"><i data-lucide="database-zap"></i>上游逐请求覆盖</span><strong class="stat-value">${formatNumber(summary.supplierLogAccountCount, 0)}</strong><span class="stat-detail">成功配对 ${formatNumber(summary.pairedAccountCount, 0)} 个账号 · Key 额外 ${formatNumber(summary.upstreamExtraRequestCount, 0)} 请求</span></div>
       <div class="stat"><span class="stat-label"><i data-lucide="scale"></i>费用可比账号</span><strong class="stat-value">${formatNumber(summary.comparableCostAccountCount, 0)}</strong><span class="stat-detail">主动检测通过 ${formatPercent(summary.probeSuccessRate)}</span></div>
     </div>
     <section class="section">
@@ -1137,27 +1197,60 @@ function paintAccountMonitorDetail(detail) {
   if (!root || !detail) return;
   const metrics = detail.metrics;
   const comparison = detail.comparison || {};
+  const comparisonBase = comparison.base || metrics;
   const upstream = comparison.upstream || {};
+  const windowBase = comparison.windowTotals?.base || comparisonBase;
+  const windowUpstream = comparison.windowTotals?.upstream || upstream;
   const cost = comparison.cost || {};
+  const overheadDelta = (value) => {
+    if (value == null || !Number.isFinite(Number(value))) return '-';
+    if (Math.abs(Number(value)) < 1e-9) return '一致';
+    return `基座 ${Number(value) > 0 ? '+' : '-'}${formatMilliseconds(Math.abs(Number(value)))}`;
+  };
   const comparisonRows = [
-    ['请求数', formatNumber(metrics.requestCount, 0), formatNumber(upstream.requestCount, 0), accountMetricDelta(metrics.requestCount, upstream.requestCount, (value) => formatNumber(value, 0))],
-    ['缓存读取率', formatPercent(metrics.cacheRate), formatPercent(upstream.cacheRate), accountMetricDelta(metrics.cacheRate, upstream.cacheRate, (value) => `${formatNumber(value, 1)} 个百分点`)],
-    ['首字 P95', formatMilliseconds(metrics.ttftP95Ms), formatMilliseconds(upstream.ttftP95Ms), accountMetricDelta(metrics.ttftP95Ms, upstream.ttftP95Ms, formatMilliseconds)],
-    ['总耗时 P95', formatMilliseconds(metrics.durationP95Ms), formatMilliseconds(upstream.durationP95Ms), accountMetricDelta(metrics.durationP95Ms, upstream.durationP95Ms, formatMilliseconds)],
-    ['输出速度', metrics.outputTokensPerSecond == null ? '-' : `${formatNumber(metrics.outputTokensPerSecond, 1)} tok/s`, upstream.outputTokensPerSecond == null ? '-' : `${formatNumber(upstream.outputTokensPerSecond, 1)} tok/s`, accountMetricDelta(metrics.outputTokensPerSecond, upstream.outputTokensPerSecond, (value) => `${formatNumber(value, 1)} tok/s`)]
+    ['请求总数（统一窗口）', formatNumber(windowBase.requestCount, 0), formatNumber(windowUpstream.requestCount, 0), accountMetricDelta(windowBase.requestCount, windowUpstream.requestCount, (value) => formatNumber(value, 0))],
+    ['缓存读取率（配对）', formatPercent(comparisonBase.cacheRate), formatPercent(upstream.cacheRate), accountMetricDelta(comparisonBase.cacheRate, upstream.cacheRate, (value) => `${formatNumber(value, 1)} 个百分点`)],
+    ['首字 P95（配对）', formatMilliseconds(comparisonBase.ttftP95Ms), formatMilliseconds(upstream.ttftP95Ms), overheadDelta(comparison.overhead?.ttftP95Ms)],
+    ['总耗时 P95（配对）', formatMilliseconds(comparisonBase.durationP95Ms), formatMilliseconds(upstream.durationP95Ms), overheadDelta(comparison.overhead?.durationP95Ms)],
+    ['输出速度（配对）', comparisonBase.outputTokensPerSecond == null ? '-' : `${formatNumber(comparisonBase.outputTokensPerSecond, 1)} tok/s`, upstream.outputTokensPerSecond == null ? '-' : `${formatNumber(upstream.outputTokensPerSecond, 1)} tok/s`, accountMetricDelta(comparisonBase.outputTokensPerSecond, upstream.outputTokensPerSecond, (value) => `${formatNumber(value, 1)} tok/s`)]
   ].map(([label, base, provider, delta]) => `<tr><td><strong>${escapeHtml(label)}</strong></td><td class="numeric">${escapeHtml(base)}</td><td class="numeric">${escapeHtml(provider)}</td><td class="numeric">${escapeHtml(delta)}</td></tr>`).join('');
-  const costCurrency = cost.currency || 'USD';
-  const costDelta = cost.comparable
-    ? cost.moreExpensive === 'same'
-      ? '一致'
-      : `${cost.moreExpensive === 'sub2api' ? '基座贵' : '上游贵'} ${formatPreciseMoney(Math.abs(cost.differenceAmount), costCurrency)}`
+  const rawCostCurrency = cost.currency || 'USD';
+  const cashCostCurrency = cost.cashCurrency || rawCostCurrency;
+  const pairedUsesCash = cost.baseCashEquivalent != null && cost.upstreamCashEquivalent != null;
+  const pairedCostCurrency = pairedUsesCash ? cashCostCurrency : rawCostCurrency;
+  const displayedBaseCost = pairedUsesCash ? cost.baseCashEquivalent : cost.baseCost;
+  const displayedUpstreamCost = pairedUsesCash ? cost.upstreamCashEquivalent : cost.upstreamCost;
+  const pairedCostDelta = cost.comparable
+    ? cost.profitStatus === 'break_even'
+      ? '收支平衡'
+      : `${cost.profitStatus === 'profit' ? '毛差' : '成本倒挂'} ${cost.profitStatus === 'profit' ? '+' : '-'}${formatPreciseMoney(Math.abs(cost.differenceAmount), cashCostCurrency)}`
     : accountComparisonReasonLabel(cost.reason);
+  const windowUsesCash = cost.baseWindowCashEquivalent != null &&
+    cost.keyTotalUpstreamCashEquivalent != null;
+  const windowCostCurrency = windowUsesCash ? cashCostCurrency : rawCostCurrency;
+  const displayedBaseWindowCost = windowUsesCash
+    ? cost.baseWindowCashEquivalent
+    : cost.baseWindowCost;
+  const displayedUpstreamWindowCost = windowUsesCash
+    ? cost.keyTotalUpstreamCashEquivalent
+    : cost.keyTotalUpstreamCost;
+  const windowCostDelta = cost.windowComparable
+    ? cost.windowProfitStatus === 'break_even'
+      ? '收支平衡'
+      : `${cost.windowProfitStatus === 'profit' ? '总账毛差' : '总账倒挂'} ${cost.windowProfitStatus === 'profit' ? '+' : '-'}${formatPreciseMoney(Math.abs(cost.windowDifferenceAmount), cashCostCurrency)}`
+    : accountComparisonReasonLabel(cost.windowReason);
   const providerHeading = comparison.provider
     ? `${escapeHtml(comparison.provider.name)} · ${escapeHtml(comparison.provider.keyName || '未绑定 Key')}`
     : comparison.status === 'multiple_upstreams' ? `${comparison.targets?.length || 0} 个供应商上游` : '未映射供应商上游';
-  const coverageText = comparison.coverage?.from && comparison.coverage?.to
-    ? `${formatDate(comparison.coverage.from)} 至 ${formatDate(comparison.coverage.to)}`
-    : '暂无上游覆盖窗口';
+  const coverageText = comparison.window?.from && comparison.window?.to
+    ? `统一窗口 ${formatDate(comparison.window.from)} 至 ${formatDate(comparison.window.to)}`
+    : '暂无统一可比窗口';
+  const pairingText = comparison.pairing?.matchedCount > 0
+    ? ` · 配对 ${formatNumber(comparison.pairing.matchedCount, 0)} / ${formatNumber(comparison.pairing.baseRequestCount, 0)}${comparison.pairing.upstreamExtraCount > 0 ? ` · 上游未归因 ${formatNumber(comparison.pairing.upstreamExtraCount, 0)}` : comparison.pairing.extraCountTrusted === false ? ' · 额外请求待回补核实' : ''}`
+    : '';
+  const metricReasonText = comparison.metricReason
+    ? ` · ${accountComparisonReasonLabel(comparison.metricReason)}`
+    : '';
   const probeRows = detail.probes.slice(0, 12).map((probe) =>
     `<tr><td>${badge(probe.status)}</td><td>${escapeHtml(accountProbeSuiteLabel(probe.suite))}</td><td>${badge(probe.details?.transport === 'direct_api_key' ? 'enabled' : 'info', accountProbeTransportLabel(probe.details))}</td><td>${escapeHtml(probe.model || '-')}</td><td class="numeric">${formatMilliseconds(probe.firstTokenMs)}</td><td class="numeric">${formatMilliseconds(probe.durationMs)}</td><td class="numeric">${probe.intelligenceScore == null ? '-' : formatNumber(probe.intelligenceScore, 0)}</td><td class="primary-cell"><strong>${escapeHtml(probe.responseExcerpt || probe.errorMessage || '-')}</strong><small>${formatDate(probe.completedAt)}</small></td></tr>`
   ).join('');
@@ -1166,8 +1259,8 @@ function paintAccountMonitorDetail(detail) {
     : emptyState('flask-conical', '暂无主动检测', '选择该账号并执行检测');
   root.innerHTML = `<div class="section-header"><h2>${escapeHtml(detail.account.name)}</h2><p>#${escapeHtml(detail.account.accountId)} · ${escapeHtml(accountMonitorPlatformLabel(detail.account.platform))} · 最近 ${detail.days} 天</p><div class="section-actions"><button class="icon-button small" data-action="close-account-quality" title="关闭详情" aria-label="关闭详情"><i data-lucide="x"></i></button></div></div>
     <div class="account-detail-metrics"><div><span>质量分</span><strong>${metrics.qualityScore == null ? '-' : formatNumber(metrics.qualityScore, 0)}</strong></div><div><span>首字 P95</span><strong>${formatMilliseconds(metrics.ttftP95Ms)}</strong></div><div><span>缓存读取率</span><strong>${formatPercent(metrics.cacheRate)}</strong></div><div><span>输出速度</span><strong>${metrics.outputTokensPerSecond == null ? '-' : formatNumber(metrics.outputTokensPerSecond, 1) + ' tok/s'}</strong></div><div><span>检测通过率</span><strong>${formatPercent(metrics.probeSuccessRate)}</strong></div><div><span>能力得分</span><strong>${metrics.intelligenceScore == null ? '未覆盖' : formatNumber(metrics.intelligenceScore, 0)}</strong></div></div>
-    <section class="section account-comparison-detail"><div class="section-header"><div><h2>基座 / 上游对比</h2><p>${providerHeading} · ${escapeHtml(accountUpstreamSourceLabel(comparison.source))} · ${escapeHtml(coverageText)}</p></div>${comparison.coverage?.stale ? badge('stale', '上游数据陈旧') : comparison.status === 'mapped' ? badge('enabled', '已映射') : badge('warning', '不可归因')}</div><div class="table-wrap"><table><thead><tr><th>指标</th><th class="numeric">Sub2API 基座</th><th class="numeric">供应商上游</th><th class="numeric">上游 - 基座</th></tr></thead><tbody>${comparisonRows}<tr class="cost-comparison-row"><td><strong>消耗费用</strong><small>${escapeHtml(cost.source ? accountUpstreamSourceLabel(cost.source) : '暂无费用来源')}</small></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(cost.baseCost == null ? metrics.actualCost : cost.baseCost, costCurrency))}</strong></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(cost.upstreamCost, costCurrency))}</strong></td><td class="numeric"><strong>${escapeHtml(costDelta)}</strong></td></tr></tbody></table></div></section>
-    <div class="panel account-quality-chart-panel"><div class="panel-header"><h3>日趋势</h3></div><div class="chart" id="account-quality-chart"></div></div>
+    <section class="section account-comparison-detail"><div class="section-header"><div><h2>基座 / 上游对比</h2><p>${providerHeading} · ${escapeHtml(accountUpstreamSourceLabel(comparison.source))} · ${escapeHtml(coverageText + pairingText)}${escapeHtml(metricReasonText)}</p></div>${comparison.coverage?.stale ? badge('stale', '上游数据陈旧') : comparison.status === 'mapped' ? badge('enabled', '已映射') : badge('warning', '不可归因')}</div><div class="table-wrap"><table><thead><tr><th>指标</th><th class="numeric">Sub2API 基座</th><th class="numeric">供应商上游</th><th class="numeric">差值</th></tr></thead><tbody>${comparisonRows}<tr class="cost-comparison-row"><td><strong>统一窗口 Key 总账${windowUsesCash ? '（现金等值）' : '（余额单位）'}</strong><small>基座 actual_cost 实际收入 / 上游 actual_cost 实际支出 · ${escapeHtml(cost.source ? `${formatDate(cost.from)} 至 ${formatDate(cost.to)}` : '暂无费用来源')}</small></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(displayedBaseWindowCost, windowCostCurrency))}</strong><small>充值倍率 ${escapeHtml(formatEffectiveRate(cost.baseRechargeMultiplier))}</small></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(displayedUpstreamWindowCost, windowCostCurrency))}</strong><small>充值倍率 ${escapeHtml(formatEffectiveRate(cost.providerRecharge?.multiplier))}</small></td><td class="numeric"><strong>${escapeHtml(windowCostDelta)}</strong>${cost.windowGrossMarginRatio == null ? '' : `<small>总账毛利率 ${escapeHtml(formatPercent(cost.windowGrossMarginRatio * 100))}</small>`}</td></tr><tr><td><strong>配对请求可归因收支${pairedUsesCash ? '（现金等值）' : '（余额单位）'}</strong><small>仅比较成功一一配对的 ${escapeHtml(formatNumber(cost.requestCount, 0))} 次请求；上游未归因流量不混入</small></td><td class="numeric">${escapeHtml(formatPreciseMoney(displayedBaseCost, pairedCostCurrency))}</td><td class="numeric">${escapeHtml(formatPreciseMoney(displayedUpstreamCost, pairedCostCurrency))}</td><td class="numeric"><strong>${escapeHtml(pairedCostDelta)}</strong>${cost.grossMarginRatio == null ? '' : `<small>配对毛利率 ${escapeHtml(formatPercent(cost.grossMarginRatio * 100))}</small>`}</td></tr></tbody></table></div></section>
+    <div class="panel account-quality-chart-panel"><div class="panel-header"><h3>统一窗口日趋势</h3><span class="stat-detail">趋势按窗口总请求聚合；表格性能优先使用配对请求</span></div><div class="chart" id="account-quality-chart"></div></div>
     <section class="section"><div class="section-header"><h2>最近主动检测</h2></div><div class="table-wrap">${probeTable}</div></section>`;
   state.chart?.dispose?.();
   const chartRoot = $('#account-quality-chart');
@@ -1219,6 +1312,7 @@ function openAccountMonitorSettings() {
   form.elements.syncIntervalMinutes.value = settings.syncIntervalMinutes;
   form.elements.lookbackDays.value = settings.lookbackDays;
   form.elements.sampleRetentionDays.value = settings.sampleRetentionDays;
+  form.elements.baseRechargeMultiplier.value = settings.baseRechargeMultiplier || 1;
   form.elements.probeEnabled.checked = settings.probeEnabled;
   form.elements.probeIntervalMinutes.value = settings.probeIntervalMinutes;
   form.elements.probeConcurrency.value = settings.probeConcurrency;
@@ -3608,6 +3702,7 @@ $('#account-monitor-settings-form').addEventListener('submit', async (event) => 
         syncIntervalMinutes: Number(form.elements.syncIntervalMinutes.value),
         lookbackDays: Number(form.elements.lookbackDays.value),
         sampleRetentionDays: Number(form.elements.sampleRetentionDays.value),
+        baseRechargeMultiplier: Number(form.elements.baseRechargeMultiplier.value),
         probeEnabled: form.elements.probeEnabled.checked,
         probeIntervalMinutes: Number(form.elements.probeIntervalMinutes.value),
         probeConcurrency: Number(form.elements.probeConcurrency.value),
