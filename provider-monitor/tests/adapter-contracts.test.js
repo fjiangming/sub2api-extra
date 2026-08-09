@@ -92,6 +92,36 @@ test('Sub2API authentication reports interactive and session-bound login require
   );
 });
 
+test('Sub2API token-pair mode reports an invalid rotated refresh token without account fallback', async () => {
+  const requests = [];
+  const adapter = new Sub2ApiAdapter(context('sub2api', (url) => {
+    requests.push(url.pathname);
+    if (url.pathname === '/api/v1/auth/refresh') {
+      throw new AppError('AUTH_FAILED', 'invalid refresh token', {
+        status: 401,
+        details: { remoteCode: 'REFRESH_TOKEN_INVALID', remoteStatus: 401 }
+      });
+    }
+    throw new Error(`Unexpected ${url.pathname}`);
+  }, {
+    connection: { auth_mode: 'token_pair' },
+    credentials: {
+      email: 'legacy@example.com',
+      password: 'legacy-password',
+      accessToken: 'expired-access-token',
+      refreshToken: 'invalid-refresh-token',
+      tokenExpiresAt: Date.now() - 60000
+    }
+  }));
+
+  await assert.rejects(
+    adapter.getAccount(),
+    (error) => error.code === 'AUTH_EXPIRED' &&
+      error.message.includes('configure a fresh OAuth token pair')
+  );
+  assert.deepEqual(requests, ['/api/v1/auth/refresh']);
+});
+
 test('Sub2API recharge login uses the official fragment callback without exposing a refresh token', async () => {
   const adapter = new Sub2ApiAdapter(context('sub2api', () => {
     throw new Error('No remote request expected');

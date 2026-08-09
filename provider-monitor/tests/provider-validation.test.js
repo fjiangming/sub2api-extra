@@ -3,6 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createTestContext } = require('./helpers');
 const { createApplication } = require('../src/server');
+const { mergeProviderCredentials } = require('../src/repositories/provider-repository');
 
 async function listen(server) {
   server.listen(0, '127.0.0.1');
@@ -127,4 +128,119 @@ test('provider validation reuses saved credentials and lets new account credenti
     email: 'saved@example.com',
     password: 'correct-password'
   });
+});
+
+test('Sub2API token-pair key discovery never falls back to legacy account credentials', async (t) => {
+  let refreshCalls = 0;
+  let loginCalls = 0;
+  const upstream = http.createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/api/v1/auth/refresh' && req.method === 'POST') {
+      refreshCalls += 1;
+      res.statusCode = 401;
+      res.end(JSON.stringify({
+        code: 401,
+        message: 'invalid refresh token',
+        reason: 'REFRESH_TOKEN_INVALID'
+      }));
+      return;
+    }
+    if (req.url === '/api/v1/auth/login' && req.method === 'POST') {
+      loginCalls += 1;
+      res.statusCode = 400;
+      res.end(JSON.stringify({
+        code: 400,
+        message: 'turnstile verification failed',
+        reason: 'TURNSTILE_VERIFICATION_FAILED'
+      }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end(JSON.stringify({ message: `Unexpected ${req.method} ${req.url}` }));
+  });
+  const upstreamBaseUrl = await listen(upstream);
+
+  const context = createTestContext();
+  const app = createApplication({ config: context.config, db: context.db, startBackground: false });
+  const server = http.createServer(app);
+  const baseUrl = await listen(server);
+  t.after(async () => {
+    await close(server);
+    await app.locals.close();
+    await close(upstream);
+    context.cleanup();
+  });
+
+  const login = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'test-password' })
+  });
+  const session = await login.json();
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const headers = {
+    Cookie: cookie,
+    'Content-Type': 'application/json',
+    'X-CSRF-Token': session.csrfToken
+  };
+
+  const provider = app.locals.services.providers.create({
+    name: 'Legacy token-pair Sub2API',
+    adapterType: 'sub2api',
+    baseUrl: upstreamBaseUrl,
+    authMode: 'account',
+    credentials: { email: 'legacy@example.com', password: 'legacy-password' },
+    enabled: false
+  });
+  app.locals.services.providers.updateCredentials(provider.id, {
+    email: 'legacy@example.com',
+    password: 'legacy-password',
+    accessToken: 'expired-access-token',
+    refreshToken: 'invalid-refresh-token',
+    tokenExpiresAt: Date.now() - 60000
+  });
+  context.db.prepare(
+    "UPDATE provider_connections SET auth_mode = 'token_pair' WHERE id = ?"
+  ).run(provider.id);
+
+  const response = await fetch(`${baseUrl}/api/providers/key-options`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      existingProviderId: provider.id,
+      baseUrl: upstreamBaseUrl,
+      authMode: 'token_pair',
+      credentials: {}
+    })
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 401);
+  assert.equal(payload.error.code, 'AUTH_EXPIRED');
+  assert.match(payload.error.message, /fresh OAuth token pair/);
+  assert.equal(refreshCalls, 1);
+  assert.equal(loginCalls, 0);
+});
+
+test('Sub2API token-only modes discard legacy account credentials', () => {
+  const merged = mergeProviderCredentials(
+    {
+      email: 'legacy@example.com',
+      password: 'legacy-password',
+      accessToken: 'old-access-token'
+    },
+    {
+      email: 'ignored@example.com',
+      password: 'ignored-password',
+      accessToken: 'fresh-access-token',
+      refreshToken: 'fresh-refresh-token'
+    },
+    'sub2api',
+    'token_pair'
+  );
+
+  assert.equal(Object.hasOwn(merged, 'email'), false);
+  assert.equal(Object.hasOwn(merged, 'password'), false);
+  assert.equal(merged.accessToken, 'fresh-access-token');
+  assert.equal(merged.refreshToken, 'fresh-refresh-token');
 });

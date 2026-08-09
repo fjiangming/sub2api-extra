@@ -963,6 +963,7 @@ test('Sub2API account key options are discovered live instead of reloading filte
   assert.deepEqual(JSON.parse(requests[0].options.body), {
     existingProviderId: provider.id,
     baseUrl: 'https://sub2api.example',
+    authMode: 'account',
     credentials: {}
   });
   const discoveredIds = JSON.parse(vm.runInContext(

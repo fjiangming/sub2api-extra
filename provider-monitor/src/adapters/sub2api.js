@@ -268,6 +268,13 @@ function normalizeRequestLog(row, expectedKey, options = {}) {
 
 function translateSub2ApiAuthError(error) {
   const remoteCode = String(error?.details?.remoteCode || '');
+  if (remoteCode === 'REFRESH_TOKEN_INVALID') {
+    return new AppError(
+      'AUTH_EXPIRED',
+      'Sub2API refresh token is invalid or has already been rotated; configure a fresh OAuth token pair',
+      { status: 401, details: error.details, cause: error }
+    );
+  }
   if (remoteCode === 'SESSION_BINDING_MISMATCH') {
     return new AppError(
       'SUB2API_SESSION_BINDING_INCOMPATIBLE',
@@ -620,7 +627,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
         return await this.refreshToken();
       } catch (error) {
         if (usesTokenPair(this.connection)) throw error;
-        if (error.code !== 'AUTH_FAILED' && error.code !== 'BUSINESS_ERROR') throw error;
+        if (!['AUTH_FAILED', 'AUTH_EXPIRED', 'BUSINESS_ERROR'].includes(error.code)) throw error;
       }
     }
     return this.login();

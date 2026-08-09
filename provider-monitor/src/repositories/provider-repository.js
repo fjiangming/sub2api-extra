@@ -112,9 +112,15 @@ function mergeProviderCredentials(existing = {}, incoming = {}, adapterType = ''
   const merged = { ...existing, ...incoming };
   if (adapterType !== 'sub2api') return merged;
 
+  const tokenOnlyMode = ['token_pair', 'bearer'].includes(normalizedAuthMode);
+  if (tokenOnlyMode) {
+    delete merged.email;
+    delete merged.password;
+  }
+
   const accountCredentialsChanged = ['email', 'password']
     .some((field) => Object.prototype.hasOwnProperty.call(incoming, field));
-  if (accountCredentialsChanged) {
+  if (accountCredentialsChanged && !tokenOnlyMode) {
     for (const field of SUB2API_SESSION_CREDENTIAL_FIELDS) delete merged[field];
     return merged;
   }
@@ -236,10 +242,12 @@ class ProviderRepository {
       : new Date(Date.now() + refreshMinutes * 60000).toISOString();
     validateBalanceThresholds(input.warningThreshold, input.secondaryWarningThreshold);
 
-    const credentials = input.adapterType === 'sub2api' && (input.authMode || 'api_key') === 'api_key' &&
-      Object.prototype.hasOwnProperty.call(input.credentials || {}, 'apiKeys')
-      ? mergeConfiguredApiKeyCredentials({}, input.credentials || {})
-      : input.credentials || {};
+    const credentials = mergeProviderCredentials(
+      {},
+      input.credentials || {},
+      input.adapterType,
+      input.authMode || 'api_key'
+    );
     const insert = this.db.transaction(() => {
       this.db
         .prepare(

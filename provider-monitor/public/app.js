@@ -2653,6 +2653,7 @@ async function loadMonitoredApiKeyOptions(form, provider) {
         body: {
           ...(provider?.id ? { existingProviderId: provider.id } : {}),
           baseUrl: normalizeProviderBaseUrl(form.elements.baseUrl.value),
+          authMode: form.elements.authMode.value,
           credentials: discoveryCredentials
         }
       })

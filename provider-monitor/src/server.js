@@ -114,6 +114,7 @@ const providerValidationSchema = providerSchema.extend({
 const providerKeyOptionsSchema = z.object({
   existingProviderId: z.string().uuid().optional(),
   baseUrl: z.string().url(),
+  authMode: z.enum(['account', 'token_pair', 'bearer', 'api_key']).optional(),
   credentials: z.record(z.string(), z.any()).optional()
 });
 const alertRuleThresholdTypes = new Set([
@@ -814,19 +815,36 @@ function createApplication(options = {}) {
       : null;
     const storedCredentials = existing ? providers.getCredentials(existing) : {};
     const submittedCredentials = input.credentials || {};
+    const requestedAuthMode = String(input.authMode || existing?.auth_mode || '').toLowerCase();
+    const explicitSessionModes = new Set(['account', 'token_pair', 'bearer']);
+    const combinedCredentials = { ...storedCredentials, ...submittedCredentials };
+    const submittedTokenPair = Boolean(
+      submittedCredentials.accessToken || submittedCredentials.refreshToken
+    );
+    const submittedAccount = Boolean(
+      submittedCredentials.email || submittedCredentials.password
+    );
+    const discoveryAuthMode = explicitSessionModes.has(requestedAuthMode)
+      ? requestedAuthMode
+      : submittedTokenPair
+        ? 'token_pair'
+        : submittedAccount
+          ? 'account'
+          : combinedCredentials.accessToken || combinedCredentials.refreshToken
+            ? 'token_pair'
+            : 'account';
     const credentials = mergeProviderCredentials(
       storedCredentials,
       submittedCredentials,
       'sub2api',
-      'account'
+      discoveryAuthMode
     );
-    const hasAccountCredentials = Boolean(credentials.email && credentials.password);
     const discoveryConnection = {
       id: existing?.id || crypto.randomUUID(),
       name: existing?.name || 'Sub2API Key inventory',
       adapter_type: 'sub2api',
       base_url: input.baseUrl.replace(/\/+$/, ''),
-      auth_mode: hasAccountCredentials ? 'account' : 'token_pair',
+      auth_mode: discoveryAuthMode,
       remote_user_id: existing?.remote_user_id || null,
       account_dedupe_key: existing?.account_dedupe_key || null,
       type_config_json: {}
