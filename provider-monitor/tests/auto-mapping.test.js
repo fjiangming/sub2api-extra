@@ -59,6 +59,10 @@ function sub2apiFixture({
       if (endpoint === '/api/v1/groups/rates') {
         return Object.fromEntries(groups.map((group) => [group.id, group.rate_multiplier]));
       }
+      const accountDetail = endpoint.match(/^\/api\/v1\/admin\/accounts\/(\d+)$/);
+      if (accountDetail) {
+        return accounts.find((account) => Number(account.id) === Number(accountDetail[1])) || null;
+      }
       if (endpoint === '/api/v1/admin/accounts/data') {
         onExport?.(options.query, options);
         if (exportError) throw exportError;
@@ -163,6 +167,92 @@ test('auto-mapping processes every account from a multiple contains match', asyn
     context.db.prepare('SELECT account_id FROM sub2api_mappings ORDER BY account_id').all().map((row) => row.account_id),
     [108, 113]
   );
+});
+
+test('auto-mapping excludes inactive Sub2API accounts before exporting keys or creating mappings', async (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Status Supplier', adapterType: 'new-api', baseUrl: 'https://status-supplier.example',
+    authMode: 'system_token', credentials: { systemToken: 'secret', userId: '1' }, enabled: true
+  });
+  insertGroup(context.db, provider.id, { remoteId: 'default', name: 'Default', ratio: 1 });
+  const activeKey = 'sk-status-active-1234567890';
+  insertKey(context.db, provider.id, {
+    remoteId: 'active-key', name: 'Active key', apiKey: activeKey, primaryGroupRef: 'default'
+  });
+  const exports = [];
+  const mappings = new MappingService({
+    db: context.db,
+    config: context.config,
+    sub2api: sub2apiFixture({
+      channels: [],
+      groups: [{ id: 31, name: 'Active group', status: 'active', rate_multiplier: 1 }],
+      accounts: [
+        {
+          id: 301, name: 'Status Supplier', status: 'inactive', type: 'api_key',
+          group_ids: [31], credentials_status: { has_api_key: true }
+        },
+        {
+          id: 302, name: 'Status Supplier', status: 'active', type: 'api_key',
+          group_ids: [31], credentials_status: { has_api_key: true }
+        }
+      ],
+      apiKeys: { 301: 'sk-status-inactive-0987654321', 302: activeKey },
+      onExport: (query) => exports.push(query)
+    })
+  });
+
+  const preview = await mappings.autoMappings({ mode: 'preview' });
+  assert.equal(preview.summary.pendingCreate, 1);
+  assert.deepEqual(preview.items.map((item) => item.accountId), [302]);
+  assert.deepEqual(exports.map((query) => query.ids), ['302']);
+
+  const applied = await mappings.autoMappings({ mode: 'apply' });
+  assert.equal(applied.summary.created, 1);
+  assert.deepEqual(exports.map((query) => query.ids), ['302', '302']);
+  assert.deepEqual(
+    context.db.prepare('SELECT account_id FROM sub2api_mappings').all().map((row) => row.account_id),
+    [302]
+  );
+});
+
+test('manual mappings reject inactive accounts when binding or re-enabling them', async (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Manual Status', adapterType: 'custom', baseUrl: 'https://manual-status.example',
+    authMode: 'api_key', credentials: { apiKey: 'secret' }, enabled: true
+  });
+  const accounts = [
+    { id: 401, name: 'Inactive', status: 'inactive' },
+    { id: 402, name: 'Active', status: 'active' }
+  ];
+  const mappings = new MappingService({
+    db: context.db,
+    config: context.config,
+    sub2api: sub2apiFixture({ channels: [], groups: [], accounts, apiKeys: {} })
+  });
+
+  await assert.rejects(
+    () => mappings.saveValidated({ connectionId: provider.id, accountId: 401, groupId: 31 }),
+    (error) => error.code === 'SUB2API_ACCOUNT_DISABLED' && error.details?.accountStatus === 'inactive'
+  );
+  assert.equal(context.db.prepare('SELECT COUNT(*) count FROM sub2api_mappings').get().count, 0);
+
+  const mapping = await mappings.saveValidated({
+    connectionId: provider.id, accountId: 402, groupId: 31
+  });
+  accounts[1].status = 'inactive';
+  const disabled = await mappings.saveValidated({ enabled: false }, mapping.id);
+  assert.equal(disabled.enabled, false);
+  await assert.rejects(
+    () => mappings.saveValidated({ enabled: true }, mapping.id),
+    (error) => error.code === 'SUB2API_ACCOUNT_DISABLED' && error.details?.accountId === 402
+  );
+  assert.equal(mappings.get(mapping.id).enabled, false);
 });
 
 test('auto-mapping normalizes an sk prefix and resolves an inherited sole provider group', async (t) => {

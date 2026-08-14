@@ -237,6 +237,20 @@
     </form>
   </dialog>
 
+  <dialog id="provider-recharge-audit-dialog" class="dialog">
+    <form method="dialog" id="provider-recharge-audit-form">
+      <header class="dialog-header"><div><h2 id="provider-recharge-audit-title">供应商累计充值</h2><p>资金审计口径</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <input type="hidden" name="connectionId">
+      <div class="form-grid">
+        <label><span>累计已充值金额</span><input name="rechargedAmount" type="number" min="0" max="1000000000000" step="0.000001" required></label>
+        <label><span>币种</span><input name="currency" maxlength="12" autocomplete="off" required></label>
+        <label class="span-2"><span>审计备注</span><textarea name="note" rows="3" maxlength="500"></textarea></label>
+      </div>
+      <p class="form-error" id="provider-recharge-audit-error" role="alert"></p>
+      <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存</span></button></footer>
+    </form>
+  </dialog>
+
   <dialog id="account-metric-rules-dialog" class="dialog wide-dialog">
     <form method="dialog">
       <header class="dialog-header"><div><h2>账号质量指标口径</h2><p>双源数据、可比条件与当前观察窗口</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>

@@ -61,6 +61,7 @@ function setBaseLogCoverage(db, from, to) {
 function createSub2ApiMock() {
   const calls = [];
   let usageReturned = false;
+  let groupCatalogReturned = false;
   return {
     calls,
     authenticationStatus() {
@@ -83,6 +84,7 @@ function createSub2ApiMock() {
               status: 'active',
               schedulable: true,
               priority: 10,
+              group_ids: [101, 102],
               credentials: { access_token: 'must-not-be-stored' }
             },
             {
@@ -91,7 +93,8 @@ function createSub2ApiMock() {
               platform: 'anthropic',
               type: 'oauth',
               status: 'active',
-              schedulable: true
+              schedulable: true,
+              groups: [{ id: 102, name: 'Embedded fallback name' }]
             }
           ],
           total: 2,
@@ -152,6 +155,18 @@ function createSub2ApiMock() {
       }
       throw new Error(`Unexpected endpoint ${endpoint}`);
     },
+    async data(endpoint) {
+      calls.push({ type: 'data', endpoint });
+      if (endpoint === '/api/v1/admin/groups/all') {
+        if (groupCatalogReturned) throw new Error('Group catalog unavailable');
+        groupCatalogReturned = true;
+        return [
+          { id: 101, name: '高速组', platform: 'openai', status: 'active', rate_multiplier: 1.2 },
+          { id: 102, name: '共享组', status: 'active', rate_multiplier: 0.8 }
+        ];
+      }
+      throw new Error(`Unexpected endpoint ${endpoint}`);
+    },
     async sse(endpoint, options) {
       calls.push({ type: 'sse', endpoint, body: options.body });
       await options.onEvent({ type: 'test_start', model: options.body.model_id || 'default-test-model' });
@@ -178,6 +193,8 @@ test('account monitor syncs redacted metrics and scores dynamic capability probe
 
   const sync = await monitor.sync();
   assert.equal(sync.accountCount, 2);
+  assert.equal(sync.groupCount, 2);
+  assert.equal(sync.groupCatalogComplete, true);
   assert.equal(sync.fetchedSampleCount, 3);
   assert.deepEqual(sync.truncatedDates, []);
   const usageCalls = sub2api.calls.filter((call) => call.endpoint === '/api/v1/admin/usage');
@@ -192,12 +209,15 @@ test('account monitor syncs redacted metrics and scores dynamic capability probe
   const expandedUsageCalls = sub2api.calls.slice(callsBeforeExpandedBackfill)
     .filter((call) => call.endpoint === '/api/v1/admin/usage');
   assert.equal(expandedSync.usageFullBackfill, true);
+  assert.equal(expandedSync.groupCatalogComplete, false);
   assert.ok(expandedUsageCalls.length >= 14);
   assert.ok(expandedUsageCalls.every((call) => call.query.exact_total === true));
   assert.doesNotMatch(
     context.db.prepare('SELECT metadata_json FROM sub2api_monitored_accounts WHERE account_id = ?').get('11').metadata_json,
     /must-not-be-stored/
   );
+  const cachedGroups = monitor.accounts({ platform: 'openai', days: 7 }).items[0].groups;
+  assert.deepEqual(cachedGroups.map((group) => [group.id, group.name]), [['101', '高速组'], ['102', '共享组']]);
 
   const listing = monitor.accounts({ platform: 'openai', days: 7 });
   assert.equal(listing.items.length, 1);
@@ -208,6 +228,36 @@ test('account monitor syncs redacted metrics and scores dynamic capability probe
   assert.equal(listing.items[0].metrics.ttftP95Ms, 1800);
   assert.equal(listing.items[0].metrics.ttftSampleCount, 2);
   assert.ok(listing.items[0].metrics.outputTokensPerSecond >= 100);
+  assert.deepEqual(
+    listing.items[0].groups.map((group) => [group.id, group.name]),
+    [['101', '高速组'], ['102', '共享组']]
+  );
+  assert.deepEqual(listing.items[0].groups.map((group) => group.rateMultiplier), [1.2, 0.8]);
+  assert.deepEqual(
+    listing.groups.map((group) => [group.id, group.accountCount])
+      .sort((left, right) => left[0].localeCompare(right[0])),
+    [['101', 1], ['102', 1]]
+  );
+  const grouped = monitor.accounts({ display: 'groups', days: 7 });
+  assert.equal(grouped.itemType, 'group');
+  assert.equal(grouped.pagination.total, 2);
+  assert.equal(grouped.summary.accountCount, 2);
+  assert.equal(grouped.summary.baseGroupCount, 2);
+  assert.equal(grouped.summary.ungroupedAccountCount, 0);
+  assert.equal(grouped.summary.groupMembershipCount, 3);
+  const sharedGroup = grouped.items.find((group) => group.groupId === '102');
+  assert.equal(sharedGroup.accountCount, 2);
+  assert.equal(sharedGroup.metrics.requestCount, 3);
+  assert.equal(sharedGroup.metrics.cacheRate, 81.8);
+  assert.equal(sharedGroup.coverage.mappedAccountCount, 0);
+  assert.deepEqual(
+    sharedGroup.accounts.map((account) => account.accountId).sort(),
+    ['11', '12']
+  );
+  assert.deepEqual(
+    monitor.accounts({ groupId: '102', days: 7 }).items.map((item) => item.accountId).sort(),
+    ['11', '12']
+  );
   assert.equal(monitor.accounts({ platform: 'anthropic', days: 7 }).items[0].comparison.metricReason, 'no_enabled_mapping');
 
   const probe = await monitor.probe({ accountIds: ['11', '12'], triggerType: 'manual' });
@@ -332,6 +382,21 @@ test('account quality compares mapped provider logs and same-window upstream cos
     sub2api: {}
   });
   const item = monitor.accounts({ search: 'Mapped account', days: 7 }).items[0];
+  assert.equal(item.groupAssociationsKnown, false);
+  assert.equal(item.groupAssociationSource, 'mapping_cache');
+  assert.deepEqual(item.groups.map((group) => [group.id, group.name]), [['1', '分组 #1']]);
+  const cachedGroupListing = monitor.accounts({
+    display: 'groups',
+    search: 'Mapped account',
+    days: 7
+  });
+  assert.equal(cachedGroupListing.items.length, 1);
+  assert.equal(cachedGroupListing.items[0].groupId, '1');
+  assert.equal(cachedGroupListing.items[0].cachedMembershipAccountCount, 1);
+  assert.equal(cachedGroupListing.summary.baseGroupCount, 1);
+  assert.equal(cachedGroupListing.summary.pendingGroupAccountCount, 1);
+  assert.equal(cachedGroupListing.summary.mappingCachedGroupAccountCount, 1);
+  assert.equal(cachedGroupListing.summary.ungroupedAccountCount, 0);
   assert.equal(item.comparison.status, 'mapped');
   assert.equal(item.comparison.source, 'provider_request_logs');
   assert.equal(item.comparison.metricReason, 'request_pairing_insufficient');
@@ -432,6 +497,202 @@ test('account quality compares mapped provider logs and same-window upstream cos
   assert.equal(unverified.comparison.source, 'unavailable');
   assert.equal(unverified.comparison.metricReason, 'request_logs_key_unverified');
   assert.equal(unverified.comparison.upstream, null);
+});
+
+test('provider quality aggregates every key and retains audited costs after samples disappear', (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Ledger Supplier',
+    adapterType: 'new-api',
+    baseUrl: 'https://ledger-provider.example',
+    authMode: 'system_token',
+    remoteUserId: 'ledger-user',
+    credentials: { systemToken: 'ledger-token' },
+    rechargeMultiplier: 2
+  });
+  const now = Date.now();
+  const iso = (minutesAgo) => new Date(now - minutesAgo * 60000).toISOString();
+  for (const account of [
+    { id: 601, name: 'Ledger account A', platform: 'openai', type: 'apikey' },
+    { id: 602, name: 'Ledger account B', platform: 'anthropic', type: 'apikey' }
+  ]) insertMonitoredAccount(context.db, account);
+  const insertKey = context.db.prepare(`
+    INSERT INTO remote_keys(
+      id, connection_id, remote_id, name, masked_key, status, currency,
+      unlimited, metadata_json, first_seen_at, last_seen_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'USD', 0, ?, ?, ?)
+  `);
+  insertKey.run(
+    'ledger-key-a', provider.id, 'key-a', 'Key A', 'sk-a...0001', 'active',
+    JSON.stringify({ identityHash: 'identity-a' }), iso(120), iso(2)
+  );
+  insertKey.run(
+    'ledger-key-b', provider.id, 'key-b', 'Key B', 'sk-b...0002', 'missing',
+    JSON.stringify({ identityHash: 'identity-b' }), iso(120), iso(2)
+  );
+  const insertMapping = context.db.prepare(`
+    INSERT INTO sub2api_mappings(
+      id, connection_id, key_id, account_id, group_id, role, enabled,
+      models_json, config_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, 'primary', 1, '[]', '{}', ?, ?)
+  `);
+  insertMapping.run('ledger-map-a', provider.id, 'ledger-key-a', 601, 1, iso(60), iso(1));
+  insertMapping.run('ledger-map-b', provider.id, 'ledger-key-b', 602, 2, iso(60), iso(1));
+  context.db.prepare(`
+    UPDATE sub2api_account_monitor_settings SET base_recharge_multiplier = 2 WHERE id = 1
+  `).run();
+
+  const insertProviderCost = context.db.prepare(`
+    INSERT INTO provider_cost_ledger(
+      connection_id, key_id, remote_key_id, key_identity, source_log_id, status,
+      currency, cost, request_count, input_tokens, output_tokens,
+      cache_creation_tokens, cache_read_tokens, occurred_at, ingested_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, 'success', 'USD', ?, 1, ?, ?, 0, ?, ?, ?, ?)
+  `);
+  insertProviderCost.run(
+    provider.id, 'ledger-key-a', 'key-a', 'identity-a', 'provider-ledger-a',
+    4, 100, 40, 60, iso(40), iso(1), iso(1)
+  );
+  insertProviderCost.run(
+    provider.id, 'ledger-key-b', 'key-b', 'identity-b', 'provider-ledger-b',
+    6, 200, 60, 40, iso(20), iso(1), iso(1)
+  );
+  context.db.prepare(`
+    INSERT OR IGNORE INTO provider_cost_ledger(
+      connection_id, key_id, remote_key_id, key_identity, source_log_id, status,
+      currency, cost, request_count, input_tokens, output_tokens,
+      cache_creation_tokens, cache_read_tokens, occurred_at, ingested_at, updated_at
+    ) VALUES (?, 'ledger-key-a', 'key-a', 'identity-a', 'provider-ledger-a',
+      'success', 'USD', 999, 1, 0, 0, 0, 0, ?, ?, ?)
+  `).run(provider.id, iso(40), iso(0), iso(0));
+  const insertBaseCost = context.db.prepare(`
+    INSERT INTO sub2api_account_cost_ledger(
+      source_log_id, account_id, currency, cost, request_count,
+      occurred_at, ingested_at, updated_at
+    ) VALUES (?, ?, 'USD', ?, 1, ?, ?, ?)
+  `);
+  insertBaseCost.run('base-ledger-a', '601', 8, iso(40), iso(1), iso(1));
+  insertBaseCost.run('base-ledger-b', '602', 6, iso(20), iso(1), iso(1));
+  const insertSample = context.db.prepare(`
+    INSERT INTO provider_request_samples(
+      connection_id, key_id, source_log_id, model, stream, status,
+      duration_ms, first_token_ms, input_tokens, output_tokens,
+      cache_creation_tokens, cache_read_tokens, actual_cost, currency,
+      created_at, ingested_at
+    ) VALUES (?, ?, ?, 'gpt-test', 1, 'success', 2000, ?, ?, ?, 0, ?, ?, 'USD', ?, ?)
+  `);
+  insertSample.run(provider.id, 'ledger-key-a', 'sample-a', 500, 100, 40, 60, 4, iso(40), iso(1));
+  insertSample.run(provider.id, 'ledger-key-b', 'sample-b', 900, 200, 60, 40, 6, iso(20), iso(1));
+
+  const monitor = new AccountMonitorService({ db: context.db, config: context.config, sub2api: {} });
+  assert.deepEqual(monitor.providerRechargeAudit(provider.id), {
+    connectionId: provider.id,
+    providerName: 'Ledger Supplier',
+    configured: false,
+    rechargedAmount: null,
+    currency: 'USD',
+    note: '',
+    updatedAt: null
+  });
+  const recharge = monitor.saveProviderRechargeAudit(provider.id, {
+    rechargedAmount: 20,
+    currency: 'usd',
+    note: 'August audit'
+  });
+  assert.equal(recharge.rechargedAmount, 20);
+  assert.equal(recharge.currency, 'USD');
+  assert.equal(recharge.configured, true);
+
+  const result = monitor.accounts({ display: 'providers', days: 7 });
+  assert.equal(result.itemType, 'provider');
+  assert.equal(result.pagination.total, 1);
+  const supplier = result.items[0];
+  assert.equal(supplier.providerName, 'Ledger Supplier');
+  assert.equal(supplier.keys.length, 2);
+  assert.equal(supplier.activeKeyCount, 1);
+  assert.deepEqual(supplier.keys.map((key) => key.name), ['Key A', 'Key B']);
+  assert.deepEqual(supplier.keys.map((key) => key.metrics.requestCount), [1, 1]);
+  assert.deepEqual(supplier.keys.map((key) => key.baseMetrics.requestCount), [1, 1]);
+  assert.deepEqual(supplier.keys.map((key) => key.upstreamMetrics.requestCount), [1, 1]);
+  assert.ok(supplier.keys.every((key) => key.baseMetrics.available));
+  assert.ok(supplier.keys.every((key) => key.upstreamMetrics.available));
+  assert.equal(supplier.metrics.requestCount, 2);
+  assert.equal(supplier.metrics.inputTokens, 300);
+  assert.equal(supplier.metrics.outputTokens, 100);
+  assert.equal(supplier.metrics.cacheReadTokens, 100);
+  assert.equal(supplier.metrics.cacheRate, 25);
+  assert.equal(supplier.baseMetrics.requestCount, 2);
+  assert.equal(supplier.baseMetrics.available, true);
+  assert.equal(supplier.upstreamMetrics.requestCount, 2);
+  assert.equal(supplier.upstreamMetrics.inputTokens, 300);
+  assert.equal(supplier.upstreamMetrics.outputTokens, 100);
+  assert.equal(supplier.upstreamMetrics.cacheReadTokens, 100);
+  assert.equal(supplier.upstreamMetrics.cacheRate, 25);
+  assert.equal(supplier.upstreamMetrics.available, true);
+  assert.equal(supplier.audit.windowUpstreamCost, 5);
+  assert.equal(supplier.audit.lifetimeUpstreamCost, 5);
+  assert.equal(supplier.audit.lifetimeBaseRevenue, 7);
+  assert.equal(supplier.audit.lifetimeGrossProfit, 2);
+  assert.equal(supplier.audit.lifetimeBaseRequestCount, 2);
+  assert.equal(supplier.audit.lifetimeRequestCount, 2);
+  assert.equal(supplier.audit.unconsumedRecharge, 15);
+  assert.equal(supplier.rechargeAudit.rechargedAmount, 20);
+  assert.equal(context.db.prepare('SELECT request_count FROM provider_cost_rollups').all()
+    .reduce((sum, row) => sum + row.request_count, 0), 2);
+
+  context.db.prepare('DELETE FROM provider_request_samples WHERE connection_id = ?').run(provider.id);
+  const retained = monitor.accounts({ display: 'providers', days: 7 }).items[0];
+  assert.equal(retained.metrics.requestCount, 2);
+  assert.equal(retained.audit.lifetimeUpstreamCost, 5);
+  assert.equal(retained.audit.lifetimeGrossProfit, 2);
+  assert.equal(retained.keys.find((key) => key.name === 'Key B').status, 'missing');
+
+  insertMapping.run('ledger-map-ambiguous', provider.id, 'ledger-key-b', 601, 2, iso(1), iso(1));
+  const ambiguous = monitor.accounts({ display: 'providers', days: 7 }).items[0];
+  assert.equal(ambiguous.audit.attributionComplete, true);
+  assert.equal(ambiguous.audit.unattributedAccountCount, 0);
+  assert.equal(ambiguous.audit.lifetimeBaseRevenue, 7);
+  assert.equal(ambiguous.audit.lifetimeGrossProfit, 2);
+  assert.equal(ambiguous.baseMetrics.requestCount, 2);
+  assert.equal(ambiguous.audit.lifetimeBaseRequestCount, 2);
+  assert.ok(ambiguous.keys.every((key) => key.baseMetrics.available === false));
+  assert.ok(ambiguous.keys.every(
+    (key) => key.baseMetrics.unavailableReason === 'base_key_attribution_incomplete'
+  ));
+  assert.ok(ambiguous.keys.every((key) => key.audit.lifetimeBaseRevenue == null));
+});
+
+test('legacy accounts await a group sync instead of being reported as ungrouped', (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  insertMonitoredAccount(context.db, {
+    id: 777,
+    name: 'Legacy account',
+    platform: 'openai',
+    type: 'apikey'
+  });
+  const monitor = new AccountMonitorService({
+    db: context.db,
+    config: context.config,
+    sub2api: {}
+  });
+
+  const grouped = monitor.accounts({ display: 'groups', days: 7 });
+  assert.equal(grouped.items.length, 1);
+  assert.equal(grouped.items[0].groupId, '__groups_pending__');
+  assert.equal(grouped.items[0].groupName, '分组待同步');
+  assert.equal(grouped.items[0].pending, true);
+  assert.equal(grouped.items[0].cachedMembershipAccountCount, 0);
+  assert.equal(grouped.summary.pendingGroupAccountCount, 1);
+  assert.equal(grouped.summary.ungroupedAccountCount, 0);
+  assert.deepEqual(
+    monitor.accounts({ groupId: '__groups_pending__', days: 7 }).items.map(
+      (item) => item.accountId
+    ),
+    ['777']
+  );
 });
 
 test('request pairing requires at least 30 samples and 95 percent coverage', () => {
@@ -657,6 +918,15 @@ test('API Key snapshot comparison restores actual cost and cache counters from r
 test('account monitor HTTP API supports manual sync, filtering and probes', async (t) => {
   const context = createTestContext();
   const sub2api = createSub2ApiMock();
+  const providers = new ProviderRepository(context.db, context.config);
+  const auditProvider = providers.create({
+    name: 'HTTP Audit Supplier',
+    adapterType: 'new-api',
+    baseUrl: 'https://http-audit-provider.example',
+    authMode: 'system_token',
+    remoteUserId: 'http-audit-user',
+    credentials: { systemToken: 'http-audit-token' }
+  });
   const app = createApplication({
     config: context.config,
     db: context.db,
@@ -694,6 +964,45 @@ test('account monitor HTTP API supports manual sync, filtering and probes', asyn
   });
   assert.equal(accounts.status, 200);
   assert.deepEqual((await accounts.json()).items.map((item) => item.accountId), ['11']);
+
+  const groupedAccounts = await fetch(
+    `${base}/api/account-monitor/accounts?display=groups&groupId=102&days=7`,
+    { headers: { Cookie: cookie } }
+  );
+  assert.equal(groupedAccounts.status, 200);
+  const groupedBody = await groupedAccounts.json();
+  assert.equal(groupedBody.itemType, 'group');
+  assert.equal(groupedBody.items.length, 1);
+  assert.equal(groupedBody.items[0].groupName, '共享组');
+  assert.equal(groupedBody.items[0].accountCount, 2);
+  assert.deepEqual(
+    groupedBody.items[0].accounts.map((account) => account.accountId).sort(),
+    ['11', '12']
+  );
+
+  const saveRecharge = await fetch(
+    `${base}/api/account-monitor/providers/${auditProvider.id}/recharge-audit`,
+    {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ rechargedAmount: 88.5, currency: 'USD', note: 'HTTP audit' })
+    }
+  );
+  assert.equal(saveRecharge.status, 200);
+  assert.equal((await saveRecharge.json()).rechargedAmount, 88.5);
+  const providerView = await fetch(
+    `${base}/api/account-monitor/accounts?display=providers&days=7`,
+    { headers: { Cookie: cookie } }
+  );
+  assert.equal(providerView.status, 200);
+  const providerBody = await providerView.json();
+  assert.equal(providerBody.itemType, 'provider');
+  assert.equal(providerBody.items[0].providerName, 'HTTP Audit Supplier');
+  assert.equal(providerBody.items[0].rechargeAudit.rechargedAmount, 88.5);
+  assert.equal(providerBody.items[0].baseMetrics.available, false);
+  assert.equal(providerBody.items[0].baseMetrics.unavailableReason, 'base_provider_unmapped');
+  assert.equal(providerBody.items[0].audit.windowUpstreamCost, null);
+  assert.equal(providerBody.items[0].audit.lifetimeUpstreamCost, null);
 
   const probe = await fetch(`${base}/api/account-monitor/probes?wait=true`, {
     method: 'POST',

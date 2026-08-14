@@ -236,6 +236,10 @@ tbody tr:hover { background: #fafbfa; }
 .account-monitor-filters { align-items: stretch; }
 .account-monitor-filters .search-box { flex: 1 1 260px; }
 .account-monitor-filters select { width: auto; min-width: 128px; }
+.account-monitor-view-tabs { flex: 0 0 auto; min-height: 34px; margin: 0; padding: 2px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-muted); }
+.account-monitor-view-tabs .tab { min-height: 28px; padding: 0 9px; border: 0; border-radius: 4px; display: inline-flex; align-items: center; gap: 5px; font-size: 11px; }
+.account-monitor-view-tabs .tab.active { border: 0; background: var(--surface); box-shadow: 0 1px 2px rgba(31, 43, 37, .09); }
+.account-monitor-view-tabs .tab svg { width: 14px; height: 14px; }
 .account-quality-table { overflow-x: hidden; }
 .account-quality-table table { min-width: 0; table-layout: fixed; }
 .account-quality-table col.account-col-select { width: 2.5%; }
@@ -252,6 +256,55 @@ tbody tr:hover { background: #fafbfa; }
 .account-quality-table .metric-rule-trigger { min-width: 0; gap: 2px; white-space: normal; }
 .account-quality-table .metric-rule-icon { flex: 0 0 18px; width: 18px; height: 18px; min-height: 18px; }
 .account-quality-table .metric-rule-icon svg { width: 12px; height: 12px; }
+.account-group-quality-table .account-group-row { cursor: pointer; }
+.account-group-quality-table .account-group-row td { height: 68px; background: #f2f6f4; }
+.account-group-quality-table .account-group-row:hover td { background: #eaf2ee; }
+.account-group-quality-table .account-group-row.expanded td { background: #e5efea; border-bottom-color: #c7d8d0; }
+.account-group-quality-table .account-group-expand { color: var(--accent); }
+.account-group-quality-table .account-group-expand svg { width: 15px; height: 15px; }
+.account-group-quality-table .account-group-member-row td { background: #fbfcfb; }
+.account-group-quality-table .account-group-member-row:hover td { background: #f6faf8; }
+.account-group-quality-table .account-group-member-row .account-identity-cell { padding-left: 11px; box-shadow: inset 3px 0 #a9c9bb; }
+.account-group-quality-table .account-group-empty-row td { height: 54px; color: var(--muted); text-align: center; }
+.account-group-identity-cell { min-width: 0; }
+.account-group-identity-cell .account-identity-main strong { font-size: 12px; }
+.account-group-identity-cell > small { max-width: 100%; font-size: 9px; }
+.account-group-count-cell > strong, .account-group-cost-cell > strong { font-size: 11px; }
+.account-provider-quality-table col.provider-col-expand { width: 3%; }
+.account-provider-quality-table col.provider-col-identity { width: 15%; }
+.account-provider-quality-table col.provider-col-accounts { width: 6%; }
+.account-provider-quality-table col.provider-col-requests, .account-provider-quality-table col.provider-col-cache, .account-provider-quality-table col.provider-col-ttft, .account-provider-quality-table col.provider-col-probe { width: 7%; }
+.account-provider-quality-table col.provider-col-speed { width: 8%; }
+.account-provider-quality-table col.provider-col-window-cost, .account-provider-quality-table col.provider-col-recharge { width: 10%; }
+.account-provider-quality-table col.provider-col-lifetime-cost { width: 15%; }
+.account-provider-quality-table col.provider-col-quality { width: 5%; }
+.account-provider-quality-table .account-provider-row { cursor: pointer; }
+.account-provider-quality-table .account-provider-row td { height: 88px; background: #f2f6f4; }
+.account-provider-quality-table .account-provider-row:hover td { background: #eaf2ee; }
+.account-provider-quality-table .account-provider-row.expanded td { background: #e5efea; border-bottom-color: #c7d8d0; }
+.account-provider-quality-table .account-provider-key-row td { height: 86px; background: #fbfcfb; }
+.account-provider-quality-table .account-provider-key-row:hover td { background: #f6faf8; }
+.account-provider-quality-table .account-provider-key-row .account-identity-cell { padding-left: 11px; box-shadow: inset 3px 0 #a9c9bb; }
+.account-provider-quality-table .account-provider-empty-row td { height: 54px; color: var(--muted); text-align: center; }
+.account-provider-expand { color: var(--accent); }
+.account-provider-expand svg { width: 15px; height: 15px; }
+.account-provider-identity-cell { min-width: 0; }
+.account-provider-identity-cell > small { display: block; max-width: 100%; margin-top: 3px; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.provider-audit-metric { min-width: 0; display: grid; justify-items: end; gap: 3px; }
+.provider-audit-metric > strong, .provider-audit-metric > small { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-audit-metric > strong { font-size: 10px; }
+.provider-audit-metric > strong.healthy { color: var(--accent); }
+.provider-audit-metric > strong.warning { color: var(--warning); }
+.provider-audit-metric > strong.info { color: var(--info); }
+.provider-recharge-metric { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 27px; align-items: center; justify-items: end; gap: 3px 4px; }
+.provider-recharge-metric > strong, .provider-recharge-metric > small { grid-column: 1; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.provider-recharge-metric > strong { font-size: 10px; }
+.provider-recharge-metric > .icon-button { grid-column: 2; grid-row: 1 / span 2; width: 27px; height: 27px; }
+.account-provider-quality-table thead th small { display: block; margin-top: 2px; color: var(--muted); font-size: 8px; font-weight: 600; line-height: 1.15; }
+.account-provider-quality-table .account-comparison-metric { gap: 2px; }
+.account-provider-quality-table .account-comparison-metric > span { grid-template-columns: minmax(28px, auto) minmax(0, 1fr); }
+.account-provider-quality-table .account-comparison-metric small { white-space: nowrap; }
+.account-provider-quality-table .account-comparison-metric strong { text-align: right; }
 .metric-rule-trigger { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; white-space: nowrap; }
 .metric-rule-icon { width: 22px; height: 22px; min-height: 22px; padding: 0; border: 0; border-radius: 50%; display: inline-grid; place-items: center; color: var(--muted); background: transparent; cursor: pointer; }
 .metric-rule-icon:hover, .metric-rule-icon:focus-visible { color: var(--accent); background: var(--accent-soft); outline: none; }
@@ -501,15 +554,30 @@ details summary { padding: 13px 18px; cursor: pointer; font-weight: 650; font-si
   .account-quality-table tbody td:not(.selection-cell):not(.actions-cell)::before { content: attr(data-label); color: var(--muted); font-size: 10px; font-weight: 700; line-height: 1.35; text-align: left; }
   .account-quality-table tbody .account-identity-cell { min-height: 72px; padding: 13px 84px 13px 48px; grid-column: 1 / -1; display: block; text-align: left; }
   .account-quality-table tbody .account-identity-cell::before { display: none; }
+  .account-group-quality-table tbody .account-group-identity-cell { min-height: 82px; padding: 13px 64px 13px 48px; grid-column: 1 / -1; display: block; text-align: left; }
+  .account-group-quality-table tbody .account-group-identity-cell::before { display: none; }
+  .account-provider-quality-table tbody .account-provider-identity-cell { min-height: 82px; padding: 13px 24px 13px 48px; grid-column: 1 / -1; display: block; text-align: left; }
+  .account-provider-quality-table tbody .account-provider-identity-cell::before { display: none; }
   .account-quality-table .account-identity-main strong { font-size: 13px; }
   .account-quality-table tbody .selection-cell { width: 24px; min-height: 24px; position: absolute; z-index: 1; top: 23px; left: 12px; padding: 4px; display: grid; place-items: center; background: transparent; }
   .account-quality-table tbody .actions-cell { width: auto; min-height: 30px; position: absolute; z-index: 1; top: 20px; right: 12px; padding: 0; display: flex; background: transparent; }
   .account-quality-table tbody .account-provider-column, .account-quality-table tbody .account-speed-cell, .account-quality-table tbody .account-cost-column, .account-quality-table tbody .account-quality-cell { grid-column: 1 / -1; }
+  .account-group-quality-table tbody .account-group-cost-cell { grid-column: 1 / -1; }
+  .account-group-quality-table tbody .account-group-row { margin-top: 6px; }
+  .account-group-quality-table tbody .account-group-member-row { margin-left: 18px; border-left: 3px solid #a9c9bb; }
+  .account-group-quality-table tbody .account-group-member-row .account-identity-cell { box-shadow: none; }
+  .account-group-quality-table tbody .account-group-empty-row td { grid-column: 1 / -1; text-align: center; }
+  .account-provider-quality-table tbody .account-provider-row { margin-top: 6px; }
+  .account-provider-quality-table tbody .account-provider-key-row { margin-left: 18px; border-left: 3px solid #a9c9bb; }
+  .account-provider-quality-table tbody .account-provider-key-row .selection-cell { display: none; }
+  .account-provider-quality-table tbody .account-provider-key-row .account-identity-cell { padding-left: 13px; box-shadow: none; }
+  .account-provider-quality-table tbody .account-provider-empty-row td { grid-column: 1 / -1; text-align: center; }
   .account-quality-table tbody .account-provider-cell { justify-items: end; }
   .account-quality-table tbody .account-comparison-metric, .account-quality-table tbody .account-cost-cell { grid-column: 2; }
   .account-quality-table tbody .account-cost-cell { justify-items: end; }
   .account-quality-table tbody .account-probe-latest { grid-column: 2; }
   .account-quality-table tbody .table-metric-note { grid-column: 2; }
+  .account-provider-quality-table tbody .provider-audit-metric .table-metric-note, .account-provider-quality-table tbody .provider-recharge-metric .table-metric-note { grid-column: 1; }
   .account-quality-table tbody .quality-score { grid-column: 2; width: min(64px, 100%); }
 }
 
@@ -525,8 +593,10 @@ details summary { padding: 13px 18px; cursor: pointer; font-weight: 650; font-si
 
 @media (max-width: 720px) {
   .account-quality-table tbody tr { grid-template-columns: minmax(0, 1fr); }
-  .account-quality-table tbody .account-identity-cell, .account-quality-table tbody .account-provider-column, .account-quality-table tbody .account-speed-cell, .account-quality-table tbody .account-cost-column, .account-quality-table tbody .account-quality-cell { grid-column: 1; }
+  .account-quality-table tbody .account-identity-cell, .account-quality-table tbody .account-provider-column, .account-quality-table tbody .account-speed-cell, .account-quality-table tbody .account-cost-column, .account-quality-table tbody .account-quality-cell, .account-group-quality-table tbody .account-group-identity-cell, .account-group-quality-table tbody .account-group-cost-cell, .account-provider-quality-table tbody .account-provider-identity-cell { grid-column: 1; }
   .account-quality-table tbody td { grid-template-columns: minmax(94px, .8fr) minmax(0, 1.2fr); }
+  .account-group-quality-table tbody .account-group-member-row { margin-left: 8px; }
+  .account-provider-quality-table tbody .account-provider-key-row { margin-left: 8px; }
   .base-instance-bar { align-items: flex-start; flex-direction: column; }
   .base-instance-bar .status-summary { width: 100%; justify-content: flex-start; }
   .security-setting-row { align-items: stretch; flex-direction: column; }
@@ -577,6 +647,8 @@ details summary { padding: 13px 18px; cursor: pointer; font-weight: 650; font-si
   .chart { height: 320px; }
   .action-grid { grid-template-columns: 1fr; }
   .account-monitor-filters .search-box, .account-monitor-filters select { width: 100%; }
+  .account-monitor-view-tabs { width: 100%; }
+  .account-monitor-view-tabs .tab { flex: 1; justify-content: center; }
   .account-detail-metrics { grid-template-columns: 1fr 1fr; }
   .account-detail-metrics > div { border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
   .account-detail-metrics > div:nth-child(2n) { border-right: 0; }

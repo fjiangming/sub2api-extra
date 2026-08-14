@@ -1133,7 +1133,12 @@ class Sub2ApiAdapter extends ProviderAdapter {
     const knownKeys = suppliedKeys.length > 0 ? suppliedKeys : await this.listKeys();
     const requestedKeys = knownKeys.filter((key) => key?.remoteId != null);
     const endAt = new Date();
-    const startAt = new Date(endAt.getTime() - lookbackDays * 86400000);
+    const oldestAt = new Date(endAt.getTime() - lookbackDays * 86400000);
+    const requestedSince = Date.parse(options.since || '');
+    const startAt = new Date(Math.max(
+      oldestAt.getTime(),
+      Number.isFinite(requestedSince) ? requestedSince : oldestAt.getTime()
+    ));
     const coverageFrom = startAt.toISOString();
     const coverageTo = endAt.toISOString();
     const timeZone = this.config.timezone || 'UTC';
@@ -1169,6 +1174,11 @@ class Sub2ApiAdapter extends ProviderAdapter {
         const key = queryableKeys[index];
         const remoteKeyId = String(key.remoteId);
         try {
+          const keyRequestedSince = Date.parse(options.sinceByKey?.[remoteKeyId] || '');
+          const keyStartAt = new Date(Math.max(
+            oldestAt.getTime(),
+            Number.isFinite(keyRequestedSince) ? keyRequestedSince : startAt.getTime()
+          ));
           if (!gatewayApiKeyLogs && !/^\d+$/.test(remoteKeyId)) {
             throw new AppError(
               'SUB2API_USAGE_KEY_ID_INVALID',
@@ -1192,7 +1202,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
           for (let page = 1; rows.length < perKeyLimit; page += 1) {
             const pageSize = Math.min(100, perKeyLimit - rows.length);
             const query = new URLSearchParams({
-              start_date: dateKey(startAt, timeZone),
+              start_date: dateKey(keyStartAt, timeZone),
               end_date: endDate,
               timezone: timeZone,
               page: String(page),
@@ -1232,7 +1242,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
             coverage: {
               remoteKeyId,
               status: 'succeeded',
-              coverageFrom,
+              coverageFrom: keyStartAt.toISOString(),
               coverageTo,
               truncated,
               total: hasTotal ? total : rows.length,

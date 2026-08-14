@@ -41,18 +41,20 @@ test('HTTP client classifies a plain-text 404 before requiring JSON', async (t) 
 
 test('New API sync persists account balance, key quota and key groups', async (t) => {
   let dynamicRouteFailure = false;
+  const requestLogStarts = [];
   const server = http.createServer((req, res) => {
     if (req.url === '/api/status') return json(res, { success: true, data: { version: 'test', quota_per_unit: 500000 } });
     if (req.url === '/api/user/self') return json(res, { success: true, data: { id: 42, username: 'alice', quota: 10000000, used_quota: 2500000, group: 'default', status: 1 } });
     if (req.url === '/api/user/self/groups') return json(res, { success: true, data: [{ id: 'premium', name: 'Premium', ratio: 1.2 }] });
     if (req.url.startsWith('/api/log/self/stat')) return json(res, { success: true, data: { quota: 2500000, rpm: 1, tpm: 10 } });
     if (req.url.startsWith('/api/log/self?')) {
+      requestLogStarts.push(Number(new URL(req.url, 'http://provider.test').searchParams.get('start_timestamp')));
       if (dynamicRouteFailure) {
         res.writeHead(503, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ message: 'temporary log failure' }));
       }
       return json(res, { success: true, data: { total: 1, items: [{
-      created_at: Math.floor(Date.now() / 1000), token_id: 9, token_name: 'build-key',
+      id: 9001, created_at: Math.floor(Date.now() / 1000), token_id: 9, token_name: 'build-key',
       model_name: 'model-a', channel: 31, channel_name: 'Low route', quota: 20,
       prompt_tokens: 100, completion_tokens: 0,
       other: { request_final_status: 'success', model_ratio: 0.2, group_ratio: 1 }
@@ -103,6 +105,12 @@ test('New API sync persists account balance, key quota and key groups', async (t
   assert.equal(result.keyCount, 1);
   assert.equal(result.groupCount, 1);
   assert.equal(result.dynamicRouteKeyCount, 1);
+  assert.equal(context.db.prepare(`
+    SELECT COUNT(*) AS count FROM provider_cost_ledger WHERE connection_id = ?
+  `).get(provider.id).count, 1);
+  assert.equal(context.db.prepare(`
+    SELECT request_count FROM provider_cost_rollups WHERE connection_id = ?
+  `).get(provider.id).request_count, 1);
 
   const queries = new QueryService(context.db, context.config);
   const summary = queries.summary();
@@ -136,6 +144,10 @@ test('New API sync persists account balance, key quota and key groups', async (t
   assert.equal(cachedDynamicRate.selected_multiplier, 0.2);
   assert.equal(cachedDynamicRate.status, 'unavailable');
   assert.equal(Boolean(cachedDynamicRate.error_code), true);
+  assert.equal(context.db.prepare(`
+    SELECT COUNT(*) AS count FROM provider_cost_ledger WHERE connection_id = ?
+  `).get(provider.id).count, 1);
+  assert.ok(requestLogStarts.some((start) => start > requestLogStarts[0]));
   context.db.prepare("UPDATE provider_connections SET last_error_code = 'REMOTE_SERVER_ERROR' WHERE id = ?").run(provider.id);
   assert.equal(queries.summary().accounts[0].status, 'error');
 });

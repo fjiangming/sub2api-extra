@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 21;
+const SCHEMA_VERSION = 23;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -123,6 +123,12 @@ CREATE TABLE IF NOT EXISTS remote_keys (
   last_seen_at TEXT NOT NULL,
   UNIQUE(connection_id, remote_id)
 );
+
+CREATE INDEX IF NOT EXISTS remote_key_connection_status_lookup
+  ON remote_keys(connection_id, status, name);
+
+CREATE INDEX IF NOT EXISTS remote_key_connection_name_lookup
+  ON remote_keys(connection_id, name, remote_id);
 
 CREATE TABLE IF NOT EXISTS provider_dynamic_route_rates (
   key_id TEXT PRIMARY KEY REFERENCES remote_keys(id) ON DELETE CASCADE,
@@ -613,6 +619,153 @@ CREATE INDEX IF NOT EXISTS provider_request_sample_request_lookup
   ON provider_request_samples(request_id, connection_id)
   WHERE request_id IS NOT NULL;
 
+CREATE INDEX IF NOT EXISTS provider_request_sample_metric_lookup
+  ON provider_request_samples(key_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS provider_cost_ledger (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
+  key_id TEXT REFERENCES remote_keys(id) ON DELETE SET NULL,
+  remote_key_id TEXT,
+  key_identity TEXT NOT NULL,
+  source_log_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'unknown',
+  currency TEXT NOT NULL DEFAULT 'USD',
+  cost REAL,
+  request_count INTEGER NOT NULL DEFAULT 1,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  occurred_at TEXT NOT NULL,
+  ingested_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(connection_id, key_identity, source_log_id)
+);
+
+CREATE INDEX IF NOT EXISTS provider_cost_ledger_key_lookup
+  ON provider_cost_ledger(key_id, occurred_at DESC);
+
+CREATE INDEX IF NOT EXISTS provider_cost_ledger_connection_lookup
+  ON provider_cost_ledger(connection_id, currency, occurred_at DESC);
+
+CREATE INDEX IF NOT EXISTS provider_cost_ledger_identity_lookup
+  ON provider_cost_ledger(connection_id, key_identity, occurred_at DESC);
+
+CREATE TABLE IF NOT EXISTS provider_cost_rollups (
+  connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
+  key_id TEXT REFERENCES remote_keys(id) ON DELETE SET NULL,
+  key_identity TEXT NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'USD',
+  request_count INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cost REAL NOT NULL DEFAULT 0,
+  cost_sample_count INTEGER NOT NULL DEFAULT 0,
+  first_at TEXT NOT NULL,
+  last_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(connection_id, key_identity, currency)
+);
+
+CREATE INDEX IF NOT EXISTS provider_cost_rollup_key_lookup
+  ON provider_cost_rollups(key_id, currency);
+
+CREATE TRIGGER IF NOT EXISTS provider_cost_ledger_rollup_insert
+AFTER INSERT ON provider_cost_ledger
+BEGIN
+  INSERT INTO provider_cost_rollups(
+    connection_id, key_id, key_identity, currency, request_count,
+    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+    cost, cost_sample_count, first_at, last_at, updated_at
+  ) VALUES (
+    NEW.connection_id, NEW.key_id, NEW.key_identity, NEW.currency,
+    CASE WHEN NEW.status = 'success' THEN NEW.request_count ELSE 0 END,
+    CASE WHEN NEW.status = 'success' THEN NEW.input_tokens ELSE 0 END,
+    CASE WHEN NEW.status = 'success' THEN NEW.output_tokens ELSE 0 END,
+    CASE WHEN NEW.status = 'success' THEN NEW.cache_creation_tokens ELSE 0 END,
+    CASE WHEN NEW.status = 'success' THEN NEW.cache_read_tokens ELSE 0 END,
+    COALESCE(NEW.cost, 0), CASE WHEN NEW.cost IS NULL THEN 0 ELSE NEW.request_count END,
+    NEW.occurred_at, NEW.occurred_at, NEW.updated_at
+  )
+  ON CONFLICT(connection_id, key_identity, currency) DO UPDATE SET
+    key_id = COALESCE(excluded.key_id, provider_cost_rollups.key_id),
+    request_count = provider_cost_rollups.request_count + excluded.request_count,
+    input_tokens = provider_cost_rollups.input_tokens + excluded.input_tokens,
+    output_tokens = provider_cost_rollups.output_tokens + excluded.output_tokens,
+    cache_creation_tokens = provider_cost_rollups.cache_creation_tokens + excluded.cache_creation_tokens,
+    cache_read_tokens = provider_cost_rollups.cache_read_tokens + excluded.cache_read_tokens,
+    cost = provider_cost_rollups.cost + excluded.cost,
+    cost_sample_count = provider_cost_rollups.cost_sample_count + excluded.cost_sample_count,
+    first_at = MIN(provider_cost_rollups.first_at, excluded.first_at),
+    last_at = MAX(provider_cost_rollups.last_at, excluded.last_at),
+    updated_at = excluded.updated_at;
+END;
+
+CREATE TRIGGER IF NOT EXISTS provider_cost_ledger_rollup_relink
+AFTER UPDATE OF key_id ON provider_cost_ledger
+BEGIN
+  UPDATE provider_cost_rollups SET key_id = NEW.key_id, updated_at = NEW.updated_at
+  WHERE connection_id = NEW.connection_id AND key_identity = NEW.key_identity
+    AND currency = NEW.currency;
+END;
+
+CREATE TABLE IF NOT EXISTS sub2api_account_cost_ledger (
+  source_log_id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'USD',
+  cost REAL,
+  request_count INTEGER NOT NULL DEFAULT 1,
+  occurred_at TEXT NOT NULL,
+  ingested_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS sub2api_account_cost_ledger_lookup
+  ON sub2api_account_cost_ledger(account_id, occurred_at DESC);
+
+CREATE TABLE IF NOT EXISTS sub2api_account_cost_rollups (
+  account_id TEXT NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'USD',
+  request_count INTEGER NOT NULL DEFAULT 0,
+  cost REAL NOT NULL DEFAULT 0,
+  cost_sample_count INTEGER NOT NULL DEFAULT 0,
+  first_at TEXT NOT NULL,
+  last_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(account_id, currency)
+);
+
+CREATE TRIGGER IF NOT EXISTS sub2api_account_cost_ledger_rollup_insert
+AFTER INSERT ON sub2api_account_cost_ledger
+BEGIN
+  INSERT INTO sub2api_account_cost_rollups(
+    account_id, currency, request_count, cost, cost_sample_count,
+    first_at, last_at, updated_at
+  ) VALUES (
+    NEW.account_id, NEW.currency, NEW.request_count, COALESCE(NEW.cost, 0),
+    CASE WHEN NEW.cost IS NULL THEN 0 ELSE NEW.request_count END,
+    NEW.occurred_at, NEW.occurred_at, NEW.updated_at
+  )
+  ON CONFLICT(account_id, currency) DO UPDATE SET
+    request_count = sub2api_account_cost_rollups.request_count + excluded.request_count,
+    cost = sub2api_account_cost_rollups.cost + excluded.cost,
+    cost_sample_count = sub2api_account_cost_rollups.cost_sample_count + excluded.cost_sample_count,
+    first_at = MIN(sub2api_account_cost_rollups.first_at, excluded.first_at),
+    last_at = MAX(sub2api_account_cost_rollups.last_at, excluded.last_at),
+    updated_at = excluded.updated_at;
+END;
+
+CREATE TABLE IF NOT EXISTS provider_recharge_audits (
+  connection_id TEXT PRIMARY KEY REFERENCES provider_connections(id) ON DELETE CASCADE,
+  recharged_amount REAL NOT NULL DEFAULT 0 CHECK (recharged_amount >= 0),
+  currency TEXT NOT NULL DEFAULT 'USD',
+  note TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS provider_request_log_sync_state (
   connection_id TEXT PRIMARY KEY REFERENCES provider_connections(id) ON DELETE CASCADE,
   status TEXT NOT NULL DEFAULT 'unknown',
@@ -700,6 +853,12 @@ CREATE TABLE IF NOT EXISTS sub2api_mappings (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS sub2api_mapping_account_lookup
+  ON sub2api_mappings(account_id, enabled, connection_id, key_id);
+
+CREATE INDEX IF NOT EXISTS sub2api_mapping_key_lookup
+  ON sub2api_mappings(key_id, enabled, account_id);
 
 CREATE TABLE IF NOT EXISTS sub2api_mapping_states (
   mapping_id TEXT PRIMARY KEY REFERENCES sub2api_mappings(id) ON DELETE CASCADE,
@@ -984,6 +1143,87 @@ function migrateAccountMonitorBaseRechargeMultiplierV21(db) {
   }
 }
 
+function migratePersistentCostLedgersV22(db) {
+  const migratedAt = nowIso();
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS sub2api_mapping_account_lookup
+      ON sub2api_mappings(account_id, enabled, connection_id, key_id);
+    CREATE INDEX IF NOT EXISTS sub2api_mapping_key_lookup
+      ON sub2api_mappings(key_id, enabled, account_id);
+
+    INSERT OR IGNORE INTO provider_cost_ledger(
+      connection_id, key_id, remote_key_id, key_identity, source_log_id, status,
+      currency, cost, request_count, input_tokens, output_tokens,
+      cache_creation_tokens, cache_read_tokens, occurred_at, ingested_at, updated_at
+    )
+    SELECT samples.connection_id, samples.key_id, keys.remote_id,
+      COALESCE(
+        NULLIF(json_extract(keys.metadata_json, '$.identityHash'), ''),
+        NULLIF(keys.remote_id, ''),
+        COALESCE(samples.key_id, 'unassigned')
+      ),
+      samples.source_log_id, samples.status, samples.currency, samples.actual_cost,
+      1, samples.input_tokens, samples.output_tokens, samples.cache_creation_tokens,
+      samples.cache_read_tokens, samples.created_at, samples.ingested_at, samples.ingested_at
+    FROM provider_request_samples samples
+    LEFT JOIN remote_keys keys ON keys.id = samples.key_id;
+
+    INSERT OR IGNORE INTO sub2api_account_cost_ledger(
+      source_log_id, account_id, currency, cost, request_count,
+      occurred_at, ingested_at, updated_at
+    )
+    SELECT source_log_id, account_id, 'USD', actual_cost, 1,
+      created_at, ingested_at, ingested_at
+    FROM sub2api_account_request_samples;
+  `);
+  db.prepare(
+    'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (22, ?)'
+  ).run(migratedAt);
+}
+
+function migratePersistentCostRollupsV23(db) {
+  const migrated = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 23'
+  ).get();
+  if (migrated) return;
+  const migratedAt = nowIso();
+  db.transaction(() => {
+    db.exec(`
+      DELETE FROM provider_cost_rollups;
+      INSERT INTO provider_cost_rollups(
+        connection_id, key_id, key_identity, currency, request_count,
+        input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+        cost, cost_sample_count, first_at, last_at, updated_at
+      )
+      SELECT connection_id, MAX(key_id), key_identity, currency,
+        SUM(CASE WHEN status = 'success' THEN request_count ELSE 0 END),
+        SUM(CASE WHEN status = 'success' THEN input_tokens ELSE 0 END),
+        SUM(CASE WHEN status = 'success' THEN output_tokens ELSE 0 END),
+        SUM(CASE WHEN status = 'success' THEN cache_creation_tokens ELSE 0 END),
+        SUM(CASE WHEN status = 'success' THEN cache_read_tokens ELSE 0 END),
+        SUM(COALESCE(cost, 0)),
+        SUM(CASE WHEN cost IS NULL THEN 0 ELSE request_count END),
+        MIN(occurred_at), MAX(occurred_at), MAX(updated_at)
+      FROM provider_cost_ledger
+      GROUP BY connection_id, key_identity, currency;
+
+      DELETE FROM sub2api_account_cost_rollups;
+      INSERT INTO sub2api_account_cost_rollups(
+        account_id, currency, request_count, cost, cost_sample_count,
+        first_at, last_at, updated_at
+      )
+      SELECT account_id, currency, SUM(request_count), SUM(COALESCE(cost, 0)),
+        SUM(CASE WHEN cost IS NULL THEN 0 ELSE request_count END),
+        MIN(occurred_at), MAX(occurred_at), MAX(updated_at)
+      FROM sub2api_account_cost_ledger
+      GROUP BY account_id, currency;
+    `);
+    db.prepare(
+      'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (23, ?)'
+    ).run(migratedAt);
+  })();
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -999,6 +1239,8 @@ function createDatabase(databasePath) {
     migrateUnexecutedCapabilityProbesV18(db);
     migrateAutomationActionFailureDetailsV19(db);
     migrateAccountMonitorBaseRechargeMultiplierV21(db);
+    migratePersistentCostLedgersV22(db);
+    migratePersistentCostRollupsV23(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

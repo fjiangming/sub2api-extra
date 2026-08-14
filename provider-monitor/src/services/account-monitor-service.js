@@ -24,6 +24,8 @@ const REQUEST_PAIR_TIME_TOLERANCE_MS = 5000;
 const REQUEST_ID_TIME_TOLERANCE_MS = 60000;
 const REQUEST_PAIR_MIN_SAMPLES = 30;
 const REQUEST_PAIR_MIN_MATCH_RATE = 95;
+const UNGROUPED_GROUP_ID = '__ungrouped__';
+const GROUPS_PENDING_GROUP_ID = '__groups_pending__';
 
 function finite(value) {
   if (value == null || value === '') return null;
@@ -52,9 +54,82 @@ function normalizePlatform(value) {
   return aliases[platform] || platform || 'unknown';
 }
 
-function normalizeAccount(account) {
+function normalizeGroupId(value) {
+  const raw = value?.id ?? value?.group_id ?? value?.groupId ?? value;
+  if (raw == null) return null;
+  const normalized = String(raw).trim();
+  return normalized || null;
+}
+
+function groupAssociationValues(account) {
+  const values = [];
+  for (const key of ['group_ids', 'groupIds', 'groups', 'group_id', 'groupId']) {
+    if (!Object.prototype.hasOwnProperty.call(account || {}, key)) continue;
+    let source = account[key];
+    if (typeof source === 'string') {
+      try {
+        source = JSON.parse(source);
+      } catch {
+        source = source.split(',').map((item) => item.trim()).filter(Boolean);
+      }
+    }
+    values.push(...(Array.isArray(source) ? source : [source]));
+  }
+  return values;
+}
+
+function normalizeBaseGroup(group) {
+  const id = normalizeGroupId(group);
+  if (!id) return null;
+  return {
+    id,
+    name: String(group?.name || group?.display_name || `分组 #${id}`).trim().slice(0, 240),
+    platform: group?.platform == null ? null : normalizePlatform(group.platform),
+    status: String(group?.status || (group?.enabled === false ? 'inactive' : 'active'))
+      .trim().toLowerCase(),
+    rateMultiplier: finite(
+      group?.effective_rate_multiplier ?? group?.rate_multiplier ?? group?.ratio
+    )
+  };
+}
+
+function normalizeAccountGroups(account, groupCatalog = new Map()) {
+  const groups = new Map();
+  for (const value of groupAssociationValues(account)) {
+    const id = normalizeGroupId(value);
+    if (!id) continue;
+    const catalogGroup = groupCatalog.get(id) || null;
+    const embeddedName = value && typeof value === 'object'
+      ? value.name ?? value.display_name
+      : null;
+    groups.set(id, {
+      id,
+      name: catalogGroup?.name || (embeddedName == null
+        ? `分组 #${id}`
+        : String(embeddedName).trim().slice(0, 240)) || `分组 #${id}`,
+      platform: catalogGroup?.platform || (
+        value && typeof value === 'object' && value.platform != null
+          ? normalizePlatform(value.platform)
+          : null
+      ),
+      status: catalogGroup?.status || (
+        value && typeof value === 'object' && value.status != null
+          ? String(value.status).trim().toLowerCase()
+          : 'unknown'
+      ),
+      rateMultiplier: catalogGroup?.rateMultiplier ?? finite(
+        value?.rateMultiplier ?? value?.effective_rate_multiplier ??
+        value?.rate_multiplier ?? value?.ratio
+      )
+    });
+  }
+  return [...groups.values()];
+}
+
+function normalizeAccount(account, groupCatalog = new Map()) {
   const accountId = account?.id ?? account?.account_id;
   if (accountId == null || String(accountId).trim() === '') return null;
+  const groups = normalizeAccountGroups(account, groupCatalog);
   return {
     accountId: String(accountId),
     name: String(account?.name || `Account ${accountId}`).trim().slice(0, 240),
@@ -72,6 +147,8 @@ function normalizeAccount(account) {
       expiresAt: account?.expires_at || null,
       rateLimitedAt: account?.rate_limited_at || null,
       rateLimitResetAt: account?.rate_limit_reset_at || null,
+      groupIds: groups.map((group) => group.id),
+      groups,
       errorMessage: account?.error_message
         ? redactText(String(account.error_message)).slice(0, 500)
         : null
@@ -609,6 +686,475 @@ function qualityScore(metrics) {
   };
 }
 
+function attachQuality(metrics) {
+  const quality = qualityScore(metrics);
+  return { ...metrics, qualityScore: quality.score, quality };
+}
+
+function storedAccountGroups(metadata) {
+  return normalizeAccountGroups({
+    group_ids: Array.isArray(metadata?.groupIds) ? metadata.groupIds : [],
+    groups: Array.isArray(metadata?.groups) ? metadata.groups : []
+  });
+}
+
+function accountGroupState(row, fallbackGroups = new Map()) {
+  const metadata = parseJson(row.metadata_json, {});
+  const storedGroups = storedAccountGroups(metadata);
+  const known = Array.isArray(metadata?.groupIds) || Array.isArray(metadata?.groups);
+  if (known || storedGroups.length > 0) {
+    return { groups: storedGroups, known: true, source: 'account_catalog' };
+  }
+  const cachedGroups = fallbackGroups.get(String(row.account_id)) || [];
+  return {
+    groups: cachedGroups,
+    known: false,
+    source: cachedGroups.length > 0 ? 'mapping_cache' : 'pending'
+  };
+}
+
+function accountGroupDefinitions(rows, groupStates = new Map()) {
+  const definitions = new Map();
+  let ungroupedCount = 0;
+  let pendingCount = 0;
+  for (const row of rows) {
+    const state = groupStates.get(String(row.account_id)) || accountGroupState(row);
+    const { groups } = state;
+    if (groups.length === 0) {
+      if (state.known) ungroupedCount += 1;
+      else pendingCount += 1;
+      continue;
+    }
+    for (const group of groups) {
+      const current = definitions.get(group.id) || {
+        ...group,
+        accountCount: 0,
+        cachedAccountCount: 0
+      };
+      current.accountCount += 1;
+      if (!state.known) current.cachedAccountCount += 1;
+      if (current.name.startsWith('分组 #') && !group.name.startsWith('分组 #')) {
+        current.name = group.name;
+      }
+      if (!current.platform && group.platform) current.platform = group.platform;
+      if (current.status === 'unknown' && group.status !== 'unknown') current.status = group.status;
+      if (current.rateMultiplier == null && group.rateMultiplier != null) {
+        current.rateMultiplier = group.rateMultiplier;
+      }
+      definitions.set(group.id, current);
+    }
+  }
+  const groups = [...definitions.values()].sort((left, right) =>
+    left.name.localeCompare(right.name, 'zh-CN') || left.id.localeCompare(right.id, 'zh-CN')
+  );
+  if (ungroupedCount > 0) {
+    groups.push({
+      id: UNGROUPED_GROUP_ID,
+      name: '未分组',
+      platform: null,
+      status: 'unknown',
+      rateMultiplier: null,
+      accountCount: ungroupedCount,
+      unassigned: true
+    });
+  }
+  if (pendingCount > 0) {
+    groups.push({
+      id: GROUPS_PENDING_GROUP_ID,
+      name: '分组待同步',
+      platform: null,
+      status: 'pending',
+      rateMultiplier: null,
+      accountCount: pendingCount,
+      cachedAccountCount: 0,
+      pending: true
+    });
+  }
+  return groups;
+}
+
+function accountBelongsToGroup(row, groupId, groupStates = new Map()) {
+  const state = groupStates.get(String(row.account_id)) || accountGroupState(row);
+  const { groups } = state;
+  if (groupId === UNGROUPED_GROUP_ID) return state.known && groups.length === 0;
+  if (groupId === GROUPS_PENDING_GROUP_ID) return !state.known && groups.length === 0;
+  return groups.some((group) => group.id === String(groupId));
+}
+
+function averageFinite(items, valueFor) {
+  const values = items.map(valueFor).map(finite).filter((value) => value != null);
+  return values.length > 0
+    ? round(values.reduce((sum, value) => sum + value, 0) / values.length, 1)
+    : null;
+}
+
+function weightedAverage(items, valueFor, weightFor) {
+  let total = 0;
+  let weight = 0;
+  for (const item of items) {
+    const value = finite(valueFor(item));
+    const itemWeight = finite(weightFor(item));
+    if (value == null || itemWeight == null || itemWeight <= 0) continue;
+    total += value * itemWeight;
+    weight += itemWeight;
+  }
+  return weight > 0 ? round(total / weight, 1) : null;
+}
+
+function aggregateAccountGroups(accounts) {
+  const grouped = new Map();
+  for (const account of accounts) {
+    const memberships = account.groups.length > 0
+      ? account.groups
+      : account.groupAssociationsKnown
+        ? [{
+            id: UNGROUPED_GROUP_ID,
+            name: '未分组',
+            platform: null,
+            status: 'unknown',
+            rateMultiplier: null,
+            unassigned: true
+          }]
+        : [{
+            id: GROUPS_PENDING_GROUP_ID,
+            name: '分组待同步',
+            platform: null,
+            status: 'pending',
+            rateMultiplier: null,
+            pending: true
+          }];
+    for (const membership of memberships) {
+      const group = grouped.get(membership.id) || { definition: membership, accounts: [] };
+      group.accounts.push(account);
+      grouped.set(membership.id, group);
+    }
+  }
+
+  return [...grouped.values()].map(({ definition, accounts: members }) => {
+    const inputTokens = members.reduce((sum, item) => sum + item.metrics.inputTokens, 0);
+    const outputTokens = members.reduce((sum, item) => sum + item.metrics.outputTokens, 0);
+    const cacheCreationTokens = members.reduce(
+      (sum, item) => sum + item.metrics.cacheCreationTokens,
+      0
+    );
+    const cacheReadTokens = members.reduce((sum, item) => sum + item.metrics.cacheReadTokens, 0);
+    const promptTokens = inputTokens + cacheCreationTokens + cacheReadTokens;
+    const probeCount = members.reduce((sum, item) => sum + item.metrics.probeCount, 0);
+    const qualityItems = members.filter((item) => item.metrics.qualityScore != null);
+    const qualityCoverage = [...new Set(qualityItems.flatMap(
+      (item) => item.metrics.quality?.coverage || []
+    ))];
+    const mapped = members.filter((item) => item.comparison?.status === 'mapped');
+    const supplierLogs = mapped.filter(
+      (item) => item.comparison?.source === 'provider_request_logs'
+    );
+    const comparableCosts = mapped.filter(
+      (item) => item.comparison?.cost?.windowComparable
+    );
+    const profitStatuses = comparableCosts.map(
+      (item) => item.comparison?.cost?.windowProfitStatus
+    );
+    const costCurrencies = [...new Set(comparableCosts.map(
+      (item) => item.comparison?.cost?.cashCurrency || item.comparison?.cost?.currency
+    ).filter(Boolean))];
+    const costDifferences = comparableCosts.map(
+      (item) => finite(item.comparison?.cost?.windowDifferenceAmount)
+    ).filter((value) => value != null);
+    const qualityScoreAverage = averageFinite(qualityItems, (item) => item.metrics.qualityScore);
+    return {
+      groupId: definition.id,
+      groupName: definition.name,
+      groupPlatform: definition.platform,
+      groupStatus: definition.status,
+      rateMultiplier: definition.rateMultiplier,
+      unassigned: Boolean(definition.unassigned),
+      pending: Boolean(definition.pending),
+      accountCount: members.length,
+      cachedMembershipAccountCount: members.filter(
+        (item) => item.groupAssociationSource === 'mapping_cache'
+      ).length,
+      activeAccountCount: members.filter(
+        (item) => ['active', 'enabled'].includes(item.status)
+      ).length,
+      platforms: [...new Set(members.map((item) => item.platform))].sort(),
+      memberNames: members.map((item) => item.name).sort((left, right) =>
+        left.localeCompare(right, 'zh-CN')
+      ).slice(0, 3),
+      accounts: members,
+      coverage: {
+        mappedAccountCount: mapped.length,
+        supplierLogAccountCount: supplierLogs.length,
+        capabilityAccountCount: members.filter(
+          (item) => item.metrics.intelligenceScore != null
+        ).length,
+        probeAccountCount: members.filter((item) => item.metrics.probeCount > 0).length
+      },
+      metrics: {
+        requestCount: members.reduce((sum, item) => sum + item.metrics.requestCount, 0),
+        inputTokens,
+        outputTokens,
+        cacheCreationTokens,
+        cacheReadTokens,
+        actualCost: round(members.reduce((sum, item) => sum + item.metrics.actualCost, 0), 6),
+        cacheRate: promptTokens > 0 ? round(cacheReadTokens / promptTokens * 100, 1) : null,
+        ttftP95Ms: weightedAverage(
+          members,
+          (item) => item.metrics.ttftP95Ms,
+          (item) => item.metrics.ttftSampleCount
+        ),
+        durationP95Ms: weightedAverage(
+          members,
+          (item) => item.metrics.durationP95Ms,
+          (item) => item.metrics.durationSampleCount
+        ),
+        outputTokensPerSecond: weightedAverage(
+          members,
+          (item) => item.metrics.outputTokensPerSecond,
+          (item) => item.metrics.requestCount
+        ),
+        probeCount,
+        probeSuccessRate: weightedAverage(
+          members,
+          (item) => item.metrics.probeSuccessRate,
+          (item) => item.metrics.probeCount
+        ),
+        intelligenceScore: averageFinite(
+          members,
+          (item) => item.metrics.intelligenceScore
+        ),
+        instructionScore: averageFinite(
+          members,
+          (item) => item.metrics.instructionScore
+        ),
+        qualityScore: qualityScoreAverage,
+        quality: { score: qualityScoreAverage, coverage: qualityCoverage }
+      },
+      cost: {
+        comparableAccountCount: comparableCosts.length,
+        profitAccountCount: profitStatuses.filter((status) => status === 'profit').length,
+        lossAccountCount: profitStatuses.filter((status) => status === 'loss').length,
+        breakEvenAccountCount: profitStatuses.filter((status) => status === 'break_even').length,
+        differenceAmount: costCurrencies.length === 1 && costDifferences.length > 0
+          ? round(costDifferences.reduce((sum, value) => sum + value, 0), 8)
+          : null,
+        currency: costCurrencies.length === 1 ? costCurrencies[0] : null
+      }
+    };
+  });
+}
+
+function emptyAccountMetrics() {
+  return {
+    requestCount: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationTokens: 0,
+    cacheReadTokens: 0,
+    actualCost: 0,
+    ttftAverageMs: null,
+    ttftP50Ms: null,
+    ttftP95Ms: null,
+    ttftSampleCount: 0,
+    durationAverageMs: null,
+    durationP95Ms: null,
+    durationSampleCount: 0,
+    outputTokensPerSecond: null,
+    cacheRate: null,
+    cacheHitRequestRate: null,
+    probeCount: 0,
+    probeSuccessRate: null,
+    intelligenceScore: null,
+    instructionScore: null,
+    lastProbeAt: null,
+    lastProbeStatus: null,
+    baseProbeCount: 0,
+    baseProbeSuccessRate: null,
+    baseIntelligenceScore: null,
+    baseInstructionScore: null,
+    baseLastProbeAt: null,
+    baseLastProbeStatus: null,
+    upstreamProbeCount: 0,
+    upstreamProbeSuccessRate: null,
+    upstreamIntelligenceScore: null,
+    upstreamInstructionScore: null,
+    upstreamLastProbeAt: null,
+    upstreamLastProbeStatus: null
+  };
+}
+
+function probeMetricsSummary(rows) {
+  if (rows.length === 0) {
+    return {
+      probeCount: 0,
+      probeSuccessRate: null,
+      intelligenceScore: null,
+      instructionScore: null,
+      lastProbeAt: null,
+      lastProbeStatus: null
+    };
+  }
+  const intelligence = rows.map((row) => finite(row.intelligence_score))
+    .filter((value) => value != null);
+  const instruction = rows.map((row) => finite(row.instruction_score))
+    .filter((value) => value != null);
+  return {
+    probeCount: rows.length,
+    probeSuccessRate: round(
+      rows.filter((row) => row.status === 'succeeded').length / rows.length * 100,
+      1
+    ),
+    intelligenceScore: intelligence.length > 0
+      ? round(intelligence.reduce((sum, value) => sum + value, 0) / intelligence.length, 1)
+      : null,
+    instructionScore: instruction.length > 0
+      ? round(instruction.reduce((sum, value) => sum + value, 0) / instruction.length, 1)
+      : null,
+    lastProbeAt: rows[0].completed_at,
+    lastProbeStatus: rows[0].status
+  };
+}
+
+function metricsForProbeScope(metrics, scope) {
+  const prefix = scope === 'upstream' ? 'upstream' : 'base';
+  const title = prefix[0].toUpperCase() + prefix.slice(1);
+  return {
+    probeCount: metrics[`${prefix}ProbeCount`] || 0,
+    probeSuccessRate: metrics[`${prefix}ProbeSuccessRate`] ?? null,
+    intelligenceScore: metrics[`${prefix}IntelligenceScore`] ?? null,
+    instructionScore: metrics[`${prefix}InstructionScore`] ?? null,
+    lastProbeAt: metrics[`${prefix}LastProbeAt`] ?? null,
+    lastProbeStatus: metrics[`${prefix}LastProbeStatus`] ?? null,
+    probeScope: prefix,
+    probeScopeLabel: title
+  };
+}
+
+function aggregateMetrics(items, valueFor = (item) => item) {
+  const values = items.map(valueFor).filter(Boolean);
+  const result = emptyAccountMetrics();
+  for (const field of [
+    'requestCount', 'inputTokens', 'outputTokens', 'cacheCreationTokens',
+    'cacheReadTokens', 'actualCost', 'probeCount'
+  ]) {
+    result[field] = round(values.reduce((sum, item) => sum + Number(item[field] || 0), 0),
+      field === 'actualCost' ? 8 : 2);
+  }
+  const promptTokens = result.inputTokens + result.cacheCreationTokens + result.cacheReadTokens;
+  result.cacheRate = promptTokens > 0
+    ? round(result.cacheReadTokens / promptTokens * 100, 1)
+    : null;
+  result.cacheHitRequestRate = weightedAverage(
+    values,
+    (item) => item.cacheHitRequestRate,
+    (item) => item.requestCount
+  );
+  result.ttftAverageMs = weightedAverage(
+    values,
+    (item) => item.ttftAverageMs,
+    (item) => item.ttftSampleCount
+  );
+  result.ttftP50Ms = weightedAverage(
+    values,
+    (item) => item.ttftP50Ms,
+    (item) => item.ttftSampleCount
+  );
+  result.ttftP95Ms = weightedAverage(
+    values,
+    (item) => item.ttftP95Ms,
+    (item) => item.ttftSampleCount
+  );
+  result.ttftSampleCount = values.reduce(
+    (sum, item) => sum + Number(item.ttftSampleCount || 0),
+    0
+  );
+  result.durationAverageMs = weightedAverage(
+    values,
+    (item) => item.durationAverageMs,
+    (item) => item.durationSampleCount
+  );
+  result.durationP95Ms = weightedAverage(
+    values,
+    (item) => item.durationP95Ms,
+    (item) => item.durationSampleCount
+  );
+  result.durationSampleCount = values.reduce(
+    (sum, item) => sum + Number(item.durationSampleCount || 0),
+    0
+  );
+  result.outputTokensPerSecond = weightedAverage(
+    values,
+    (item) => item.outputTokensPerSecond,
+    (item) => item.requestCount
+  );
+  result.probeSuccessRate = weightedAverage(
+    values,
+    (item) => item.probeSuccessRate,
+    (item) => item.probeCount
+  );
+  result.intelligenceScore = averageFinite(values, (item) => item.intelligenceScore);
+  result.instructionScore = averageFinite(values, (item) => item.instructionScore);
+  result.lastProbeAt = latestIso(values.map((item) => item.lastProbeAt));
+  result.lastProbeStatus = values.find(
+    (item) => item.lastProbeAt === result.lastProbeAt
+  )?.lastProbeStatus || null;
+  for (const prefix of ['base', 'upstream']) {
+    const countField = `${prefix}ProbeCount`;
+    const rateField = `${prefix}ProbeSuccessRate`;
+    const intelligenceField = `${prefix}IntelligenceScore`;
+    const instructionField = `${prefix}InstructionScore`;
+    const lastAtField = `${prefix}LastProbeAt`;
+    const lastStatusField = `${prefix}LastProbeStatus`;
+    result[countField] = values.reduce(
+      (sum, item) => sum + Number(item[countField] || 0),
+      0
+    );
+    result[rateField] = weightedAverage(
+      values,
+      (item) => item[rateField],
+      (item) => item[countField]
+    );
+    result[intelligenceField] = averageFinite(
+      values,
+      (item) => item[intelligenceField]
+    );
+    result[instructionField] = averageFinite(
+      values,
+      (item) => item[instructionField]
+    );
+    result[lastAtField] = latestIso(values.map((item) => item[lastAtField]));
+    result[lastStatusField] = values.find(
+      (item) => item[lastAtField] === result[lastAtField]
+    )?.[lastStatusField] || null;
+  }
+  return result;
+}
+
+function sortAccountGroups(groups, sortBy, order) {
+  const direction = order === 'asc' ? 1 : -1;
+  const field = [
+    'name', 'accountCount', 'requestCount', 'cacheRate', 'ttftP95Ms',
+    'probeSuccessRate', 'intelligenceScore', 'qualityScore', 'costDifference'
+  ].includes(sortBy) ? sortBy : 'qualityScore';
+  return groups.sort((left, right) => {
+    const valueFor = (group) => {
+      if (field === 'name') return group.groupName;
+      if (field === 'accountCount') return group.accountCount;
+      if (field === 'costDifference') return group.cost.differenceAmount;
+      return group.metrics[field];
+    };
+    const leftValue = valueFor(left);
+    const rightValue = valueFor(right);
+    if (leftValue == null && rightValue == null) {
+      return left.groupName.localeCompare(right.groupName, 'zh-CN');
+    }
+    if (leftValue == null) return 1;
+    if (rightValue == null) return -1;
+    if (typeof leftValue === 'string') return leftValue.localeCompare(rightValue, 'zh-CN') * direction;
+    const difference = (Number(leftValue) - Number(rightValue)) * direction;
+    return difference || left.groupName.localeCompare(right.groupName, 'zh-CN');
+  });
+}
+
 function dateInTimezone(value, timezone) {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone,
@@ -828,16 +1374,73 @@ class AccountMonitorService {
     };
   }
 
+  async #baseGroups() {
+    let primaryError = null;
+    if (typeof this.sub2api.data === 'function') {
+      try {
+        const payload = await this.sub2api.data('/api/v1/admin/groups/all', {
+          query: { include_inactive: true }
+        });
+        const items = Array.isArray(payload) ? payload : payload?.items || payload?.groups;
+        if (!Array.isArray(items)) {
+          throw new AppError(
+            'SCHEMA_MISMATCH',
+            'Sub2API group response did not contain an array',
+            { status: 502, details: { endpoint: '/api/v1/admin/groups/all' } }
+          );
+        }
+        return { items: items.map(normalizeBaseGroup).filter(Boolean), complete: true, error: null };
+      } catch (error) {
+        primaryError = error;
+      }
+    }
+    if (typeof this.sub2api.listAll === 'function') {
+      try {
+        const result = await this.sub2api.listAll(
+          '/api/v1/admin/groups',
+          { include_inactive: true },
+          { maxItems: 5000 }
+        );
+        return {
+          items: result.items.map(normalizeBaseGroup).filter(Boolean),
+          complete: !result.truncated,
+          error: result.truncated ? 'Sub2API group catalog reached the collection limit' : null
+        };
+      } catch (error) {
+        primaryError ||= error;
+      }
+    }
+    return {
+      items: [],
+      complete: false,
+      error: redactText(primaryError?.message || 'Sub2API group catalog is unavailable').slice(0, 500)
+    };
+  }
+
   async sync(options = {}) {
     const startedAt = nowIso();
     const settings = this.settings();
     try {
-      const accountResult = await this.sub2api.listAll(
-        '/api/v1/admin/accounts',
-        options.platform ? { platform: normalizePlatform(options.platform) } : {},
-        { maxItems: 50000 }
-      );
-      const accounts = accountResult.items.map(normalizeAccount).filter(Boolean);
+      const [accountResult, groupResult] = await Promise.all([
+        this.sub2api.listAll(
+          '/api/v1/admin/accounts',
+          options.platform ? { platform: normalizePlatform(options.platform) } : {},
+          { maxItems: 50000 }
+        ),
+        this.#baseGroups()
+      ]);
+      const groupCatalog = new Map();
+      for (const row of this.db.prepare(
+        'SELECT metadata_json FROM sub2api_monitored_accounts'
+      ).all()) {
+        for (const group of storedAccountGroups(parseJson(row.metadata_json, {}))) {
+          groupCatalog.set(group.id, group);
+        }
+      }
+      for (const group of groupResult.items) groupCatalog.set(group.id, group);
+      const accounts = accountResult.items
+        .map((account) => normalizeAccount(account, groupCatalog))
+        .filter(Boolean);
       const now = nowIso();
       const upsertAccount = this.db.prepare(`
         INSERT INTO sub2api_monitored_accounts(
@@ -878,7 +1481,9 @@ class AccountMonitorService {
       const previousCoverageVerified = previousSummary.usageExactTotal === true &&
         !previousSummary.usageTruncated && Number.isFinite(previousCoverageFrom) &&
         previousCoverageFrom <= oldestAllowed;
-      const latest = this.db.prepare('SELECT MAX(created_at) AS value FROM sub2api_account_request_samples').get()?.value;
+      const latest = this.db.prepare(
+        'SELECT MAX(last_at) AS value FROM sub2api_account_cost_rollups'
+      ).get()?.value;
       const incrementalStart = latest ? Date.parse(latest) - 86400000 : oldestAllowed;
       const usageFullBackfill = !previousCoverageVerified;
       const startAt = new Date(usageFullBackfill
@@ -908,6 +1513,13 @@ class AccountMonitorService {
           cache_creation_tokens = excluded.cache_creation_tokens,
           cache_read_tokens = excluded.cache_read_tokens, actual_cost = excluded.actual_cost,
           created_at = excluded.created_at, ingested_at = excluded.ingested_at
+      `);
+      const insertCost = this.db.prepare(`
+        INSERT INTO sub2api_account_cost_ledger(
+          source_log_id, account_id, currency, cost, request_count,
+          occurred_at, ingested_at, updated_at
+        ) VALUES (?, ?, 'USD', ?, 1, ?, ?, ?)
+        ON CONFLICT(source_log_id) DO NOTHING
       `);
       let fetchedSampleCount = 0;
       let insertedSamples = 0;
@@ -942,6 +1554,14 @@ class AccountMonitorService {
               sample.inputTokens, sample.outputTokens, sample.cacheCreationTokens,
               sample.cacheReadTokens, sample.actualCost, sample.createdAt, now
             );
+            insertCost.run(
+              sample.sourceLogId,
+              sample.accountId,
+              sample.actualCost,
+              sample.createdAt,
+              now,
+              now
+            );
             insertedSamples += result.changes;
           }
         })();
@@ -955,6 +1575,9 @@ class AccountMonitorService {
       const summary = {
         accountCount: accounts.length,
         accountCatalogTruncated: Boolean(accountResult.truncated),
+        groupCount: groupResult.items.length,
+        groupCatalogComplete: groupResult.complete,
+        groupCatalogError: groupResult.error,
         fetchedSampleCount,
         storedSampleChanges: insertedSamples,
         usageExactTotal: true,
@@ -998,9 +1621,9 @@ class AccountMonitorService {
       params.push(String(filters.status).trim().toLowerCase());
     }
     if (filters.search) {
-      clauses.push('(LOWER(name) LIKE ? OR account_id LIKE ?)');
+      clauses.push('(LOWER(name) LIKE ? OR account_id LIKE ? OR LOWER(metadata_json) LIKE ?)');
       const query = `%${String(filters.search).trim().toLowerCase()}%`;
-      params.push(query, query);
+      params.push(query, query, query);
     }
     return this.db.prepare(`
       SELECT * FROM sub2api_monitored_accounts
@@ -1008,6 +1631,37 @@ class AccountMonitorService {
       ORDER BY name COLLATE NOCASE, account_id
       LIMIT ${ACCOUNT_LIMIT}
     `).all(...params);
+  }
+
+  #mappedAccountGroups() {
+    const groupsByAccount = new Map();
+    const rows = this.db.prepare(`
+      SELECT m.id, m.account_id, m.group_id, m.updated_at,
+        s.base_group_name, s.base_group_rate, s.details_json, s.checked_at
+      FROM sub2api_mappings m
+      LEFT JOIN sub2api_mapping_states s ON s.mapping_id = m.id
+      WHERE m.account_id IS NOT NULL AND m.group_id IS NOT NULL
+      ORDER BY COALESCE(s.checked_at, m.updated_at) DESC, m.id
+    `).all();
+    for (const row of rows) {
+      const details = parseJson(row.details_json, {});
+      const group = normalizeBaseGroup({
+        id: row.group_id,
+        name: row.base_group_name,
+        platform: details.baseGroupPlatform,
+        status: details.baseGroupStatus || 'unknown',
+        rate_multiplier: row.base_group_rate
+      });
+      if (!group) continue;
+      const accountId = String(row.account_id);
+      const accountGroups = groupsByAccount.get(accountId) || new Map();
+      if (!accountGroups.has(group.id)) accountGroups.set(group.id, group);
+      groupsByAccount.set(accountId, accountGroups);
+    }
+    return new Map([...groupsByAccount].map(([accountId, groups]) => [
+      accountId,
+      [...groups.values()]
+    ]));
   }
 
   #metrics(accountIds, since, until = nowIso()) {
@@ -1124,21 +1778,23 @@ class AccountMonitorService {
       }
       for (const [accountId, rows] of probeGroups) {
         const item = metrics.get(accountId);
-        item.probeCount = rows.length;
-        item.probeSuccessRate = round(
-          rows.filter((row) => row.status === 'succeeded').length / rows.length * 100,
-          1
-        );
-        const intelligence = rows.map((row) => finite(row.intelligence_score)).filter((value) => value != null);
-        const instruction = rows.map((row) => finite(row.instruction_score)).filter((value) => value != null);
-        item.intelligenceScore = intelligence.length > 0
-          ? round(intelligence.reduce((sum, value) => sum + value, 0) / intelligence.length, 1)
-          : null;
-        item.instructionScore = instruction.length > 0
-          ? round(instruction.reduce((sum, value) => sum + value, 0) / instruction.length, 1)
-          : null;
-        item.lastProbeAt = rows[0].completed_at;
-        item.lastProbeStatus = rows[0].status;
+        Object.assign(item, probeMetricsSummary(rows));
+        const scopedRows = { base: [], upstream: [] };
+        for (const row of rows) {
+          const details = parseJson(row.details_json, {});
+          const scope = details.transport === 'direct_api_key' ? 'upstream' : 'base';
+          scopedRows[scope].push(row);
+        }
+        for (const scope of ['base', 'upstream']) {
+          const summary = probeMetricsSummary(scopedRows[scope]);
+          const prefix = scope === 'base' ? 'base' : 'upstream';
+          item[`${prefix}ProbeCount`] = summary.probeCount;
+          item[`${prefix}ProbeSuccessRate`] = summary.probeSuccessRate;
+          item[`${prefix}IntelligenceScore`] = summary.intelligenceScore;
+          item[`${prefix}InstructionScore`] = summary.instructionScore;
+          item[`${prefix}LastProbeAt`] = summary.lastProbeAt;
+          item[`${prefix}LastProbeStatus`] = summary.lastProbeStatus;
+        }
       }
     }
     return metrics;
@@ -1277,6 +1933,214 @@ class AccountMonitorService {
       }
     }
     return result;
+  }
+
+  #providerCostLedger(keyIds, since, until) {
+    const result = new Map();
+    for (const batch of chunks(keyIds)) {
+      const placeholders = batch.map(() => '?').join(',');
+      const windows = this.db.prepare(`
+        SELECT key_id, currency,
+          SUM(CASE WHEN status = 'success' THEN request_count ELSE 0 END) AS window_requests,
+          SUM(CASE WHEN status = 'success' THEN input_tokens ELSE 0 END) AS window_input_tokens,
+          SUM(CASE WHEN status = 'success' THEN output_tokens ELSE 0 END) AS window_output_tokens,
+          SUM(CASE WHEN status = 'success' THEN cache_creation_tokens ELSE 0 END) AS window_cache_creation_tokens,
+          SUM(CASE WHEN status = 'success' THEN cache_read_tokens ELSE 0 END) AS window_cache_read_tokens,
+          SUM(COALESCE(cost, 0)) AS window_cost,
+          SUM(CASE WHEN cost IS NULL THEN 0 ELSE request_count END) AS window_cost_samples
+        FROM provider_cost_ledger
+        WHERE key_id IN (${placeholders})
+          AND occurred_at >= ? AND occurred_at <= ?
+        GROUP BY key_id, currency
+      `).all(...batch, since, until);
+      const totals = this.db.prepare(`
+        SELECT key_id, currency, SUM(request_count) AS lifetime_requests,
+          SUM(cost) AS lifetime_cost, SUM(cost_sample_count) AS lifetime_cost_samples,
+          MIN(first_at) AS first_at, MAX(last_at) AS last_at
+        FROM provider_cost_rollups
+        WHERE key_id IN (${placeholders})
+        GROUP BY key_id, currency
+      `).all(...batch);
+      const entriesByIdentity = new Map();
+      const ensureEntry = (row) => {
+        const keyId = String(row.key_id);
+        const identity = `${keyId}\u0000${row.currency || 'USD'}`;
+        if (entriesByIdentity.has(identity)) return entriesByIdentity.get(identity);
+        const entries = result.get(keyId) || [];
+        const entry = {
+          currency: row.currency || 'USD',
+          windowRequestCount: 0,
+          windowInputTokens: 0,
+          windowOutputTokens: 0,
+          windowCacheCreationTokens: 0,
+          windowCacheReadTokens: 0,
+          windowCost: 0,
+          windowCostSampleCount: 0,
+          lifetimeRequestCount: 0,
+          lifetimeCost: 0,
+          lifetimeCostSampleCount: 0,
+          firstAt: null,
+          lastAt: null
+        };
+        entries.push(entry);
+        result.set(keyId, entries);
+        entriesByIdentity.set(identity, entry);
+        return entry;
+      };
+      for (const row of windows) {
+        Object.assign(ensureEntry(row), {
+          windowRequestCount: integer(row.window_requests),
+          windowInputTokens: integer(row.window_input_tokens),
+          windowOutputTokens: integer(row.window_output_tokens),
+          windowCacheCreationTokens: integer(row.window_cache_creation_tokens),
+          windowCacheReadTokens: integer(row.window_cache_read_tokens),
+          windowCost: round(finite(row.window_cost) || 0, 8),
+          windowCostSampleCount: integer(row.window_cost_samples)
+        });
+      }
+      for (const row of totals) {
+        Object.assign(ensureEntry(row), {
+          lifetimeRequestCount: integer(row.lifetime_requests),
+          lifetimeCost: round(finite(row.lifetime_cost) || 0, 8),
+          lifetimeCostSampleCount: integer(row.lifetime_cost_samples),
+          firstAt: row.first_at,
+          lastAt: row.last_at
+        });
+      }
+    }
+    return result;
+  }
+
+  #baseCostLedger(accountIds, since, until) {
+    const result = new Map();
+    for (const batch of chunks(accountIds)) {
+      const placeholders = batch.map(() => '?').join(',');
+      const windows = this.db.prepare(`
+        SELECT account_id, currency,
+          SUM(request_count) AS window_requests,
+          SUM(COALESCE(cost, 0)) AS window_cost,
+          SUM(CASE WHEN cost IS NULL THEN 0 ELSE request_count END) AS window_cost_samples
+        FROM sub2api_account_cost_ledger
+        WHERE account_id IN (${placeholders}) AND occurred_at >= ? AND occurred_at <= ?
+        GROUP BY account_id, currency
+      `).all(...batch, since, until);
+      const totals = this.db.prepare(`
+        SELECT account_id, currency, request_count AS lifetime_requests,
+          cost AS lifetime_cost, cost_sample_count AS lifetime_cost_samples,
+          first_at, last_at
+        FROM sub2api_account_cost_rollups
+        WHERE account_id IN (${placeholders})
+      `).all(...batch);
+      const entriesByIdentity = new Map();
+      const ensureEntry = (row) => {
+        const accountId = String(row.account_id);
+        const identity = `${accountId}\u0000${row.currency || 'USD'}`;
+        if (entriesByIdentity.has(identity)) return entriesByIdentity.get(identity);
+        const entries = result.get(accountId) || [];
+        const entry = {
+          currency: row.currency || 'USD',
+          windowRequestCount: 0,
+          windowCost: 0,
+          windowCostSampleCount: 0,
+          lifetimeRequestCount: 0,
+          lifetimeCost: 0,
+          lifetimeCostSampleCount: 0,
+          firstAt: null,
+          lastAt: null
+        };
+        entries.push(entry);
+        result.set(accountId, entries);
+        entriesByIdentity.set(identity, entry);
+        return entry;
+      };
+      for (const row of windows) {
+        Object.assign(ensureEntry(row), {
+          windowRequestCount: integer(row.window_requests),
+          windowCost: round(finite(row.window_cost) || 0, 8),
+          windowCostSampleCount: integer(row.window_cost_samples)
+        });
+      }
+      for (const row of totals) {
+        Object.assign(ensureEntry(row), {
+          lifetimeRequestCount: integer(row.lifetime_requests),
+          lifetimeCost: round(finite(row.lifetime_cost) || 0, 8),
+          lifetimeCostSampleCount: integer(row.lifetime_cost_samples),
+          firstAt: row.first_at,
+          lastAt: row.last_at
+        });
+      }
+    }
+    return result;
+  }
+
+  #auditCurrencySettings() {
+    const rows = this.db.prepare(`
+      SELECT key, value_json FROM settings
+      WHERE key IN ('displayCurrency', 'currencyRates')
+    `).all();
+    const settings = Object.fromEntries(
+      rows.map((row) => [row.key, parseJson(row.value_json, null)])
+    );
+    return {
+      displayCurrency: String(settings.displayCurrency || 'USD').toUpperCase(),
+      rates: settings.currencyRates && typeof settings.currencyRates === 'object'
+        ? settings.currencyRates
+        : { USD: 1 }
+    };
+  }
+
+  #auditAmount(amount, currency, settings) {
+    const value = finite(amount);
+    if (value == null) return null;
+    const source = String(currency || settings.displayCurrency).toUpperCase();
+    if (source === settings.displayCurrency) return round(value, 8);
+    const rate = finite(settings.rates[source]);
+    return rate == null ? null : round(value * rate, 8);
+  }
+
+  providerRechargeAudit(connectionId) {
+    const provider = this.db.prepare(`
+      SELECT id, name FROM provider_connections WHERE id = ?
+    `).get(String(connectionId));
+    if (!provider) {
+      throw new AppError('PROVIDER_NOT_FOUND', 'Provider connection was not found', { status: 404 });
+    }
+    const row = this.db.prepare(`
+      SELECT * FROM provider_recharge_audits WHERE connection_id = ?
+    `).get(provider.id);
+    return {
+      connectionId: provider.id,
+      providerName: provider.name,
+      configured: Boolean(row),
+      rechargedAmount: row ? Number(row.recharged_amount) : null,
+      currency: row?.currency || 'USD',
+      note: row?.note || '',
+      updatedAt: row?.updated_at || null
+    };
+  }
+
+  saveProviderRechargeAudit(connectionId, input = {}) {
+    const current = this.providerRechargeAudit(connectionId);
+    const amount = finite(input.rechargedAmount);
+    if (amount == null || amount < 0) {
+      throw new AppError('VALIDATION_ERROR', 'Recharge amount must be a non-negative number', {
+        status: 400
+      });
+    }
+    const currency = String(input.currency || current.currency || 'USD').trim().toUpperCase();
+    const note = String(input.note || '').trim().slice(0, 500);
+    const updatedAt = nowIso();
+    this.db.prepare(`
+      INSERT INTO provider_recharge_audits(
+        connection_id, recharged_amount, currency, note, updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(connection_id) DO UPDATE SET
+        recharged_amount = excluded.recharged_amount,
+        currency = excluded.currency,
+        note = excluded.note,
+        updated_at = excluded.updated_at
+    `).run(String(connectionId), amount, currency, note, updatedAt);
+    return this.providerRechargeAudit(connectionId);
   }
 
   #snapshotDeltas(keyIds, since, until) {
@@ -2190,17 +3054,536 @@ class AccountMonitorService {
     });
   }
 
-  accounts(filters = {}) {
+  providersView(filters = {}) {
     const days = clamp(integer(filters.days, this.settings().lookbackDays), 1, 90);
     const requestedWindow = accountMonitorWindow(days, this.config.timezone);
     const { from: since, to: until } = requestedWindow;
-    const rows = this.#accountRows(filters);
+    const pageSize = clamp(integer(filters.pageSize, 50), 10, 200);
+    const clauses = ['connection.enabled = 1'];
+    const params = [];
+    if (filters.search) {
+      const query = `%${String(filters.search).trim().toLowerCase()}%`;
+      clauses.push(`(
+        LOWER(connection.name) LIKE ? OR LOWER(connection.adapter_type) LIKE ? OR
+        EXISTS (
+          SELECT 1 FROM remote_keys search_key
+          WHERE search_key.connection_id = connection.id
+            AND (LOWER(search_key.name) LIKE ? OR LOWER(search_key.remote_id) LIKE ? OR
+              LOWER(search_key.masked_key) LIKE ?)
+        )
+      )`);
+      params.push(query, query, query, query, query);
+    }
+    const where = clauses.join(' AND ');
+    const total = Number(this.db.prepare(`
+      SELECT COUNT(*) AS count FROM provider_connections connection WHERE ${where}
+    `).get(...params).count || 0);
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const page = clamp(integer(filters.page, 1), 1, totalPages);
+    const offset = (page - 1) * pageSize;
+    const providerRows = this.db.prepare(`
+      SELECT connection.id, connection.name, connection.adapter_type,
+        connection.auth_mode, connection.last_success_at, connection.last_error_code,
+        recharge.detected_multiplier AS recharge_detected_multiplier,
+        recharge.manual_multiplier AS recharge_manual_multiplier,
+        recharge.paid_currency AS recharge_paid_currency,
+        recharge.balance_currency AS recharge_balance_currency,
+        recharge.detection_source AS recharge_detection_source,
+        recharge.status AS recharge_status,
+        recharge.checked_at AS recharge_checked_at,
+        audit.recharged_amount, audit.currency AS audit_currency,
+        audit.note AS audit_note, audit.updated_at AS audit_updated_at,
+        (SELECT COUNT(*) FROM remote_keys key_count
+          WHERE key_count.connection_id = connection.id
+        ) AS key_count
+      FROM provider_connections connection
+      LEFT JOIN provider_recharge_rates recharge ON recharge.connection_id = connection.id
+      LEFT JOIN provider_recharge_audits audit ON audit.connection_id = connection.id
+      WHERE ${where}
+      ORDER BY connection.name COLLATE NOCASE, connection.id
+      LIMIT ? OFFSET ?
+    `).all(...params, pageSize, offset);
+    const providerIds = providerRows.map((row) => row.id);
+    const keys = [];
+    for (const batch of chunks(providerIds)) {
+      const placeholders = batch.map(() => '?').join(',');
+      keys.push(...this.db.prepare(`
+        SELECT key.id, key.connection_id, key.remote_id, key.name, key.masked_key,
+          key.status, key.currency, key.expires_at, key.last_used_at,
+          key.metadata_json, key.last_seen_at,
+          COALESCE(key_sync.status, connection_sync.status) AS request_log_status
+        FROM remote_keys key
+        LEFT JOIN provider_request_key_sync_state key_sync ON key_sync.key_id = key.id
+        LEFT JOIN provider_request_log_sync_state connection_sync
+          ON connection_sync.connection_id = key.connection_id
+        WHERE key.connection_id IN (${placeholders})
+        ORDER BY key.connection_id, key.name COLLATE NOCASE, key.remote_id
+      `).all(...batch));
+    }
+    const keyIds = keys.map((key) => String(key.id));
+    const mappings = [];
+    for (const batch of chunks(keyIds)) {
+      const placeholders = batch.map(() => '?').join(',');
+      mappings.push(...this.db.prepare(`
+        SELECT mapping.key_id, CAST(mapping.account_id AS TEXT) AS account_id,
+          mapping.connection_id, mapping.role, account.name, account.platform,
+          account.status, account.account_type
+        FROM sub2api_mappings mapping
+        JOIN sub2api_monitored_accounts account
+          ON account.account_id = CAST(mapping.account_id AS TEXT)
+        WHERE mapping.enabled = 1 AND mapping.key_id IN (${placeholders})
+          AND account.missing_since IS NULL
+        ORDER BY mapping.key_id, account.name COLLATE NOCASE, account.account_id
+      `).all(...batch));
+    }
+    const mappingsByKey = new Map();
+    for (const mapping of mappings) {
+      const keyId = String(mapping.key_id);
+      const byAccount = mappingsByKey.get(keyId) || new Map();
+      if (!byAccount.has(String(mapping.account_id))) {
+        byAccount.set(String(mapping.account_id), {
+          accountId: String(mapping.account_id),
+          name: mapping.name,
+          platform: mapping.platform,
+          status: mapping.status,
+          accountType: mapping.account_type
+        });
+      }
+      mappingsByKey.set(keyId, byAccount);
+    }
+    const accountIds = [...new Set(mappings.map((mapping) => String(mapping.account_id)))];
+    const targetsByAccount = new Map();
+    for (const batch of chunks(accountIds)) {
+      const placeholders = batch.map(() => '?').join(',');
+      const rows = this.db.prepare(`
+        SELECT CAST(account_id AS TEXT) AS account_id, connection_id, key_id
+        FROM sub2api_mappings
+        WHERE enabled = 1 AND key_id IS NOT NULL
+          AND CAST(account_id AS TEXT) IN (${placeholders})
+        GROUP BY account_id, connection_id, key_id
+      `).all(...batch);
+      for (const row of rows) {
+        const accountId = String(row.account_id);
+        const targets = targetsByAccount.get(accountId) || [];
+        targets.push({ connectionId: row.connection_id, keyId: String(row.key_id) });
+        targetsByAccount.set(accountId, targets);
+      }
+    }
+    const upstreamMetrics = this.#providerRequestMetrics(keyIds, since, until);
+    const providerLedger = this.#providerCostLedger(keyIds, since, until);
+    const baseMetrics = this.#metrics(accountIds, since, until);
+    const baseLedger = this.#baseCostLedger(accountIds, since, until);
+    const auditSettings = this.#auditCurrencySettings();
+    const baseRechargeMultiplier = finite(this.settings().baseRechargeMultiplier) || 1;
+
+    const ledgerValue = (entries, field) => entries.reduce(
+      (sum, entry) => sum + Number(entry[field] || 0),
+      0
+    );
+    const ledgerCash = (entries, field, recharge) => {
+      if (!(finite(recharge.multiplier) > 0)) return null;
+      let totalAmount = 0;
+      for (const entry of entries) {
+        const multiplier = recharge.multiplier;
+        const cashCurrency = recharge.paidCurrency || entry.currency;
+        const converted = this.#auditAmount(
+          Number(entry[field] || 0) / multiplier,
+          cashCurrency,
+          auditSettings
+        );
+        if (converted == null) return null;
+        totalAmount += converted;
+      }
+      return round(totalAmount, 8);
+    };
+    const baseLedgerCash = (ids, field) => {
+      let totalAmount = 0;
+      for (const accountId of ids) {
+        for (const entry of baseLedger.get(String(accountId)) || []) {
+          const converted = this.#auditAmount(
+            Number(entry[field] || 0) / baseRechargeMultiplier,
+            entry.currency,
+            auditSettings
+          );
+          if (converted == null) return null;
+          totalAmount += converted;
+        }
+      }
+      return round(totalAmount, 8);
+    };
+    const baseLedgerValue = (ids, field) => ids.reduce((sum, accountId) =>
+      sum + (baseLedger.get(String(accountId)) || []).reduce(
+        (accountSum, entry) => accountSum + Number(entry[field] || 0),
+        0
+      ), 0);
+
+    const keysByProvider = groupBy(keys, (key) => key.connection_id);
+    const items = providerRows.map((providerRow) => {
+      const recharge = this.#providerRecharge(providerRow);
+      const providerKeys = (keysByProvider.get(providerRow.id) || []).map((key) => {
+        const keyId = String(key.id);
+        const accounts = [...(mappingsByKey.get(keyId) || new Map()).values()];
+        const mappedAccountIds = accounts.map((account) => account.accountId);
+        const attributedAccountIds = mappedAccountIds.filter((accountId) => {
+          const targets = targetsByAccount.get(String(accountId)) || [];
+          return targets.length === 1 && targets[0].connectionId === providerRow.id &&
+            targets[0].keyId === keyId;
+        });
+        const attributionComplete = mappedAccountIds.length > 0 &&
+          attributedAccountIds.length === mappedAccountIds.length;
+        const accountMetricValues = attributedAccountIds.map(
+          (accountId) => baseMetrics.get(String(accountId))
+        ).filter(Boolean);
+        const accountMetric = aggregateMetrics(accountMetricValues);
+        const keyBaseMetrics = attachQuality({
+          ...accountMetric,
+          ...metricsForProbeScope(accountMetric, 'base'),
+          requestCount: baseLedgerValue(attributedAccountIds, 'windowRequestCount'),
+          available: attributionComplete,
+          unavailableReason: attributionComplete
+            ? null
+            : mappedAccountIds.length === 0
+              ? 'base_key_unmapped'
+              : 'base_key_attribution_incomplete'
+        });
+        const ledgerEntries = providerLedger.get(keyId) || [];
+        const sampleMetric = upstreamMetrics.get(keyId) || emptyUpstreamMetrics(true);
+        const windowRequestCount = ledgerValue(ledgerEntries, 'windowRequestCount');
+        const windowInputTokens = ledgerValue(ledgerEntries, 'windowInputTokens');
+        const windowOutputTokens = ledgerValue(ledgerEntries, 'windowOutputTokens');
+        const windowCacheCreationTokens = ledgerValue(
+          ledgerEntries,
+          'windowCacheCreationTokens'
+        );
+        const windowCacheReadTokens = ledgerValue(ledgerEntries, 'windowCacheReadTokens');
+        const promptTokens = windowInputTokens + windowCacheCreationTokens + windowCacheReadTokens;
+        const currencies = [...new Set(ledgerEntries.map((entry) => entry.currency))];
+        const windowCost = currencies.length === 1
+          ? ledgerValue(ledgerEntries, 'windowCost')
+          : null;
+        const keyUpstreamMetrics = attachQuality({
+          ...sampleMetric,
+          requestCount: windowRequestCount,
+          inputTokens: windowInputTokens,
+          outputTokens: windowOutputTokens,
+          cacheCreationTokens: windowCacheCreationTokens,
+          cacheReadTokens: windowCacheReadTokens,
+          cacheRate: promptTokens > 0
+            ? round(windowCacheReadTokens / promptTokens * 100, 1)
+            : null,
+          actualCost: windowCost,
+          actualCostSampleCount: ledgerValue(ledgerEntries, 'windowCostSampleCount'),
+          currency: currencies.length === 1 ? currencies[0] : null,
+          ...metricsForProbeScope(accountMetric, 'upstream'),
+          available: ledgerEntries.length > 0 ||
+            ['succeeded', 'partial'].includes(key.request_log_status),
+          unavailableReason: ledgerEntries.length > 0 ||
+            ['succeeded', 'partial'].includes(key.request_log_status)
+            ? null
+            : 'upstream_request_logs_unavailable'
+        });
+        const metrics = attachQuality({
+          ...keyUpstreamMetrics,
+          probeCount: keyBaseMetrics.probeCount + keyUpstreamMetrics.probeCount,
+          probeSuccessRate: accountMetric.probeSuccessRate,
+          intelligenceScore: accountMetric.intelligenceScore,
+          instructionScore: accountMetric.instructionScore,
+          lastProbeAt: accountMetric.lastProbeAt,
+          lastProbeStatus: accountMetric.lastProbeStatus
+        });
+        const upstreamWindowCash = keyUpstreamMetrics.available
+          ? ledgerCash(ledgerEntries, 'windowCost', recharge)
+          : null;
+        const upstreamLifetimeCash = keyUpstreamMetrics.available
+          ? ledgerCash(ledgerEntries, 'lifetimeCost', recharge)
+          : null;
+        const baseWindowCash = attributionComplete
+          ? baseLedgerCash(attributedAccountIds, 'windowCost')
+          : null;
+        const baseLifetimeCash = attributionComplete
+          ? baseLedgerCash(attributedAccountIds, 'lifetimeCost')
+          : null;
+        const lifetimeRequestCount = ledgerValue(ledgerEntries, 'lifetimeRequestCount');
+        const lifetimeCostSamples = ledgerValue(ledgerEntries, 'lifetimeCostSampleCount');
+        return {
+          keyId,
+          remoteKeyId: String(key.remote_id),
+          name: key.name,
+          maskedKey: key.masked_key,
+          status: key.status,
+          currency: key.currency || metrics.currency || 'USD',
+          expiresAt: key.expires_at,
+          lastUsedAt: key.last_used_at,
+          lastSeenAt: key.last_seen_at,
+          mappedAccountCount: accounts.length,
+          accounts,
+          metrics,
+          baseMetrics: keyBaseMetrics,
+          upstreamMetrics: keyUpstreamMetrics,
+          audit: {
+            displayCurrency: auditSettings.displayCurrency,
+            windowUpstreamCost: upstreamWindowCash,
+            lifetimeUpstreamCost: upstreamLifetimeCash,
+            windowBaseRevenue: baseWindowCash,
+            lifetimeBaseRevenue: baseLifetimeCash,
+            windowGrossProfit: baseWindowCash == null || upstreamWindowCash == null
+              ? null
+              : round(baseWindowCash - upstreamWindowCash, 8),
+            lifetimeGrossProfit: baseLifetimeCash == null || upstreamLifetimeCash == null
+              ? null
+              : round(baseLifetimeCash - upstreamLifetimeCash, 8),
+            attributedAccountCount: attributedAccountIds.length,
+            unattributedAccountCount: mappedAccountIds.length - attributedAccountIds.length,
+            attributionComplete,
+            lifetimeBaseRequestCount: attributionComplete
+              ? baseLedgerValue(attributedAccountIds, 'lifetimeRequestCount')
+              : null,
+            lifetimeRequestCount,
+            lifetimeCostSampleCount: lifetimeCostSamples,
+            firstObservedAt: latestIso(ledgerEntries.map((entry) => entry.firstAt).filter(Boolean)
+              .sort((left, right) => Date.parse(left) - Date.parse(right)).slice(0, 1)),
+            lastObservedAt: latestIso(ledgerEntries.map((entry) => entry.lastAt))
+          }
+        };
+      });
+      const mappedAccounts = new Map();
+      for (const key of providerKeys) {
+        for (const account of key.accounts) mappedAccounts.set(account.accountId, account);
+      }
+      const mappedAccountIds = [...mappedAccounts.keys()];
+      const attributedAccountIds = mappedAccountIds.filter((accountId) => {
+        const targets = targetsByAccount.get(String(accountId)) || [];
+        return targets.length > 0 && targets.every(
+          (target) => target.connectionId === providerRow.id
+        );
+      });
+      const providerAttributionComplete = mappedAccountIds.length > 0 &&
+        attributedAccountIds.length === mappedAccountIds.length;
+      const providerBaseMetricValues = attributedAccountIds.map(
+        (accountId) => baseMetrics.get(String(accountId))
+      ).filter(Boolean);
+      const aggregatedProviderBaseMetrics = aggregateMetrics(providerBaseMetricValues);
+      const providerBaseMetrics = attachQuality({
+        ...aggregatedProviderBaseMetrics,
+        ...metricsForProbeScope(aggregatedProviderBaseMetrics, 'base'),
+        requestCount: baseLedgerValue(attributedAccountIds, 'windowRequestCount'),
+        available: providerAttributionComplete,
+        unavailableReason: providerAttributionComplete
+          ? null
+          : mappedAccountIds.length === 0
+            ? 'base_provider_unmapped'
+            : 'base_provider_attribution_incomplete'
+      });
+      const providerCombinedProbeMetrics = aggregateMetrics(providerBaseMetricValues);
+      const aggregatedProviderUpstreamMetrics = aggregateMetrics(
+        providerKeys,
+        (key) => key.upstreamMetrics
+      );
+      const providerUpstreamMetrics = attachQuality({
+        ...aggregatedProviderUpstreamMetrics,
+        ...metricsForProbeScope(providerCombinedProbeMetrics, 'upstream'),
+        available: providerKeys.some((key) => key.upstreamMetrics.available),
+        unavailableReason: providerKeys.some((key) => key.upstreamMetrics.available)
+          ? null
+          : 'upstream_request_logs_unavailable'
+      });
+      const metrics = attachQuality({
+        ...providerUpstreamMetrics,
+        probeCount: providerBaseMetrics.probeCount + providerUpstreamMetrics.probeCount,
+        probeSuccessRate: providerCombinedProbeMetrics.probeSuccessRate,
+        intelligenceScore: providerCombinedProbeMetrics.intelligenceScore,
+        instructionScore: providerCombinedProbeMetrics.instructionScore,
+        lastProbeAt: providerCombinedProbeMetrics.lastProbeAt,
+        lastProbeStatus: providerCombinedProbeMetrics.lastProbeStatus
+      });
+      const providerLedgerEntries = providerKeys.flatMap(
+        (key) => providerLedger.get(key.keyId) || []
+      );
+      const upstreamWindowCost = providerKeys.length === 0 || providerKeys.some(
+        (key) => key.audit.windowUpstreamCost == null
+      )
+        ? null
+        : round(providerKeys.reduce(
+            (sum, key) => sum + Number(key.audit.windowUpstreamCost || 0),
+            0
+          ), 8);
+      const upstreamLifetimeCost = providerKeys.length === 0 || providerKeys.some(
+        (key) => key.audit.lifetimeUpstreamCost == null
+      )
+        ? null
+        : round(providerKeys.reduce(
+            (sum, key) => sum + Number(key.audit.lifetimeUpstreamCost || 0),
+            0
+          ), 8);
+      const attributionComplete = providerAttributionComplete;
+      const baseWindowRevenue = attributionComplete
+        ? baseLedgerCash(attributedAccountIds, 'windowCost')
+        : null;
+      const baseLifetimeRevenue = attributionComplete
+        ? baseLedgerCash(attributedAccountIds, 'lifetimeCost')
+        : null;
+      const rechargeAuditConfigured = providerRow.recharged_amount != null;
+      const configuredRecharge = rechargeAuditConfigured
+        ? this.#auditAmount(
+            providerRow.recharged_amount,
+            providerRow.audit_currency || 'USD',
+            auditSettings
+          )
+        : null;
+      const lifetimeGrossProfit = baseLifetimeRevenue == null || upstreamLifetimeCost == null
+        ? null
+        : round(baseLifetimeRevenue - upstreamLifetimeCost, 8);
+      const windowGrossProfit = baseWindowRevenue == null || upstreamWindowCost == null
+        ? null
+        : round(baseWindowRevenue - upstreamWindowCost, 8);
+      return {
+        connectionId: providerRow.id,
+        providerName: providerRow.name,
+        adapterType: providerRow.adapter_type,
+        authMode: providerRow.auth_mode,
+        lastSyncAt: providerRow.last_success_at,
+        lastErrorCode: providerRow.last_error_code,
+        keyCount: providerKeys.length,
+        activeKeyCount: providerKeys.filter(
+          (key) => ['active', 'enabled', 'healthy'].includes(key.status)
+        ).length,
+        mappedAccountCount: mappedAccounts.size,
+        keys: providerKeys,
+        metrics,
+        baseMetrics: providerBaseMetrics,
+        upstreamMetrics: providerUpstreamMetrics,
+        recharge,
+        rechargeAudit: {
+          configured: rechargeAuditConfigured,
+          rechargedAmount: rechargeAuditConfigured ? Number(providerRow.recharged_amount) : null,
+          currency: providerRow.audit_currency || 'USD',
+          note: providerRow.audit_note || '',
+          updatedAt: providerRow.audit_updated_at || null,
+          displayAmount: configuredRecharge
+        },
+        audit: {
+          displayCurrency: auditSettings.displayCurrency,
+          windowUpstreamCost: upstreamWindowCost,
+          lifetimeUpstreamCost: upstreamLifetimeCost,
+          windowBaseRevenue: baseWindowRevenue,
+          lifetimeBaseRevenue: baseLifetimeRevenue,
+          windowGrossProfit,
+          lifetimeGrossProfit,
+          lifetimeGrossMarginRatio: baseLifetimeRevenue > 0 && lifetimeGrossProfit != null
+            ? round(lifetimeGrossProfit / baseLifetimeRevenue, 6)
+            : null,
+          fundingDifference: configuredRecharge == null || baseLifetimeRevenue == null
+            ? null
+            : round(baseLifetimeRevenue - configuredRecharge, 8),
+          unconsumedRecharge: configuredRecharge == null || upstreamLifetimeCost == null
+            ? null
+            : round(configuredRecharge - upstreamLifetimeCost, 8),
+          attributedAccountCount: attributedAccountIds.length,
+          unattributedAccountCount: mappedAccountIds.length - attributedAccountIds.length,
+          attributionComplete,
+          lifetimeBaseRequestCount: attributionComplete
+            ? baseLedgerValue(attributedAccountIds, 'lifetimeRequestCount')
+            : null,
+          lifetimeRequestCount: providerKeys.reduce(
+            (sum, key) => sum + Number(key.audit.lifetimeRequestCount || 0),
+            0
+          ),
+          firstObservedAt: providerLedgerEntries.map((entry) => entry.firstAt)
+            .filter(Boolean).sort((left, right) => Date.parse(left) - Date.parse(right))[0] || null,
+          lastObservedAt: latestIso(providerLedgerEntries.map((entry) => entry.lastAt))
+        }
+      };
+    });
+    return {
+      items,
+      itemType: 'provider',
+      pagination: { page, pageSize, total, totalPages },
+      summary: {
+        providerCount: total,
+        visibleProviderCount: items.length,
+        keyCount: providerRows.reduce((sum, row) => sum + Number(row.key_count || 0), 0),
+        visibleKeyCount: items.reduce((sum, item) => sum + item.keyCount, 0),
+        mappedAccountCount: new Set(items.flatMap(
+          (item) => item.keys.flatMap((key) => key.accounts.map((account) => account.accountId))
+        )).size,
+        requestCount: items.reduce((sum, item) => sum + Number(item.metrics.requestCount || 0), 0),
+        lifetimeRequestCount: items.reduce(
+          (sum, item) => sum + Number(item.audit.lifetimeRequestCount || 0),
+          0
+        ),
+        configuredRechargeAmount: items.every(
+          (item) => item.rechargeAudit.displayAmount != null
+        ) ? round(items.reduce(
+            (sum, item) => sum + Number(item.rechargeAudit.displayAmount || 0),
+            0
+          ), 8) : null,
+        lifetimeUpstreamCost: items.every(
+          (item) => item.audit.lifetimeUpstreamCost != null
+        ) ? round(items.reduce(
+            (sum, item) => sum + Number(item.audit.lifetimeUpstreamCost || 0),
+            0
+          ), 8) : null,
+        lifetimeBaseRevenue: items.every(
+          (item) => item.audit.lifetimeBaseRevenue != null
+        ) ? round(items.reduce(
+            (sum, item) => sum + Number(item.audit.lifetimeBaseRevenue || 0),
+            0
+          ), 8) : null,
+        lifetimeGrossProfit: items.every(
+          (item) => item.audit.lifetimeGrossProfit != null
+        ) ? round(items.reduce(
+            (sum, item) => sum + Number(item.audit.lifetimeGrossProfit || 0),
+            0
+          ), 8) : null,
+        supplierLastSyncAt: latestIso(items.map((item) => item.lastSyncAt)),
+        displayCurrency: auditSettings.displayCurrency,
+        days
+      },
+      groups: [],
+      platforms: this.db.prepare(`
+        SELECT DISTINCT platform FROM sub2api_monitored_accounts
+        WHERE missing_since IS NULL ORDER BY platform
+      `).all().map((row) => row.platform),
+      state: this.state(),
+      settings: this.settings()
+    };
+  }
+
+  accounts(filters = {}) {
+    if (filters.display === 'providers') {
+      return this.providersView(filters);
+    }
+    const days = clamp(integer(filters.days, this.settings().lookbackDays), 1, 90);
+    const requestedWindow = accountMonitorWindow(days, this.config.timezone);
+    const { from: since, to: until } = requestedWindow;
+    const candidateRows = this.#accountRows(filters);
+    const fallbackGroups = this.#mappedAccountGroups();
+    const groupStates = new Map(candidateRows.map((row) => [
+      String(row.account_id),
+      accountGroupState(row, fallbackGroups)
+    ]));
+    const groupOptions = accountGroupDefinitions(candidateRows, groupStates);
+    const groupId = String(filters.groupId || '').trim();
+    const rows = groupId
+      ? candidateRows.filter((row) => accountBelongsToGroup(row, groupId, groupStates))
+      : candidateRows;
     const accountIds = rows.map((row) => row.account_id);
+    const display = filters.display === 'groups' ? 'groups' : 'accounts';
+    const requestedSortBy = [
+      'name', 'platform', 'status', 'requestCount', 'cacheRate', 'ttftP95Ms',
+      'probeSuccessRate', 'intelligenceScore', 'qualityScore', 'lastProbeAt',
+      'costDifference', 'accountCount'
+    ].includes(filters.sortBy) ? filters.sortBy : 'qualityScore';
+    const needsAllComparisons = display === 'groups' || requestedSortBy === 'costDifference';
     const metricMap = this.#metrics(accountIds, since, until);
-    const comparisonMap = this.#comparisons(accountIds, since, until);
+    const comparisonMap = needsAllComparisons
+      ? this.#comparisons(accountIds, since, until)
+      : new Map();
     const decorated = rows.map((row) => {
       const metrics = metricMap.get(String(row.account_id));
       const quality = qualityScore(metrics);
+      const metadata = parseJson(row.metadata_json, {});
+      const groupState = groupStates.get(String(row.account_id));
       return {
         accountId: row.account_id,
         name: row.name,
@@ -2211,17 +3594,16 @@ class AccountMonitorService {
         priority: row.priority,
         concurrency: row.concurrency,
         rateMultiplier: row.rate_multiplier,
-        metadata: parseJson(row.metadata_json, {}),
+        groups: groupState.groups,
+        groupAssociationsKnown: groupState.known,
+        groupAssociationSource: groupState.source,
+        metadata,
         lastSeenAt: row.last_seen_at,
         metrics: { ...metrics, qualityScore: quality.score, quality },
-        comparison: comparisonMap.get(String(row.account_id))
+        comparison: comparisonMap.get(String(row.account_id)) || null
       };
     });
-    const sortBy = [
-      'name', 'platform', 'status', 'requestCount', 'cacheRate', 'ttftP95Ms',
-      'probeSuccessRate', 'intelligenceScore', 'qualityScore', 'lastProbeAt',
-      'costDifference'
-    ].includes(filters.sortBy) ? filters.sortBy : 'qualityScore';
+    const sortBy = requestedSortBy === 'accountCount' ? 'qualityScore' : requestedSortBy;
     const order = filters.order === 'asc' ? 1 : -1;
     decorated.sort((left, right) => {
       const leftComparisonMetric = sortBy === 'requestCount'
@@ -2246,11 +3628,32 @@ class AccountMonitorService {
       if (typeof leftValue === 'string') return leftValue.localeCompare(rightValue) * order;
       return (Number(leftValue) - Number(rightValue)) * order;
     });
+    const grouped = display === 'groups'
+      ? sortAccountGroups(
+          aggregateAccountGroups(decorated).filter(
+            (group) => !groupId || group.groupId === groupId
+          ),
+          requestedSortBy,
+          filters.order
+        )
+      : [];
+    const collection = display === 'groups' ? grouped : decorated;
     const pageSize = clamp(integer(filters.pageSize, 50), 10, 200);
-    const total = decorated.length;
+    const total = collection.length;
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const page = clamp(integer(filters.page, 1), 1, totalPages);
     const offset = (page - 1) * pageSize;
+    const items = collection.slice(offset, offset + pageSize);
+    if (display === 'accounts' && !needsAllComparisons) {
+      const visibleComparisons = this.#comparisons(
+        items.map((item) => item.accountId),
+        since,
+        until
+      );
+      for (const item of items) {
+        item.comparison = visibleComparisons.get(String(item.accountId)) || null;
+      }
+    }
     const promptTokens = decorated.reduce((sum, item) => sum + item.metrics.inputTokens +
       item.metrics.cacheCreationTokens + item.metrics.cacheReadTokens, 0);
     const cacheReadTokens = decorated.reduce((sum, item) => sum + item.metrics.cacheReadTokens, 0);
@@ -2259,15 +3662,34 @@ class AccountMonitorService {
     const successfulProbes = decorated.reduce((sum, item) => sum +
       (item.metrics.probeSuccessRate == null ? 0 : item.metrics.probeCount * item.metrics.probeSuccessRate / 100), 0);
     const capabilityItems = decorated.filter((item) => item.metrics.intelligenceScore != null);
-    const mappedItems = decorated.filter((item) => item.comparison?.status === 'mapped');
+    const comparisonItems = display === 'accounts' && !needsAllComparisons
+      ? items
+      : decorated;
+    const mappedItems = comparisonItems.filter((item) => item.comparison?.status === 'mapped');
     const supplierLogItems = mappedItems.filter((item) => item.comparison.source === 'provider_request_logs');
     const pairedItems = supplierLogItems.filter((item) => item.comparison.pairing?.matchedCount > 0);
     const comparableCostItems = mappedItems.filter((item) => item.comparison.cost?.windowComparable);
     return {
-      items: decorated.slice(offset, offset + pageSize),
+      items,
+      itemType: display === 'groups' ? 'group' : 'account',
       pagination: { page, pageSize, total, totalPages },
       summary: {
-        accountCount: total,
+        accountCount: decorated.length,
+        filteredAccountCount: decorated.length,
+        groupCount: groupOptions.length,
+        baseGroupCount: groupOptions.filter(
+          (item) => item.id !== UNGROUPED_GROUP_ID && item.id !== GROUPS_PENDING_GROUP_ID
+        ).length,
+        ungroupedAccountCount: groupOptions.find(
+          (item) => item.id === UNGROUPED_GROUP_ID
+        )?.accountCount || 0,
+        pendingGroupAccountCount: decorated.filter(
+          (item) => !item.groupAssociationsKnown
+        ).length,
+        mappingCachedGroupAccountCount: decorated.filter(
+          (item) => !item.groupAssociationsKnown && item.groups.length > 0
+        ).length,
+        groupMembershipCount: groupOptions.reduce((sum, item) => sum + item.accountCount, 0),
         platformCount: new Set(decorated.map((item) => item.platform)).size,
         requestCount,
         cacheRate: promptTokens > 0 ? round(cacheReadTokens / promptTokens * 100, 1) : null,
@@ -2285,8 +3707,11 @@ class AccountMonitorService {
         ),
         comparableCostAccountCount: comparableCostItems.length,
         supplierLastSyncAt: latestIso(mappedItems.map((item) => item.comparison.provider?.lastSyncAt)),
+        comparisonScope: display === 'accounts' && !needsAllComparisons ? 'page' : 'filtered',
+        comparisonAccountCount: comparisonItems.length,
         days
       },
+      groups: groupOptions,
       platforms: this.db.prepare(`
         SELECT DISTINCT platform FROM sub2api_monitored_accounts
         WHERE missing_since IS NULL ORDER BY platform
@@ -2333,6 +3758,8 @@ class AccountMonitorService {
       };
     });
     const probes = this.runs({ accountId, limit: 50 }).items;
+    const metadata = parseJson(row.metadata_json, {});
+    const groupState = accountGroupState(row, this.#mappedAccountGroups());
     return {
       account: {
         accountId: row.account_id,
@@ -2344,7 +3771,10 @@ class AccountMonitorService {
         priority: row.priority,
         concurrency: row.concurrency,
         rateMultiplier: row.rate_multiplier,
-        metadata: parseJson(row.metadata_json, {}),
+        groups: groupState.groups,
+        groupAssociationsKnown: groupState.known,
+        groupAssociationSource: groupState.source,
+        metadata,
         lastSeenAt: row.last_seen_at
       },
       metrics: { ...metrics, qualityScore: quality.score, quality },
@@ -2850,8 +4280,10 @@ module.exports = {
   createCapabilityChallenge,
   scoreCapabilityChallenge,
   normalizeAccount,
+  normalizeAccountGroups,
   normalizeUsageSample,
   accountMonitorWindow,
+  aggregateAccountGroups,
   requestPairingTrust,
   scoreChallenge,
   qualityScore

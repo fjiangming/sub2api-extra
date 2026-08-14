@@ -142,6 +142,277 @@ test('account quality list fits its container and keeps every metric in the resp
   }
 });
 
+test('account quality expands Sub2API groups and accounts in one list', () => {
+  const { context, source } = createBrowserContext();
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+  context.groupRows = [{
+    groupId: '102',
+    groupName: '共享组',
+    groupStatus: 'active',
+    groupPlatform: null,
+    rateMultiplier: 0.8,
+    accountCount: 3,
+    cachedMembershipAccountCount: 3,
+    activeAccountCount: 2,
+    platforms: ['openai', 'anthropic'],
+    memberNames: ['Account A', 'Account B', 'Account C'],
+    coverage: {
+      mappedAccountCount: 2,
+      supplierLogAccountCount: 1,
+      capabilityAccountCount: 2,
+      probeAccountCount: 2
+    },
+    metrics: {
+      requestCount: 120,
+      cacheRate: 40,
+      ttftP95Ms: 1800,
+      outputTokensPerSecond: 52.5,
+      probeSuccessRate: 95,
+      probeCount: 20,
+      intelligenceScore: 88,
+      qualityScore: 84,
+      quality: { coverage: ['latency', 'reliability', 'capability'] }
+    },
+    cost: {
+      comparableAccountCount: 2,
+      profitAccountCount: 1,
+      lossAccountCount: 1,
+      breakEvenAccountCount: 0,
+      differenceAmount: null,
+      currency: null
+    },
+    accounts: [{
+      accountId: '11',
+      name: 'Account A',
+      platform: 'openai',
+      accountType: 'apikey',
+      status: 'active',
+      groups: [{ id: '102', name: '共享组' }],
+      groupAssociationsKnown: true,
+      metrics: {
+        requestCount: 50,
+        inputTokens: 100,
+        outputTokens: 100,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 50,
+        cacheRate: 33.3,
+        ttftP50Ms: 900,
+        ttftP95Ms: 1400,
+        durationP95Ms: 2600,
+        outputTokensPerSecond: 48,
+        probeSuccessRate: null,
+        probeCount: 0,
+        intelligenceScore: null,
+        instructionScore: null,
+        qualityScore: 80,
+        quality: { coverage: ['latency'] }
+      },
+      comparison: { status: 'unmapped' }
+    }]
+  }];
+  vm.runInContext("state.accountMonitorExpandedGroups.add('102')", context);
+  const html = vm.runInContext('accountMonitorGroupTable(groupRows)', context);
+
+  assert.match(html, /基座分组 \/ 账号/);
+  assert.match(html, /共享组/);
+  assert.match(html, /映射缓存/);
+  assert.match(html, /3 个缓存关联/);
+  assert.match(html, /账号首字 P95 均值/);
+  assert.match(html, /data-action="toggle-account-monitor-group" data-group-id="102"/);
+  assert.match(html, /class="account-group-member-row"[^>]*data-account-monitor-row="11"/);
+  assert.match(html, /Account A/);
+  assert.ok(html.indexOf('data-account-monitor-group="102"') < html.indexOf('data-account-monitor-row="11"'));
+  assert.equal(vm.runInContext("accountGroupSummary([{ id: '1', name: '主组' }, { id: '2', name: '备用组' }])", context), '主组 +1');
+  assert.equal(vm.runInContext('accountGroupSummary([], false)', context), '分组待同步');
+  assert.equal(vm.runInContext("accountGroupSummary([{ id: '1', name: '主组' }], false)", context), '主组（映射缓存）');
+  assert.match(source, /display: filters\.display/);
+  assert.match(source, /groupId: filters\.groupId/);
+  assert.match(source, /id="account-monitor-group"/);
+  assert.match(source, /data-action="account-monitor-display" data-display="providers"/);
+  assert.match(source, /data-action="account-monitor-display" data-display="groups"/);
+  assert.match(source, /summary\.pendingGroupAccountCount/);
+  assert.match(source, /display: 'providers'/);
+  assert.ok(source.indexOf('data-display="providers"') < source.indexOf('data-display="groups"'));
+  assert.ok(source.indexOf('data-display="groups"') < source.indexOf('data-display="accounts"'));
+  assert.doesNotMatch(source, /account-monitor-group-accounts/);
+  assert.match(css, /\.account-group-quality-table \.account-group-member-row/);
+  assert.match(css, /@media \(max-width: 1180px\)[\s\S]*?\.account-group-quality-table tbody \.account-group-identity-cell/);
+});
+
+test('account quality defaults to suppliers and expands every provider key', () => {
+  const { context, source } = createBrowserContext();
+  const htmlDocument = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+  context.providerRows = [{
+    connectionId: 'provider-1',
+    providerName: 'Supplier Alpha',
+    adapterType: 'new-api',
+    lastSyncAt: new Date().toISOString(),
+    lastErrorCode: null,
+    keyCount: 2,
+    activeKeyCount: 1,
+    mappedAccountCount: 2,
+    rechargeAudit: {
+      configured: true,
+      rechargedAmount: 50,
+      currency: 'USD',
+      note: '',
+      updatedAt: null
+    },
+    metrics: {
+      requestCount: 30,
+      cacheRate: 25,
+      ttftP95Ms: 800,
+      outputTokensPerSecond: 40,
+      probeSuccessRate: 90,
+      probeCount: 10,
+      qualityScore: 88,
+      quality: { coverage: ['latency', 'reliability'] }
+    },
+    baseMetrics: {
+      available: true,
+      requestCount: 28,
+      cacheRate: 22,
+      ttftP95Ms: 850,
+      outputTokensPerSecond: 37,
+      probeSuccessRate: 95,
+      probeCount: 8,
+      qualityScore: 86
+    },
+    upstreamMetrics: {
+      available: true,
+      requestCount: 30,
+      cacheRate: 25,
+      ttftP95Ms: 800,
+      outputTokensPerSecond: 40,
+      probeSuccessRate: 80,
+      probeCount: 2,
+      qualityScore: 90
+    },
+    audit: {
+      displayCurrency: 'USD',
+      windowUpstreamCost: 3,
+      lifetimeUpstreamCost: 12,
+      windowBaseRevenue: 5,
+      windowGrossProfit: 2,
+      lifetimeBaseRevenue: 20,
+      lifetimeGrossProfit: 8,
+      fundingDifference: -30,
+      lifetimeBaseRequestCount: 112,
+      lifetimeRequestCount: 120
+    },
+    keys: [{
+      keyId: 'key-a',
+      remoteKeyId: 'remote-a',
+      name: 'Key A',
+      maskedKey: 'sk-a...0001',
+      status: 'active',
+      mappedAccountCount: 1,
+      accounts: [{ accountId: '11', name: 'Account A' }],
+      metrics: {
+        requestCount: 10,
+        cacheRate: 20,
+        ttftP95Ms: 700,
+        outputTokensPerSecond: 38,
+        probeSuccessRate: 100,
+        probeCount: 5,
+        qualityScore: 90,
+        quality: { coverage: ['latency', 'reliability'] }
+      },
+      baseMetrics: {
+        available: true,
+        requestCount: 9,
+        cacheRate: 18,
+        ttftP95Ms: 760,
+        outputTokensPerSecond: 35,
+        probeSuccessRate: 100,
+        probeCount: 4,
+        qualityScore: 88
+      },
+      upstreamMetrics: {
+        available: true,
+        requestCount: 10,
+        cacheRate: 20,
+        ttftP95Ms: 700,
+        outputTokensPerSecond: 38,
+        probeSuccessRate: 100,
+        probeCount: 1,
+        qualityScore: 90
+      },
+      audit: {
+        displayCurrency: 'USD', windowUpstreamCost: 1, lifetimeUpstreamCost: 4,
+        windowBaseRevenue: 2, windowGrossProfit: 1,
+        lifetimeBaseRevenue: 7, lifetimeGrossProfit: 3,
+        lifetimeBaseRequestCount: 36, lifetimeRequestCount: 40
+      }
+    }, {
+      keyId: 'key-b',
+      remoteKeyId: 'remote-b',
+      name: 'Retired Key B',
+      maskedKey: 'sk-b...0002',
+      status: 'missing',
+      mappedAccountCount: 1,
+      accounts: [{ accountId: '12', name: 'Account B' }],
+      metrics: {
+        requestCount: 20,
+        cacheRate: 30,
+        ttftP95Ms: 900,
+        outputTokensPerSecond: 42,
+        probeSuccessRate: 80,
+        probeCount: 5,
+        qualityScore: 82,
+        quality: { coverage: ['latency', 'reliability'] }
+      },
+      baseMetrics: {
+        available: false,
+        unavailableReason: 'base_key_attribution_incomplete',
+        probeCount: 4
+      },
+      upstreamMetrics: {
+        available: true,
+        requestCount: 20,
+        cacheRate: 30,
+        ttftP95Ms: 900,
+        outputTokensPerSecond: 42,
+        probeSuccessRate: 60,
+        probeCount: 1,
+        qualityScore: 82
+      },
+      audit: {
+        displayCurrency: 'USD', windowUpstreamCost: 2, lifetimeUpstreamCost: 8,
+        windowBaseRevenue: null, windowGrossProfit: null,
+        lifetimeBaseRevenue: null, lifetimeGrossProfit: null,
+        lifetimeBaseRequestCount: null, lifetimeRequestCount: 80
+      }
+    }]
+  }];
+  vm.runInContext("state.accountMonitorExpandedProviders.add('provider-1')", context);
+  const html = vm.runInContext('accountMonitorProviderTable(providerRows)', context);
+
+  assert.match(html, /供应商 \/ Key/);
+  assert.match(html, /Supplier Alpha/);
+  assert.match(html, /Key A/);
+  assert.match(html, /Retired Key B/);
+  assert.match(html, /data-action="toggle-account-monitor-provider" data-provider-id="provider-1"/);
+  assert.match(html, /data-action="edit-provider-recharge-audit" data-id="provider-1"/);
+  assert.match(html, /基座 \/ 上游/);
+  assert.match(html, /基座收入/);
+  assert.match(html, /上游成本/);
+  assert.match(html, /850 ms/);
+  assert.match(html, /800 ms/);
+  assert.match(html, /多个 Key，无法唯一归因/);
+  assert.match(html, /毛利 US\$8\.00/);
+  assert.match(html, /US\$50\.00/);
+  assert.ok(html.indexOf('Supplier Alpha') < html.indexOf('Key A'));
+  assert.ok(html.indexOf('Key A') < html.indexOf('Retired Key B'));
+  assert.match(htmlDocument, /id="provider-recharge-audit-dialog"/);
+  assert.match(htmlDocument, /name="rechargedAmount" type="number" min="0"/);
+  assert.match(source, /\/api\/account-monitor\/providers\/\$\{encodeURIComponent\(form\.elements\.connectionId\.value\)\}\/recharge-audit/);
+  assert.match(source, /accountMonitorExpandedProviders: new Set\(\)/);
+  assert.match(css, /\.account-provider-quality-table \.account-provider-key-row/);
+  assert.match(css, /@media \(max-width: 1180px\)[\s\S]*?\.account-provider-quality-table tbody \.account-provider-key-row/);
+});
+
 test('a local AUTH_REQUIRED response still clears the expired session', async () => {
   const { context, removedSessionKeys } = createBrowserContext();
   context.fetch = async () => errorResponse('AUTH_REQUIRED', 'Administrator login is required');

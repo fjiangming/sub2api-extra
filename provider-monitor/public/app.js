@@ -52,8 +52,10 @@ const state = {
   accountMonitor: null,
   accountMonitorDetail: null,
   accountMonitorSelected: new Set(),
+  accountMonitorExpandedGroups: new Set(),
+  accountMonitorExpandedProviders: new Set(),
   accountMonitorFilters: {
-    platform: '', status: '', search: '', days: '7', page: 1,
+    display: 'providers', groupId: '', platform: '', status: '', search: '', days: '7', page: 1,
     pageSize: 50, sortBy: 'qualityScore', order: 'desc'
   },
   integrationGroups: [],
@@ -965,7 +967,7 @@ function accountComparisonMetric(baseValue, upstreamValue, formatter, options = 
   const upstream = formatter(upstreamValue);
   const upstreamTitle = options.upstreamTitle || (upstream === '-' ? '供应商未提供该指标' : '供应商上游');
   const note = options.note ? `<small class="table-metric-note">${escapeHtml(options.note)}</small>` : '';
-  return `<div class="account-comparison-metric"><span><small class="source-base">基座</small><strong>${escapeHtml(base)}</strong></span><span title="${escapeHtml(upstreamTitle)}"><small class="source-upstream">上游</small><strong class="${upstream === '-' ? 'metric-empty' : ''}">${escapeHtml(upstream)}</strong></span></div>${note}`;
+  return `<div class="account-comparison-metric"><span><small class="source-base">${escapeHtml(options.baseLabel || '基座')}</small><strong class="${base === '-' ? 'metric-empty' : ''}">${escapeHtml(base)}</strong></span><span title="${escapeHtml(upstreamTitle)}"><small class="source-upstream">${escapeHtml(options.upstreamLabel || '上游')}</small><strong class="${upstream === '-' ? 'metric-empty' : ''}">${escapeHtml(upstream)}</strong></span></div>${note}`;
 }
 
 function accountTtftComparison(base, upstream) {
@@ -1075,6 +1077,8 @@ function accountQualityMarkup(score, quality = {}) {
 function accountMonitorQuery() {
   const filters = state.accountMonitorFilters;
   return new URLSearchParams(Object.entries({
+    display: filters.display,
+    groupId: filters.groupId,
     platform: filters.platform,
     status: filters.status,
     search: filters.search,
@@ -1086,11 +1090,12 @@ function accountMonitorQuery() {
   }).filter(([, value]) => value !== '' && value != null));
 }
 
-function accountMonitorPagination(pagination) {
+function accountMonitorPagination(pagination, itemType = 'account') {
   if (!pagination || pagination.total <= 0) return '';
   const start = (pagination.page - 1) * pagination.pageSize + 1;
   const end = Math.min(pagination.total, pagination.page * pagination.pageSize);
-  return `<footer class="table-pagination"><span class="pagination-summary">第 ${start}–${end} 条，共 ${pagination.total} 条</span><div class="pagination-actions"><button class="icon-button small" data-action="account-monitor-page" data-page="${pagination.page - 1}" title="上一页" aria-label="上一页" ${pagination.page <= 1 ? 'disabled' : ''}><i data-lucide="chevron-left"></i></button><span class="pagination-position">${pagination.page} / ${pagination.totalPages}</span><button class="icon-button small" data-action="account-monitor-page" data-page="${pagination.page + 1}" title="下一页" aria-label="下一页" ${pagination.page >= pagination.totalPages ? 'disabled' : ''}><i data-lucide="chevron-right"></i></button></div></footer>`;
+  const label = itemType === 'provider' ? '个供应商' : itemType === 'group' ? '个分组' : '个账号';
+  return `<footer class="table-pagination"><span class="pagination-summary">第 ${start}–${end} 条，共 ${pagination.total} ${label}</span><div class="pagination-actions"><button class="icon-button small" data-action="account-monitor-page" data-page="${pagination.page - 1}" title="上一页" aria-label="上一页" ${pagination.page <= 1 ? 'disabled' : ''}><i data-lucide="chevron-left"></i></button><span class="pagination-position">${pagination.page} / ${pagination.totalPages}</span><button class="icon-button small" data-action="account-monitor-page" data-page="${pagination.page + 1}" title="下一页" aria-label="下一页" ${pagination.page >= pagination.totalPages ? 'disabled' : ''}><i data-lucide="chevron-right"></i></button></div></footer>`;
 }
 
 function updateAccountMonitorSelectionAction() {
@@ -1109,17 +1114,34 @@ function updateAccountMonitorSelectionAction() {
   }
 }
 
-async function renderAccountMonitor() {
-  const result = await api(`/api/account-monitor/accounts?${accountMonitorQuery()}`);
-  state.accountMonitor = result;
-  state.accountMonitorFilters.page = result.pagination.page;
-  const visibleIds = new Set(result.items.map((item) => String(item.accountId)));
-  const filters = state.accountMonitorFilters;
-  setTopActions('<button class="button" data-action="open-account-metric-rules" title="查看指标计算规则" aria-label="查看指标计算规则"><i data-lucide="circle-help"></i><span>指标口径</span></button><button class="button" data-action="open-account-monitor-settings" title="检测设置" aria-label="检测设置"><i data-lucide="settings-2"></i><span>检测设置</span></button><button class="button" data-action="sync-account-monitor" title="同步基座和供应商日志" aria-label="同步基座和供应商日志"><i data-lucide="refresh-cw"></i><span>同步双源</span></button><button class="button primary" data-action="detect-selected-accounts" title="检测所选账号" aria-label="检测所选账号" disabled><i data-lucide="flask-conical"></i><span>检测所选</span></button>');
-  const platformOptions = (result.platforms || []).map((platform) =>
-    `<option value="${escapeHtml(platform)}" ${filters.platform === platform ? 'selected' : ''}>${escapeHtml(accountMonitorPlatformLabel(platform))}</option>`
-  ).join('');
-  const rows = result.items.map((item) => {
+function accountGroupSummary(groups = [], associationsKnown = true) {
+  if (!Array.isArray(groups) || groups.length === 0) {
+    return associationsKnown ? '未分组' : '分组待同步';
+  }
+  const names = groups.map((group) => group.name || `分组 #${group.id}`);
+  const summary = names.length > 1 ? `${names[0]} +${names.length - 1}` : names[0];
+  return associationsKnown ? summary : `${summary}（映射缓存）`;
+}
+
+function accountMonitorGroupCostMarkup(group) {
+  const cost = group.cost || {};
+  const comparable = Number(cost.comparableAccountCount || 0);
+  const detail = comparable > 0
+    ? `毛差正向 ${formatNumber(cost.profitAccountCount, 0)} · 倒挂 ${formatNumber(cost.lossAccountCount, 0)}`
+    : '暂无可比总账';
+  const amount = cost.differenceAmount == null || !cost.currency
+    ? ''
+    : `<small class="table-metric-note">净额 ${escapeHtml(formatPreciseMoney(cost.differenceAmount, cost.currency))}</small>`;
+  return `<strong>${formatNumber(comparable, 0)} / ${formatNumber(group.accountCount, 0)}</strong><small class="table-metric-note">${escapeHtml(detail)}</small>${amount}`;
+}
+
+function accountMonitorTableStructure(grouped = false) {
+  const selectLabel = grouped ? '选择已展开的全部账号' : '选择当前页全部账号';
+  return `<colgroup><col class="account-col-select"><col class="account-col-identity"><col class="account-col-provider"><col class="account-col-requests"><col class="account-col-cache"><col class="account-col-ttft"><col class="account-col-duration"><col class="account-col-speed"><col class="account-col-cost"><col class="account-col-probe"><col class="account-col-capability"><col class="account-col-quality"><col class="account-col-actions"></colgroup><thead><tr><th class="selection-cell"><input type="checkbox" id="account-monitor-select-page" aria-label="${selectLabel}"></th><th>${grouped ? '基座分组 / 账号' : '账号 / 状态'}</th><th>${grouped ? '账号覆盖 / 供应商上游' : '供应商上游'}</th><th class="numeric">${accountMetricRuleHeader('请求数', 'requests', '基座与上游在同一实际覆盖窗口内的请求总数')}</th><th class="numeric">${accountMetricRuleHeader('缓存读取率', 'cache', '同一窗口内已配对请求的缓存读取 Token 比例')}</th><th class="numeric">${grouped ? '首字 P95 / 分组均值' : accountMetricRuleHeader('首字 P95', 'ttft', '同一窗口内已配对流式请求的首字 95 分位数')}</th><th class="numeric">${grouped ? '总耗时 P95 / 分组均值' : '总耗时 P95'}</th><th class="numeric">${grouped ? '输出速度 / 分组均值' : '输出速度'}</th><th class="numeric">${accountMetricRuleHeader('费用对比', 'cost', '统一窗口 Key 总账收入与支出；详情同时展示配对请求可归因收支')}</th><th class="numeric">${accountMetricRuleHeader('检测通过率', 'probe', '成功主动检测占最近检测样本的比例，并展示最近一次检测状态')}</th><th class="numeric">${accountMetricRuleHeader(grouped ? '能力均值' : '能力分 / 遵循', 'capability', '动态五维能力题集与格式遵循得分')}</th><th class="numeric">${accountMetricRuleHeader(grouped ? '质量均值' : '质量分', 'quality', '延迟、检测通过率与能力分的加权结果')}</th><th aria-label="操作"></th></tr></thead>`;
+}
+
+function accountMonitorAccountRows(items, options = {}) {
+  return items.map((item) => {
     const metrics = item.metrics;
     const comparison = item.comparison || {};
     const comparisonBase = comparison.base || metrics;
@@ -1130,17 +1152,22 @@ async function renderAccountMonitor() {
       ? `性能按 ${formatNumber(comparison.pairing.matchedCount, 0)} 个配对请求${comparison.pairing.upstreamExtraCount > 0 ? `；同窗上游未归因 ${formatNumber(comparison.pairing.upstreamExtraCount, 0)} 个` : comparison.pairing.extraCountTrusted === false ? '；额外请求待基座回补核实' : ''}`
       : '';
     const selected = state.accountMonitorSelected.has(String(item.accountId));
+    const groupSummary = accountGroupSummary(item.groups, item.groupAssociationsKnown !== false);
     const probeStatus = metrics.lastProbeStatus
       ? `<span class="account-probe-latest">${badge(metrics.lastProbeStatus)}<small>${escapeHtml(timeAgo(metrics.lastProbeAt))}</small></span>`
       : '<span class="account-probe-latest"><span class="metric-empty">暂无最近检测</span></span>';
     const capability = metrics.intelligenceScore == null
       ? '<span class="metric-empty" title="暂无有效能力题结果：平台不支持，或当前 Sub2API 基座未转发自定义题目">未覆盖</span>'
       : `<strong>${formatNumber(metrics.intelligenceScore, 0)}</strong><small class="table-metric-note">遵循 ${formatNumber(metrics.instructionScore, 0)}</small>`;
-    return `<tr data-account-monitor-row="${escapeHtml(item.accountId)}">
+    const rowClass = options.nested ? ' class="account-group-member-row"' : '';
+    const parentGroup = options.parentGroupId == null
+      ? ''
+      : ` data-parent-group="${escapeHtml(options.parentGroupId)}"`;
+    return `<tr${rowClass} data-account-monitor-row="${escapeHtml(item.accountId)}"${parentGroup}>
       <td class="selection-cell"><input type="checkbox" data-account-monitor-select="${escapeHtml(item.accountId)}" aria-label="选择 ${escapeHtml(item.name)}" ${selected ? 'checked' : ''}></td>
       <td class="primary-cell account-identity-cell" data-label="账号">
         <div class="account-identity-main"><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong>${badge(item.status, accountMonitorStatusLabel(item.status))}</div>
-        <small title="#${escapeHtml(item.accountId)} · ${escapeHtml(item.accountType)} · ${escapeHtml(accountMonitorPlatformLabel(item.platform))}">#${escapeHtml(item.accountId)} · ${escapeHtml(item.accountType)} · ${escapeHtml(accountMonitorPlatformLabel(item.platform))}</small>
+        <small title="#${escapeHtml(item.accountId)} · ${escapeHtml(item.accountType)} · ${escapeHtml(accountMonitorPlatformLabel(item.platform))} · 基座分组：${escapeHtml(groupSummary)}">#${escapeHtml(item.accountId)} · ${escapeHtml(accountMonitorPlatformLabel(item.platform))} · ${escapeHtml(groupSummary)}</small>
       </td>
       <td class="account-provider-column" data-label="供应商上游">${accountProviderMarkup(comparison)}</td>
       <td class="numeric account-metric-column" data-label="请求数">${accountComparisonMetric(windowBase?.requestCount, windowUpstream?.requestCount, (value) => formatNumber(value, 0), { note: pairingNote })}</td>
@@ -1155,6 +1182,250 @@ async function renderAccountMonitor() {
       <td class="actions-cell"><button class="icon-button small" data-action="view-account-quality" data-id="${escapeHtml(item.accountId)}" title="查看趋势" aria-label="查看趋势"><i data-lucide="chart-no-axes-combined"></i></button><button class="icon-button small" data-action="detect-account" data-id="${escapeHtml(item.accountId)}" title="立即检测" aria-label="立即检测"><i data-lucide="flask-conical"></i></button></td>
     </tr>`;
   }).join('');
+}
+
+function accountMonitorGroupTable(groups) {
+  if (!groups.length) {
+    return emptyState('list-tree', '暂无基座分组质量数据', '同步 Sub2API 账号及分组后显示');
+  }
+  const rows = groups.map((group) => {
+    const metrics = group.metrics || {};
+    const coverage = group.coverage || {};
+    const platform = (group.platforms || []).map(accountMonitorPlatformLabel).join('、') || '未知平台';
+    const groupId = group.pending
+      ? '等待账号目录同步'
+      : group.unassigned
+        ? '未关联'
+        : `#${group.groupId}`;
+    const rate = group.rateMultiplier == null ? '' : ` · ${formatEffectiveRate(group.rateMultiplier)}`;
+    const cachedMembershipCount = Number(group.cachedMembershipAccountCount || 0);
+    const groupBadge = group.pending
+      ? badge('warning', '待同步')
+      : group.unassigned
+        ? badge('info', '未分组')
+        : cachedMembershipCount === Number(group.accountCount || 0)
+          ? badge('stale', '映射缓存')
+          : badge(group.groupStatus);
+    const members = (group.memberNames || []).join('、');
+    const memberSummary = members
+      ? `${members}${group.accountCount > group.memberNames.length ? ` 等 ${group.accountCount} 个` : ''}`
+      : '暂无账号';
+    const expanded = state.accountMonitorExpandedGroups.has(String(group.groupId));
+    const memberRows = expanded
+      ? accountMonitorAccountRows(group.accounts || [], {
+          nested: true,
+          parentGroupId: group.groupId
+        }) || `<tr class="account-group-empty-row"><td colspan="13">该分组暂无账号</td></tr>`
+      : '';
+    return `<tr class="account-group-row${expanded ? ' expanded' : ''}" data-action="toggle-account-monitor-group" data-group-id="${escapeHtml(group.groupId)}" data-account-monitor-group="${escapeHtml(group.groupId)}">
+      <td class="selection-cell"><button class="icon-button small account-group-expand" data-action="toggle-account-monitor-group" data-group-id="${escapeHtml(group.groupId)}" title="${expanded ? '收起分组账号' : '展开分组账号'}" aria-label="${expanded ? '收起' : '展开'} ${escapeHtml(group.groupName)}" aria-expanded="${expanded}"><i data-lucide="${expanded ? 'chevron-down' : 'chevron-right'}"></i></button></td>
+      <td class="primary-cell account-group-identity-cell" data-label="基座分组">
+        <div class="account-identity-main"><strong title="${escapeHtml(group.groupName)}">${escapeHtml(group.groupName)}</strong>${groupBadge}</div>
+        <small title="${escapeHtml(`${groupId} · ${platform}${rate}`)}">${escapeHtml(`${groupId} · ${platform}${rate}`)}</small>
+        <small title="${escapeHtml(memberSummary)}">${escapeHtml(memberSummary)}${cachedMembershipCount > 0 ? ` · ${formatNumber(cachedMembershipCount, 0)} 个缓存关联` : ''}</small>
+      </td>
+      <td class="account-provider-column account-group-count-cell" data-label="账号覆盖"><strong>${formatNumber(group.activeAccountCount, 0)} / ${formatNumber(group.accountCount, 0)}</strong><small class="table-metric-note">映射 ${formatNumber(coverage.mappedAccountCount, 0)} · 逐请求 ${formatNumber(coverage.supplierLogAccountCount, 0)}</small></td>
+      <td class="numeric" data-label="基座请求"><strong>${formatNumber(metrics.requestCount, 0)}</strong></td>
+      <td class="numeric" data-label="缓存读取率"><strong>${formatPercent(metrics.cacheRate)}</strong></td>
+      <td class="numeric" data-label="账号首字 P95 均值"><strong>${formatMilliseconds(metrics.ttftP95Ms)}</strong></td>
+      <td class="numeric" data-label="账号总耗时 P95 均值"><strong>${formatMilliseconds(metrics.durationP95Ms)}</strong></td>
+      <td class="numeric account-speed-cell" data-label="账号输出速度均值"><strong>${metrics.outputTokensPerSecond == null ? '-' : `${formatNumber(metrics.outputTokensPerSecond, 1)} tok/s`}</strong></td>
+      <td class="numeric account-cost-column account-group-cost-cell" data-label="费用可比">${accountMonitorGroupCostMarkup(group)}</td>
+      <td class="numeric account-probe-cell" data-label="检测通过率"><strong>${formatPercent(metrics.probeSuccessRate)}</strong><small class="table-metric-note">${formatNumber(metrics.probeCount, 0)} 次 · ${formatNumber(coverage.probeAccountCount, 0)} 个账号</small></td>
+      <td class="numeric account-capability-cell" data-label="能力均值"><strong>${metrics.intelligenceScore == null ? '-' : formatNumber(metrics.intelligenceScore, 0)}</strong><small class="table-metric-note">覆盖 ${formatNumber(coverage.capabilityAccountCount, 0)} 个</small></td>
+      <td class="numeric account-quality-cell" data-label="质量均值">${accountQualityMarkup(metrics.qualityScore, metrics.quality)}</td>
+      <td class="actions-cell" aria-hidden="true"></td>
+    </tr>${memberRows}`;
+  }).join('');
+  return `<table>${accountMonitorTableStructure(true)}<tbody>${rows}</tbody></table>`;
+}
+
+function repaintAccountMonitorGroupTable() {
+  const root = $('#account-monitor-table');
+  if (!root || state.accountMonitor?.itemType !== 'group') return;
+  root.innerHTML = accountMonitorGroupTable(state.accountMonitor.items || []);
+  updateAccountMonitorSelectionAction();
+  icons();
+}
+
+function providerRechargeAuditMarkup(provider) {
+  const recharge = provider.rechargeAudit || {};
+  const audit = provider.audit || {};
+  const currency = audit.displayCurrency || recharge.currency || 'USD';
+  const funding = audit.fundingDifference;
+  const configured = recharge.configured ?? recharge.updatedAt != null;
+  const fundingText = !configured
+    ? '配置后显示资金差额'
+    : funding == null
+    ? '资金差额待核算'
+    : `${Number(funding) >= 0 ? '收入超充值' : '充值超收入'} ${formatPreciseMoney(Math.abs(Number(funding)), currency)}`;
+  const amount = configured
+    ? formatPreciseMoney(recharge.rechargedAmount, recharge.currency || 'USD')
+    : '未配置';
+  return `<div class="provider-recharge-metric"><strong>${escapeHtml(amount)}</strong><small class="table-metric-note">${escapeHtml(fundingText)}</small><button class="icon-button small" data-action="edit-provider-recharge-audit" data-id="${escapeHtml(provider.connectionId)}" title="配置累计充值金额" aria-label="配置 ${escapeHtml(provider.providerName)} 累计充值金额"><i data-lucide="wallet-cards"></i></button></div>`;
+}
+
+function providerMetricUnavailableReason(reason) {
+  return ({
+    base_key_unmapped: '未映射基座账号',
+    base_key_attribution_incomplete: '多个 Key，无法唯一归因',
+    base_provider_unmapped: '未映射基座账号',
+    base_provider_attribution_incomplete: '跨供应商映射，无法唯一归因',
+    upstream_request_logs_unavailable: '上游日志未采集'
+  })[reason] || '暂不可比';
+}
+
+function providerComparisonMetric(item, field, formatter, options = {}) {
+  const baseMetrics = item.baseMetrics || {};
+  const upstreamMetrics = item.upstreamMetrics || item.metrics || {};
+  const notes = [];
+  if (baseMetrics.available === false) {
+    notes.push(`基座：${providerMetricUnavailableReason(baseMetrics.unavailableReason)}`);
+  }
+  if (upstreamMetrics.available === false) {
+    notes.push(`上游：${providerMetricUnavailableReason(upstreamMetrics.unavailableReason)}`);
+  }
+  if (options.note) notes.push(options.note);
+  return accountComparisonMetric(
+    baseMetrics.available === false ? null : baseMetrics[field],
+    upstreamMetrics.available === false ? null : upstreamMetrics[field],
+    formatter,
+    { ...options, note: notes.join(' · ') }
+  );
+}
+
+function providerRequestComparison(item) {
+  const note = `累计 ${formatNumber(item.audit?.lifetimeBaseRequestCount, 0)} / ${formatNumber(item.audit?.lifetimeRequestCount, 0)}`;
+  return providerComparisonMetric(item, 'requestCount', (value) => formatNumber(value, 0), {
+    note,
+    upstreamTitle: '供应商上游永久账本中的窗口请求数'
+  });
+}
+
+function providerCostComparison(item, period = 'window') {
+  const audit = item.audit || {};
+  const currency = audit.displayCurrency || 'USD';
+  const lifetime = period === 'lifetime';
+  const base = lifetime ? audit.lifetimeBaseRevenue : audit.windowBaseRevenue;
+  const upstream = lifetime ? audit.lifetimeUpstreamCost : audit.windowUpstreamCost;
+  const grossProfit = lifetime ? audit.lifetimeGrossProfit : audit.windowGrossProfit;
+  return accountComparisonMetric(base, upstream, (value) => formatPreciseMoney(value, currency), {
+    baseLabel: lifetime ? '累计收入' : '基座收入',
+    upstreamLabel: lifetime ? '累计成本' : '上游成本',
+    upstreamTitle: lifetime ? '供应商永久费用账本累计成本' : '供应商永久费用账本窗口成本',
+    note: grossProfit == null ? '毛利待核算' : `毛利 ${formatPreciseMoney(grossProfit, currency)}`
+  });
+}
+
+function providerProbeComparison(item) {
+  const base = item.baseMetrics || {};
+  const upstream = item.upstreamMetrics || {};
+  const baseCount = base.available === false ? null : base.probeCount;
+  const upstreamCount = upstream.available === false ? null : upstream.probeCount;
+  return providerComparisonMetric(item, 'probeSuccessRate', formatPercent, {
+    note: `样本 ${formatNumber(baseCount, 0)} / ${formatNumber(upstreamCount, 0)}`,
+    upstreamTitle: upstream.probeCount > 0 ? '直连上游检测' : '尚无直连上游检测样本'
+  });
+}
+
+function providerQualityComparison(item) {
+  return providerComparisonMetric(
+    item,
+    'qualityScore',
+    (value) => value == null ? '-' : formatNumber(value, 0),
+    { upstreamTitle: '上游质量分仅使用已采集的上游延迟及直连检测项' }
+  );
+}
+
+function accountMonitorProviderTable(providers) {
+  if (!providers.length) {
+    return emptyState('server-cog', '暂无供应商质量数据', '添加并同步供应商后显示');
+  }
+  const header = `<colgroup><col class="provider-col-expand"><col class="provider-col-identity"><col class="provider-col-accounts"><col class="provider-col-requests"><col class="provider-col-cache"><col class="provider-col-ttft"><col class="provider-col-speed"><col class="provider-col-window-cost"><col class="provider-col-lifetime-cost"><col class="provider-col-recharge"><col class="provider-col-probe"><col class="provider-col-quality"></colgroup><thead><tr><th aria-label="展开"></th><th>供应商 / Key</th><th class="numeric">映射账号</th><th class="numeric">窗口请求<br><small>基座 / 上游</small></th><th class="numeric">缓存读取率<br><small>基座 / 上游</small></th><th class="numeric">首字 P95<br><small>基座 / 上游</small></th><th class="numeric">输出速度<br><small>基座 / 上游</small></th><th class="numeric">窗口费用<br><small>收入 / 成本</small></th><th class="numeric">累计费用<br><small>收入 / 成本</small></th><th class="numeric">已充值</th><th class="numeric">检测通过率<br><small>基座 / 上游</small></th><th class="numeric">质量分<br><small>基座 / 上游</small></th></tr></thead>`;
+  const rows = providers.map((provider) => {
+    const expanded = state.accountMonitorExpandedProviders.has(String(provider.connectionId));
+    const keyRows = expanded
+      ? (provider.keys || []).map((key) => {
+          const accounts = (key.accounts || []).map((account) => account.name).join('、') || '未映射账号';
+          return `<tr class="account-provider-key-row" data-parent-provider="${escapeHtml(provider.connectionId)}">
+            <td class="selection-cell" aria-hidden="true"></td>
+            <td class="primary-cell account-identity-cell" data-label="Key"><div class="account-identity-main"><strong title="${escapeHtml(key.name)}">${escapeHtml(key.name)}</strong>${badge(key.status)}</div><small title="${escapeHtml(key.maskedKey || key.remoteKeyId)}">${escapeHtml(key.maskedKey || key.remoteKeyId)}</small><small title="${escapeHtml(accounts)}">${escapeHtml(accounts)}</small></td>
+            <td class="numeric" data-label="映射账号"><strong>${formatNumber(key.mappedAccountCount, 0)}</strong></td>
+            <td class="numeric" data-label="窗口请求">${providerRequestComparison(key)}</td>
+            <td class="numeric" data-label="缓存读取率">${providerComparisonMetric(key, 'cacheRate', formatPercent)}</td>
+            <td class="numeric" data-label="首字 P95">${providerComparisonMetric(key, 'ttftP95Ms', formatMilliseconds)}</td>
+            <td class="numeric account-speed-cell" data-label="输出速度">${providerComparisonMetric(key, 'outputTokensPerSecond', (value) => value == null ? '-' : `${formatNumber(value, 1)} tok/s`)}</td>
+            <td class="numeric account-cost-column" data-label="窗口费用">${providerCostComparison(key)}</td>
+            <td class="numeric account-cost-column" data-label="累计费用">${providerCostComparison(key, 'lifetime')}</td>
+            <td class="numeric" data-label="已充值"><span class="metric-empty">供应商级</span></td>
+            <td class="numeric account-probe-cell" data-label="检测通过率">${providerProbeComparison(key)}</td>
+            <td class="numeric account-quality-cell" data-label="质量分">${providerQualityComparison(key)}</td>
+          </tr>`;
+        }).join('') || `<tr class="account-provider-empty-row"><td colspan="12">该供应商暂无 Key</td></tr>`
+      : '';
+    return `<tr class="account-provider-row${expanded ? ' expanded' : ''}" data-action="toggle-account-monitor-provider" data-provider-id="${escapeHtml(provider.connectionId)}">
+      <td class="selection-cell"><button class="icon-button small account-provider-expand" data-action="toggle-account-monitor-provider" data-provider-id="${escapeHtml(provider.connectionId)}" title="${expanded ? '收起供应商 Key' : '展开供应商 Key'}" aria-label="${expanded ? '收起' : '展开'} ${escapeHtml(provider.providerName)}" aria-expanded="${expanded}"><i data-lucide="${expanded ? 'chevron-down' : 'chevron-right'}"></i></button></td>
+      <td class="primary-cell account-provider-identity-cell" data-label="供应商"><div class="account-identity-main"><strong title="${escapeHtml(provider.providerName)}">${escapeHtml(provider.providerName)}</strong>${provider.lastErrorCode ? badge('error', '同步异常') : badge('healthy', '已连接')}</div><small>${escapeHtml(adapterLabel(provider.adapterType))} · ${formatNumber(provider.activeKeyCount, 0)} / ${formatNumber(provider.keyCount, 0)} 个活动 Key</small><small>最近同步 ${escapeHtml(timeAgo(provider.lastSyncAt))}</small></td>
+      <td class="numeric" data-label="映射账号"><strong>${formatNumber(provider.mappedAccountCount, 0)}</strong></td>
+      <td class="numeric" data-label="窗口请求">${providerRequestComparison(provider)}</td>
+      <td class="numeric" data-label="缓存读取率">${providerComparisonMetric(provider, 'cacheRate', formatPercent)}</td>
+      <td class="numeric" data-label="首字 P95">${providerComparisonMetric(provider, 'ttftP95Ms', formatMilliseconds)}</td>
+      <td class="numeric account-speed-cell" data-label="输出速度">${providerComparisonMetric(provider, 'outputTokensPerSecond', (value) => value == null ? '-' : `${formatNumber(value, 1)} tok/s`)}</td>
+      <td class="numeric account-cost-column" data-label="窗口费用">${providerCostComparison(provider)}</td>
+      <td class="numeric account-cost-column" data-label="累计费用">${providerCostComparison(provider, 'lifetime')}</td>
+      <td class="numeric provider-recharge-column" data-label="已充值">${providerRechargeAuditMarkup(provider)}</td>
+      <td class="numeric account-probe-cell" data-label="检测通过率">${providerProbeComparison(provider)}</td>
+      <td class="numeric account-quality-cell" data-label="质量分">${providerQualityComparison(provider)}</td>
+    </tr>${keyRows}`;
+  }).join('');
+  return `<table>${header}<tbody>${rows}</tbody></table>`;
+}
+
+function repaintAccountMonitorProviderTable() {
+  const root = $('#account-monitor-table');
+  if (!root || state.accountMonitor?.itemType !== 'provider') return;
+  root.innerHTML = accountMonitorProviderTable(state.accountMonitor.items || []);
+  icons();
+}
+
+function openProviderRechargeAudit(provider) {
+  const dialog = $('#provider-recharge-audit-dialog');
+  const form = $('#provider-recharge-audit-form');
+  const recharge = provider.rechargeAudit || {};
+  form.elements.connectionId.value = provider.connectionId;
+  form.elements.rechargedAmount.value = recharge.rechargedAmount ?? 0;
+  form.elements.currency.value = recharge.currency || provider.audit?.displayCurrency || 'USD';
+  form.elements.note.value = recharge.note || '';
+  $('#provider-recharge-audit-title').textContent = `${provider.providerName} · 累计充值`;
+  $('#provider-recharge-audit-error').textContent = '';
+  dialog.showModal();
+  icons();
+}
+
+async function renderAccountMonitor() {
+  const result = await api(`/api/account-monitor/accounts?${accountMonitorQuery()}`);
+  state.accountMonitor = result;
+  state.accountMonitorFilters.page = result.pagination.page;
+  const filters = state.accountMonitorFilters;
+  filters.display = result.itemType === 'provider'
+    ? 'providers'
+    : result.itemType === 'group' ? 'groups' : 'accounts';
+  const visibleIds = new Set((result.itemType === 'account'
+    ? result.items
+    : result.itemType === 'group'
+      ? result.items.flatMap((group) => group.accounts || [])
+      : result.items.flatMap((provider) => provider.keys || []).flatMap((key) => key.accounts || []))
+    .map((item) => String(item.accountId)));
+  setTopActions(`<button class="button" data-action="open-account-metric-rules" title="查看指标计算规则" aria-label="查看指标计算规则"><i data-lucide="circle-help"></i><span>指标口径</span></button><button class="button" data-action="open-account-monitor-settings" title="检测设置" aria-label="检测设置"><i data-lucide="settings-2"></i><span>检测设置</span></button><button class="button" data-action="sync-account-monitor" title="同步基座和供应商日志" aria-label="同步基座和供应商日志"><i data-lucide="refresh-cw"></i><span>同步双源</span></button>${result.itemType === 'provider' ? '' : '<button class="button primary" data-action="detect-selected-accounts" title="检测所选账号" aria-label="检测所选账号" disabled><i data-lucide="flask-conical"></i><span>检测所选</span></button>'}`);
+  const platformOptions = (result.platforms || []).map((platform) =>
+    `<option value="${escapeHtml(platform)}" ${filters.platform === platform ? 'selected' : ''}>${escapeHtml(accountMonitorPlatformLabel(platform))}</option>`
+  ).join('');
+  const groupOptions = (result.groups || []).map((group) =>
+    `<option value="${escapeHtml(group.id)}" ${filters.groupId === group.id ? 'selected' : ''}>${escapeHtml(group.name)} (${formatNumber(group.accountCount, 0)})</option>`
+  ).join('');
+  const rows = result.itemType === 'account'
+    ? accountMonitorAccountRows(result.items)
+    : '';
   const summary = result.summary;
   const monitorState = result.state || {};
   const baseSyncSummary = monitorState.lastSyncSummary || {};
@@ -1163,27 +1434,46 @@ async function renderAccountMonitor() {
     : baseSyncSummary.usageExactTotal !== true
       ? ' · 基座待精确分页回补'
       : '';
-  const tableContent = rows
-    ? `<table><colgroup><col class="account-col-select"><col class="account-col-identity"><col class="account-col-provider"><col class="account-col-requests"><col class="account-col-cache"><col class="account-col-ttft"><col class="account-col-duration"><col class="account-col-speed"><col class="account-col-cost"><col class="account-col-probe"><col class="account-col-capability"><col class="account-col-quality"><col class="account-col-actions"></colgroup><thead><tr><th class="selection-cell"><input type="checkbox" id="account-monitor-select-page" aria-label="选择当前页全部账号"></th><th>账号 / 状态</th><th>供应商上游</th><th class="numeric">${accountMetricRuleHeader('请求数', 'requests', '基座与上游在同一实际覆盖窗口内的请求总数')}</th><th class="numeric">${accountMetricRuleHeader('缓存读取率', 'cache', '同一窗口内已配对请求的缓存读取 Token 比例')}</th><th class="numeric">${accountMetricRuleHeader('首字 P95', 'ttft', '同一窗口内已配对流式请求的首字 95 分位数')}</th><th class="numeric">总耗时 P95</th><th class="numeric">输出速度</th><th class="numeric">${accountMetricRuleHeader('费用对比', 'cost', '统一窗口 Key 总账收入与支出；详情同时展示配对请求可归因收支')}</th><th class="numeric">${accountMetricRuleHeader('检测通过率', 'probe', '成功主动检测占最近检测样本的比例，并展示最近一次检测状态')}</th><th class="numeric">${accountMetricRuleHeader('能力分 / 遵循', 'capability', '动态五维能力题集与格式遵循得分')}</th><th class="numeric">${accountMetricRuleHeader('质量分', 'quality', '延迟、检测通过率与能力分的加权结果')}</th><th aria-label="操作"></th></tr></thead><tbody>${rows}</tbody></table>`
-    : emptyState('brain-circuit', '暂无账号质量数据', '同步 Sub2API 账号与请求日志后显示');
+  const groupSyncNote = baseSyncSummary.groupCatalogComplete === false
+    ? ' · 基座分组目录未完整同步'
+    : '';
+  const groupMembershipSyncNote = summary.pendingGroupAccountCount > 0
+    ? ` · ${formatNumber(summary.pendingGroupAccountCount, 0)} 个账号分组待同步${summary.mappingCachedGroupAccountCount > 0 ? `（${formatNumber(summary.mappingCachedGroupAccountCount, 0)} 个按映射缓存展示）` : ''}`
+    : '';
+  const tableContent = result.itemType === 'provider'
+    ? accountMonitorProviderTable(result.items)
+    : result.itemType === 'group'
+      ? accountMonitorGroupTable(result.items)
+      : rows
+      ? `<table>${accountMonitorTableStructure()}<tbody>${rows}</tbody></table>`
+      : emptyState('brain-circuit', '暂无账号质量数据', '同步 Sub2API 账号与请求日志后显示');
+  const statsMarkup = result.itemType === 'provider'
+    ? `<div class="stats-grid account-quality-stats">
+        <div class="stat"><span class="stat-label"><i data-lucide="server-cog"></i>供应商 / Key</span><strong class="stat-value">${formatNumber(summary.providerCount, 0)} / ${formatNumber(summary.visibleKeyCount, 0)}</strong><span class="stat-detail">当前页 ${formatNumber(summary.visibleProviderCount, 0)} 个供应商 · 映射 ${formatNumber(summary.mappedAccountCount, 0)} 个账号</span></div>
+        <div class="stat"><span class="stat-label"><i data-lucide="activity"></i>累计请求</span><strong class="stat-value">${formatNumber(summary.lifetimeRequestCount, 0)}</strong><span class="stat-detail">当前窗口 ${formatNumber(summary.requestCount, 0)} · ${summary.days} 天</span></div>
+        <div class="stat"><span class="stat-label"><i data-lucide="wallet-cards"></i>当前页累计充值</span><strong class="stat-value">${escapeHtml(formatPreciseMoney(summary.configuredRechargeAmount, summary.displayCurrency))}</strong><span class="stat-detail">上游累计成本 ${escapeHtml(formatPreciseMoney(summary.lifetimeUpstreamCost, summary.displayCurrency))}</span></div>
+        <div class="stat"><span class="stat-label"><i data-lucide="scale"></i>当前页累计毛利</span><strong class="stat-value">${escapeHtml(formatPreciseMoney(summary.lifetimeGrossProfit, summary.displayCurrency))}</strong><span class="stat-detail">基座累计收入 ${escapeHtml(formatPreciseMoney(summary.lifetimeBaseRevenue, summary.displayCurrency))}</span></div>
+      </div>`
+    : `<div class="stats-grid account-quality-stats">
+        <div class="stat"><span class="stat-label"><i data-lucide="users-round"></i>${summary.comparisonScope === 'page' ? '当前页账号映射' : '账号映射'}</span><strong class="stat-value">${formatNumber(summary.mappedAccountCount, 0)} / ${formatNumber(summary.comparisonScope === 'page' ? summary.comparisonAccountCount : summary.accountCount, 0)}</strong><span class="stat-detail">${summary.platformCount} 个平台 · ${formatNumber(summary.baseGroupCount, 0)} 个基座分组${summary.ungroupedAccountCount ? ` · ${formatNumber(summary.ungroupedAccountCount, 0)} 个未分组` : ''}${summary.pendingGroupAccountCount ? ` · ${formatNumber(summary.pendingGroupAccountCount, 0)} 个待核验` : ''}</span></div>
+        <div class="stat"><span class="stat-label"><i data-lucide="radio-tower"></i>基座请求</span><strong class="stat-value">${formatNumber(summary.requestCount, 0)}</strong><span class="stat-detail">缓存读取 ${formatPercent(summary.cacheRate)} · ${summary.days} 天</span></div>
+        <div class="stat"><span class="stat-label"><i data-lucide="database-zap"></i>${summary.comparisonScope === 'page' ? '当前页上游覆盖' : '上游逐请求覆盖'}</span><strong class="stat-value">${formatNumber(summary.supplierLogAccountCount, 0)}</strong><span class="stat-detail">成功配对 ${formatNumber(summary.pairedAccountCount, 0)} 个账号 · Key 额外 ${formatNumber(summary.upstreamExtraRequestCount, 0)} 请求</span></div>
+        <div class="stat"><span class="stat-label"><i data-lucide="scale"></i>${summary.comparisonScope === 'page' ? '当前页费用可比' : '费用可比账号'}</span><strong class="stat-value">${formatNumber(summary.comparableCostAccountCount, 0)}</strong><span class="stat-detail">主动检测通过 ${formatPercent(summary.probeSuccessRate)}</span></div>
+      </div>`;
+  const providerView = filters.display === 'providers';
   $('#main-content').innerHTML = `
-      <section class="base-instance-bar account-monitor-source"><div><span class="status-dot ${monitorState.lastSyncStatus === 'failed' ? 'error' : monitorState.lastLogSyncAt ? 'healthy' : 'warning'}"></span><strong>Sub2API 基座 / 供应商上游</strong><small>基座 ${escapeHtml(timeAgo(monitorState.lastLogSyncAt))} · 上游 ${escapeHtml(timeAgo(summary.supplierLastSyncAt))}${baseSyncNote}</small></div><div class="status-summary">${badge(result.settings.syncEnabled ? 'enabled' : 'info', result.settings.syncEnabled ? result.settings.syncIntervalMinutes + ' 分钟双源同步' : '仅手动同步')}${badge(result.settings.probeEnabled ? 'enabled' : 'info', result.settings.probeEnabled ? result.settings.probeIntervalMinutes + ' 分钟检测' : '定时检测关闭')}</div></section>
-    <div class="stats-grid account-quality-stats">
-      <div class="stat"><span class="stat-label"><i data-lucide="users-round"></i>账号映射</span><strong class="stat-value">${formatNumber(summary.mappedAccountCount, 0)} / ${formatNumber(summary.accountCount, 0)}</strong><span class="stat-detail">${summary.platformCount} 个平台</span></div>
-      <div class="stat"><span class="stat-label"><i data-lucide="radio-tower"></i>基座请求</span><strong class="stat-value">${formatNumber(summary.requestCount, 0)}</strong><span class="stat-detail">缓存读取 ${formatPercent(summary.cacheRate)} · ${summary.days} 天</span></div>
-      <div class="stat"><span class="stat-label"><i data-lucide="database-zap"></i>上游逐请求覆盖</span><strong class="stat-value">${formatNumber(summary.supplierLogAccountCount, 0)}</strong><span class="stat-detail">成功配对 ${formatNumber(summary.pairedAccountCount, 0)} 个账号 · Key 额外 ${formatNumber(summary.upstreamExtraRequestCount, 0)} 请求</span></div>
-      <div class="stat"><span class="stat-label"><i data-lucide="scale"></i>费用可比账号</span><strong class="stat-value">${formatNumber(summary.comparableCostAccountCount, 0)}</strong><span class="stat-detail">主动检测通过 ${formatPercent(summary.probeSuccessRate)}</span></div>
-    </div>
+      <section class="base-instance-bar account-monitor-source"><div><span class="status-dot ${monitorState.lastSyncStatus === 'failed' ? 'error' : monitorState.lastLogSyncAt ? 'healthy' : 'warning'}"></span><strong>Sub2API 基座 / 供应商上游</strong><small>基座 ${escapeHtml(timeAgo(monitorState.lastLogSyncAt))} · 上游 ${escapeHtml(timeAgo(summary.supplierLastSyncAt))}${baseSyncNote}${groupSyncNote}${groupMembershipSyncNote}</small></div><div class="status-summary">${badge(result.settings.syncEnabled ? 'enabled' : 'info', result.settings.syncEnabled ? result.settings.syncIntervalMinutes + ' 分钟双源同步' : '仅手动同步')}${badge(result.settings.probeEnabled ? 'enabled' : 'info', result.settings.probeEnabled ? result.settings.probeIntervalMinutes + ' 分钟检测' : '定时检测关闭')}</div></section>
+    ${statsMarkup}
     <section class="section">
       <div class="filter-bar account-monitor-filters">
-        <label class="search-box"><i data-lucide="search"></i><input id="account-monitor-search" type="search" value="${escapeHtml(filters.search)}" placeholder="搜索账号名称或 ID" aria-label="搜索账号"></label>
-        <select id="account-monitor-platform" aria-label="平台"><option value="">全部平台</option>${platformOptions}</select>
-        <select id="account-monitor-status" aria-label="账号状态"><option value="">全部状态</option><option value="active" ${filters.status === 'active' ? 'selected' : ''}>活动</option><option value="error" ${filters.status === 'error' ? 'selected' : ''}>错误</option><option value="rate_limited" ${filters.status === 'rate_limited' ? 'selected' : ''}>限流</option></select>
+        <div class="tabs account-monitor-view-tabs" role="tablist" aria-label="账号质量展示方式"><button class="tab ${filters.display === 'providers' ? 'active' : ''}" data-action="account-monitor-display" data-display="providers" role="tab" aria-selected="${filters.display === 'providers'}" tabindex="${filters.display === 'providers' ? '0' : '-1'}"><i data-lucide="server-cog"></i><span>供应商</span></button><button class="tab ${filters.display === 'groups' ? 'active' : ''}" data-action="account-monitor-display" data-display="groups" role="tab" aria-selected="${filters.display === 'groups'}" tabindex="${filters.display === 'groups' ? '0' : '-1'}"><i data-lucide="list-tree"></i><span>基座分组</span></button><button class="tab ${filters.display === 'accounts' ? 'active' : ''}" data-action="account-monitor-display" data-display="accounts" role="tab" aria-selected="${filters.display === 'accounts'}" tabindex="${filters.display === 'accounts' ? '0' : '-1'}"><i data-lucide="users-round"></i><span>账号</span></button></div>
+        <label class="search-box"><i data-lucide="search"></i><input id="account-monitor-search" type="search" value="${escapeHtml(filters.search)}" placeholder="${providerView ? '搜索供应商或 Key' : '搜索账号或基座分组'}" aria-label="${providerView ? '搜索供应商或 Key' : '搜索账号或基座分组'}"></label>
+        ${providerView ? '' : `<select id="account-monitor-group" aria-label="Sub2API 基座分组"><option value="">全部基座分组</option>${groupOptions}</select><select id="account-monitor-platform" aria-label="平台"><option value="">全部平台</option>${platformOptions}</select><select id="account-monitor-status" aria-label="账号状态"><option value="">全部状态</option><option value="active" ${filters.status === 'active' ? 'selected' : ''}>活动</option><option value="error" ${filters.status === 'error' ? 'selected' : ''}>错误</option><option value="rate_limited" ${filters.status === 'rate_limited' ? 'selected' : ''}>限流</option></select>`}
         <select id="account-monitor-days" aria-label="观察窗口"><option value="1" ${filters.days === '1' ? 'selected' : ''}>24 小时</option><option value="7" ${filters.days === '7' ? 'selected' : ''}>7 天</option><option value="30" ${filters.days === '30' ? 'selected' : ''}>30 天</option><option value="90" ${filters.days === '90' ? 'selected' : ''}>90 天</option></select>
-        <select id="account-monitor-sort" aria-label="排序"><option value="qualityScore" ${filters.sortBy === 'qualityScore' ? 'selected' : ''}>质量分</option><option value="costDifference" ${filters.sortBy === 'costDifference' ? 'selected' : ''}>费用差额</option><option value="ttftP95Ms" ${filters.sortBy === 'ttftP95Ms' ? 'selected' : ''}>首字 P95</option><option value="cacheRate" ${filters.sortBy === 'cacheRate' ? 'selected' : ''}>缓存读取率</option><option value="probeSuccessRate" ${filters.sortBy === 'probeSuccessRate' ? 'selected' : ''}>检测通过率</option><option value="intelligenceScore" ${filters.sortBy === 'intelligenceScore' ? 'selected' : ''}>能力分</option><option value="requestCount" ${filters.sortBy === 'requestCount' ? 'selected' : ''}>请求数</option></select>
+        ${providerView ? '' : `<select id="account-monitor-sort" aria-label="排序"><option value="qualityScore" ${filters.sortBy === 'qualityScore' ? 'selected' : ''}>${filters.display === 'groups' ? '质量均值' : '质量分'}</option>${filters.display === 'groups' ? `<option value="accountCount" ${filters.sortBy === 'accountCount' ? 'selected' : ''}>账号数</option>` : `<option value="costDifference" ${filters.sortBy === 'costDifference' ? 'selected' : ''}>费用差额</option>`}<option value="ttftP95Ms" ${filters.sortBy === 'ttftP95Ms' ? 'selected' : ''}>${filters.display === 'groups' ? '账号首字 P95 均值' : '首字 P95'}</option><option value="cacheRate" ${filters.sortBy === 'cacheRate' ? 'selected' : ''}>缓存读取率</option><option value="probeSuccessRate" ${filters.sortBy === 'probeSuccessRate' ? 'selected' : ''}>检测通过率</option><option value="intelligenceScore" ${filters.sortBy === 'intelligenceScore' ? 'selected' : ''}>${filters.display === 'groups' ? '能力均值' : '能力分'}</option><option value="requestCount" ${filters.sortBy === 'requestCount' ? 'selected' : ''}>请求数</option></select>`}
       </div>
-      <div class="table-wrap account-quality-table">${tableContent}</div>
-      ${accountMonitorPagination(result.pagination)}
+      <div id="account-monitor-table" class="table-wrap account-quality-table ${result.itemType === 'provider' ? 'account-provider-quality-table' : result.itemType === 'group' ? 'account-group-quality-table' : ''}">${tableContent}</div>
+      ${accountMonitorPagination(result.pagination, result.itemType)}
     </section>
     <section class="section" id="account-monitor-detail"></section>`;
   updateAccountMonitorSelectionAction();
@@ -1264,7 +1554,7 @@ function paintAccountMonitorDetail(detail) {
   const probeTable = probeRows
     ? `<table><thead><tr><th>结果</th><th>检测</th><th>路径</th><th>模型</th><th class="numeric">首字</th><th class="numeric">总耗时</th><th class="numeric">能力</th><th>响应 / 错误</th></tr></thead><tbody>${probeRows}</tbody></table>`
     : emptyState('flask-conical', '暂无主动检测', '选择该账号并执行检测');
-  root.innerHTML = `<div class="section-header"><h2>${escapeHtml(detail.account.name)}</h2><p>#${escapeHtml(detail.account.accountId)} · ${escapeHtml(accountMonitorPlatformLabel(detail.account.platform))} · 最近 ${detail.days} 天</p><div class="section-actions"><button class="icon-button small" data-action="close-account-quality" title="关闭详情" aria-label="关闭详情"><i data-lucide="x"></i></button></div></div>
+  root.innerHTML = `<div class="section-header"><h2>${escapeHtml(detail.account.name)}</h2><p>#${escapeHtml(detail.account.accountId)} · ${escapeHtml(accountMonitorPlatformLabel(detail.account.platform))} · ${escapeHtml(accountGroupSummary(detail.account.groups, detail.account.groupAssociationsKnown !== false))} · 最近 ${detail.days} 天</p><div class="section-actions"><button class="icon-button small" data-action="close-account-quality" title="关闭详情" aria-label="关闭详情"><i data-lucide="x"></i></button></div></div>
     <div class="account-detail-metrics"><div><span>质量分</span><strong>${metrics.qualityScore == null ? '-' : formatNumber(metrics.qualityScore, 0)}</strong></div><div><span>首字 P95</span><strong>${formatMilliseconds(metrics.ttftP95Ms)}</strong></div><div><span>缓存读取率</span><strong>${formatPercent(metrics.cacheRate)}</strong></div><div><span>输出速度</span><strong>${metrics.outputTokensPerSecond == null ? '-' : formatNumber(metrics.outputTokensPerSecond, 1) + ' tok/s'}</strong></div><div><span>检测通过率</span><strong>${formatPercent(metrics.probeSuccessRate)}</strong></div><div><span>能力得分</span><strong>${metrics.intelligenceScore == null ? '未覆盖' : formatNumber(metrics.intelligenceScore, 0)}</strong></div></div>
     <section class="section account-comparison-detail"><div class="section-header"><div><h2>基座 / 上游对比</h2><p>${providerHeading} · ${escapeHtml(accountUpstreamSourceLabel(comparison.source))} · ${escapeHtml(coverageText + pairingText)}${escapeHtml(metricReasonText)}</p></div>${comparison.coverage?.stale ? badge('stale', '上游数据陈旧') : comparison.status === 'mapped' ? badge('enabled', '已映射') : badge('warning', '不可归因')}</div><div class="table-wrap"><table><thead><tr><th>指标</th><th class="numeric">Sub2API 基座</th><th class="numeric">供应商上游</th><th class="numeric">差值</th></tr></thead><tbody>${comparisonRows}<tr class="cost-comparison-row"><td><strong>统一窗口 Key 总账${windowUsesCash ? '（现金等值）' : '（余额单位）'}</strong><small>基座 actual_cost 实际收入 / 上游 actual_cost 实际支出 · ${escapeHtml(cost.source ? `${formatDate(cost.from)} 至 ${formatDate(cost.to)}` : '暂无费用来源')}</small></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(displayedBaseWindowCost, windowCostCurrency))}</strong><small>${windowUsesCash ? `余额消费 ${escapeHtml(formatPreciseMoney(cost.baseWindowCost, rawCostCurrency))} · ` : ''}充值倍率 ${escapeHtml(formatEffectiveRate(cost.baseRechargeMultiplier))}</small></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(displayedUpstreamWindowCost, windowCostCurrency))}</strong><small>${windowUsesCash ? `余额消费 ${escapeHtml(formatPreciseMoney(cost.keyTotalUpstreamCost, rawCostCurrency))} · ` : ''}充值倍率 ${escapeHtml(formatEffectiveRate(cost.providerRecharge?.multiplier))}</small></td><td class="numeric"><strong>${escapeHtml(windowCostDelta)}</strong>${cost.windowGrossMarginRatio == null ? '' : `<small>总账毛利率 ${escapeHtml(formatPercent(cost.windowGrossMarginRatio * 100))}</small>`}</td></tr><tr><td><strong>配对请求可归因收支${pairedUsesCash ? '（现金等值）' : '（余额单位）'}</strong><small>仅比较成功一一配对的 ${escapeHtml(formatNumber(cost.requestCount, 0))} 次请求；上游未归因流量不混入</small></td><td class="numeric">${escapeHtml(formatPreciseMoney(displayedBaseCost, pairedCostCurrency))}</td><td class="numeric">${escapeHtml(formatPreciseMoney(displayedUpstreamCost, pairedCostCurrency))}</td><td class="numeric"><strong>${escapeHtml(pairedCostDelta)}</strong>${cost.grossMarginRatio == null ? '' : `<small>配对毛利率 ${escapeHtml(formatPercent(cost.grossMarginRatio * 100))}</small>`}</td></tr></tbody></table></div></section>
     <div class="panel account-quality-chart-panel"><div class="panel-header"><h3>统一窗口日趋势</h3><span class="stat-detail">趋势按窗口总请求聚合；表格性能优先使用配对请求</span></div><div class="chart" id="account-quality-chart"></div></div>
@@ -1608,6 +1898,8 @@ function autoMappingVerificationLabel(item) {
 }
 
 function autoMappingErrorMessage(error) {
+  if (error.code === 'SUB2API_ACCOUNT_DISABLED') return '所选 Sub2API 账号未启用，不能建立或重新启用映射。';
+  if (error.code === 'SUB2API_ACCOUNT_NOT_FOUND') return '所选 Sub2API 账号不存在，请刷新后重新选择。';
   if (error.code === 'SUB2API_ADMIN_API_KEY_EXPORT_FORBIDDEN') return 'Sub2API 已开启敏感操作 step-up 2FA，管理员 API Key 无法导出账号 Key。请先用完成 TOTP 验证的 Sub2API 管理员会话关闭该开关。';
   if (error.code === 'SUB2API_STEP_UP_REQUIRED') return '当前 Sub2API 管理员会话尚未获得账号 Key 读取授权，请完成 TOTP 二次验证。';
   if (error.code === 'SUB2API_LOGIN_2FA_REQUIRED') return '配置的 Sub2API 管理员账号需要 TOTP 二次验证，请完成登录。';
@@ -3329,6 +3621,44 @@ async function handleAction(button) {
       trackAccountMonitorJob(result.jobId, '账号主动检测').catch((error) => toast(error.message, 'error'));
     }
     if (action === 'view-account-quality') await loadAccountMonitorDetail(id);
+    if (action === 'account-monitor-display') {
+      const display = String(button.dataset.display || 'providers');
+      state.accountMonitorFilters.display = ['providers', 'groups', 'accounts'].includes(display)
+        ? display
+        : 'providers';
+      state.accountMonitorFilters.groupId = '';
+      state.accountMonitorFilters.sortBy = 'qualityScore';
+      state.accountMonitorFilters.order = 'desc';
+      state.accountMonitorFilters.page = 1;
+      state.accountMonitorDetail = null;
+      await renderAccountMonitor();
+    }
+    if (action === 'toggle-account-monitor-group') {
+      const groupId = String(button.dataset.groupId || '');
+      if (!groupId) return;
+      if (state.accountMonitorExpandedGroups.has(groupId)) {
+        state.accountMonitorExpandedGroups.delete(groupId);
+      } else {
+        state.accountMonitorExpandedGroups.add(groupId);
+      }
+      repaintAccountMonitorGroupTable();
+    }
+    if (action === 'toggle-account-monitor-provider') {
+      const providerId = String(button.dataset.providerId || '');
+      if (!providerId) return;
+      if (state.accountMonitorExpandedProviders.has(providerId)) {
+        state.accountMonitorExpandedProviders.delete(providerId);
+      } else {
+        state.accountMonitorExpandedProviders.add(providerId);
+      }
+      repaintAccountMonitorProviderTable();
+    }
+    if (action === 'edit-provider-recharge-audit') {
+      const provider = (state.accountMonitor?.items || []).find(
+        (item) => String(item.connectionId) === String(id)
+      );
+      if (provider) openProviderRechargeAudit(provider);
+    }
     if (action === 'close-account-quality') {
       state.accountMonitorDetail = null;
       state.chart?.dispose?.();
@@ -3560,6 +3890,11 @@ document.addEventListener('change', (event) => {
     const accountId = String(event.target.dataset.accountMonitorSelect);
     if (event.target.checked) state.accountMonitorSelected.add(accountId);
     else state.accountMonitorSelected.delete(accountId);
+    $$('[data-account-monitor-select]').forEach((input) => {
+      if (String(input.dataset.accountMonitorSelect) === accountId) {
+        input.checked = event.target.checked;
+      }
+    });
     updateAccountMonitorSelectionAction();
   }
   if (event.target.matches('#account-monitor-select-page')) {
@@ -3571,8 +3906,9 @@ document.addEventListener('change', (event) => {
     });
     updateAccountMonitorSelectionAction();
   }
-  if (event.target.matches('#account-monitor-platform, #account-monitor-status, #account-monitor-days, #account-monitor-sort')) {
+  if (event.target.matches('#account-monitor-group, #account-monitor-platform, #account-monitor-status, #account-monitor-days, #account-monitor-sort')) {
     const field = ({
+      'account-monitor-group': 'groupId',
       'account-monitor-platform': 'platform',
       'account-monitor-status': 'status',
       'account-monitor-days': 'days',
@@ -3737,6 +4073,30 @@ $('#account-monitor-settings-form').addEventListener('submit', async (event) => 
   }
 });
 
+$('#provider-recharge-audit-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const submit = $('button[type="submit"]', form);
+  submit.disabled = true;
+  try {
+    await api(`/api/account-monitor/providers/${encodeURIComponent(form.elements.connectionId.value)}/recharge-audit`, {
+      method: 'PUT',
+      body: {
+        rechargedAmount: Number(form.elements.rechargedAmount.value),
+        currency: form.elements.currency.value.trim(),
+        note: form.elements.note.value.trim()
+      }
+    });
+    $('#provider-recharge-audit-dialog').close();
+    toast('供应商累计充值已保存');
+    await renderAccountMonitor();
+  } catch (error) {
+    $('#provider-recharge-audit-error').textContent = error.message;
+  } finally {
+    submit.disabled = false;
+  }
+});
+
 $('#alert-rule-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const id = form.elements.id.value;
   const payload = alertRulePayload(form);
@@ -3795,7 +4155,7 @@ $('#mapping-form').addEventListener('submit', async (event) => {
     models: form.elements.models.value.split(',').map((value) => value.trim()).filter(Boolean),
     config
   };
-  try { await api(id ? `/api/mappings/${id}` : '/api/mappings', { method: id ? 'PUT' : 'POST', body: payload }); $('#mapping-dialog').close(); toast('分组映射已保存'); navigate('integrations'); } catch (error) { toast(error.message, 'error'); }
+  try { await api(id ? `/api/mappings/${id}` : '/api/mappings', { method: id ? 'PUT' : 'POST', body: payload }); $('#mapping-dialog').close(); toast('分组映射已保存'); navigate('integrations'); } catch (error) { toast(autoMappingErrorMessage(error), 'error'); }
 });
 
 $('#credential-form').addEventListener('submit', async (event) => {

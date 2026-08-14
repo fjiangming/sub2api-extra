@@ -108,6 +108,35 @@ class SyncService {
     );
   }
 
+  #requestLogIncrementalOptions(connectionId, keys, options = {}) {
+    const lookbackDays = Math.min(90, Math.max(1, Number(options.lookbackDays) || 30));
+    const overlapMinutes = Math.min(
+      1440,
+      Math.max(1, Number(options.incrementalOverlapMinutes) || 60)
+    );
+    const oldest = Date.now() - lookbackDays * 86400000;
+    const rows = this.db.prepare(`
+      SELECT key_identity, MAX(last_at) AS latest_at
+      FROM provider_cost_rollups
+      WHERE connection_id = ?
+      GROUP BY key_identity
+    `).all(connectionId);
+    const latestByIdentity = new Map(
+      rows.filter((row) => row.latest_at).map((row) => [String(row.key_identity), row.latest_at])
+    );
+    const sinceByKey = {};
+    for (const key of keys) {
+      const keyIdentity = String(key.metadata?.identityHash || key.remoteId || '');
+      const latest = Date.parse(latestByIdentity.get(keyIdentity) || '');
+      const timestamp = Number.isFinite(latest)
+        ? Math.max(oldest, latest - overlapMinutes * 60000)
+        : oldest;
+      sinceByKey[String(key.remoteId)] = new Date(timestamp).toISOString();
+    }
+    const since = Object.values(sinceByKey).sort()[0] || new Date(oldest).toISOString();
+    return { lookbackDays, since, sinceByKey };
+  }
+
   async #run(connectionId, options = {}) {
     const connection = this.providers.get(connectionId, { forAdapter: true });
     if (!options.manual) this.#assertCircuitClosed(connection);
@@ -180,11 +209,16 @@ class SyncService {
           : keysResult.value
         : [];
       const requestLogOptions = connection.type_config_json?.requestLogs || {};
+      const incrementalRequestLogOptions = this.#requestLogIncrementalOptions(
+        connectionId,
+        requestLogKeys,
+        requestLogOptions
+      );
       const shouldLoadRequestLogs = probe.capabilities?.requestLogs &&
         (connection.adapter_type !== 'sub2api' || requestLogKeys.length > 0);
       const requestLogResult = shouldLoadRequestLogs
         ? await this.#optional('getRequestLogs', () => adapter.getRequestLogs({
-            lookbackDays: requestLogOptions.lookbackDays || 30,
+            ...incrementalRequestLogOptions,
             maxRecords: requestLogOptions.maxRecords || 10000,
             keys: requestLogKeys,
             restrictToKeys: monitoredKeyIds != null || mappedRemoteKeyIds?.size > 0
@@ -217,13 +251,27 @@ class SyncService {
       let dynamicRouteResult = null;
       if (dynamicRouteConfig.enabled) {
         if (probe.capabilities?.dynamicRouteRates) {
+          const dynamicRouteRequestLogs = requestLogResult?.ok
+            ? await this.#optional(
+                'getDynamicRouteRequestLogs',
+                () => adapter.getRequestLogs({
+                  lookbackDays: dynamicRouteConfig.lookbackDays,
+                  maxRecords: requestLogOptions.maxRecords || 10000,
+                  keys: requestLogKeys,
+                  restrictToKeys: dynamicRouteConfig.restrictToKeys
+                }),
+                warnings
+              )
+            : null;
           dynamicRouteResult = await this.#optional(
             'getDynamicRouteRates',
             () => adapter.getDynamicRouteRates({
               ...dynamicRouteConfig,
               keys: keysResult.ok ? keysResult.value : [],
               restrictToKeys: dynamicRouteConfig.restrictToKeys,
-              requestLogs: requestLogResult?.ok ? requestLogResult.value : undefined
+              requestLogs: dynamicRouteRequestLogs?.ok
+                ? dynamicRouteRequestLogs.value
+                : undefined
             }),
             warnings
           );
@@ -804,6 +852,17 @@ class SyncService {
       (map, row) => map.set(String(row.remote_id), row.id),
       new Map()
     );
+    const keyIdentityByRemoteId = this.db.prepare(`
+      SELECT remote_id, COALESCE(
+        NULLIF(json_extract(metadata_json, '$.identityHash'), ''),
+        NULLIF(remote_id, ''),
+        id
+      ) AS key_identity
+      FROM remote_keys WHERE connection_id = ?
+    `).all(connectionId).reduce(
+      (map, row) => map.set(String(row.remote_id), String(row.key_identity)),
+      new Map()
+    );
     const markKeyUnavailable = this.db.prepare(`
       INSERT INTO provider_request_key_sync_state(
         key_id, connection_id, status, last_error_code, last_error_message, updated_at
@@ -866,11 +925,24 @@ class SyncService {
         created_at = excluded.created_at,
         ingested_at = excluded.ingested_at
     `);
+    const insertCost = this.db.prepare(`
+      INSERT INTO provider_cost_ledger(
+        connection_id, key_id, remote_key_id, key_identity, source_log_id, status,
+        currency, cost, request_count, input_tokens, output_tokens,
+        cache_creation_tokens, cache_read_tokens, occurred_at, ingested_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(connection_id, key_identity, source_log_id) DO UPDATE SET
+        key_id = COALESCE(excluded.key_id, provider_cost_ledger.key_id),
+        remote_key_id = excluded.remote_key_id,
+        updated_at = excluded.updated_at
+    `);
     const items = Array.isArray(result.value?.items) ? result.value.items : [];
     for (const item of items) {
+      const remoteKeyId = String(item.remoteKeyId || '');
+      const keyId = keyIdByRemoteId.get(remoteKeyId) || null;
       insert.run(
         connectionId,
-        keyIdByRemoteId.get(String(item.remoteKeyId)) || null,
+        keyId,
         String(item.sourceLogId),
         item.requestId || null,
         item.model || null,
@@ -886,6 +958,23 @@ class SyncService {
         item.actualCost ?? null,
         item.currency || 'USD',
         item.createdAt,
+        capturedAt
+      );
+      insertCost.run(
+        connectionId,
+        keyId,
+        remoteKeyId || null,
+        keyIdentityByRemoteId.get(remoteKeyId) || remoteKeyId || 'unassigned',
+        String(item.sourceLogId),
+        item.status || 'unknown',
+        item.currency || 'USD',
+        item.actualCost ?? null,
+        item.inputTokens || 0,
+        item.outputTokens || 0,
+        item.cacheCreationTokens || 0,
+        item.cacheReadTokens || 0,
+        item.createdAt,
+        capturedAt,
         capturedAt
       );
     }

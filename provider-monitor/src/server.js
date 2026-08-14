@@ -91,6 +91,11 @@ const accountMonitorSyncSchema = z.object({
   platform: z.string().trim().min(1).max(40).optional(),
   lookbackDays: z.number().int().min(1).max(90).optional()
 });
+const providerRechargeAuditSchema = z.object({
+  rechargedAmount: z.number().finite().nonnegative().max(1000000000000),
+  currency: z.string().trim().min(1).max(12).regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
+  note: z.string().trim().max(500).optional().default('')
+});
 const accountProbeSchema = z.object({
   accountIds: z.array(z.union([z.string().trim().min(1).max(40), z.number().int().nonnegative()])).max(5000).optional(),
   platforms: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
@@ -1484,18 +1489,24 @@ function createApplication(options = {}) {
     audit(db, req, 'mapping.delete_all', 'mapping', null, result);
     res.json(result);
   });
-  api.post('/mappings', (req, res) => {
-    const mapping = mappings.save(validate(mappingSchema, req.body));
+  api.post('/mappings', asyncRoute(async (req, res) => {
+    const mapping = await mappings.saveValidated(validate(mappingSchema, req.body), null, {
+      accessToken: req.auth?.upstreamTokens?.accessToken || null
+    });
     queue.enqueue('sub2api_mapping_sync', { priority: 5 });
     audit(db, req, 'mapping.create', 'mapping', mapping.id, { mapping });
     res.status(201).json(mapping);
-  });
-  api.put('/mappings/:id', (req, res) => {
-    const mapping = mappings.save(validate(mappingSchema.partial(), req.body), req.params.id);
+  }));
+  api.put('/mappings/:id', asyncRoute(async (req, res) => {
+    const mapping = await mappings.saveValidated(
+      validate(mappingSchema.partial(), req.body),
+      req.params.id,
+      { accessToken: req.auth?.upstreamTokens?.accessToken || null }
+    );
     queue.enqueue('sub2api_mapping_sync', { priority: 5 });
     audit(db, req, 'mapping.update', 'mapping', mapping.id, { mapping });
     res.json(mapping);
-  });
+  }));
   api.delete('/mappings/:id', (req, res) => {
     mappings.delete(req.params.id);
     audit(db, req, 'mapping.delete', 'mapping', req.params.id);
@@ -1522,6 +1533,8 @@ function createApplication(options = {}) {
     platform: req.query.platform || null,
     status: req.query.status || null,
     search: req.query.search || null,
+    groupId: req.query.groupId || req.query.group_id || null,
+    display: req.query.display || null,
     days: req.query.days,
     page: req.query.page,
     pageSize: req.query.pageSize || req.query.page_size,
@@ -1532,6 +1545,16 @@ function createApplication(options = {}) {
     req.params.id,
     { days: req.query.days }
   )));
+  api.put('/account-monitor/providers/:id/recharge-audit', (req, res) => {
+    const input = validate(providerRechargeAuditSchema, req.body || {});
+    const result = accountMonitor.saveProviderRechargeAudit(req.params.id, input);
+    audit(db, req, 'account_monitor.provider_recharge_update', 'provider', req.params.id, {
+      rechargedAmount: result.rechargedAmount,
+      currency: result.currency,
+      note: result.note
+    });
+    res.json(result);
+  });
   api.get('/account-monitor/probes', (req, res) => res.json(accountMonitor.runs({
     accountId: req.query.accountId || req.query.account_id,
     batchId: req.query.batchId || req.query.batch_id,

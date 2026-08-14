@@ -177,18 +177,28 @@ function equivalentRates(left, right) {
 function matchProviderAccounts(providerName, accounts) {
   const needle = normalizeName(providerName);
   if (!needle) return { status: 'unmatched', matchType: null, accounts: [] };
-  const exact = accounts.filter((account) => normalizeName(account.name) === needle);
+  const enabledAccounts = accounts.filter(isBaseAccountEnabled);
+  const exact = enabledAccounts.filter((account) => normalizeName(account.name) === needle);
   if (exact.length > 0) return { status: 'matched', matchType: 'exact', accounts: exact };
-  const contains = accounts.filter((account) => normalizeName(account.name).includes(needle));
+  const contains = enabledAccounts.filter((account) => normalizeName(account.name).includes(needle));
   if (contains.length > 0) return { status: 'matched', matchType: 'contains', accounts: contains };
   return { status: 'unmatched', matchType: null, accounts: [] };
 }
 
+function isBaseAccountEnabled(account) {
+  const status = String(account?.status || '').trim().toLowerCase();
+  if (status) return status === 'active' || status === 'enabled';
+  return ![false, 0, '0', 'false'].includes(account?.enabled);
+}
+
 function normalizeBaseAccount(account) {
+  const enabled = isBaseAccountEnabled(account);
   return {
     id: finite(account?.id ?? account?.account_id),
     name: String(account?.name || account?.id || 'Unnamed account'),
     type: String(account?.type || '').toLowerCase(),
+    status: String(account?.status || (enabled ? 'active' : 'inactive')).trim().toLowerCase(),
+    enabled,
     priority: finite(account?.priority ?? account?.account_priority),
     groupIds: normalizeGroupIds(account),
     hasApiKey: Boolean(
@@ -495,6 +505,37 @@ class MappingService {
     const row = this.list().find((item) => item.id === id);
     if (!row) throw new AppError('MAPPING_NOT_FOUND', 'Sub2API mapping was not found', { status: 404 });
     return row;
+  }
+
+  async saveValidated(input, id = null, { accessToken = null } = {}) {
+    const existing = id
+      ? this.db.prepare('SELECT account_id, enabled FROM sub2api_mappings WHERE id = ?').get(id)
+      : null;
+    if (id && !existing) {
+      throw new AppError('MAPPING_NOT_FOUND', 'Sub2API mapping was not found', { status: 404 });
+    }
+    const accountId = finite(input.accountId === undefined ? existing?.account_id : input.accountId);
+    const mappingEnabled = input.enabled == null
+      ? existing ? Boolean(existing.enabled) : true
+      : Boolean(input.enabled);
+    const accountChanged = !existing || finite(existing.account_id) !== accountId;
+    const mappingReenabled = Boolean(existing && !existing.enabled && mappingEnabled);
+    if (accountId != null && (accountChanged || mappingReenabled)) {
+      const account = await this.#baseAccount(accountId, { force: true, accessToken });
+      if (!account) {
+        throw new AppError('SUB2API_ACCOUNT_NOT_FOUND', 'The selected Sub2API account was not found', {
+          status: 404,
+          details: { accountId }
+        });
+      }
+      if (!account.enabled) {
+        throw new AppError('SUB2API_ACCOUNT_DISABLED', 'The selected Sub2API account is not active', {
+          status: 409,
+          details: { accountId, accountStatus: account.status }
+        });
+      }
+    }
+    return this.save(input, id);
   }
 
   save(input, id = null) {

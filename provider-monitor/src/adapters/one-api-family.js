@@ -456,7 +456,12 @@ class OneApiFamilyAdapter extends ProviderAdapter {
     const status = await this.ensureStatus();
     const quotaPerUnit = toFiniteNumber(status?.quota_per_unit, 500000) || 500000;
     const endTimestamp = Math.floor(Date.now() / 1000);
-    const startTimestamp = endTimestamp - lookbackDays * 86400;
+    const oldestTimestamp = endTimestamp - lookbackDays * 86400;
+    const requestedSince = Math.floor(Date.parse(options.since || '') / 1000);
+    const startTimestamp = Math.max(
+      oldestTimestamp,
+      Number.isFinite(requestedSince) ? requestedSince : oldestTimestamp
+    );
     const pageSize = 100;
     const rows = [];
     let total = null;

@@ -6,7 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
-test('schema v21 migration preserves mappings and adds account comparison settings', (t) => {
+test('schema v23 migration preserves mappings and adds persistent cost audit data', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
   let db = createDatabase(databasePath);
@@ -80,6 +80,19 @@ test('schema v21 migration preserves mappings and adds account comparison settin
       checksum: false
     }
   }), now, now);
+  db.prepare(`
+    INSERT INTO provider_request_samples(
+      connection_id, key_id, source_log_id, status, input_tokens, output_tokens,
+      cache_creation_tokens, cache_read_tokens, actual_cost, currency, created_at, ingested_at
+    ) VALUES ('provider', 'key', 'legacy-provider-log', 'success', 10, 5, 0, 2,
+      1.25, 'USD', ?, ?)
+  `).run(now, now);
+  db.prepare(`
+    INSERT INTO sub2api_account_request_samples(
+      source_log_id, account_id, input_tokens, output_tokens,
+      cache_creation_tokens, cache_read_tokens, actual_cost, created_at, ingested_at
+    ) VALUES ('legacy-base-log', 'probe-account', 10, 5, 0, 2, 2.5, ?, ?)
+  `).run(now, now);
 
   db.pragma('foreign_keys = OFF');
   db.exec(`
@@ -119,7 +132,7 @@ test('schema v21 migration preserves mappings and adds account comparison settin
   db.close();
 
   db = createDatabase(databasePath);
-  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 21').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 23').get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());
   assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'recharge_url'));
@@ -130,6 +143,17 @@ test('schema v21 migration preserves mappings and adds account comparison settin
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_request_samples'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_request_log_sync_state'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_request_key_sync_state'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_cost_ledger'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_cost_rollups'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_account_cost_ledger'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_account_cost_rollups'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_audits'").get());
+  assert.equal(db.prepare(`
+    SELECT cost FROM provider_cost_rollups WHERE connection_id = 'provider'
+  `).get().cost, 1.25);
+  assert.equal(db.prepare(`
+    SELECT cost FROM sub2api_account_cost_rollups WHERE account_id = 'probe-account'
+  `).get().cost, 2.5);
   const accountMonitorColumns = new Set(
     db.prepare('PRAGMA table_info(sub2api_account_monitor_settings)').all().map((column) => column.name)
   );
