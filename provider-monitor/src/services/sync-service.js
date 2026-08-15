@@ -5,6 +5,10 @@ const { nowIso, parseJson, stringifyJson } = require('../db');
 const { maskKey, redact, redactText } = require('../security/redaction');
 const { upsertGroups } = require('./group-store');
 const { normalizeDynamicRouteConfig } = require('./dynamic-route-rate');
+const {
+  providerValuationContext,
+  rebuildProviderCostRollups
+} = require('./accounting-context');
 
 function monitoredRemoteKeyIds(connection) {
   const supportsSelection =
@@ -443,13 +447,13 @@ class SyncService {
       if (data.keysComplete) this.#replaceKeyGroupRelations(connection.id, data.keys);
       this.#insertSnapshots(connection.id, accountId, data.balances, data.groups, data.keys, data.capturedAt);
       this.#insertUsage(connection.id, accountId, data.usage || [], data.capturedAt);
+      if (data.recharge) this.providers.recordRecharge(connection.id, data.recharge, data.capturedAt);
       const requestLogCount = this.#insertRequestLogs(
         connection.id,
         data.requestLogs,
         data.capturedAt,
         data.requestLogKeys || data.keys
       );
-      if (data.recharge) this.providers.recordRecharge(connection.id, data.recharge, data.capturedAt);
       const dynamicRouteKeyCount = this.#recordDynamicRouteRates(
         connection.id,
         data.dynamicRoute,
@@ -863,6 +867,31 @@ class SyncService {
       (map, row) => map.set(String(row.remote_id), String(row.key_identity)),
       new Map()
     );
+    const keyAccountingByRemoteId = this.db.prepare(`
+      SELECT key.remote_id, key.primary_group_ref,
+        (
+          SELECT provider_group.ratio FROM remote_groups provider_group
+          WHERE provider_group.connection_id = key.connection_id
+            AND (
+              provider_group.id = key.primary_group_ref OR
+              provider_group.remote_id = key.primary_group_ref OR
+              provider_group.name = key.primary_group_ref
+            )
+          ORDER BY CASE WHEN provider_group.status = 'missing' THEN 1 ELSE 0 END,
+            provider_group.last_seen_at DESC
+          LIMIT 1
+        ) AS provider_group_rate
+      FROM remote_keys key WHERE key.connection_id = ?
+    `).all(connectionId).reduce(
+      (map, row) => map.set(String(row.remote_id), {
+        groupRef: row.primary_group_ref || null,
+        groupRate: Number.isFinite(Number(row.provider_group_rate))
+          ? Number(row.provider_group_rate)
+          : null
+      }),
+      new Map()
+    );
+    const valuation = providerValuationContext(this.db, connectionId);
     const markKeyUnavailable = this.db.prepare(`
       INSERT INTO provider_request_key_sync_state(
         key_id, connection_id, status, last_error_code, last_error_message, updated_at
@@ -929,17 +958,68 @@ class SyncService {
       INSERT INTO provider_cost_ledger(
         connection_id, key_id, remote_key_id, key_identity, source_log_id, status,
         currency, cost, request_count, input_tokens, output_tokens,
-        cache_creation_tokens, cache_read_tokens, occurred_at, ingested_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+        cache_creation_tokens, cache_read_tokens, occurred_at, ingested_at, updated_at,
+        recharge_multiplier, recharge_source, cash_currency, cash_cost,
+        provider_group_ref, provider_group_rate, valuation_status, context_json,
+        revision, first_observed_at, last_observed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        'observed', ?, 1, ?, ?)
       ON CONFLICT(connection_id, key_identity, source_log_id) DO UPDATE SET
         key_id = COALESCE(excluded.key_id, provider_cost_ledger.key_id),
         remote_key_id = excluded.remote_key_id,
+        status = excluded.status,
+        currency = excluded.currency,
+        cost = excluded.cost,
+        request_count = excluded.request_count,
+        input_tokens = excluded.input_tokens,
+        output_tokens = excluded.output_tokens,
+        cache_creation_tokens = excluded.cache_creation_tokens,
+        cache_read_tokens = excluded.cache_read_tokens,
+        occurred_at = excluded.occurred_at,
+        cash_cost = CASE WHEN excluded.cost IS NULL THEN NULL
+          ELSE excluded.cost / provider_cost_ledger.recharge_multiplier END,
+        revision = provider_cost_ledger.revision + CASE WHEN
+          provider_cost_ledger.status IS NOT excluded.status OR
+          provider_cost_ledger.currency IS NOT excluded.currency OR
+          provider_cost_ledger.cost IS NOT excluded.cost OR
+          provider_cost_ledger.request_count IS NOT excluded.request_count OR
+          provider_cost_ledger.input_tokens IS NOT excluded.input_tokens OR
+          provider_cost_ledger.output_tokens IS NOT excluded.output_tokens OR
+          provider_cost_ledger.cache_creation_tokens IS NOT excluded.cache_creation_tokens OR
+          provider_cost_ledger.cache_read_tokens IS NOT excluded.cache_read_tokens OR
+          provider_cost_ledger.occurred_at IS NOT excluded.occurred_at
+          THEN 1 ELSE 0 END,
+        last_observed_at = excluded.last_observed_at,
         updated_at = excluded.updated_at
     `);
     const items = Array.isArray(result.value?.items) ? result.value.items : [];
+    const affectedKeyIdentities = new Set();
+    this.db.exec(`
+      CREATE TEMP TABLE IF NOT EXISTS provider_request_log_presence (
+        connection_id TEXT NOT NULL,
+        remote_key_id TEXT NOT NULL,
+        source_log_id TEXT NOT NULL,
+        PRIMARY KEY(connection_id, remote_key_id, source_log_id)
+      ) WITHOUT ROWID
+    `);
+    this.db.prepare(
+      'DELETE FROM provider_request_log_presence WHERE connection_id = ?'
+    ).run(connectionId);
+    const recordPresence = this.db.prepare(`
+      INSERT OR IGNORE INTO provider_request_log_presence(
+        connection_id, remote_key_id, source_log_id
+      ) VALUES (?, ?, ?)
+    `);
     for (const item of items) {
       const remoteKeyId = String(item.remoteKeyId || '');
       const keyId = keyIdByRemoteId.get(remoteKeyId) || null;
+      const keyIdentity = keyIdentityByRemoteId.get(remoteKeyId) || remoteKeyId || 'unassigned';
+      const keyAccounting = keyAccountingByRemoteId.get(remoteKeyId) || {};
+      const currency = item.currency || 'USD';
+      const cashCurrency = valuation.cashCurrency || currency;
+      const cashCost = item.actualCost == null
+        ? null
+        : Number(item.actualCost) / valuation.multiplier;
       insert.run(
         connectionId,
         keyId,
@@ -964,10 +1044,10 @@ class SyncService {
         connectionId,
         keyId,
         remoteKeyId || null,
-        keyIdentityByRemoteId.get(remoteKeyId) || remoteKeyId || 'unassigned',
+        keyIdentity,
         String(item.sourceLogId),
         item.status || 'unknown',
-        item.currency || 'USD',
+        currency,
         item.actualCost ?? null,
         item.inputTokens || 0,
         item.outputTokens || 0,
@@ -975,9 +1055,40 @@ class SyncService {
         item.cacheReadTokens || 0,
         item.createdAt,
         capturedAt,
+        capturedAt,
+        valuation.multiplier,
+        valuation.source,
+        cashCurrency,
+        cashCost,
+        keyAccounting.groupRef || null,
+        keyAccounting.groupRate ?? null,
+        stringifyJson({
+          recharge: {
+            status: valuation.status,
+            observedAt: valuation.observedAt
+          },
+          providerGroup: {
+            ref: keyAccounting.groupRef || null,
+            rate: keyAccounting.groupRate ?? null
+          }
+        }),
+        capturedAt,
         capturedAt
       );
+      affectedKeyIdentities.add(keyIdentity);
+      if (remoteKeyId) recordPresence.run(connectionId, remoteKeyId, String(item.sourceLogId));
     }
+    this.db.prepare(`
+      UPDATE provider_cost_ledger AS ledger SET
+        source_status = 'observed', source_last_checked_at = ?, updated_at = ?
+      WHERE ledger.connection_id = ? AND EXISTS (
+        SELECT 1 FROM provider_request_log_presence presence
+        WHERE presence.connection_id = ledger.connection_id
+          AND presence.remote_key_id = ledger.remote_key_id
+          AND presence.source_log_id = ledger.source_log_id
+      )
+    `).run(capturedAt, capturedAt, connectionId);
+    rebuildProviderCostRollups(this.db, connectionId, affectedKeyIdentities);
     const suppliedCoverage = Array.isArray(result.value?.keyCoverage)
       ? result.value.keyCoverage
       : [];
@@ -1027,7 +1138,31 @@ class SyncService {
         succeeded ? capturedAt : null,
         capturedAt
       );
+      if (
+        succeeded && !coverage.truncated && coverage.coverageFrom && coverage.coverageTo
+      ) {
+        this.db.prepare(`
+          UPDATE provider_cost_ledger AS ledger SET
+            source_status = 'missing_upstream',
+            source_missing_at = COALESCE(source_missing_at, ?),
+            source_last_checked_at = ?, updated_at = ?
+          WHERE ledger.connection_id = ? AND ledger.remote_key_id = ?
+            AND ledger.occurred_at >= ? AND ledger.occurred_at <= ?
+            AND NOT EXISTS (
+              SELECT 1 FROM provider_request_log_presence presence
+              WHERE presence.connection_id = ledger.connection_id
+                AND presence.remote_key_id = ledger.remote_key_id
+                AND presence.source_log_id = ledger.source_log_id
+            )
+        `).run(
+          capturedAt, capturedAt, capturedAt, connectionId,
+          String(coverage.remoteKeyId), coverage.coverageFrom, coverage.coverageTo
+        );
+      }
     }
+    this.db.prepare(
+      'DELETE FROM provider_request_log_presence WHERE connection_id = ?'
+    ).run(connectionId);
     const partial = keyCoverage.some((coverage) => coverage.status !== 'succeeded');
     this.db.prepare(`
       INSERT INTO provider_request_log_sync_state(

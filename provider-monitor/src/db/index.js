@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 23;
+const SCHEMA_VERSION = 24;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -532,6 +532,7 @@ CREATE INDEX IF NOT EXISTS checkin_lookup
 CREATE TABLE IF NOT EXISTS sub2api_account_monitor_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   sync_enabled INTEGER NOT NULL DEFAULT 1,
+  auto_mapping_enabled INTEGER NOT NULL DEFAULT 1,
   sync_interval_minutes INTEGER NOT NULL DEFAULT 15,
   lookback_days INTEGER NOT NULL DEFAULT 7,
   sample_retention_days INTEGER NOT NULL DEFAULT 30,
@@ -1224,6 +1225,705 @@ function migratePersistentCostRollupsV23(db) {
   })();
 }
 
+function migrateTemporalAccountingV24(db) {
+  const migrated = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 24'
+  ).get();
+  if (migrated) return;
+  const migratedAt = nowIso();
+  const addColumn = (table, name, definition) => {
+    const columns = new Set(
+      db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name)
+    );
+    if (!columns.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+  };
+
+  addColumn(
+    'sub2api_account_monitor_settings',
+    'auto_mapping_enabled',
+    'INTEGER NOT NULL DEFAULT 1'
+  );
+
+  for (const [name, definition] of [
+    ['recharge_multiplier', 'REAL NOT NULL DEFAULT 1 CHECK (recharge_multiplier > 0)'],
+    ['recharge_source', 'TEXT'],
+    ['cash_currency', 'TEXT'],
+    ['cash_cost', 'REAL'],
+    ['provider_group_ref', 'TEXT'],
+    ['provider_group_rate', 'REAL'],
+    ['valuation_status', "TEXT NOT NULL DEFAULT 'observed'"],
+    ['source_status', "TEXT NOT NULL DEFAULT 'observed'"],
+    ['source_missing_at', 'TEXT'],
+    ['source_last_checked_at', 'TEXT'],
+    ['context_json', "TEXT NOT NULL DEFAULT '{}'"],
+    ['revision', 'INTEGER NOT NULL DEFAULT 1'],
+    ['first_observed_at', 'TEXT'],
+    ['last_observed_at', 'TEXT']
+  ]) addColumn('provider_cost_ledger', name, definition);
+
+  for (const [name, definition] of [
+    ['connection_id', 'TEXT'],
+    ['key_id', 'TEXT'],
+    ['mapping_id', 'TEXT'],
+    ['mapping_version_id', 'INTEGER'],
+    ['group_id', 'INTEGER'],
+    ['recharge_multiplier', 'REAL NOT NULL DEFAULT 1 CHECK (recharge_multiplier > 0)'],
+    ['recharge_source', 'TEXT'],
+    ['cash_currency', 'TEXT'],
+    ['cash_revenue', 'REAL'],
+    ['base_group_rate', 'REAL'],
+    ['provider_group_rate', 'REAL'],
+    ['attribution_status', "TEXT NOT NULL DEFAULT 'unmapped'"],
+    ['valuation_status', "TEXT NOT NULL DEFAULT 'observed'"],
+    ['source_status', "TEXT NOT NULL DEFAULT 'observed'"],
+    ['source_missing_at', 'TEXT'],
+    ['source_last_checked_at', 'TEXT'],
+    ['context_json', "TEXT NOT NULL DEFAULT '{}'"],
+    ['revision', 'INTEGER NOT NULL DEFAULT 1'],
+    ['first_observed_at', 'TEXT'],
+    ['last_observed_at', 'TEXT']
+  ]) addColumn('sub2api_account_cost_ledger', name, definition);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS provider_key_state_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      connection_id TEXT NOT NULL,
+      key_id TEXT NOT NULL,
+      remote_key_id TEXT,
+      status TEXT NOT NULL,
+      valid_from TEXT NOT NULL,
+      valid_to TEXT,
+      observed_at TEXT NOT NULL,
+      context_json TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS provider_key_state_history_current
+      ON provider_key_state_history(key_id) WHERE valid_to IS NULL;
+    CREATE INDEX IF NOT EXISTS provider_key_state_history_lookup
+      ON provider_key_state_history(connection_id, key_id, valid_from, valid_to);
+
+    CREATE TABLE IF NOT EXISTS sub2api_account_state_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      missing INTEGER NOT NULL DEFAULT 0,
+      valid_from TEXT NOT NULL,
+      valid_to TEXT,
+      observed_at TEXT NOT NULL,
+      context_json TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS sub2api_account_state_history_current
+      ON sub2api_account_state_history(account_id) WHERE valid_to IS NULL;
+    CREATE INDEX IF NOT EXISTS sub2api_account_state_history_lookup
+      ON sub2api_account_state_history(account_id, valid_from, valid_to);
+
+    CREATE TABLE IF NOT EXISTS provider_group_rate_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      connection_id TEXT NOT NULL,
+      group_id TEXT NOT NULL,
+      remote_group_id TEXT,
+      name TEXT NOT NULL,
+      rate REAL,
+      status TEXT NOT NULL,
+      valid_from TEXT NOT NULL,
+      valid_to TEXT,
+      observed_at TEXT NOT NULL,
+      context_json TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS provider_group_rate_history_current
+      ON provider_group_rate_history(group_id) WHERE valid_to IS NULL;
+    CREATE INDEX IF NOT EXISTS provider_group_rate_history_lookup
+      ON provider_group_rate_history(connection_id, group_id, valid_from, valid_to);
+
+    CREATE TABLE IF NOT EXISTS sub2api_group_rate_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      rate REAL,
+      status TEXT NOT NULL DEFAULT 'active',
+      valid_from TEXT NOT NULL,
+      valid_to TEXT,
+      observed_at TEXT NOT NULL,
+      context_json TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS sub2api_group_rate_history_current
+      ON sub2api_group_rate_history(group_id) WHERE valid_to IS NULL;
+    CREATE INDEX IF NOT EXISTS sub2api_group_rate_history_lookup
+      ON sub2api_group_rate_history(group_id, valid_from, valid_to);
+
+    CREATE TABLE IF NOT EXISTS provider_recharge_rate_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      connection_id TEXT NOT NULL,
+      multiplier REAL NOT NULL CHECK (multiplier > 0),
+      source TEXT NOT NULL,
+      status TEXT NOT NULL,
+      paid_currency TEXT,
+      balance_currency TEXT,
+      paid_amount REAL,
+      credited_amount REAL,
+      valid_from TEXT NOT NULL,
+      valid_to TEXT,
+      observed_at TEXT NOT NULL,
+      context_json TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS provider_recharge_rate_history_current
+      ON provider_recharge_rate_history(connection_id) WHERE valid_to IS NULL;
+    CREATE INDEX IF NOT EXISTS provider_recharge_rate_history_lookup
+      ON provider_recharge_rate_history(connection_id, valid_from, valid_to);
+
+    CREATE TABLE IF NOT EXISTS base_recharge_rate_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      multiplier REAL NOT NULL CHECK (multiplier > 0),
+      source TEXT NOT NULL,
+      valid_from TEXT NOT NULL,
+      valid_to TEXT,
+      observed_at TEXT NOT NULL,
+      context_json TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS base_recharge_rate_history_current
+      ON base_recharge_rate_history((1)) WHERE valid_to IS NULL;
+    CREATE INDEX IF NOT EXISTS base_recharge_rate_history_lookup
+      ON base_recharge_rate_history(valid_from, valid_to);
+
+    CREATE TABLE IF NOT EXISTS sub2api_mapping_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mapping_id TEXT NOT NULL,
+      connection_id TEXT NOT NULL,
+      key_id TEXT,
+      account_id TEXT,
+      group_id INTEGER,
+      role TEXT NOT NULL,
+      enabled INTEGER NOT NULL,
+      provider_group_ref TEXT,
+      provider_group_name TEXT,
+      provider_rate REAL,
+      base_group_name TEXT,
+      base_group_rate REAL,
+      source TEXT NOT NULL,
+      valid_from TEXT NOT NULL,
+      valid_to TEXT,
+      observed_at TEXT NOT NULL,
+      context_json TEXT NOT NULL DEFAULT '{}'
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS sub2api_mapping_history_current
+      ON sub2api_mapping_history(mapping_id) WHERE valid_to IS NULL;
+    CREATE INDEX IF NOT EXISTS sub2api_mapping_history_account_lookup
+      ON sub2api_mapping_history(account_id, valid_from, valid_to, enabled, role);
+    CREATE INDEX IF NOT EXISTS sub2api_mapping_history_target_lookup
+      ON sub2api_mapping_history(connection_id, key_id, valid_from, valid_to);
+
+    CREATE TABLE IF NOT EXISTS provider_cost_ledger_revisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ledger_id INTEGER NOT NULL,
+      revision INTEGER NOT NULL,
+      snapshot_json TEXT NOT NULL,
+      changed_at TEXT NOT NULL,
+      UNIQUE(ledger_id, revision)
+    );
+    CREATE INDEX IF NOT EXISTS provider_cost_revision_lookup
+      ON provider_cost_ledger_revisions(ledger_id, revision DESC);
+
+    CREATE TABLE IF NOT EXISTS sub2api_account_cost_ledger_revisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_log_id TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      snapshot_json TEXT NOT NULL,
+      changed_at TEXT NOT NULL,
+      UNIQUE(source_log_id, revision)
+    );
+    CREATE INDEX IF NOT EXISTS sub2api_account_cost_revision_lookup
+      ON sub2api_account_cost_ledger_revisions(source_log_id, revision DESC);
+
+    CREATE TABLE IF NOT EXISTS provider_cost_cash_rollups (
+      connection_id TEXT NOT NULL,
+      key_id TEXT,
+      key_identity TEXT NOT NULL,
+      cash_currency TEXT NOT NULL,
+      cash_cost REAL NOT NULL DEFAULT 0,
+      cost_sample_count INTEGER NOT NULL DEFAULT 0,
+      first_at TEXT NOT NULL,
+      last_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(connection_id, key_identity, cash_currency)
+    );
+    CREATE INDEX IF NOT EXISTS provider_cost_cash_rollup_key_lookup
+      ON provider_cost_cash_rollups(key_id, cash_currency);
+
+    CREATE TABLE IF NOT EXISTS sub2api_attributed_cost_rollups (
+      connection_id TEXT NOT NULL,
+      key_id TEXT NOT NULL,
+      account_id TEXT NOT NULL,
+      cash_currency TEXT NOT NULL,
+      request_count INTEGER NOT NULL DEFAULT 0,
+      raw_cost REAL NOT NULL DEFAULT 0,
+      cash_revenue REAL NOT NULL DEFAULT 0,
+      cost_sample_count INTEGER NOT NULL DEFAULT 0,
+      first_at TEXT NOT NULL,
+      last_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(connection_id, key_id, account_id, cash_currency)
+    );
+    CREATE INDEX IF NOT EXISTS sub2api_attributed_cost_provider_lookup
+      ON sub2api_attributed_cost_rollups(connection_id, key_id, cash_currency);
+    CREATE INDEX IF NOT EXISTS sub2api_account_cost_attribution_window
+      ON sub2api_account_cost_ledger(connection_id, key_id, occurred_at DESC);
+    CREATE INDEX IF NOT EXISTS sub2api_account_cost_key_window
+      ON sub2api_account_cost_ledger(key_id, occurred_at DESC)
+      WHERE key_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS provider_cost_source_status_lookup
+      ON provider_cost_ledger(connection_id, source_status, occurred_at DESC);
+    CREATE INDEX IF NOT EXISTS sub2api_cost_source_status_lookup
+      ON sub2api_account_cost_ledger(source_status, occurred_at DESC);
+    CREATE INDEX IF NOT EXISTS sub2api_cost_pending_attribution_lookup
+      ON sub2api_account_cost_ledger(attribution_status, account_id);
+  `);
+
+  db.transaction(() => {
+    db.prepare(`
+      INSERT OR IGNORE INTO provider_key_state_history(
+        connection_id, key_id, remote_key_id, status, valid_from, observed_at, context_json
+      )
+      SELECT connection_id, id, remote_id, status, first_seen_at, last_seen_at,
+        json_object('source', 'migration_v24')
+      FROM remote_keys
+    `).run();
+    db.prepare(`
+      INSERT OR IGNORE INTO sub2api_account_state_history(
+        account_id, status, missing, valid_from, observed_at, context_json
+      )
+      SELECT account_id, status, CASE WHEN missing_since IS NULL THEN 0 ELSE 1 END,
+        first_seen_at, last_seen_at, json_object('source', 'migration_v24')
+      FROM sub2api_monitored_accounts
+    `).run();
+    db.prepare(`
+      INSERT OR IGNORE INTO provider_group_rate_history(
+        connection_id, group_id, remote_group_id, name, rate, status,
+        valid_from, observed_at, context_json
+      )
+      SELECT connection_id, id, remote_id, name, ratio, status,
+        first_seen_at, last_seen_at, json_object('source', 'migration_v24')
+      FROM remote_groups
+    `).run();
+    db.prepare(`
+      INSERT OR IGNORE INTO provider_recharge_rate_history(
+        connection_id, multiplier, source, status, paid_currency, balance_currency,
+        paid_amount, credited_amount, valid_from, observed_at, context_json
+      )
+      SELECT connection.id,
+        COALESCE(NULLIF(rate.manual_multiplier, 0), NULLIF(rate.detected_multiplier, 0), 1),
+        CASE WHEN rate.manual_multiplier > 0 THEN 'manual'
+          WHEN rate.detected_multiplier > 0 THEN COALESCE(rate.detection_source, 'detected')
+          ELSE 'default' END,
+        CASE WHEN rate.manual_multiplier > 0 THEN 'manual'
+          WHEN rate.detected_multiplier > 0 THEN COALESCE(rate.status, 'detected')
+          ELSE 'default' END,
+        rate.paid_currency, COALESCE(rate.balance_currency, 'USD'),
+        rate.quote_paid_amount, rate.quote_credited_amount,
+        COALESCE(rate.detected_at, connection.created_at, ?),
+        COALESCE(rate.checked_at, rate.updated_at, connection.updated_at, ?),
+        json_object('source', 'migration_v24')
+      FROM provider_connections connection
+      LEFT JOIN provider_recharge_rates rate ON rate.connection_id = connection.id
+    `).run(migratedAt, migratedAt);
+    const baseSettings = db.prepare(
+      'SELECT base_recharge_multiplier, updated_at FROM sub2api_account_monitor_settings WHERE id = 1'
+    ).get();
+    if (baseSettings) {
+      db.prepare(`
+        INSERT INTO base_recharge_rate_history(
+          multiplier, source, valid_from, observed_at, context_json
+        )
+        SELECT ?, 'migration_v24', ?, ?, '{}'
+        WHERE NOT EXISTS (
+          SELECT 1 FROM base_recharge_rate_history WHERE valid_to IS NULL
+        )
+      `).run(
+        Number(baseSettings.base_recharge_multiplier) || 1,
+        baseSettings.updated_at || migratedAt,
+        migratedAt
+      );
+    }
+    db.prepare(`
+      INSERT OR IGNORE INTO sub2api_mapping_history(
+        mapping_id, connection_id, key_id, account_id, group_id, role, enabled,
+        provider_group_ref, provider_group_name, provider_rate,
+        base_group_name, base_group_rate, source, valid_from, observed_at, context_json
+      )
+      SELECT mapping.id, mapping.connection_id, mapping.key_id,
+        CAST(mapping.account_id AS TEXT), mapping.group_id, mapping.role, mapping.enabled,
+        state.provider_group_ref, state.provider_group_name, state.provider_rate,
+        state.base_group_name, state.base_group_rate,
+        CASE WHEN json_type(mapping.config_json, '$.autoMapping') IS NOT NULL
+          THEN 'auto_legacy' ELSE 'manual_legacy' END,
+        COALESCE(
+          json_extract(mapping.config_json, '$.accounting.effectiveFrom'),
+          (SELECT MIN(ledger.occurred_at) FROM sub2api_account_cost_ledger ledger
+            WHERE ledger.account_id = CAST(mapping.account_id AS TEXT)),
+          mapping.created_at
+        ),
+        mapping.updated_at,
+        json_object('source', 'migration_v24')
+      FROM sub2api_mappings mapping
+      LEFT JOIN sub2api_mapping_states state ON state.mapping_id = mapping.id
+    `).run();
+
+    db.prepare(`
+      UPDATE provider_cost_ledger
+      SET recharge_multiplier = COALESCE((
+            SELECT history.multiplier FROM provider_recharge_rate_history history
+            WHERE history.connection_id = provider_cost_ledger.connection_id
+              AND history.valid_to IS NULL LIMIT 1
+          ), 1),
+          recharge_source = COALESCE((
+            SELECT history.source FROM provider_recharge_rate_history history
+            WHERE history.connection_id = provider_cost_ledger.connection_id
+              AND history.valid_to IS NULL LIMIT 1
+          ), 'default'),
+          cash_currency = COALESCE((
+            SELECT history.paid_currency FROM provider_recharge_rate_history history
+            WHERE history.connection_id = provider_cost_ledger.connection_id
+              AND history.valid_to IS NULL LIMIT 1
+          ), currency, 'USD'),
+          provider_group_ref = COALESCE(provider_group_ref, (
+            SELECT key.primary_group_ref FROM remote_keys key
+            WHERE key.id = provider_cost_ledger.key_id
+          )),
+          provider_group_rate = COALESCE(provider_group_rate, (
+            SELECT group_row.ratio FROM remote_keys key
+            JOIN remote_groups group_row ON group_row.connection_id = key.connection_id
+              AND (group_row.remote_id = key.primary_group_ref OR group_row.name = key.primary_group_ref)
+            WHERE key.id = provider_cost_ledger.key_id LIMIT 1
+          )),
+          first_observed_at = COALESCE(first_observed_at, ingested_at),
+          last_observed_at = COALESCE(last_observed_at, updated_at),
+          valuation_status = CASE WHEN cash_cost IS NULL THEN 'legacy_snapshot' ELSE valuation_status END
+    `).run();
+    db.prepare(`
+      UPDATE provider_cost_ledger
+      SET cash_cost = CASE WHEN cost IS NULL THEN NULL ELSE cost / recharge_multiplier END
+      WHERE cash_cost IS NULL
+    `).run();
+    db.prepare(`
+      UPDATE sub2api_account_cost_ledger
+      SET recharge_multiplier = COALESCE((
+            SELECT multiplier FROM base_recharge_rate_history WHERE valid_to IS NULL LIMIT 1
+          ), 1),
+          recharge_source = COALESCE(recharge_source, 'migration_v24'),
+          cash_currency = COALESCE(cash_currency, currency, 'USD'),
+          first_observed_at = COALESCE(first_observed_at, ingested_at),
+          last_observed_at = COALESCE(last_observed_at, updated_at),
+          valuation_status = CASE WHEN cash_revenue IS NULL THEN 'legacy_snapshot' ELSE valuation_status END
+    `).run();
+    db.prepare(`
+      UPDATE sub2api_account_cost_ledger
+      SET cash_revenue = CASE WHEN cost IS NULL THEN NULL ELSE cost / recharge_multiplier END
+      WHERE cash_revenue IS NULL
+    `).run();
+
+    db.exec(`
+      DELETE FROM provider_cost_cash_rollups;
+      INSERT INTO provider_cost_cash_rollups(
+        connection_id, key_id, key_identity, cash_currency, cash_cost,
+        cost_sample_count, first_at, last_at, updated_at
+      )
+      SELECT connection_id, MAX(key_id), key_identity, COALESCE(cash_currency, currency, 'USD'),
+        SUM(COALESCE(cash_cost, 0)),
+        SUM(CASE WHEN cash_cost IS NULL THEN 0 ELSE request_count END),
+        MIN(occurred_at), MAX(occurred_at), MAX(updated_at)
+      FROM provider_cost_ledger
+      GROUP BY connection_id, key_identity, COALESCE(cash_currency, currency, 'USD');
+
+      DELETE FROM sub2api_attributed_cost_rollups;
+    `);
+  })();
+
+  db.exec(`
+    DROP TRIGGER IF EXISTS provider_key_state_history_insert;
+    DROP TRIGGER IF EXISTS provider_key_state_history_update;
+    CREATE TRIGGER provider_key_state_history_insert
+    AFTER INSERT ON remote_keys
+    BEGIN
+      INSERT INTO provider_key_state_history(
+        connection_id, key_id, remote_key_id, status, valid_from, observed_at, context_json
+      ) VALUES (
+        NEW.connection_id, NEW.id, NEW.remote_id, NEW.status, NEW.first_seen_at,
+        NEW.last_seen_at, json_object('source', 'provider_sync')
+      );
+    END;
+    CREATE TRIGGER provider_key_state_history_update
+    AFTER UPDATE OF status ON remote_keys
+    WHEN OLD.status IS NOT NEW.status
+    BEGIN
+      UPDATE provider_key_state_history
+      SET valid_to = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE key_id = NEW.id AND valid_to IS NULL;
+      INSERT INTO provider_key_state_history(
+        connection_id, key_id, remote_key_id, status, valid_from, observed_at, context_json
+      ) VALUES (
+        NEW.connection_id, NEW.id, NEW.remote_id, NEW.status,
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), json_object('source', 'provider_sync')
+      );
+    END;
+
+    DROP TRIGGER IF EXISTS sub2api_account_state_history_insert;
+    DROP TRIGGER IF EXISTS sub2api_account_state_history_update;
+    CREATE TRIGGER sub2api_account_state_history_insert
+    AFTER INSERT ON sub2api_monitored_accounts
+    BEGIN
+      INSERT INTO sub2api_account_state_history(
+        account_id, status, missing, valid_from, observed_at, context_json
+      ) VALUES (
+        NEW.account_id, NEW.status, CASE WHEN NEW.missing_since IS NULL THEN 0 ELSE 1 END,
+        NEW.first_seen_at, NEW.last_seen_at, json_object('source', 'base_sync')
+      );
+    END;
+    CREATE TRIGGER sub2api_account_state_history_update
+    AFTER UPDATE OF status, missing_since ON sub2api_monitored_accounts
+    WHEN OLD.status IS NOT NEW.status OR OLD.missing_since IS NOT NEW.missing_since
+    BEGIN
+      UPDATE sub2api_account_state_history
+      SET valid_to = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE account_id = NEW.account_id AND valid_to IS NULL;
+      INSERT INTO sub2api_account_state_history(
+        account_id, status, missing, valid_from, observed_at, context_json
+      ) VALUES (
+        NEW.account_id, NEW.status, CASE WHEN NEW.missing_since IS NULL THEN 0 ELSE 1 END,
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), json_object('source', 'base_sync')
+      );
+    END;
+
+    DROP TRIGGER IF EXISTS provider_group_rate_history_insert;
+    DROP TRIGGER IF EXISTS provider_group_rate_history_update;
+    CREATE TRIGGER provider_group_rate_history_insert
+    AFTER INSERT ON remote_groups
+    BEGIN
+      INSERT INTO provider_group_rate_history(
+        connection_id, group_id, remote_group_id, name, rate, status,
+        valid_from, observed_at, context_json
+      ) VALUES (
+        NEW.connection_id, NEW.id, NEW.remote_id, NEW.name, NEW.ratio, NEW.status,
+        NEW.first_seen_at, NEW.last_seen_at, json_object('source', 'provider_sync')
+      );
+    END;
+    CREATE TRIGGER provider_group_rate_history_update
+    AFTER UPDATE OF name, ratio, status ON remote_groups
+    WHEN OLD.name IS NOT NEW.name OR OLD.ratio IS NOT NEW.ratio OR OLD.status IS NOT NEW.status
+    BEGIN
+      UPDATE provider_group_rate_history
+      SET valid_to = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE group_id = NEW.id AND valid_to IS NULL;
+      INSERT INTO provider_group_rate_history(
+        connection_id, group_id, remote_group_id, name, rate, status,
+        valid_from, observed_at, context_json
+      ) VALUES (
+        NEW.connection_id, NEW.id, NEW.remote_id, NEW.name, NEW.ratio, NEW.status,
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+        strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), json_object('source', 'provider_sync')
+      );
+    END;
+
+    DROP TRIGGER IF EXISTS provider_recharge_rate_history_insert;
+    DROP TRIGGER IF EXISTS provider_recharge_rate_history_update;
+    CREATE TRIGGER provider_recharge_rate_history_insert
+    AFTER INSERT ON provider_recharge_rates
+    BEGIN
+      UPDATE provider_recharge_rate_history SET valid_to = NEW.updated_at
+      WHERE connection_id = NEW.connection_id AND valid_to IS NULL;
+      INSERT INTO provider_recharge_rate_history(
+        connection_id, multiplier, source, status, paid_currency, balance_currency,
+        paid_amount, credited_amount, valid_from, observed_at, context_json
+      ) VALUES (
+        NEW.connection_id,
+        COALESCE(NULLIF(NEW.manual_multiplier, 0), NULLIF(NEW.detected_multiplier, 0), 1),
+        CASE WHEN NEW.manual_multiplier > 0 THEN 'manual'
+          WHEN NEW.detected_multiplier > 0 THEN COALESCE(NEW.detection_source, 'detected')
+          ELSE 'default' END,
+        CASE WHEN NEW.manual_multiplier > 0 THEN 'manual' ELSE COALESCE(NEW.status, 'unknown') END,
+        NEW.paid_currency, NEW.balance_currency, NEW.quote_paid_amount,
+        NEW.quote_credited_amount, NEW.updated_at, NEW.updated_at,
+        COALESCE(NEW.metadata_json, '{}')
+      );
+    END;
+    CREATE TRIGGER provider_recharge_rate_history_update
+    AFTER UPDATE ON provider_recharge_rates
+    WHEN COALESCE(OLD.manual_multiplier, -1) != COALESCE(NEW.manual_multiplier, -1)
+      OR COALESCE(OLD.detected_multiplier, -1) != COALESCE(NEW.detected_multiplier, -1)
+      OR COALESCE(OLD.paid_currency, '') != COALESCE(NEW.paid_currency, '')
+      OR COALESCE(OLD.balance_currency, '') != COALESCE(NEW.balance_currency, '')
+      OR COALESCE(OLD.quote_paid_amount, -1) != COALESCE(NEW.quote_paid_amount, -1)
+      OR COALESCE(OLD.quote_credited_amount, -1) != COALESCE(NEW.quote_credited_amount, -1)
+      OR COALESCE(OLD.status, '') != COALESCE(NEW.status, '')
+    BEGIN
+      UPDATE provider_recharge_rate_history SET valid_to = NEW.updated_at
+      WHERE connection_id = NEW.connection_id AND valid_to IS NULL;
+      INSERT INTO provider_recharge_rate_history(
+        connection_id, multiplier, source, status, paid_currency, balance_currency,
+        paid_amount, credited_amount, valid_from, observed_at, context_json
+      ) VALUES (
+        NEW.connection_id,
+        COALESCE(NULLIF(NEW.manual_multiplier, 0), NULLIF(NEW.detected_multiplier, 0), 1),
+        CASE WHEN NEW.manual_multiplier > 0 THEN 'manual'
+          WHEN NEW.detected_multiplier > 0 THEN COALESCE(NEW.detection_source, 'detected')
+          ELSE 'default' END,
+        CASE WHEN NEW.manual_multiplier > 0 THEN 'manual' ELSE COALESCE(NEW.status, 'unknown') END,
+        NEW.paid_currency, NEW.balance_currency, NEW.quote_paid_amount,
+        NEW.quote_credited_amount, NEW.updated_at, NEW.updated_at,
+        COALESCE(NEW.metadata_json, '{}')
+      );
+    END;
+
+    DROP TRIGGER IF EXISTS base_recharge_rate_history_update;
+    CREATE TRIGGER base_recharge_rate_history_update
+    AFTER UPDATE OF base_recharge_multiplier ON sub2api_account_monitor_settings
+    WHEN OLD.base_recharge_multiplier != NEW.base_recharge_multiplier
+    BEGIN
+      UPDATE base_recharge_rate_history SET valid_to = NEW.updated_at WHERE valid_to IS NULL;
+      INSERT INTO base_recharge_rate_history(
+        multiplier, source, valid_from, observed_at, context_json
+      ) VALUES (
+        NEW.base_recharge_multiplier, 'settings', NEW.updated_at, NEW.updated_at,
+        json_object('source', 'account_monitor_settings')
+      );
+    END;
+
+    DROP TRIGGER IF EXISTS sub2api_mapping_history_insert;
+    DROP TRIGGER IF EXISTS sub2api_mapping_history_update;
+    DROP TRIGGER IF EXISTS sub2api_mapping_history_delete;
+    CREATE TRIGGER sub2api_mapping_history_insert
+    AFTER INSERT ON sub2api_mappings
+    BEGIN
+      INSERT INTO sub2api_mapping_history(
+        mapping_id, connection_id, key_id, account_id, group_id, role, enabled,
+        provider_group_ref, provider_group_name, provider_rate,
+        base_group_name, base_group_rate, source, valid_from, observed_at, context_json
+      ) VALUES (
+        NEW.id, NEW.connection_id, NEW.key_id, CAST(NEW.account_id AS TEXT),
+        NEW.group_id, NEW.role, NEW.enabled,
+        (SELECT provider_group_ref FROM sub2api_mapping_states WHERE mapping_id = NEW.id),
+        (SELECT provider_group_name FROM sub2api_mapping_states WHERE mapping_id = NEW.id),
+        (SELECT provider_rate FROM sub2api_mapping_states WHERE mapping_id = NEW.id),
+        (SELECT base_group_name FROM sub2api_mapping_states WHERE mapping_id = NEW.id),
+        (SELECT base_group_rate FROM sub2api_mapping_states WHERE mapping_id = NEW.id),
+        CASE WHEN json_type(NEW.config_json, '$.autoMapping') IS NOT NULL THEN 'auto' ELSE 'manual' END,
+        COALESCE(json_extract(NEW.config_json, '$.accounting.effectiveFrom'), NEW.created_at),
+        NEW.updated_at, NEW.config_json
+      );
+    END;
+    CREATE TRIGGER sub2api_mapping_history_update
+    AFTER UPDATE ON sub2api_mappings
+    WHEN OLD.connection_id IS NOT NEW.connection_id OR OLD.key_id IS NOT NEW.key_id
+      OR OLD.account_id IS NOT NEW.account_id OR OLD.group_id IS NOT NEW.group_id
+      OR OLD.role IS NOT NEW.role OR OLD.enabled IS NOT NEW.enabled
+    BEGIN
+      UPDATE sub2api_mapping_history SET valid_to = NEW.updated_at
+      WHERE mapping_id = NEW.id AND valid_to IS NULL;
+      INSERT INTO sub2api_mapping_history(
+        mapping_id, connection_id, key_id, account_id, group_id, role, enabled,
+        provider_group_ref, provider_group_name, provider_rate,
+        base_group_name, base_group_rate, source, valid_from, observed_at, context_json
+      ) VALUES (
+        NEW.id, NEW.connection_id, NEW.key_id, CAST(NEW.account_id AS TEXT),
+        NEW.group_id, NEW.role, NEW.enabled,
+        (SELECT provider_group_ref FROM sub2api_mapping_states WHERE mapping_id = NEW.id),
+        (SELECT provider_group_name FROM sub2api_mapping_states WHERE mapping_id = NEW.id),
+        (SELECT provider_rate FROM sub2api_mapping_states WHERE mapping_id = NEW.id),
+        (SELECT base_group_name FROM sub2api_mapping_states WHERE mapping_id = NEW.id),
+        (SELECT base_group_rate FROM sub2api_mapping_states WHERE mapping_id = NEW.id),
+        CASE WHEN json_type(NEW.config_json, '$.autoMapping') IS NOT NULL THEN 'auto' ELSE 'manual' END,
+        NEW.updated_at, NEW.updated_at, NEW.config_json
+      );
+    END;
+    CREATE TRIGGER sub2api_mapping_history_delete
+    BEFORE DELETE ON sub2api_mappings
+    BEGIN
+      UPDATE sub2api_mapping_history
+      SET valid_to = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE mapping_id = OLD.id AND valid_to IS NULL;
+    END;
+
+    DROP TRIGGER IF EXISTS provider_cost_ledger_revision;
+    CREATE TRIGGER provider_cost_ledger_revision
+    BEFORE UPDATE ON provider_cost_ledger
+    WHEN OLD.status IS NOT NEW.status OR OLD.currency IS NOT NEW.currency
+      OR OLD.cost IS NOT NEW.cost OR OLD.request_count IS NOT NEW.request_count
+      OR OLD.input_tokens IS NOT NEW.input_tokens OR OLD.output_tokens IS NOT NEW.output_tokens
+      OR OLD.cache_creation_tokens IS NOT NEW.cache_creation_tokens
+      OR OLD.cache_read_tokens IS NOT NEW.cache_read_tokens
+      OR OLD.occurred_at IS NOT NEW.occurred_at
+    BEGIN
+      INSERT OR IGNORE INTO provider_cost_ledger_revisions(
+        ledger_id, revision, snapshot_json, changed_at
+      ) VALUES (
+        OLD.id, OLD.revision,
+        json_object(
+          'status', OLD.status, 'currency', OLD.currency, 'cost', OLD.cost,
+          'requestCount', OLD.request_count, 'inputTokens', OLD.input_tokens,
+          'outputTokens', OLD.output_tokens,
+          'cacheCreationTokens', OLD.cache_creation_tokens,
+          'cacheReadTokens', OLD.cache_read_tokens, 'occurredAt', OLD.occurred_at,
+          'rechargeMultiplier', OLD.recharge_multiplier, 'cashCost', OLD.cash_cost,
+          'providerGroupRef', OLD.provider_group_ref,
+          'providerGroupRate', OLD.provider_group_rate,
+          'context', json(OLD.context_json)
+        ),
+        NEW.updated_at
+      );
+    END;
+
+    DROP TRIGGER IF EXISTS sub2api_account_cost_ledger_revision;
+    CREATE TRIGGER sub2api_account_cost_ledger_revision
+    BEFORE UPDATE ON sub2api_account_cost_ledger
+    WHEN OLD.account_id IS NOT NEW.account_id OR OLD.currency IS NOT NEW.currency
+      OR OLD.cost IS NOT NEW.cost OR OLD.request_count IS NOT NEW.request_count
+      OR OLD.occurred_at IS NOT NEW.occurred_at
+    BEGIN
+      INSERT OR IGNORE INTO sub2api_account_cost_ledger_revisions(
+        source_log_id, revision, snapshot_json, changed_at
+      ) VALUES (
+        OLD.source_log_id, OLD.revision,
+        json_object(
+          'accountId', OLD.account_id, 'currency', OLD.currency, 'cost', OLD.cost,
+          'requestCount', OLD.request_count, 'occurredAt', OLD.occurred_at,
+          'rechargeMultiplier', OLD.recharge_multiplier,
+          'cashRevenue', OLD.cash_revenue, 'connectionId', OLD.connection_id,
+          'keyId', OLD.key_id, 'mappingId', OLD.mapping_id,
+          'mappingVersionId', OLD.mapping_version_id,
+          'attributionStatus', OLD.attribution_status,
+          'context', json(OLD.context_json)
+        ),
+        NEW.updated_at
+      );
+    END;
+
+    DROP TRIGGER IF EXISTS provider_cost_cash_rollup_insert;
+    CREATE TRIGGER provider_cost_cash_rollup_insert
+    AFTER INSERT ON provider_cost_ledger
+    BEGIN
+      INSERT INTO provider_cost_cash_rollups(
+        connection_id, key_id, key_identity, cash_currency, cash_cost,
+        cost_sample_count, first_at, last_at, updated_at
+      ) VALUES (
+        NEW.connection_id, NEW.key_id, NEW.key_identity,
+        COALESCE(NEW.cash_currency, NEW.currency, 'USD'), COALESCE(NEW.cash_cost, 0),
+        CASE WHEN NEW.cash_cost IS NULL THEN 0 ELSE NEW.request_count END,
+        NEW.occurred_at, NEW.occurred_at, NEW.updated_at
+      )
+      ON CONFLICT(connection_id, key_identity, cash_currency) DO UPDATE SET
+        key_id = COALESCE(excluded.key_id, provider_cost_cash_rollups.key_id),
+        cash_cost = provider_cost_cash_rollups.cash_cost + excluded.cash_cost,
+        cost_sample_count = provider_cost_cash_rollups.cost_sample_count + excluded.cost_sample_count,
+        first_at = MIN(provider_cost_cash_rollups.first_at, excluded.first_at),
+        last_at = MAX(provider_cost_cash_rollups.last_at, excluded.last_at),
+        updated_at = excluded.updated_at;
+    END;
+  `);
+
+  db.prepare(
+    'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (24, ?)'
+  ).run(migratedAt);
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -1241,6 +1941,12 @@ function createDatabase(databasePath) {
     migrateAccountMonitorBaseRechargeMultiplierV21(db);
     migratePersistentCostLedgersV22(db);
     migratePersistentCostRollupsV23(db);
+    try {
+      migrateTemporalAccountingV24(db);
+    } catch (error) {
+      error.message = `Temporal accounting migration failed: ${error.message}`;
+      throw error;
+    }
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

@@ -8,6 +8,10 @@ const {
   normalizeConfiguredApiKeys
 } = require('../security/configured-api-keys');
 const { normalizeDynamicRouteConfig } = require('./dynamic-route-rate');
+const {
+  recordMappingRateVersions,
+  refreshBaseCostAttributions
+} = require('./accounting-context');
 
 const ROUTED_GROUP_RATE_ADAPTERS = new Set([
   'new-api', 'one-api', 'one-hub', 'done-hub', 'veloera'
@@ -317,7 +321,7 @@ function groupComparisons(items, catalog) {
 
 const AUTO_MAPPING_STATUSES = [
   'pending_create', 'created', 'existing', 'unmatched', 'conflict',
-  'missing_api_key', 'missing_remote_key', 'missing_provider_group'
+  'missing_api_key', 'missing_remote_key', 'missing_provider_group', 'manual_review'
 ];
 const COMPLETE_REBUILD_COMPARISON_STATUSES = new Set(['aligned', 'rate_mismatch']);
 
@@ -333,11 +337,11 @@ function autoMappingSummary(items) {
     summary[key] = items.filter((item) => item.status === status).length;
   }
   summary.skipped = summary.unmatched + summary.conflict + summary.missingApiKey +
-    summary.missingRemoteKey + summary.missingProviderGroup;
+    summary.missingRemoteKey + summary.missingProviderGroup + summary.manualReview;
   return summary;
 }
 
-function autoMappingConfig(item, createdAt) {
+function autoMappingConfig(item, createdAt, effectiveFrom = createdAt) {
   return {
     autoMapping: {
       source: item.keyMatch === 'exact_configured_secret'
@@ -349,8 +353,29 @@ function autoMappingConfig(item, createdAt) {
       keyMatch: item.keyMatch || 'fingerprint',
       billingScope: item.verifiedBillingScope || null,
       createdAt
+    },
+    accounting: {
+      effectiveFrom
     }
   };
+}
+
+const SAFE_AUTO_KEY_MATCHES = new Set([
+  'fingerprint', 'normalized_fingerprint',
+  'exact_configured_secret', 'verified_gateway_billing'
+]);
+
+function isSafeAutoMapping(item) {
+  const accountVerified = item.accountMatch === 'exact' || (
+    item.accountMatch === 'contains' &&
+    ['exact_configured_secret', 'verified_gateway_billing'].includes(item.keyMatch)
+  );
+  return item.status === 'pending_create' && accountVerified &&
+    SAFE_AUTO_KEY_MATCHES.has(item.keyMatch) &&
+    item.providerGroupSource !== 'sole_group_inferred' &&
+    ['active', 'enabled', 'healthy'].includes(String(item.keyStatus || '').toLowerCase()) &&
+    !['inactive', 'disabled', 'missing'].includes(String(item.groupStatus || '').toLowerCase()) &&
+    !['inactive', 'disabled', 'missing'].includes(String(item.providerGroupStatus || '').toLowerCase());
 }
 
 function comparisonSummary(items) {
@@ -555,6 +580,25 @@ class MappingService {
     }
     const mappingId = id || crypto.randomUUID();
     const now = nowIso();
+    const accountId = input.accountId === undefined ? existing?.account_id : input.accountId ?? null;
+    const suppliedConfigValue = input.config ?? parseJson(existing?.config_json, {});
+    const suppliedConfig = suppliedConfigValue && typeof suppliedConfigValue === 'object' &&
+      !Array.isArray(suppliedConfigValue) ? suppliedConfigValue : {};
+    const suppliedAccounting = suppliedConfig.accounting &&
+      typeof suppliedConfig.accounting === 'object' && !Array.isArray(suppliedConfig.accounting)
+      ? suppliedConfig.accounting
+      : {};
+    const requestedEffectiveAt = Date.parse(suppliedAccounting.effectiveFrom || '');
+    const effectiveFrom = Number.isFinite(requestedEffectiveAt) && requestedEffectiveAt <= Date.parse(now)
+      ? new Date(requestedEffectiveAt).toISOString()
+      : this.#initialMappingEffectiveFrom(accountId, now);
+    const config = existing ? suppliedConfig : {
+      ...suppliedConfig,
+      accounting: {
+        ...suppliedAccounting,
+        effectiveFrom
+      }
+    };
     try {
       if (existing) {
         this.db.prepare(`
@@ -568,7 +612,7 @@ class MappingService {
           input.role ?? existing.role,
           input.enabled == null ? existing.enabled : input.enabled ? 1 : 0,
           stringifyJson(input.models ?? parseJson(existing.models_json, [])),
-          stringifyJson(input.config ?? parseJson(existing.config_json, {})),
+          stringifyJson(config),
           now, mappingId
         );
       } else {
@@ -580,7 +624,7 @@ class MappingService {
         `).run(
           mappingId, connectionId, keyId, input.accountId ?? null,
           groupId, input.role || 'primary', input.enabled === false ? 0 : 1,
-          stringifyJson(input.models || []), stringifyJson(input.config || {}), now, now
+          stringifyJson(input.models || []), stringifyJson(config), now, now
         );
       }
     } catch (error) {
@@ -589,16 +633,25 @@ class MappingService {
       }
       throw error;
     }
+    refreshBaseCostAttributions(this.db, accountId == null ? [] : [String(accountId)]);
     return this.get(mappingId);
   }
 
   delete(id) {
+    const existing = this.db.prepare(
+      'SELECT CAST(account_id AS TEXT) AS account_id FROM sub2api_mappings WHERE id = ?'
+    ).get(id);
     const result = this.db.prepare('DELETE FROM sub2api_mappings WHERE id = ?').run(id);
     if (!result.changes) throw new AppError('MAPPING_NOT_FOUND', 'Sub2API mapping was not found', { status: 404 });
+    if (existing?.account_id != null) refreshBaseCostAttributions(this.db, [existing.account_id]);
   }
 
   deleteAll() {
-    return this.db.transaction(() => {
+    const accountIds = this.db.prepare(`
+      SELECT DISTINCT CAST(account_id AS TEXT) AS account_id FROM sub2api_mappings
+      WHERE account_id IS NOT NULL
+    `).all().map((row) => row.account_id);
+    const summary = this.db.transaction(() => {
       const deletedComparisonStates = this.db.prepare('SELECT COUNT(*) AS count FROM sub2api_mapping_states').get().count;
       const deletedReconciliations = this.db.prepare('SELECT COUNT(*) AS count FROM reconciliation_runs').get().count;
       const result = this.db.prepare('DELETE FROM sub2api_mappings').run();
@@ -608,6 +661,8 @@ class MappingService {
         deletedReconciliations
       };
     })();
+    refreshBaseCostAttributions(this.db, accountIds);
+    return summary;
   }
 
   activateBackup(id) {
@@ -626,7 +681,24 @@ class MappingService {
       `).run(nowIso(), selected.group_id, id);
       this.db.prepare(`UPDATE sub2api_mappings SET enabled = 1, role = 'primary', updated_at = ? WHERE id = ?`).run(nowIso(), id);
     })();
+    const accountIds = this.db.prepare(`
+      SELECT DISTINCT CAST(account_id AS TEXT) AS account_id FROM sub2api_mappings
+      WHERE group_id = ? AND account_id IS NOT NULL
+    `).all(selected.group_id).map((row) => row.account_id);
+    refreshBaseCostAttributions(this.db, accountIds);
     return this.get(id);
+  }
+
+  #initialMappingEffectiveFrom(accountId, fallback) {
+    if (accountId == null) return fallback;
+    const hasHistory = this.db.prepare(`
+      SELECT 1 FROM sub2api_mapping_history WHERE account_id = ? LIMIT 1
+    `).get(String(accountId));
+    if (hasHistory) return fallback;
+    return this.db.prepare(`
+      SELECT MIN(occurred_at) AS occurred_at
+      FROM sub2api_account_cost_ledger WHERE account_id = ?
+    `).get(String(accountId))?.occurred_at || fallback;
   }
 
   async channels(options = {}) {
@@ -723,17 +795,24 @@ class MappingService {
         state.toleranceRatio, stringifyJson(state.details), state.checkedAt
       );
     }
+    return recordMappingRateVersions(this.db, states);
   }
 
   async refreshComparisons({ connectionId = null, force = true, catalog = null, accountCatalog = null } = {}) {
     const baseCatalog = catalog || await this.#baseCatalog({ force });
     const mappings = this.list({ connectionId });
     const states = mappings.map((mapping) => this.#compareMapping(mapping, baseCatalog));
-    this.db.transaction(() => this.#writeComparisonStates(states))();
+    const versioning = this.db.transaction(() => this.#writeComparisonStates(states))();
+    const changedMappingIds = new Set(versioning.mappingIds);
+    refreshBaseCostAttributions(this.db, mappings
+      .filter((mapping) => changedMappingIds.has(mapping.id))
+      .map((mapping) => mapping.account_id)
+      .filter((value) => value != null)
+      .map(String));
     return this.comparisons({ connectionId, catalog: baseCatalog, accountCatalog, force });
   }
 
-  async autoMappings({ mode = 'preview' } = {}, { accessToken = null } = {}) {
+  async autoMappings({ mode = 'preview', safeOnly = false } = {}, { accessToken = null } = {}) {
     if (!['preview', 'apply'].includes(mode)) {
       throw new AppError('VALIDATION_ERROR', 'Auto-mapping mode must be preview or apply', { status: 400 });
     }
@@ -760,8 +839,17 @@ class MappingService {
     this.db.transaction(() => {
       for (const item of discovery.items) {
         if (item.status !== 'pending_create') continue;
+        if (safeOnly && !isSafeAutoMapping(item)) {
+          item.status = 'manual_review';
+          item.reason = 'automatic_mapping_requires_exact_verified_match';
+          continue;
+        }
         const mappingId = crypto.randomUUID();
-        const config = autoMappingConfig(item, createdAt);
+        const config = autoMappingConfig(
+          item,
+          createdAt,
+          this.#initialMappingEffectiveFrom(item.accountId, createdAt)
+        );
         const result = insert.run(
           mappingId, item.providerId, item.keyId, item.accountId,
           item.groupId, stringifyJson(config), createdAt, createdAt
@@ -1122,6 +1210,7 @@ class MappingService {
         accountMatch,
         groupId: baseGroup.id,
         groupName: baseGroup.name,
+        groupStatus: baseGroup.status,
         accountId: account.id,
         accountName: account.name
       };
@@ -1229,7 +1318,9 @@ class MappingService {
         verifiedBillingScope: gatewayMatch?.billingScope || null,
         providerGroupRef: providerGroup?.remote_id || providerRef || null,
         providerGroupName: providerGroup?.name || null,
+        providerGroupStatus: providerGroup?.status || null,
         providerGroupSource,
+        keyStatus: key.status,
         providerRate: finite(providerGroup?.ratio),
         providerRateScope: 'group_multiplier',
         channelCostVerified: ROUTED_GROUP_RATE_ADAPTERS.has(provider.adapter_type) ? false : null

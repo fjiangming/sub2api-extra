@@ -661,7 +661,14 @@ test('provider quality aggregates every key and retains audited costs after samp
   assert.ok(ambiguous.keys.every(
     (key) => key.baseMetrics.unavailableReason === 'base_key_attribution_incomplete'
   ));
-  assert.ok(ambiguous.keys.every((key) => key.audit.lifetimeBaseRevenue == null));
+  assert.equal(
+    ambiguous.keys.find((key) => key.name === 'Key A').audit.lifetimeBaseRevenue,
+    4
+  );
+  assert.equal(
+    ambiguous.keys.find((key) => key.name === 'Key B').audit.lifetimeBaseRevenue,
+    3
+  );
 });
 
 test('legacy accounts await a group sync instead of being reported as ungrouped', (t) => {

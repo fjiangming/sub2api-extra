@@ -6,7 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
-test('schema v23 migration preserves mappings and adds persistent cost audit data', (t) => {
+test('schema v24 migration preserves mappings and adds temporal cost audit data', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
   let db = createDatabase(databasePath);
@@ -133,6 +133,7 @@ test('schema v23 migration preserves mappings and adds persistent cost audit dat
 
   db = createDatabase(databasePath);
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 23').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 24').get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());
   assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'recharge_url'));
@@ -148,6 +149,9 @@ test('schema v23 migration preserves mappings and adds persistent cost audit dat
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_account_cost_ledger'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_account_cost_rollups'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_audits'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_cost_cash_rollups'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_attributed_cost_rollups'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_mapping_history'").get());
   assert.equal(db.prepare(`
     SELECT cost FROM provider_cost_rollups WHERE connection_id = 'provider'
   `).get().cost, 1.25);
@@ -158,11 +162,33 @@ test('schema v23 migration preserves mappings and adds persistent cost audit dat
     db.prepare('PRAGMA table_info(sub2api_account_monitor_settings)').all().map((column) => column.name)
   );
   assert.equal(accountMonitorColumns.has('base_recharge_multiplier'), true);
+  assert.equal(accountMonitorColumns.has('auto_mapping_enabled'), true);
   assert.equal(
     db.prepare('SELECT base_recharge_multiplier FROM sub2api_account_monitor_settings WHERE id = 1').get()
       .base_recharge_multiplier,
     1
   );
+  const providerLedger = db.prepare(`
+    SELECT recharge_multiplier, cash_cost, source_status
+    FROM provider_cost_ledger WHERE source_log_id = 'legacy-provider-log'
+  `).get();
+  assert.deepEqual(providerLedger, {
+    recharge_multiplier: 1,
+    cash_cost: 1.25,
+    source_status: 'observed'
+  });
+  const baseLedger = db.prepare(`
+    SELECT recharge_multiplier, cash_revenue, source_status
+    FROM sub2api_account_cost_ledger WHERE source_log_id = 'legacy-base-log'
+  `).get();
+  assert.deepEqual(baseLedger, {
+    recharge_multiplier: 1,
+    cash_revenue: 2.5,
+    source_status: 'observed'
+  });
+  assert.equal(db.prepare(`
+    SELECT COUNT(*) AS count FROM sub2api_mapping_history WHERE mapping_id = 'mapping'
+  `).get().count, 1);
   const actionColumns = new Set(db.prepare('PRAGMA table_info(automation_actions)').all().map((column) => column.name));
   assert.equal(actionColumns.has('error_code'), true);
   assert.equal(actionColumns.has('failure_stage'), true);

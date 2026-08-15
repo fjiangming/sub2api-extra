@@ -1309,11 +1309,19 @@ function providerCostComparison(item, period = 'window') {
   const base = lifetime ? audit.lifetimeBaseRevenue : audit.windowBaseRevenue;
   const upstream = lifetime ? audit.lifetimeUpstreamCost : audit.windowUpstreamCost;
   const grossProfit = lifetime ? audit.lifetimeGrossProfit : audit.windowGrossProfit;
+  const missingCount = lifetime
+    ? audit.lifetimeSourceMissingCount
+    : audit.windowSourceMissingCount;
+  const note = grossProfit == null
+    ? '毛利待核算'
+    : `毛利 ${formatPreciseMoney(grossProfit, currency)}`;
   return accountComparisonMetric(base, upstream, (value) => formatPreciseMoney(value, currency), {
     baseLabel: lifetime ? '累计收入' : '基座收入',
     upstreamLabel: lifetime ? '累计成本' : '上游成本',
     upstreamTitle: lifetime ? '供应商永久费用账本累计成本' : '供应商永久费用账本窗口成本',
-    note: grossProfit == null ? '毛利待核算' : `毛利 ${formatPreciseMoney(grossProfit, currency)}`
+    note: Number(missingCount) > 0
+      ? `${note} · ${formatNumber(missingCount, 0)} 条源记录已删除，本地账本保留`
+      : note
   });
 }
 
@@ -1531,6 +1539,13 @@ function paintAccountMonitorDetail(detail) {
   const displayedUpstreamWindowCost = windowUsesCash
     ? cost.keyTotalUpstreamCashEquivalent
     : cost.keyTotalUpstreamCost;
+  const frozenValuation = cost.valuationMode === 'transaction_snapshot';
+  const baseValuationLabel = frozenValuation
+    ? '发生时充值倍率已冻结'
+    : `当前充值倍率 ${formatEffectiveRate(cost.baseRechargeMultiplier)}`;
+  const upstreamValuationLabel = frozenValuation
+    ? '发生时充值倍率已冻结'
+    : `当前充值倍率 ${formatEffectiveRate(cost.providerRecharge?.multiplier)}`;
   const windowCostDelta = cost.windowComparable
     ? cost.windowProfitStatus === 'break_even'
       ? '收支平衡'
@@ -1556,7 +1571,7 @@ function paintAccountMonitorDetail(detail) {
     : emptyState('flask-conical', '暂无主动检测', '选择该账号并执行检测');
   root.innerHTML = `<div class="section-header"><h2>${escapeHtml(detail.account.name)}</h2><p>#${escapeHtml(detail.account.accountId)} · ${escapeHtml(accountMonitorPlatformLabel(detail.account.platform))} · ${escapeHtml(accountGroupSummary(detail.account.groups, detail.account.groupAssociationsKnown !== false))} · 最近 ${detail.days} 天</p><div class="section-actions"><button class="icon-button small" data-action="close-account-quality" title="关闭详情" aria-label="关闭详情"><i data-lucide="x"></i></button></div></div>
     <div class="account-detail-metrics"><div><span>质量分</span><strong>${metrics.qualityScore == null ? '-' : formatNumber(metrics.qualityScore, 0)}</strong></div><div><span>首字 P95</span><strong>${formatMilliseconds(metrics.ttftP95Ms)}</strong></div><div><span>缓存读取率</span><strong>${formatPercent(metrics.cacheRate)}</strong></div><div><span>输出速度</span><strong>${metrics.outputTokensPerSecond == null ? '-' : formatNumber(metrics.outputTokensPerSecond, 1) + ' tok/s'}</strong></div><div><span>检测通过率</span><strong>${formatPercent(metrics.probeSuccessRate)}</strong></div><div><span>能力得分</span><strong>${metrics.intelligenceScore == null ? '未覆盖' : formatNumber(metrics.intelligenceScore, 0)}</strong></div></div>
-    <section class="section account-comparison-detail"><div class="section-header"><div><h2>基座 / 上游对比</h2><p>${providerHeading} · ${escapeHtml(accountUpstreamSourceLabel(comparison.source))} · ${escapeHtml(coverageText + pairingText)}${escapeHtml(metricReasonText)}</p></div>${comparison.coverage?.stale ? badge('stale', '上游数据陈旧') : comparison.status === 'mapped' ? badge('enabled', '已映射') : badge('warning', '不可归因')}</div><div class="table-wrap"><table><thead><tr><th>指标</th><th class="numeric">Sub2API 基座</th><th class="numeric">供应商上游</th><th class="numeric">差值</th></tr></thead><tbody>${comparisonRows}<tr class="cost-comparison-row"><td><strong>统一窗口 Key 总账${windowUsesCash ? '（现金等值）' : '（余额单位）'}</strong><small>基座 actual_cost 实际收入 / 上游 actual_cost 实际支出 · ${escapeHtml(cost.source ? `${formatDate(cost.from)} 至 ${formatDate(cost.to)}` : '暂无费用来源')}</small></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(displayedBaseWindowCost, windowCostCurrency))}</strong><small>${windowUsesCash ? `余额消费 ${escapeHtml(formatPreciseMoney(cost.baseWindowCost, rawCostCurrency))} · ` : ''}充值倍率 ${escapeHtml(formatEffectiveRate(cost.baseRechargeMultiplier))}</small></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(displayedUpstreamWindowCost, windowCostCurrency))}</strong><small>${windowUsesCash ? `余额消费 ${escapeHtml(formatPreciseMoney(cost.keyTotalUpstreamCost, rawCostCurrency))} · ` : ''}充值倍率 ${escapeHtml(formatEffectiveRate(cost.providerRecharge?.multiplier))}</small></td><td class="numeric"><strong>${escapeHtml(windowCostDelta)}</strong>${cost.windowGrossMarginRatio == null ? '' : `<small>总账毛利率 ${escapeHtml(formatPercent(cost.windowGrossMarginRatio * 100))}</small>`}</td></tr><tr><td><strong>配对请求可归因收支${pairedUsesCash ? '（现金等值）' : '（余额单位）'}</strong><small>仅比较成功一一配对的 ${escapeHtml(formatNumber(cost.requestCount, 0))} 次请求；上游未归因流量不混入</small></td><td class="numeric">${escapeHtml(formatPreciseMoney(displayedBaseCost, pairedCostCurrency))}</td><td class="numeric">${escapeHtml(formatPreciseMoney(displayedUpstreamCost, pairedCostCurrency))}</td><td class="numeric"><strong>${escapeHtml(pairedCostDelta)}</strong>${cost.grossMarginRatio == null ? '' : `<small>配对毛利率 ${escapeHtml(formatPercent(cost.grossMarginRatio * 100))}</small>`}</td></tr></tbody></table></div></section>
+    <section class="section account-comparison-detail"><div class="section-header"><div><h2>基座 / 上游对比</h2><p>${providerHeading} · ${escapeHtml(accountUpstreamSourceLabel(comparison.source))} · ${escapeHtml(coverageText + pairingText)}${escapeHtml(metricReasonText)}</p></div>${comparison.coverage?.stale ? badge('stale', '上游数据陈旧') : comparison.status === 'mapped' ? badge('enabled', '已映射') : badge('warning', '不可归因')}</div><div class="table-wrap"><table><thead><tr><th>指标</th><th class="numeric">Sub2API 基座</th><th class="numeric">供应商上游</th><th class="numeric">差值</th></tr></thead><tbody>${comparisonRows}<tr class="cost-comparison-row"><td><strong>统一窗口 Key 总账${windowUsesCash ? '（现金等值）' : '（余额单位）'}</strong><small>基座 actual_cost 实际收入 / 上游 actual_cost 实际支出 · ${escapeHtml(cost.source ? `${formatDate(cost.from)} 至 ${formatDate(cost.to)}` : '暂无费用来源')}</small></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(displayedBaseWindowCost, windowCostCurrency))}</strong><small>${windowUsesCash ? `余额消费 ${escapeHtml(formatPreciseMoney(cost.baseWindowCost, rawCostCurrency))} · ` : ''}${escapeHtml(baseValuationLabel)}</small></td><td class="numeric"><strong>${escapeHtml(formatPreciseMoney(displayedUpstreamWindowCost, windowCostCurrency))}</strong><small>${windowUsesCash ? `余额消费 ${escapeHtml(formatPreciseMoney(cost.keyTotalUpstreamCost, rawCostCurrency))} · ` : ''}${escapeHtml(upstreamValuationLabel)}</small></td><td class="numeric"><strong>${escapeHtml(windowCostDelta)}</strong>${cost.windowGrossMarginRatio == null ? '' : `<small>总账毛利率 ${escapeHtml(formatPercent(cost.windowGrossMarginRatio * 100))}</small>`}</td></tr><tr><td><strong>配对请求可归因收支${pairedUsesCash ? '（现金等值）' : '（余额单位）'}</strong><small>仅比较成功一一配对的 ${escapeHtml(formatNumber(cost.requestCount, 0))} 次请求；上游未归因流量不混入</small></td><td class="numeric">${escapeHtml(formatPreciseMoney(displayedBaseCost, pairedCostCurrency))}</td><td class="numeric">${escapeHtml(formatPreciseMoney(displayedUpstreamCost, pairedCostCurrency))}</td><td class="numeric"><strong>${escapeHtml(pairedCostDelta)}</strong>${cost.grossMarginRatio == null ? '' : `<small>配对毛利率 ${escapeHtml(formatPercent(cost.grossMarginRatio * 100))}</small>`}</td></tr></tbody></table></div></section>
     <div class="panel account-quality-chart-panel"><div class="panel-header"><h3>统一窗口日趋势</h3><span class="stat-detail">趋势按窗口总请求聚合；表格性能优先使用配对请求</span></div><div class="chart" id="account-quality-chart"></div></div>
     <section class="section"><div class="section-header"><h2>最近主动检测</h2></div><div class="table-wrap">${probeTable}</div></section>`;
   state.chart?.dispose?.();
@@ -1606,6 +1621,7 @@ function openAccountMonitorSettings() {
   const settings = state.accountMonitor?.settings;
   if (!settings) return;
   form.elements.syncEnabled.checked = settings.syncEnabled;
+  form.elements.autoMappingEnabled.checked = settings.autoMappingEnabled;
   form.elements.syncIntervalMinutes.value = settings.syncIntervalMinutes;
   form.elements.lookbackDays.value = settings.lookbackDays;
   form.elements.sampleRetentionDays.value = settings.sampleRetentionDays;
@@ -4053,6 +4069,7 @@ $('#account-monitor-settings-form').addEventListener('submit', async (event) => 
       method: 'PUT',
       body: {
         syncEnabled: form.elements.syncEnabled.checked,
+        autoMappingEnabled: form.elements.autoMappingEnabled.checked,
         syncIntervalMinutes: Number(form.elements.syncIntervalMinutes.value),
         lookbackDays: Number(form.elements.lookbackDays.value),
         sampleRetentionDays: Number(form.elements.sampleRetentionDays.value),

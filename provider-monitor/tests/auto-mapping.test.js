@@ -376,7 +376,7 @@ test('auto-mapping requires the exact configured Sub2API API Key', async (t) => 
   assert.equal(item.baseMaskedKey, item.providerMaskedKey);
   assert.doesNotMatch(JSON.stringify(preview), /sk-(?:base-account|monitor-key)-/);
 
-  const applied = await mappings.autoMappings({ mode: 'apply' });
+  const applied = await mappings.autoMappings({ mode: 'apply', safeOnly: true });
   assert.equal(applied.summary.created, 1);
   const config = JSON.parse(context.db.prepare(
     'SELECT config_json FROM sub2api_mappings WHERE account_id = 901'

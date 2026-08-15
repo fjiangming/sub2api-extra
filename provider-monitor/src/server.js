@@ -77,6 +77,7 @@ const providerSchema = z.object({
 const providerUpdateSchema = providerSchema.partial();
 const accountMonitorSettingsSchema = z.object({
   syncEnabled: z.boolean().optional(),
+  autoMappingEnabled: z.boolean().optional(),
   syncIntervalMinutes: z.number().int().min(5).max(1440).optional(),
   lookbackDays: z.number().int().min(1).max(90).optional(),
   sampleRetentionDays: z.number().int().min(1).max(3650).optional(),
@@ -551,8 +552,35 @@ function createApplication(options = {}) {
       }
     );
     await Promise.all(workers);
+    let autoMapping = null;
+    let mappingRefresh = null;
+    if (accountMonitor.settings().autoMappingEnabled) {
+      try {
+        autoMapping = await mappings.autoMappings({ mode: 'apply', safeOnly: true });
+      } catch (error) {
+        autoMapping = {
+          mode: 'apply',
+          status: 'failed',
+          errorCode: error?.code || 'AUTO_MAPPING_FAILED',
+          errorMessage: redactText(error?.message || error).slice(0, 500)
+        };
+      }
+    }
+    if (!autoMapping?.comparisons) {
+      try {
+        mappingRefresh = await mappings.refreshComparisons({ force: true });
+      } catch (error) {
+        mappingRefresh = {
+          status: 'failed',
+          errorCode: error?.code || 'MAPPING_REFRESH_FAILED',
+          errorMessage: redactText(error?.message || error).slice(0, 500)
+        };
+      }
+    }
     return {
       ...base,
+      autoMapping,
+      mappingRefresh,
       supplierSync: {
         connectionCount: connectionIds.length,
         succeeded: results.filter((item) => item?.status === 'succeeded').length,

@@ -152,6 +152,120 @@ test('New API sync persists account balance, key quota and key groups', async (t
   assert.equal(queries.summary().accounts[0].status, 'error');
 });
 
+test('provider cost ledger freezes recharge rates and retains records deleted upstream', async (t) => {
+  let phase = 0;
+  const createdAt = Math.floor(Date.now() / 1000);
+  const log = (id, quota) => ({
+    id,
+    created_at: createdAt,
+    token_id: 9,
+    token_name: 'audit-key',
+    model_name: 'model-a',
+    quota,
+    prompt_tokens: quota,
+    completion_tokens: 0,
+    other: { request_final_status: 'success', model_ratio: 1, group_ratio: 1 }
+  });
+  const server = http.createServer((req, res) => {
+    if (req.url === '/api/status') {
+      return json(res, { success: true, data: { version: 'test', quota_per_unit: 500000 } });
+    }
+    if (req.url === '/api/user/self') {
+      return json(res, { success: true, data: {
+        id: 42, username: 'audit', quota: 10000000, used_quota: 1000,
+        group: 'default', status: 1
+      } });
+    }
+    if (req.url === '/api/user/self/groups') {
+      return json(res, {
+        success: true,
+        data: [{ id: 'audit', name: 'Audit', ratio: phase === 0 ? 1 : 1.5 }]
+      });
+    }
+    if (req.url.startsWith('/api/log/self/stat')) {
+      return json(res, { success: true, data: { quota: 1000, rpm: 1, tpm: 10 } });
+    }
+    if (req.url.startsWith('/api/log/self?')) {
+      const items = phase === 0 ? [log(9001, 20)] : phase === 1
+        ? []
+        : [log(9001, 20), log(9002, 40)];
+      return json(res, { success: true, data: { total: items.length, items } });
+    }
+    if (req.url.startsWith('/api/token/')) {
+      return json(res, { success: true, data: { total: 1, items: [{
+        id: 9, name: 'audit-key', key: 'sk-audit-secret', status: 1,
+        group: 'audit', unlimited_quota: true, expired_time: -1
+      }] } });
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ message: 'not found' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Temporal Audit Provider',
+    adapterType: 'new-api',
+    baseUrl: `http://127.0.0.1:${server.address().port}`,
+    authMode: 'system_token',
+    remoteUserId: '42',
+    credentials: { systemToken: 'system-token' },
+    rechargeMultiplier: 2
+  });
+  const sync = new SyncService({
+    db: context.db,
+    config: context.config,
+    providers,
+    http: new HttpClient(context.config),
+    metrics: null
+  });
+
+  await sync.run(provider.id);
+  const first = context.db.prepare(`
+    SELECT cost, recharge_multiplier, cash_cost, provider_group_rate, source_status
+    FROM provider_cost_ledger WHERE source_log_id = '9001'
+  `).get();
+  assert.equal(first.recharge_multiplier, 2);
+  assert.equal(first.cash_cost, first.cost / 2);
+  assert.equal(first.provider_group_rate, 1);
+  assert.equal(first.source_status, 'observed');
+
+  providers.update(provider.id, { rechargeMultiplier: 4 });
+  phase = 1;
+  await sync.run(provider.id);
+  const missing = context.db.prepare(`
+    SELECT cost, cash_cost, source_status, source_missing_at
+    FROM provider_cost_ledger WHERE source_log_id = '9001'
+  `).get();
+  assert.equal(missing.cost, first.cost);
+  assert.equal(missing.cash_cost, first.cash_cost);
+  assert.equal(missing.source_status, 'missing_upstream');
+  assert.ok(missing.source_missing_at);
+
+  phase = 2;
+  await sync.run(provider.id);
+  const rows = context.db.prepare(`
+    SELECT source_log_id, recharge_multiplier, cost, cash_cost,
+      provider_group_rate, source_status, source_missing_at
+    FROM provider_cost_ledger ORDER BY source_log_id
+  `).all();
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].recharge_multiplier, 2);
+  assert.equal(rows[0].cash_cost, rows[0].cost / 2);
+  assert.equal(rows[0].provider_group_rate, 1);
+  assert.equal(rows[0].source_status, 'observed');
+  assert.ok(rows[0].source_missing_at);
+  assert.equal(rows[1].recharge_multiplier, 4);
+  assert.equal(rows[1].cash_cost, rows[1].cost / 4);
+  assert.equal(rows[1].provider_group_rate, 1.5);
+  assert.equal(context.db.prepare(`
+    SELECT COUNT(*) AS count FROM provider_cost_ledger_revisions
+  `).get().count, 0);
+});
+
 test('New API API Key mode monitors only the selected remote keys and their logs', async (t) => {
   const server = http.createServer((req, res) => {
     if (req.url === '/api/status') return json(res, { success: true, data: { quota_per_unit: 500000 } });

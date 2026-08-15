@@ -222,7 +222,8 @@
     <form method="dialog" id="account-monitor-settings-form">
       <header class="dialog-header"><div><h2>账号质量检测设置</h2><p>真实日志采集与主动检测分别调度</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
       <div class="form-grid">
-        <label class="toggle-field"><input name="syncEnabled" type="checkbox"><span>定时同步真实请求日志</span></label>
+          <label class="toggle-field"><input name="syncEnabled" type="checkbox"><span>定时同步真实请求日志</span></label>
+          <label class="toggle-field"><input name="autoMappingEnabled" type="checkbox"><span>自动建立精确验证的账号 / Key 映射</span></label>
         <label><span>日志同步间隔（分钟）</span><input name="syncIntervalMinutes" type="number" min="5" max="1440" required></label>
         <label><span>默认观察窗口（天）</span><input name="lookbackDays" type="number" min="1" max="90" required></label>
         <label><span>样本保留（天）</span><input name="sampleRetentionDays" type="number" min="1" max="3650" required></label>
