@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 24;
+const SCHEMA_VERSION = 25;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1924,6 +1924,196 @@ function migrateTemporalAccountingV24(db) {
   ).run(migratedAt);
 }
 
+function migrateApiKeyCounterAccountingV25(db) {
+  const migrated = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 25'
+  ).get();
+  if (migrated) return;
+  const migratedAt = nowIso();
+  const addColumn = (table, name, definition) => {
+    const columns = new Set(
+      db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name)
+    );
+    if (!columns.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+  };
+
+  for (const [name, definition] of [
+    ['source_type', "TEXT NOT NULL DEFAULT 'request_log'"],
+    ['entry_kind', "TEXT NOT NULL DEFAULT 'request'"],
+    ['accounting_status', "TEXT NOT NULL DEFAULT 'active'"],
+    ['interval_start', 'TEXT'],
+    ['counter_epoch', 'INTEGER'],
+    ['precision_seconds', 'INTEGER'],
+    ['comparable', 'INTEGER NOT NULL DEFAULT 1'],
+    ['attributed_account_id', 'TEXT'],
+    ['mapping_id', 'TEXT'],
+    ['mapping_version_id', 'INTEGER'],
+    ['base_group_rate', 'REAL'],
+    ['attribution_status', "TEXT NOT NULL DEFAULT 'unmapped'"]
+  ]) addColumn('provider_cost_ledger', name, definition);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS provider_usage_counter_state (
+      connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
+      key_id TEXT REFERENCES remote_keys(id) ON DELETE SET NULL,
+      remote_key_id TEXT,
+      key_identity TEXT NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'USD',
+      epoch INTEGER NOT NULL DEFAULT 1,
+      last_cost REAL,
+      last_request_count INTEGER,
+      last_input_tokens INTEGER,
+      last_output_tokens INTEGER,
+      last_cache_creation_tokens INTEGER,
+      last_cache_read_tokens INTEGER,
+      lifetime_cost_offset REAL NOT NULL DEFAULT 0,
+      lifetime_request_offset INTEGER NOT NULL DEFAULT 0,
+      lifetime_input_offset INTEGER NOT NULL DEFAULT 0,
+      lifetime_output_offset INTEGER NOT NULL DEFAULT 0,
+      lifetime_cache_creation_offset INTEGER NOT NULL DEFAULT 0,
+      lifetime_cache_read_offset INTEGER NOT NULL DEFAULT 0,
+      reset_count INTEGER NOT NULL DEFAULT 0,
+      last_mode TEXT NOT NULL DEFAULT 'shadow',
+      counter_accounting_started_at TEXT,
+      first_observed_at TEXT NOT NULL,
+      last_captured_at TEXT NOT NULL,
+      context_json TEXT NOT NULL DEFAULT '{}',
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(connection_id, key_identity, currency)
+    );
+    CREATE INDEX IF NOT EXISTS provider_usage_counter_key_lookup
+      ON provider_usage_counter_state(key_id, currency, last_captured_at DESC);
+    CREATE INDEX IF NOT EXISTS provider_usage_counter_connection_lookup
+      ON provider_usage_counter_state(connection_id, last_mode, last_captured_at DESC);
+
+    CREATE INDEX IF NOT EXISTS provider_cost_accounting_source_lookup
+      ON provider_cost_ledger(
+        key_id, source_type, accounting_status, comparable, occurred_at DESC
+      );
+    CREATE INDEX IF NOT EXISTS provider_cost_attributed_account_lookup
+      ON provider_cost_ledger(
+        attributed_account_id, key_id, accounting_status, occurred_at DESC
+      ) WHERE attributed_account_id IS NOT NULL;
+  `);
+
+  db.transaction(() => {
+    db.exec(`
+      UPDATE provider_cost_ledger SET
+        source_type = COALESCE(NULLIF(source_type, ''), 'request_log'),
+        entry_kind = COALESCE(NULLIF(entry_kind, ''), 'request'),
+        accounting_status = COALESCE(NULLIF(accounting_status, ''), 'active'),
+        interval_start = COALESCE(interval_start, occurred_at),
+        comparable = COALESCE(comparable, 1);
+
+      DELETE FROM provider_cost_rollups;
+      INSERT INTO provider_cost_rollups(
+        connection_id, key_id, key_identity, currency, request_count,
+        input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+        cost, cost_sample_count, first_at, last_at, updated_at
+      )
+      SELECT connection_id, MAX(key_id), key_identity, currency,
+        SUM(CASE WHEN status = 'success' THEN request_count ELSE 0 END),
+        SUM(CASE WHEN status = 'success' THEN input_tokens ELSE 0 END),
+        SUM(CASE WHEN status = 'success' THEN output_tokens ELSE 0 END),
+        SUM(CASE WHEN status = 'success' THEN cache_creation_tokens ELSE 0 END),
+        SUM(CASE WHEN status = 'success' THEN cache_read_tokens ELSE 0 END),
+        SUM(COALESCE(cost, 0)),
+        SUM(CASE WHEN cost IS NULL THEN 0 ELSE request_count END),
+        MIN(occurred_at), MAX(occurred_at), MAX(updated_at)
+      FROM provider_cost_ledger
+      WHERE accounting_status = 'active' AND comparable = 1
+      GROUP BY connection_id, key_identity, currency;
+
+      DELETE FROM provider_cost_cash_rollups;
+      INSERT INTO provider_cost_cash_rollups(
+        connection_id, key_id, key_identity, cash_currency, cash_cost,
+        cost_sample_count, first_at, last_at, updated_at
+      )
+      SELECT connection_id, MAX(key_id), key_identity,
+        COALESCE(cash_currency, currency, 'USD'),
+        SUM(COALESCE(cash_cost, CASE WHEN cost IS NULL THEN 0
+          ELSE cost / recharge_multiplier END)),
+        SUM(CASE WHEN cost IS NULL THEN 0 ELSE request_count END),
+        MIN(occurred_at), MAX(occurred_at), MAX(updated_at)
+      FROM provider_cost_ledger
+      WHERE accounting_status = 'active' AND comparable = 1
+      GROUP BY connection_id, key_identity, COALESCE(cash_currency, currency, 'USD');
+    `);
+  })();
+
+  db.exec(`
+    DROP TRIGGER IF EXISTS provider_cost_ledger_rollup_insert;
+    CREATE TRIGGER provider_cost_ledger_rollup_insert
+    AFTER INSERT ON provider_cost_ledger
+    BEGIN
+      INSERT INTO provider_cost_rollups(
+        connection_id, key_id, key_identity, currency, request_count,
+        input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+        cost, cost_sample_count, first_at, last_at, updated_at
+      ) VALUES (
+        NEW.connection_id, NEW.key_id, NEW.key_identity, NEW.currency,
+        CASE WHEN NEW.accounting_status = 'active' AND NEW.comparable = 1
+          AND NEW.status = 'success' THEN NEW.request_count ELSE 0 END,
+        CASE WHEN NEW.accounting_status = 'active' AND NEW.comparable = 1
+          AND NEW.status = 'success' THEN NEW.input_tokens ELSE 0 END,
+        CASE WHEN NEW.accounting_status = 'active' AND NEW.comparable = 1
+          AND NEW.status = 'success' THEN NEW.output_tokens ELSE 0 END,
+        CASE WHEN NEW.accounting_status = 'active' AND NEW.comparable = 1
+          AND NEW.status = 'success' THEN NEW.cache_creation_tokens ELSE 0 END,
+        CASE WHEN NEW.accounting_status = 'active' AND NEW.comparable = 1
+          AND NEW.status = 'success' THEN NEW.cache_read_tokens ELSE 0 END,
+        CASE WHEN NEW.accounting_status = 'active' AND NEW.comparable = 1
+          THEN COALESCE(NEW.cost, 0) ELSE 0 END,
+        CASE WHEN NEW.accounting_status = 'active' AND NEW.comparable = 1
+          AND NEW.cost IS NOT NULL THEN NEW.request_count ELSE 0 END,
+        NEW.occurred_at, NEW.occurred_at, NEW.updated_at
+      )
+      ON CONFLICT(connection_id, key_identity, currency) DO UPDATE SET
+        key_id = COALESCE(excluded.key_id, provider_cost_rollups.key_id),
+        request_count = provider_cost_rollups.request_count + excluded.request_count,
+        input_tokens = provider_cost_rollups.input_tokens + excluded.input_tokens,
+        output_tokens = provider_cost_rollups.output_tokens + excluded.output_tokens,
+        cache_creation_tokens = provider_cost_rollups.cache_creation_tokens + excluded.cache_creation_tokens,
+        cache_read_tokens = provider_cost_rollups.cache_read_tokens + excluded.cache_read_tokens,
+        cost = provider_cost_rollups.cost + excluded.cost,
+        cost_sample_count = provider_cost_rollups.cost_sample_count + excluded.cost_sample_count,
+        first_at = MIN(provider_cost_rollups.first_at, excluded.first_at),
+        last_at = MAX(provider_cost_rollups.last_at, excluded.last_at),
+        updated_at = excluded.updated_at;
+    END;
+
+    DROP TRIGGER IF EXISTS provider_cost_cash_rollup_insert;
+    CREATE TRIGGER provider_cost_cash_rollup_insert
+    AFTER INSERT ON provider_cost_ledger
+    BEGIN
+      INSERT INTO provider_cost_cash_rollups(
+        connection_id, key_id, key_identity, cash_currency, cash_cost,
+        cost_sample_count, first_at, last_at, updated_at
+      ) VALUES (
+        NEW.connection_id, NEW.key_id, NEW.key_identity,
+        COALESCE(NEW.cash_currency, NEW.currency, 'USD'),
+        CASE WHEN NEW.accounting_status = 'active' AND NEW.comparable = 1
+          THEN COALESCE(NEW.cash_cost, CASE WHEN NEW.cost IS NULL THEN 0
+            ELSE NEW.cost / NEW.recharge_multiplier END) ELSE 0 END,
+        CASE WHEN NEW.accounting_status = 'active' AND NEW.comparable = 1
+          AND NEW.cost IS NOT NULL THEN NEW.request_count ELSE 0 END,
+        NEW.occurred_at, NEW.occurred_at, NEW.updated_at
+      )
+      ON CONFLICT(connection_id, key_identity, cash_currency) DO UPDATE SET
+        key_id = COALESCE(excluded.key_id, provider_cost_cash_rollups.key_id),
+        cash_cost = provider_cost_cash_rollups.cash_cost + excluded.cash_cost,
+        cost_sample_count = provider_cost_cash_rollups.cost_sample_count + excluded.cost_sample_count,
+        first_at = MIN(provider_cost_cash_rollups.first_at, excluded.first_at),
+        last_at = MAX(provider_cost_cash_rollups.last_at, excluded.last_at),
+        updated_at = excluded.updated_at;
+    END;
+  `);
+
+  db.prepare(
+    'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (25, ?)'
+  ).run(migratedAt);
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -1945,6 +2135,12 @@ function createDatabase(databasePath) {
       migrateTemporalAccountingV24(db);
     } catch (error) {
       error.message = `Temporal accounting migration failed: ${error.message}`;
+      throw error;
+    }
+    try {
+      migrateApiKeyCounterAccountingV25(db);
+    } catch (error) {
+      error.message = `API Key counter accounting migration failed: ${error.message}`;
       throw error;
     }
     db.prepare(

@@ -6,7 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
-test('schema v24 migration preserves mappings and adds temporal cost audit data', (t) => {
+test('schema v25 migration preserves mappings and adds temporal counter accounting data', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
   let db = createDatabase(databasePath);
@@ -134,6 +134,7 @@ test('schema v24 migration preserves mappings and adds temporal cost audit data'
   db = createDatabase(databasePath);
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 23').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 24').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 25').get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());
   assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'recharge_url'));
@@ -152,6 +153,15 @@ test('schema v24 migration preserves mappings and adds temporal cost audit data'
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_cost_cash_rollups'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_attributed_cost_rollups'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_mapping_history'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_usage_counter_state'").get());
+  const providerCostColumns = new Set(
+    db.prepare('PRAGMA table_info(provider_cost_ledger)').all().map((column) => column.name)
+  );
+  for (const column of [
+    'source_type', 'entry_kind', 'accounting_status', 'interval_start',
+    'counter_epoch', 'precision_seconds', 'comparable', 'attributed_account_id',
+    'mapping_id', 'mapping_version_id', 'base_group_rate', 'attribution_status'
+  ]) assert.equal(providerCostColumns.has(column), true, `missing provider ledger column ${column}`);
   assert.equal(db.prepare(`
     SELECT cost FROM provider_cost_rollups WHERE connection_id = 'provider'
   `).get().cost, 1.25);

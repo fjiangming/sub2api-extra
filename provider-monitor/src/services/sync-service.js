@@ -9,6 +9,7 @@ const {
   providerValuationContext,
   rebuildProviderCostRollups
 } = require('./accounting-context');
+const { recordProviderUsageCounters } = require('./provider-counter-accounting');
 
 function monitoredRemoteKeyIds(connection) {
   const supportsSelection =
@@ -454,6 +455,14 @@ class SyncService {
         data.capturedAt,
         data.requestLogKeys || data.keys
       );
+      const counterAccounting = recordProviderUsageCounters({
+        db: this.db,
+        connectionId: connection.id,
+        usage: data.usage || [],
+        keys: data.requestLogKeys || data.keys || [],
+        requestLogs: data.requestLogs,
+        capturedAt: data.capturedAt
+      });
       const dynamicRouteKeyCount = this.#recordDynamicRouteRates(
         connection.id,
         data.dynamicRoute,
@@ -484,6 +493,11 @@ class SyncService {
         keyCount: data.keys.length,
         usageCount: (data.usage || []).length,
         requestLogCount,
+        counterCheckpointCount: counterAccounting.checkpointCount,
+        counterLedgerEntryCount: counterAccounting.ledgerEntryCount,
+        counterOpeningEntryCount: counterAccounting.openingEntryCount,
+        counterResetCount: counterAccounting.resetCount,
+        counterCorrectionCount: counterAccounting.correctionCount,
         dynamicRouteKeyCount,
         mappingSnapshot: data.mappingSnapshot,
         capturedAt: data.capturedAt

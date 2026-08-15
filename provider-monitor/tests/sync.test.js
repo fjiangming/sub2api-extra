@@ -670,6 +670,9 @@ test('Sub2API API Key sync keeps per-key rates, usage and mapping comparisons in
   assert.equal(result.keyCount, 2);
   assert.equal(result.groupCount, 2);
   assert.equal(result.usageCount, 4);
+  assert.equal(result.counterCheckpointCount, 2);
+  assert.equal(result.counterOpeningEntryCount, 2);
+  assert.equal(result.counterLedgerEntryCount, 0);
 
   const keys = context.db.prepare(`
     SELECT id, remote_id, primary_group_ref, quota_remaining
@@ -705,10 +708,23 @@ test('Sub2API API Key sync keeps per-key rates, usage and mapping comparisons in
   assert.equal(storedRaw.monitorMetrics.cacheReadCount, 20);
   assert.equal(storedRaw.monitorMetrics.averageDurationMs, null);
   assert.match(storedRaw.monitorMetrics.credentialIdentity, /^[a-f0-9]{64}$/);
+  assert.deepEqual(context.db.prepare(`
+    SELECT COUNT(*) AS state_count, SUM(last_request_count) AS requests,
+      ROUND(SUM(last_cost), 8) AS cost
+    FROM provider_usage_counter_state WHERE connection_id = ?
+  `).get(provider.id), { state_count: 2, requests: 8, cost: 0.4 });
+  assert.deepEqual(context.db.prepare(`
+    SELECT COUNT(*) AS opening_count, SUM(request_count) AS requests,
+      ROUND(SUM(cost), 8) AS cost
+    FROM provider_cost_ledger
+    WHERE connection_id = ? AND entry_kind = 'counter_opening'
+  `).get(provider.id), { opening_count: 2, requests: 8, cost: 0.4 });
 
+  fixtures['sk-low-12345678'].used = 2;
   failedBillingToken = 'sk-high-12345678';
   const partial = await sync.run(provider.id);
   assert.equal(partial.status, 'partial');
+  assert.equal(partial.counterLedgerEntryCount, 1);
   assert.equal(partial.warnings.some((warning) => warning.capability === 'configuredApiKey'), true);
   const preservedHighKey = context.db.prepare(`
     SELECT primary_group_ref FROM remote_keys

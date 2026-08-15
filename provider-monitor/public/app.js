@@ -925,6 +925,7 @@ function formatPreciseMoney(value, currency = 'USD') {
 function accountUpstreamSourceLabel(source) {
   return ({
     provider_request_logs: '逐请求日志',
+    provider_counter_ledger: '累计计数器账本',
     provider_daily_usage: '逐日用量',
     provider_usage_snapshots: '累计用量',
     provider_key_snapshots: 'Key 快照',
@@ -955,6 +956,7 @@ function accountComparisonReasonLabel(reason) {
     cache_token_mismatch: '配对请求的缓存 Token 不一致',
     provider_sync_unavailable: '上游同步失败或尚未成功',
     request_logs_unavailable: '上游请求日志不可用',
+    provider_counter_baseline_only: '已建立累计基线，等待下一次同步计算窗口增量',
     no_successful_requests: '观察窗口内没有成功请求',
     account_usage_not_attributable: '供应商仅返回账号汇总，无法按 Key 归因',
     provider_latency_unavailable: '上游仅提供累计用量，未提供延迟字段',
@@ -963,8 +965,8 @@ function accountComparisonReasonLabel(reason) {
 }
 
 function accountComparisonMetric(baseValue, upstreamValue, formatter, options = {}) {
-  const base = formatter(baseValue);
-  const upstream = formatter(upstreamValue);
+  const base = (options.baseFormatter || formatter)(baseValue);
+  const upstream = (options.upstreamFormatter || formatter)(upstreamValue);
   const upstreamTitle = options.upstreamTitle || (upstream === '-' ? '供应商未提供该指标' : '供应商上游');
   const note = options.note ? `<small class="table-metric-note">${escapeHtml(options.note)}</small>` : '';
   return `<div class="account-comparison-metric"><span><small class="source-base">${escapeHtml(options.baseLabel || '基座')}</small><strong class="${base === '-' ? 'metric-empty' : ''}">${escapeHtml(base)}</strong></span><span title="${escapeHtml(upstreamTitle)}"><small class="source-upstream">${escapeHtml(options.upstreamLabel || '上游')}</small><strong class="${upstream === '-' ? 'metric-empty' : ''}">${escapeHtml(upstream)}</strong></span></div>${note}`;
@@ -1044,7 +1046,19 @@ function accountCostMarkup(_metrics, comparison = {}) {
   const rawCostText = usesCash
     ? `余额消费 ${formatPreciseMoney(rawBase, rawCurrency)} / ${formatPreciseMoney(rawUpstream, rawCurrency)}`
     : '';
-  return `<div class="account-cost-cell"><div class="account-comparison-metric"><span><small class="source-base">基座${usesCash ? '收入' : '扣费'}</small><strong>${escapeHtml(formatPreciseMoney(baseDisplay, displayCurrency))}</strong></span><span><small class="source-upstream">上游${usesCash ? '支出' : '扣费'}</small><strong class="${upstreamDisplay == null ? 'metric-empty' : ''}">${escapeHtml(formatPreciseMoney(upstreamDisplay, displayCurrency))}</strong></span></div>${delta}${scopeText || pairingText || extraText || rawCostText ? `<small class="table-metric-note">${escapeHtml([scopeText, useWindowLedger ? pairingText : '', extraText.replace(/^ · /, ''), rawCostText].filter(Boolean).join(' · '))}</small>` : ''}</div>`;
+  const precisionText = cost.estimated
+    ? Number(cost.precisionSeconds) > 0
+      ? `累计增量，精度约 ${Math.max(1, Math.ceil(Number(cost.precisionSeconds) / 60))} 分钟`
+      : '累计增量'
+    : '';
+  const notes = [
+    scopeText,
+    useWindowLedger ? pairingText : '',
+    extraText.replace(/^ · /, ''),
+    rawCostText,
+    precisionText
+  ].filter(Boolean);
+  return `<div class="account-cost-cell"><div class="account-comparison-metric"><span><small class="source-base">基座${usesCash ? '收入' : '扣费'}</small><strong>${escapeHtml(formatPreciseMoney(baseDisplay, displayCurrency))}</strong></span><span><small class="source-upstream">上游${usesCash ? '支出' : '扣费'}</small><strong class="${upstreamDisplay == null ? 'metric-empty' : ''}">${escapeHtml(formatPreciseMoney(upstreamDisplay, displayCurrency))}</strong></span></div>${delta}${notes.length > 0 ? `<small class="table-metric-note">${escapeHtml(notes.join(' · '))}</small>` : ''}</div>`;
 }
 
 function accountProbeTransportLabel(details = {}) {
@@ -1271,6 +1285,7 @@ function providerMetricUnavailableReason(reason) {
     base_key_attribution_incomplete: '多个 Key，无法唯一归因',
     base_provider_unmapped: '未映射基座账号',
     base_provider_attribution_incomplete: '跨供应商映射，无法唯一归因',
+    provider_counter_baseline_only: '已建立累计基线，等待下一次同步计算窗口增量',
     upstream_request_logs_unavailable: '上游日志未采集'
   })[reason] || '暂不可比';
 }
@@ -1305,23 +1320,48 @@ function providerRequestComparison(item) {
 function providerCostComparison(item, period = 'window') {
   const audit = item.audit || {};
   const currency = audit.displayCurrency || 'USD';
+  const balanceCurrency = audit.upstreamBalanceCurrency || 'USD';
   const lifetime = period === 'lifetime';
   const base = lifetime ? audit.lifetimeBaseRevenue : audit.windowBaseRevenue;
-  const upstream = lifetime ? audit.lifetimeUpstreamCost : audit.windowUpstreamCost;
+  const cashUpstream = lifetime ? audit.lifetimeUpstreamCost : audit.windowUpstreamCost;
+  const balanceUpstream = lifetime
+    ? audit.reportedLifetimeUpstreamBalanceCost
+    : audit.windowUpstreamBalanceCost;
+  const usesBalanceFallback = cashUpstream == null && balanceUpstream != null;
+  const upstream = usesBalanceFallback ? balanceUpstream : cashUpstream;
   const grossProfit = lifetime ? audit.lifetimeGrossProfit : audit.windowGrossProfit;
   const missingCount = lifetime
     ? audit.lifetimeSourceMissingCount
     : audit.windowSourceMissingCount;
-  const note = grossProfit == null
+  const notes = [grossProfit == null
     ? '毛利待核算'
-    : `毛利 ${formatPreciseMoney(grossProfit, currency)}`;
+    : `毛利 ${formatPreciseMoney(grossProfit, currency)}`];
+  if (usesBalanceFallback) notes.push('未确认充值倍率，成本为余额口径');
+  if (audit.accountingMode === 'counter_ledger' || audit.accountingMode === 'mixed') {
+    const precisionSeconds = Number(audit.maximumPrecisionSeconds || 0);
+    const precision = period === 'window' && precisionSeconds > 0
+      ? `，精度约 ${Math.max(1, Math.ceil(precisionSeconds / 60))} 分钟`
+      : '';
+    notes.push(`计数器账本${precision}`);
+  }
+  if (lifetime && Number(audit.unallocatedEntryCount) > 0) {
+    notes.push(`含 ${formatNumber(audit.unallocatedEntryCount, 0)} 个期初累计，暂不计毛利`);
+  }
+  if (Number(missingCount) > 0) {
+    notes.push(`${formatNumber(missingCount, 0)} 条源记录已删除，本地账本保留`);
+  }
   return accountComparisonMetric(base, upstream, (value) => formatPreciseMoney(value, currency), {
     baseLabel: lifetime ? '累计收入' : '基座收入',
-    upstreamLabel: lifetime ? '累计成本' : '上游成本',
-    upstreamTitle: lifetime ? '供应商永久费用账本累计成本' : '供应商永久费用账本窗口成本',
-    note: Number(missingCount) > 0
-      ? `${note} · ${formatNumber(missingCount, 0)} 条源记录已删除，本地账本保留`
-      : note
+    upstreamLabel: usesBalanceFallback
+      ? lifetime ? '累计余额消费' : '上游余额消费'
+      : lifetime ? '累计成本' : '上游成本',
+    upstreamFormatter: usesBalanceFallback
+      ? (value) => formatPreciseMoney(value, balanceCurrency)
+      : (value) => formatPreciseMoney(value, currency),
+    upstreamTitle: lifetime
+      ? '供应商永久费用账本累计成本'
+      : '供应商永久费用账本窗口成本',
+    note: notes.join(' · ')
   });
 }
 

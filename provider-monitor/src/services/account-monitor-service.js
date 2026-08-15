@@ -2037,10 +2037,12 @@ class AccountMonitorService {
           SUM(CASE WHEN status = 'success' THEN cache_read_tokens ELSE 0 END) AS window_cache_read_tokens,
           SUM(COALESCE(cost, 0)) AS window_cost,
           SUM(CASE WHEN cost IS NULL THEN 0 ELSE request_count END) AS window_cost_samples,
+          COUNT(*) AS window_entries,
           SUM(CASE WHEN source_status = 'missing_upstream' THEN request_count ELSE 0 END)
             AS window_source_missing
         FROM provider_cost_ledger
         WHERE key_id IN (${placeholders})
+          AND accounting_status = 'active' AND comparable = 1
           AND occurred_at >= ? AND occurred_at <= ?
         GROUP BY key_id, currency
       `).all(...batch, since, until);
@@ -2058,6 +2060,51 @@ class AccountMonitorService {
             AS lifetime_source_missing
         FROM provider_cost_ledger
         WHERE key_id IN (${placeholders}) AND source_status = 'missing_upstream'
+          AND accounting_status = 'active' AND comparable = 1
+        GROUP BY key_id, currency
+      `).all(...batch);
+      const reportedTotals = this.db.prepare(`
+        SELECT key_id, currency,
+          SUM(lifetime_request_offset + COALESCE(last_request_count, 0))
+            AS reported_lifetime_requests,
+          SUM(lifetime_input_offset + COALESCE(last_input_tokens, 0))
+            AS reported_lifetime_input_tokens,
+          SUM(lifetime_output_offset + COALESCE(last_output_tokens, 0))
+            AS reported_lifetime_output_tokens,
+          SUM(lifetime_cache_creation_offset + COALESCE(last_cache_creation_tokens, 0))
+            AS reported_lifetime_cache_creation_tokens,
+          SUM(lifetime_cache_read_offset + COALESCE(last_cache_read_tokens, 0))
+            AS reported_lifetime_cache_read_tokens,
+          SUM(lifetime_cost_offset + COALESCE(last_cost, 0))
+            AS reported_lifetime_cost,
+          SUM(reset_count) AS counter_reset_count,
+          SUM(CASE WHEN last_captured_at > first_observed_at THEN 1 ELSE 0 END)
+            AS counter_observed_intervals,
+          MIN(counter_accounting_started_at) AS counter_accounting_started_at,
+          MAX(last_captured_at) AS counter_last_captured_at
+        FROM provider_usage_counter_state
+        WHERE key_id IN (${placeholders}) AND counter_accounting_started_at IS NOT NULL
+        GROUP BY key_id, currency
+      `).all(...batch);
+      const sourceTotals = this.db.prepare(`
+        SELECT key_id, currency,
+          SUM(CASE WHEN source_type = 'usage_counter' AND comparable = 1
+            AND accounting_status = 'active' THEN 1 ELSE 0 END) AS counter_entries,
+          SUM(CASE WHEN source_type = 'request_log'
+            AND accounting_status = 'active' THEN 1 ELSE 0 END) AS request_entries,
+          SUM(CASE WHEN entry_kind = 'counter_opening'
+            AND accounting_status = 'active' THEN COALESCE(cost, 0) ELSE 0 END)
+            AS opening_cost,
+          SUM(CASE WHEN entry_kind = 'counter_opening'
+            AND accounting_status = 'active' THEN request_count ELSE 0 END)
+            AS opening_requests,
+          SUM(CASE WHEN entry_kind = 'counter_opening'
+            AND accounting_status = 'active' THEN 1 ELSE 0 END) AS unallocated_entries,
+          MAX(CASE WHEN source_type = 'usage_counter' AND comparable = 1
+            AND accounting_status = 'active' THEN precision_seconds END)
+            AS maximum_precision_seconds
+        FROM provider_cost_ledger
+        WHERE key_id IN (${placeholders})
         GROUP BY key_id, currency
       `).all(...batch);
       const entriesByIdentity = new Map();
@@ -2075,11 +2122,28 @@ class AccountMonitorService {
           windowCacheReadTokens: 0,
           windowCost: 0,
           windowCostSampleCount: 0,
+          windowEntryCount: 0,
           windowSourceMissingCount: 0,
           lifetimeRequestCount: 0,
           lifetimeCost: 0,
           lifetimeCostSampleCount: 0,
           lifetimeSourceMissingCount: 0,
+          reportedLifetimeRequestCount: null,
+          reportedLifetimeInputTokens: null,
+          reportedLifetimeOutputTokens: null,
+          reportedLifetimeCacheCreationTokens: null,
+          reportedLifetimeCacheReadTokens: null,
+          reportedLifetimeCost: null,
+          counterResetCount: 0,
+          counterObservedIntervalCount: 0,
+          counterAccountingStartedAt: null,
+          counterLastCapturedAt: null,
+          counterEntryCount: 0,
+          requestEntryCount: 0,
+          openingCost: 0,
+          openingRequestCount: 0,
+          unallocatedEntryCount: 0,
+          maximumPrecisionSeconds: null,
           firstAt: null,
           lastAt: null
         };
@@ -2097,6 +2161,7 @@ class AccountMonitorService {
           windowCacheReadTokens: integer(row.window_cache_read_tokens),
           windowCost: round(finite(row.window_cost) || 0, 8),
           windowCostSampleCount: integer(row.window_cost_samples),
+          windowEntryCount: integer(row.window_entries),
           windowSourceMissingCount: integer(row.window_source_missing)
         });
       }
@@ -2112,6 +2177,28 @@ class AccountMonitorService {
       for (const row of missingTotals) {
         ensureEntry(row).lifetimeSourceMissingCount = integer(row.lifetime_source_missing);
       }
+      for (const row of reportedTotals) Object.assign(ensureEntry(row), {
+        reportedLifetimeRequestCount: integer(row.reported_lifetime_requests),
+        reportedLifetimeInputTokens: integer(row.reported_lifetime_input_tokens),
+        reportedLifetimeOutputTokens: integer(row.reported_lifetime_output_tokens),
+        reportedLifetimeCacheCreationTokens: integer(
+          row.reported_lifetime_cache_creation_tokens
+        ),
+        reportedLifetimeCacheReadTokens: integer(row.reported_lifetime_cache_read_tokens),
+        reportedLifetimeCost: round(finite(row.reported_lifetime_cost) || 0, 8),
+        counterResetCount: integer(row.counter_reset_count),
+        counterObservedIntervalCount: integer(row.counter_observed_intervals),
+        counterAccountingStartedAt: row.counter_accounting_started_at,
+        counterLastCapturedAt: row.counter_last_captured_at
+      });
+      for (const row of sourceTotals) Object.assign(ensureEntry(row), {
+        counterEntryCount: integer(row.counter_entries),
+        requestEntryCount: integer(row.request_entries),
+        openingCost: round(finite(row.opening_cost) || 0, 8),
+        openingRequestCount: integer(row.opening_requests),
+        unallocatedEntryCount: integer(row.unallocated_entries),
+        maximumPrecisionSeconds: finite(row.maximum_precision_seconds)
+      });
     }
     return result;
   }
@@ -2125,9 +2212,13 @@ class AccountMonitorService {
           SUM(COALESCE(cash_cost,
             CASE WHEN cost IS NULL THEN 0 ELSE cost / recharge_multiplier END
           )) AS window_cash_cost,
-          SUM(CASE WHEN cost IS NULL THEN 0 ELSE request_count END) AS window_cost_samples
+          SUM(CASE WHEN cost IS NULL THEN 0 ELSE request_count END) AS window_cost_samples,
+          SUM(CASE WHEN cost IS NOT NULL AND COALESCE(recharge_source, 'default') = 'default'
+            THEN 1 ELSE 0 END) AS window_unconfirmed_samples
         FROM provider_cost_ledger
-        WHERE key_id IN (${placeholders}) AND occurred_at >= ? AND occurred_at <= ?
+        WHERE key_id IN (${placeholders})
+          AND accounting_status = 'active' AND comparable = 1
+          AND occurred_at >= ? AND occurred_at <= ?
         GROUP BY key_id, COALESCE(cash_currency, currency, 'USD')
       `).all(...batch, since, until);
       const totals = this.db.prepare(`
@@ -2137,6 +2228,23 @@ class AccountMonitorService {
         FROM provider_cost_cash_rollups
         WHERE key_id IN (${placeholders})
         GROUP BY key_id, cash_currency
+      `).all(...batch);
+      const auditTotals = this.db.prepare(`
+        SELECT key_id, COALESCE(cash_currency, currency, 'USD') AS cash_currency,
+          SUM(CASE WHEN entry_kind = 'counter_opening'
+            AND accounting_status = 'active' THEN COALESCE(cash_cost,
+              CASE WHEN cost IS NULL THEN 0 ELSE cost / recharge_multiplier END
+            ) ELSE 0 END) AS opening_cash_cost,
+          SUM(CASE WHEN entry_kind = 'counter_opening'
+            AND accounting_status = 'active' AND cost IS NOT NULL
+            AND COALESCE(recharge_source, 'default') = 'default'
+            THEN 1 ELSE 0 END) AS opening_unconfirmed_samples,
+          SUM(CASE WHEN comparable = 1 AND accounting_status = 'active'
+            AND cost IS NOT NULL AND COALESCE(recharge_source, 'default') = 'default'
+            THEN 1 ELSE 0 END) AS lifetime_unconfirmed_samples
+        FROM provider_cost_ledger
+        WHERE key_id IN (${placeholders})
+        GROUP BY key_id, COALESCE(cash_currency, currency, 'USD')
       `).all(...batch);
       const entries = new Map();
       const ensure = (row) => {
@@ -2150,6 +2258,14 @@ class AccountMonitorService {
           windowCostSampleCount: 0,
           lifetimeCashCost: 0,
           lifetimeCostSampleCount: 0,
+          openingCashCost: 0,
+          reportedLifetimeCashCost: 0,
+          windowUnconfirmedSampleCount: 0,
+          lifetimeUnconfirmedSampleCount: 0,
+          openingUnconfirmedSampleCount: 0,
+          windowConfirmed: true,
+          lifetimeComparableConfirmed: true,
+          reportedLifetimeConfirmed: true,
           firstAt: null,
           lastAt: null
         };
@@ -2161,14 +2277,30 @@ class AccountMonitorService {
       };
       for (const row of windows) Object.assign(ensure(row), {
         windowCashCost: round(finite(row.window_cash_cost) || 0, 8),
-        windowCostSampleCount: integer(row.window_cost_samples)
+        windowCostSampleCount: integer(row.window_cost_samples),
+        windowUnconfirmedSampleCount: integer(row.window_unconfirmed_samples),
+        windowConfirmed: integer(row.window_unconfirmed_samples) === 0
       });
       for (const row of totals) Object.assign(ensure(row), {
         lifetimeCashCost: round(finite(row.lifetime_cash_cost) || 0, 8),
+        reportedLifetimeCashCost: round(finite(row.lifetime_cash_cost) || 0, 8),
         lifetimeCostSampleCount: integer(row.lifetime_cost_samples),
         firstAt: row.first_at,
         lastAt: row.last_at
       });
+      for (const row of auditTotals) {
+        const entry = ensure(row);
+        entry.openingCashCost = round(finite(row.opening_cash_cost) || 0, 8);
+        entry.reportedLifetimeCashCost = round(
+          Number(entry.lifetimeCashCost || 0) + Number(entry.openingCashCost || 0),
+          8
+        );
+        entry.lifetimeUnconfirmedSampleCount = integer(row.lifetime_unconfirmed_samples);
+        entry.openingUnconfirmedSampleCount = integer(row.opening_unconfirmed_samples);
+        entry.lifetimeComparableConfirmed = entry.lifetimeUnconfirmedSampleCount === 0;
+        entry.reportedLifetimeConfirmed = entry.lifetimeComparableConfirmed &&
+          entry.openingUnconfirmedSampleCount === 0;
+      }
     }
     return result;
   }
@@ -2374,6 +2506,7 @@ class AccountMonitorService {
     const usageRows = [];
     const dailyRows = [];
     const balanceRows = [];
+    const counterRows = [];
     const currentIdentityByKey = new Map();
     const startDate = dateInTimezone(new Date(since), this.config.timezone);
     const endDate = dateInTimezone(new Date(until), this.config.timezone);
@@ -2445,6 +2578,18 @@ class AccountMonitorService {
           )
         ORDER BY subject_id, currency, captured_at
       `).all(...batch, until, since, since));
+      counterRows.push(...this.db.prepare(`
+        SELECT key_id, attributed_account_id AS account_id, currency, cost,
+          request_count, input_tokens, output_tokens, cache_creation_tokens,
+          cache_read_tokens, interval_start, occurred_at, source_log_id,
+          precision_seconds, attribution_status
+        FROM provider_cost_ledger
+        WHERE key_id IN (${placeholders}) AND source_type = 'usage_counter'
+          AND accounting_status = 'active' AND comparable = 1
+          AND attributed_account_id IS NOT NULL
+          AND occurred_at >= ? AND occurred_at <= ?
+        ORDER BY key_id, attributed_account_id, occurred_at
+      `).all(...batch, since, until));
     }
 
     const normalizeUsageRow = (row) => {
@@ -2581,9 +2726,58 @@ class AccountMonitorService {
     };
     const usage = reduceRows(normalizedUsageRows, 'usage');
     for (const [keyId, daily] of reduceDailyRows()) usage.set(keyId, daily);
+    const counter = new Map();
+    const counterGroups = groupBy(counterRows, (row) => (
+      `${row.key_id}\u0000${row.account_id}`
+    ));
+    for (const [identity, entries] of counterGroups) {
+      const currencies = [...new Set(entries.map((row) => row.currency || 'USD'))];
+      if (currencies.length !== 1) continue;
+      const sum = (field) => entries.reduce((total, row) => (
+        total + Number(finite(row[field]) || 0)
+      ), 0);
+      const costSamples = entries.filter((row) => finite(row.cost) != null);
+      const from = entries.reduce((earliest, row) => {
+        const value = row.interval_start || row.occurred_at;
+        return !earliest || Date.parse(value) < Date.parse(earliest) ? value : earliest;
+      }, null);
+      const to = entries.reduce((latest, row) => (
+        !latest || Date.parse(row.occurred_at) > Date.parse(latest)
+          ? row.occurred_at
+          : latest
+      ), null);
+      counter.set(identity, {
+        source: 'provider_counter_ledger',
+        keyId: String(entries[0].key_id),
+        accountId: String(entries[0].account_id),
+        currency: currencies[0],
+        cost: costSamples.length > 0 ? round(sum('cost'), 8) : null,
+        requestCount: Math.round(sum('request_count')),
+        inputTokens: Math.round(sum('input_tokens')),
+        outputTokens: Math.round(sum('output_tokens')),
+        cacheCreationTokens: Math.round(sum('cache_creation_tokens')),
+        cacheReadTokens: Math.round(sum('cache_read_tokens')),
+        totalTokens: Math.round(
+          sum('input_tokens') + sum('output_tokens') +
+          sum('cache_creation_tokens') + sum('cache_read_tokens')
+        ),
+        from,
+        to,
+        sampleCount: entries.length,
+        exactWindow: false,
+        snapshotKind: 'counter_ledger',
+        precisionSeconds: entries.reduce(
+          (maximum, row) => Math.max(maximum, integer(row.precision_seconds)),
+          0
+        ),
+        sourceLogIds: entries.map((row) => String(row.source_log_id)),
+        attributionStatuses: [...new Set(entries.map((row) => row.attribution_status))]
+      });
+    }
     return {
       usage,
-      balance: reduceRows(normalizedBalanceRows, 'balance')
+      balance: reduceRows(normalizedBalanceRows, 'balance'),
+      counter
     };
   }
 
@@ -2630,7 +2824,12 @@ class AccountMonitorService {
     const base = side === 'base';
     const table = base ? 'sub2api_account_cost_ledger' : 'provider_cost_ledger';
     const value = base ? 'cash_revenue' : 'cash_cost';
-    const ownerClause = base ? 'account_id = ? AND key_id = ?' : "key_id = ? AND status = 'success'";
+    const ownerClause = base
+      ? 'account_id = ? AND key_id = ?'
+      : "key_id = ? AND status = 'success' AND accounting_status = 'active' AND comparable = 1";
+    const confirmedCost = base
+      ? 'cost IS NOT NULL'
+      : "cost IS NOT NULL AND COALESCE(recharge_source, 'default') != 'default'";
     const ownerParams = base ? [String(accountId), String(keyId)] : [String(keyId)];
     const batches = sourceLogIds == null
       ? [null]
@@ -2639,6 +2838,7 @@ class AccountMonitorService {
     let amount = 0;
     let requestCount = 0;
     let costSampleCount = 0;
+    let unconfirmedCostCount = 0;
     let rowCount = 0;
     for (const batch of batches) {
       if (batch && batch.length === 0) continue;
@@ -2651,7 +2851,9 @@ class AccountMonitorService {
             CASE WHEN cost IS NULL THEN 0 ELSE cost / recharge_multiplier END
           )) AS cash_amount,
           SUM(request_count) AS request_count,
-          SUM(CASE WHEN cost IS NULL THEN 0 ELSE request_count END) AS cost_sample_count
+          SUM(CASE WHEN ${confirmedCost} THEN request_count ELSE 0 END) AS cost_sample_count,
+          SUM(CASE WHEN cost IS NOT NULL AND NOT (${confirmedCost}) THEN 1 ELSE 0 END)
+            AS unconfirmed_cost_count
         FROM ${table}
         WHERE ${ownerClause} AND occurred_at >= ? AND occurred_at <= ? ${sourceClause}
         GROUP BY COALESCE(cash_currency, currency, 'USD')
@@ -2671,14 +2873,17 @@ class AccountMonitorService {
         amount += converted;
         requestCount += integer(row.request_count);
         costSampleCount += integer(row.cost_sample_count);
+        unconfirmedCostCount += integer(row.unconfirmed_cost_count);
         rowCount += 1;
       }
     }
     return {
-      available: rowCount > 0 && requestCount === costSampleCount,
+      available: rowCount > 0 && requestCount === costSampleCount && unconfirmedCostCount === 0,
       reason: rowCount === 0
         ? 'ledger_snapshot_unavailable'
-        : requestCount !== costSampleCount ? 'ledger_cost_incomplete' : null,
+        : requestCount !== costSampleCount || unconfirmedCostCount > 0
+          ? 'ledger_cost_incomplete'
+          : null,
       amount: rowCount > 0 ? round(amount, 8) : null,
       currency: settings.displayCurrency,
       requestCount,
@@ -2707,9 +2912,12 @@ class AccountMonitorService {
     accountId, target, requestedWindow, logContext, baseLogCoverage, usageDelta, balanceDelta
   }) {
     const hasActivity = (delta, fields) => delta && fields.some((field) => Number(delta[field]) > 0);
-    const usageHasActivity = hasActivity(usageDelta, [
+    const usageFields = [
       'cost', 'requestCount', 'inputTokens', 'outputTokens', 'totalTokens'
-    ]);
+    ];
+    const usageHasActivity = usageDelta?.source === 'provider_counter_ledger'
+      ? usageFields.some((field) => Math.abs(Number(usageDelta[field] || 0)) > 1e-10)
+      : hasActivity(usageDelta, usageFields);
     const balanceHasActivity = hasActivity(balanceDelta, ['cost']);
     let candidate = null;
 
@@ -2772,12 +2980,17 @@ class AccountMonitorService {
         pairedUpstreamCost: null,
         requestCount: snapshotCandidate.requestCount,
         pairing: null,
-        exactWindow: snapshotCandidate.exactWindow === true
+        exactWindow: snapshotCandidate.exactWindow === true,
+        precisionSeconds: snapshotCandidate.precisionSeconds ?? null,
+        sourceLogIds: snapshotCandidate.sourceLogIds || null
       };
     }
 
     let frozenCash = null;
-    if (candidate?.source === 'provider_request_logs' && target.key_id) {
+    if (
+      ['provider_request_logs', 'provider_counter_ledger'].includes(candidate?.source) &&
+      target.key_id
+    ) {
       const common = {
         accountId,
         keyId: String(target.key_id),
@@ -2786,7 +2999,13 @@ class AccountMonitorService {
       };
       frozenCash = {
         windowBase: this.#frozenLedgerCash({ ...common, side: 'base' }),
-        windowUpstream: this.#frozenLedgerCash({ ...common, side: 'upstream' }),
+        windowUpstream: this.#frozenLedgerCash({
+          ...common,
+          side: 'upstream',
+          sourceLogIds: candidate.source === 'provider_counter_ledger'
+            ? candidate.sourceLogIds
+            : null
+        }),
         pairedBase: candidate.scope === 'paired_requests'
           ? this.#frozenLedgerCash({
               ...common,
@@ -2841,6 +3060,8 @@ class AccountMonitorService {
       baseRechargeMultiplier,
       providerRecharge,
       valuationMode: frozenCash ? 'transaction_snapshot' : 'current_multiplier_fallback',
+      estimated: candidate?.source === 'provider_counter_ledger',
+      precisionSeconds: candidate?.precisionSeconds ?? null,
       reason: candidate ? null : 'provider_cost_unavailable',
       requestedFrom: requestedWindow.from,
       requestedTo: requestedWindow.to
@@ -2885,10 +3106,13 @@ class AccountMonitorService {
       frozenCash?.pairedBase?.available && frozenCash?.pairedUpstream?.available &&
       frozenCash.pairedBase.requestCount === candidate.baseMetrics.requestCount &&
       frozenCash.pairedUpstream.requestCount === candidate.upstreamMetrics.requestCount;
+    const expectedWindowUpstreamRequests = candidate.scope === 'snapshot_window'
+      ? candidate.requestCount
+      : candidate.windowUpstreamMetrics?.requestCount;
     const windowFrozenAvailable = frozenCash?.windowBase?.available &&
       frozenCash?.windowUpstream?.available &&
       frozenCash.windowBase.requestCount === candidate.windowBaseMetrics.requestCount &&
-      frozenCash.windowUpstream.requestCount === candidate.windowUpstreamMetrics.requestCount;
+      frozenCash.windowUpstream.requestCount === expectedWindowUpstreamRequests;
     cost.baseCashEquivalent = pairedFrozenAvailable
       ? frozenCash.pairedBase.amount
       : baseCostAvailable ? round(Number(candidate.baseCost) / baseRechargeMultiplier, 8) : null;
@@ -2920,7 +3144,11 @@ class AccountMonitorService {
       ? 'transaction_snapshot'
       : 'current_multiplier_fallback';
 
-    if (candidate.source !== 'provider_request_logs' && !candidate.exactWindow) {
+    if (
+      candidate.source !== 'provider_request_logs' &&
+      candidate.source !== 'provider_counter_ledger' &&
+      !candidate.exactWindow
+    ) {
       cost.windowReason = 'request_logs_unavailable';
     } else if (!candidate.baseCoverageComplete) {
       cost.windowReason = 'base_request_logs_incomplete';
@@ -3120,7 +3348,8 @@ class AccountMonitorService {
         target.request_log_scope === 'key';
       const hasKeyLogCoverage = (hasLogCoverage &&
         target.request_log_scope === 'key') || hasRetainedKeyLogCoverage;
-      const usageDelta = snapshots.usage.get(keyId) || null;
+      const usageDelta = snapshots.counter.get(`${keyId}\u0000${accountId}`) ||
+        snapshots.usage.get(keyId) || null;
       const balanceDelta = snapshots.balance.get(keyId) || null;
       let source = 'unavailable';
       let base = null;
@@ -3242,15 +3471,19 @@ class AccountMonitorService {
               ? 'no_successful_requests'
               : pairing.reason;
       } else if (usageDelta) {
-        source = usageDelta.snapshotKind === 'daily_usage'
-          ? 'provider_daily_usage'
-          : 'provider_usage_snapshots';
+        source = usageDelta.snapshotKind === 'counter_ledger'
+          ? 'provider_counter_ledger'
+          : usageDelta.snapshotKind === 'daily_usage'
+            ? 'provider_daily_usage'
+            : 'provider_usage_snapshots';
         window = {
           requestedFrom: since,
           requestedTo: until,
           from: usageDelta.from,
           to: usageDelta.to,
-          source: usageDelta.snapshotKind === 'daily_usage' ? 'daily_usage' : 'snapshot_delta',
+          source: usageDelta.snapshotKind === 'counter_ledger'
+            ? 'counter_ledger'
+            : usageDelta.snapshotKind === 'daily_usage' ? 'daily_usage' : 'snapshot_delta',
           complete: usageDelta.exactWindow === true || (
             Date.parse(usageDelta.from) <= Date.parse(since) &&
             Date.parse(usageDelta.to) >= Date.parse(until)
@@ -3520,9 +3753,10 @@ class AccountMonitorService {
       (sum, entry) => sum + Number(entry[field] || 0),
       0
     );
-    const ledgerCash = (entries, field) => {
+    const ledgerCash = (entries, field, confirmationField = null) => {
       let totalAmount = 0;
       for (const entry of entries) {
+        if (confirmationField && entry[confirmationField] === false) return null;
         const converted = this.#auditAmount(
           Number(entry[field] || 0),
           entry.cashCurrency,
@@ -3582,8 +3816,29 @@ class AccountMonitorService {
         const windowCacheReadTokens = ledgerValue(ledgerEntries, 'windowCacheReadTokens');
         const promptTokens = windowInputTokens + windowCacheCreationTokens + windowCacheReadTokens;
         const currencies = [...new Set(ledgerEntries.map((entry) => entry.currency))];
-        const windowCost = currencies.length === 1
+        const counterWindowCovered = ledgerEntries.some((entry) => (
+          entry.counterObservedIntervalCount > 0 &&
+          Date.parse(entry.counterLastCapturedAt) >= Date.parse(since) &&
+          Date.parse(entry.counterAccountingStartedAt) <= Date.parse(until)
+        ));
+        const hasWindowAccounting = ledgerValue(ledgerEntries, 'windowEntryCount') > 0 ||
+          counterWindowCovered || ['succeeded', 'partial'].includes(key.request_log_status);
+        const windowCost = currencies.length === 1 && hasWindowAccounting
           ? ledgerValue(ledgerEntries, 'windowCost')
+          : null;
+        const lifetimeBalanceCost = currencies.length === 1
+          ? ledgerValue(ledgerEntries, 'lifetimeCost')
+          : null;
+        const hasReportedCounter = ledgerEntries.some(
+          (entry) => entry.reportedLifetimeCost != null
+        );
+        const reportedLifetimeBalanceCost = currencies.length === 1
+          ? hasReportedCounter
+            ? ledgerValue(ledgerEntries, 'reportedLifetimeCost')
+            : lifetimeBalanceCost
+          : null;
+        const openingBalanceCost = currencies.length === 1
+          ? ledgerValue(ledgerEntries, 'openingCost')
           : null;
         const keyUpstreamMetrics = attachQuality({
           ...sampleMetric,
@@ -3616,10 +3871,21 @@ class AccountMonitorService {
           lastProbeStatus: accountMetric.lastProbeStatus
         });
         const upstreamWindowCash = keyUpstreamMetrics.available
-          ? ledgerCash(cashLedgerEntries, 'windowCashCost')
+          ? ledgerCash(cashLedgerEntries, 'windowCashCost', 'windowConfirmed')
           : null;
-        const upstreamLifetimeCash = keyUpstreamMetrics.available
-          ? ledgerCash(cashLedgerEntries, 'lifetimeCashCost')
+        const upstreamComparableLifetimeCash = keyUpstreamMetrics.available
+          ? ledgerCash(
+              cashLedgerEntries,
+              'lifetimeCashCost',
+              'lifetimeComparableConfirmed'
+            )
+          : null;
+        const upstreamReportedLifetimeCash = keyUpstreamMetrics.available
+          ? ledgerCash(
+              cashLedgerEntries,
+              'reportedLifetimeCashCost',
+              'reportedLifetimeConfirmed'
+            )
           : null;
         const baseWindowCash = baseCashEntries.length > 0
           ? ledgerCash(baseCashEntries, 'windowCashRevenue')
@@ -3627,8 +3893,29 @@ class AccountMonitorService {
         const baseLifetimeCash = baseCashEntries.length > 0
           ? ledgerCash(baseCashEntries, 'lifetimeCashRevenue')
           : attributionComplete ? 0 : null;
-        const lifetimeRequestCount = ledgerValue(ledgerEntries, 'lifetimeRequestCount');
+        const comparableLifetimeRequestCount = ledgerValue(
+          ledgerEntries,
+          'lifetimeRequestCount'
+        );
+        const lifetimeRequestCount = hasReportedCounter
+          ? ledgerValue(ledgerEntries, 'reportedLifetimeRequestCount')
+          : comparableLifetimeRequestCount;
         const lifetimeCostSamples = ledgerValue(ledgerEntries, 'lifetimeCostSampleCount');
+        const unallocatedEntryCount = ledgerValue(ledgerEntries, 'unallocatedEntryCount');
+        const counterEntryCount = ledgerValue(ledgerEntries, 'counterEntryCount');
+        const requestEntryCount = ledgerValue(ledgerEntries, 'requestEntryCount');
+        const accountingMode = counterEntryCount > 0 && requestEntryCount > 0
+          ? 'mixed'
+          : counterEntryCount > 0 || hasReportedCounter
+            ? 'counter_ledger'
+            : requestEntryCount > 0 ? 'request_log' : 'unavailable';
+        const hasComparableUpstreamWindow = hasWindowAccounting;
+        keyUpstreamMetrics.available = hasComparableUpstreamWindow;
+        keyUpstreamMetrics.unavailableReason = hasComparableUpstreamWindow
+          ? null
+          : hasReportedCounter
+            ? 'provider_counter_baseline_only'
+            : 'upstream_request_logs_unavailable';
         return {
           keyId,
           remoteKeyId: String(key.remote_id),
@@ -3646,16 +3933,23 @@ class AccountMonitorService {
           upstreamMetrics: keyUpstreamMetrics,
           audit: {
             displayCurrency: auditSettings.displayCurrency,
+            upstreamBalanceCurrency: currencies.length === 1 ? currencies[0] : null,
             windowUpstreamCost: upstreamWindowCash,
-            lifetimeUpstreamCost: upstreamLifetimeCash,
+            lifetimeUpstreamCost: upstreamReportedLifetimeCash,
+            comparableLifetimeUpstreamCost: upstreamComparableLifetimeCash,
+            windowUpstreamBalanceCost: windowCost,
+            lifetimeUpstreamBalanceCost: lifetimeBalanceCost,
+            reportedLifetimeUpstreamBalanceCost: reportedLifetimeBalanceCost,
+            openingUpstreamBalanceCost: openingBalanceCost,
             windowBaseRevenue: baseWindowCash,
             lifetimeBaseRevenue: baseLifetimeCash,
             windowGrossProfit: baseWindowCash == null || upstreamWindowCash == null
               ? null
               : round(baseWindowCash - upstreamWindowCash, 8),
-            lifetimeGrossProfit: baseLifetimeCash == null || upstreamLifetimeCash == null
+            lifetimeGrossProfit: baseLifetimeCash == null ||
+              upstreamReportedLifetimeCash == null || unallocatedEntryCount > 0
               ? null
-              : round(baseLifetimeCash - upstreamLifetimeCash, 8),
+              : round(baseLifetimeCash - upstreamReportedLifetimeCash, 8),
             attributedAccountCount: attributedAccountIds.length,
             unattributedAccountCount: mappedAccountIds.length - attributedAccountIds.length,
             attributionComplete,
@@ -3663,7 +3957,27 @@ class AccountMonitorService {
               ? ledgerValue(baseCashEntries, 'lifetimeRequestCount')
               : attributionComplete ? 0 : null,
             lifetimeRequestCount,
+            comparableLifetimeRequestCount,
             lifetimeCostSampleCount: lifetimeCostSamples,
+            accountingMode,
+            counterEntryCount,
+            requestEntryCount,
+            unallocatedEntryCount,
+            maximumPrecisionSeconds: ledgerEntries.reduce(
+              (maximum, entry) => Math.max(
+                maximum,
+                finite(entry.maximumPrecisionSeconds) || 0
+              ),
+              0
+            ),
+            counterResetCount: ledgerValue(ledgerEntries, 'counterResetCount'),
+            counterAccountingStartedAt: latestIso(
+              ledgerEntries.map((entry) => entry.counterAccountingStartedAt).filter(Boolean)
+                .sort((left, right) => Date.parse(left) - Date.parse(right)).slice(0, 1)
+            ),
+            counterLastCapturedAt: latestIso(
+              ledgerEntries.map((entry) => entry.counterLastCapturedAt)
+            ),
             windowSourceMissingCount: ledgerValue(
               ledgerEntries,
               'windowSourceMissingCount'
@@ -3711,13 +4025,21 @@ class AccountMonitorService {
         providerKeys,
         (key) => key.upstreamMetrics
       );
+      const providerUpstreamAvailable = providerKeys.some(
+        (key) => key.upstreamMetrics.available
+      );
+      const providerUnavailableReasons = [...new Set(providerKeys
+        .map((key) => key.upstreamMetrics.unavailableReason)
+        .filter(Boolean))];
       const providerUpstreamMetrics = attachQuality({
         ...aggregatedProviderUpstreamMetrics,
         ...metricsForProbeScope(providerCombinedProbeMetrics, 'upstream'),
-        available: providerKeys.some((key) => key.upstreamMetrics.available),
-        unavailableReason: providerKeys.some((key) => key.upstreamMetrics.available)
+        available: providerUpstreamAvailable,
+        unavailableReason: providerUpstreamAvailable
           ? null
-          : 'upstream_request_logs_unavailable'
+          : providerUnavailableReasons.length === 1
+            ? providerUnavailableReasons[0]
+            : 'upstream_request_logs_unavailable'
       });
       const metrics = attachQuality({
         ...providerUpstreamMetrics,
@@ -3747,6 +4069,33 @@ class AccountMonitorService {
             (sum, key) => sum + Number(key.audit.lifetimeUpstreamCost || 0),
             0
           ), 8);
+      const upstreamWindowBalanceCost = providerKeys.length === 0 || providerKeys.some(
+        (key) => key.audit.windowUpstreamBalanceCost == null
+      ) ? null : round(providerKeys.reduce(
+        (sum, key) => sum + Number(key.audit.windowUpstreamBalanceCost || 0),
+        0
+      ), 8);
+      const reportedLifetimeUpstreamBalanceCost = providerKeys.length === 0 ||
+        providerKeys.some((key) => key.audit.reportedLifetimeUpstreamBalanceCost == null)
+        ? null
+        : round(providerKeys.reduce(
+            (sum, key) => sum + Number(key.audit.reportedLifetimeUpstreamBalanceCost || 0),
+            0
+          ), 8);
+      const comparableLifetimeUpstreamBalanceCost = providerKeys.length === 0 ||
+        providerKeys.some((key) => key.audit.lifetimeUpstreamBalanceCost == null)
+        ? null
+        : round(providerKeys.reduce(
+            (sum, key) => sum + Number(key.audit.lifetimeUpstreamBalanceCost || 0),
+            0
+          ), 8);
+      const unallocatedEntryCount = providerKeys.reduce(
+        (sum, key) => sum + Number(key.audit.unallocatedEntryCount || 0),
+        0
+      );
+      const providerBalanceCurrencies = [...new Set(
+        providerKeys.map((key) => key.audit.upstreamBalanceCurrency).filter(Boolean)
+      )];
       const attributionComplete = providerAttributionComplete;
       const keyBaseWindowValues = providerKeys.map((key) => key.audit.windowBaseRevenue)
         .filter((value) => value != null);
@@ -3766,7 +4115,8 @@ class AccountMonitorService {
             auditSettings
           )
         : null;
-      const lifetimeGrossProfit = baseLifetimeRevenue == null || upstreamLifetimeCost == null
+      const lifetimeGrossProfit = baseLifetimeRevenue == null ||
+        upstreamLifetimeCost == null || unallocatedEntryCount > 0
         ? null
         : round(baseLifetimeRevenue - upstreamLifetimeCost, 8);
       const windowGrossProfit = baseWindowRevenue == null || upstreamWindowCost == null
@@ -3799,8 +4149,14 @@ class AccountMonitorService {
         },
         audit: {
           displayCurrency: auditSettings.displayCurrency,
+          upstreamBalanceCurrency: providerBalanceCurrencies.length === 1
+            ? providerBalanceCurrencies[0]
+            : null,
           windowUpstreamCost: upstreamWindowCost,
           lifetimeUpstreamCost: upstreamLifetimeCost,
+          windowUpstreamBalanceCost: upstreamWindowBalanceCost,
+          lifetimeUpstreamBalanceCost: comparableLifetimeUpstreamBalanceCost,
+          reportedLifetimeUpstreamBalanceCost,
           windowBaseRevenue: baseWindowRevenue,
           lifetimeBaseRevenue: baseLifetimeRevenue,
           windowGrossProfit,
@@ -3817,6 +4173,31 @@ class AccountMonitorService {
           attributedAccountCount: attributedAccountIds.length,
           unattributedAccountCount: mappedAccountIds.length - attributedAccountIds.length,
           attributionComplete,
+          accountingMode: providerKeys.some(
+            (key) => key.audit.accountingMode === 'mixed'
+          ) || new Set(providerKeys.map((key) => key.audit.accountingMode)).size > 1
+            ? 'mixed'
+            : providerKeys[0]?.audit.accountingMode || 'unavailable',
+          counterEntryCount: providerKeys.reduce(
+            (sum, key) => sum + Number(key.audit.counterEntryCount || 0),
+            0
+          ),
+          requestEntryCount: providerKeys.reduce(
+            (sum, key) => sum + Number(key.audit.requestEntryCount || 0),
+            0
+          ),
+          unallocatedEntryCount,
+          maximumPrecisionSeconds: providerKeys.reduce(
+            (maximum, key) => Math.max(
+              maximum,
+              Number(key.audit.maximumPrecisionSeconds || 0)
+            ),
+            0
+          ),
+          counterResetCount: providerKeys.reduce(
+            (sum, key) => sum + Number(key.audit.counterResetCount || 0),
+            0
+          ),
           lifetimeBaseRequestCount: providerKeys.some(
             (key) => key.audit.lifetimeBaseRequestCount != null
           ) ? providerKeys.reduce(

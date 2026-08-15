@@ -19,7 +19,8 @@ function providerValuationContext(db, connectionId) {
     status: manual ? 'manual' : detected ? row.status || 'detected' : 'default',
     cashCurrency: row.paid_currency || row.balance_currency || null,
     balanceCurrency: row.balance_currency || null,
-    observedAt: row.checked_at || null
+    observedAt: row.checked_at || null,
+    confirmed: Boolean(manual || detected)
   };
 }
 
@@ -172,6 +173,7 @@ function rebuildProviderCostRollups(db, connectionId, keyIdentities = null) {
       MIN(occurred_at), MAX(occurred_at), MAX(updated_at)
     FROM provider_cost_ledger
     WHERE connection_id = ? AND key_identity = ?
+      AND accounting_status = 'active' AND comparable = 1
     GROUP BY connection_id, key_identity, currency
   `);
   const removeCash = db.prepare(`
@@ -189,6 +191,7 @@ function rebuildProviderCostRollups(db, connectionId, keyIdentities = null) {
       MIN(occurred_at), MAX(occurred_at), MAX(updated_at)
     FROM provider_cost_ledger
     WHERE connection_id = ? AND key_identity = ?
+      AND accounting_status = 'active' AND comparable = 1
     GROUP BY connection_id, key_identity, COALESCE(cash_currency, currency, 'USD')
   `);
   for (const identity of identities) {
