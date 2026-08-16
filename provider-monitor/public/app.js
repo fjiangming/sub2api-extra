@@ -2298,12 +2298,13 @@ async function loadTrend() {
 }
 
 async function renderAutomation() {
-  const [alertRules, automationRules, events, channels, actions] = await Promise.all([
+  const [alertRules, automationRules, events, channels, actions, mappings] = await Promise.all([
     api('/api/alert-rules'),
     api('/api/automation-rules'),
     api('/api/alerts'),
     api('/api/notification-channels'),
-    api('/api/automation-actions')
+    api('/api/automation-actions'),
+    api('/api/mappings')
   ]);
   const rules = normalizeUnifiedRules(alertRules.items, automationRules.items);
   state.alertRules = rules.filter((rule) => rule.kind === 'alert');
@@ -2311,6 +2312,7 @@ async function renderAutomation() {
   state.alerts = events.items;
   state.channels = channels.items;
   state.automationActions = actions.items;
+  state.mappings = mappings.items;
   setTopActions(`<button class="button" data-action="evaluate-alerts" title="立即评估告警" aria-label="立即评估告警"><i data-lucide="scan-line"></i><span>立即评估</span></button><button class="button" data-action="add-alert-rule" title="添加告警规则" aria-label="添加告警规则"><i data-lucide="bell-plus"></i><span>告警规则</span></button><button class="button primary" data-action="add-automation" title="添加自动化规则" aria-label="添加自动化规则"><i data-lucide="workflow"></i><span>自动化规则</span></button>`);
   const ruleRows = rules.map(unifiedRuleRow).join('');
   const eventList = state.alerts.map((event) => `<div class="alert-item"><span class="alert-symbol ${event.severity === 'error' ? 'error' : ''}"><i data-lucide="${event.severity === 'error' ? 'octagon-alert' : 'triangle-alert'}"></i></span><div><p>${escapeHtml(event.message)}</p><small>${formatDate(event.triggered_at)} · ${escapeHtml(alertSeverityLabel(event.severity))}</small></div><div>${badge(event.status)}${event.status === 'active' ? `<button class="icon-button small" data-action="ack-alert" data-id="${event.id}" title="确认告警" aria-label="确认告警"><i data-lucide="check"></i></button>` : ''}</div></div>`).join('');
@@ -2415,6 +2417,19 @@ function ruleTriggerDetail(rule) {
       details.push(`综合倍率偏差 ${operator} ${formatNumber(rule.config.condition.threshold)}%`);
     }
     return details.join(' · ');
+  }
+  if (rule.kind === 'alert' && rule.triggerType === 'rate_mismatch') {
+    const operator = {
+      abs_gt: '绝对偏差 >', lt: '偏差 <', lte: '偏差 ≤', gt: '偏差 >', gte: '偏差 ≥'
+    }[rule.config?.comparisonOperator || 'abs_gt'];
+    const groupId = Number(rule.config?.groupId);
+    const mapping = Number.isInteger(groupId)
+      ? state.mappings.find((item) => Number(item.group_id) === groupId)
+      : null;
+    const groupLabel = Number.isInteger(groupId)
+      ? mapping?.comparison?.baseGroupName || `分组 #${groupId}`
+      : '全部已映射分组';
+    return `${groupLabel} · ${operator} ${formatNumber(rule.threshold)}%`;
   }
   const threshold = rule.kind === 'alert' ? rule.threshold : rule.config?.threshold;
   const currency = rule.kind === 'alert' ? rule.currency : rule.config?.currency;
@@ -3349,7 +3364,7 @@ const ALERT_RULE_FIELD_CONFIG = Object.freeze({
   sync_failed: { fields: [] },
   key_expiry: { fields: ['threshold'], thresholdLabel: '提前预警（天）', min: '0', step: '1' },
   key_disabled: { fields: [] },
-  rate_mismatch: { fields: ['threshold'], thresholdLabel: '倍率偏差（%）', min: '0', step: '0.01' },
+  rate_mismatch: { fields: ['groupId', 'comparisonOperator', 'threshold'], thresholdLabel: '偏差阈值（%）', min: '', step: '0.01' },
   asset_drift: { fields: [] },
   contract_changed: { fields: [] },
   anomaly: { fields: [] },
@@ -3367,8 +3382,8 @@ function updateAlertRuleFields(form = $('#alert-rule-form'), { resetValues = fal
   form.querySelectorAll('[data-alert-field]').forEach((field) => {
     field.hidden = !activeFields.has(field.dataset.alertField);
   });
-  for (const fieldName of ['scope', 'threshold', 'currency', 'consecutiveMatches']) {
-    form.elements[fieldName].required = activeFields.has(fieldName);
+  for (const fieldName of ['scope', 'threshold', 'currency', 'consecutiveMatches', 'comparisonOperator', 'groupId']) {
+    form.elements[fieldName].required = fieldName !== 'groupId' && activeFields.has(fieldName);
   }
   form.elements.threshold.min = config.min || '';
   form.elements.threshold.step = config.step || 'any';
@@ -3378,21 +3393,55 @@ function updateAlertRuleFields(form = $('#alert-rule-form'), { resetValues = fal
     form.elements.threshold.value = '';
     form.elements.currency.value = 'USD';
     form.elements.consecutiveMatches.value = '1';
+    form.elements.comparisonOperator.value = 'lt';
+    form.elements.groupId.value = '';
   }
+}
+
+function updateAlertGroupOptions(selected = '') {
+  const form = $('#alert-rule-form');
+  const connectionId = form.elements.connectionId.value;
+  const groups = new Map();
+  for (const mapping of state.mappings) {
+    if (connectionId && mapping.connection_id !== connectionId) continue;
+    const groupId = Number(mapping.group_id);
+    if (!Number.isInteger(groupId) || groupId <= 0 || groups.has(groupId)) continue;
+    groups.set(groupId, mapping.comparison?.baseGroupName || `分组 #${groupId}`);
+  }
+  const selectedId = Number(selected);
+  const missingOption = selected && !groups.has(selectedId)
+    ? `<option value="${escapeHtml(selected)}">分组 #${escapeHtml(selected)}（当前无映射）</option>`
+    : '';
+  form.elements.groupId.innerHTML = `<option value="">全部已映射分组</option>${missingOption}${[...groups.entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map(([id, name]) => `<option value="${id}">${escapeHtml(name)} · #${id}</option>`).join('')}`;
+  form.elements.groupId.value = selected || '';
 }
 
 function openAlertRule(rule = null) {
   const form = $('#alert-rule-form'); form.reset();
+  form.dataset.config = JSON.stringify(rule?.config || {});
   form.elements.id.value = rule?.id || ''; form.elements.name.value = rule?.name || '';
   form.elements.ruleType.value = rule?.rule_type || 'low_balance'; fillProviderSelect(form.elements.connectionId, rule?.connection_id);
+  updateAlertGroupOptions(rule?.config?.groupId || '');
   form.elements.scope.value = rule?.scope || 'account';
   form.elements.threshold.value = rule?.threshold ?? ''; form.elements.currency.value = rule?.currency || 'USD';
+  form.elements.comparisonOperator.value = rule?.config?.comparisonOperator || (rule ? 'abs_gt' : 'lt');
   form.elements.consecutiveMatches.value = rule?.consecutive_matches || 1; form.elements.cooldownMinutes.value = rule?.cooldown_minutes || 60;
   form.elements.enabled.checked = rule?.enabled ?? true; updateAlertRuleFields(); $('#alert-rule-dialog').showModal(); icons();
 }
 
 function alertRulePayload(form) {
   const activeFields = new Set(alertRuleFieldConfig(form.elements.ruleType.value).fields);
+  const config = { ...JSON.parse(form.dataset?.config || '{}') };
+  if (form.elements.ruleType.value === 'rate_mismatch') {
+    config.comparisonOperator = form.elements.comparisonOperator.value;
+    if (form.elements.groupId.value) config.groupId = Number(form.elements.groupId.value);
+    else delete config.groupId;
+  } else {
+    delete config.comparisonOperator;
+    delete config.groupId;
+  }
   return {
     name: form.elements.name.value.trim(),
     ruleType: form.elements.ruleType.value,
@@ -3405,7 +3454,7 @@ function alertRulePayload(form) {
     consecutiveMatches: activeFields.has('consecutiveMatches') ? Number(form.elements.consecutiveMatches.value) : 1,
     cooldownMinutes: Number(form.elements.cooldownMinutes.value),
     enabled: form.elements.enabled.checked,
-    config: {}
+    config
   };
 }
 
@@ -4082,6 +4131,7 @@ $('#logout-button').addEventListener('click', async () => {
 });
 $('#provider-dialog').addEventListener('close', () => cancelProviderDetection({ clearStatus: true }));
 $('#alert-rule-form')?.elements?.ruleType?.addEventListener('change', (event) => updateAlertRuleFields(event.target.form, { resetValues: true }));
+$('#alert-rule-form')?.elements?.connectionId?.addEventListener('change', () => updateAlertGroupOptions(''));
 $('#automation-form')?.elements?.action?.addEventListener('change', (event) => updateAutomationActionFields(event.target.form));
 $('#automation-form')?.elements?.triggerType?.addEventListener('change', (event) => updateAutomationActionFields(event.target.form));
 $('#automation-form')?.elements?.scheduledConditionType?.addEventListener('change', (event) => updateAutomationActionFields(event.target.form));

@@ -27,6 +27,37 @@ function insertKeySnapshot(db, connectionId, keyId, available, capturedAt = new 
   `).run(connectionId, keyId, available, capturedAt);
 }
 
+function insertMappingState(db, {
+  id, connectionId, groupId, groupName, differenceRatio,
+  status = 'rate_mismatch', compositeRate = 1, baseRate = 1 + differenceRatio
+}) {
+  const now = new Date().toISOString();
+  db.transaction(() => {
+    db.prepare(`
+      INSERT INTO sub2api_mappings(
+        id, connection_id, group_id, role, enabled, models_json, config_json, created_at, updated_at
+      ) VALUES (?, ?, ?, 'primary', 1, '[]', '{}', ?, ?)
+    `).run(id, connectionId, groupId, now, now);
+    db.prepare(`
+      INSERT INTO sub2api_mapping_states(
+        mapping_id, status, provider_group_name, provider_rate,
+        base_group_id, base_group_name, base_group_rate, difference_ratio,
+        tolerance_ratio, details_json, checked_at
+      ) VALUES (?, ?, 'upstream', ?, ?, ?, ?, ?, 0.05, ?, ?)
+    `).run(
+      id,
+      status,
+      compositeRate,
+      groupId,
+      groupName,
+      baseRate,
+      differenceRatio,
+      JSON.stringify({ rechargeMultiplier: 1, compositeRate, differenceRateScope: 'composite_rate' }),
+      now
+    );
+  })();
+}
+
 test('legacy English alert messages are returned in Chinese', () => {
   assert.equal(
     localizeLegacyAlertMessage('hubway balance is 92.52 USD, at or below 100 USD.'),
@@ -81,6 +112,65 @@ test('alert remains acknowledged while matched and resolves after balance recove
   event = alerts.listEvents().find((item) => item.rule_id === rule.id);
   assert.equal(event.status, 'active');
   assert.equal(event.acknowledged_at, null);
+});
+
+test('signed composite-rate alert filters one Sub2API group and dispatches notifications', async (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Margin Provider', adapterType: 'custom', baseUrl: 'https://margin.example.com',
+    authMode: 'api_key', credentials: { apiKey: 'secret' }
+  });
+  insertMappingState(context.db, {
+    id: 'target-group-mapping', connectionId: provider.id, groupId: 7,
+    groupName: 'Target', differenceRatio: -0.08, compositeRate: 1.25, baseRate: 1.15
+  });
+  insertMappingState(context.db, {
+    id: 'other-group-mapping', connectionId: provider.id, groupId: 8,
+    groupName: 'Other', differenceRatio: -0.2, compositeRate: 1.25, baseRate: 1
+  });
+  const deliveries = [];
+  const alerts = new AlertService({
+    db: context.db,
+    config: context.config,
+    queries: new QueryService(context.db, context.config),
+    notifications: { dispatch: async (event) => deliveries.push(event) }
+  });
+  const rule = alerts.saveRule({
+    name: 'Target group negative margin', ruleType: 'rate_mismatch', connectionId: provider.id,
+    threshold: -5, cooldownMinutes: 60, enabled: true,
+    config: { comparisonOperator: 'lt', groupId: 7 }
+  });
+
+  await alerts.evaluateConnection(provider.id);
+
+  let events = alerts.listEvents();
+  assert.equal(events.length, 1);
+  assert.equal(events[0].rule_id, rule.id);
+  assert.equal(events[0].subject_id, 'target-group-mapping');
+  assert.equal(events[0].details.comparisonOperator, 'lt');
+  assert.equal(events[0].details.targetGroupId, 7);
+  assert.equal(events[0].details.thresholdRatio, -0.05);
+  assert.equal(events[0].details.compositeRate, 1.25);
+  assert.equal(
+    events[0].message,
+    'Margin Provider 映射分组“Target”的综合倍率偏差命中条件：-8.00% < -5.00%。'
+  );
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries[0].id, events[0].id);
+
+  context.db.prepare(`
+    UPDATE sub2api_mapping_states
+    SET status = 'aligned', difference_ratio = -0.03, checked_at = ?
+    WHERE mapping_id = 'target-group-mapping'
+  `).run(new Date(Date.now() + 1000).toISOString());
+  await alerts.evaluateConnection(provider.id);
+
+  events = alerts.listEvents();
+  assert.equal(events[0].status, 'resolved');
+  assert.equal(deliveries.length, 2);
+  assert.equal(deliveries[1].severity, 'info');
 });
 
 test('provider balance thresholds deduplicate alerts and suppress recovery notifications', async (t) => {

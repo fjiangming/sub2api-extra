@@ -70,6 +70,29 @@ test('HTTP API enforces login and CSRF while serving the operational frontend', 
   });
   assert.equal(completeBalanceRule.status, 201);
 
+  const signedRateRule = await fetch(`${base}/api/alert-rules`, {
+    method: 'POST',
+    headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
+    body: JSON.stringify({
+      name: 'Negative group margin', ruleType: 'rate_mismatch', threshold: -5,
+      config: { comparisonOperator: 'lt', groupId: 7 }
+    })
+  });
+  assert.equal(signedRateRule.status, 201);
+  const savedSignedRateRule = await signedRateRule.json();
+  assert.equal(savedSignedRateRule.threshold, -5);
+  assert.deepEqual(savedSignedRateRule.config, { comparisonOperator: 'lt', groupId: 7 });
+
+  const invalidRateRule = await fetch(`${base}/api/alert-rules`, {
+    method: 'POST',
+    headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
+    body: JSON.stringify({
+      name: 'Invalid margin operator', ruleType: 'rate_mismatch', threshold: -5,
+      config: { comparisonOperator: 'outside', groupId: 7 }
+    })
+  });
+  assert.equal(invalidRateRule.status, 400);
+
   const keyInventoryServer = http.createServer((req, res) => {
     assert.equal(req.headers.authorization, 'Bearer inventory-session-token');
     assert.match(req.url, /^\/api\/v1\/keys\?/);

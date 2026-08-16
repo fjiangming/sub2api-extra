@@ -797,20 +797,24 @@ test('alert rule form only enables fields used by the selected type', () => {
     threshold: { value: '20' },
     currency: { value: 'USD' },
     consecutiveMatches: { value: '2' },
+    comparisonOperator: { value: 'lt' },
+    groupId: { value: '', innerHTML: '' },
     cooldownMinutes: { value: '60' },
     enabled: { checked: true }
   };
-  const fields = ['scope', 'threshold', 'currency', 'consecutiveMatches'].map((name) => ({
+  const fields = ['scope', 'threshold', 'currency', 'consecutiveMatches', 'comparisonOperator', 'groupId'].map((name) => ({
     dataset: { alertField: name }, hidden: false
   }));
   const form = {
+    dataset: { config: '{}' },
     elements: controls,
     querySelectorAll(selector) { return selector === '[data-alert-field]' ? fields : []; }
   };
   context.testAlertRuleForm = form;
 
   vm.runInContext('updateAlertRuleFields(testAlertRuleForm)', context);
-  assert.equal(fields.every((field) => !field.hidden), true);
+  assert.equal(fields.filter((field) => ['scope', 'threshold', 'currency', 'consecutiveMatches'].includes(field.dataset.alertField)).every((field) => !field.hidden), true);
+  assert.equal(fields.filter((field) => ['comparisonOperator', 'groupId'].includes(field.dataset.alertField)).every((field) => field.hidden), true);
   assert.equal(controls.threshold.required, true);
   assert.equal(controls.currency.required, true);
   assert.equal(
@@ -822,6 +826,18 @@ test('alert rule form only enables fields used by the selected type', () => {
   assert.equal(lowBalancePayload.threshold, 20);
   assert.equal(lowBalancePayload.currency, 'USD');
   assert.equal(lowBalancePayload.consecutiveMatches, 2);
+
+  controls.ruleType.value = 'rate_mismatch';
+  controls.threshold.value = '-5';
+  controls.comparisonOperator.value = 'lt';
+  controls.groupId.value = '7';
+  vm.runInContext('updateAlertRuleFields(testAlertRuleForm)', context);
+  const ratePayload = JSON.parse(vm.runInContext('JSON.stringify(alertRulePayload(testAlertRuleForm))', context));
+  assert.equal(controls.threshold.min, '');
+  assert.equal(controls.comparisonOperator.required, true);
+  assert.equal(controls.groupId.required, false);
+  assert.equal(ratePayload.threshold, -5);
+  assert.deepEqual(ratePayload.config, { comparisonOperator: 'lt', groupId: 7 });
 
   controls.ruleType.value = 'sync_failed';
   vm.runInContext('updateAlertRuleFields(testAlertRuleForm)', context);
@@ -835,6 +851,8 @@ test('alert rule form only enables fields used by the selected type', () => {
 
   assert.match(index, /data-alert-field="scope"/);
   assert.match(index, /data-alert-field="threshold"/);
+  assert.match(index, /data-alert-field="groupId"/);
+  assert.match(index, /name="comparisonOperator"/);
   assert.match(index, /name="cooldownMinutes"[^>]+required/);
 });
 

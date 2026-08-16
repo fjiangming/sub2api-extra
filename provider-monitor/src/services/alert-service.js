@@ -34,6 +34,28 @@ const ALERT_TERM_LABELS = {
   switch_to_backup: '切换到备用渠道'
 };
 
+const RATE_DIFFERENCE_OPERATORS = new Set(['abs_gt', 'lt', 'lte', 'gt', 'gte']);
+const RATE_DIFFERENCE_OPERATOR_SYMBOLS = {
+  lt: '<',
+  lte: '≤',
+  gt: '>',
+  gte: '≥'
+};
+
+function normalizeRateDifferenceOperator(value) {
+  return RATE_DIFFERENCE_OPERATORS.has(value) ? value : 'abs_gt';
+}
+
+function rateDifferenceMatches(value, operator, threshold) {
+  if (!Number.isFinite(value) || !Number.isFinite(threshold)) return false;
+  if (operator === 'abs_gt') return Math.abs(value) > Math.max(0, threshold);
+  if (operator === 'lt') return value < threshold;
+  if (operator === 'lte') return value <= threshold;
+  if (operator === 'gt') return value > threshold;
+  if (operator === 'gte') return value >= threshold;
+  return false;
+}
+
 function alertTermLabel(value) {
   return ALERT_TERM_LABELS[value] || value;
 }
@@ -261,31 +283,44 @@ class AlertService {
 
   #evaluateRateMismatch(provider, rule) {
     const config = parseJson(rule.config_json, {});
-    const thresholdRatio = rule.threshold == null ? null : Math.max(0, Number(rule.threshold) / 100);
+    const comparisonOperator = normalizeRateDifferenceOperator(config.comparisonOperator);
+    const configuredThreshold = rule.threshold == null ? null : Number(rule.threshold) / 100;
+    const targetGroupId = Number.isInteger(Number(config.groupId)) && Number(config.groupId) > 0
+      ? Number(config.groupId)
+      : null;
     const states = this.db.prepare(`
       SELECT s.*, m.group_id FROM sub2api_mapping_states s
       JOIN sub2api_mappings m ON m.id = s.mapping_id
       WHERE m.connection_id = ? AND m.enabled = 1 AND s.status != 'mapping_disabled'
+        AND (? IS NULL OR m.group_id = ?)
       ORDER BY CASE s.status
         WHEN 'missing_base_group' THEN 0 WHEN 'rate_mismatch' THEN 1 ELSE 2 END,
         ABS(COALESCE(s.difference_ratio, 0)) DESC
-    `).all(provider.id);
+    `).all(provider.id, targetGroupId, targetGroupId);
     const evaluations = states.map((state) => {
       const comparisonDetails = parseJson(state.details_json, {});
-      const effectiveThreshold = thresholdRatio ?? state.tolerance_ratio;
-      const differenceExceeded = state.difference_ratio != null &&
-        Math.abs(state.difference_ratio) > Number(effectiveThreshold ?? 0);
-      const structuralMismatch = !['aligned', 'rate_mismatch'].includes(state.status);
-      const matched = structuralMismatch || differenceExceeded;
+      const effectiveThreshold = configuredThreshold ?? Number(state.tolerance_ratio ?? 0);
+      const differenceMatched = rateDifferenceMatches(
+        state.difference_ratio == null ? Number.NaN : Number(state.difference_ratio),
+        comparisonOperator,
+        effectiveThreshold
+      );
+      const structuralMismatch = comparisonOperator === 'abs_gt' &&
+        !['aligned', 'rate_mismatch'].includes(state.status);
+      const matched = structuralMismatch || differenceMatched;
       const differencePercent = state.difference_ratio == null ? null : state.difference_ratio * 100;
-      const alertStatus = differenceExceeded ? 'rate_mismatch' : state.status;
+      const thresholdPercent = effectiveThreshold * 100;
+      const alertStatus = differenceMatched ? 'rate_mismatch' : state.status;
+      const groupName = state.base_group_name || state.group_id;
       return {
         matched,
         subjectType: 'mapping',
         subjectId: state.mapping_id,
         severity: config.severity || (state.status === 'missing_base_group' ? 'error' : 'warning'),
         message: matched
-          ? `${provider.name} 映射分组“${state.base_group_name || state.group_id}”的倍率状态为${alertTermLabel(alertStatus)}${differencePercent == null ? '' : `（偏差 ${differencePercent.toFixed(2)}%）`}。`
+          ? comparisonOperator === 'abs_gt'
+            ? `${provider.name} 映射分组“${groupName}”的倍率状态为${alertTermLabel(alertStatus)}${differencePercent == null ? '' : `（偏差 ${differencePercent.toFixed(2)}%）`}。`
+            : `${provider.name} 映射分组“${groupName}”的综合倍率偏差命中条件：${differencePercent.toFixed(2)}% ${RATE_DIFFERENCE_OPERATOR_SYMBOLS[comparisonOperator]} ${thresholdPercent.toFixed(2)}%。`
           : '',
         details: matched ? {
           mappingId: state.mapping_id,
@@ -302,6 +337,8 @@ class AlertService {
           differenceRateScope: comparisonDetails.differenceRateScope || 'composite_rate',
           differenceRatio: state.difference_ratio,
           thresholdRatio: effectiveThreshold,
+          comparisonOperator,
+          targetGroupId,
           checkedAt: state.checked_at
         } : {}
       };

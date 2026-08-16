@@ -128,6 +128,7 @@ const alertRuleThresholdTypes = new Set([
   'credential_expiry', 'rate_mismatch'
 ]);
 const alertRuleCurrencyTypes = new Set(['low_balance', 'runway_below']);
+const rateDifferenceOperators = new Set(['abs_gt', 'lt', 'lte', 'gt', 'gte']);
 const alertRuleBaseSchema = z.object({
   name: z.string().trim().min(1).max(120),
   enabled: z.boolean().optional(),
@@ -139,7 +140,7 @@ const alertRuleBaseSchema = z.object({
   ]),
   scope: z.enum(['account', 'key', 'team']).optional(),
   currency: z.string().trim().max(12).optional().nullable(),
-  threshold: z.number().nonnegative().optional().nullable(),
+  threshold: z.number().finite().optional().nullable(),
   consecutiveMatches: z.number().int().min(1).max(20).optional(),
   cooldownMinutes: z.number().int().min(1).max(10080).optional(),
   config: z.record(z.string(), z.any()).optional()
@@ -150,6 +151,18 @@ const validateAlertRuleFields = (input, context) => {
   }
   if (alertRuleCurrencyTypes.has(input.ruleType) && !input.currency?.trim()) {
     context.addIssue({ code: 'custom', path: ['currency'], message: 'Currency is required for this alert type' });
+  }
+  const comparisonOperator = input.config?.comparisonOperator || 'abs_gt';
+  if (input.ruleType === 'rate_mismatch' && !rateDifferenceOperators.has(comparisonOperator)) {
+    context.addIssue({ code: 'custom', path: ['config', 'comparisonOperator'], message: 'Unsupported rate difference operator' });
+  }
+  if (input.ruleType === 'rate_mismatch' && input.config?.groupId != null &&
+      (!Number.isInteger(input.config.groupId) || input.config.groupId <= 0)) {
+    context.addIssue({ code: 'custom', path: ['config', 'groupId'], message: 'Group ID must be a positive integer' });
+  }
+  if (input.threshold != null && input.threshold < 0 &&
+      (input.ruleType !== 'rate_mismatch' || comparisonOperator === 'abs_gt')) {
+    context.addIssue({ code: 'custom', path: ['threshold'], message: 'Threshold must not be negative for this alert type' });
   }
   if (['stale_data', 'credential_expiry'].includes(input.ruleType) && Number(input.threshold) < 1) {
     context.addIssue({ code: 'custom', path: ['threshold'], message: 'Threshold must be at least 1 for this alert type' });
