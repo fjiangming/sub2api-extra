@@ -4,7 +4,18 @@ const { parseJson } = require('../db');
 
 const DIMENSIONS = new Set(['provider', 'key', 'account']);
 const GRANULARITIES = new Set(['day', 'week', 'month']);
+const ACCOUNTING_MODES = new Set(['standard', 'exclude_admin', 'admin_expense']);
+const ADMINISTRATOR_ACCOUNT_ID = '1';
 const MAX_RETURNED_ENTITIES = 200;
+
+const ACCOUNTING_MODE_ALIASES = {
+  default: 'standard',
+  normal: 'standard',
+  filter_admin: 'exclude_admin',
+  exclude_administrator: 'exclude_admin',
+  admin_as_expense: 'admin_expense',
+  pure: 'admin_expense'
+};
 
 function finite(value) {
   const number = Number(value);
@@ -107,6 +118,22 @@ function bucketForTimestamp(value, granularity, timezone) {
   return bucketForDateKey(dateInTimezone(new Date(timestamp), timezone), granularity);
 }
 
+function resolvedAccountExpression(alias = 'ledger') {
+  return `COALESCE(
+    ${alias}.attributed_account_id,
+    CASE WHEN ${alias}.source_type = 'request_log' THEN (
+      SELECT CASE WHEN COUNT(DISTINCT history.account_id) = 1
+        THEN MIN(history.account_id) END
+      FROM sub2api_mapping_history history
+      WHERE history.connection_id = ${alias}.connection_id
+        AND history.key_id = ${alias}.key_id
+        AND history.enabled = 1 AND history.role = 'primary'
+        AND history.valid_from <= ${alias}.occurred_at
+        AND (history.valid_to IS NULL OR history.valid_to > ${alias}.occurred_at)
+    ) END
+  )`;
+}
+
 function nextBucket(value, granularity) {
   if (granularity === 'day') return shiftDateKey(value, 1);
   if (granularity === 'week') return shiftDateKey(value, 7);
@@ -141,7 +168,9 @@ function calculationStatus(item) {
   if (!item.hasActivity) return 'empty';
   if (
     item.missingRevenueRequests > 0 || item.missingCostRequests > 0 ||
-    item.unconvertedRevenueRequests > 0 || item.unconvertedCostRequests > 0
+    item.missingAdministratorExpenseRequests > 0 ||
+    item.unconvertedRevenueRequests > 0 || item.unconvertedCostRequests > 0 ||
+    item.unconvertedAdministratorExpenseRequests > 0
   ) return 'partial';
   if (item.unconfirmedCostRequests > 0) return 'estimated';
   return 'complete';
@@ -149,10 +178,15 @@ function calculationStatus(item) {
 
 function finalizeAmounts(item) {
   const status = calculationStatus(item);
-  const provisionalGrossProfit = round(item.revenue - item.upstreamCost);
+  const administratorExpense = round(item.administratorExpense) || 0;
+  const operatingGrossProfit = round(item.revenue - item.upstreamCost);
+  const provisionalGrossProfit = round(operatingGrossProfit - administratorExpense);
   return {
     revenue: round(item.revenue),
     upstreamCost: round(item.upstreamCost),
+    administratorExpense,
+    totalCost: round(item.upstreamCost + administratorExpense),
+    operatingGrossProfit,
     grossProfit: status === 'complete' ? provisionalGrossProfit : null,
     estimatedGrossProfit: status === 'estimated' ? provisionalGrossProfit : null,
     provisionalGrossProfit,
@@ -164,9 +198,12 @@ function finalizeAmounts(item) {
     status,
     missingRevenueRequests: item.missingRevenueRequests,
     missingCostRequests: item.missingCostRequests,
+    administratorRequestCount: item.administratorRequestCount,
+    missingAdministratorExpenseRequests: item.missingAdministratorExpenseRequests,
     unconfirmedCostRequests: item.unconfirmedCostRequests,
     unconvertedRevenueRequests: item.unconvertedRevenueRequests,
     unconvertedCostRequests: item.unconvertedCostRequests,
+    unconvertedAdministratorExpenseRequests: item.unconvertedAdministratorExpenseRequests,
     maximumPrecisionSeconds: item.maximumPrecisionSeconds || null
   };
 }
@@ -175,13 +212,17 @@ function emptyAmounts() {
   return {
     revenue: 0,
     upstreamCost: 0,
+    administratorExpense: 0,
     baseRequestCount: 0,
     upstreamRequestCount: 0,
+    administratorRequestCount: 0,
     missingRevenueRequests: 0,
     missingCostRequests: 0,
+    missingAdministratorExpenseRequests: 0,
     unconfirmedCostRequests: 0,
     unconvertedRevenueRequests: 0,
     unconvertedCostRequests: 0,
+    unconvertedAdministratorExpenseRequests: 0,
     maximumPrecisionSeconds: 0,
     hasActivity: false
   };
@@ -198,11 +239,19 @@ class GrossProfitService {
   #query(input = {}) {
     const dimension = String(input.dimension || 'provider').trim().toLowerCase();
     const granularity = String(input.granularity || 'day').trim().toLowerCase();
+    const rawAccountingMode = String(
+      input.accountingMode || input.accounting_mode || input.statisticalMode ||
+      input.statistical_mode || input.mode || 'standard'
+    ).trim().toLowerCase();
+    const accountingMode = ACCOUNTING_MODE_ALIASES[rawAccountingMode] || rawAccountingMode;
     if (!DIMENSIONS.has(dimension)) {
       throw new AppError('VALIDATION_ERROR', 'Unsupported gross profit dimension', { status: 400 });
     }
     if (!GRANULARITIES.has(granularity)) {
       throw new AppError('VALIDATION_ERROR', 'Unsupported gross profit granularity', { status: 400 });
+    }
+    if (!ACCOUNTING_MODES.has(accountingMode)) {
+      throw new AppError('VALIDATION_ERROR', 'Unsupported gross profit accounting mode', { status: 400 });
     }
     const today = dateInTimezone(this.now(), this.config.timezone);
     const from = String(input.from || shiftDateKey(today, -29));
@@ -239,7 +288,9 @@ class GrossProfitService {
       toAt: toAt.toISOString(),
       connectionId,
       currency,
-      timezone: this.config.timezone
+      timezone: this.config.timezone,
+      accountingMode,
+      administratorAccountId: ADMINISTRATOR_ACCOUNT_ID
     };
   }
 
@@ -287,11 +338,14 @@ class GrossProfitService {
       timezone: query.timezone,
       fromAt: query.fromAt,
       toAt: query.toAt,
-      connectionId: query.connectionId
+      connectionId: query.connectionId,
+      administratorAccountId: query.administratorAccountId
     };
   }
 
-  #baseRows(query, excluded = false) {
+  #baseRows(query, purpose = 'included') {
+    const excluded = purpose === 'unattributed';
+    const administrator = purpose === 'administrator';
     const expressions = {
       provider: {
         id: 'ledger.connection_id',
@@ -306,9 +360,16 @@ class GrossProfitService {
         name: "COALESCE(account.name, '账号 #' || ledger.account_id)"
       }
     }[query.dimension];
-    const attributionClause = excluded
-      ? "ledger.attribution_status NOT IN ('attributed', 'attributed_multi_group') OR ledger.connection_id IS NULL OR ledger.key_id IS NULL"
-      : "ledger.attribution_status IN ('attributed', 'attributed_multi_group') AND ledger.connection_id IS NOT NULL AND ledger.key_id IS NOT NULL";
+    const attributionClause = administrator
+      ? '1 = 1'
+      : excluded
+        ? "ledger.attribution_status NOT IN ('attributed', 'attributed_multi_group') OR ledger.connection_id IS NULL OR ledger.key_id IS NULL"
+        : "ledger.attribution_status IN ('attributed', 'attributed_multi_group') AND ledger.connection_id IS NOT NULL AND ledger.key_id IS NOT NULL";
+    const administratorClause = administrator
+      ? 'AND CAST(ledger.account_id AS TEXT) = @administratorAccountId'
+      : query.accountingMode === 'standard'
+        ? ''
+        : 'AND (ledger.account_id IS NULL OR CAST(ledger.account_id AS TEXT) <> @administratorAccountId)';
     const providerClause = query.connectionId ? 'AND ledger.connection_id = @connectionId' : '';
     return this.db.prepare(`
       SELECT gross_profit_bucket(ledger.occurred_at, @granularity, @timezone) AS period_key,
@@ -328,6 +389,7 @@ class GrossProfitService {
       LEFT JOIN sub2api_monitored_accounts account ON account.account_id = ledger.account_id
       WHERE (${attributionClause})
         AND ledger.occurred_at >= @fromAt AND ledger.occurred_at < @toAt
+        ${administratorClause}
         ${providerClause}
       GROUP BY period_key, ledger.connection_id, entity_id,
         COALESCE(ledger.cash_currency, ledger.currency, 'USD')
@@ -342,63 +404,42 @@ class GrossProfitService {
       AND ledger.occurred_at >= @fromAt AND ledger.occurred_at < @toAt
       ${providerClause}
     `;
-    if (query.dimension === 'account') {
-      return this.db.prepare(`
-        WITH attributed AS (
-          SELECT ledger.*,
-            COALESCE(
-              ledger.attributed_account_id,
-              CASE WHEN ledger.source_type = 'request_log' THEN (
-                SELECT CASE WHEN COUNT(DISTINCT history.account_id) = 1
-                  THEN MIN(history.account_id) END
-                FROM sub2api_mapping_history history
-                WHERE history.connection_id = ledger.connection_id
-                  AND history.key_id = ledger.key_id
-                  AND history.enabled = 1 AND history.role = 'primary'
-                  AND history.valid_from <= ledger.occurred_at
-                  AND (history.valid_to IS NULL OR history.valid_to > ledger.occurred_at)
-              ) END
-            ) AS resolved_account_id
+    const needsResolvedAccount = query.dimension === 'account' || query.accountingMode !== 'standard';
+    const source = needsResolvedAccount
+      ? `(
+          SELECT ledger.*, ${resolvedAccountExpression('ledger')} AS resolved_account_id
           FROM provider_cost_ledger ledger
           WHERE ${commonWhere}
-        )
-        SELECT gross_profit_bucket(ledger.occurred_at, @granularity, @timezone) AS period_key,
-          ledger.connection_id, ledger.resolved_account_id AS entity_id,
-          MAX(COALESCE(account.name, '账号 #' || ledger.resolved_account_id)) AS entity_name,
-          MAX(COALESCE(connection.name, '历史供应商')) AS provider_name,
-          COALESCE(ledger.cash_currency, ledger.currency, 'USD') AS cash_currency,
-          SUM(CASE WHEN ledger.cost IS NULL THEN 0 ELSE COALESCE(
-            ledger.cash_cost, ledger.cost / ledger.recharge_multiplier
-          ) END) AS amount,
-          SUM(CASE WHEN ledger.cost IS NULL THEN 0 ELSE ledger.request_count END) AS request_count,
-          SUM(CASE WHEN ledger.cost IS NULL THEN ledger.request_count ELSE 0 END) AS missing_value_requests,
-          SUM(CASE WHEN ledger.cost IS NOT NULL
-            AND COALESCE(ledger.recharge_source, 'default') = 'default'
-            THEN ledger.request_count ELSE 0 END) AS unconfirmed_requests,
-          MAX(COALESCE(ledger.precision_seconds, 0)) AS maximum_precision_seconds
-        FROM attributed ledger
-        LEFT JOIN provider_connections connection ON connection.id = ledger.connection_id
-        LEFT JOIN sub2api_monitored_accounts account
-          ON account.account_id = ledger.resolved_account_id
-        GROUP BY period_key, ledger.connection_id, ledger.resolved_account_id,
-          COALESCE(ledger.cash_currency, ledger.currency, 'USD')
-        ORDER BY period_key, entity_name
-      `).all(this.#params(query));
-    }
-    const expression = query.dimension === 'provider'
-      ? {
-          id: 'ledger.connection_id',
-          name: "COALESCE(connection.name, '历史供应商')"
-        }
-      : {
-          id: "COALESCE(ledger.key_id, 'unattributed:' || ledger.connection_id)",
-          name: "COALESCE(remote_key.name, '历史 / 未归属 Key')"
-        };
+        )`
+      : 'provider_cost_ledger';
+    const outerWhere = needsResolvedAccount
+      ? query.accountingMode === 'exclude_admin' || query.accountingMode === 'admin_expense'
+        ? '(ledger.resolved_account_id IS NULL OR CAST(ledger.resolved_account_id AS TEXT) <> @administratorAccountId)'
+        : '1 = 1'
+      : commonWhere;
+    const administratorFlag = needsResolvedAccount
+      ? 'CASE WHEN CAST(ledger.resolved_account_id AS TEXT) = @administratorAccountId THEN 1 ELSE 0 END'
+      : '0';
+    const expression = {
+      provider: {
+        id: 'ledger.connection_id',
+        name: "COALESCE(connection.name, '历史供应商')"
+      },
+      key: {
+        id: "COALESCE(ledger.key_id, 'unattributed:' || ledger.connection_id)",
+        name: "COALESCE(remote_key.name, '历史 / 未归属 Key')"
+      },
+      account: {
+        id: 'ledger.resolved_account_id',
+        name: "COALESCE(account.name, '账号 #' || ledger.resolved_account_id)"
+      }
+    }[query.dimension];
     return this.db.prepare(`
       SELECT gross_profit_bucket(ledger.occurred_at, @granularity, @timezone) AS period_key,
         ledger.connection_id, ${expression.id} AS entity_id,
         MAX(${expression.name}) AS entity_name,
         MAX(COALESCE(connection.name, '历史供应商')) AS provider_name,
+        ${administratorFlag} AS is_administrator,
         COALESCE(ledger.cash_currency, ledger.currency, 'USD') AS cash_currency,
         SUM(CASE WHEN ledger.cost IS NULL THEN 0 ELSE COALESCE(
           ledger.cash_cost, ledger.cost / ledger.recharge_multiplier
@@ -409,10 +450,12 @@ class GrossProfitService {
           AND COALESCE(ledger.recharge_source, 'default') = 'default'
           THEN ledger.request_count ELSE 0 END) AS unconfirmed_requests,
         MAX(COALESCE(ledger.precision_seconds, 0)) AS maximum_precision_seconds
-      FROM provider_cost_ledger ledger
+      FROM ${source} ledger
       LEFT JOIN provider_connections connection ON connection.id = ledger.connection_id
       LEFT JOIN remote_keys remote_key ON remote_key.id = ledger.key_id
-      WHERE ${commonWhere}
+      LEFT JOIN sub2api_monitored_accounts account
+        ON account.account_id = ${needsResolvedAccount ? 'ledger.resolved_account_id' : 'ledger.attributed_account_id'}
+      WHERE ${outerWhere}
       GROUP BY period_key, ledger.connection_id, entity_id,
         COALESCE(ledger.cash_currency, ledger.currency, 'USD')
       ORDER BY period_key, entity_name
@@ -476,6 +519,8 @@ class GrossProfitService {
       unattributedBaseRevenue: 0,
       unattributedUpstreamRequestCount: 0,
       unattributedUpstreamCost: 0,
+      unattributedAdministratorRequestCount: 0,
+      unattributedAdministratorExpense: 0,
       complete: true
     };
 
@@ -508,10 +553,12 @@ class GrossProfitService {
       const missing = integer(row.missing_value_requests);
       const unconfirmed = integer(row.unconfirmed_requests);
       const precision = integer(row.maximum_precision_seconds);
+      const isRevenue = side === 'revenue';
+      const isAdministratorExpense = side === 'administratorExpense';
       if (includeInPeriod) {
         period.hasActivity = period.hasActivity || requests > 0 || missing > 0 || finite(row.amount) !== 0;
         period.maximumPrecisionSeconds = Math.max(period.maximumPrecisionSeconds, precision);
-        if (side === 'revenue') {
+        if (isRevenue) {
           period.baseRequestCount += requests;
           period.missingRevenueRequests += missing;
           if (amount == null) {
@@ -519,6 +566,15 @@ class GrossProfitService {
             unconvertedCurrencies.add(sourceCurrency);
           } else {
             period.revenue += amount;
+          }
+        } else if (isAdministratorExpense) {
+          period.administratorRequestCount += requests;
+          period.missingAdministratorExpenseRequests += missing;
+          if (amount == null) {
+            period.unconvertedAdministratorExpenseRequests += requests;
+            unconvertedCurrencies.add(sourceCurrency);
+          } else {
+            period.administratorExpense += amount;
           }
         } else {
           period.upstreamRequestCount += requests;
@@ -534,9 +590,12 @@ class GrossProfitService {
       }
       if (!assignEntity) {
         breakdown.complete = false;
-        if (side === 'revenue') {
+        if (isRevenue) {
           breakdown.unattributedBaseRequestCount += requests;
           if (amount != null) breakdown.unattributedBaseRevenue += amount;
+        } else if (isAdministratorExpense) {
+          breakdown.unattributedAdministratorRequestCount += requests;
+          if (amount != null) breakdown.unattributedAdministratorExpense += amount;
         } else {
           breakdown.unattributedUpstreamRequestCount += requests;
           if (amount != null) breakdown.unattributedUpstreamCost += amount;
@@ -546,11 +605,16 @@ class GrossProfitService {
       const item = ensureItem(row);
       item.hasActivity = item.hasActivity || requests > 0 || missing > 0 || finite(row.amount) !== 0;
       item.maximumPrecisionSeconds = Math.max(item.maximumPrecisionSeconds, precision);
-      if (side === 'revenue') {
+      if (isRevenue) {
         item.baseRequestCount += requests;
         item.missingRevenueRequests += missing;
         if (amount == null) item.unconvertedRevenueRequests += requests;
         else item.revenue += amount;
+      } else if (isAdministratorExpense) {
+        item.administratorRequestCount += requests;
+        item.missingAdministratorExpenseRequests += missing;
+        if (amount == null) item.unconvertedAdministratorExpenseRequests += requests;
+        else item.administratorExpense += amount;
       } else {
         item.upstreamRequestCount += requests;
         item.missingCostRequests += missing;
@@ -562,7 +626,13 @@ class GrossProfitService {
 
     for (const row of this.#baseRows(query)) apply(row, 'revenue');
     if (!query.connectionId) {
-      for (const row of this.#baseRows(query, true)) apply(row, 'revenue', false, false);
+      for (const row of this.#baseRows(query, 'unattributed')) apply(row, 'revenue', false, false);
+    }
+    if (query.accountingMode === 'admin_expense') {
+      for (const row of this.#baseRows(query, 'administrator')) {
+        const assignEntity = query.dimension === 'account' || row.connection_id != null;
+        apply(row, 'administratorExpense', assignEntity);
+      }
     }
     for (const row of this.#costRows(query)) {
       apply(row, 'cost', query.dimension !== 'account' || row.entity_id != null);
@@ -597,13 +667,17 @@ class GrossProfitService {
       for (const providerName of item.providerNames) entity.providerNames.add(providerName);
       entity.revenue += item.revenue;
       entity.upstreamCost += item.upstreamCost;
+      entity.administratorExpense += item.administratorExpense;
       entity.baseRequestCount += item.baseRequestCount;
       entity.upstreamRequestCount += item.upstreamRequestCount;
+      entity.administratorRequestCount += item.administratorRequestCount;
       entity.missingRevenueRequests += item.missingRevenueRequests;
       entity.missingCostRequests += item.missingCostRequests;
+      entity.missingAdministratorExpenseRequests += item.missingAdministratorExpenseRequests;
       entity.unconfirmedCostRequests += item.unconfirmedCostRequests;
       entity.unconvertedRevenueRequests += item.unconvertedRevenueRequests;
       entity.unconvertedCostRequests += item.unconvertedCostRequests;
+      entity.unconvertedAdministratorExpenseRequests += item.unconvertedAdministratorExpenseRequests;
       entity.maximumPrecisionSeconds = Math.max(
         entity.maximumPrecisionSeconds,
         item.maximumPrecisionSeconds || 0
@@ -630,13 +704,17 @@ class GrossProfitService {
     const summaryAmounts = periods.reduce((summary, period) => {
       summary.revenue += period.revenue;
       summary.upstreamCost += period.upstreamCost;
+      summary.administratorExpense += period.administratorExpense;
       summary.baseRequestCount += period.baseRequestCount;
       summary.upstreamRequestCount += period.upstreamRequestCount;
+      summary.administratorRequestCount += period.administratorRequestCount;
       summary.missingRevenueRequests += period.missingRevenueRequests;
       summary.missingCostRequests += period.missingCostRequests;
+      summary.missingAdministratorExpenseRequests += period.missingAdministratorExpenseRequests;
       summary.unconfirmedCostRequests += period.unconfirmedCostRequests;
       summary.unconvertedRevenueRequests += period.unconvertedRevenueRequests;
       summary.unconvertedCostRequests += period.unconvertedCostRequests;
+      summary.unconvertedAdministratorExpenseRequests += period.unconvertedAdministratorExpenseRequests;
       summary.maximumPrecisionSeconds = Math.max(
         summary.maximumPrecisionSeconds,
         period.maximumPrecisionSeconds || 0
@@ -663,6 +741,8 @@ class GrossProfitService {
       unattributedBaseRevenue: round(breakdown.unattributedBaseRevenue),
       unattributedUpstreamRequestCount: breakdown.unattributedUpstreamRequestCount,
       unattributedUpstreamCost: round(breakdown.unattributedUpstreamCost),
+      unattributedAdministratorRequestCount: breakdown.unattributedAdministratorRequestCount,
+      unattributedAdministratorExpense: round(breakdown.unattributedAdministratorExpense),
       unconvertedCurrencies: [...unconvertedCurrencies].sort()
     };
     return {
@@ -673,7 +753,8 @@ class GrossProfitService {
         to: query.to,
         connectionId: query.connectionId,
         currency: query.currency,
-        timezone: query.timezone
+        timezone: query.timezone,
+        accountingMode: query.accountingMode
       },
       summary,
       periods,
@@ -686,6 +767,7 @@ class GrossProfitService {
 }
 
 module.exports = {
+  ADMINISTRATOR_ACCOUNT_ID,
   GrossProfitService,
   bucketForTimestamp,
   startOfDateInTimezone

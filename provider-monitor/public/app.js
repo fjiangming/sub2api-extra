@@ -60,7 +60,8 @@ const state = {
   },
   grossProfit: null,
   grossProfitFilters: {
-    dimension: 'provider', granularity: 'day', connectionId: '', from: '', to: '', currency: ''
+    dimension: 'provider', granularity: 'day', connectionId: '', from: '', to: '', currency: '',
+    accountingMode: 'standard'
   },
   grossProfitDetailPage: 1,
   integrationGroups: [],
@@ -2316,6 +2317,18 @@ const GROSS_PROFIT_GRANULARITY_LABELS = {
   month: '每月'
 };
 
+const GROSS_PROFIT_ACCOUNTING_MODE_LABELS = {
+  standard: '标准毛利',
+  exclude_admin: '排除管理员账本',
+  admin_expense: '管理员消费计入费用（纯毛利）'
+};
+
+const GROSS_PROFIT_ACCOUNTING_MODE_NOTES = {
+  standard: '标准口径：包含管理员账号 #1 的收入与已归因上游成本',
+  exclude_admin: '经营口径：排除管理员账号 #1 的收入与已归因上游成本',
+  admin_expense: '纯毛利口径：排除管理员收入及已归因成本，并将管理员消费作为费用扣除'
+};
+
 function grossProfitDisplayValue(item) {
   if (!item) return null;
   return item.grossProfit ?? item.estimatedGrossProfit ?? item.provisionalGrossProfit ?? null;
@@ -2354,12 +2367,17 @@ function grossProfitMargin(item) {
   return `${item.status === 'complete' ? '' : '约 '}${formatPercent(ratio * 100)}`;
 }
 
-function grossProfitNotes(summary, currency) {
+function grossProfitNotes(summary, currency, accountingMode = 'standard') {
   const notes = [];
+  if (accountingMode === 'admin_expense') {
+    notes.push(`管理员消费支出 ${formatPreciseMoney(summary.administratorExpense || 0, currency)}，已从经营毛利中扣除`);
+  }
   if (summary.unconfirmedCostRequests > 0) {
     notes.push(`${formatNumber(summary.unconfirmedCostRequests, 0)} 笔上游成本使用待确认倍率`);
   }
-  const missing = Number(summary.missingRevenueRequests || 0) + Number(summary.missingCostRequests || 0);
+  const missing = Number(summary.missingRevenueRequests || 0) +
+    Number(summary.missingCostRequests || 0) +
+    Number(summary.missingAdministratorExpenseRequests || 0);
   if (missing > 0) notes.push(`${formatNumber(missing, 0)} 笔账目缺少金额`);
   if (summary.unconvertedCurrencies?.length) {
     notes.push(`${summary.unconvertedCurrencies.join('、')} 缺少到 ${currency} 的汇率`);
@@ -2369,6 +2387,9 @@ function grossProfitNotes(summary, currency) {
   }
   if (summary.unattributedUpstreamRequestCount > 0) {
     notes.push(`${formatNumber(summary.unattributedUpstreamRequestCount, 0)} 笔上游成本未归属当前维度`);
+  }
+  if (summary.unattributedAdministratorRequestCount > 0) {
+    notes.push(`${formatNumber(summary.unattributedAdministratorRequestCount, 0)} 笔管理员消费无法归属当前维度`);
   }
   if (summary.maximumPrecisionSeconds > 0) {
     const minutes = Math.max(1, Math.ceil(summary.maximumPrecisionSeconds / 60));
@@ -2392,12 +2413,16 @@ function grossProfitPagination(totalItems) {
 
 function grossProfitDetailRows(report) {
   const pageSize = 50;
+  const showAdministratorExpense = report.query.accountingMode === 'admin_expense';
   const totalPages = Math.max(1, Math.ceil(report.items.length / pageSize));
   state.grossProfitDetailPage = Math.min(totalPages, Math.max(1, state.grossProfitDetailPage));
   const offset = (state.grossProfitDetailPage - 1) * pageSize;
   return report.items.slice(offset, offset + pageSize).map((item) => {
     const provider = item.providerNames?.join(' / ') || '-';
-    return `<tr><td class="primary-cell"><strong>${escapeHtml(item.periodLabel)}</strong><small>${escapeHtml(GROSS_PROFIT_GRANULARITY_LABELS[report.query.granularity])}</small></td><td class="primary-cell"><strong>${escapeHtml(item.entityName)}</strong><small>${escapeHtml(provider)}</small></td><td class="numeric">${escapeHtml(formatPreciseMoney(item.revenue, report.query.currency))}</td><td class="numeric">${escapeHtml(formatPreciseMoney(item.upstreamCost, report.query.currency))}</td><td class="numeric gross-profit-value ${grossProfitTone(item)}"><strong>${escapeHtml(grossProfitAmount(item, report.query.currency))}</strong><small>${escapeHtml(grossProfitMargin(item))}</small></td><td>${grossProfitStatus(item)}</td></tr>`;
+    const administratorExpense = showAdministratorExpense
+      ? `<td class="numeric">${escapeHtml(formatPreciseMoney(item.administratorExpense || 0, report.query.currency))}</td>`
+      : '';
+    return `<tr><td class="primary-cell"><strong>${escapeHtml(item.periodLabel)}</strong><small>${escapeHtml(GROSS_PROFIT_GRANULARITY_LABELS[report.query.granularity])}</small></td><td class="primary-cell"><strong>${escapeHtml(item.entityName)}</strong><small>${escapeHtml(provider)}</small></td><td class="numeric">${escapeHtml(formatPreciseMoney(item.revenue, report.query.currency))}</td><td class="numeric">${escapeHtml(formatPreciseMoney(item.upstreamCost, report.query.currency))}</td>${administratorExpense}<td class="numeric gross-profit-value ${grossProfitTone(item)}"><strong>${escapeHtml(grossProfitAmount(item, report.query.currency))}</strong><small>${escapeHtml(grossProfitMargin(item))}</small></td><td>${grossProfitStatus(item)}</td></tr>`;
   }).join('');
 }
 
@@ -2408,16 +2433,20 @@ function paintGrossProfitChart(report) {
   if (!chartRoot || !window.echarts || report.periods.length === 0) return;
   const currency = report.query.currency;
   const labels = report.periods.map((period) => period.periodLabel);
+  const showAdministratorExpense = report.query.accountingMode === 'admin_expense';
+  const profitLabel = showAdministratorExpense ? '纯毛利' : '毛利';
+  const legend = [profitLabel, '基座收入', '上游成本'];
+  if (showAdministratorExpense) legend.push('管理员消费支出');
   state.chart = window.echarts.init(chartRoot);
   state.chart.setOption({
     animationDuration: 300,
-    color: ['#147d64', '#2f6fba', '#b66a16'],
+    color: ['#147d64', '#2f6fba', '#b66a16', '#b94a48'],
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'shadow' },
       valueFormatter: (value) => formatPreciseMoney(value, currency)
     },
-    legend: { top: 10, data: ['毛利', '基座收入', '上游成本'] },
+    legend: { top: 10, data: legend },
     grid: { left: 72, right: 28, top: 54, bottom: 58 },
     xAxis: {
       type: 'category',
@@ -2432,7 +2461,7 @@ function paintGrossProfitChart(report) {
     },
     series: [
       {
-        name: '毛利',
+        name: profitLabel,
         type: 'bar',
         barMaxWidth: 32,
         data: report.periods.map((period) => ({
@@ -2455,7 +2484,15 @@ function paintGrossProfitChart(report) {
         symbolSize: 6,
         lineStyle: { width: 2 },
         data: report.periods.map((period) => period.upstreamCost)
-      }
+      },
+      ...(showAdministratorExpense ? [{
+        name: '管理员消费支出',
+        type: 'line',
+        showSymbol: report.periods.length <= 12,
+        symbolSize: 6,
+        lineStyle: { width: 2, type: 'dashed' },
+        data: report.periods.map((period) => period.administratorExpense || 0)
+      }] : [])
     ]
   });
 }
@@ -2464,11 +2501,17 @@ function paintGrossProfit(report) {
   const filters = state.grossProfitFilters;
   const summary = report.summary;
   const currency = report.query.currency;
+  const accountingMode = report.query.accountingMode || 'standard';
+  const showAdministratorExpense = accountingMode === 'admin_expense';
+  const accountingModeLabel = GROSS_PROFIT_ACCOUNTING_MODE_LABELS[accountingMode] || accountingMode;
   const providers = report.filterOptions.providers.map((provider) => (
     `<option value="${escapeHtml(provider.id)}" ${filters.connectionId === provider.id ? 'selected' : ''}>${escapeHtml(provider.name)}</option>`
   )).join('');
   const currencies = report.filterOptions.currencies.filter((item) => item.convertible).map((item) => (
     `<option value="${escapeHtml(item.currency)}" ${currency === item.currency ? 'selected' : ''}>${escapeHtml(item.currency)}</option>`
+  )).join('');
+  const accountingModes = Object.entries(GROSS_PROFIT_ACCOUNTING_MODE_LABELS).map(([value, label]) => (
+    `<option value="${value}" ${accountingMode === value ? 'selected' : ''}>${escapeHtml(label)}</option>`
   )).join('');
   const dimensionButtons = Object.entries(GROSS_PROFIT_DIMENSION_LABELS).map(([value, label]) => (
     `<button class="tab ${filters.dimension === value ? 'active' : ''}" data-action="gross-profit-dimension" data-dimension="${value}" role="tab" aria-selected="${filters.dimension === value}" tabindex="${filters.dimension === value ? '0' : '-1'}">${escapeHtml(label)}</button>`
@@ -2477,31 +2520,45 @@ function paintGrossProfit(report) {
     `<button class="tab ${filters.granularity === value ? 'active' : ''}" data-action="gross-profit-granularity" data-granularity="${value}" role="tab" aria-selected="${filters.granularity === value}" tabindex="${filters.granularity === value ? '0' : '-1'}">${escapeHtml(label)}</button>`
   )).join('');
   const summaryMargin = grossProfitMargin(summary);
-  const notes = grossProfitNotes(summary, currency);
+  const notes = [
+    GROSS_PROFIT_ACCOUNTING_MODE_NOTES[accountingMode],
+    ...grossProfitNotes(summary, currency, accountingMode)
+  ].filter(Boolean);
+  const profitLabel = showAdministratorExpense ? '纯毛利' : '毛利';
+  const marginLabel = showAdministratorExpense ? '纯毛利率' : '毛利率';
+  const costLabel = showAdministratorExpense ? '总成本' : '上游成本';
+  const costValue = showAdministratorExpense ? summary.totalCost : summary.upstreamCost;
+  const costDetail = showAdministratorExpense
+    ? `上游 ${formatPreciseMoney(summary.upstreamCost, currency)} + 管理员消费 ${formatPreciseMoney(summary.administratorExpense || 0, currency)}`
+    : `${formatNumber(summary.upstreamRequestCount, 0)} 笔计费请求`;
+  const administratorHeader = showAdministratorExpense ? '<th class="numeric">管理员消费支出</th>' : '';
   const entityRows = report.entities.map((entity) => {
     const provider = entity.providerNames?.join(' / ') || '-';
-    return `<tr><td class="primary-cell"><strong>${escapeHtml(entity.entityName)}</strong><small>${escapeHtml(provider)}</small></td><td class="numeric">${escapeHtml(formatPreciseMoney(entity.revenue, currency))}</td><td class="numeric">${escapeHtml(formatPreciseMoney(entity.upstreamCost, currency))}</td><td class="numeric gross-profit-value ${grossProfitTone(entity)}"><strong>${escapeHtml(grossProfitAmount(entity, currency))}</strong></td><td class="numeric">${escapeHtml(grossProfitMargin(entity))}</td><td class="numeric">${formatNumber(entity.baseRequestCount, 0)} / ${formatNumber(entity.upstreamRequestCount, 0)}</td><td>${grossProfitStatus(entity)}</td></tr>`;
+    const administratorExpense = showAdministratorExpense
+      ? `<td class="numeric">${escapeHtml(formatPreciseMoney(entity.administratorExpense || 0, currency))}</td>`
+      : '';
+    return `<tr><td class="primary-cell"><strong>${escapeHtml(entity.entityName)}</strong><small>${escapeHtml(provider)}</small></td><td class="numeric">${escapeHtml(formatPreciseMoney(entity.revenue, currency))}</td><td class="numeric">${escapeHtml(formatPreciseMoney(entity.upstreamCost, currency))}</td>${administratorExpense}<td class="numeric gross-profit-value ${grossProfitTone(entity)}"><strong>${escapeHtml(grossProfitAmount(entity, currency))}</strong></td><td class="numeric">${escapeHtml(grossProfitMargin(entity))}</td><td class="numeric">${formatNumber(entity.baseRequestCount, 0)} / ${formatNumber(entity.upstreamRequestCount, 0)}</td><td>${grossProfitStatus(entity)}</td></tr>`;
   }).join('');
   const detailRows = grossProfitDetailRows(report);
   $('#main-content').innerHTML = `
     <section class="gross-profit-controls" aria-label="毛利统计筛选">
       <div class="gross-profit-mode"><span>统计维度</span><div class="tabs gross-profit-segmented" role="tablist" aria-label="统计维度">${dimensionButtons}</div></div>
       <div class="gross-profit-mode"><span>时间粒度</span><div class="tabs gross-profit-segmented" role="tablist" aria-label="时间粒度">${granularityButtons}</div></div>
-      <label><span>供应商</span><select id="gross-profit-provider"><option value="">全部供应商</option>${providers}</select></label>
+      <label class="gross-profit-provider-field"><span>供应商</span><select id="gross-profit-provider"><option value="">全部供应商</option>${providers}</select></label>
       <label><span>开始日期</span><input id="gross-profit-from" type="date" value="${escapeHtml(filters.from)}"></label>
       <label><span>结束日期</span><input id="gross-profit-to" type="date" value="${escapeHtml(filters.to)}"></label>
-      <label><span>折算币种</span><select id="gross-profit-currency">${currencies}</select></label>
+      <div class="gross-profit-currency-mode"><label class="gross-profit-currency-field"><span>折算币种</span><select id="gross-profit-currency">${currencies}</select></label><label class="gross-profit-accounting-mode-field"><span>统计模式</span><select id="gross-profit-accounting-mode">${accountingModes}</select></label></div>
     </section>
     <div class="stats-grid gross-profit-stats">
-      <div class="stat"><span class="stat-label"><i data-lucide="chart-column-increasing"></i>毛利</span><strong class="stat-value gross-profit-summary-value ${grossProfitTone(summary)}">${escapeHtml(grossProfitAmount(summary, currency))}</strong><span class="stat-detail">${grossProfitStatus(summary)}</span></div>
+      <div class="stat"><span class="stat-label"><i data-lucide="chart-column-increasing"></i>${escapeHtml(profitLabel)}</span><strong class="stat-value gross-profit-summary-value ${grossProfitTone(summary)}">${escapeHtml(grossProfitAmount(summary, currency))}</strong><span class="stat-detail">${grossProfitStatus(summary)}</span></div>
       <div class="stat"><span class="stat-label"><i data-lucide="circle-arrow-up"></i>基座收入</span><strong class="stat-value">${escapeHtml(formatPreciseMoney(summary.revenue, currency))}</strong><span class="stat-detail">${formatNumber(summary.baseRequestCount, 0)} 笔计费请求</span></div>
-      <div class="stat"><span class="stat-label"><i data-lucide="circle-arrow-down"></i>上游成本</span><strong class="stat-value">${escapeHtml(formatPreciseMoney(summary.upstreamCost, currency))}</strong><span class="stat-detail">${formatNumber(summary.upstreamRequestCount, 0)} 笔计费请求</span></div>
-      <div class="stat"><span class="stat-label"><i data-lucide="percent"></i>毛利率</span><strong class="stat-value">${escapeHtml(summaryMargin)}</strong><span class="stat-detail">${formatNumber(summary.profitablePeriodCount, 0)} 个盈利周期 · ${formatNumber(summary.lossPeriodCount, 0)} 个亏损周期</span></div>
+      <div class="stat"><span class="stat-label"><i data-lucide="circle-arrow-down"></i>${escapeHtml(costLabel)}</span><strong class="stat-value">${escapeHtml(formatPreciseMoney(costValue, currency))}</strong><span class="stat-detail">${escapeHtml(costDetail)}</span></div>
+      <div class="stat"><span class="stat-label"><i data-lucide="percent"></i>${escapeHtml(marginLabel)}</span><strong class="stat-value">${escapeHtml(summaryMargin)}</strong><span class="stat-detail">${formatNumber(summary.profitablePeriodCount, 0)} 个盈利周期 · ${formatNumber(summary.lossPeriodCount, 0)} 个亏损周期</span></div>
     </div>
-    <div class="gross-profit-status ${summary.status}"><div>${grossProfitStatus(summary)}<strong>${escapeHtml(report.query.from)} 至 ${escapeHtml(report.query.to)}</strong><span>${escapeHtml(report.query.timezone)} · ${escapeHtml(GROSS_PROFIT_GRANULARITY_LABELS[report.query.granularity])}</span></div>${notes.length ? `<ul>${notes.map((note) => `<li>${escapeHtml(note)}</li>`).join('')}</ul>` : '<span>账本金额与维度归因完整</span>'}</div>
-    <section class="panel gross-profit-chart-panel"><div class="panel-header"><h2>毛利时间线</h2><span class="stat-detail">${formatNumber(summary.activePeriodCount, 0)} / ${formatNumber(summary.periodCount, 0)} 个周期有账本</span></div><div class="chart gross-profit-chart" id="gross-profit-chart"></div></section>
-    <section class="section"><div class="section-header"><div><h2>${escapeHtml(GROSS_PROFIT_DIMENSION_LABELS[report.query.dimension])}汇总</h2><p>${formatNumber(summary.entityCount, 0)} 个统计对象</p></div></div><div class="table-wrap gross-profit-table">${entityRows ? `<table><thead><tr><th>${escapeHtml(GROSS_PROFIT_DIMENSION_LABELS[report.query.dimension])}</th><th class="numeric">基座收入</th><th class="numeric">上游成本</th><th class="numeric">毛利</th><th class="numeric">毛利率</th><th class="numeric">请求（基座 / 上游）</th><th>口径</th></tr></thead><tbody>${entityRows}</tbody></table>` : emptyState('chart-column-increasing', '暂无维度数据', '所选期间没有可归因账本')}</div></section>
-    <section class="section"><div class="section-header"><div><h2>周期明细</h2><p>${escapeHtml(GROSS_PROFIT_GRANULARITY_LABELS[report.query.granularity])} × ${escapeHtml(GROSS_PROFIT_DIMENSION_LABELS[report.query.dimension])}</p></div></div><div class="table-wrap gross-profit-table">${detailRows ? `<table><thead><tr><th>周期</th><th>${escapeHtml(GROSS_PROFIT_DIMENSION_LABELS[report.query.dimension])}</th><th class="numeric">基座收入</th><th class="numeric">上游成本</th><th class="numeric">毛利 / 毛利率</th><th>口径</th></tr></thead><tbody>${detailRows}</tbody></table>` : emptyState('calendar-x', '暂无周期明细', '所选期间没有可归因账本')}</div>${grossProfitPagination(report.items.length)}</section>`;
+    <div class="gross-profit-status ${summary.status}"><div>${grossProfitStatus(summary)}<strong>${escapeHtml(report.query.from)} 至 ${escapeHtml(report.query.to)}</strong><span>${escapeHtml(report.query.timezone)} · ${escapeHtml(GROSS_PROFIT_GRANULARITY_LABELS[report.query.granularity])} · ${escapeHtml(accountingModeLabel)}</span></div>${notes.length ? `<ul>${notes.map((note) => `<li>${escapeHtml(note)}</li>`).join('')}</ul>` : '<span>账本金额与维度归因完整</span>'}</div>
+    <section class="panel gross-profit-chart-panel"><div class="panel-header"><h2>${escapeHtml(profitLabel)}时间线</h2><span class="stat-detail">${formatNumber(summary.activePeriodCount, 0)} / ${formatNumber(summary.periodCount, 0)} 个周期有账本</span></div><div class="chart gross-profit-chart" id="gross-profit-chart"></div></section>
+    <section class="section"><div class="section-header"><div><h2>${escapeHtml(GROSS_PROFIT_DIMENSION_LABELS[report.query.dimension])}汇总</h2><p>${formatNumber(summary.entityCount, 0)} 个统计对象</p></div></div><div class="table-wrap gross-profit-table${showAdministratorExpense ? ' has-admin-expense' : ''}">${entityRows ? `<table><thead><tr><th>${escapeHtml(GROSS_PROFIT_DIMENSION_LABELS[report.query.dimension])}</th><th class="numeric">基座收入</th><th class="numeric">上游成本</th>${administratorHeader}<th class="numeric">${escapeHtml(profitLabel)}</th><th class="numeric">${escapeHtml(marginLabel)}</th><th class="numeric">请求（基座 / 上游）</th><th>口径</th></tr></thead><tbody>${entityRows}</tbody></table>` : emptyState('chart-column-increasing', '暂无维度数据', '所选期间没有可归因账本')}</div></section>
+    <section class="section"><div class="section-header"><div><h2>周期明细</h2><p>${escapeHtml(GROSS_PROFIT_GRANULARITY_LABELS[report.query.granularity])} × ${escapeHtml(GROSS_PROFIT_DIMENSION_LABELS[report.query.dimension])}</p></div></div><div class="table-wrap gross-profit-table${showAdministratorExpense ? ' has-admin-expense' : ''}">${detailRows ? `<table><thead><tr><th>周期</th><th>${escapeHtml(GROSS_PROFIT_DIMENSION_LABELS[report.query.dimension])}</th><th class="numeric">基座收入</th><th class="numeric">上游成本</th>${administratorHeader}<th class="numeric">${escapeHtml(profitLabel)} / ${escapeHtml(marginLabel)}</th><th>口径</th></tr></thead><tbody>${detailRows}</tbody></table>` : emptyState('calendar-x', '暂无周期明细', '所选期间没有可归因账本')}</div>${grossProfitPagination(report.items.length)}</section>`;
   paintGrossProfitChart(report);
   icons();
 }
@@ -2510,7 +2567,8 @@ async function loadGrossProfit() {
   const filters = state.grossProfitFilters;
   const search = new URLSearchParams({
     dimension: filters.dimension,
-    granularity: filters.granularity
+    granularity: filters.granularity,
+    accountingMode: filters.accountingMode || 'standard'
   });
   if (filters.connectionId) search.set('connectionId', filters.connectionId);
   if (filters.from) search.set('from', filters.from);
@@ -2524,7 +2582,8 @@ async function loadGrossProfit() {
     connectionId: report.query.connectionId || '',
     from: report.query.from,
     to: report.query.to,
-    currency: report.query.currency
+    currency: report.query.currency,
+    accountingMode: report.query.accountingMode || 'standard'
   };
   paintGrossProfit(report);
 }
@@ -4278,12 +4337,13 @@ document.addEventListener('change', (event) => {
     state.accountMonitorFilters.page = 1;
     renderAccountMonitor().catch((error) => toast(error.message, 'error'));
   }
-  if (event.target.matches('#gross-profit-provider, #gross-profit-from, #gross-profit-to, #gross-profit-currency')) {
+  if (event.target.matches('#gross-profit-provider, #gross-profit-from, #gross-profit-to, #gross-profit-currency, #gross-profit-accounting-mode')) {
     const field = ({
       'gross-profit-provider': 'connectionId',
       'gross-profit-from': 'from',
       'gross-profit-to': 'to',
-      'gross-profit-currency': 'currency'
+      'gross-profit-currency': 'currency',
+      'gross-profit-accounting-mode': 'accountingMode'
     })[event.target.id];
     state.grossProfitFilters[field] = event.target.value;
     if (

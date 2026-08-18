@@ -19,6 +19,12 @@ test('gross profit dashboard exposes supplier daily defaults and all requested d
   assert.match(app, /id="gross-profit-provider"/);
   assert.match(app, /id="gross-profit-from" type="date"/);
   assert.match(app, /id="gross-profit-to" type="date"/);
+  assert.match(app, /id="gross-profit-accounting-mode"/);
+  assert.match(app, /gross-profit-currency-mode/);
+  assert.match(app, /standard: '标准毛利'/);
+  assert.match(app, /exclude_admin: '排除管理员账本'/);
+  assert.match(app, /admin_expense: '管理员消费计入费用（纯毛利）'/);
+  assert.match(app, /accountingMode: filters\.accountingMode \|\| 'standard'/);
   assert.match(app, /id="gross-profit-chart"/);
   assert.match(app, /上游供应商汇总|GROSS_PROFIT_DIMENSION_LABELS/);
   assert.match(app, /周期明细/);
@@ -26,5 +32,6 @@ test('gross profit dashboard exposes supplier daily defaults and all requested d
   assert.match(css, /\.gross-profit-controls/);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.gross-profit-controls/);
   assert.match(css, /\.gross-profit-stats \{ grid-template-columns: repeat\(2, minmax\(0, 1fr\)\); \}/);
+  assert.match(css, /\.gross-profit-currency-mode/);
   assert.match(css, /\.gross-profit-value\.negative/);
 });

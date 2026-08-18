@@ -1594,7 +1594,9 @@ function createApplication(options = {}) {
     from: req.query.from,
     to: req.query.to,
     connectionId: req.query.connectionId || req.query.connection_id,
-    currency: req.query.currency
+    currency: req.query.currency,
+    accountingMode: req.query.accountingMode || req.query.accounting_mode ||
+      req.query.statisticalMode || req.query.statistical_mode || req.query.mode
   })));
   api.put('/account-monitor/providers/:id/recharge-audit', (req, res) => {
     const input = validate(providerRechargeAuditSchema, req.body || {});

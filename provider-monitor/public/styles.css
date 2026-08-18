@@ -176,7 +176,10 @@ tbody tr:hover { background: #fafbfa; }
 .chart { width: 100%; height: 390px; }
 .gross-profit-controls { min-height: 82px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 6px; display: flex; align-items: end; gap: 10px; flex-wrap: wrap; background: var(--surface); }
 .gross-profit-controls > label { width: 150px; flex: 0 1 150px; }
-.gross-profit-controls > label:nth-last-child(4) { min-width: 190px; flex: 1 1 220px; }
+.gross-profit-controls > .gross-profit-provider-field { min-width: 190px; flex: 1 1 220px; }
+.gross-profit-currency-mode { display: flex; flex: 0 0 auto; align-items: end; gap: 10px; }
+.gross-profit-currency-mode > label { width: 150px; flex: 0 0 150px; }
+.gross-profit-currency-mode > .gross-profit-accounting-mode-field { width: 250px; flex-basis: 250px; }
 .gross-profit-controls input, .gross-profit-controls select { min-height: 34px; }
 .gross-profit-mode { min-width: max-content; display: grid; gap: 6px; }
 .gross-profit-mode > span { color: #4f5953; font-size: 12px; font-weight: 650; }
@@ -201,6 +204,7 @@ tbody tr:hover { background: #fafbfa; }
 .gross-profit-chart-panel .panel-header .stat-detail { margin-left: auto; }
 .gross-profit-chart { height: 360px; }
 .gross-profit-table table { min-width: 880px; }
+.gross-profit-table.has-admin-expense table { min-width: 1000px; }
 .gross-profit-table td { height: 52px; }
 .empty { min-height: 180px; display: grid; place-items: center; text-align: center; color: var(--muted); padding: 28px; }
 .empty svg { width: 30px; height: 30px; margin-bottom: 8px; opacity: .55; }
@@ -617,7 +621,7 @@ details summary { padding: 13px 18px; cursor: pointer; font-weight: 650; font-si
   .account-detail-metrics { grid-template-columns: repeat(3, minmax(110px, 1fr)); }
   .account-detail-metrics > div:nth-child(3n) { border-right: 0; }
   .account-detail-metrics > div:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
-  .gross-profit-controls > label:nth-last-child(4) { flex-basis: 100%; }
+  .gross-profit-controls > .gross-profit-provider-field { flex-basis: 100%; }
   .gross-profit-mode { flex: 1 1 auto; }
   .gross-profit-mode .gross-profit-segmented { width: 100%; }
   .gross-profit-mode .tab { flex: 1; }
@@ -688,7 +692,9 @@ details summary { padding: 13px 18px; cursor: pointer; font-weight: 650; font-si
   .account-detail-metrics > div:nth-last-child(-n+2) { border-bottom: 0; }
   .account-platform-setting { grid-template-columns: 1fr; }
   .gross-profit-controls { align-items: stretch; }
-  .gross-profit-controls > label, .gross-profit-controls > label:nth-last-child(4), .gross-profit-mode { width: 100%; min-width: 0; flex: 1 1 100%; }
+  .gross-profit-controls > label, .gross-profit-controls > .gross-profit-provider-field, .gross-profit-mode { width: 100%; min-width: 0; flex: 1 1 100%; }
+  .gross-profit-currency-mode { width: 100%; flex: 1 1 100%; flex-direction: column; align-items: stretch; gap: 8px; }
+  .gross-profit-currency-mode > label, .gross-profit-currency-mode > .gross-profit-accounting-mode-field { width: 100%; min-width: 0; flex: 1 1 auto; }
   .gross-profit-segmented .tab { min-width: 0; flex: 1; }
   .gross-profit-status { align-items: flex-start; flex-direction: column; gap: 8px; }
   .gross-profit-status > div { min-width: 0; flex-wrap: wrap; }

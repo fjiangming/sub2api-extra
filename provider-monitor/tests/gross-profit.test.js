@@ -2,7 +2,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createTestContext } = require('./helpers');
 const { ProviderRepository } = require('../src/repositories/provider-repository');
-const { GrossProfitService, bucketForTimestamp } = require('../src/services/gross-profit-service');
+const {
+  ADMINISTRATOR_ACCOUNT_ID,
+  GrossProfitService,
+  bucketForTimestamp
+} = require('../src/services/gross-profit-service');
 const { createApplication } = require('../src/server');
 
 function createProvider(providers, name, suffix) {
@@ -129,6 +133,36 @@ function setupLedger(context) {
   return { alpha, beta };
 }
 
+function setupAdministratorLedger(context, provider) {
+  const occurredAt = '2026-08-16T16:45:00.000Z';
+  insertKey(context.db, provider, 'key-admin', 'Administrator Key', occurredAt);
+  insertAccount(context.db, ADMINISTRATOR_ACCOUNT_ID, 'Administrator', occurredAt);
+  insertMappingHistory(
+    context.db,
+    'map-admin',
+    provider.id,
+    'key-admin',
+    ADMINISTRATOR_ACCOUNT_ID,
+    '2026-01-01T00:00:00.000Z'
+  );
+  insertRevenue(context.db, {
+    id: 'admin-revenue',
+    accountId: ADMINISTRATOR_ACCOUNT_ID,
+    providerId: provider.id,
+    keyId: 'key-admin',
+    occurredAt,
+    cashRevenue: 4
+  });
+  insertCost(context.db, {
+    id: 'admin-cost',
+    providerId: provider.id,
+    keyId: 'key-admin',
+    occurredAt,
+    cashCost: 1,
+    attributedAccountId: ADMINISTRATOR_ACCOUNT_ID
+  });
+}
+
 test('gross profit uses the configured timezone and defaults to daily supplier totals', (t) => {
   const context = createTestContext({ PROVIDER_MONITOR_TIMEZONE: 'Asia/Shanghai' });
   t.after(() => context.cleanup());
@@ -150,7 +184,8 @@ test('gross profit uses the configured timezone and defaults to daily supplier t
     to: '2026-08-17',
     connectionId: null,
     currency: 'USD',
-    timezone: 'Asia/Shanghai'
+    timezone: 'Asia/Shanghai',
+    accountingMode: 'standard'
   });
   assert.equal(report.summary.revenue, 18);
   assert.equal(report.summary.upstreamCost, 12);
@@ -218,6 +253,66 @@ test('gross profit keeps totals stable across key, account, week and month views
   assert.equal(monthly.periods[0].grossProfit, 6);
 });
 
+test('gross profit supports standard, administrator exclusion and administrator expense modes', (t) => {
+  const context = createTestContext({ PROVIDER_MONITOR_TIMEZONE: 'Asia/Shanghai' });
+  t.after(() => context.cleanup());
+  const { alpha } = setupLedger(context);
+  setupAdministratorLedger(context, alpha);
+  const service = new GrossProfitService({
+    db: context.db,
+    config: context.config,
+    now: () => new Date('2026-08-17T12:00:00.000Z')
+  });
+  const input = { from: '2026-08-16', to: '2026-08-17' };
+
+  const standard = service.report(input);
+  assert.equal(standard.query.accountingMode, 'standard');
+  assert.equal(standard.summary.revenue, 22);
+  assert.equal(standard.summary.upstreamCost, 13);
+  assert.equal(standard.summary.administratorExpense, 0);
+  assert.equal(standard.summary.grossProfit, 9);
+
+  const excluded = service.report({ ...input, accountingMode: 'exclude_admin' });
+  assert.equal(excluded.query.accountingMode, 'exclude_admin');
+  assert.equal(excluded.summary.revenue, 18);
+  assert.equal(excluded.summary.upstreamCost, 12);
+  assert.equal(excluded.summary.administratorExpense, 0);
+  assert.equal(excluded.summary.grossProfit, 6);
+
+  const expense = service.report({ ...input, mode: 'admin_as_expense' });
+  assert.equal(expense.query.accountingMode, 'admin_expense');
+  assert.equal(expense.summary.revenue, 18);
+  assert.equal(expense.summary.upstreamCost, 12);
+  assert.equal(expense.summary.administratorExpense, 4);
+  assert.equal(expense.summary.administratorRequestCount, 1);
+  assert.equal(expense.summary.operatingGrossProfit, 6);
+  assert.equal(expense.summary.totalCost, 16);
+  assert.equal(expense.summary.grossProfit, 2);
+  assert.equal(expense.summary.grossMarginRatio, 0.111111);
+  assert.deepEqual(expense.periods.map((period) => [
+    period.periodKey,
+    period.grossProfit,
+    period.administratorExpense
+  ]), [
+    ['2026-08-16', 3, 0],
+    ['2026-08-17', -1, 4]
+  ]);
+
+  const accountExpense = service.report({
+    ...input,
+    accountingMode: 'admin_expense',
+    dimension: 'account'
+  });
+  const administrator = accountExpense.entities.find(
+    (entity) => entity.entityId === ADMINISTRATOR_ACCOUNT_ID
+  );
+  assert.equal(administrator.entityName, 'Administrator');
+  assert.equal(administrator.revenue, 0);
+  assert.equal(administrator.upstreamCost, 0);
+  assert.equal(administrator.administratorExpense, 4);
+  assert.equal(administrator.grossProfit, -4);
+});
+
 test('unconfirmed supplier recharge rates expose estimates instead of exact gross profit', (t) => {
   const context = createTestContext({ PROVIDER_MONITOR_TIMEZONE: 'Asia/Shanghai' });
   t.after(() => context.cleanup());
@@ -261,6 +356,10 @@ test('gross profit rejects invalid dimensions and oversized daily ranges', (t) =
     () => service.report({ from: '2025-01-01', to: '2026-08-17', granularity: 'day' }),
     (error) => error.code === 'VALIDATION_ERROR' && error.status === 400
   );
+  assert.throws(
+    () => service.report({ accountingMode: 'unknown' }),
+    (error) => error.code === 'VALIDATION_ERROR' && error.status === 400
+  );
 });
 
 test('gross profit HTTP endpoint is authenticated and validates query dimensions', async (t) => {
@@ -292,6 +391,7 @@ test('gross profit HTTP endpoint is authenticated and validates query dimensions
   assert.equal(response.status, 200);
   const report = await response.json();
   assert.equal(report.summary.grossProfit, 6);
+  assert.equal(report.query.accountingMode, 'standard');
   assert.equal(report.periods.length, 2);
   assert.equal(report.entities.length, 2);
 
@@ -300,4 +400,10 @@ test('gross profit HTTP endpoint is authenticated and validates query dimensions
   });
   assert.equal(invalid.status, 400);
   assert.equal((await invalid.json()).error.code, 'VALIDATION_ERROR');
+
+  const invalidMode = await fetch(`${baseUrl}/api/gross-profit?accountingMode=unknown`, {
+    headers: { Cookie: cookie }
+  });
+  assert.equal(invalidMode.status, 400);
+  assert.equal((await invalidMode.json()).error.code, 'VALIDATION_ERROR');
 });
