@@ -1578,6 +1578,7 @@ function createApplication(options = {}) {
     search: req.query.search || null,
     groupId: req.query.groupId || req.query.group_id || null,
     display: req.query.display || null,
+    window: req.query.window || req.query.timeWindow || req.query.period || null,
     days: req.query.days,
     page: req.query.page,
     pageSize: req.query.pageSize || req.query.page_size,
@@ -1586,7 +1587,10 @@ function createApplication(options = {}) {
   })));
   api.get('/account-monitor/accounts/:id', (req, res) => res.json(accountMonitor.account(
     req.params.id,
-    { days: req.query.days }
+    {
+      window: req.query.window || req.query.timeWindow || req.query.period || null,
+      days: req.query.days
+    }
   )));
   api.get('/gross-profit', (req, res) => res.json(grossProfit.report({
     dimension: req.query.dimension,

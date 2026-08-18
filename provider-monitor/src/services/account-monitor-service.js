@@ -1218,17 +1218,45 @@ function startOfDateInTimezone(value, timezone) {
   return new Date(timestamp);
 }
 
-function accountMonitorWindow(days, timezone, current = new Date()) {
-  const safeDays = clamp(integer(days, 7), 1, 90);
+function normalizeAccountMonitorWindowSelection(value, fallbackDays = 7) {
+  const raw = String(value ?? '').trim().toLowerCase();
+  if (['24h', '24_hours', 'last24h', 'rolling24h', 'rolling_24h'].includes(raw)) {
+    return { type: '24h', value: '24h', days: 1 };
+  }
+  if (['today', 'day', 'current_day', 'calendar_day'].includes(raw)) {
+    return { type: 'today', value: 'today', days: 1 };
+  }
+  const days = clamp(integer(value, fallbackDays), 1, 90);
+  // Keep the original numeric one-day filter as the rolling 24-hour option.
+  // The explicit `today` value above is reserved for the local calendar day.
+  if (days === 1) return { type: '24h', value: '24h', days: 1 };
+  return { type: 'days', value: String(days), days };
+}
+
+function accountMonitorWindow(selection, timezone, current = new Date()) {
+  const normalized = typeof selection === 'object' && selection !== null
+    ? normalizeAccountMonitorWindowSelection(selection.value ?? selection.type, selection.days)
+    : normalizeAccountMonitorWindowSelection(selection);
   const endDate = dateInTimezone(current, timezone);
-  const startDate = shiftDateKey(endDate, -(safeDays - 1));
+  const end = current.toISOString();
+  if (normalized.type === '24h') {
+    const start = new Date(current.getTime() - 86400000);
+    return {
+      from: start.toISOString(),
+      to: end,
+      startDate: dateInTimezone(start, timezone),
+      endDate,
+      days: 1
+    };
+  }
+  const startDate = shiftDateKey(endDate, -(normalized.days - 1));
   const start = startOfDateInTimezone(startDate, timezone);
   return {
-    from: (start || new Date(current.getTime() - safeDays * 86400000)).toISOString(),
-    to: current.toISOString(),
+    from: (start || new Date(current.getTime() - normalized.days * 86400000)).toISOString(),
+    to: end,
     startDate,
     endDate,
-    days: safeDays
+    days: normalized.days
   };
 }
 
@@ -2679,6 +2707,10 @@ class AccountMonitorService {
     };
 
     const reduceDailyRows = () => {
+      // Daily snapshots represent complete local calendar dates. They cannot
+      // safely answer a rolling 24-hour window that starts mid-day.
+      const calendarWindowStart = startOfDateInTimezone(startDate, this.config.timezone);
+      if (!calendarWindowStart || calendarWindowStart.toISOString() !== since) return new Map();
       const currentRows = normalizedDailyRows.filter(matchesCurrentIdentity);
       const grouped = groupBy(currentRows, (row) => (
         `${row.key_id}\u0000${row.currency}\u0000${row.credential_identity || 'legacy'}`
@@ -3627,8 +3659,12 @@ class AccountMonitorService {
   }
 
   providersView(filters = {}) {
-    const days = clamp(integer(filters.days, this.settings().lookbackDays), 1, 90);
-    const requestedWindow = accountMonitorWindow(days, this.config.timezone);
+    const windowSelection = normalizeAccountMonitorWindowSelection(
+      filters.window || filters.timeWindow || filters.period || filters.days,
+      this.settings().lookbackDays
+    );
+    const days = windowSelection.days;
+    const requestedWindow = accountMonitorWindow(windowSelection, this.config.timezone);
     const { from: since, to: until } = requestedWindow;
     const pageSize = clamp(integer(filters.pageSize, 50), 10, 200);
     const clauses = ['connection.enabled = 1'];
@@ -4226,6 +4262,13 @@ class AccountMonitorService {
       items,
       itemType: 'provider',
       pagination: { page, pageSize, total, totalPages },
+      windowType: windowSelection.type,
+      window: {
+        from: requestedWindow.from,
+        to: requestedWindow.to,
+        startDate: requestedWindow.startDate,
+        endDate: requestedWindow.endDate
+      },
       summary: {
         providerCount: total,
         visibleProviderCount: items.length,
@@ -4265,7 +4308,14 @@ class AccountMonitorService {
           ), 8) : null,
         supplierLastSyncAt: latestIso(items.map((item) => item.lastSyncAt)),
         displayCurrency: auditSettings.displayCurrency,
-        days
+        days,
+        windowType: windowSelection.type,
+        window: {
+          from: requestedWindow.from,
+          to: requestedWindow.to,
+          startDate: requestedWindow.startDate,
+          endDate: requestedWindow.endDate
+        }
       },
       groups: [],
       platforms: this.db.prepare(`
@@ -4281,8 +4331,12 @@ class AccountMonitorService {
     if (filters.display === 'providers') {
       return this.providersView(filters);
     }
-    const days = clamp(integer(filters.days, this.settings().lookbackDays), 1, 90);
-    const requestedWindow = accountMonitorWindow(days, this.config.timezone);
+    const windowSelection = normalizeAccountMonitorWindowSelection(
+      filters.window || filters.timeWindow || filters.period || filters.days,
+      this.settings().lookbackDays
+    );
+    const days = windowSelection.days;
+    const requestedWindow = accountMonitorWindow(windowSelection, this.config.timezone);
     const { from: since, to: until } = requestedWindow;
     const candidateRows = this.#accountRows(filters);
     const fallbackGroups = this.#mappedAccountGroups();
@@ -4401,6 +4455,13 @@ class AccountMonitorService {
       items,
       itemType: display === 'groups' ? 'group' : 'account',
       pagination: { page, pageSize, total, totalPages },
+      windowType: windowSelection.type,
+      window: {
+        from: requestedWindow.from,
+        to: requestedWindow.to,
+        startDate: requestedWindow.startDate,
+        endDate: requestedWindow.endDate
+      },
       summary: {
         accountCount: decorated.length,
         filteredAccountCount: decorated.length,
@@ -4437,7 +4498,14 @@ class AccountMonitorService {
         supplierLastSyncAt: latestIso(mappedItems.map((item) => item.comparison.provider?.lastSyncAt)),
         comparisonScope: display === 'accounts' && !needsAllComparisons ? 'page' : 'filtered',
         comparisonAccountCount: comparisonItems.length,
-        days
+        days,
+        windowType: windowSelection.type,
+        window: {
+          from: requestedWindow.from,
+          to: requestedWindow.to,
+          startDate: requestedWindow.startDate,
+          endDate: requestedWindow.endDate
+        }
       },
       groups: groupOptions,
       platforms: this.db.prepare(`
@@ -4454,8 +4522,12 @@ class AccountMonitorService {
       'SELECT * FROM sub2api_monitored_accounts WHERE account_id = ?'
     ).get(String(accountId));
     if (!row) throw new AppError('ACCOUNT_NOT_FOUND', 'Sub2API account was not found', { status: 404 });
-    const days = clamp(integer(options.days, this.settings().lookbackDays), 1, 90);
-    const requestedWindow = accountMonitorWindow(days, this.config.timezone);
+    const windowSelection = normalizeAccountMonitorWindowSelection(
+      options.window || options.timeWindow || options.period || options.days,
+      this.settings().lookbackDays
+    );
+    const days = windowSelection.days;
+    const requestedWindow = accountMonitorWindow(windowSelection, this.config.timezone);
     const { from: since, to: until } = requestedWindow;
     const metrics = this.#metrics([String(accountId)], since, until).get(String(accountId));
     const comparison = this.#comparisons([String(accountId)], since, until).get(String(accountId));
@@ -4511,6 +4583,13 @@ class AccountMonitorService {
       upstreamTrends: this.#upstreamTrends(comparison, trendFrom, trendTo),
       probes,
       days,
+      windowType: windowSelection.type,
+      window: {
+        from: requestedWindow.from,
+        to: requestedWindow.to,
+        startDate: requestedWindow.startDate,
+        endDate: requestedWindow.endDate
+      },
       requestedWindow: { from: since, to: until },
       comparisonWindow: { from: trendFrom, to: trendTo }
     };
@@ -5010,6 +5089,7 @@ module.exports = {
   normalizeAccount,
   normalizeAccountGroups,
   normalizeUsageSample,
+  normalizeAccountMonitorWindowSelection,
   accountMonitorWindow,
   aggregateAccountGroups,
   requestPairingTrust,

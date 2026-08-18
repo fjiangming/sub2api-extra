@@ -9,6 +9,7 @@ const {
   AccountMonitorService,
   CHALLENGE_EXPECTED,
   accountMonitorWindow,
+  normalizeAccountMonitorWindowSelection,
   createCapabilityChallenge,
   requestPairingTrust,
   scoreCapabilityChallenge,
@@ -742,6 +743,43 @@ test('seven-day account windows use seven local calendar dates including today',
   );
 });
 
+test('account quality windows distinguish rolling 24 hours from the local calendar day', () => {
+  const current = new Date('2026-08-07T16:30:00.000Z');
+  assert.deepEqual(normalizeAccountMonitorWindowSelection('24h'), {
+    type: '24h', value: '24h', days: 1
+  });
+  assert.deepEqual(normalizeAccountMonitorWindowSelection('today'), {
+    type: 'today', value: 'today', days: 1
+  });
+  assert.deepEqual(normalizeAccountMonitorWindowSelection(1), {
+    type: '24h', value: '24h', days: 1
+  });
+  assert.deepEqual(
+    accountMonitorWindow('24h', 'Asia/Shanghai', current),
+    {
+      from: '2026-08-06T16:30:00.000Z',
+      to: '2026-08-07T16:30:00.000Z',
+      startDate: '2026-08-07',
+      endDate: '2026-08-08',
+      days: 1
+    }
+  );
+  assert.deepEqual(
+    accountMonitorWindow(1, 'Asia/Shanghai', current),
+    accountMonitorWindow('24h', 'Asia/Shanghai', current)
+  );
+  assert.deepEqual(
+    accountMonitorWindow('today', 'Asia/Shanghai', current),
+    {
+      from: '2026-08-07T16:00:00.000Z',
+      to: '2026-08-07T16:30:00.000Z',
+      startDate: '2026-08-08',
+      endDate: '2026-08-08',
+      days: 1
+    }
+  );
+});
+
 test('daily API Key usage wins over a cumulative counter from a rotated credential', (t) => {
   const context = createTestContext();
   t.after(() => context.cleanup());
@@ -971,6 +1009,15 @@ test('account monitor HTTP API supports manual sync, filtering and probes', asyn
   });
   assert.equal(accounts.status, 200);
   assert.deepEqual((await accounts.json()).items.map((item) => item.accountId), ['11']);
+
+  const todayAccounts = await fetch(`${base}/api/account-monitor/accounts?platform=openai&days=today`, {
+    headers: { Cookie: cookie }
+  });
+  assert.equal(todayAccounts.status, 200);
+  const todayBody = await todayAccounts.json();
+  assert.equal(todayBody.windowType, 'today');
+  assert.equal(todayBody.summary.windowType, 'today');
+  assert.equal(todayBody.summary.window.startDate, todayBody.summary.window.endDate);
 
   const groupedAccounts = await fetch(
     `${base}/api/account-monitor/accounts?display=groups&groupId=102&days=7`,

@@ -124,6 +124,13 @@ test('account quality exposes metric and dual-source comparison rules from the d
   assert.match(app, /openAccountMetricRules\(button\.dataset\.ruleTarget\)/);
 });
 
+test('account quality exposes rolling and calendar-day observation windows', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  assert.match(app, /<select id="account-monitor-days"[\s\S]*value="1"[\s\S]*>24 小时<\/option>/);
+  assert.match(app, /<option value="today"[\s\S]*>当天<\/option>/);
+  assert.match(app, /accountMonitorWindowLabel/);
+});
+
 test('account quality list fits its container and keeps every metric in the responsive layout', () => {
   const app = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
