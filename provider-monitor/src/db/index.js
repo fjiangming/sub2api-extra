@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 25;
+const SCHEMA_VERSION = 26;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -2114,6 +2114,18 @@ function migrateApiKeyCounterAccountingV25(db) {
   ).run(migratedAt);
 }
 
+function migrateGrossProfitIndexesV26(db) {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS provider_cost_profit_window
+      ON provider_cost_ledger(occurred_at, connection_id, accounting_status, comparable);
+    CREATE INDEX IF NOT EXISTS sub2api_cost_profit_window
+      ON sub2api_account_cost_ledger(occurred_at, connection_id, attribution_status);
+  `);
+  db.prepare(
+    'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (26, ?)'
+  ).run(nowIso());
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -2143,6 +2155,7 @@ function createDatabase(databasePath) {
       error.message = `API Key counter accounting migration failed: ${error.message}`;
       throw error;
     }
+    migrateGrossProfitIndexesV26(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

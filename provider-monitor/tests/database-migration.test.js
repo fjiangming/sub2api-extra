@@ -6,7 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
-test('schema v25 migration preserves mappings and adds temporal counter accounting data', (t) => {
+test('schema v26 migration preserves mappings and adds gross-profit accounting indexes', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
   let db = createDatabase(databasePath);
@@ -135,6 +135,7 @@ test('schema v25 migration preserves mappings and adds temporal counter accounti
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 23').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 24').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 25').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 26').get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());
   assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'recharge_url'));
@@ -154,6 +155,8 @@ test('schema v25 migration preserves mappings and adds temporal counter accounti
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_attributed_cost_rollups'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_mapping_history'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_usage_counter_state'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'provider_cost_profit_window'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'sub2api_cost_profit_window'").get());
   const providerCostColumns = new Set(
     db.prepare('PRAGMA table_info(provider_cost_ledger)').all().map((column) => column.name)
   );

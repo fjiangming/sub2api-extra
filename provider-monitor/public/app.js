@@ -58,6 +58,11 @@ const state = {
     display: 'providers', groupId: '', platform: '', status: '', search: '', days: '7', page: 1,
     pageSize: 50, sortBy: 'qualityScore', order: 'desc'
   },
+  grossProfit: null,
+  grossProfitFilters: {
+    dimension: 'provider', granularity: 'day', connectionId: '', from: '', to: '', currency: ''
+  },
+  grossProfitDetailPage: 1,
   integrationGroups: [],
   integrationExpandedGroups: new Set(),
   autoMappingPreview: null,
@@ -83,6 +88,7 @@ const VIEW_META = {
   assets: ['密钥与分组', '配额、路由分组与到期状态'],
   usage: ['使用量', '供应商用量快照、请求数与 Token'],
   trends: ['余额趋势', '历史快照、消耗速度与可用天数'],
+  'gross-profit': ['毛利统计', '基座现金收入、上游现金成本与毛利趋势'],
   costs: ['价格比较', '模型价格、分组倍率与供应商推荐'],
   risks: ['健康与漂移', 'Key 检测、资产变化与异常识别'],
   'account-monitor': ['账号质量', '真实请求性能、缓存效率与主动能力检测'],
@@ -527,6 +533,7 @@ async function navigate(view) {
     if (view === 'assets') await renderAssets();
     if (view === 'usage') await renderUsage();
     if (view === 'trends') await renderTrends();
+    if (view === 'gross-profit') await renderGrossProfit();
     if (view === 'costs') await renderCosts();
     if (view === 'risks') await renderRisks();
     if (view === 'account-monitor') await renderAccountMonitor();
@@ -2297,6 +2304,236 @@ async function loadTrend() {
   $('#forecast-panel').innerHTML = `<div class="currency-list"><div class="currency-row"><span>当前余额</span><strong>${formatMoney(forecast.currentAvailable, currency)}</strong></div><div class="currency-row"><span>日均消耗</span><strong>${forecast.dailyBurn == null ? '-' : formatMoney(forecast.dailyBurn, currency)}</strong></div><div class="currency-row"><span>预计可用</span><strong>${forecast.runwayDays == null ? '-' : `${formatNumber(forecast.runwayDays, 1)} 天`}</strong></div><div class="currency-row"><span>样本</span><strong>${forecast.sampleCount || history.items.length}</strong></div><div class="currency-row"><span>可信度</span>${badge(forecast.confidence === 'medium' ? 'healthy' : 'unknown', forecast.confidence === 'medium' ? '中等' : '较低')}</div></div>`;
 }
 
+const GROSS_PROFIT_DIMENSION_LABELS = {
+  provider: '上游供应商',
+  key: 'Key',
+  account: '账号'
+};
+
+const GROSS_PROFIT_GRANULARITY_LABELS = {
+  day: '每天',
+  week: '每周',
+  month: '每月'
+};
+
+function grossProfitDisplayValue(item) {
+  if (!item) return null;
+  return item.grossProfit ?? item.estimatedGrossProfit ?? item.provisionalGrossProfit ?? null;
+}
+
+function grossProfitAmount(item, currency) {
+  const value = grossProfitDisplayValue(item);
+  if (value == null) return '-';
+  const prefix = item.status === 'estimated' ? '约 ' : item.status === 'partial' ? '暂计 ' : '';
+  return `${prefix}${formatPreciseMoney(value, currency)}`;
+}
+
+function grossProfitTone(item) {
+  const value = grossProfitDisplayValue(item);
+  if (value == null) return 'neutral';
+  return Number(value) < 0 ? 'negative' : Number(value) > 0 ? 'positive' : 'neutral';
+}
+
+function grossProfitStatus(item) {
+  return ({
+    complete: badge('healthy', '已核算'),
+    estimated: badge('warning', '倍率估算'),
+    partial: badge('failed', '数据不完整'),
+    empty: badge('info', '无账本')
+  })[item?.status] || badge('unknown');
+}
+
+function grossProfitMargin(item) {
+  if (!item || !(Number(item.revenue) > 0)) return '-';
+  const ratio = item.grossMarginRatio ?? (
+    grossProfitDisplayValue(item) == null
+      ? null
+      : Number(grossProfitDisplayValue(item)) / Number(item.revenue)
+  );
+  if (!Number.isFinite(ratio)) return '-';
+  return `${item.status === 'complete' ? '' : '约 '}${formatPercent(ratio * 100)}`;
+}
+
+function grossProfitNotes(summary, currency) {
+  const notes = [];
+  if (summary.unconfirmedCostRequests > 0) {
+    notes.push(`${formatNumber(summary.unconfirmedCostRequests, 0)} 笔上游成本使用待确认倍率`);
+  }
+  const missing = Number(summary.missingRevenueRequests || 0) + Number(summary.missingCostRequests || 0);
+  if (missing > 0) notes.push(`${formatNumber(missing, 0)} 笔账目缺少金额`);
+  if (summary.unconvertedCurrencies?.length) {
+    notes.push(`${summary.unconvertedCurrencies.join('、')} 缺少到 ${currency} 的汇率`);
+  }
+  if (summary.unattributedBaseRequestCount > 0) {
+    notes.push(`${formatNumber(summary.unattributedBaseRequestCount, 0)} 笔基座收入未归属供应商`);
+  }
+  if (summary.unattributedUpstreamRequestCount > 0) {
+    notes.push(`${formatNumber(summary.unattributedUpstreamRequestCount, 0)} 笔上游成本未归属当前维度`);
+  }
+  if (summary.maximumPrecisionSeconds > 0) {
+    const minutes = Math.max(1, Math.ceil(summary.maximumPrecisionSeconds / 60));
+    notes.push(`累计计数器最高入账精度 ${formatNumber(minutes, 0)} 分钟`);
+  }
+  if (summary.entityResultsTruncated) {
+    notes.push(`维度汇总显示毛利绝对值最高的 ${formatNumber(summary.returnedEntityCount, 0)} 项`);
+  }
+  return notes;
+}
+
+function grossProfitPagination(totalItems) {
+  if (!totalItems) return '';
+  const pageSize = 50;
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  const page = Math.min(totalPages, Math.max(1, state.grossProfitDetailPage));
+  const start = (page - 1) * pageSize + 1;
+  const end = Math.min(totalItems, page * pageSize);
+  return `<footer class="table-pagination" aria-label="毛利明细分页"><span class="pagination-summary">第 ${start}–${end} 条，共 ${totalItems} 条</span><div class="pagination-actions"><button class="icon-button small" data-action="gross-profit-page" data-page="1" title="第一页" aria-label="第一页" ${page <= 1 ? 'disabled' : ''}><i data-lucide="chevrons-left"></i></button><button class="icon-button small" data-action="gross-profit-page" data-page="${page - 1}" title="上一页" aria-label="上一页" ${page <= 1 ? 'disabled' : ''}><i data-lucide="chevron-left"></i></button><span class="pagination-position" aria-live="polite">${page} / ${totalPages}</span><button class="icon-button small" data-action="gross-profit-page" data-page="${page + 1}" title="下一页" aria-label="下一页" ${page >= totalPages ? 'disabled' : ''}><i data-lucide="chevron-right"></i></button><button class="icon-button small" data-action="gross-profit-page" data-page="${totalPages}" title="最后一页" aria-label="最后一页" ${page >= totalPages ? 'disabled' : ''}><i data-lucide="chevrons-right"></i></button></div></footer>`;
+}
+
+function grossProfitDetailRows(report) {
+  const pageSize = 50;
+  const totalPages = Math.max(1, Math.ceil(report.items.length / pageSize));
+  state.grossProfitDetailPage = Math.min(totalPages, Math.max(1, state.grossProfitDetailPage));
+  const offset = (state.grossProfitDetailPage - 1) * pageSize;
+  return report.items.slice(offset, offset + pageSize).map((item) => {
+    const provider = item.providerNames?.join(' / ') || '-';
+    return `<tr><td class="primary-cell"><strong>${escapeHtml(item.periodLabel)}</strong><small>${escapeHtml(GROSS_PROFIT_GRANULARITY_LABELS[report.query.granularity])}</small></td><td class="primary-cell"><strong>${escapeHtml(item.entityName)}</strong><small>${escapeHtml(provider)}</small></td><td class="numeric">${escapeHtml(formatPreciseMoney(item.revenue, report.query.currency))}</td><td class="numeric">${escapeHtml(formatPreciseMoney(item.upstreamCost, report.query.currency))}</td><td class="numeric gross-profit-value ${grossProfitTone(item)}"><strong>${escapeHtml(grossProfitAmount(item, report.query.currency))}</strong><small>${escapeHtml(grossProfitMargin(item))}</small></td><td>${grossProfitStatus(item)}</td></tr>`;
+  }).join('');
+}
+
+function paintGrossProfitChart(report) {
+  state.chart?.dispose?.();
+  state.chart = null;
+  const chartRoot = $('#gross-profit-chart');
+  if (!chartRoot || !window.echarts || report.periods.length === 0) return;
+  const currency = report.query.currency;
+  const labels = report.periods.map((period) => period.periodLabel);
+  state.chart = window.echarts.init(chartRoot);
+  state.chart.setOption({
+    animationDuration: 300,
+    color: ['#147d64', '#2f6fba', '#b66a16'],
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'shadow' },
+      valueFormatter: (value) => formatPreciseMoney(value, currency)
+    },
+    legend: { top: 10, data: ['毛利', '基座收入', '上游成本'] },
+    grid: { left: 72, right: 28, top: 54, bottom: 58 },
+    xAxis: {
+      type: 'category',
+      data: labels,
+      axisLabel: { color: '#667069', hideOverlap: true },
+      axisLine: { lineStyle: { color: '#c7cec9' } }
+    },
+    yAxis: {
+      type: 'value',
+      axisLabel: { color: '#667069' },
+      splitLine: { lineStyle: { color: '#e5e9e6' } }
+    },
+    series: [
+      {
+        name: '毛利',
+        type: 'bar',
+        barMaxWidth: 32,
+        data: report.periods.map((period) => ({
+          value: grossProfitDisplayValue(period),
+          itemStyle: { color: grossProfitTone(period) === 'negative' ? '#b94a48' : '#147d64' }
+        }))
+      },
+      {
+        name: '基座收入',
+        type: 'line',
+        showSymbol: report.periods.length <= 12,
+        symbolSize: 6,
+        lineStyle: { width: 2 },
+        data: report.periods.map((period) => period.revenue)
+      },
+      {
+        name: '上游成本',
+        type: 'line',
+        showSymbol: report.periods.length <= 12,
+        symbolSize: 6,
+        lineStyle: { width: 2 },
+        data: report.periods.map((period) => period.upstreamCost)
+      }
+    ]
+  });
+}
+
+function paintGrossProfit(report) {
+  const filters = state.grossProfitFilters;
+  const summary = report.summary;
+  const currency = report.query.currency;
+  const providers = report.filterOptions.providers.map((provider) => (
+    `<option value="${escapeHtml(provider.id)}" ${filters.connectionId === provider.id ? 'selected' : ''}>${escapeHtml(provider.name)}</option>`
+  )).join('');
+  const currencies = report.filterOptions.currencies.filter((item) => item.convertible).map((item) => (
+    `<option value="${escapeHtml(item.currency)}" ${currency === item.currency ? 'selected' : ''}>${escapeHtml(item.currency)}</option>`
+  )).join('');
+  const dimensionButtons = Object.entries(GROSS_PROFIT_DIMENSION_LABELS).map(([value, label]) => (
+    `<button class="tab ${filters.dimension === value ? 'active' : ''}" data-action="gross-profit-dimension" data-dimension="${value}" role="tab" aria-selected="${filters.dimension === value}" tabindex="${filters.dimension === value ? '0' : '-1'}">${escapeHtml(label)}</button>`
+  )).join('');
+  const granularityButtons = Object.entries(GROSS_PROFIT_GRANULARITY_LABELS).map(([value, label]) => (
+    `<button class="tab ${filters.granularity === value ? 'active' : ''}" data-action="gross-profit-granularity" data-granularity="${value}" role="tab" aria-selected="${filters.granularity === value}" tabindex="${filters.granularity === value ? '0' : '-1'}">${escapeHtml(label)}</button>`
+  )).join('');
+  const summaryMargin = grossProfitMargin(summary);
+  const notes = grossProfitNotes(summary, currency);
+  const entityRows = report.entities.map((entity) => {
+    const provider = entity.providerNames?.join(' / ') || '-';
+    return `<tr><td class="primary-cell"><strong>${escapeHtml(entity.entityName)}</strong><small>${escapeHtml(provider)}</small></td><td class="numeric">${escapeHtml(formatPreciseMoney(entity.revenue, currency))}</td><td class="numeric">${escapeHtml(formatPreciseMoney(entity.upstreamCost, currency))}</td><td class="numeric gross-profit-value ${grossProfitTone(entity)}"><strong>${escapeHtml(grossProfitAmount(entity, currency))}</strong></td><td class="numeric">${escapeHtml(grossProfitMargin(entity))}</td><td class="numeric">${formatNumber(entity.baseRequestCount, 0)} / ${formatNumber(entity.upstreamRequestCount, 0)}</td><td>${grossProfitStatus(entity)}</td></tr>`;
+  }).join('');
+  const detailRows = grossProfitDetailRows(report);
+  $('#main-content').innerHTML = `
+    <section class="gross-profit-controls" aria-label="毛利统计筛选">
+      <div class="gross-profit-mode"><span>统计维度</span><div class="tabs gross-profit-segmented" role="tablist" aria-label="统计维度">${dimensionButtons}</div></div>
+      <div class="gross-profit-mode"><span>时间粒度</span><div class="tabs gross-profit-segmented" role="tablist" aria-label="时间粒度">${granularityButtons}</div></div>
+      <label><span>供应商</span><select id="gross-profit-provider"><option value="">全部供应商</option>${providers}</select></label>
+      <label><span>开始日期</span><input id="gross-profit-from" type="date" value="${escapeHtml(filters.from)}"></label>
+      <label><span>结束日期</span><input id="gross-profit-to" type="date" value="${escapeHtml(filters.to)}"></label>
+      <label><span>折算币种</span><select id="gross-profit-currency">${currencies}</select></label>
+    </section>
+    <div class="stats-grid gross-profit-stats">
+      <div class="stat"><span class="stat-label"><i data-lucide="chart-column-increasing"></i>毛利</span><strong class="stat-value gross-profit-summary-value ${grossProfitTone(summary)}">${escapeHtml(grossProfitAmount(summary, currency))}</strong><span class="stat-detail">${grossProfitStatus(summary)}</span></div>
+      <div class="stat"><span class="stat-label"><i data-lucide="circle-arrow-up"></i>基座收入</span><strong class="stat-value">${escapeHtml(formatPreciseMoney(summary.revenue, currency))}</strong><span class="stat-detail">${formatNumber(summary.baseRequestCount, 0)} 笔计费请求</span></div>
+      <div class="stat"><span class="stat-label"><i data-lucide="circle-arrow-down"></i>上游成本</span><strong class="stat-value">${escapeHtml(formatPreciseMoney(summary.upstreamCost, currency))}</strong><span class="stat-detail">${formatNumber(summary.upstreamRequestCount, 0)} 笔计费请求</span></div>
+      <div class="stat"><span class="stat-label"><i data-lucide="percent"></i>毛利率</span><strong class="stat-value">${escapeHtml(summaryMargin)}</strong><span class="stat-detail">${formatNumber(summary.profitablePeriodCount, 0)} 个盈利周期 · ${formatNumber(summary.lossPeriodCount, 0)} 个亏损周期</span></div>
+    </div>
+    <div class="gross-profit-status ${summary.status}"><div>${grossProfitStatus(summary)}<strong>${escapeHtml(report.query.from)} 至 ${escapeHtml(report.query.to)}</strong><span>${escapeHtml(report.query.timezone)} · ${escapeHtml(GROSS_PROFIT_GRANULARITY_LABELS[report.query.granularity])}</span></div>${notes.length ? `<ul>${notes.map((note) => `<li>${escapeHtml(note)}</li>`).join('')}</ul>` : '<span>账本金额与维度归因完整</span>'}</div>
+    <section class="panel gross-profit-chart-panel"><div class="panel-header"><h2>毛利时间线</h2><span class="stat-detail">${formatNumber(summary.activePeriodCount, 0)} / ${formatNumber(summary.periodCount, 0)} 个周期有账本</span></div><div class="chart gross-profit-chart" id="gross-profit-chart"></div></section>
+    <section class="section"><div class="section-header"><div><h2>${escapeHtml(GROSS_PROFIT_DIMENSION_LABELS[report.query.dimension])}汇总</h2><p>${formatNumber(summary.entityCount, 0)} 个统计对象</p></div></div><div class="table-wrap gross-profit-table">${entityRows ? `<table><thead><tr><th>${escapeHtml(GROSS_PROFIT_DIMENSION_LABELS[report.query.dimension])}</th><th class="numeric">基座收入</th><th class="numeric">上游成本</th><th class="numeric">毛利</th><th class="numeric">毛利率</th><th class="numeric">请求（基座 / 上游）</th><th>口径</th></tr></thead><tbody>${entityRows}</tbody></table>` : emptyState('chart-column-increasing', '暂无维度数据', '所选期间没有可归因账本')}</div></section>
+    <section class="section"><div class="section-header"><div><h2>周期明细</h2><p>${escapeHtml(GROSS_PROFIT_GRANULARITY_LABELS[report.query.granularity])} × ${escapeHtml(GROSS_PROFIT_DIMENSION_LABELS[report.query.dimension])}</p></div></div><div class="table-wrap gross-profit-table">${detailRows ? `<table><thead><tr><th>周期</th><th>${escapeHtml(GROSS_PROFIT_DIMENSION_LABELS[report.query.dimension])}</th><th class="numeric">基座收入</th><th class="numeric">上游成本</th><th class="numeric">毛利 / 毛利率</th><th>口径</th></tr></thead><tbody>${detailRows}</tbody></table>` : emptyState('calendar-x', '暂无周期明细', '所选期间没有可归因账本')}</div>${grossProfitPagination(report.items.length)}</section>`;
+  paintGrossProfitChart(report);
+  icons();
+}
+
+async function loadGrossProfit() {
+  const filters = state.grossProfitFilters;
+  const search = new URLSearchParams({
+    dimension: filters.dimension,
+    granularity: filters.granularity
+  });
+  if (filters.connectionId) search.set('connectionId', filters.connectionId);
+  if (filters.from) search.set('from', filters.from);
+  if (filters.to) search.set('to', filters.to);
+  if (filters.currency) search.set('currency', filters.currency);
+  const report = await api(`/api/gross-profit?${search}`);
+  state.grossProfit = report;
+  state.grossProfitFilters = {
+    dimension: report.query.dimension,
+    granularity: report.query.granularity,
+    connectionId: report.query.connectionId || '',
+    from: report.query.from,
+    to: report.query.to,
+    currency: report.query.currency
+  };
+  paintGrossProfit(report);
+}
+
+async function renderGrossProfit() {
+  setTopActions(`<button class="button" data-action="refresh-gross-profit" title="刷新毛利统计"><i data-lucide="refresh-cw"></i><span>刷新</span></button>`);
+  await loadGrossProfit();
+}
+
 async function renderAutomation() {
   const [alertRules, automationRules, events, channels, actions, mappings] = await Promise.all([
     api('/api/alert-rules'),
@@ -3939,6 +4176,21 @@ async function handleAction(button) {
       $('#disaster-dialog').showModal(); icons();
     }
     if (action === 'refresh-view') navigate(state.view);
+    if (action === 'refresh-gross-profit') await loadGrossProfit();
+    if (action === 'gross-profit-dimension') {
+      state.grossProfitFilters.dimension = button.dataset.dimension;
+      state.grossProfitDetailPage = 1;
+      await loadGrossProfit();
+    }
+    if (action === 'gross-profit-granularity') {
+      state.grossProfitFilters.granularity = button.dataset.granularity;
+      state.grossProfitDetailPage = 1;
+      await loadGrossProfit();
+    }
+    if (action === 'gross-profit-page') {
+      state.grossProfitDetailPage = Math.max(1, Number(button.dataset.page) || 1);
+      if (state.grossProfit) paintGrossProfit(state.grossProfit);
+    }
     if (action === 'detect-provider') {
       const form = $('#provider-form');
       const outcome = await detectProvider(form, { manual: true });
@@ -4025,6 +4277,24 @@ document.addEventListener('change', (event) => {
       : 'desc';
     state.accountMonitorFilters.page = 1;
     renderAccountMonitor().catch((error) => toast(error.message, 'error'));
+  }
+  if (event.target.matches('#gross-profit-provider, #gross-profit-from, #gross-profit-to, #gross-profit-currency')) {
+    const field = ({
+      'gross-profit-provider': 'connectionId',
+      'gross-profit-from': 'from',
+      'gross-profit-to': 'to',
+      'gross-profit-currency': 'currency'
+    })[event.target.id];
+    state.grossProfitFilters[field] = event.target.value;
+    if (
+      state.grossProfitFilters.from && state.grossProfitFilters.to &&
+      state.grossProfitFilters.from > state.grossProfitFilters.to
+    ) {
+      if (field === 'from') state.grossProfitFilters.to = state.grossProfitFilters.from;
+      else state.grossProfitFilters.from = state.grossProfitFilters.to;
+    }
+    state.grossProfitDetailPage = 1;
+    loadGrossProfit().catch((error) => toast(error.message, 'error'));
   }
   if (event.target.matches('#trend-provider, #trend-days, #trend-currency')) loadTrend().catch((e) => toast(e.message, 'error'));
   if (event.target.matches('#asset-status')) filterAssets().catch((e) => toast(e.message, 'error'));

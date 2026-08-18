@@ -35,6 +35,7 @@ const { BackupService } = require('./services/backup-service');
 const { RetentionService } = require('./services/retention-service');
 const { SimulationService } = require('./services/simulation-service');
 const { AccountMonitorService } = require('./services/account-monitor-service');
+const { GrossProfitService } = require('./services/gross-profit-service');
 const {
   RechargeLinkService,
   pageHeaders,
@@ -475,6 +476,7 @@ function createApplication(options = {}) {
     adminApiKeyStatus.capabilities?.accountKeyExport === true ? 'verified' : null
   );
   const accountMonitor = new AccountMonitorService({ db, config, sub2api, http });
+  const grossProfit = new GrossProfitService({ db, config });
   const mappings = new MappingService({ db, config, sub2api, http });
   const automation = new AutomationService({ db, config, sub2api, mappings, notifications });
   const analysis = new AnalysisService({ db, config });
@@ -1586,6 +1588,14 @@ function createApplication(options = {}) {
     req.params.id,
     { days: req.query.days }
   )));
+  api.get('/gross-profit', (req, res) => res.json(grossProfit.report({
+    dimension: req.query.dimension,
+    granularity: req.query.granularity,
+    from: req.query.from,
+    to: req.query.to,
+    connectionId: req.query.connectionId || req.query.connection_id,
+    currency: req.query.currency
+  })));
   api.put('/account-monitor/providers/:id/recharge-audit', (req, res) => {
     const input = validate(providerRechargeAuditSchema, req.body || {});
     const result = accountMonitor.saveProviderRechargeAudit(req.params.id, input);
@@ -1993,7 +2003,7 @@ function createApplication(options = {}) {
     config, db, providers, queries, notifications, alerts, automation, analysis,
     keyHealth, catalog, checkins, mappings, credentials, transfers, sub2api,
     metrics, auth, queue, sync, detection, backups, retention, rechargeLinks,
-    simulations, accountMonitor
+    simulations, accountMonitor, grossProfit
   };
   app.locals.startBackground = startBackground;
   app.locals.close = close;
