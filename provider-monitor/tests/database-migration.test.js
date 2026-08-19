@@ -6,7 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
-test('schema v26 migration preserves mappings and adds gross-profit accounting indexes', (t) => {
+test('schema v27 migration preserves mappings and adds requester user accounting fields', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
   let db = createDatabase(databasePath);
@@ -93,6 +93,15 @@ test('schema v26 migration preserves mappings and adds gross-profit accounting i
       cache_creation_tokens, cache_read_tokens, actual_cost, created_at, ingested_at
     ) VALUES ('legacy-base-log', 'probe-account', 10, 5, 0, 2, 2.5, ?, ?)
   `).run(now, now);
+  db.prepare(`
+    UPDATE sub2api_account_monitor_state SET
+      last_sync_summary_json = ?, updated_at = ?
+    WHERE id = 1
+  `).run(JSON.stringify({
+    usageExactTotal: true,
+    usageCoverageFrom: '2026-01-01T00:00:00.000Z',
+    usageCoverageTo: now
+  }), now);
 
   db.pragma('foreign_keys = OFF');
   db.exec(`
@@ -119,6 +128,11 @@ test('schema v26 migration preserves mappings and adds gross-profit accounting i
     ALTER TABLE sub2api_mappings_v7 RENAME TO sub2api_mappings;
     CREATE UNIQUE INDEX sub2api_mapping_account_identity
       ON sub2api_mappings(connection_id, channel_id) WHERE key_id IS NULL;
+    DROP INDEX IF EXISTS sub2api_account_sample_user_lookup;
+    DROP INDEX IF EXISTS sub2api_account_cost_ledger_user_lookup;
+    DROP TRIGGER IF EXISTS sub2api_account_cost_ledger_revision;
+    ALTER TABLE sub2api_account_request_samples DROP COLUMN user_id;
+    ALTER TABLE sub2api_account_cost_ledger DROP COLUMN user_id;
     INSERT INTO sub2api_mappings(
       id, connection_id, key_id, channel_id, account_id, group_id,
       role, enabled, models_json, config_json, created_at, updated_at
@@ -136,6 +150,7 @@ test('schema v26 migration preserves mappings and adds gross-profit accounting i
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 24').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 25').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 26').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 27').get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());
   assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'recharge_url'));
@@ -150,6 +165,23 @@ test('schema v26 migration preserves mappings and adds gross-profit accounting i
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_cost_rollups'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_account_cost_ledger'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_account_cost_rollups'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'sub2api_account_sample_user_lookup'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'sub2api_account_cost_ledger_user_lookup'").get());
+  assert.equal(
+    db.prepare('PRAGMA table_info(sub2api_account_request_samples)').all().some((column) => column.name === 'user_id'),
+    true
+  );
+  assert.equal(
+    db.prepare('PRAGMA table_info(sub2api_account_cost_ledger)').all().some((column) => column.name === 'user_id'),
+    true
+  );
+  const requesterBackfill = JSON.parse(db.prepare(`
+    SELECT last_sync_summary_json
+    FROM sub2api_account_monitor_state
+    WHERE id = 1
+  `).get().last_sync_summary_json);
+  assert.equal(requesterBackfill.usageExactTotal, false);
+  assert.equal(requesterBackfill.requesterUserBackfillRequired, true);
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_audits'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_cost_cash_rollups'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_attributed_cost_rollups'").get());

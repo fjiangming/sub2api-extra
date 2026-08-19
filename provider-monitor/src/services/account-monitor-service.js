@@ -166,6 +166,7 @@ function normalizeAccount(account, groupCatalog = new Map()) {
 
 function normalizeUsageSample(log) {
   const sourceLogId = log?.id ?? log?.usage_id;
+  const userId = log?.user_id ?? log?.user?.id;
   const accountId = log?.account_id ?? log?.account?.id;
   const createdAt = log?.created_at || log?.timestamp;
   if (sourceLogId == null || accountId == null || !createdAt || !Number.isFinite(Date.parse(createdAt))) {
@@ -173,6 +174,7 @@ function normalizeUsageSample(log) {
   }
   return {
     sourceLogId: String(sourceLogId),
+    userId: userId == null || String(userId).trim() === '' ? null : String(userId),
     accountId: String(accountId),
     requestId: log?.request_id == null ? null : String(log.request_id).slice(0, 160),
     model: log?.model == null ? null : String(log.model).slice(0, 200),
@@ -1540,12 +1542,13 @@ class AccountMonitorService {
       `);
       const insertSample = this.db.prepare(`
         INSERT INTO sub2api_account_request_samples(
-          source_log_id, account_id, request_id, model, upstream_model,
+          source_log_id, user_id, account_id, request_id, model, upstream_model,
           model_mapping_chain, request_type, stream, duration_ms, first_token_ms,
           input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
           actual_cost, created_at, ingested_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_log_id) DO UPDATE SET
+          user_id = excluded.user_id,
           account_id = excluded.account_id, request_id = excluded.request_id,
           model = excluded.model, upstream_model = excluded.upstream_model,
           model_mapping_chain = excluded.model_mapping_chain,
@@ -1558,12 +1561,13 @@ class AccountMonitorService {
       `);
       const insertCost = this.db.prepare(`
         INSERT INTO sub2api_account_cost_ledger(
-          source_log_id, account_id, currency, cost, request_count,
+          source_log_id, user_id, account_id, currency, cost, request_count,
           occurred_at, ingested_at, updated_at, recharge_multiplier,
           recharge_source, cash_currency, cash_revenue, valuation_status,
           context_json, revision, first_observed_at, last_observed_at
-        ) VALUES (?, ?, 'USD', ?, 1, ?, ?, ?, ?, ?, ?, ?, 'observed', ?, 1, ?, ?)
+        ) VALUES (?, ?, ?, 'USD', ?, 1, ?, ?, ?, ?, ?, ?, ?, 'observed', ?, 1, ?, ?)
         ON CONFLICT(source_log_id) DO UPDATE SET
+          user_id = excluded.user_id,
           account_id = excluded.account_id,
           currency = excluded.currency,
           cost = excluded.cost,
@@ -1572,6 +1576,7 @@ class AccountMonitorService {
           cash_revenue = CASE WHEN excluded.cost IS NULL THEN NULL
             ELSE excluded.cost / sub2api_account_cost_ledger.recharge_multiplier END,
           revision = sub2api_account_cost_ledger.revision + CASE WHEN
+            sub2api_account_cost_ledger.user_id IS NOT excluded.user_id OR
             sub2api_account_cost_ledger.account_id IS NOT excluded.account_id OR
             sub2api_account_cost_ledger.currency IS NOT excluded.currency OR
             sub2api_account_cost_ledger.cost IS NOT excluded.cost OR
@@ -1640,7 +1645,7 @@ class AccountMonitorService {
               now
             );
             const result = insertSample.run(
-              sample.sourceLogId, sample.accountId, sample.requestId, sample.model,
+              sample.sourceLogId, sample.userId, sample.accountId, sample.requestId, sample.model,
               sample.upstreamModel, sample.modelMappingChain, sample.requestType,
               sample.stream ? 1 : 0, sample.durationMs, sample.firstTokenMs,
               sample.inputTokens, sample.outputTokens, sample.cacheCreationTokens,
@@ -1648,6 +1653,7 @@ class AccountMonitorService {
             );
             insertCost.run(
               sample.sourceLogId,
+              sample.userId,
               sample.accountId,
               sample.actualCost,
               sample.createdAt,

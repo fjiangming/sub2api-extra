@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { createTestContext } = require('./helpers');
 const { ProviderRepository } = require('../src/repositories/provider-repository');
 const {
-  ADMINISTRATOR_ACCOUNT_ID,
+  ADMINISTRATOR_USER_ID,
   GrossProfitService,
   bucketForTimestamp
 } = require('../src/services/gross-profit-service');
@@ -50,17 +50,17 @@ function insertMappingHistory(db, mappingId, providerId, keyId, accountId, valid
 
 function insertRevenue(db, {
   id, accountId, providerId = null, keyId = null, occurredAt, cashRevenue,
-  attributionStatus = 'attributed'
+  attributionStatus = 'attributed', userId = '2'
 }) {
   db.prepare(`
     INSERT INTO sub2api_account_cost_ledger(
-      source_log_id, account_id, currency, cost, request_count,
+      source_log_id, user_id, account_id, currency, cost, request_count,
       occurred_at, ingested_at, updated_at, recharge_multiplier,
       recharge_source, cash_currency, cash_revenue, connection_id, key_id,
       attribution_status, first_observed_at, last_observed_at
-    ) VALUES (?, ?, 'USD', ?, 1, ?, ?, ?, 2, 'base_settings', 'USD', ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, 'USD', ?, 1, ?, ?, ?, 2, 'base_settings', 'USD', ?, ?, ?, ?, ?, ?)
   `).run(
-    id, accountId, cashRevenue * 2, occurredAt, occurredAt, occurredAt,
+    id, userId, accountId, cashRevenue * 2, occurredAt, occurredAt, occurredAt,
     cashRevenue, providerId, keyId, attributionStatus, occurredAt, occurredAt
   );
 }
@@ -135,31 +135,32 @@ function setupLedger(context) {
 
 function setupAdministratorLedger(context, provider) {
   const occurredAt = '2026-08-16T16:45:00.000Z';
-  insertKey(context.db, provider, 'key-admin', 'Administrator Key', occurredAt);
-  insertAccount(context.db, ADMINISTRATOR_ACCOUNT_ID, 'Administrator', occurredAt);
-  insertMappingHistory(
-    context.db,
-    'map-admin',
-    provider.id,
-    'key-admin',
-    ADMINISTRATOR_ACCOUNT_ID,
-    '2026-01-01T00:00:00.000Z'
-  );
   insertRevenue(context.db, {
     id: 'admin-revenue',
-    accountId: ADMINISTRATOR_ACCOUNT_ID,
+    accountId: '101',
     providerId: provider.id,
-    keyId: 'key-admin',
+    keyId: 'key-alpha',
     occurredAt,
-    cashRevenue: 4
+    cashRevenue: 4,
+    userId: ADMINISTRATOR_USER_ID
   });
   insertCost(context.db, {
     id: 'admin-cost',
     providerId: provider.id,
-    keyId: 'key-admin',
+    keyId: 'key-alpha',
     occurredAt,
     cashCost: 1,
-    attributedAccountId: ADMINISTRATOR_ACCOUNT_ID
+    attributedAccountId: '101'
+  });
+  insertAccount(context.db, '1', 'Upstream Account #1', occurredAt);
+  insertRevenue(context.db, {
+    id: 'non-admin-upstream-account-one',
+    accountId: '1',
+    providerId: provider.id,
+    keyId: 'key-alpha',
+    occurredAt,
+    cashRevenue: 2,
+    userId: '42'
   });
 }
 
@@ -267,35 +268,37 @@ test('gross profit supports standard, administrator exclusion and administrator 
 
   const standard = service.report(input);
   assert.equal(standard.query.accountingMode, 'standard');
-  assert.equal(standard.summary.revenue, 22);
+  assert.equal(standard.summary.revenue, 24);
   assert.equal(standard.summary.upstreamCost, 13);
   assert.equal(standard.summary.administratorExpense, 0);
-  assert.equal(standard.summary.grossProfit, 9);
+  assert.equal(standard.summary.grossProfit, 11);
+  assert.equal(standard.summary.unknownRequesterUserRequestCount, 0);
 
   const excluded = service.report({ ...input, accountingMode: 'exclude_admin' });
   assert.equal(excluded.query.accountingMode, 'exclude_admin');
-  assert.equal(excluded.summary.revenue, 18);
-  assert.equal(excluded.summary.upstreamCost, 12);
+  assert.equal(excluded.summary.revenue, 20);
+  assert.equal(excluded.summary.upstreamCost, 13);
   assert.equal(excluded.summary.administratorExpense, 0);
-  assert.equal(excluded.summary.grossProfit, 6);
+  assert.equal(excluded.summary.grossProfit, 7);
+  assert.equal(excluded.summary.accountingModeComplete, true);
 
   const expense = service.report({ ...input, mode: 'admin_as_expense' });
   assert.equal(expense.query.accountingMode, 'admin_expense');
-  assert.equal(expense.summary.revenue, 18);
-  assert.equal(expense.summary.upstreamCost, 12);
+  assert.equal(expense.summary.revenue, 20);
+  assert.equal(expense.summary.upstreamCost, 13);
   assert.equal(expense.summary.administratorExpense, 4);
   assert.equal(expense.summary.administratorRequestCount, 1);
-  assert.equal(expense.summary.operatingGrossProfit, 6);
-  assert.equal(expense.summary.totalCost, 16);
-  assert.equal(expense.summary.grossProfit, 2);
-  assert.equal(expense.summary.grossMarginRatio, 0.111111);
+  assert.equal(expense.summary.operatingGrossProfit, 7);
+  assert.equal(expense.summary.totalCost, 17);
+  assert.equal(expense.summary.grossProfit, 3);
+  assert.equal(expense.summary.grossMarginRatio, 0.15);
   assert.deepEqual(expense.periods.map((period) => [
     period.periodKey,
     period.grossProfit,
     period.administratorExpense
   ]), [
     ['2026-08-16', 3, 0],
-    ['2026-08-17', -1, 4]
+    ['2026-08-17', 0, 4]
   ]);
 
   const accountExpense = service.report({
@@ -303,14 +306,44 @@ test('gross profit supports standard, administrator exclusion and administrator 
     accountingMode: 'admin_expense',
     dimension: 'account'
   });
-  const administrator = accountExpense.entities.find(
-    (entity) => entity.entityId === ADMINISTRATOR_ACCOUNT_ID
+  const administratorUsage = accountExpense.entities.find(
+    (entity) => entity.entityId === '101'
   );
-  assert.equal(administrator.entityName, 'Administrator');
-  assert.equal(administrator.revenue, 0);
-  assert.equal(administrator.upstreamCost, 0);
-  assert.equal(administrator.administratorExpense, 4);
-  assert.equal(administrator.grossProfit, -4);
+  assert.equal(administratorUsage.entityName, 'Alpha Account');
+  assert.equal(administratorUsage.revenue, 8);
+  assert.equal(administratorUsage.upstreamCost, 7);
+  assert.equal(administratorUsage.administratorExpense, 4);
+  assert.equal(administratorUsage.grossProfit, -3);
+  const nonAdministratorOnAccountOne = accountExpense.entities.find(
+    (entity) => entity.entityId === '1'
+  );
+  assert.equal(nonAdministratorOnAccountOne.entityName, 'Upstream Account #1');
+  assert.equal(nonAdministratorOnAccountOne.revenue, 2);
+});
+
+test('administrator modes report legacy rows without a requester user id', (t) => {
+  const context = createTestContext({ PROVIDER_MONITOR_TIMEZONE: 'Asia/Shanghai' });
+  t.after(() => context.cleanup());
+  const { alpha } = setupLedger(context);
+  insertRevenue(context.db, {
+    id: 'legacy-requester-unknown',
+    accountId: '101',
+    providerId: alpha.id,
+    keyId: 'key-alpha',
+    occurredAt: '2026-08-16T16:45:00.000Z',
+    cashRevenue: 1,
+    userId: null
+  });
+  const service = new GrossProfitService({ db: context.db, config: context.config });
+  const report = service.report({
+    from: '2026-08-16',
+    to: '2026-08-17',
+    accountingMode: 'exclude_admin'
+  });
+
+  assert.equal(report.summary.unknownRequesterUserRequestCount, 1);
+  assert.equal(report.summary.requesterUserCoverageComplete, false);
+  assert.equal(report.summary.accountingModeComplete, false);
 });
 
 test('unconfirmed supplier recharge rates expose estimates instead of exact gross profit', (t) => {

@@ -109,6 +109,7 @@ function createSub2ApiMock() {
           items: [
             {
               id: 101,
+              user_id: 7,
               account_id: 11,
               request_id: 'request-101',
               model: 'gpt-5.4',
@@ -125,6 +126,7 @@ function createSub2ApiMock() {
             },
             {
               id: 102,
+              user_id: 7,
               account_id: 11,
               request_id: 'request-102',
               model: 'gpt-5.4',
@@ -140,6 +142,7 @@ function createSub2ApiMock() {
             },
             {
               id: 103,
+              user_id: 7,
               account_id: 11,
               request_id: 'request-103',
               model: 'gpt-5.4',
@@ -204,6 +207,13 @@ test('account monitor syncs redacted metrics and scores dynamic capability probe
   assert.ok(usageCalls.every((call) => call.query.exact_total === true));
   assert.equal(sync.usageExactTotal, true);
   assert.equal(sync.usageFullBackfill, true);
+  assert.deepEqual(
+    context.db.prepare(`
+      SELECT user_id FROM sub2api_account_cost_ledger
+      ORDER BY source_log_id
+    `).all().map((row) => row.user_id),
+    ['7', '7', '7']
+  );
   assert.ok(Date.parse(sync.usageCoverageFrom) < Date.parse(sync.usageCoverageTo));
   const callsBeforeExpandedBackfill = sub2api.calls.length;
   const expandedSync = await monitor.sync({ lookbackDays: 14 });

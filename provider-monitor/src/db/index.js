@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 26;
+const SCHEMA_VERSION = 27;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -566,6 +566,7 @@ CREATE INDEX IF NOT EXISTS sub2api_monitored_account_lookup
 
 CREATE TABLE IF NOT EXISTS sub2api_account_request_samples (
   source_log_id TEXT PRIMARY KEY,
+  user_id TEXT,
   account_id TEXT NOT NULL REFERENCES sub2api_monitored_accounts(account_id) ON DELETE CASCADE,
   request_id TEXT,
   model TEXT,
@@ -715,6 +716,7 @@ END;
 
 CREATE TABLE IF NOT EXISTS sub2api_account_cost_ledger (
   source_log_id TEXT PRIMARY KEY,
+  user_id TEXT,
   account_id TEXT NOT NULL,
   currency TEXT NOT NULL DEFAULT 'USD',
   cost REAL,
@@ -2126,6 +2128,78 @@ function migrateGrossProfitIndexesV26(db) {
   ).run(nowIso());
 }
 
+function migrateRequesterUserAccountingV27(db) {
+  const migrated = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 27'
+  ).get();
+  if (migrated) return;
+  const addColumn = (table, name, definition) => {
+    const columns = new Set(
+      db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name)
+    );
+    if (!columns.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+  };
+
+  addColumn('sub2api_account_request_samples', 'user_id', 'TEXT');
+  addColumn('sub2api_account_cost_ledger', 'user_id', 'TEXT');
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS sub2api_account_sample_user_lookup
+      ON sub2api_account_request_samples(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS sub2api_account_cost_ledger_user_lookup
+      ON sub2api_account_cost_ledger(user_id, occurred_at DESC);
+
+    DROP TRIGGER IF EXISTS sub2api_account_cost_ledger_revision;
+    CREATE TRIGGER sub2api_account_cost_ledger_revision
+    BEFORE UPDATE ON sub2api_account_cost_ledger
+    WHEN OLD.user_id IS NOT NEW.user_id OR OLD.account_id IS NOT NEW.account_id
+      OR OLD.currency IS NOT NEW.currency
+      OR OLD.cost IS NOT NEW.cost OR OLD.request_count IS NOT NEW.request_count
+      OR OLD.occurred_at IS NOT NEW.occurred_at
+    BEGIN
+      INSERT OR IGNORE INTO sub2api_account_cost_ledger_revisions(
+        source_log_id, revision, snapshot_json, changed_at
+      ) VALUES (
+        OLD.source_log_id, OLD.revision,
+        json_object(
+          'userId', OLD.user_id, 'accountId', OLD.account_id,
+          'currency', OLD.currency, 'cost', OLD.cost,
+          'requestCount', OLD.request_count, 'occurredAt', OLD.occurred_at,
+          'rechargeMultiplier', OLD.recharge_multiplier,
+          'cashRevenue', OLD.cash_revenue, 'connectionId', OLD.connection_id,
+          'keyId', OLD.key_id, 'mappingId', OLD.mapping_id,
+          'mappingVersionId', OLD.mapping_version_id,
+          'attributionStatus', OLD.attribution_status,
+          'context', json(OLD.context_json)
+        ),
+        NEW.updated_at
+      );
+    END;
+  `);
+  const missingRequesterUser = db.prepare(`
+    SELECT 1 FROM sub2api_account_cost_ledger
+    WHERE user_id IS NULL
+    LIMIT 1
+  `).get();
+  if (missingRequesterUser) {
+    const state = db.prepare(`
+      SELECT last_sync_summary_json
+      FROM sub2api_account_monitor_state
+      WHERE id = 1
+    `).get();
+    const summary = parseJson(state?.last_sync_summary_json, {});
+    summary.usageExactTotal = false;
+    summary.requesterUserBackfillRequired = true;
+    db.prepare(`
+      UPDATE sub2api_account_monitor_state SET
+        last_sync_summary_json = ?, updated_at = ?
+      WHERE id = 1
+    `).run(JSON.stringify(summary), nowIso());
+  }
+  db.prepare(
+    'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (27, ?)'
+  ).run(nowIso());
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -2156,6 +2230,7 @@ function createDatabase(databasePath) {
       throw error;
     }
     migrateGrossProfitIndexesV26(db);
+    migrateRequesterUserAccountingV27(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

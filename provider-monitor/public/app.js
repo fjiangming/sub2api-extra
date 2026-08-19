@@ -2334,14 +2334,14 @@ const GROSS_PROFIT_GRANULARITY_LABELS = {
 
 const GROSS_PROFIT_ACCOUNTING_MODE_LABELS = {
   standard: '标准毛利',
-  exclude_admin: '排除管理员账本',
+  exclude_admin: '排除管理员用户账本',
   admin_expense: '管理员消费计入费用（纯毛利）'
 };
 
 const GROSS_PROFIT_ACCOUNTING_MODE_NOTES = {
-  standard: '标准口径：包含管理员账号 #1 的收入与已归因上游成本',
-  exclude_admin: '经营口径：排除管理员账号 #1 的收入与已归因上游成本',
-  admin_expense: '纯毛利口径：排除管理员收入及已归因成本，并将管理员消费作为费用扣除'
+  standard: '标准口径：沿用现有归因规则，包含已归因的全部用户账本',
+  exclude_admin: '经营口径：排除管理员用户 #1 的基座消费账本',
+  admin_expense: '纯毛利口径：先排除管理员用户 #1 的基座消费，再将其消费金额作为费用扣除'
 };
 
 function grossProfitDisplayValue(item) {
@@ -2384,6 +2384,9 @@ function grossProfitMargin(item) {
 
 function grossProfitNotes(summary, currency, accountingMode = 'standard') {
   const notes = [];
+  if (accountingMode !== 'standard' && summary.unknownRequesterUserRequestCount > 0) {
+    notes.push(`${formatNumber(summary.unknownRequesterUserRequestCount, 0)} 笔基座账本缺少请求用户 ID，管理员口径暂不完整；请在“账号质量”执行一次同步完成历史回补`);
+  }
   if (accountingMode === 'admin_expense') {
     notes.push(`管理员消费支出 ${formatPreciseMoney(summary.administratorExpense || 0, currency)}，已从经营毛利中扣除`);
   }
@@ -4353,6 +4356,7 @@ document.addEventListener('change', (event) => {
     renderAccountMonitor().catch((error) => toast(error.message, 'error'));
   }
   if (event.target.matches('#gross-profit-provider, #gross-profit-from, #gross-profit-to, #gross-profit-currency, #gross-profit-accounting-mode')) {
+    const previousFilters = { ...state.grossProfitFilters };
     const field = ({
       'gross-profit-provider': 'connectionId',
       'gross-profit-from': 'from',
@@ -4369,7 +4373,11 @@ document.addEventListener('change', (event) => {
       else state.grossProfitFilters.from = state.grossProfitFilters.to;
     }
     state.grossProfitDetailPage = 1;
-    loadGrossProfit().catch((error) => toast(error.message, 'error'));
+    loadGrossProfit().catch((error) => {
+      state.grossProfitFilters = previousFilters;
+      if (state.grossProfit) paintGrossProfit(state.grossProfit);
+      toast(error.message, 'error');
+    });
   }
   if (event.target.matches('#trend-provider, #trend-days, #trend-currency')) loadTrend().catch((e) => toast(e.message, 'error'));
   if (event.target.matches('#asset-status')) filterAssets().catch((e) => toast(e.message, 'error'));

@@ -5,7 +5,9 @@ const { parseJson } = require('../db');
 const DIMENSIONS = new Set(['provider', 'key', 'account']);
 const GRANULARITIES = new Set(['day', 'week', 'month']);
 const ACCOUNTING_MODES = new Set(['standard', 'exclude_admin', 'admin_expense']);
-const ADMINISTRATOR_ACCOUNT_ID = '1';
+const ADMINISTRATOR_USER_ID = '1';
+// Kept as an export alias for integrations that consumed the first implementation.
+const ADMINISTRATOR_ACCOUNT_ID = ADMINISTRATOR_USER_ID;
 const MAX_RETURNED_ENTITIES = 200;
 
 const ACCOUNTING_MODE_ALIASES = {
@@ -290,7 +292,7 @@ class GrossProfitService {
       currency,
       timezone: this.config.timezone,
       accountingMode,
-      administratorAccountId: ADMINISTRATOR_ACCOUNT_ID
+      administratorUserId: ADMINISTRATOR_USER_ID
     };
   }
 
@@ -339,7 +341,7 @@ class GrossProfitService {
       fromAt: query.fromAt,
       toAt: query.toAt,
       connectionId: query.connectionId,
-      administratorAccountId: query.administratorAccountId
+      administratorUserId: query.administratorUserId
     };
   }
 
@@ -366,10 +368,10 @@ class GrossProfitService {
         ? "ledger.attribution_status NOT IN ('attributed', 'attributed_multi_group') OR ledger.connection_id IS NULL OR ledger.key_id IS NULL"
         : "ledger.attribution_status IN ('attributed', 'attributed_multi_group') AND ledger.connection_id IS NOT NULL AND ledger.key_id IS NOT NULL";
     const administratorClause = administrator
-      ? 'AND CAST(ledger.account_id AS TEXT) = @administratorAccountId'
+      ? 'AND CAST(ledger.user_id AS TEXT) = @administratorUserId'
       : query.accountingMode === 'standard'
         ? ''
-        : 'AND (ledger.account_id IS NULL OR CAST(ledger.account_id AS TEXT) <> @administratorAccountId)';
+        : 'AND (ledger.user_id IS NULL OR CAST(ledger.user_id AS TEXT) <> @administratorUserId)';
     const providerClause = query.connectionId ? 'AND ledger.connection_id = @connectionId' : '';
     return this.db.prepare(`
       SELECT gross_profit_bucket(ledger.occurred_at, @granularity, @timezone) AS period_key,
@@ -397,6 +399,18 @@ class GrossProfitService {
     `).all(this.#params(query));
   }
 
+  #unknownRequesterUserRequestCount(query) {
+    const providerClause = query.connectionId ? 'AND ledger.connection_id = @connectionId' : '';
+    const row = this.db.prepare(`
+      SELECT COALESCE(SUM(ledger.request_count), 0) AS request_count
+      FROM sub2api_account_cost_ledger ledger
+      WHERE ledger.user_id IS NULL
+        AND ledger.occurred_at >= @fromAt AND ledger.occurred_at < @toAt
+        ${providerClause}
+    `).get(this.#params(query));
+    return integer(row?.request_count);
+  }
+
   #costRows(query) {
     const providerClause = query.connectionId ? 'AND ledger.connection_id = @connectionId' : '';
     const commonWhere = `
@@ -404,7 +418,7 @@ class GrossProfitService {
       AND ledger.occurred_at >= @fromAt AND ledger.occurred_at < @toAt
       ${providerClause}
     `;
-    const needsResolvedAccount = query.dimension === 'account' || query.accountingMode !== 'standard';
+    const needsResolvedAccount = query.dimension === 'account';
     const source = needsResolvedAccount
       ? `(
           SELECT ledger.*, ${resolvedAccountExpression('ledger')} AS resolved_account_id
@@ -412,14 +426,8 @@ class GrossProfitService {
           WHERE ${commonWhere}
         )`
       : 'provider_cost_ledger';
-    const outerWhere = needsResolvedAccount
-      ? query.accountingMode === 'exclude_admin' || query.accountingMode === 'admin_expense'
-        ? '(ledger.resolved_account_id IS NULL OR CAST(ledger.resolved_account_id AS TEXT) <> @administratorAccountId)'
-        : '1 = 1'
-      : commonWhere;
-    const administratorFlag = needsResolvedAccount
-      ? 'CASE WHEN CAST(ledger.resolved_account_id AS TEXT) = @administratorAccountId THEN 1 ELSE 0 END'
-      : '0';
+    const outerWhere = needsResolvedAccount ? '1 = 1' : commonWhere;
+    const administratorFlag = '0';
     const expression = {
       provider: {
         id: 'ledger.connection_id',
@@ -507,6 +515,7 @@ class GrossProfitService {
     const query = this.#query(input);
     const currencySettings = this.#currencySettings(query.currency);
     query.currency = currencySettings.currency;
+    const unknownRequesterUserRequestCount = this.#unknownRequesterUserRequestCount(query);
     const periodDefinitions = this.#periods(query);
     const periodAmounts = new Map(periodDefinitions.map((period) => [
       period.periodKey,
@@ -743,6 +752,9 @@ class GrossProfitService {
       unattributedUpstreamCost: round(breakdown.unattributedUpstreamCost),
       unattributedAdministratorRequestCount: breakdown.unattributedAdministratorRequestCount,
       unattributedAdministratorExpense: round(breakdown.unattributedAdministratorExpense),
+      unknownRequesterUserRequestCount,
+      requesterUserCoverageComplete: unknownRequesterUserRequestCount === 0,
+      accountingModeComplete: query.accountingMode === 'standard' || unknownRequesterUserRequestCount === 0,
       unconvertedCurrencies: [...unconvertedCurrencies].sort()
     };
     return {
@@ -767,6 +779,7 @@ class GrossProfitService {
 }
 
 module.exports = {
+  ADMINISTRATOR_USER_ID,
   ADMINISTRATOR_ACCOUNT_ID,
   GrossProfitService,
   bucketForTimestamp,
