@@ -35,6 +35,7 @@ const { BackupService } = require('./services/backup-service');
 const { RetentionService } = require('./services/retention-service');
 const { SimulationService } = require('./services/simulation-service');
 const { AccountMonitorService } = require('./services/account-monitor-service');
+const { KeyProbeService } = require('./services/key-probe-service');
 const { GrossProfitService } = require('./services/gross-profit-service');
 const {
   RechargeLinkService,
@@ -111,6 +112,55 @@ const accountProbeSchema = z.object({
       message: 'Select at least one account or platform for a manual probe'
     });
   }
+});
+const keyProbePromptsSchema = z.object({
+  simple: z.array(z.string().trim().min(1).max(4000)).min(1).max(5),
+  medium: z.array(z.string().trim().min(1).max(4000)).min(1).max(5),
+  complex: z.array(z.string().trim().min(1).max(4000)).min(1).max(5)
+});
+const keyProbeSettingsSchema = z.object({
+  enabled: z.boolean().optional(),
+  defaultIntervalMinutes: z.number().int().min(1).max(10080).optional(),
+  sampleCount: z.number().int().min(1).max(5).optional(),
+  complexity: z.enum(['simple', 'medium', 'complex']).optional(),
+  timeoutSeconds: z.number().int().min(5).max(300).optional(),
+  warningThresholdMs: z.number().int().min(100).max(300000).optional(),
+  criticalThresholdMs: z.number().int().min(200).max(600000).optional(),
+  staleAfterMinutes: z.number().int().min(5).max(43200).optional(),
+  concurrency: z.number().int().min(1).max(10).optional(),
+  scheduledBatchSize: z.number().int().min(1).max(500).optional(),
+  retentionDays: z.number().int().min(1).max(3650).optional(),
+  models: z.record(z.string(), z.string().trim().max(200)).optional(),
+  prompts: keyProbePromptsSchema.optional()
+}).superRefine((input, context) => {
+  if (
+    input.warningThresholdMs != null && input.criticalThresholdMs != null &&
+    input.criticalThresholdMs <= input.warningThresholdMs
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['criticalThresholdMs'],
+      message: '红色阈值必须大于黄色阈值'
+    });
+  }
+});
+const keyProbeAccountConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  intervalMinutes: z.number().int().min(1).max(10080).nullable().optional(),
+  model: z.string().trim().max(200).nullable().optional(),
+  complexity: z.enum(['simple', 'medium', 'complex']).nullable().optional(),
+  sampleCount: z.number().int().min(1).max(5).nullable().optional(),
+  timeoutSeconds: z.number().int().min(5).max(300).nullable().optional(),
+  warningThresholdMs: z.number().int().min(100).max(300000).nullable().optional(),
+  criticalThresholdMs: z.number().int().min(200).max(600000).nullable().optional()
+});
+const keyProbeBulkConfigSchema = keyProbeAccountConfigSchema.extend({
+  accountIds: z.array(z.union([z.string().trim().min(1).max(80), z.number().int().nonnegative()])).min(1).max(5000)
+});
+const keyProbeRunSchema = z.object({
+  accountIds: z.array(z.union([z.string().trim().min(1).max(80), z.number().int().nonnegative()])).max(5000).optional(),
+  platforms: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
+  concurrency: z.number().int().min(1).max(10).optional()
 });
 const sub2apiAdminApiKeySchema = z.object({
   adminApiKey: z.string().trim().min(16).max(4096)
@@ -476,6 +526,7 @@ function createApplication(options = {}) {
     adminApiKeyStatus.capabilities?.accountKeyExport === true ? 'verified' : null
   );
   const accountMonitor = new AccountMonitorService({ db, config, sub2api, http });
+  const keyProbes = new KeyProbeService({ db, config, sub2api });
   const grossProfit = new GrossProfitService({ db, config });
   const mappings = new MappingService({ db, config, sub2api, http });
   const automation = new AutomationService({ db, config, sub2api, mappings, notifications });
@@ -622,7 +673,8 @@ function createApplication(options = {}) {
   });
   queue.register('snapshot_retention', () => ({
     snapshots: retention.run(),
-    accountMonitor: accountMonitor.cleanup()
+    accountMonitor: accountMonitor.cleanup(),
+    keyProbes: keyProbes.cleanup()
   }));
   queue.register('remote_backup', (job) => backups.runAll(job.payload.targetIds || null, job.payload.label || 'scheduled'));
   queue.register('account_monitor_sync', (job) => syncAccountMonitorData(job.payload || {}));
@@ -632,6 +684,13 @@ function createApplication(options = {}) {
     `).get().count;
     if (activeAccounts === 0) await accountMonitor.sync({ lookbackDays: 1 });
     return accountMonitor.probe(job.payload || {});
+  });
+  queue.register('key_probe_run', async (job) => {
+    const activeAccounts = db.prepare(`
+      SELECT COUNT(*) AS count FROM sub2api_monitored_accounts WHERE missing_since IS NULL
+    `).get().count;
+    if (activeAccounts === 0) await accountMonitor.sync({ lookbackDays: 1 });
+    return keyProbes.run(job.payload || {});
   });
 
   const app = express();
@@ -1661,6 +1720,95 @@ function createApplication(options = {}) {
     return res.status(202).json({ jobId });
   }));
 
+  api.get('/key-probes/config', (_req, res) => res.json({
+    settings: keyProbes.settings(),
+    authentication: sub2api.authenticationStatus()
+  }));
+  api.put('/key-probes/config', (req, res) => {
+    const settings = keyProbes.saveSettings(validate(keyProbeSettingsSchema, req.body || {}));
+    audit(db, req, 'key_probe.settings_update', 'key_probe', null, { settings });
+    res.json({ settings });
+  });
+  api.get('/key-probes/keys', (req, res) => res.json(keyProbes.list({
+    platform: req.query.platform || null,
+    health: req.query.health || null,
+    accountStatus: req.query.accountStatus || req.query.account_status || null,
+    enabled: req.query.enabled,
+    search: req.query.search || null,
+    sortBy: req.query.sortBy || req.query.sort_by,
+    order: req.query.order,
+    page: req.query.page,
+    pageSize: req.query.pageSize || req.query.page_size
+  })));
+  api.get('/key-probes/history', (req, res) => res.json(keyProbes.history({
+    accountId: req.query.accountId || req.query.account_id,
+    runId: req.query.runId || req.query.run_id,
+    limit: req.query.limit
+  })));
+  api.put('/key-probes/keys/:id', (req, res) => {
+    const result = keyProbes.saveAccountConfig(
+      req.params.id,
+      validate(keyProbeAccountConfigSchema, req.body || {})
+    );
+    audit(db, req, 'key_probe.account_config_update', 'sub2api_account', req.params.id, {
+      config: result.config
+    });
+    res.json(result);
+  });
+  api.post('/key-probes/keys/bulk-config', (req, res) => {
+    const input = validate(keyProbeBulkConfigSchema, req.body || {});
+    const { accountIds, ...configInput } = input;
+    const result = keyProbes.saveBulkConfig(accountIds, configInput);
+    audit(db, req, 'key_probe.bulk_config_update', 'key_probe', null, {
+      accountCount: result.count,
+      config: configInput
+    });
+    res.json(result);
+  });
+  api.post('/key-probes/sync', asyncRoute(async (req, res) => {
+    await sub2api.adminToken();
+    if (req.query.wait === 'true') {
+      const result = await syncAccountMonitorData({ lookbackDays: 1, providerManual: true });
+      audit(db, req, 'key_probe.sync', 'key_probe', null, result);
+      return res.json(result);
+    }
+    const jobId = queue.enqueue('account_monitor_sync', {
+      payload: { lookbackDays: 1, providerManual: true },
+      priority: 15
+    });
+    audit(db, req, 'key_probe.sync_enqueue', 'key_probe', null, { jobId });
+    return res.status(202).json({ jobId });
+  }));
+  api.post('/key-probes/run', asyncRoute(async (req, res) => {
+    const input = validate(keyProbeRunSchema, req.body || {});
+    await sub2api.adminToken();
+    if (db.prepare('SELECT COUNT(*) AS count FROM sub2api_monitored_accounts WHERE missing_since IS NULL').get().count === 0) {
+      await accountMonitor.sync({ lookbackDays: 1 });
+    }
+    const payload = { ...input, triggerType: 'manual' };
+    if (req.query.wait === 'true') {
+      const result = await keyProbes.run(payload);
+      audit(db, req, 'key_probe.run', 'key_probe', result.runId, {
+        accountCount: result.accountCount,
+        succeeded: result.succeeded,
+        warning: result.warning,
+        failed: result.failed
+      });
+      return res.json(result);
+    }
+    const jobId = queue.enqueue('key_probe_run', {
+      payload,
+      priority: 20,
+      dedupe: false
+    });
+    audit(db, req, 'key_probe.run_enqueue', 'key_probe', null, {
+      jobId,
+      accountCount: input.accountIds?.length || null,
+      platforms: input.platforms || []
+    });
+    return res.status(202).json({ jobId });
+  }));
+
   api.get('/sub2api/channels', asyncRoute(async (_req, res) => res.json(await mappings.channels())));
   api.get('/sub2api/groups', asyncRoute(async (_req, res) => res.json(await mappings.groups())));
   api.get('/sub2api/status', (_req, res) => res.json(mappings.status()));
@@ -1930,6 +2078,14 @@ function createApplication(options = {}) {
 
   const cronTasks = [];
   let backgroundStarted = false;
+  const enqueueDueKeyProbes = () => {
+    const accountIds = keyProbes.dueAccountIds();
+    if (accountIds.length === 0) return null;
+    return queue.enqueue('key_probe_run', {
+      payload: { triggerType: 'scheduled', accountIds },
+      priority: -3
+    });
+  };
   const startBackground = () => {
     if (backgroundStarted) return;
     backgroundStarted = true;
@@ -1945,6 +2101,7 @@ function createApplication(options = {}) {
         priority: -3
       });
     }
+    enqueueDueKeyProbes();
     cronTasks.push(cron.schedule('* * * * *', () => {
       const due = db.prepare(`
         SELECT id FROM provider_connections
@@ -1962,6 +2119,7 @@ function createApplication(options = {}) {
           priority: -3
         });
       }
+      enqueueDueKeyProbes();
     }, { timezone: config.timezone }));
     cronTasks.push(cron.schedule('17 3 * * *', () => {
       queue.enqueue('snapshot_retention', { priority: -5 });
@@ -2009,7 +2167,7 @@ function createApplication(options = {}) {
     config, db, providers, queries, notifications, alerts, automation, analysis,
     keyHealth, catalog, checkins, mappings, credentials, transfers, sub2api,
     metrics, auth, queue, sync, detection, backups, retention, rechargeLinks,
-    simulations, accountMonitor, grossProfit
+    simulations, accountMonitor, keyProbes, grossProfit
   };
   app.locals.startBackground = startBackground;
   app.locals.close = close;

@@ -131,6 +131,48 @@ test('account quality exposes rolling and calendar-day observation windows', () 
   assert.match(app, /accountMonitorWindowLabel/);
 });
 
+test('Key status tab exposes centralized probes, filters and per-key controls', () => {
+  const { context, source } = createBrowserContext();
+  const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
+
+  assert.match(index, /data-view="key-status"[\s\S]*?<span>Key 状态<\/span>/);
+  assert.match(index, /id="key-probe-settings-dialog"/);
+  assert.match(index, /name="sampleCount"[^>]+min="1" max="5"/);
+  assert.match(index, /name="promptsSimple"/);
+  assert.match(index, /name="promptsMedium"/);
+  assert.match(index, /name="promptsComplex"/);
+  assert.match(index, /id="key-probe-account-dialog"/);
+  assert.match(index, /id="key-probe-history-dialog"/);
+  assert.match(source, /\/api\/key-probes\/keys\?/);
+  assert.match(source, /id="key-probe-platform"/);
+  assert.match(source, /id="key-probe-health"/);
+  assert.match(source, /data-key-probe-enabled/);
+  assert.match(source, /data-action="run-selected-key-probes"/);
+  assert.match(styles, /\.badge\.critical/);
+  assert.match(styles, /\.key-probe-row\.health-critical/);
+
+  const rows = vm.runInContext(`keyProbeRows([{
+    accountId: '31', name: 'OpenAI Primary', platform: 'openai', accountType: 'apikey',
+    accountStatus: 'active', health: 'warning',
+    config: {
+      enabled: true, intervalMinutes: 30, model: 'gpt-monitor', complexity: 'medium',
+      sampleCount: 3, warningThresholdMs: 1000, criticalThresholdMs: 3000,
+      nextProbeAt: '2026-09-16T10:30:00.000Z', hasOverrides: false, overrides: {}
+    },
+    latest: {
+      avgDurationMs: 1200, avgFirstTokenMs: 300, minDurationMs: 900,
+      maxDurationMs: 1500, p95DurationMs: 1500, succeededCount: 2,
+      sampleCount: 3, completedAt: '2026-09-16T10:00:00.000Z'
+    }
+  }])`, context);
+  assert.match(rows, /health-warning/);
+  assert.match(rows, /黄色/);
+  assert.match(rows, /1\.20 s/);
+  assert.match(rows, /2 \/ 3 次成功/);
+  assert.match(rows, /gpt-monitor/);
+});
+
 test('account quality list fits its container and keeps every metric in the responsive layout', () => {
   const app = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');

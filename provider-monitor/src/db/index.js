@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 27;
+const SCHEMA_VERSION = 28;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -840,6 +840,94 @@ INSERT OR IGNORE INTO sub2api_account_monitor_settings(id, updated_at)
 VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 INSERT OR IGNORE INTO sub2api_account_monitor_state(id, updated_at)
+VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+
+CREATE TABLE IF NOT EXISTS sub2api_key_probe_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled INTEGER NOT NULL DEFAULT 0,
+  default_interval_minutes INTEGER NOT NULL DEFAULT 360,
+  sample_count INTEGER NOT NULL DEFAULT 3,
+  complexity TEXT NOT NULL DEFAULT 'medium',
+  timeout_seconds INTEGER NOT NULL DEFAULT 120,
+  warning_threshold_ms INTEGER NOT NULL DEFAULT 5000,
+  critical_threshold_ms INTEGER NOT NULL DEFAULT 15000,
+  stale_after_minutes INTEGER NOT NULL DEFAULT 1440,
+  concurrency INTEGER NOT NULL DEFAULT 3,
+  scheduled_batch_size INTEGER NOT NULL DEFAULT 100,
+  retention_days INTEGER NOT NULL DEFAULT 30,
+  models_json TEXT NOT NULL DEFAULT '{}',
+  prompts_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sub2api_key_probe_configs (
+  account_id TEXT PRIMARY KEY REFERENCES sub2api_monitored_accounts(account_id) ON DELETE CASCADE,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  interval_minutes INTEGER,
+  model TEXT,
+  complexity TEXT,
+  sample_count INTEGER,
+  timeout_seconds INTEGER,
+  warning_threshold_ms INTEGER,
+  critical_threshold_ms INTEGER,
+  next_probe_at TEXT,
+  last_probe_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS sub2api_key_probe_due_lookup
+  ON sub2api_key_probe_configs(enabled, next_probe_at, account_id);
+
+CREATE TABLE IF NOT EXISTS sub2api_key_probe_batches (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  account_id TEXT NOT NULL REFERENCES sub2api_monitored_accounts(account_id) ON DELETE CASCADE,
+  trigger_type TEXT NOT NULL,
+  model TEXT,
+  complexity TEXT NOT NULL,
+  sample_count INTEGER NOT NULL,
+  succeeded_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  avg_duration_ms REAL,
+  min_duration_ms INTEGER,
+  max_duration_ms INTEGER,
+  p95_duration_ms INTEGER,
+  avg_first_token_ms REAL,
+  error_code TEXT,
+  error_message TEXT,
+  prompts_json TEXT NOT NULL DEFAULT '[]',
+  details_json TEXT NOT NULL DEFAULT '{}',
+  started_at TEXT NOT NULL,
+  completed_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS sub2api_key_probe_batch_account_lookup
+  ON sub2api_key_probe_batches(account_id, completed_at DESC);
+
+CREATE INDEX IF NOT EXISTS sub2api_key_probe_batch_run_lookup
+  ON sub2api_key_probe_batches(run_id, completed_at DESC);
+
+CREATE TABLE IF NOT EXISTS sub2api_key_probe_samples (
+  id TEXT PRIMARY KEY,
+  batch_id TEXT NOT NULL REFERENCES sub2api_key_probe_batches(id) ON DELETE CASCADE,
+  sample_index INTEGER NOT NULL,
+  prompt TEXT NOT NULL,
+  status TEXT NOT NULL,
+  duration_ms INTEGER,
+  first_token_ms INTEGER,
+  response_excerpt TEXT,
+  error_code TEXT,
+  error_message TEXT,
+  started_at TEXT NOT NULL,
+  completed_at TEXT NOT NULL,
+  UNIQUE(batch_id, sample_index)
+);
+
+CREATE INDEX IF NOT EXISTS sub2api_key_probe_sample_batch_lookup
+  ON sub2api_key_probe_samples(batch_id, sample_index);
+
+INSERT OR IGNORE INTO sub2api_key_probe_settings(id, updated_at)
 VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 CREATE TABLE IF NOT EXISTS sub2api_mappings (
