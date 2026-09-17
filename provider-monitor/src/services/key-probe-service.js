@@ -544,12 +544,15 @@ class KeyProbeService {
       };
     });
     const allItems = items;
-    const groups = this.#groupDefinitions(allItems);
+    const platform = normalizePlatform(filters.platform || '');
+    const platformItems = filters.platform
+      ? allItems.filter((item) => item.platform === platform)
+      : allItems;
+    const groups = this.#groupDefinitions(platformItems);
+    items = platformItems;
     if (filters.groupId) {
       items = items.filter((item) => item.groups.some((group) => group.id === String(filters.groupId)));
     }
-    const platform = normalizePlatform(filters.platform || '');
-    if (filters.platform) items = items.filter((item) => item.platform === platform);
     if (filters.health) items = items.filter((item) => item.health === String(filters.health));
     if (filters.accountStatus) items = items.filter((item) => item.accountStatus === String(filters.accountStatus));
     if (filters.enabled === 'true' || filters.enabled === true) items = items.filter((item) => item.config.enabled);
@@ -603,6 +606,7 @@ class KeyProbeService {
           .sort((left, right) => Date.parse(right) - Date.parse(left))[0] || null
       },
       platforms: [...new Set(allItems.map((item) => item.platform))].sort(),
+      groupScopeCount: platformItems.length,
       groups,
       items: items.slice(resolved.offset, resolved.offset + resolved.limit),
       pagination: resolved.pagination

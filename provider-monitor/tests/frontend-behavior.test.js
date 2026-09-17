@@ -154,6 +154,8 @@ test('Key status tab exposes centralized probes, filters and per-key controls', 
   assert.match(source, /data-key-probe-enabled/);
   assert.match(source, /data-action="run-selected-key-probes"/);
   assert.match(source, /data-action="key-probe-group"/);
+  assert.match(source, /key-probe-platform-filter[\s\S]*id="key-probe-platform"[\s\S]*key-probe-group-tabs/);
+  assert.match(source, /field === 'platform'\) state\.keyProbeFilters\.groupId = ''/);
   assert.match(source, /业务首字（近 10 条）/);
   assert.match(source, /\/api\/key-probes\/automation\/run/);
   assert.match(styles, /\.badge\.critical/);

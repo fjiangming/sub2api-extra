@@ -214,6 +214,44 @@ test('key probe health thresholds account for partial and complete failures', ()
   assert.equal(probeHealth({ succeededCount: 3, failedCount: 0, averageMs: 3200, warningMs: 1000, criticalMs: 3000 }), 'critical');
 });
 
+test('key probe group facets follow the selected platform', (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  insertAccount(context.db, {
+    id: 25,
+    name: 'OpenAI Primary',
+    groups: [{ id: 'shared', name: '共享分组' }, { id: 'openai-only', name: 'OpenAI 分组' }]
+  });
+  insertAccount(context.db, {
+    id: 26,
+    name: 'OpenAI Backup',
+    groups: [{ id: 'shared', name: '共享分组' }]
+  });
+  insertAccount(context.db, {
+    id: 27,
+    name: 'Claude Primary',
+    platform: 'anthropic',
+    groups: [{ id: 'shared', name: '共享分组' }, { id: 'claude-only', name: 'Claude 分组' }]
+  });
+  const service = new KeyProbeService({
+    db: context.db,
+    config: context.config,
+    sub2api: createSub2ApiMock(context.db)
+  });
+
+  const openai = service.list({ platform: 'openai' });
+  assert.equal(openai.groupScopeCount, 2);
+  assert.deepEqual(openai.items.map((item) => item.accountId).sort(), ['25', '26']);
+  assert.deepEqual(openai.groups.map((group) => group.id).sort(), ['openai-only', 'shared']);
+  assert.equal(openai.groups.find((group) => group.id === 'shared').accountCount, 2);
+
+  const anthropic = service.list({ platform: 'anthropic' });
+  assert.equal(anthropic.groupScopeCount, 1);
+  assert.deepEqual(anthropic.items.map((item) => item.accountId), ['27']);
+  assert.deepEqual(anthropic.groups.map((group) => group.id).sort(), ['claude-only', 'shared']);
+  assert.equal(anthropic.groups.find((group) => group.id === 'shared').accountCount, 1);
+});
+
 test('key probe automation groups accounts, disables slow traffic and recovers inactive keys', async (t) => {
   const context = createTestContext();
   t.after(() => context.cleanup());

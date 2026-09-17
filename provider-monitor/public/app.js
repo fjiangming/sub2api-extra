@@ -1799,7 +1799,7 @@ async function renderKeyProbes() {
   const counts = summary.counts;
   const rows = keyProbeRows(result.items);
   const platformOptions = result.platforms.map((platform) => `<option value="${escapeHtml(platform)}" ${filters.platform === platform ? 'selected' : ''}>${escapeHtml(accountMonitorPlatformLabel(platform))}</option>`).join('');
-  const groupTabs = [{ id: '', name: '全部分组', accountCount: summary.total }, ...(result.groups || [])]
+  const groupTabs = [{ id: '', name: '全部分组', accountCount: result.groupScopeCount ?? summary.total }, ...(result.groups || [])]
     .map((group) => `<button class="tab ${filters.groupId === group.id ? 'active' : ''}" role="tab" aria-selected="${filters.groupId === group.id}" data-action="key-probe-group" data-group-id="${escapeHtml(group.id)}"><span>${escapeHtml(group.name)}</span><small>${formatNumber(group.accountCount, 0)}</small></button>`).join('');
   setTopActions(`<button class="button" data-action="open-key-probe-settings" title="检测设置" aria-label="检测设置"><i data-lucide="settings-2"></i><span>检测设置</span></button><button class="button" data-action="sync-key-probes" title="同步 Key" aria-label="同步 Key"><i data-lucide="refresh-cw"></i><span>同步 Key</span></button>${result.settings.autoControlEnabled ? '<button class="button" data-action="run-key-probe-automation" title="立即评估自动停启" aria-label="立即评估自动停启"><i data-lucide="shield-check"></i><span>评估管控</span></button>' : ''}<button class="button" data-action="bulk-enable-key-probes" data-key-probe-selection-action data-selection-text="启用" title="启用所选 Key" aria-label="启用所选 Key" disabled><i data-lucide="power"></i><span data-selection-label>启用</span></button><button class="button" data-action="bulk-disable-key-probes" data-key-probe-selection-action data-selection-text="停用" title="停用所选 Key" aria-label="停用所选 Key" disabled><i data-lucide="power-off"></i><span data-selection-label>停用</span></button><button class="button primary" data-action="run-selected-key-probes" data-key-probe-selection-action data-selection-text="检测" title="检测所选 Key" aria-label="检测所选 Key" disabled><i data-lucide="play"></i><span data-selection-label>检测</span></button>`);
   $('#main-content').innerHTML = `
@@ -1811,10 +1811,13 @@ async function renderKeyProbes() {
       <div class="stat"><span class="stat-label"><i data-lucide="circle-x"></i>红色</span><strong class="stat-value danger-text">${formatNumber(counts.critical, 0)}</strong><span class="stat-detail">全部失败或超过 ${formatMilliseconds(result.settings.criticalThresholdMs)}</span></div>
     </div>
     <section class="section">
+      <div class="key-probe-platform-filter">
+        <label for="key-probe-platform">模型平台</label>
+        <select id="key-probe-platform" aria-label="模型平台"><option value="">全部平台</option>${platformOptions}</select>
+      </div>
       <div class="key-probe-group-tabs" role="tablist" aria-label="Sub2API 分组">${groupTabs}</div>
       <div class="filter-bar key-probe-filters">
         <label class="search-box"><i data-lucide="search"></i><input id="key-probe-search" type="search" value="${escapeHtml(filters.search)}" placeholder="搜索 Key、ID、平台或分组" aria-label="搜索 Key、ID、平台或分组"></label>
-        <select id="key-probe-platform" aria-label="模型平台"><option value="">全部平台</option>${platformOptions}</select>
         <select id="key-probe-health" aria-label="检测状态"><option value="">全部检测状态</option><option value="healthy" ${filters.health === 'healthy' ? 'selected' : ''}>绿色</option><option value="warning" ${filters.health === 'warning' ? 'selected' : ''}>黄色</option><option value="critical" ${filters.health === 'critical' ? 'selected' : ''}>红色</option><option value="stale" ${filters.health === 'stale' ? 'selected' : ''}>陈旧</option><option value="unknown" ${filters.health === 'unknown' ? 'selected' : ''}>未检测</option><option value="disabled" ${filters.health === 'disabled' ? 'selected' : ''}>已停用</option></select>
         <select id="key-probe-enabled-filter" aria-label="检测启用状态"><option value="">全部启用状态</option><option value="true" ${filters.enabled === 'true' ? 'selected' : ''}>已启用</option><option value="false" ${filters.enabled === 'false' ? 'selected' : ''}>已停用</option></select>
         <select id="key-probe-sort" aria-label="排序"><option value="completedAt" ${filters.sortBy === 'completedAt' ? 'selected' : ''}>最近检测</option><option value="trafficFirstTokenMs" ${filters.sortBy === 'trafficFirstTokenMs' ? 'selected' : ''}>业务首字</option><option value="avgDurationMs" ${filters.sortBy === 'avgDurationMs' ? 'selected' : ''}>平均耗时</option><option value="health" ${filters.sortBy === 'health' ? 'selected' : ''}>状态严重度</option><option value="name" ${filters.sortBy === 'name' ? 'selected' : ''}>Key 名称</option><option value="platform" ${filters.sortBy === 'platform' ? 'selected' : ''}>平台</option></select>
@@ -4674,6 +4677,7 @@ document.addEventListener('change', (event) => {
       'key-probe-sort': 'sortBy'
     })[event.target.id];
     state.keyProbeFilters[field] = event.target.value;
+    if (field === 'platform') state.keyProbeFilters.groupId = '';
     state.keyProbeFilters.order = ['name', 'platform'].includes(state.keyProbeFilters.sortBy) ? 'asc' : 'desc';
     state.keyProbeFilters.page = 1;
     renderKeyProbes().catch((error) => toast(error.message, 'error'));
