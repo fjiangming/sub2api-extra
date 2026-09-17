@@ -659,7 +659,7 @@ function createApplication(options = {}) {
     adminApiKeyStatus.capabilities?.accountKeyExport === true ? 'verified' : null
   );
   const accountMonitor = new AccountMonitorService({ db, config, sub2api, http });
-  const keyProbes = new KeyProbeService({ db, config, sub2api });
+  const keyProbes = new KeyProbeService({ db, config, sub2api, http });
   const grossProfit = new GrossProfitService({ db, config });
   const mappings = new MappingService({ db, config, sub2api, http });
   const automation = new AutomationService({ db, config, sub2api, mappings, notifications });

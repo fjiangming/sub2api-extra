@@ -4,6 +4,12 @@ const { AppError } = require('../errors');
 const { nowIso, parseJson, stringifyJson } = require('../db');
 const { resolvePagination } = require('../pagination');
 const { redactText } = require('../security/redaction');
+const {
+  DIRECT_PROBE_PLATFORMS,
+  DirectKeyProbeTransport,
+  Sub2ApiProbeCredentialExporter,
+  clearCredentialMap
+} = require('./direct-key-probe');
 
 const COMPLEXITIES = new Set(['simple', 'medium', 'complex']);
 const ACTIVE_ACCOUNT_STATUSES = new Set(['active', 'enabled', 'unknown', 'rate_limited']);
@@ -127,10 +133,12 @@ function average(values) {
 }
 
 class KeyProbeService {
-  constructor({ db, config, sub2api }) {
+  constructor({ db, config, sub2api, http, credentialExporter, directProbe }) {
     this.db = db;
     this.config = config;
     this.sub2api = sub2api;
+    this.credentialExporter = credentialExporter || new Sub2ApiProbeCredentialExporter({ sub2api });
+    this.directProbe = directProbe || new DirectKeyProbeTransport({ http, config });
   }
 
   settings() {
@@ -258,6 +266,31 @@ class KeyProbeService {
         configRow.warning_threshold_ms, configRow.critical_threshold_ms
       ].some((value) => value != null && value !== ''))
     };
+  }
+
+  async #prepareDirectProbeContext(rows, settings) {
+    const eligible = rows.filter((account) => {
+      const platform = normalizePlatform(account.platform);
+      const accountType = String(account.account_type || '').trim().toLowerCase();
+      const model = this.#effectiveConfig(account, this.#accountConfigRow(account.account_id), settings).model;
+      return accountType === 'apikey' && DIRECT_PROBE_PLATFORMS.has(platform) && Boolean(model);
+    });
+    if (eligible.length === 0) return { credentials: new Map(), exportError: null };
+    try {
+      return {
+        credentials: await this.credentialExporter.export(eligible),
+        exportError: null
+      };
+    } catch (error) {
+      return {
+        credentials: new Map(),
+        exportError: error
+      };
+    }
+  }
+
+  #disposeDirectProbeContext(context) {
+    clearCredentialMap(context?.credentials);
   }
 
   saveAccountConfig(accountId, input = {}) {
@@ -876,34 +909,46 @@ class KeyProbeService {
     const selectedRecoveries = recoveryCandidates.slice(0, settings.scheduledBatchSize);
     summary.recoveryCandidates = recoveryCandidates.length;
 
-    const recoveryResults = await this.#mapConcurrent(
-      selectedRecoveries,
-      settings.concurrency,
-      async (candidate) => {
-        const probe = await this.#probeAccount(candidate.account, {
-          runId,
-          triggerType: 'recovery',
-          settings,
-          recoverySignature: candidate.shortage.signature,
-          recoveryReason: candidate.reason
-        });
-        const completeFirstTokenCoverage = probe.succeededCount === probe.sampleCount &&
-          probe.failedCount === 0 && probe.firstTokenSampleCount === probe.sampleCount;
-        let action = null;
-        if (completeFirstTokenCoverage && probe.avgFirstTokenMs < settings.autoEnableThresholdMs) {
-          action = await this.#changeUpstreamStatus(candidate.account, 'active', {
-            action: 'auto_enable',
-            reason: 'recovery_probe_passed',
-            measuredFirstTokenMs: probe.avgFirstTokenMs,
-            thresholdMs: settings.autoEnableThresholdMs,
-            sampleCount: probe.firstTokenSampleCount,
-            groupIds: accountGroups(candidate.account).map((group) => group.id),
-            probeBatchId: probe.id
-          });
-        }
-        return { candidate, probe, action };
-      }
+    const directContext = await this.#prepareDirectProbeContext(
+      selectedRecoveries.map((candidate) => candidate.account),
+      settings
     );
+    let recoveryResults;
+    try {
+      recoveryResults = await this.#mapConcurrent(
+        selectedRecoveries,
+        settings.concurrency,
+        async (candidate) => {
+          const probe = await this.#probeAccount(candidate.account, {
+            runId,
+            triggerType: 'recovery',
+            settings,
+            directContext,
+            recoverySignature: candidate.shortage.signature,
+            recoveryReason: candidate.reason
+          });
+          const completeVerifiedCoverage = probe.succeededCount === probe.sampleCount &&
+            probe.failedCount === 0 && probe.firstTokenSampleCount === probe.sampleCount &&
+            probe.directSampleCount === probe.sampleCount &&
+            probe.verifiedSampleCount === probe.sampleCount;
+          let action = null;
+          if (completeVerifiedCoverage && probe.avgFirstTokenMs < settings.autoEnableThresholdMs) {
+            action = await this.#changeUpstreamStatus(candidate.account, 'active', {
+              action: 'auto_enable',
+              reason: 'recovery_probe_passed',
+              measuredFirstTokenMs: probe.avgFirstTokenMs,
+              thresholdMs: settings.autoEnableThresholdMs,
+              sampleCount: probe.firstTokenSampleCount,
+              groupIds: accountGroups(candidate.account).map((group) => group.id),
+              probeBatchId: probe.id
+            });
+          }
+          return { candidate, probe, action };
+        }
+      );
+    } finally {
+      this.#disposeDirectProbeContext(directContext);
+    }
     summary.recoveryProbed = recoveryResults.length;
     summary.probes.push(...recoveryResults.map((result) => result.probe));
     const enableActions = recoveryResults.map((result) => result.action).filter(Boolean);
@@ -983,15 +1028,25 @@ class KeyProbeService {
     const runId = crypto.randomUUID();
     const results = new Array(rows.length);
     const concurrency = clamp(integer(options.concurrency, settings.concurrency), 1, 10);
+    const directContext = await this.#prepareDirectProbeContext(rows, settings);
     let cursor = 0;
     const workers = Array.from({ length: Math.min(concurrency, rows.length) }, async () => {
       while (cursor < rows.length) {
         const index = cursor;
         cursor += 1;
-        results[index] = await this.#probeAccount(rows[index], { runId, triggerType, settings });
+        results[index] = await this.#probeAccount(rows[index], {
+          runId,
+          triggerType,
+          settings,
+          directContext
+        });
       }
     });
-    await Promise.all(workers);
+    try {
+      await Promise.all(workers);
+    } finally {
+      this.#disposeDirectProbeContext(directContext);
+    }
     return {
       runId,
       triggerType,
@@ -1007,6 +1062,7 @@ class KeyProbeService {
     runId,
     triggerType,
     settings,
+    directContext,
     recoverySignature = null,
     recoveryReason = null
   }) {
@@ -1026,12 +1082,15 @@ class KeyProbeService {
         index: index + 1,
         prompt: selectedPrompts[index],
         model: effective.model,
-        timeoutMs: effective.timeoutSeconds * 1000
+        timeoutMs: effective.timeoutSeconds * 1000,
+        directContext
       }));
     }
     const successful = samples.filter((sample) => sample.status === 'succeeded');
     const durations = successful.map((sample) => sample.durationMs);
     const firstTokens = successful.map((sample) => sample.firstTokenMs).filter((value) => value != null);
+    const directSampleCount = samples.filter((sample) => sample.direct).length;
+    const verifiedSampleCount = samples.filter((sample) => sample.promptVerified).length;
     const averageMs = durations.length
       ? Math.round(durations.reduce((sum, value) => sum + value, 0) / durations.length)
       : null;
@@ -1054,6 +1113,10 @@ class KeyProbeService {
       timeoutSeconds: effective.timeoutSeconds,
       warningThresholdMs: effective.warningThresholdMs,
       criticalThresholdMs: effective.criticalThresholdMs,
+      transport: 'direct_api_key',
+      directSampleCount,
+      verifiedSampleCount,
+      capabilities: [...new Set(samples.map((sample) => sample.capability).filter(Boolean))],
       ...(triggerType === 'recovery' ? {
         recoveryReason: recoveryReason || 'recovery_interval_due'
       } : {})
@@ -1133,6 +1196,8 @@ class KeyProbeService {
       p95DurationMs: percentile(durations, 0.95),
       avgFirstTokenMs: averageFirstTokenMs,
       firstTokenSampleCount: firstTokens.length,
+      directSampleCount,
+      verifiedSampleCount,
       nextProbeAt,
       startedAt,
       completedAt
@@ -1144,48 +1209,78 @@ class KeyProbeService {
     const started = performance.now();
     let firstTokenMs = null;
     let responseText = '';
-    let completed = false;
+    let durationMs = null;
+    let direct = false;
+    let promptVerified = false;
+    let capability = null;
     let errorCode = null;
     let errorMessage = null;
     try {
-      await this.sub2api.sse(`/api/v1/admin/accounts/${encodeURIComponent(account.account_id)}/test`, {
-        method: 'POST',
-        timeoutMs: options.timeoutMs,
-        body: { model_id: options.model || '', prompt: options.prompt, mode: '' },
-        onEvent: (event) => {
-          if (event?.type === 'content' && event.text) {
-            if (firstTokenMs == null) firstTokenMs = Math.round(performance.now() - started);
-            responseText += String(event.text);
-            if (responseText.length > 4000) responseText = responseText.slice(0, 4000);
-          }
-          if (event?.type === 'error') {
-            errorCode = String(event.code || 'UPSTREAM_TEST_FAILED');
-            errorMessage = String(event.error || event.text || 'Sub2API Key 测试失败');
-          }
-          if (event?.type === 'test_complete' && event.success !== false) completed = true;
-        }
-      });
-      if (errorMessage || !completed) {
-        throw new AppError(
-          errorCode || 'INCOMPLETE_PROBE',
-          errorMessage || 'Sub2API Key 测试未返回完成事件',
-          { status: 502 }
-        );
+      const platform = normalizePlatform(account.platform);
+      const accountType = String(account.account_type || '').trim().toLowerCase();
+      if (accountType !== 'apikey') {
+        throw new AppError('DIRECT_PROBE_ACCOUNT_TYPE_UNSUPPORTED', `账号类型 ${accountType || 'unknown'} 无法安全直连检测`, {
+          status: 409
+        });
       }
+      if (!DIRECT_PROBE_PLATFORMS.has(platform)) {
+        throw new AppError('DIRECT_PROBE_PLATFORM_UNSUPPORTED', `平台 ${platform} 暂不支持安全直连检测`, {
+          status: 409
+        });
+      }
+      if (!options.model) {
+        throw new AppError('DIRECT_PROBE_MODEL_REQUIRED', '直连检测必须为该平台或 Key 配置具体模型', {
+          status: 409
+        });
+      }
+      if (options.directContext?.exportError) throw options.directContext.exportError;
+      const credential = options.directContext?.credentials?.get(String(account.account_id)) || null;
+      if (!credential?.apiKey) {
+        throw new AppError('DIRECT_PROBE_CREDENTIAL_UNAVAILABLE', '未能取得该 Key 的临时直连凭据', {
+          status: 409
+        });
+      }
+      if (credential.proxyConfigured) {
+        throw new AppError('DIRECT_PROBE_PROXY_UNSUPPORTED', '该 Key 配置了账号代理，Provider Monitor 不会绕过代理直接检测', {
+          status: 409
+        });
+      }
+      direct = true;
+      const result = await this.directProbe.probe({
+        platform,
+        credential,
+        model: options.model,
+        prompt: options.prompt,
+        timeoutMs: options.timeoutMs
+      });
+      if (!result?.completed || !result?.promptVerified) {
+        throw new AppError('PROMPT_VERIFICATION_FAILED', '直连检测没有完成提示词校验', { status: 502 });
+      }
+      firstTokenMs = Number.isFinite(result.firstTokenMs) ? result.firstTokenMs : null;
+      durationMs = Number.isFinite(result.durationMs) ? result.durationMs : null;
+      responseText = String(result.responseText || '').slice(0, 4000);
+      capability = String(result.capability || '').slice(0, 80) || null;
+      promptVerified = true;
     } catch (error) {
-      errorCode = String(error?.code || errorCode || 'KEY_PROBE_FAILED');
+      errorCode = String(error?.code || errorCode || 'KEY_PROBE_FAILED').slice(0, 120);
       errorMessage = redactText(error?.message || errorMessage || error).slice(0, 1000);
+      if (!responseText && error?.details?.responseExcerpt) {
+        responseText = String(error.details.responseExcerpt).slice(0, 500);
+      }
     }
     return {
       id: crypto.randomUUID(),
       index: options.index,
       prompt: options.prompt,
-      status: errorMessage ? 'failed' : 'succeeded',
-      durationMs: Math.round(performance.now() - started),
+      status: errorMessage || !promptVerified ? 'failed' : 'succeeded',
+      durationMs: durationMs ?? Math.round(performance.now() - started),
       firstTokenMs,
       responseExcerpt: responseText
         ? redactText(responseText).replace(/\s+/g, ' ').trim().slice(0, 500)
         : null,
+      direct,
+      promptVerified,
+      capability,
       errorCode,
       errorMessage,
       startedAt,

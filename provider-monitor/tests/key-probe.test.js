@@ -2,11 +2,17 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createTestContext } = require('./helpers');
 const { createApplication } = require('../src/server');
+const { AppError } = require('../src/errors');
 const {
   KeyProbeService,
   DEFAULT_PROMPTS,
   probeHealth
 } = require('../src/services/key-probe-service');
+const {
+  DirectKeyProbeTransport,
+  Sub2ApiProbeCredentialExporter,
+  clearCredentialMap
+} = require('../src/services/direct-key-probe');
 
 function insertAccount(db, {
   id,
@@ -32,7 +38,7 @@ function insertAccount(db, {
   }), now, now);
 }
 
-function createSub2ApiMock() {
+function createSub2ApiMock(db, mockOptions = {}) {
   const calls = [];
   const statuses = new Map();
   return {
@@ -45,12 +51,34 @@ function createSub2ApiMock() {
       calls.push({ type: 'auth' });
       return 'test-token';
     },
-    async data(endpoint, options = {}) {
+    async data(endpoint, requestOptions = {}) {
+      if (endpoint === '/api/v1/admin/accounts/data') {
+        const ids = String(requestOptions.query?.ids || '').split(',').filter(Boolean);
+        calls.push({ type: 'credential_export', endpoint, ids, query: requestOptions.query });
+        return {
+          accounts: ids.map((id) => {
+            const account = db.prepare(`
+              SELECT name, platform, account_type FROM sub2api_monitored_accounts WHERE account_id = ?
+            `).get(id);
+            return {
+              name: account.name,
+              platform: account.platform,
+              type: account.account_type,
+              credentials: {
+                api_key: `sk-ephemeral-test-${id}`,
+                base_url: 'https://upstream.example'
+              },
+              extra: { openai_responses_supported: true },
+              ...(mockOptions.proxyAccountIds?.has?.(String(id)) ? { proxy_key: `proxy-${id}` } : {})
+            };
+          })
+        };
+      }
       const match = endpoint.match(/\/accounts\/([^/?]+)$/);
       const accountId = match ? decodeURIComponent(match[1]) : null;
-      calls.push({ type: 'data', endpoint, method: options.method || 'GET', body: options.body });
+      calls.push({ type: 'data', endpoint, method: requestOptions.method || 'GET', body: requestOptions.body });
       if (!accountId) return {};
-      if (options.method === 'PUT') statuses.set(accountId, options.body.status);
+      if (requestOptions.method === 'PUT') statuses.set(accountId, requestOptions.body.status);
       return { id: accountId, name: `Account ${accountId}`, status: statuses.get(accountId) || 'active' };
     },
     async sse(endpoint, options) {
@@ -59,6 +87,46 @@ function createSub2ApiMock() {
       await options.onEvent({ type: 'content', text: '探测响应内容' });
       await options.onEvent({ type: 'test_complete', success: true });
       return { eventCount: 3, bytes: 32 };
+    }
+  };
+}
+
+function createStreamingHttpMock() {
+  const calls = [];
+  return {
+    calls,
+    async requestSse(url, options) {
+      calls.push({ url, options });
+      const prompt = options.body?.input?.[0]?.content?.[0]?.text ||
+        options.body?.messages?.[0]?.content ||
+        options.body?.contents?.[0]?.parts?.[0]?.text || '';
+      const marker = prompt.match(/PMV_[a-f0-9]+/)?.[0];
+      assert.ok(marker, 'direct probe must add a per-sample verification marker');
+      if (url.includes('/responses')) {
+        await options.onEvent({
+          event: 'response.output_text.delta',
+          rawData: '{}',
+          data: { type: 'response.output_text.delta', delta: marker }
+        });
+        await options.onEvent({
+          event: 'response.output_text.delta',
+          rawData: '{}',
+          data: { type: 'response.output_text.delta', delta: ' 探测响应内容' }
+        });
+        await options.onEvent({
+          event: 'response.completed',
+          rawData: '{}',
+          data: { type: 'response.completed', response: { model: options.body.model } }
+        });
+      } else {
+        await options.onEvent({
+          event: 'message',
+          rawData: '{}',
+          data: { choices: [{ delta: { content: `${marker} 探测响应内容` }, finish_reason: null }] }
+        });
+        await options.onEvent({ event: 'message', rawData: '[DONE]', data: '[DONE]' });
+      }
+      return { eventCount: 3, bytes: 64 };
     }
   };
 }
@@ -89,8 +157,9 @@ test('key probe service stores settings, schedules individual keys and aggregate
   t.after(() => context.cleanup());
   insertAccount(context.db, { id: 11, name: 'OpenAI Primary' });
   insertAccount(context.db, { id: 12, name: 'Claude Backup', platform: 'anthropic', type: 'oauth' });
-  const sub2api = createSub2ApiMock();
-  const service = new KeyProbeService({ db: context.db, config: context.config, sub2api });
+  const sub2api = createSub2ApiMock(context.db);
+  const http = createStreamingHttpMock();
+  const service = new KeyProbeService({ db: context.db, config: context.config, sub2api, http });
 
   assert.deepEqual(service.settings().prompts.simple, [...DEFAULT_PROMPTS.simple]);
   const settings = service.saveSettings({
@@ -114,8 +183,12 @@ test('key probe service stores settings, schedules individual keys and aggregate
   assert.equal(result.results[0].sampleCount, 3);
   assert.equal(result.results[0].succeededCount, 3);
   assert.equal(result.results[0].status, 'healthy');
-  assert.equal(sub2api.calls.filter((call) => call.type === 'sse').length, 3);
-  assert.equal(sub2api.calls.find((call) => call.type === 'sse').body.model_id, 'gpt-monitor');
+  assert.equal(sub2api.calls.filter((call) => call.type === 'sse').length, 0);
+  assert.equal(sub2api.calls.filter((call) => call.type === 'credential_export').length, 1);
+  assert.equal(http.calls.length, 3);
+  assert.equal(http.calls[0].options.body.model, 'gpt-monitor');
+  assert.match(http.calls[0].options.body.input[0].content[0].text, /一个接口连续 5 次响应耗时/);
+  assert.doesNotMatch(JSON.stringify(result), /ephemeral-test/);
 
   const listed = service.list({ platform: 'openai', health: 'healthy' });
   assert.equal(listed.items.length, 1);
@@ -127,6 +200,10 @@ test('key probe service stores settings, schedules individual keys and aggregate
   assert.equal(history.items.length, 1);
   assert.equal(history.items[0].samples.length, 3);
   assert.equal(history.items[0].samples[0].prompt, settings.prompts.medium[0]);
+  assert.doesNotMatch(
+    JSON.stringify(context.db.prepare('SELECT * FROM sub2api_key_probe_samples').all()),
+    /ephemeral-test/
+  );
 });
 
 test('key probe health thresholds account for partial and complete failures', () => {
@@ -147,19 +224,21 @@ test('key probe automation groups accounts, disables slow traffic and recovers i
   insertAccount(context.db, { id: 33, name: 'Beta recovery', status: 'inactive', groups: [beta] });
   insertAccount(context.db, { id: 34, name: 'Ungrouped recovery', status: 'inactive' });
   insertTrafficSamples(context.db, '31', Array.from({ length: 10 }, () => 2200));
-  const sub2api = createSub2ApiMock();
+  const sub2api = createSub2ApiMock(context.db);
+  const http = createStreamingHttpMock();
   sub2api.statuses.set('31', 'active');
   sub2api.statuses.set('32', 'active');
   sub2api.statuses.set('33', 'inactive');
   sub2api.statuses.set('34', 'inactive');
-  const service = new KeyProbeService({ db: context.db, config: context.config, sub2api });
+  const service = new KeyProbeService({ db: context.db, config: context.config, sub2api, http });
   service.saveSettings({
     autoControlEnabled: true,
     autoDisableThresholdMs: 1500,
     autoEnableThresholdMs: 1000,
     recoveryIntervalMinutes: 45,
     sampleCount: 2,
-    concurrency: 2
+    concurrency: 2,
+    models: { openai: 'gpt-monitor' }
   });
 
   const before = service.list({ groupId: 'beta' });
@@ -208,7 +287,11 @@ test('key probe automation groups accounts, disables slow traffic and recovers i
 test('key probe automation requires a lower recovery threshold', (t) => {
   const context = createTestContext();
   t.after(() => context.cleanup());
-  const service = new KeyProbeService({ db: context.db, config: context.config, sub2api: createSub2ApiMock() });
+  const service = new KeyProbeService({
+    db: context.db,
+    config: context.config,
+    sub2api: createSub2ApiMock(context.db)
+  });
   assert.throws(
     () => service.saveSettings({ autoDisableThresholdMs: 1000, autoEnableThresholdMs: 1000 }),
     /自动启用阈值必须小于自动停用阈值/
@@ -221,7 +304,7 @@ test('group shortage triggers one immediate recovery probe then respects the int
   const group = { id: 'scarce', name: '容量不足分组' };
   insertAccount(context.db, { id: 41, name: 'Only active', groups: [group] });
   insertAccount(context.db, { id: 42, name: 'Inactive candidate', status: 'inactive', groups: [group] });
-  const sub2api = createSub2ApiMock();
+  const sub2api = createSub2ApiMock(context.db);
   sub2api.statuses.set('41', 'active');
   sub2api.statuses.set('42', 'inactive');
   sub2api.sse = async (_endpoint, options) => {
@@ -255,9 +338,81 @@ test('group shortage triggers one immediate recovery probe then respects the int
   assert.equal(history.items[0].details.recoveryReason, 'recovery_interval_due');
 });
 
+test('automatic recovery never enables OAuth, proxied, or prompt-unverified keys', async (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  insertAccount(context.db, { id: 51, name: 'OAuth disabled', type: 'oauth', status: 'inactive' });
+  insertAccount(context.db, { id: 52, name: 'Proxy disabled', status: 'inactive' });
+  insertAccount(context.db, { id: 53, name: 'Greeting disabled', status: 'inactive' });
+  const sub2api = createSub2ApiMock(context.db, { proxyAccountIds: new Set(['52']) });
+  for (const id of ['51', '52', '53']) sub2api.statuses.set(id, 'inactive');
+  const http = {
+    calls: [],
+    async requestSse(url, options) {
+      this.calls.push({ url, options });
+      await options.onEvent({
+        event: 'response.output_text.delta', rawData: '{}',
+        data: { type: 'response.output_text.delta', delta: 'Hi! What can I help you with?' }
+      });
+      await options.onEvent({
+        event: 'response.completed', rawData: '{}',
+        data: { type: 'response.completed', response: {} }
+      });
+      return { eventCount: 2, bytes: 64 };
+    }
+  };
+  const service = new KeyProbeService({ db: context.db, config: context.config, sub2api, http });
+  service.saveSettings({
+    autoControlEnabled: true,
+    autoDisableThresholdMs: 2000,
+    autoEnableThresholdMs: 800,
+    recoveryIntervalMinutes: 60,
+    sampleCount: 1,
+    models: { openai: 'gpt-monitor' }
+  });
+
+  const result = await service.reconcileAutomation();
+
+  assert.equal(result.recoveryProbed, 3);
+  assert.equal(result.reenabled, 0);
+  assert.equal(http.calls.length, 1);
+  assert.deepEqual([...sub2api.statuses.values()], ['inactive', 'inactive', 'inactive']);
+  assert.equal(service.history({ accountId: '51' }).items[0].errorCode, 'DIRECT_PROBE_ACCOUNT_TYPE_UNSUPPORTED');
+  assert.equal(service.history({ accountId: '52' }).items[0].errorCode, 'DIRECT_PROBE_PROXY_UNSUPPORTED');
+  assert.equal(service.history({ accountId: '53' }).items[0].errorCode, 'PROMPT_VERIFICATION_FAILED');
+  assert.ok(result.probes.every((probe) => probe.verifiedSampleCount === 0));
+});
+
+test('credential export failure is recorded safely and never reaches the upstream', async (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  insertAccount(context.db, { id: 61, name: 'Step-up protected' });
+  const sub2api = createSub2ApiMock(context.db);
+  sub2api.data = async (endpoint) => {
+    if (endpoint === '/api/v1/admin/accounts/data') {
+      throw new AppError('SUB2API_REQUEST_FAILED', 'step up required', {
+        status: 403,
+        details: { remoteCode: 'STEP_UP_REQUIRED', remoteStatus: 403 }
+      });
+    }
+    return {};
+  };
+  const http = createStreamingHttpMock();
+  const service = new KeyProbeService({ db: context.db, config: context.config, sub2api, http });
+  service.saveSettings({ sampleCount: 1, models: { openai: 'gpt-monitor' } });
+
+  const result = await service.run({ accountIds: ['61'] });
+
+  assert.equal(result.results[0].status, 'critical');
+  assert.equal(http.calls.length, 0);
+  assert.equal(service.history({ accountId: '61' }).items[0].errorCode, 'SUB2API_STEP_UP_REQUIRED');
+  assert.doesNotMatch(JSON.stringify(result), /api_key|sk-/i);
+});
+
 test('key probe HTTP API exposes configuration, filtering and immediate runs', async (t) => {
   const context = createTestContext();
-  const sub2api = createSub2ApiMock();
+  const sub2api = createSub2ApiMock(context.db);
+  const http = createStreamingHttpMock();
   insertAccount(context.db, {
     id: 21,
     name: 'HTTP OpenAI Key',
@@ -267,6 +422,7 @@ test('key probe HTTP API exposes configuration, filtering and immediate runs', a
     config: context.config,
     db: context.db,
     sub2api,
+    http,
     startBackground: false
   });
   const server = app.listen(0, '127.0.0.1');

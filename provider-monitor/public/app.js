@@ -1782,7 +1782,7 @@ function keyProbeRows(items) {
       <td class="numeric"><strong class="${trafficClass}">${formatMilliseconds(traffic.avgFirstTokenMs)}</strong><small class="table-metric-note">${traffic.sampleCount || 0} / ${traffic.requiredSampleCount || 10} 条${traffic.lastRequestAt ? ` · ${escapeHtml(timeAgo(traffic.lastRequestAt))}` : ''}</small></td>
       <td class="numeric"><strong>${formatMilliseconds(latest?.avgDurationMs)}</strong><small class="table-metric-note">首字 ${formatMilliseconds(latest?.avgFirstTokenMs)}</small></td>
       <td class="numeric"><strong>${latest ? `${formatMilliseconds(latest.minDurationMs)} – ${formatMilliseconds(latest.maxDurationMs)}` : '-'}</strong><small class="table-metric-note">P95 ${formatMilliseconds(latest?.p95DurationMs)}</small></td>
-      <td><strong>${escapeHtml(item.config.model || '基座默认')}</strong><small class="table-metric-note">${escapeHtml(keyProbeComplexityLabel(item.config.complexity))} · ${item.config.sampleCount} 次${item.config.hasOverrides ? ' · 已覆盖' : ''}</small></td>
+      <td><strong class="${item.config.model ? '' : 'danger-text'}">${escapeHtml(item.config.model || '未配置模型')}</strong><small class="table-metric-note">${escapeHtml(keyProbeComplexityLabel(item.config.complexity))} · ${item.config.sampleCount} 次${item.config.hasOverrides ? ' · 已覆盖' : ''}</small></td>
       <td><strong>${escapeHtml(timeAgo(latest?.completedAt))}</strong><small class="table-metric-note">${nextSchedule}</small>${item.latestAction ? `<small class="table-metric-note" title="${escapeHtml(item.latestAction.errorMessage || '')}">${actionLabel}${actionResult} · ${escapeHtml(timeAgo(item.latestAction.completedAt || item.latestAction.createdAt))}</small>` : ''}</td>
       <td class="key-probe-enabled-cell"><label class="switch-control" title="${item.config.enabled ? '停用该 Key 检测与自动管控' : '启用该 Key 检测与自动管控'}"><input type="checkbox" data-key-probe-enabled="${escapeHtml(item.accountId)}" ${item.config.enabled ? 'checked' : ''}><span aria-hidden="true"></span></label></td>
       <td class="actions-cell"><button class="icon-button small" data-action="run-key-probe" data-id="${escapeHtml(item.accountId)}" title="立即检测" aria-label="立即检测 ${escapeHtml(item.name)}"><i data-lucide="play"></i></button><button class="icon-button small" data-action="configure-key-probe" data-id="${escapeHtml(item.accountId)}" title="检测配置" aria-label="配置 ${escapeHtml(item.name)}"><i data-lucide="sliders-horizontal"></i></button><button class="icon-button small" data-action="view-key-probe-history" data-id="${escapeHtml(item.accountId)}" title="检测历史" aria-label="查看 ${escapeHtml(item.name)} 检测历史"><i data-lucide="history"></i></button></td>
@@ -1844,7 +1844,7 @@ function openKeyProbeSettings() {
   form.elements.promptsMedium.value = settings.prompts.medium.join('\n');
   form.elements.promptsComplex.value = settings.prompts.complex.join('\n');
   const platforms = [...new Set([...(state.keyProbes.platforms || []), ...Object.keys(settings.models || {})])].sort();
-  const rows = platforms.map((platform) => `<div class="account-platform-setting"><strong>${escapeHtml(accountMonitorPlatformLabel(platform))}</strong><label><span>检测模型</span><input data-key-probe-model="${escapeHtml(platform)}" value="${escapeHtml(settings.models?.[platform] || '')}" placeholder="使用基座默认模型"></label></div>`).join('');
+  const rows = platforms.map((platform) => `<div class="account-platform-setting"><strong>${escapeHtml(accountMonitorPlatformLabel(platform))}</strong><label><span>直连检测模型</span><input data-key-probe-model="${escapeHtml(platform)}" value="${escapeHtml(settings.models?.[platform] || '')}" placeholder="直连检测必填"></label></div>`).join('');
   $('#key-probe-model-settings').innerHTML = `<span class="field-group-label">平台默认模型</span><div class="account-platform-setting-list">${rows || '<span class="stat-detail key-probe-model-empty">同步 Key 后显示平台</span>'}</div>`;
   $('#key-probe-settings-error').textContent = '';
   dialog.showModal();
@@ -1883,7 +1883,12 @@ async function openKeyProbeHistory(accountId) {
     ? `<section class="key-probe-action-history"><h3>自动管控记录</h3><div class="table-wrap"><table><thead><tr><th>时间</th><th>动作 / 原因</th><th class="numeric">平均首字 / 阈值</th><th>结果</th></tr></thead><tbody>${actionRows}</tbody></table></div></section>`
     : '';
   const probeHistory = result.items.map((batch, index) => {
-    const samples = batch.samples.map((sample) => `<tr><td class="numeric">${sample.index}</td><td>${badge(sample.status)}</td><td class="numeric">${formatMilliseconds(sample.firstTokenMs)}</td><td class="numeric">${formatMilliseconds(sample.durationMs)}</td><td class="key-probe-prompt-cell">${escapeHtml(sample.prompt)}</td><td class="key-probe-response-cell">${escapeHtml(sample.responseExcerpt || sample.errorMessage || '-')}</td></tr>`).join('');
+    const samples = batch.samples.map((sample) => {
+      const response = sample.errorMessage
+        ? `<strong class="danger-text" title="${escapeHtml(sample.errorCode || '')}">${escapeHtml(sample.errorMessage)}</strong>${sample.responseExcerpt ? `<small class="table-metric-note">上游原文：${escapeHtml(sample.responseExcerpt)}</small>` : ''}`
+        : escapeHtml(sample.responseExcerpt || '-');
+      return `<tr><td class="numeric">${sample.index}</td><td>${badge(sample.status)}</td><td class="numeric">${formatMilliseconds(sample.firstTokenMs)}</td><td class="numeric">${formatMilliseconds(sample.durationMs)}</td><td class="key-probe-prompt-cell">${escapeHtml(sample.prompt)}</td><td class="key-probe-response-cell">${response}</td></tr>`;
+    }).join('');
     return `<details class="key-probe-history-run" ${index === 0 ? 'open' : ''}><summary><span>${badge(batch.status)}</span><strong>${escapeHtml(formatDate(batch.completedAt))}</strong><span>${escapeHtml(keyProbeComplexityLabel(batch.complexity))} · ${batch.succeededCount}/${batch.sampleCount} 成功</span><span>平均 ${formatMilliseconds(batch.avgDurationMs)}</span></summary><div class="table-wrap"><table><thead><tr><th class="numeric">#</th><th>结果</th><th class="numeric">首字</th><th class="numeric">总耗时</th><th>测试输入</th><th>响应 / 错误</th></tr></thead><tbody>${samples}</tbody></table></div></details>`;
   }).join('');
   $('#key-probe-history-body').innerHTML = actionHistory || probeHistory
