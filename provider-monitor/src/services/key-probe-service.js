@@ -6,7 +6,11 @@ const { resolvePagination } = require('../pagination');
 const { redactText } = require('../security/redaction');
 
 const COMPLEXITIES = new Set(['simple', 'medium', 'complex']);
-const ACTIVE_ACCOUNT_STATUSES = new Set(['active', 'unknown', 'rate_limited']);
+const ACTIVE_ACCOUNT_STATUSES = new Set(['active', 'enabled', 'unknown', 'rate_limited']);
+const UPSTREAM_ENABLED_STATUSES = new Set(['active', 'enabled']);
+const UPSTREAM_DISABLED_STATUSES = new Set(['inactive', 'disabled']);
+const TRAFFIC_SAMPLE_COUNT = 10;
+const UNGROUPED_GROUP_ID = '__ungrouped__';
 const DEFAULT_PROMPTS = Object.freeze({
   simple: Object.freeze([
     '请用一句话说明水在标准大气压下的沸点，只给出核心结论。',
@@ -79,6 +83,49 @@ function accountIsActive(row) {
   return ACTIVE_ACCOUNT_STATUSES.has(String(row.status || '').toLowerCase());
 }
 
+function upstreamIsEnabled(row) {
+  return UPSTREAM_ENABLED_STATUSES.has(String(row.status || row.accountStatus || '').toLowerCase());
+}
+
+function upstreamIsDisabled(row) {
+  return UPSTREAM_DISABLED_STATUSES.has(String(row.status || row.accountStatus || '').toLowerCase());
+}
+
+function accountGroups(row) {
+  const metadata = parseJson(row?.metadata_json, {});
+  const groups = new Map();
+  const add = (value) => {
+    const rawId = value && typeof value === 'object'
+      ? value.id ?? value.group_id ?? value.groupId
+      : value;
+    if (rawId == null || String(rawId).trim() === '') return;
+    const id = String(rawId).trim();
+    const existing = groups.get(id);
+    const name = value && typeof value === 'object'
+      ? String(value.name || value.display_name || `分组 #${id}`).trim().slice(0, 240)
+      : `分组 #${id}`;
+    groups.set(id, {
+      id,
+      name: existing && !existing.name.startsWith('分组 #') ? existing.name : name,
+      platform: value && typeof value === 'object' && value.platform != null
+        ? normalizePlatform(value.platform)
+        : existing?.platform || null,
+      status: value && typeof value === 'object' && value.status != null
+        ? String(value.status).trim().toLowerCase()
+        : existing?.status || 'unknown'
+    });
+  };
+  for (const value of Array.isArray(metadata.groupIds) ? metadata.groupIds : []) add(value);
+  for (const value of Array.isArray(metadata.groups) ? metadata.groups : []) add(value);
+  return [...groups.values()];
+}
+
+function average(values) {
+  return values.length
+    ? Math.round(values.reduce((sum, value) => sum + value, 0) / values.length)
+    : null;
+}
+
 class KeyProbeService {
   constructor({ db, config, sub2api }) {
     this.db = db;
@@ -91,6 +138,11 @@ class KeyProbeService {
     const storedPrompts = parseJson(row.prompts_json, {});
     return {
       enabled: Boolean(row.enabled),
+      autoControlEnabled: Boolean(row.auto_control_enabled),
+      autoDisableThresholdMs: row.auto_disable_threshold_ms,
+      autoEnableThresholdMs: row.auto_enable_threshold_ms,
+      recoveryIntervalMinutes: row.recovery_interval_minutes,
+      trafficSampleCount: TRAFFIC_SAMPLE_COUNT,
       defaultIntervalMinutes: row.default_interval_minutes,
       sampleCount: row.sample_count,
       complexity: COMPLEXITIES.has(row.complexity) ? row.complexity : 'medium',
@@ -123,16 +175,27 @@ class KeyProbeService {
     if (integer(next.criticalThresholdMs) <= integer(next.warningThresholdMs)) {
       throw new AppError('VALIDATION_ERROR', '红色阈值必须大于黄色阈值', { status: 400 });
     }
+    if (integer(next.autoEnableThresholdMs) >= integer(next.autoDisableThresholdMs)) {
+      throw new AppError('VALIDATION_ERROR', '自动启用阈值必须小于自动停用阈值，以避免 Key 反复切换', {
+        status: 400
+      });
+    }
     const updatedAt = nowIso();
     this.db.prepare(`
       UPDATE sub2api_key_probe_settings SET
-        enabled = ?, default_interval_minutes = ?, sample_count = ?, complexity = ?,
+        enabled = ?, auto_control_enabled = ?, auto_disable_threshold_ms = ?,
+        auto_enable_threshold_ms = ?, recovery_interval_minutes = ?,
+        default_interval_minutes = ?, sample_count = ?, complexity = ?,
         timeout_seconds = ?, warning_threshold_ms = ?, critical_threshold_ms = ?,
         stale_after_minutes = ?, concurrency = ?, scheduled_batch_size = ?,
         retention_days = ?, models_json = ?, prompts_json = ?, updated_at = ?
       WHERE id = 1
     `).run(
       next.enabled ? 1 : 0,
+      next.autoControlEnabled ? 1 : 0,
+      clamp(integer(next.autoDisableThresholdMs, 8000), 100, 600000),
+      clamp(integer(next.autoEnableThresholdMs, 3000), 50, 300000),
+      clamp(integer(next.recoveryIntervalMinutes, 30), 1, 10080),
       clamp(integer(next.defaultIntervalMinutes, 360), 1, 10080),
       clamp(integer(next.sampleCount, 3), 1, 5),
       next.complexity,
@@ -175,8 +238,11 @@ class KeyProbeService {
       timeoutSeconds: configRow?.timeout_seconds ?? settings.timeoutSeconds,
       warningThresholdMs: configRow?.warning_threshold_ms ?? settings.warningThresholdMs,
       criticalThresholdMs: configRow?.critical_threshold_ms ?? settings.criticalThresholdMs,
+      recoveryIntervalMinutes: configRow?.interval_minutes ?? settings.recoveryIntervalMinutes,
       nextProbeAt: configRow?.next_probe_at || null,
       lastProbeAt: configRow?.last_probe_at || null,
+      nextRecoveryProbeAt: configRow?.next_recovery_probe_at || null,
+      lastRecoveryProbeAt: configRow?.last_recovery_probe_at || null,
       overrides: {
         intervalMinutes: configRow?.interval_minutes ?? null,
         model: configRow?.model || null,
@@ -275,6 +341,95 @@ class KeyProbeService {
     `).all();
   }
 
+  #trafficMetricRows() {
+    return this.db.prepare(`
+      WITH last_action AS (
+        SELECT account_id, MAX(completed_at) AS changed_at
+        FROM sub2api_key_probe_actions
+        WHERE status IN ('succeeded', 'skipped') AND completed_at IS NOT NULL
+        GROUP BY account_id
+      ), ranked AS (
+        SELECT sample.account_id, sample.first_token_ms, sample.created_at,
+          ROW_NUMBER() OVER (
+            PARTITION BY sample.account_id
+            ORDER BY sample.created_at DESC, sample.source_log_id DESC
+          ) AS row_number
+        FROM sub2api_account_request_samples sample
+        LEFT JOIN last_action ON last_action.account_id = sample.account_id
+        WHERE sample.stream = 1 AND sample.first_token_ms > 0
+          AND (last_action.changed_at IS NULL OR sample.created_at > last_action.changed_at)
+      )
+      SELECT account_id, COUNT(*) AS sample_count,
+        ROUND(AVG(first_token_ms)) AS avg_first_token_ms,
+        MIN(first_token_ms) AS min_first_token_ms,
+        MAX(first_token_ms) AS max_first_token_ms,
+        MAX(created_at) AS last_request_at
+      FROM ranked WHERE row_number <= ${TRAFFIC_SAMPLE_COUNT}
+      GROUP BY account_id
+    `).all();
+  }
+
+  #latestActionRows() {
+    return this.db.prepare(`
+      SELECT action.* FROM sub2api_key_probe_actions action
+      WHERE action.id = (
+        SELECT latest.id FROM sub2api_key_probe_actions latest
+        WHERE latest.account_id = action.account_id
+        ORDER BY latest.created_at DESC, latest.id DESC LIMIT 1
+      )
+    `).all();
+  }
+
+  #serializeAction(row) {
+    if (!row) return null;
+    return {
+      id: row.id,
+      accountId: String(row.account_id),
+      action: row.action,
+      reason: row.reason,
+      status: row.status,
+      measuredFirstTokenMs: row.measured_first_token_ms,
+      thresholdMs: row.threshold_ms,
+      sampleCount: row.sample_count,
+      groupIds: parseJson(row.group_ids_json, []),
+      beforeStatus: row.before_status,
+      afterStatus: row.after_status,
+      probeBatchId: row.probe_batch_id,
+      errorCode: row.error_code,
+      errorMessage: row.error_message,
+      createdAt: row.created_at,
+      completedAt: row.completed_at
+    };
+  }
+
+  #groupDefinitions(items) {
+    const groups = new Map();
+    for (const item of items) {
+      for (const group of item.groups) {
+        const current = groups.get(group.id) || {
+          ...group,
+          accountCount: 0,
+          enabledCount: 0,
+          disabledCount: 0
+        };
+        current.accountCount += 1;
+        if (upstreamIsEnabled(item)) current.enabledCount += 1;
+        else if (upstreamIsDisabled(item)) current.disabledCount += 1;
+        if (current.name.startsWith('分组 #') && !group.name.startsWith('分组 #')) {
+          current.name = group.name;
+        }
+        if (!current.platform && group.platform) current.platform = group.platform;
+        if (current.status === 'unknown' && group.status !== 'unknown') current.status = group.status;
+        groups.set(group.id, current);
+      }
+    }
+    return [...groups.values()].sort((left, right) => {
+      if (left.id === UNGROUPED_GROUP_ID) return 1;
+      if (right.id === UNGROUPED_GROUP_ID) return -1;
+      return left.name.localeCompare(right.name, 'zh-CN');
+    });
+  }
+
   #healthFor(batch, effective, settings, at = Date.now()) {
     if (!effective.enabled) return 'disabled';
     if (!batch) return 'unknown';
@@ -292,7 +447,9 @@ class KeyProbeService {
         c.timeout_seconds AS probe_timeout_seconds,
         c.warning_threshold_ms AS probe_warning_threshold_ms,
         c.critical_threshold_ms AS probe_critical_threshold_ms,
-        c.next_probe_at, c.last_probe_at, c.updated_at AS probe_config_updated_at
+        c.next_probe_at, c.last_probe_at, c.next_recovery_probe_at,
+        c.last_recovery_probe_at, c.last_shortage_signature,
+        c.updated_at AS probe_config_updated_at
       FROM sub2api_monitored_accounts a
       LEFT JOIN sub2api_key_probe_configs c ON c.account_id = a.account_id
       WHERE a.missing_since IS NULL
@@ -300,6 +457,8 @@ class KeyProbeService {
       LIMIT ${ACCOUNT_LIMIT}
     `).all();
     const latest = new Map(this.#latestBatchRows().map((row) => [String(row.account_id), row]));
+    const traffic = new Map(this.#trafficMetricRows().map((row) => [String(row.account_id), row]));
+    const latestActions = new Map(this.#latestActionRows().map((row) => [String(row.account_id), row]));
     const at = Date.now();
     let items = accounts.map((row) => {
       const configRow = row.probe_config_updated_at == null ? null : {
@@ -312,10 +471,15 @@ class KeyProbeService {
         warning_threshold_ms: row.probe_warning_threshold_ms,
         critical_threshold_ms: row.probe_critical_threshold_ms,
         next_probe_at: row.next_probe_at,
-        last_probe_at: row.last_probe_at
+        last_probe_at: row.last_probe_at,
+        next_recovery_probe_at: row.next_recovery_probe_at,
+        last_recovery_probe_at: row.last_recovery_probe_at,
+        last_shortage_signature: row.last_shortage_signature
       };
       const effective = this.#effectiveConfig(row, configRow, settings);
       const batch = latest.get(String(row.account_id)) || null;
+      const trafficRow = traffic.get(String(row.account_id)) || null;
+      const groups = accountGroups(row);
       return {
         accountId: String(row.account_id),
         name: row.name,
@@ -323,12 +487,34 @@ class KeyProbeService {
         accountType: row.account_type,
         accountStatus: row.status,
         schedulable: Boolean(row.schedulable),
+        groups: groups.length ? groups : [{
+          id: UNGROUPED_GROUP_ID,
+          name: '未分组',
+          platform: null,
+          status: 'unknown'
+        }],
         health: this.#healthFor(batch, effective, settings, at),
         config: effective,
-        latest: batch ? this.#serializeBatch(batch, false) : null
+        latest: batch ? this.#serializeBatch(batch, false) : null,
+        traffic: {
+          sampleCount: trafficRow?.sample_count || 0,
+          requiredSampleCount: TRAFFIC_SAMPLE_COUNT,
+          ready: Number(trafficRow?.sample_count || 0) >= TRAFFIC_SAMPLE_COUNT,
+          avgFirstTokenMs: trafficRow?.avg_first_token_ms ?? null,
+          minFirstTokenMs: trafficRow?.min_first_token_ms ?? null,
+          maxFirstTokenMs: trafficRow?.max_first_token_ms ?? null,
+          lastRequestAt: trafficRow?.last_request_at || null,
+          exceedsDisableThreshold: Number(trafficRow?.sample_count || 0) >= TRAFFIC_SAMPLE_COUNT &&
+            Number(trafficRow?.avg_first_token_ms) > settings.autoDisableThresholdMs
+        },
+        latestAction: this.#serializeAction(latestActions.get(String(row.account_id)))
       };
     });
     const allItems = items;
+    const groups = this.#groupDefinitions(allItems);
+    if (filters.groupId) {
+      items = items.filter((item) => item.groups.some((group) => group.id === String(filters.groupId)));
+    }
     const platform = normalizePlatform(filters.platform || '');
     if (filters.platform) items = items.filter((item) => item.platform === platform);
     if (filters.health) items = items.filter((item) => item.health === String(filters.health));
@@ -337,11 +523,14 @@ class KeyProbeService {
     if (filters.enabled === 'false' || filters.enabled === false) items = items.filter((item) => !item.config.enabled);
     const search = String(filters.search || '').trim().toLowerCase();
     if (search) {
-      items = items.filter((item) => [item.accountId, item.name, item.platform, item.accountType]
+      items = items.filter((item) => [
+        item.accountId, item.name, item.platform, item.accountType,
+        ...item.groups.flatMap((group) => [group.id, group.name])
+      ]
         .some((value) => String(value || '').toLowerCase().includes(search)));
     }
     const direction = filters.order === 'asc' ? 1 : -1;
-    const sortBy = ['name', 'platform', 'avgDurationMs', 'completedAt', 'health'].includes(filters.sortBy)
+    const sortBy = ['name', 'platform', 'avgDurationMs', 'trafficFirstTokenMs', 'completedAt', 'health'].includes(filters.sortBy)
       ? filters.sortBy
       : 'completedAt';
     const healthRank = { critical: 5, warning: 4, stale: 3, unknown: 2, disabled: 1, healthy: 0 };
@@ -351,6 +540,7 @@ class KeyProbeService {
       if (sortBy === 'name') [a, b] = [left.name, right.name];
       else if (sortBy === 'platform') [a, b] = [left.platform, right.platform];
       else if (sortBy === 'avgDurationMs') [a, b] = [left.latest?.avgDurationMs ?? -1, right.latest?.avgDurationMs ?? -1];
+      else if (sortBy === 'trafficFirstTokenMs') [a, b] = [left.traffic.avgFirstTokenMs ?? -1, right.traffic.avgFirstTokenMs ?? -1];
       else if (sortBy === 'health') [a, b] = [healthRank[left.health] ?? 0, healthRank[right.health] ?? 0];
       else [a, b] = [Date.parse(left.latest?.completedAt || 0) || 0, Date.parse(right.latest?.completedAt || 0) || 0];
       if (typeof a === 'string') return a.localeCompare(b, 'zh-CN') * direction;
@@ -372,11 +562,15 @@ class KeyProbeService {
       summary: {
         total: allItems.length,
         enabled: allItems.filter((item) => item.config.enabled).length,
+        upstreamEnabled: allItems.filter(upstreamIsEnabled).length,
+        upstreamDisabled: allItems.filter(upstreamIsDisabled).length,
+        trafficReady: allItems.filter((item) => item.traffic.ready).length,
         counts,
         lastCompletedAt: allItems.map((item) => item.latest?.completedAt).filter(Boolean)
           .sort((left, right) => Date.parse(right) - Date.parse(left))[0] || null
       },
       platforms: [...new Set(allItems.map((item) => item.platform))].sort(),
+      groups,
       items: items.slice(resolved.offset, resolved.offset + resolved.limit),
       pagination: resolved.pagination
     };
@@ -433,6 +627,13 @@ class KeyProbeService {
     const samplesStatement = this.db.prepare(`
       SELECT * FROM sub2api_key_probe_samples WHERE batch_id = ? ORDER BY sample_index
     `);
+    const actionRows = filters.accountId == null
+      ? []
+      : this.db.prepare(`
+          SELECT * FROM sub2api_key_probe_actions
+          WHERE account_id = ?
+          ORDER BY created_at DESC, id DESC LIMIT ?
+        `).all(String(filters.accountId), limit);
     return {
       items: rows.map((row) => ({
         ...this.#serializeBatch(row),
@@ -451,8 +652,265 @@ class KeyProbeService {
           startedAt: sample.started_at,
           completedAt: sample.completed_at
         }))
-      }))
+      })),
+      actions: actionRows.map((row) => this.#serializeAction(row))
     };
+  }
+
+  #managedAccountRows() {
+    return this.db.prepare(`
+      SELECT a.*, c.enabled AS probe_enabled, c.interval_minutes,
+        c.next_recovery_probe_at, c.last_recovery_probe_at,
+        c.last_shortage_signature, c.updated_at AS probe_config_updated_at
+      FROM sub2api_monitored_accounts a
+      LEFT JOIN sub2api_key_probe_configs c ON c.account_id = a.account_id
+      WHERE a.missing_since IS NULL
+      ORDER BY a.platform, a.name, a.account_id
+      LIMIT ${ACCOUNT_LIMIT}
+    `).all();
+  }
+
+  #shortageState(account, enabledByGroup) {
+    const lowGroups = accountGroups(account)
+      .map((group) => ({
+        id: group.id,
+        name: group.name,
+        enabledAccountIds: [...(enabledByGroup.get(group.id) || [])].sort()
+      }))
+      .filter((group) => group.enabledAccountIds.length <= 1)
+      .sort((left, right) => left.id.localeCompare(right.id));
+    if (lowGroups.length === 0) return { groups: [], signature: null };
+    return {
+      groups: lowGroups,
+      signature: crypto.createHash('sha256').update(JSON.stringify(lowGroups)).digest('hex')
+    };
+  }
+
+  async #mapConcurrent(items, concurrency, operation) {
+    const results = new Array(items.length);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(items.length, concurrency) }, async () => {
+      while (cursor < items.length) {
+        const index = cursor;
+        cursor += 1;
+        results[index] = await operation(items[index], index);
+      }
+    });
+    await Promise.all(workers);
+    return results;
+  }
+
+  async #changeUpstreamStatus(account, desiredStatus, context) {
+    const id = crypto.randomUUID();
+    const createdAt = nowIso();
+    const accountId = String(account.account_id);
+    const beforeStatus = String(account.status || 'unknown').toLowerCase();
+    this.db.prepare(`
+      INSERT INTO sub2api_key_probe_actions(
+        id, account_id, action, reason, status, measured_first_token_ms,
+        threshold_ms, sample_count, group_ids_json, before_status,
+        probe_batch_id, created_at
+      ) VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id, accountId, context.action, context.reason,
+      context.measuredFirstTokenMs ?? null, context.thresholdMs ?? null,
+      context.sampleCount || 0, stringifyJson(context.groupIds || [], []),
+      beforeStatus, context.probeBatchId || null, createdAt
+    );
+    try {
+      const currentPayload = await this.sub2api.data(
+        `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`
+      );
+      const current = currentPayload?.account ?? currentPayload ?? {};
+      const remoteStatus = String(current.status || beforeStatus).toLowerCase();
+      let afterStatus = remoteStatus;
+      let actionStatus = 'skipped';
+      if (remoteStatus !== desiredStatus) {
+        const updatedPayload = await this.sub2api.data(
+          `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`,
+          { method: 'PUT', body: { status: desiredStatus } }
+        );
+        const updated = updatedPayload?.account ?? updatedPayload ?? {};
+        afterStatus = String(updated.status || desiredStatus).toLowerCase();
+        if (afterStatus !== desiredStatus) {
+          throw new AppError(
+            'SUB2API_ACCOUNT_STATUS_UPDATE_FAILED',
+            `Sub2API 未将 Key 状态更新为 ${desiredStatus}`,
+            { status: 502 }
+          );
+        }
+        actionStatus = 'succeeded';
+      }
+      const completedAt = nowIso();
+      this.db.transaction(() => {
+        this.db.prepare(`
+          UPDATE sub2api_monitored_accounts SET status = ?, last_seen_at = ?
+          WHERE account_id = ?
+        `).run(afterStatus, completedAt, accountId);
+        this.db.prepare(`
+          UPDATE sub2api_key_probe_actions SET status = ?, after_status = ?,
+            completed_at = ? WHERE id = ?
+        `).run(actionStatus, afterStatus, completedAt, id);
+      })();
+      account.status = afterStatus;
+      return {
+        id,
+        accountId,
+        status: actionStatus,
+        beforeStatus: remoteStatus,
+        afterStatus,
+        changed: actionStatus === 'succeeded'
+      };
+    } catch (error) {
+      const completedAt = nowIso();
+      const errorCode = String(error?.code || 'KEY_PROBE_AUTOMATION_FAILED').slice(0, 120);
+      const errorMessage = redactText(error?.message || error).slice(0, 1000);
+      this.db.prepare(`
+        UPDATE sub2api_key_probe_actions SET status = 'failed', error_code = ?,
+          error_message = ?, completed_at = ? WHERE id = ?
+      `).run(errorCode, errorMessage, completedAt, id);
+      return {
+        id,
+        accountId,
+        status: 'failed',
+        beforeStatus,
+        afterStatus: beforeStatus,
+        changed: false,
+        errorCode,
+        errorMessage
+      };
+    }
+  }
+
+  async reconcileAutomation(options = {}) {
+    const settings = this.settings();
+    const runId = crypto.randomUUID();
+    const summary = {
+      runId,
+      enabled: settings.autoControlEnabled,
+      trafficSampleCount: TRAFFIC_SAMPLE_COUNT,
+      disableCandidates: 0,
+      disabled: 0,
+      disableFailed: 0,
+      recoveryCandidates: 0,
+      recoveryProbed: 0,
+      reenabled: 0,
+      enableFailed: 0,
+      actions: [],
+      probes: []
+    };
+    if (!settings.autoControlEnabled) return summary;
+
+    const at = Number.isFinite(options.at) ? options.at : Date.now();
+    const atIso = new Date(at).toISOString();
+    const allRows = this.#managedAccountRows();
+    const rows = allRows.filter((row) =>
+      row.probe_config_updated_at == null || Boolean(row.probe_enabled));
+    const traffic = new Map(this.#trafficMetricRows().map((row) => [String(row.account_id), row]));
+    const disableCandidates = rows.filter((row) => {
+      const metric = traffic.get(String(row.account_id));
+      return upstreamIsEnabled(row) && Number(metric?.sample_count || 0) >= TRAFFIC_SAMPLE_COUNT &&
+        Number(metric?.avg_first_token_ms) > settings.autoDisableThresholdMs;
+    }).slice(0, settings.scheduledBatchSize);
+    summary.disableCandidates = disableCandidates.length;
+
+    const disableResults = await this.#mapConcurrent(
+      disableCandidates,
+      settings.concurrency,
+      (account) => {
+        const metric = traffic.get(String(account.account_id));
+        return this.#changeUpstreamStatus(account, 'inactive', {
+          action: 'auto_disable',
+          reason: 'traffic_ttft_exceeded',
+          measuredFirstTokenMs: metric.avg_first_token_ms,
+          thresholdMs: settings.autoDisableThresholdMs,
+          sampleCount: metric.sample_count,
+          groupIds: accountGroups(account).map((group) => group.id)
+        });
+      }
+    );
+    summary.actions.push(...disableResults);
+    summary.disabled = disableResults.filter((result) => result.status === 'succeeded').length;
+    summary.disableFailed = disableResults.filter((result) => result.status === 'failed').length;
+    const disabledThisRun = new Set(disableResults
+      .filter((result) => UPSTREAM_DISABLED_STATUSES.has(result.afterStatus))
+      .map((result) => result.accountId));
+
+    const enabledByGroup = new Map();
+    for (const account of allRows.filter(upstreamIsEnabled)) {
+      for (const group of accountGroups(account)) {
+        const ids = enabledByGroup.get(group.id) || new Set();
+        ids.add(String(account.account_id));
+        enabledByGroup.set(group.id, ids);
+      }
+    }
+
+    const clearShortage = this.db.prepare(`
+      UPDATE sub2api_key_probe_configs SET last_shortage_signature = NULL,
+        updated_at = ? WHERE account_id = ? AND last_shortage_signature IS NOT NULL
+    `);
+    const recoveryCandidates = [];
+    for (const account of rows) {
+      if (!upstreamIsDisabled(account) || disabledThisRun.has(String(account.account_id))) continue;
+      const shortage = this.#shortageState(account, enabledByGroup);
+      const configRow = this.#accountConfigRow(account.account_id);
+      if (!shortage.signature && configRow?.last_shortage_signature) {
+        clearShortage.run(atIso, String(account.account_id));
+      }
+      const nextAt = Date.parse(configRow?.next_recovery_probe_at || 0);
+      const intervalDue = !Number.isFinite(nextAt) || nextAt <= at;
+      const shortageChanged = Boolean(shortage.signature) &&
+        shortage.signature !== configRow?.last_shortage_signature;
+      if (!intervalDue && !shortageChanged) continue;
+      recoveryCandidates.push({
+        account,
+        shortage,
+        reason: shortageChanged ? 'group_capacity_low' : 'recovery_interval_due',
+        priority: shortageChanged ? 1 : 0,
+        nextAt: Number.isFinite(nextAt) ? nextAt : 0
+      });
+    }
+    recoveryCandidates.sort((left, right) =>
+      right.priority - left.priority || left.nextAt - right.nextAt ||
+      left.account.name.localeCompare(right.account.name, 'zh-CN'));
+    const selectedRecoveries = recoveryCandidates.slice(0, settings.scheduledBatchSize);
+    summary.recoveryCandidates = recoveryCandidates.length;
+
+    const recoveryResults = await this.#mapConcurrent(
+      selectedRecoveries,
+      settings.concurrency,
+      async (candidate) => {
+        const probe = await this.#probeAccount(candidate.account, {
+          runId,
+          triggerType: 'recovery',
+          settings,
+          recoverySignature: candidate.shortage.signature,
+          recoveryReason: candidate.reason
+        });
+        const completeFirstTokenCoverage = probe.succeededCount === probe.sampleCount &&
+          probe.failedCount === 0 && probe.firstTokenSampleCount === probe.sampleCount;
+        let action = null;
+        if (completeFirstTokenCoverage && probe.avgFirstTokenMs < settings.autoEnableThresholdMs) {
+          action = await this.#changeUpstreamStatus(candidate.account, 'active', {
+            action: 'auto_enable',
+            reason: 'recovery_probe_passed',
+            measuredFirstTokenMs: probe.avgFirstTokenMs,
+            thresholdMs: settings.autoEnableThresholdMs,
+            sampleCount: probe.firstTokenSampleCount,
+            groupIds: accountGroups(candidate.account).map((group) => group.id),
+            probeBatchId: probe.id
+          });
+        }
+        return { candidate, probe, action };
+      }
+    );
+    summary.recoveryProbed = recoveryResults.length;
+    summary.probes.push(...recoveryResults.map((result) => result.probe));
+    const enableActions = recoveryResults.map((result) => result.action).filter(Boolean);
+    summary.actions.push(...enableActions);
+    summary.reenabled = enableActions.filter((result) => result.status === 'succeeded').length;
+    summary.enableFailed = enableActions.filter((result) => result.status === 'failed').length;
+    return summary;
   }
 
   dueAccountIds(at = Date.now()) {
@@ -474,10 +932,13 @@ class KeyProbeService {
 
   cleanup() {
     const before = new Date(Date.now() - this.settings().retentionDays * 86400000).toISOString();
-    const result = this.db.prepare(`
+    const actions = this.db.prepare(`
+      DELETE FROM sub2api_key_probe_actions WHERE created_at < ?
+    `).run(before).changes;
+    const batches = this.db.prepare(`
       DELETE FROM sub2api_key_probe_batches WHERE completed_at < ?
-    `).run(before);
-    return { batches: result.changes, before };
+    `).run(before).changes;
+    return { batches, actions, before };
   }
 
   #selectAccounts(options = {}) {
@@ -485,12 +946,14 @@ class KeyProbeService {
     const platforms = [...new Set((options.platforms || []).map(normalizePlatform).filter(Boolean))];
     const rows = this.db.prepare(`
       SELECT * FROM sub2api_monitored_accounts
-      WHERE missing_since IS NULL AND status NOT IN ('disabled', 'inactive')
+      WHERE missing_since IS NULL
       ORDER BY platform, name LIMIT ${ACCOUNT_LIMIT}
     `).all().filter((row) => {
       if (requestedIds.length > 0 && !requestedIds.includes(String(row.account_id))) return false;
       if (platforms.length > 0 && !platforms.includes(normalizePlatform(row.platform))) return false;
-      if (options.triggerType === 'scheduled' || requestedIds.length === 0) {
+      if (options.triggerType === 'scheduled' && !accountIsActive(row)) return false;
+      if (options.triggerType === 'recovery' && !upstreamIsDisabled(row)) return false;
+      if (['scheduled', 'recovery'].includes(options.triggerType) || requestedIds.length === 0) {
         const config = this.#accountConfigRow(row.account_id);
         return config ? Boolean(config.enabled) : true;
       }
@@ -504,7 +967,9 @@ class KeyProbeService {
 
   async run(options = {}) {
     const settings = this.settings();
-    const triggerType = options.triggerType === 'scheduled' ? 'scheduled' : 'manual';
+    const triggerType = ['scheduled', 'recovery'].includes(options.triggerType)
+      ? options.triggerType
+      : 'manual';
     const scheduledIds = triggerType === 'scheduled' && !options.accountIds?.length
       ? this.dueAccountIds()
       : options.accountIds;
@@ -538,7 +1003,13 @@ class KeyProbeService {
     };
   }
 
-  async #probeAccount(account, { runId, triggerType, settings }) {
+  async #probeAccount(account, {
+    runId,
+    triggerType,
+    settings,
+    recoverySignature = null,
+    recoveryReason = null
+  }) {
     const configRow = this.#accountConfigRow(account.account_id);
     const effective = this.#effectiveConfig(account, configRow, settings);
     const prompts = settings.prompts[effective.complexity];
@@ -573,12 +1044,19 @@ class KeyProbeService {
     });
     const firstFailure = samples.find((sample) => sample.status !== 'succeeded') || null;
     const completedAt = nowIso();
-    const nextProbeAt = new Date(Date.parse(completedAt) + effective.intervalMinutes * 60000).toISOString();
+    const intervalMinutes = triggerType === 'recovery'
+      ? effective.recoveryIntervalMinutes
+      : effective.intervalMinutes;
+    const nextProbeAt = new Date(Date.parse(completedAt) + intervalMinutes * 60000).toISOString();
+    const averageFirstTokenMs = average(firstTokens);
     const details = {
-      intervalMinutes: effective.intervalMinutes,
+      intervalMinutes,
       timeoutSeconds: effective.timeoutSeconds,
       warningThresholdMs: effective.warningThresholdMs,
-      criticalThresholdMs: effective.criticalThresholdMs
+      criticalThresholdMs: effective.criticalThresholdMs,
+      ...(triggerType === 'recovery' ? {
+        recoveryReason: recoveryReason || 'recovery_interval_due'
+      } : {})
     };
     this.db.transaction(() => {
       this.db.prepare(`
@@ -595,7 +1073,7 @@ class KeyProbeService {
         durations.length ? Math.min(...durations) : null,
         durations.length ? Math.max(...durations) : null,
         percentile(durations, 0.95),
-        firstTokens.length ? Math.round(firstTokens.reduce((sum, value) => sum + value, 0) / firstTokens.length) : null,
+        averageFirstTokenMs,
         firstFailure?.errorCode || null, firstFailure?.errorMessage || null,
         stringifyJson(selectedPrompts, []), stringifyJson(details), startedAt, completedAt
       );
@@ -621,6 +1099,20 @@ class KeyProbeService {
           last_probe_at = excluded.last_probe_at,
           updated_at = excluded.updated_at
       `).run(String(account.account_id), nextProbeAt, completedAt, completedAt);
+      if (triggerType === 'recovery') {
+        this.db.prepare(`
+          UPDATE sub2api_key_probe_configs SET
+            next_recovery_probe_at = ?, last_recovery_probe_at = ?,
+            last_shortage_signature = ?, updated_at = ?
+          WHERE account_id = ?
+        `).run(
+          nextProbeAt,
+          completedAt,
+          recoverySignature,
+          completedAt,
+          String(account.account_id)
+        );
+      }
     })();
     return {
       id: batchId,
@@ -639,6 +1131,8 @@ class KeyProbeService {
       minDurationMs: durations.length ? Math.min(...durations) : null,
       maxDurationMs: durations.length ? Math.max(...durations) : null,
       p95DurationMs: percentile(durations, 0.95),
+      avgFirstTokenMs: averageFirstTokenMs,
+      firstTokenSampleCount: firstTokens.length,
       nextProbeAt,
       startedAt,
       completedAt

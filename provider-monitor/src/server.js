@@ -120,6 +120,10 @@ const keyProbePromptsSchema = z.object({
 });
 const keyProbeSettingsSchema = z.object({
   enabled: z.boolean().optional(),
+  autoControlEnabled: z.boolean().optional(),
+  autoDisableThresholdMs: z.number().int().min(100).max(600000).optional(),
+  autoEnableThresholdMs: z.number().int().min(50).max(300000).optional(),
+  recoveryIntervalMinutes: z.number().int().min(1).max(10080).optional(),
   defaultIntervalMinutes: z.number().int().min(1).max(10080).optional(),
   sampleCount: z.number().int().min(1).max(5).optional(),
   complexity: z.enum(['simple', 'medium', 'complex']).optional(),
@@ -143,6 +147,16 @@ const keyProbeSettingsSchema = z.object({
       message: '红色阈值必须大于黄色阈值'
     });
   }
+  if (
+    input.autoEnableThresholdMs != null && input.autoDisableThresholdMs != null &&
+    input.autoEnableThresholdMs >= input.autoDisableThresholdMs
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['autoEnableThresholdMs'],
+      message: '自动启用阈值必须小于自动停用阈值'
+    });
+  }
 });
 const keyProbeAccountConfigSchema = z.object({
   enabled: z.boolean().optional(),
@@ -164,6 +178,11 @@ const keyProbeRunSchema = z.object({
 });
 const sub2apiAdminApiKeySchema = z.object({
   adminApiKey: z.string().trim().min(16).max(4096)
+});
+const sub2apiPoolConfigSchema = z.object({
+  retryCount: z.number().int().min(0).max(10),
+  retryStatusCodes: z.array(z.number().int().min(100).max(599)).max(100)
+    .transform((values) => [...new Set(values)].sort((left, right) => left - right))
 });
 const providerValidationSchema = providerSchema.extend({
   existingProviderId: z.string().uuid().optional()
@@ -473,6 +492,120 @@ async function validateConfiguredApiKeyMonitoring(adapter, adapterType, authMode
   );
 }
 
+const SUB2API_UPSTREAM_KEY_ACCOUNT_TYPES = new Set(['api_key', 'apikey', 'upstream']);
+
+function sub2apiAccountType(account) {
+  return String(account?.type ?? account?.account_type ?? account?.accountType ?? '')
+    .trim()
+    .toLowerCase();
+}
+
+function sub2apiAccountId(account) {
+  const value = Number(account?.id ?? account?.account_id ?? account?.accountId);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+async function sub2apiPoolConfigTargets(sub2api, { accessToken = null } = {}) {
+  const result = await sub2api.listAll('/api/v1/admin/accounts', {}, {
+    maxItems: 50000,
+    ...(accessToken ? { accessToken } : {})
+  });
+  if (result.truncated) {
+    throw new AppError(
+      'SUB2API_ACCOUNT_LIST_TRUNCATED',
+      'Sub2API 账号数量超过批量编辑上限，未执行任何更新',
+      { status: 409, details: { loaded: result.items.length, total: result.total } }
+    );
+  }
+
+  const matches = result.items.filter((account) =>
+    SUB2API_UPSTREAM_KEY_ACCOUNT_TYPES.has(sub2apiAccountType(account))
+  );
+  const invalid = matches.filter((account) => sub2apiAccountId(account) == null);
+  if (invalid.length > 0) {
+    throw new AppError(
+      'SCHEMA_MISMATCH',
+      'Sub2API 上游 Key 账号列表包含无效账号 ID，未执行任何更新',
+      { status: 502, details: { invalidAccountCount: invalid.length } }
+    );
+  }
+
+  const uniqueMatches = new Map();
+  for (const account of matches) {
+    const accountId = sub2apiAccountId(account);
+    if (!uniqueMatches.has(accountId)) uniqueMatches.set(accountId, account);
+  }
+  const accountIds = [...uniqueMatches.keys()];
+  const accountTypes = {};
+  for (const account of uniqueMatches.values()) {
+    const type = sub2apiAccountType(account);
+    accountTypes[type] = (accountTypes[type] || 0) + 1;
+  }
+  return { accountIds, accountTypes };
+}
+
+function sub2apiBulkResultCount(result, countField, idsField, expectedStatus) {
+  const direct = Number(result?.[countField]);
+  if (Number.isInteger(direct) && direct >= 0) return direct;
+  const ids = result?.[idsField] ?? result?.[idsField.replace(/_([a-z])/g, (_match, letter) => letter.toUpperCase())];
+  if (Array.isArray(ids)) return ids.length;
+  if (Array.isArray(result?.results)) {
+    return result.results.filter((item) => Boolean(item?.success) === expectedStatus).length;
+  }
+  return null;
+}
+
+async function updateSub2apiPoolConfig(sub2api, input, options = {}) {
+  const targets = await sub2apiPoolConfigTargets(sub2api, options);
+  if (targets.accountIds.length === 0) {
+    return {
+      targetCount: 0,
+      success: 0,
+      failed: 0,
+      failedAccountIds: [],
+      retryCount: input.retryCount,
+      retryStatusCodes: input.retryStatusCodes
+    };
+  }
+
+  const result = await sub2api.data('/api/v1/admin/accounts/bulk-update', {
+    method: 'POST',
+    body: {
+      account_ids: targets.accountIds,
+      credentials: {
+        pool_mode_retry_count: input.retryCount,
+        pool_mode_retry_status_codes: input.retryStatusCodes
+      }
+    },
+    ...(options.accessToken ? { accessToken: options.accessToken } : {})
+  });
+  const success = sub2apiBulkResultCount(result, 'success', 'success_ids', true);
+  const failed = sub2apiBulkResultCount(result, 'failed', 'failed_ids', false);
+  if (success == null || failed == null || success + failed !== targets.accountIds.length) {
+    throw new AppError(
+      'SCHEMA_MISMATCH',
+      'Sub2API 批量更新结果与目标账号数量不一致',
+      {
+        status: 502,
+        details: {
+          targetCount: targets.accountIds.length,
+          reportedSuccess: success,
+          reportedFailed: failed
+        }
+      }
+    );
+  }
+  const failedIds = result?.failed_ids ?? result?.failedIds ?? [];
+  return {
+    targetCount: targets.accountIds.length,
+    success,
+    failed,
+    failedAccountIds: Array.isArray(failedIds) ? failedIds.slice(0, 100) : [],
+    retryCount: input.retryCount,
+    retryStatusCodes: input.retryStatusCodes
+  };
+}
+
 function auditLogList(db, query) {
   if (hasPagination(query)) {
     const total = db.prepare('SELECT COUNT(*) AS total FROM audit_logs').get().total;
@@ -643,10 +776,14 @@ function createApplication(options = {}) {
         };
       }
     }
+    const keyProbeAutomationJobId = keyProbes.settings().autoControlEnabled
+      ? queue.enqueue('key_probe_automation', { priority: -2 })
+      : null;
     return {
       ...base,
       autoMapping,
       mappingRefresh,
+      keyProbeAutomationJobId,
       supplierSync: {
         connectionCount: connectionIds.length,
         succeeded: results.filter((item) => item?.status === 'succeeded').length,
@@ -691,6 +828,13 @@ function createApplication(options = {}) {
     `).get().count;
     if (activeAccounts === 0) await accountMonitor.sync({ lookbackDays: 1 });
     return keyProbes.run(job.payload || {});
+  });
+  queue.register('key_probe_automation', async () => {
+    const accountCount = db.prepare(`
+      SELECT COUNT(*) AS count FROM sub2api_monitored_accounts WHERE missing_since IS NULL
+    `).get().count;
+    if (accountCount === 0) await accountMonitor.sync({ lookbackDays: 1 });
+    return keyProbes.reconcileAutomation();
   });
 
   const app = express();
@@ -1730,6 +1874,7 @@ function createApplication(options = {}) {
     res.json({ settings });
   });
   api.get('/key-probes/keys', (req, res) => res.json(keyProbes.list({
+    groupId: req.query.groupId || req.query.group_id || null,
     platform: req.query.platform || null,
     health: req.query.health || null,
     accountStatus: req.query.accountStatus || req.query.account_status || null,
@@ -1808,6 +1953,22 @@ function createApplication(options = {}) {
     });
     return res.status(202).json({ jobId });
   }));
+  api.post('/key-probes/automation/run', asyncRoute(async (req, res) => {
+    await sub2api.adminToken();
+    if (req.query.wait === 'true') {
+      const result = await keyProbes.reconcileAutomation();
+      audit(db, req, 'key_probe.automation_run', 'key_probe', result.runId, {
+        disabled: result.disabled,
+        reenabled: result.reenabled,
+        disableFailed: result.disableFailed,
+        enableFailed: result.enableFailed
+      });
+      return res.json(result);
+    }
+    const jobId = queue.enqueue('key_probe_automation', { priority: 10 });
+    audit(db, req, 'key_probe.automation_enqueue', 'key_probe', null, { jobId });
+    return res.status(202).json({ jobId });
+  }));
 
   api.get('/sub2api/channels', asyncRoute(async (_req, res) => res.json(await mappings.channels())));
   api.get('/sub2api/groups', asyncRoute(async (_req, res) => res.json(await mappings.groups())));
@@ -1840,6 +2001,28 @@ function createApplication(options = {}) {
     res.setHeader('Cache-Control', 'no-store');
     res.json(result.status);
   });
+  api.get('/sub2api/accounts/pool-config-targets', asyncRoute(async (req, res) => {
+    const targets = await sub2apiPoolConfigTargets(sub2api, {
+      accessToken: req.auth?.upstreamTokens?.accessToken || null
+    });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ count: targets.accountIds.length, accountTypes: targets.accountTypes });
+  }));
+  api.post('/sub2api/accounts/pool-config', asyncRoute(async (req, res) => {
+    const input = validate(sub2apiPoolConfigSchema, req.body || {});
+    const result = await updateSub2apiPoolConfig(sub2api, input, {
+      accessToken: req.auth?.upstreamTokens?.accessToken || null
+    });
+    audit(db, req, 'sub2api.pool_config.bulk_update', 'sub2api_account', null, {
+      targetCount: result.targetCount,
+      success: result.success,
+      failed: result.failed,
+      retryCount: result.retryCount,
+      retryStatusCodes: result.retryStatusCodes
+    });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(result);
+  }));
   api.get('/sub2api/comparisons', asyncRoute(async (req, res) => res.json(await mappings.comparisons({
     connectionId: req.query.connectionId || null
   }))));
@@ -2086,6 +2269,10 @@ function createApplication(options = {}) {
       priority: -3
     });
   };
+  const enqueueKeyProbeAutomation = () => {
+    if (!keyProbes.settings().autoControlEnabled) return null;
+    return queue.enqueue('key_probe_automation', { priority: -2 });
+  };
   const startBackground = () => {
     if (backgroundStarted) return;
     backgroundStarted = true;
@@ -2102,6 +2289,7 @@ function createApplication(options = {}) {
       });
     }
     enqueueDueKeyProbes();
+    enqueueKeyProbeAutomation();
     cronTasks.push(cron.schedule('* * * * *', () => {
       const due = db.prepare(`
         SELECT id FROM provider_connections
@@ -2120,6 +2308,7 @@ function createApplication(options = {}) {
         });
       }
       enqueueDueKeyProbes();
+      enqueueKeyProbeAutomation();
     }, { timezone: config.timezone }));
     cronTasks.push(cron.schedule('17 3 * * *', () => {
       queue.enqueue('snapshot_retention', { priority: -5 });

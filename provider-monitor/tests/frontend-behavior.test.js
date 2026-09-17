@@ -142,6 +142,10 @@ test('Key status tab exposes centralized probes, filters and per-key controls', 
   assert.match(index, /name="promptsSimple"/);
   assert.match(index, /name="promptsMedium"/);
   assert.match(index, /name="promptsComplex"/);
+  assert.match(index, /name="autoControlEnabled"/);
+  assert.match(index, /name="autoDisableThresholdMs"/);
+  assert.match(index, /name="autoEnableThresholdMs"/);
+  assert.match(index, /name="recoveryIntervalMinutes"/);
   assert.match(index, /id="key-probe-account-dialog"/);
   assert.match(index, /id="key-probe-history-dialog"/);
   assert.match(source, /\/api\/key-probes\/keys\?/);
@@ -149,12 +153,16 @@ test('Key status tab exposes centralized probes, filters and per-key controls', 
   assert.match(source, /id="key-probe-health"/);
   assert.match(source, /data-key-probe-enabled/);
   assert.match(source, /data-action="run-selected-key-probes"/);
+  assert.match(source, /data-action="key-probe-group"/);
+  assert.match(source, /业务首字（近 10 条）/);
+  assert.match(source, /\/api\/key-probes\/automation\/run/);
   assert.match(styles, /\.badge\.critical/);
   assert.match(styles, /\.key-probe-row\.health-critical/);
+  assert.match(styles, /\.key-probe-group-tabs/);
 
   const rows = vm.runInContext(`keyProbeRows([{
     accountId: '31', name: 'OpenAI Primary', platform: 'openai', accountType: 'apikey',
-    accountStatus: 'active', health: 'warning',
+    accountStatus: 'active', health: 'warning', groups: [{ id: '7', name: 'OpenAI 主分组' }],
     config: {
       enabled: true, intervalMinutes: 30, model: 'gpt-monitor', complexity: 'medium',
       sampleCount: 3, warningThresholdMs: 1000, criticalThresholdMs: 3000,
@@ -164,6 +172,13 @@ test('Key status tab exposes centralized probes, filters and per-key controls', 
       avgDurationMs: 1200, avgFirstTokenMs: 300, minDurationMs: 900,
       maxDurationMs: 1500, p95DurationMs: 1500, succeededCount: 2,
       sampleCount: 3, completedAt: '2026-09-16T10:00:00.000Z'
+    },
+    traffic: {
+      sampleCount: 10, requiredSampleCount: 10, avgFirstTokenMs: 1800,
+      lastRequestAt: '2026-09-16T10:01:00.000Z', exceedsDisableThreshold: true
+    },
+    latestAction: {
+      action: 'auto_disable', status: 'succeeded', completedAt: '2026-09-16T10:02:00.000Z'
     }
   }])`, context);
   assert.match(rows, /health-warning/);
@@ -171,6 +186,10 @@ test('Key status tab exposes centralized probes, filters and per-key controls', 
   assert.match(rows, /1\.20 s/);
   assert.match(rows, /2 \/ 3 次成功/);
   assert.match(rows, /gpt-monitor/);
+  assert.match(rows, /OpenAI 主分组/);
+  assert.match(rows, /1\.80 s/);
+  assert.match(rows, /10 \/ 10 条/);
+  assert.match(rows, /自动停用成功/);
 });
 
 test('account quality list fits its container and keeps every metric in the responsive layout', () => {

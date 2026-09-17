@@ -61,7 +61,7 @@ const state = {
   keyProbes: null,
   keyProbeSelected: new Set(),
   keyProbeFilters: {
-    platform: '', health: '', enabled: '', search: '', sortBy: 'completedAt', order: 'desc',
+    groupId: '', platform: '', health: '', enabled: '', search: '', sortBy: 'completedAt', order: 'desc',
     page: 1, pageSize: 50
   },
   grossProfit: null,
@@ -1721,7 +1721,7 @@ function keyProbeQuery() {
     sortBy: filters.sortBy,
     order: filters.order
   });
-  for (const field of ['platform', 'health', 'enabled', 'search']) {
+  for (const field of ['groupId', 'platform', 'health', 'enabled', 'search']) {
     if (filters[field] !== '') query.set(field, filters[field]);
   }
   return query.toString();
@@ -1758,19 +1758,33 @@ function keyProbeRows(items) {
     const latest = item.latest;
     const selected = state.keyProbeSelected.has(String(item.accountId));
     const statusLabel = item.health === 'critical' ? '红色' : item.health === 'warning' ? '黄色' : item.health === 'healthy' ? '绿色' : null;
+    const itemGroups = Array.isArray(item.groups) && item.groups.length
+      ? item.groups
+      : [{ id: '__ungrouped__', name: '未分组' }];
+    const groupNames = itemGroups.map((group) => group.name).join(' / ');
+    const traffic = item.traffic || {};
+    const trafficClass = traffic.exceedsDisableThreshold ? 'danger-text' : traffic.ready ? 'healthy-text' : '';
+    const actionLabel = item.latestAction?.action === 'auto_disable' ? '自动停用' : '自动启用';
+    const actionResult = item.latestAction?.status === 'failed'
+      ? '失败'
+      : item.latestAction?.status === 'skipped' ? '无需变更' : '成功';
     const resultNote = latest?.errorMessage
       ? `<small title="${escapeHtml(latest.errorMessage)}">${escapeHtml(latest.errorCode || latest.errorMessage)}</small>`
       : latest ? `<small>${latest.succeededCount} / ${latest.sampleCount} 次成功</small>` : '<small>尚未检测</small>';
+    const nextSchedule = ['inactive', 'disabled'].includes(String(item.accountStatus).toLowerCase()) && item.config.nextRecoveryProbeAt
+      ? `恢复检测 ${formatDate(item.config.nextRecoveryProbeAt)}`
+      : item.config.enabled ? `下次 ${formatDate(item.config.nextProbeAt)}` : '已停用检测与管控';
     return `<tr class="key-probe-row health-${escapeHtml(item.health)}">
       <td class="selection-cell"><input type="checkbox" data-key-probe-select="${escapeHtml(item.accountId)}" aria-label="选择 ${escapeHtml(item.name)}" ${selected ? 'checked' : ''}></td>
-      <td class="primary-cell key-probe-identity"><div><span class="status-dot ${item.health === 'critical' ? 'error' : escapeHtml(item.health)}"></span><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong></div><small>#${escapeHtml(item.accountId)} · ${escapeHtml(item.accountType)}</small></td>
+      <td class="primary-cell key-probe-identity"><div><span class="status-dot ${item.health === 'critical' ? 'error' : escapeHtml(item.health)}"></span><strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong></div><small>#${escapeHtml(item.accountId)} · ${escapeHtml(item.accountType)}</small><small class="key-probe-group-note" title="${escapeHtml(groupNames)}">${escapeHtml(groupNames)}</small></td>
       <td>${escapeHtml(accountMonitorPlatformLabel(item.platform))}<small class="table-metric-note">${badge(item.accountStatus)}</small></td>
       <td><div class="key-probe-health">${badge(item.health, statusLabel)}${resultNote}</div></td>
+      <td class="numeric"><strong class="${trafficClass}">${formatMilliseconds(traffic.avgFirstTokenMs)}</strong><small class="table-metric-note">${traffic.sampleCount || 0} / ${traffic.requiredSampleCount || 10} 条${traffic.lastRequestAt ? ` · ${escapeHtml(timeAgo(traffic.lastRequestAt))}` : ''}</small></td>
       <td class="numeric"><strong>${formatMilliseconds(latest?.avgDurationMs)}</strong><small class="table-metric-note">首字 ${formatMilliseconds(latest?.avgFirstTokenMs)}</small></td>
       <td class="numeric"><strong>${latest ? `${formatMilliseconds(latest.minDurationMs)} – ${formatMilliseconds(latest.maxDurationMs)}` : '-'}</strong><small class="table-metric-note">P95 ${formatMilliseconds(latest?.p95DurationMs)}</small></td>
       <td><strong>${escapeHtml(item.config.model || '基座默认')}</strong><small class="table-metric-note">${escapeHtml(keyProbeComplexityLabel(item.config.complexity))} · ${item.config.sampleCount} 次${item.config.hasOverrides ? ' · 已覆盖' : ''}</small></td>
-      <td><strong>${escapeHtml(timeAgo(latest?.completedAt))}</strong><small class="table-metric-note">${item.config.enabled ? `下次 ${formatDate(item.config.nextProbeAt)}` : '已停用定时检测'}</small></td>
-      <td class="key-probe-enabled-cell"><label class="switch-control" title="${item.config.enabled ? '停用该 Key 检测' : '启用该 Key 检测'}"><input type="checkbox" data-key-probe-enabled="${escapeHtml(item.accountId)}" ${item.config.enabled ? 'checked' : ''}><span aria-hidden="true"></span></label></td>
+      <td><strong>${escapeHtml(timeAgo(latest?.completedAt))}</strong><small class="table-metric-note">${nextSchedule}</small>${item.latestAction ? `<small class="table-metric-note" title="${escapeHtml(item.latestAction.errorMessage || '')}">${actionLabel}${actionResult} · ${escapeHtml(timeAgo(item.latestAction.completedAt || item.latestAction.createdAt))}</small>` : ''}</td>
+      <td class="key-probe-enabled-cell"><label class="switch-control" title="${item.config.enabled ? '停用该 Key 检测与自动管控' : '启用该 Key 检测与自动管控'}"><input type="checkbox" data-key-probe-enabled="${escapeHtml(item.accountId)}" ${item.config.enabled ? 'checked' : ''}><span aria-hidden="true"></span></label></td>
       <td class="actions-cell"><button class="icon-button small" data-action="run-key-probe" data-id="${escapeHtml(item.accountId)}" title="立即检测" aria-label="立即检测 ${escapeHtml(item.name)}"><i data-lucide="play"></i></button><button class="icon-button small" data-action="configure-key-probe" data-id="${escapeHtml(item.accountId)}" title="检测配置" aria-label="配置 ${escapeHtml(item.name)}"><i data-lucide="sliders-horizontal"></i></button><button class="icon-button small" data-action="view-key-probe-history" data-id="${escapeHtml(item.accountId)}" title="检测历史" aria-label="查看 ${escapeHtml(item.name)} 检测历史"><i data-lucide="history"></i></button></td>
     </tr>`;
   }).join('');
@@ -1785,25 +1799,28 @@ async function renderKeyProbes() {
   const counts = summary.counts;
   const rows = keyProbeRows(result.items);
   const platformOptions = result.platforms.map((platform) => `<option value="${escapeHtml(platform)}" ${filters.platform === platform ? 'selected' : ''}>${escapeHtml(accountMonitorPlatformLabel(platform))}</option>`).join('');
-  setTopActions(`<button class="button" data-action="open-key-probe-settings" title="检测设置" aria-label="检测设置"><i data-lucide="settings-2"></i><span>检测设置</span></button><button class="button" data-action="sync-key-probes" title="同步 Key" aria-label="同步 Key"><i data-lucide="refresh-cw"></i><span>同步 Key</span></button><button class="button" data-action="bulk-enable-key-probes" data-key-probe-selection-action data-selection-text="启用" title="启用所选 Key" aria-label="启用所选 Key" disabled><i data-lucide="power"></i><span data-selection-label>启用</span></button><button class="button" data-action="bulk-disable-key-probes" data-key-probe-selection-action data-selection-text="停用" title="停用所选 Key" aria-label="停用所选 Key" disabled><i data-lucide="power-off"></i><span data-selection-label>停用</span></button><button class="button primary" data-action="run-selected-key-probes" data-key-probe-selection-action data-selection-text="检测" title="检测所选 Key" aria-label="检测所选 Key" disabled><i data-lucide="play"></i><span data-selection-label>检测</span></button>`);
+  const groupTabs = [{ id: '', name: '全部分组', accountCount: summary.total }, ...(result.groups || [])]
+    .map((group) => `<button class="tab ${filters.groupId === group.id ? 'active' : ''}" role="tab" aria-selected="${filters.groupId === group.id}" data-action="key-probe-group" data-group-id="${escapeHtml(group.id)}"><span>${escapeHtml(group.name)}</span><small>${formatNumber(group.accountCount, 0)}</small></button>`).join('');
+  setTopActions(`<button class="button" data-action="open-key-probe-settings" title="检测设置" aria-label="检测设置"><i data-lucide="settings-2"></i><span>检测设置</span></button><button class="button" data-action="sync-key-probes" title="同步 Key" aria-label="同步 Key"><i data-lucide="refresh-cw"></i><span>同步 Key</span></button>${result.settings.autoControlEnabled ? '<button class="button" data-action="run-key-probe-automation" title="立即评估自动停启" aria-label="立即评估自动停启"><i data-lucide="shield-check"></i><span>评估管控</span></button>' : ''}<button class="button" data-action="bulk-enable-key-probes" data-key-probe-selection-action data-selection-text="启用" title="启用所选 Key" aria-label="启用所选 Key" disabled><i data-lucide="power"></i><span data-selection-label>启用</span></button><button class="button" data-action="bulk-disable-key-probes" data-key-probe-selection-action data-selection-text="停用" title="停用所选 Key" aria-label="停用所选 Key" disabled><i data-lucide="power-off"></i><span data-selection-label>停用</span></button><button class="button primary" data-action="run-selected-key-probes" data-key-probe-selection-action data-selection-text="检测" title="检测所选 Key" aria-label="检测所选 Key" disabled><i data-lucide="play"></i><span data-selection-label>检测</span></button>`);
   $('#main-content').innerHTML = `
-    <section class="base-instance-bar key-probe-source"><div><span class="status-dot ${result.settings.enabled ? 'healthy' : 'stale'}"></span><strong>Sub2API 上游 Key</strong><small>最近完成 ${escapeHtml(timeAgo(summary.lastCompletedAt))} · 默认 ${result.settings.defaultIntervalMinutes} 分钟 / ${result.settings.sampleCount} 次 / ${escapeHtml(keyProbeComplexityLabel(result.settings.complexity))}</small></div><div class="status-summary">${badge(result.settings.enabled ? 'enabled' : 'info', result.settings.enabled ? '定时检测已启用' : '仅手动检测')}${badge('info', `并发 ${result.settings.concurrency}`)}</div></section>
+    <section class="base-instance-bar key-probe-source"><div><span class="status-dot ${result.settings.autoControlEnabled ? 'healthy' : result.settings.enabled ? 'warning' : 'stale'}"></span><strong>Sub2API 上游 Key</strong><small>最近完成 ${escapeHtml(timeAgo(summary.lastCompletedAt))} · 默认 ${result.settings.defaultIntervalMinutes} 分钟 / ${result.settings.sampleCount} 次 / ${escapeHtml(keyProbeComplexityLabel(result.settings.complexity))}</small></div><div class="status-summary">${badge(result.settings.autoControlEnabled ? 'enabled' : 'info', result.settings.autoControlEnabled ? '自动管控已启用' : '自动管控未启用')}${badge(result.settings.enabled ? 'enabled' : 'info', result.settings.enabled ? '定时检测已启用' : '仅手动检测')}${badge('info', `并发 ${result.settings.concurrency}`)}</div></section>
     <div class="stats-grid key-probe-stats">
-      <div class="stat"><span class="stat-label"><i data-lucide="key-round"></i>全部 Key</span><strong class="stat-value">${formatNumber(summary.total, 0)}</strong><span class="stat-detail">启用 ${formatNumber(summary.enabled, 0)} · 停用 ${formatNumber(counts.disabled, 0)}</span></div>
+      <div class="stat"><span class="stat-label"><i data-lucide="key-round"></i>全部 Key</span><strong class="stat-value">${formatNumber(summary.total, 0)}</strong><span class="stat-detail">上游启用 ${formatNumber(summary.upstreamEnabled, 0)} · 未启用 ${formatNumber(summary.upstreamDisabled, 0)}</span></div>
       <div class="stat"><span class="stat-label"><i data-lucide="circle-check"></i>绿色</span><strong class="stat-value healthy-text">${formatNumber(counts.healthy, 0)}</strong><span class="stat-detail">平均耗时低于 ${formatMilliseconds(result.settings.warningThresholdMs)}</span></div>
       <div class="stat"><span class="stat-label"><i data-lucide="triangle-alert"></i>黄色</span><strong class="stat-value warning-text">${formatNumber(counts.warning, 0)}</strong><span class="stat-detail">慢请求或存在部分失败</span></div>
       <div class="stat"><span class="stat-label"><i data-lucide="circle-x"></i>红色</span><strong class="stat-value danger-text">${formatNumber(counts.critical, 0)}</strong><span class="stat-detail">全部失败或超过 ${formatMilliseconds(result.settings.criticalThresholdMs)}</span></div>
     </div>
     <section class="section">
+      <div class="key-probe-group-tabs" role="tablist" aria-label="Sub2API 分组">${groupTabs}</div>
       <div class="filter-bar key-probe-filters">
-        <label class="search-box"><i data-lucide="search"></i><input id="key-probe-search" type="search" value="${escapeHtml(filters.search)}" placeholder="搜索 Key、ID 或平台" aria-label="搜索 Key、ID 或平台"></label>
+        <label class="search-box"><i data-lucide="search"></i><input id="key-probe-search" type="search" value="${escapeHtml(filters.search)}" placeholder="搜索 Key、ID、平台或分组" aria-label="搜索 Key、ID、平台或分组"></label>
         <select id="key-probe-platform" aria-label="模型平台"><option value="">全部平台</option>${platformOptions}</select>
         <select id="key-probe-health" aria-label="检测状态"><option value="">全部检测状态</option><option value="healthy" ${filters.health === 'healthy' ? 'selected' : ''}>绿色</option><option value="warning" ${filters.health === 'warning' ? 'selected' : ''}>黄色</option><option value="critical" ${filters.health === 'critical' ? 'selected' : ''}>红色</option><option value="stale" ${filters.health === 'stale' ? 'selected' : ''}>陈旧</option><option value="unknown" ${filters.health === 'unknown' ? 'selected' : ''}>未检测</option><option value="disabled" ${filters.health === 'disabled' ? 'selected' : ''}>已停用</option></select>
         <select id="key-probe-enabled-filter" aria-label="检测启用状态"><option value="">全部启用状态</option><option value="true" ${filters.enabled === 'true' ? 'selected' : ''}>已启用</option><option value="false" ${filters.enabled === 'false' ? 'selected' : ''}>已停用</option></select>
-        <select id="key-probe-sort" aria-label="排序"><option value="completedAt" ${filters.sortBy === 'completedAt' ? 'selected' : ''}>最近检测</option><option value="avgDurationMs" ${filters.sortBy === 'avgDurationMs' ? 'selected' : ''}>平均耗时</option><option value="health" ${filters.sortBy === 'health' ? 'selected' : ''}>状态严重度</option><option value="name" ${filters.sortBy === 'name' ? 'selected' : ''}>Key 名称</option><option value="platform" ${filters.sortBy === 'platform' ? 'selected' : ''}>平台</option></select>
+        <select id="key-probe-sort" aria-label="排序"><option value="completedAt" ${filters.sortBy === 'completedAt' ? 'selected' : ''}>最近检测</option><option value="trafficFirstTokenMs" ${filters.sortBy === 'trafficFirstTokenMs' ? 'selected' : ''}>业务首字</option><option value="avgDurationMs" ${filters.sortBy === 'avgDurationMs' ? 'selected' : ''}>平均耗时</option><option value="health" ${filters.sortBy === 'health' ? 'selected' : ''}>状态严重度</option><option value="name" ${filters.sortBy === 'name' ? 'selected' : ''}>Key 名称</option><option value="platform" ${filters.sortBy === 'platform' ? 'selected' : ''}>平台</option></select>
         <button class="button" data-action="run-all-key-probes"><i data-lucide="scan-line"></i><span>检测已启用</span></button>
       </div>
-      <div class="table-wrap key-probe-table">${rows ? `<table><thead><tr><th class="selection-cell"><input type="checkbox" id="key-probe-select-page" aria-label="选择当前页 Key"></th><th>Key / 账号</th><th>平台</th><th>渠道状态</th><th class="numeric">平均 / 首字</th><th class="numeric">范围 / P95</th><th>模型 / 输入</th><th>最近 / 下次</th><th>启用</th><th aria-label="操作"></th></tr></thead><tbody>${rows}</tbody></table>` : emptyState('radio-tower', '暂无匹配 Key', summary.total ? '调整筛选条件后重试' : '先同步 Sub2API Key 目录')}</div>
+      <div class="table-wrap key-probe-table">${rows ? `<table><thead><tr><th class="selection-cell"><input type="checkbox" id="key-probe-select-page" aria-label="选择当前页 Key"></th><th>Key / 账号</th><th>平台 / 上游状态</th><th>检测状态</th><th class="numeric">业务首字（近 10 条）</th><th class="numeric">检测平均 / 首字</th><th class="numeric">范围 / P95</th><th>模型 / 输入</th><th>最近 / 下次 / 管控</th><th>纳管</th><th aria-label="操作"></th></tr></thead><tbody>${rows}</tbody></table>` : emptyState('radio-tower', '暂无匹配 Key', summary.total ? '调整筛选条件后重试' : '先同步 Sub2API Key 目录')}</div>
       ${keyProbePagination(result.pagination)}
     </section>`;
   updateKeyProbeSelectionActions();
@@ -1816,11 +1833,13 @@ function openKeyProbeSettings() {
   const dialog = $('#key-probe-settings-dialog');
   const form = $('#key-probe-settings-form');
   for (const field of [
+    'autoDisableThresholdMs', 'autoEnableThresholdMs', 'recoveryIntervalMinutes',
     'defaultIntervalMinutes', 'sampleCount', 'complexity', 'timeoutSeconds',
     'warningThresholdMs', 'criticalThresholdMs', 'staleAfterMinutes', 'concurrency',
     'scheduledBatchSize', 'retentionDays'
   ]) form.elements[field].value = settings[field];
   form.elements.enabled.checked = settings.enabled;
+  form.elements.autoControlEnabled.checked = settings.autoControlEnabled;
   form.elements.promptsSimple.value = settings.prompts.simple.join('\n');
   form.elements.promptsMedium.value = settings.prompts.medium.join('\n');
   form.elements.promptsComplex.value = settings.prompts.complex.join('\n');
@@ -1854,11 +1873,22 @@ async function openKeyProbeHistory(accountId) {
   const item = state.keyProbes?.items.find((entry) => String(entry.accountId) === String(accountId));
   const result = await api(`/api/key-probes/history?accountId=${encodeURIComponent(accountId)}&limit=30`);
   $('#key-probe-history-title').textContent = `${item?.name || `Key #${accountId}`} · 检测历史`;
-  const content = result.items.map((batch, index) => {
+  const actionRows = (result.actions || []).map((action) => {
+    const actionLabel = action.action === 'auto_disable' ? '自动停用' : '自动启用';
+    const reasonLabel = action.reason === 'traffic_ttft_exceeded' ? '业务首字超过停用阈值' : '恢复检测通过';
+    const statusLabel = action.status === 'skipped' ? '无需变更' : null;
+    return `<tr><td>${escapeHtml(formatDate(action.completedAt || action.createdAt))}</td><td><strong>${actionLabel}</strong><small class="table-metric-note">${reasonLabel}</small></td><td class="numeric"><strong>${formatMilliseconds(action.measuredFirstTokenMs)}</strong><small class="table-metric-note">阈值 ${formatMilliseconds(action.thresholdMs)} · ${action.sampleCount} 条</small></td><td>${badge(action.status, statusLabel)}${action.errorMessage ? `<small class="table-metric-note danger-text" title="${escapeHtml(action.errorMessage)}">${escapeHtml(action.errorCode || action.errorMessage)}</small>` : ''}</td></tr>`;
+  }).join('');
+  const actionHistory = actionRows
+    ? `<section class="key-probe-action-history"><h3>自动管控记录</h3><div class="table-wrap"><table><thead><tr><th>时间</th><th>动作 / 原因</th><th class="numeric">平均首字 / 阈值</th><th>结果</th></tr></thead><tbody>${actionRows}</tbody></table></div></section>`
+    : '';
+  const probeHistory = result.items.map((batch, index) => {
     const samples = batch.samples.map((sample) => `<tr><td class="numeric">${sample.index}</td><td>${badge(sample.status)}</td><td class="numeric">${formatMilliseconds(sample.firstTokenMs)}</td><td class="numeric">${formatMilliseconds(sample.durationMs)}</td><td class="key-probe-prompt-cell">${escapeHtml(sample.prompt)}</td><td class="key-probe-response-cell">${escapeHtml(sample.responseExcerpt || sample.errorMessage || '-')}</td></tr>`).join('');
     return `<details class="key-probe-history-run" ${index === 0 ? 'open' : ''}><summary><span>${badge(batch.status)}</span><strong>${escapeHtml(formatDate(batch.completedAt))}</strong><span>${escapeHtml(keyProbeComplexityLabel(batch.complexity))} · ${batch.succeededCount}/${batch.sampleCount} 成功</span><span>平均 ${formatMilliseconds(batch.avgDurationMs)}</span></summary><div class="table-wrap"><table><thead><tr><th class="numeric">#</th><th>结果</th><th class="numeric">首字</th><th class="numeric">总耗时</th><th>测试输入</th><th>响应 / 错误</th></tr></thead><tbody>${samples}</tbody></table></div></details>`;
   }).join('');
-  $('#key-probe-history-body').innerHTML = content || emptyState('history', '暂无检测历史', '执行一次检测后显示逐次请求结果');
+  $('#key-probe-history-body').innerHTML = actionHistory || probeHistory
+    ? `${actionHistory}${probeHistory}`
+    : emptyState('history', '暂无检测历史', '执行一次检测后显示逐次请求结果');
   $('#key-probe-history-dialog').showModal();
   icons();
 }
@@ -2194,6 +2224,46 @@ async function withSub2ApiTwoFactor(operation, attemptsRemaining = 2) {
   }
 }
 
+function parseSub2ApiPoolRetryStatusCodes(value) {
+  const input = String(value || '').trim();
+  if (!input) return [];
+  const tokens = input.split(/[,，\s]+/).filter(Boolean);
+  const invalid = tokens.filter((token) => !/^\d+$/.test(token) || Number(token) < 100 || Number(token) > 599);
+  if (invalid.length > 0) {
+    throw new Error(`重试状态码必须是 100–599 的整数：${invalid.slice(0, 3).join('、')}`);
+  }
+  const codes = [...new Set(tokens.map(Number))].sort((left, right) => left - right);
+  if (codes.length > 100) throw new Error('重试状态码最多填写 100 个');
+  return codes;
+}
+
+async function openSub2ApiPoolConfig() {
+  const dialog = $('#sub2api-pool-config-dialog');
+  const form = $('#sub2api-pool-config-form');
+  const submit = $('button[type="submit"]', form);
+  form.reset();
+  form.dataset.targetCount = '0';
+  $('#sub2api-pool-config-error').textContent = '';
+  $('#sub2api-pool-config-target').textContent = '正在读取账号目录';
+  submit.disabled = true;
+  dialog.showModal();
+  icons();
+  try {
+    const targets = await withSub2ApiTwoFactor(() => api('/api/sub2api/accounts/pool-config-targets'));
+    form.dataset.targetCount = String(targets.count);
+    $('#sub2api-pool-config-target').textContent = `${formatNumber(targets.count, 0)} 个非官方上游 Key 账号`;
+    submit.disabled = targets.count === 0;
+    if (targets.count === 0) {
+      $('#sub2api-pool-config-error').textContent = '当前没有符合条件的 Sub2API 账号';
+    } else {
+      form.elements.retryCount.focus();
+    }
+  } catch (error) {
+    $('#sub2api-pool-config-target').textContent = '账号目录读取失败';
+    $('#sub2api-pool-config-error').textContent = error.message;
+  }
+}
+
 function requestAutoMappings(mode) {
   return withSub2ApiTwoFactor(() => api('/api/sub2api/auto-mappings', {
     method: 'POST',
@@ -2259,7 +2329,7 @@ async function renderIntegrations() {
   state.integrationGroups = comparisonData.groups || [];
   state.sub2apiStatus = comparisonData.status;
   state.reconciliations = reconciliationData.items;
-  setTopActions(`<button class="button" data-action="refresh-comparisons" title="刷新基座" aria-label="刷新基座"><i data-lucide="refresh-cw"></i><span>刷新基座</span></button><button class="button primary" data-action="auto-map" title="自动映射" aria-label="自动映射"><i data-lucide="wand-sparkles"></i><span>自动映射</span></button><button class="button" data-action="add-mapping" title="添加映射" aria-label="添加映射"><i data-lucide="plus"></i><span>添加映射</span></button><button class="button danger" data-action="delete-all-mappings" title="删除全部映射" aria-label="删除全部映射" ${state.mappings.length ? '' : 'disabled'}><i data-lucide="trash-2"></i><span>删除全部映射</span></button>`);
+  setTopActions(`<button class="button" data-action="refresh-comparisons" title="刷新基座" aria-label="刷新基座"><i data-lucide="refresh-cw"></i><span>刷新基座</span></button><button class="button" data-action="open-sub2api-pool-config" title="批量编辑池模式配置" aria-label="批量编辑池模式配置"><i data-lucide="pencil"></i><span>批量编辑</span></button><button class="button primary" data-action="auto-map" title="自动映射" aria-label="自动映射"><i data-lucide="wand-sparkles"></i><span>自动映射</span></button><button class="button" data-action="add-mapping" title="添加映射" aria-label="添加映射"><i data-lucide="plus"></i><span>添加映射</span></button><button class="button danger" data-action="delete-all-mappings" title="删除全部映射" aria-label="删除全部映射" ${state.mappings.length ? '' : 'disabled'}><i data-lucide="trash-2"></i><span>删除全部映射</span></button>`);
   const groupedRows = state.integrationGroups.map(integrationGroupRows).join('');
   const unassigned = comparisonData.unassignedItems?.length
     ? integrationGroupRows({ groupId: 'unassigned', groupName: '未归组', baseRate: null, channels: [], mappingCount: comparisonData.unassignedItems.length, highest: null, items: comparisonData.unassignedItems })
@@ -4199,6 +4269,19 @@ async function handleAction(button) {
       const result = await withSub2ApiTwoFactor(() => api('/api/key-probes/sync', { method: 'POST', body: {} }));
       trackKeyProbeJob(result.jobId, 'Key 目录同步').catch((error) => toast(error.message, 'error'));
     }
+    if (action === 'key-probe-group') {
+      state.keyProbeFilters.groupId = button.dataset.groupId || '';
+      state.keyProbeFilters.page = 1;
+      await renderKeyProbes();
+    }
+    if (action === 'run-key-probe-automation') {
+      if (!confirm('本次评估可能自动停用或启用符合阈值的 Key，确认继续？')) return;
+      const result = await withSub2ApiTwoFactor(() => api('/api/key-probes/automation/run', {
+        method: 'POST',
+        body: {}
+      }));
+      trackKeyProbeJob(result.jobId, 'Key 自动管控评估').catch((error) => toast(error.message, 'error'));
+    }
     if (action === 'run-key-probe' || action === 'run-selected-key-probes' || action === 'run-all-key-probes') {
       const accountIds = action === 'run-key-probe'
         ? [String(id)]
@@ -4415,6 +4498,7 @@ async function handleAction(button) {
         toast(`${matched} 个供应商满足执行条件`);
       }
     }
+    if (action === 'open-sub2api-pool-config') await openSub2ApiPoolConfig();
     if (action === 'auto-map') await openAutoMappingPreview();
     if (action === 'toggle-integration-group') {
       const groupKey = String(button.dataset.groupId);
@@ -4789,6 +4873,10 @@ $('#key-probe-settings-form').addEventListener('submit', async (event) => {
       method: 'PUT',
       body: {
         enabled: form.elements.enabled.checked,
+        autoControlEnabled: form.elements.autoControlEnabled.checked,
+        autoDisableThresholdMs: Number(form.elements.autoDisableThresholdMs.value),
+        autoEnableThresholdMs: Number(form.elements.autoEnableThresholdMs.value),
+        recoveryIntervalMinutes: Number(form.elements.recoveryIntervalMinutes.value),
         defaultIntervalMinutes: Number(form.elements.defaultIntervalMinutes.value),
         sampleCount: Number(form.elements.sampleCount.value),
         complexity: form.elements.complexity.value,
@@ -4921,6 +5009,35 @@ $('#automation-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const id = form.elements.id.value;
   const payload = automationPayload(form);
   try { await api(id ? `/api/automation-rules/${id}` : '/api/automation-rules', { method: id ? 'PUT' : 'POST', body: payload }); $('#automation-dialog').close(); toast('自动化规则已保存'); navigate('automation'); } catch (error) { toast(error.message, 'error'); }
+});
+
+$('#sub2api-pool-config-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = $('button[type="submit"]', form);
+  button.disabled = true;
+  $('#sub2api-pool-config-error').textContent = '';
+  try {
+    const result = await withSub2ApiTwoFactor(() => api('/api/sub2api/accounts/pool-config', {
+      method: 'POST',
+      body: {
+        retryCount: Number(form.elements.retryCount.value),
+        retryStatusCodes: parseSub2ApiPoolRetryStatusCodes(form.elements.retryStatusCodes.value)
+      }
+    }));
+    form.dataset.targetCount = String(result.targetCount);
+    $('#sub2api-pool-config-target').textContent = `${formatNumber(result.targetCount, 0)} 个非官方上游 Key 账号`;
+    if (result.failed > 0) {
+      $('#sub2api-pool-config-error').textContent = `已更新 ${result.success} 个账号，${result.failed} 个失败；可再次确认重试`;
+      button.disabled = false;
+      return;
+    }
+    $('#sub2api-pool-config-dialog').close('updated');
+    toast(result.success > 0 ? `已批量更新 ${result.success} 个上游 Key 账号` : '当前没有符合条件的 Sub2API 账号');
+  } catch (error) {
+    $('#sub2api-pool-config-error').textContent = error.message;
+    button.disabled = Number(form.dataset.targetCount || 0) === 0;
+  }
 });
 
 $('#auto-mapping-form').addEventListener('submit', async (event) => {

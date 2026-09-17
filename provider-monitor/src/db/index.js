@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 28;
+const SCHEMA_VERSION = 29;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -845,6 +845,10 @@ VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 CREATE TABLE IF NOT EXISTS sub2api_key_probe_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   enabled INTEGER NOT NULL DEFAULT 0,
+  auto_control_enabled INTEGER NOT NULL DEFAULT 0,
+  auto_disable_threshold_ms INTEGER NOT NULL DEFAULT 8000,
+  auto_enable_threshold_ms INTEGER NOT NULL DEFAULT 3000,
+  recovery_interval_minutes INTEGER NOT NULL DEFAULT 30,
   default_interval_minutes INTEGER NOT NULL DEFAULT 360,
   sample_count INTEGER NOT NULL DEFAULT 3,
   complexity TEXT NOT NULL DEFAULT 'medium',
@@ -872,6 +876,9 @@ CREATE TABLE IF NOT EXISTS sub2api_key_probe_configs (
   critical_threshold_ms INTEGER,
   next_probe_at TEXT,
   last_probe_at TEXT,
+  next_recovery_probe_at TEXT,
+  last_recovery_probe_at TEXT,
+  last_shortage_signature TEXT,
   updated_at TEXT NOT NULL
 );
 
@@ -926,6 +933,28 @@ CREATE TABLE IF NOT EXISTS sub2api_key_probe_samples (
 
 CREATE INDEX IF NOT EXISTS sub2api_key_probe_sample_batch_lookup
   ON sub2api_key_probe_samples(batch_id, sample_index);
+
+CREATE TABLE IF NOT EXISTS sub2api_key_probe_actions (
+  id TEXT PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES sub2api_monitored_accounts(account_id) ON DELETE CASCADE,
+  action TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  status TEXT NOT NULL,
+  measured_first_token_ms REAL,
+  threshold_ms INTEGER,
+  sample_count INTEGER NOT NULL DEFAULT 0,
+  group_ids_json TEXT NOT NULL DEFAULT '[]',
+  before_status TEXT,
+  after_status TEXT,
+  probe_batch_id TEXT REFERENCES sub2api_key_probe_batches(id) ON DELETE SET NULL,
+  error_code TEXT,
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS sub2api_key_probe_action_account_lookup
+  ON sub2api_key_probe_actions(account_id, created_at DESC);
 
 INSERT OR IGNORE INTO sub2api_key_probe_settings(id, updated_at)
 VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
@@ -2288,6 +2317,62 @@ function migrateRequesterUserAccountingV27(db) {
   ).run(nowIso());
 }
 
+function migrateKeyProbeAutomationV29(db) {
+  const migrated = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 29'
+  ).get();
+  if (migrated) return;
+  const addColumn = (table, name, definition) => {
+    const columns = new Set(
+      db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name)
+    );
+    if (!columns.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+  };
+
+  for (const [name, definition] of [
+    ['auto_control_enabled', 'INTEGER NOT NULL DEFAULT 0'],
+    ['auto_disable_threshold_ms', 'INTEGER NOT NULL DEFAULT 8000'],
+    ['auto_enable_threshold_ms', 'INTEGER NOT NULL DEFAULT 3000'],
+    ['recovery_interval_minutes', 'INTEGER NOT NULL DEFAULT 30']
+  ]) addColumn('sub2api_key_probe_settings', name, definition);
+
+  for (const [name, definition] of [
+    ['next_recovery_probe_at', 'TEXT'],
+    ['last_recovery_probe_at', 'TEXT'],
+    ['last_shortage_signature', 'TEXT']
+  ]) addColumn('sub2api_key_probe_configs', name, definition);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS sub2api_key_probe_recovery_due_lookup
+      ON sub2api_key_probe_configs(enabled, next_recovery_probe_at, account_id);
+
+    CREATE TABLE IF NOT EXISTS sub2api_key_probe_actions (
+      id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL REFERENCES sub2api_monitored_accounts(account_id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL,
+      measured_first_token_ms REAL,
+      threshold_ms INTEGER,
+      sample_count INTEGER NOT NULL DEFAULT 0,
+      group_ids_json TEXT NOT NULL DEFAULT '[]',
+      before_status TEXT,
+      after_status TEXT,
+      probe_batch_id TEXT REFERENCES sub2api_key_probe_batches(id) ON DELETE SET NULL,
+      error_code TEXT,
+      error_message TEXT,
+      created_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS sub2api_key_probe_action_account_lookup
+      ON sub2api_key_probe_actions(account_id, created_at DESC);
+  `);
+  db.prepare(
+    'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (29, ?)'
+  ).run(nowIso());
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -2319,6 +2404,10 @@ function createDatabase(databasePath) {
     }
     migrateGrossProfitIndexesV26(db);
     migrateRequesterUserAccountingV27(db);
+    db.prepare(
+      'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (28, ?)'
+    ).run(nowIso());
+    migrateKeyProbeAutomationV29(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

@@ -6,7 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
-test('schema v28 migration preserves mappings and adds requester and Key probe fields', (t) => {
+test('schema v29 migration preserves mappings and adds Key probe automation fields', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
   let db = createDatabase(databasePath);
@@ -152,6 +152,7 @@ test('schema v28 migration preserves mappings and adds requester and Key probe f
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 26').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 27').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 28').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 29').get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());
   assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'recharge_url'));
@@ -163,6 +164,20 @@ test('schema v28 migration preserves mappings and adds requester and Key probe f
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_key_probe_configs'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_key_probe_batches'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_key_probe_samples'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_key_probe_actions'").get());
+  const keyProbeSettingColumns = new Set(
+    db.prepare('PRAGMA table_info(sub2api_key_probe_settings)').all().map((column) => column.name)
+  );
+  for (const column of [
+    'auto_control_enabled', 'auto_disable_threshold_ms',
+    'auto_enable_threshold_ms', 'recovery_interval_minutes'
+  ]) assert.equal(keyProbeSettingColumns.has(column), true, `missing Key probe setting ${column}`);
+  const keyProbeConfigColumns = new Set(
+    db.prepare('PRAGMA table_info(sub2api_key_probe_configs)').all().map((column) => column.name)
+  );
+  for (const column of [
+    'next_recovery_probe_at', 'last_recovery_probe_at', 'last_shortage_signature'
+  ]) assert.equal(keyProbeConfigColumns.has(column), true, `missing Key probe config ${column}`);
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_request_samples'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_request_log_sync_state'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_request_key_sync_state'").get());

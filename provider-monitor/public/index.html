@@ -222,6 +222,20 @@
     </form>
   </dialog>
 
+  <dialog id="sub2api-pool-config-dialog" class="dialog">
+    <form method="dialog" id="sub2api-pool-config-form">
+      <header class="dialog-header"><div><h2>批量编辑池模式配置</h2><p>应用到全部非官方上游 Key 账号</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+      <div class="form-grid">
+        <div class="bulk-pool-target span-2" aria-live="polite"><i data-lucide="key-round"></i><div><span>本次更新范围</span><strong id="sub2api-pool-config-target">正在读取账号目录</strong></div></div>
+        <label><span>同账号重试次数</span><input name="retryCount" type="number" min="0" max="10" step="1" value="3" required><small>0 表示不在当前账号原地重试</small></label>
+        <label><span>同账号重试状态码</span><input name="retryStatusCodes" type="text" inputmode="numeric" autocomplete="off" value="401, 403, 429" aria-describedby="sub2api-pool-config-codes-hint"><small id="sub2api-pool-config-codes-hint">使用逗号或空格分隔；留空表示不按状态码重试</small></label>
+        <p class="form-hint span-2">仅合并更新这两项凭据，不修改 API Key、分组或账号状态；配置仅在账号已启用池模式时生效。</p>
+      </div>
+      <p class="form-error" id="sub2api-pool-config-error" role="alert"></p>
+      <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit" disabled><i data-lucide="save"></i><span>确认更新</span></button></footer>
+    </form>
+  </dialog>
+
   <dialog id="account-monitor-settings-dialog" class="dialog wide-dialog">
     <form method="dialog" id="account-monitor-settings-form">
       <header class="dialog-header"><div><h2>账号质量检测设置</h2><p>真实日志采集与主动检测分别调度</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
@@ -247,6 +261,10 @@
       <header class="dialog-header"><div><h2>Key 状态检测设置</h2><p>统一请求样本、判定阈值与定时调度</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
       <div class="form-grid key-probe-settings-grid">
         <label class="toggle-field"><input name="enabled" type="checkbox"><span>启用定时检测</span></label>
+        <label class="toggle-field"><input name="autoControlEnabled" type="checkbox"><span>启用自动停用与恢复</span></label>
+        <label><span>业务平均首字停用阈值（毫秒）</span><input name="autoDisableThresholdMs" type="number" min="100" max="600000" required></label>
+        <label><span>检测平均首字启用阈值（毫秒）</span><input name="autoEnableThresholdMs" type="number" min="50" max="300000" required></label>
+        <label><span>停用 Key 检测间隔（分钟）</span><input name="recoveryIntervalMinutes" type="number" min="1" max="10080" required></label>
         <label><span>默认间隔（分钟）</span><input name="defaultIntervalMinutes" type="number" min="1" max="10080" required></label>
         <label><span>每个 Key 请求次数</span><input name="sampleCount" type="number" min="1" max="5" required></label>
         <label><span>默认复杂度</span><select name="complexity"><option value="simple">简单</option><option value="medium">中等</option><option value="complex">复杂</option></select></label>
@@ -272,7 +290,7 @@
       <header class="dialog-header"><div><h2 id="key-probe-account-title">Key 检测配置</h2><p>留空时继承全局设置</p></div><button class="icon-button" type="button" data-dialog-close title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
       <input type="hidden" name="accountId">
       <div class="form-grid">
-        <label class="toggle-field span-2"><input name="enabled" type="checkbox"><span>对这个 Key 启用检测</span></label>
+        <label class="toggle-field span-2"><input name="enabled" type="checkbox"><span>将这个 Key 纳入检测与自动管控</span></label>
         <label><span>间隔（分钟）</span><input name="intervalMinutes" type="number" min="1" max="10080" placeholder="继承全局"></label>
         <label><span>模型</span><input name="model" maxlength="200" placeholder="继承平台模型"></label>
         <label><span>复杂度</span><select name="complexity"><option value="">继承全局</option><option value="simple">简单</option><option value="medium">中等</option><option value="complex">复杂</option></select></label>
