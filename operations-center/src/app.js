@@ -7,6 +7,8 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { z } = require('zod');
 const { asyncRoute, errorMiddleware, AppError } = require('./errors');
+const { cleanupTargetIds } = require('./config');
+const { ROLE_PATTERN } = require('./services/system-settings-service');
 
 const loginSchema = z.object({
   username: z.string().min(1).max(320).optional(),
@@ -27,6 +29,50 @@ const executeSchema = z.object({
   acknowledgeImpact: z.literal(true),
   acknowledgeDownstream: z.literal(true)
 });
+
+const databaseSetupSchema = z.object({
+  host: z.string().trim().min(1).max(255),
+  port: z.coerce.number().int().min(1).max(65535).default(5432),
+  database: z.string().trim().min(1).max(63).regex(/^[a-zA-Z0-9_.-]+$/),
+  username: z.string().trim().min(1).max(63),
+  password: z.string().min(1).max(1024),
+  sslMode: z.enum(['disable', 'require', 'verify-full']).default('disable'),
+  readRole: z.string().regex(ROLE_PATTERN).default('sub2api_ops_read'),
+  createMaintenance: z.boolean().default(true),
+  maintenanceRole: z.string().regex(ROLE_PATTERN).default('sub2api_ops_maintenance'),
+  grantMonitoring: z.boolean().default(false),
+  hardenPublicSchema: z.boolean().default(false)
+});
+
+const cleanupSettingsSchema = z.object({
+  enabled: z.boolean(),
+  automaticEnabled: z.boolean(),
+  automaticTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+  automaticTargets: z.array(z.enum(cleanupTargetIds)).min(1),
+  backupWaitMinutes: z.number().int().min(1).max(55),
+  retention: z.object({
+    usageLogsDays: z.number().int().min(30).max(3650),
+    usageHourlyDays: z.number().int().min(30).max(3650),
+    usageDailyDays: z.number().int().min(365).max(3650),
+    systemLogDays: z.number().int().min(7).max(3650),
+    errorLogDays: z.number().int().min(30).max(3650),
+    opsMetricDays: z.number().int().min(7).max(3650)
+  })
+}).superRefine((value, context) => {
+  if (value.automaticEnabled && !value.enabled) {
+    context.addIssue({ code: 'custom', path: ['automaticEnabled'], message: '自动清理要求先启用清理执行' });
+  }
+});
+
+const sub2ApiCredentialsSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('session') }),
+  z.object({ mode: z.literal('token'), token: z.string().trim().min(16).max(16384) }),
+  z.object({
+    mode: z.literal('account'),
+    email: z.string().trim().email().max(320),
+    password: z.string().min(1).max(1024)
+  })
+]);
 
 function parse(schema, input) {
   const result = schema.safeParse(input);
@@ -52,7 +98,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, storage, retention, scheduler, sub2api }) {
+function createApp({ config, database, auth, inspector, metrics, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -80,6 +126,9 @@ function createApp({ config, database, auth, inspector, metrics, storage, retent
 
   app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
   app.get('/readyz', asyncRoute(async (_req, res) => {
+    if (database.configured?.() === false) {
+      return res.status(503).json({ status: 'setup_required', database: null });
+    }
     const db = await database.ping();
     res.json({ status: 'ready', database: db.database, latencyMs: db.latencyMs });
   }));
@@ -90,6 +139,13 @@ function createApp({ config, database, auth, inspector, metrics, storage, retent
     standardHeaders: 'draft-8',
     legacyHeaders: false,
     message: { error: { code: 'LOGIN_RATE_LIMITED', message: '登录尝试过多，请稍后再试' } }
+  });
+  const setupLimiter = rateLimit({
+    windowMs: 15 * 60000,
+    limit: 5,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: { error: { code: 'SETUP_RATE_LIMITED', message: '数据库初始化尝试过多，请稍后再试' } }
   });
 
   app.get('/api/auth/config', (_req, res) => {
@@ -180,8 +236,27 @@ function createApp({ config, database, auth, inspector, metrics, storage, retent
       financeTimezone: config.financeTimezone,
       cleanupEnabled: config.cleanupEnabled,
       automaticCleanupEnabled: Boolean(config.automaticCleanup?.enabled),
-      maintenanceConnectionConfigured: Boolean(database.maintenance)
+      maintenanceConnectionConfigured: database.configured?.('maintenance') ?? Boolean(database.maintenance)
     });
+  }));
+
+  api.get('/settings', (_req, res) => res.json(settings.getStatus()));
+  api.post('/settings/checks', csrf, asyncRoute(async (_req, res) => res.json(await settings.runChecks())));
+  api.post('/settings/database/test', setupLimiter, csrf, asyncRoute(async (req, res) => {
+    const input = parse(databaseSetupSchema, req.body || {});
+    res.json(await settings.testDatabaseAdministrator(input));
+  }));
+  api.post('/settings/database/provision', setupLimiter, csrf, asyncRoute(async (req, res) => {
+    const input = parse(databaseSetupSchema, req.body || {});
+    res.status(201).json(await settings.provisionDatabase(input));
+  }));
+  api.put('/settings/cleanup', csrf, asyncRoute(async (req, res) => {
+    const input = parse(cleanupSettingsSchema, req.body || {});
+    res.json(await settings.updateCleanup(input));
+  }));
+  api.put('/settings/sub2api-credentials', csrf, asyncRoute(async (req, res) => {
+    const input = parse(sub2ApiCredentialsSchema, req.body || {});
+    res.json(await settings.updateSub2ApiCredentials(input));
   }));
 
   api.get('/retention/policy', (_req, res) => res.json(retention.getPolicy()));

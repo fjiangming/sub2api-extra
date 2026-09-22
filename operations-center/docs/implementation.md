@@ -12,10 +12,11 @@
        -> PostgreSQL 维护连接：仅固定白名单 DELETE
        -> Sub2API 管理 API：版本、原生备份记录、创建备份
        -> 每日调度器：可选，复用同一预览/备份/执行链路
+       -> 加密运行配置：受限连接、清理设置、可选持久 API 凭据
        -> 有上限内存：会话、查询缓存、容量样本、预览和运行报告
 ```
 
-业务事实始终留在 Sub2API。服务没有迁移文件、业务表、消息队列或额外 Redis。
+业务事实始终留在 Sub2API。服务没有迁移文件、业务表、消息队列或额外 Redis。加密运行配置不包含运营统计或清理历史数据。
 
 ## 2. 目录
 
@@ -27,6 +28,7 @@ operations-center/
     auth.js                  # Sub2API SSO、本地内存会话和 CSRF
     config.js                # 环境变量验证
     db.js                    # 只读/维护连接池
+    runtime-settings-store.js # AES-256-GCM 运行配置
     schema-inspector.js      # 表、列和分区能力识别
     sub2api-client.js        # 固定路径的版本/备份 API 客户端
     services/
@@ -34,6 +36,7 @@ operations-center/
       storage-service.js     # 关系大小与容量诊断
       retention-service.js   # 保留策略、预览和批量清理
       cleanup-scheduler.js   # 可选每日自动清理编排
+      system-settings-service.js # 角色初始化、依赖检查与运行配置
     server.js
   tests/
   docs/
@@ -44,27 +47,29 @@ operations-center/
 
 ## 3. 身份与安全
 
-- `sub2api` 模式校验自定义菜单附带的访问 Token 是否仍有效且属于管理员，再换取运营中心会话；也允许用户临时输入 Sub2API 凭据登录，但不保存凭据。
+- `sub2api` 模式校验自定义菜单附带的访问 Token 是否仍有效且属于管理员，再换取运营中心会话；登录页临时输入的 Sub2API 凭据不保存。
 - `local` 模式保留独立管理员账号，登录比较使用定长哈希和 timing-safe 比较。
-- Sub2API Token、会话 ID 与 CSRF token 仅存在内存；原始 Token 在首次交换后从 URL 删除。
+- 自定义菜单 Token、会话 ID 与 CSRF token 仅存在内存；原始 Token 在首次交换后从 URL 删除。只有管理员在系统设置中明确启用无人值守认证时，所选 Token 或账号凭据才会进入 AES-256-GCM 加密运行配置。
 - HTTPS iframe 同时设置 `SameSite=Lax` Cookie、`SameSite=None; Partitioned` Cookie，并用 URL fragment 返回运营中心短期会话作为第三方 Cookie 受限时的兜底。
 - CSP `frame-ancestors` 只允许本服务和 `SUB2API_PUBLIC_URL`，不开放任意嵌入来源。
 - 登录接口每 IP 15 分钟最多 10 次。
 - Helmet 设置 CSP，并禁止对象和跨源脚本。
 - 所有写接口要求登录和 CSRF；响应禁止缓存。
+- 数据库初始化接口额外限流；同名未知角色拒绝接管，高权限数据库密码不持久化。
+- 页面托管连接和可选 Sub2API 管理凭据使用实例随机密钥进行 AES-256-GCM 加密。
 - Sub2API 客户端只暴露固定版本和备份路径，不是通用管理 API 代理。
 
-容器默认非 root、只读根文件系统、无 Linux capabilities、不挂 Docker socket，并限制 PID、CPU、内存和日志大小。
+容器默认非 root、只读根文件系统、无 Linux capabilities、不挂 Docker socket，并限制 PID、CPU、内存和日志大小。只有 `/app/data` 命名卷可写。
 
 ## 4. 数据库连接
 
 ### 4.1 只读连接
 
-`SUB2API_DATABASE_URL` 用于所有报表、容量和预览查询，最大 4 个连接。查询超时默认 15 秒。统计依赖的表缺失时返回明确的 schema 错误，不创建兼容表。
+只读连接用于所有报表、容量和预览查询，最大 4 个连接。查询超时默认 15 秒。连接可由系统设置创建和加密保存，也可用 `SUB2API_DATABASE_URL` 提供。未配置时服务保持可登录并返回 `setup_required`，统计接口明确失败，不创建兼容表。
 
 ### 4.2 维护连接
 
-`SUB2API_MAINTENANCE_DATABASE_URL` 只有在显式开启清理时才必填，连接池大小固定为 1。建议使用只能 `SELECT/DELETE` 清理白名单以及 `SELECT/UPDATE usage_group_rollup_state` 的独立角色。
+维护连接池大小固定为 1。系统设置可以自动创建只能 `SELECT/DELETE` 清理白名单以及 `SELECT/UPDATE usage_group_rollup_state` 的独立角色；也可以通过 `SUB2API_MAINTENANCE_DATABASE_URL` 接入已有角色。没有该连接时执行接口硬阻断。
 
 维护连接开始运行后显式调用 `set_config('TimeZone', SUB2API_TIMEZONE, false)`，保证日期桶和 Sub2API 删除触发器使用同一时区。
 
@@ -97,6 +102,12 @@ operations-center/
 | `GET /api/metrics/finance` | 实收、退款估算和额度入账 |
 | `GET /api/storage` | 容量、关系和维护信号 |
 | `GET /api/capabilities` | schema、版本和执行能力 |
+| `GET /api/settings` | 脱敏的连接、认证和清理配置状态 |
+| `POST /api/settings/checks` | 运行数据库、Schema、API 和备份检查 |
+| `POST /api/settings/database/test` | 临时测试 PostgreSQL 管理连接 |
+| `POST /api/settings/database/provision` | 创建受限角色、加密保存并热切换连接 |
+| `PUT /api/settings/sub2api-credentials` | 验证并保存或清除持久管理认证 |
+| `PUT /api/settings/cleanup` | 更新保留周期和自动清理配置 |
 | `GET /api/retention/policy` | 固定保留策略与保护范围 |
 | `GET /api/retention/automation` | 自动调度配置、下次运行和最近尝试 |
 | `POST /api/retention/previews` | 生成有时效的清理预览 |

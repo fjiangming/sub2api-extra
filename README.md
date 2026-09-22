@@ -225,8 +225,8 @@ OPERATIONS_CENTER_AUTH_MODE=sub2api
 OPERATIONS_CENTER_ADMIN_USER=admin
 OPERATIONS_CENTER_ADMIN_PASSWORD=
 
-# 统计使用只读角色；必须与 Sub2API 指向同一个 PostgreSQL 数据库
-SUB2API_DATABASE_URL=postgresql://sub2api_ops_read:替换密码@host.docker.internal:5432/sub2api
+# 首次部署可留空，登录后在“系统设置”一键创建受限角色并连接
+SUB2API_DATABASE_URL=
 SUB2API_DATABASE_SSL=disable
 SUB2API_TIMEZONE=Asia/Shanghai
 FINANCE_TIMEZONE=Asia/Shanghai
@@ -239,11 +239,13 @@ SUB2API_ADMIN_TOKEN=
 ADMIN_EMAIL=
 ADMIN_PASSWORD=
 
-# 默认只读；启用删除前请按模块 README 创建独立受限维护角色
+# 默认只读；系统设置可以创建独立受限维护角色并启用清理
 OPERATIONS_CENTER_ENABLE_CLEANUP=false
 SUB2API_MAINTENANCE_DATABASE_URL=
 OPERATIONS_CENTER_REQUIRE_FRESH_BACKUP=true
 ```
+
+运营中心数据库连接、权限初始化、依赖检查和清理计划均可在页面完成，详见[部署与操作手册](operations-center/docs/deployment-operations.md)。
 
 > 完整参数说明请参阅各模块的 `.env.example` 或模块 README。
 

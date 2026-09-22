@@ -9,6 +9,7 @@ services:
     environment:
       OPERATIONS_CENTER_BIND_HOST: "0.0.0.0"
       OPERATIONS_CENTER_PORT: "9872"
+      OPERATIONS_CENTER_DATA_DIR: "/app/data"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
@@ -21,6 +22,8 @@ services:
       retries: 3
       start_period: 15s
     read_only: true
+    volumes:
+      - operations-center-data:/app/data
     tmpfs:
       - /tmp:size=32m,mode=1777
     security_opt:
@@ -35,3 +38,6 @@ services:
       options:
         max-size: 10m
         max-file: "7"
+
+volumes:
+  operations-center-data:

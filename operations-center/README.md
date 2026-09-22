@@ -1,6 +1,6 @@
 # Sub2API 运营数据与存储管理中心
 
-`operations-center` 是 `sub2api-extra` 中的独立无状态服务，默认监听 `9872`。它直接读取 Sub2API PostgreSQL 业务表与原生聚合表，不修改 Sub2API 源码，不建立业务数据副本，也不创建新的永久扣费账本。
+`operations-center` 是 `sub2api-extra` 中的独立轻状态服务，默认监听 `9872`。它直接读取 Sub2API PostgreSQL 业务表与原生聚合表，不修改 Sub2API 源码，不建立业务数据副本，也不创建新的永久扣费账本；本地只保存加密后的运行配置。
 
 当前实现基于 Sub2API `d2e319b2a17006122cd2d53d828c44a0bf21bd9b` 之后的最新 schema 完成核对。线上接入时仍会检查实际表结构；未知或缺失 schema 会阻断清理。
 
@@ -15,6 +15,7 @@
 - 清理控制：固定白名单预览、精确行数、逻辑体积估算、聚合完整性复核、原生备份硬闸门、双重确认、小批事务、取消和 JSON 报告。
 - 原生能力复用：只核验或触发 Sub2API 已有 `.sql.gz`/S3 备份；不重复实现上传、下载或覆盖恢复。
 - 管理员 SSO：从 Sub2API 管理员自定义菜单打开时自动校验当前登录态，不要求在运营中心保存邮箱密码。
+- 系统设置：页面创建最小权限数据库角色、加密保存受限连接、运行依赖检查，并管理保留周期、自动清理和可选持久 API 认证。
 
 ## 数据保留结果
 
@@ -32,7 +33,7 @@
 
 ## 本地运行
 
-要求 Node.js `>=20.18.1`、可访问的 PostgreSQL，以及与当前版本兼容的 Sub2API 数据库。
+要求 Node.js `>=20.18.1` 和可访问的 Sub2API。PostgreSQL 连接可以在服务启动后通过“系统设置”完成。
 
 ```bash
 cd operations-center
@@ -55,7 +56,7 @@ npm run dev
 
 ```bash
 cp operations-center/.env.example operations-center/.env
-# 编辑 operations-center/.env
+# 编辑认证和 Sub2API 地址；数据库连接可以先留空
 # 在 compose.services.env 中加入 operations-center
 docker compose --env-file compose.services.env pull operations-center
 docker compose --env-file compose.services.env up -d --no-build operations-center
@@ -70,7 +71,9 @@ docker compose --env-file compose.services.env up -d --no-build operations-cente
 | `OPERATIONS_CENTER_AUTH_MODE` | `local` | `sub2api` 使用基座管理员 SSO；`local` 使用独立账号 |
 | `OPERATIONS_CENTER_ADMIN_USER` | `admin` | 仅 `local` 模式使用 |
 | `OPERATIONS_CENTER_ADMIN_PASSWORD` | 无 | 仅 `local` 模式必填；生产环境至少 16 个字符 |
-| `SUB2API_DATABASE_URL` | 无 | 只读 PostgreSQL 连接，必填 |
+| `OPERATIONS_CENTER_DATA_DIR` | `./data` | 加密运行配置目录；Compose 使用持久命名卷 |
+| `OPERATIONS_CENTER_DATABASE_SETUP_ENABLED` | `true` | 允许管理员从页面创建受限 PostgreSQL 角色 |
+| `SUB2API_DATABASE_URL` | 无 | 可选高级覆盖；留空后从系统设置初始化只读连接 |
 | `SUB2API_DATABASE_SSL` | `disable` | `disable`、`require` 或 `verify-full` |
 | `SUB2API_TIMEZONE` | `Asia/Shanghai` | 必须与 Sub2API 全局 `timezone`/`TZ` 一致 |
 | `FINANCE_TIMEZONE` | `Asia/Shanghai` | 支付和入账报表自然日时区 |
@@ -79,7 +82,7 @@ docker compose --env-file compose.services.env up -d --no-build operations-cente
 | `SUB2API_ADMIN_TOKEN` | 无 | 可选的 Sub2API 管理员 JWT |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | 无 | 可选；无人值守调用需要持久认证时使用 |
 | `OPERATIONS_CENTER_ENABLE_CLEANUP` | `false` | 显式开启破坏性执行 |
-| `SUB2API_MAINTENANCE_DATABASE_URL` | 无 | 开启执行时必填，必须使用独立受限角色 |
+| `SUB2API_MAINTENANCE_DATABASE_URL` | 无 | 可选高级覆盖；页面可以自动创建独立受限清理角色 |
 | `OPERATIONS_CENTER_REQUIRE_FRESH_BACKUP` | `true` | 要求成功备份的完成时间晚于本次预览 |
 | `OPERATIONS_CENTER_CLEANUP_BATCH_SIZE` | `5000` | 单事务最多删除行数 |
 | `OPERATIONS_CENTER_CLEANUP_MAX_ROWS` | `5000000` | 单次运行总删除上限 |
@@ -104,44 +107,21 @@ docker compose --env-file compose.services.env up -d --no-build operations-cente
 
 Sub2API 的会话绑定会校验登录浏览器的 IP 和 User-Agent，独立服务无法代替浏览器通过该校验。使用自定义菜单 SSO 时需要关闭会话绑定并重新登录；必须保留会话绑定时，请改用 `local` 模式。
 
-`SUB2API_ADMIN_TOKEN`、`ADMIN_EMAIL` 和 `ADMIN_PASSWORD` 对交互式 SSO 均非必填。当前有效的 SSO Token 可以触发手动原生备份，也可暂时供自动清理使用；但它会过期且服务重启后丢失。要求每日自动清理长期无人值守时，仍应配置管理员 Token 或邮箱密码，否则认证不可用的场次会在备份阶段安全失败，不会执行删除。
+`SUB2API_ADMIN_TOKEN`、`ADMIN_EMAIL` 和 `ADMIN_PASSWORD` 对交互式 SSO 均非必填。当前有效的 SSO Token 可以触发手动原生备份，也可暂时供自动清理使用；但它会过期且服务重启后丢失。要求每日自动清理长期无人值守时，可在系统设置中验证并加密保存管理员 Token 或邮箱密码，否则认证不可用的场次会在备份阶段安全失败，不会执行删除。
 
 ## 数据库最小权限
 
-以下示例假设业务表位于 `public`。生产环境应替换密码并按实际 schema 调整；不要给运营中心超级用户、建表或任意写权限。
+数据库连接是统计功能的必要条件，但不要求部署前手工创建指定账号。默认流程是在首次登录后进入“系统设置 -> 数据库访问”，临时提供一个具有 `CREATEROLE` 和现有表授权能力的 PostgreSQL 管理连接，然后点击按钮自动完成：
 
-```sql
-CREATE ROLE sub2api_ops_read LOGIN PASSWORD 'replace-me';
-GRANT CONNECT ON DATABASE sub2api TO sub2api_ops_read;
-GRANT USAGE ON SCHEMA public TO sub2api_ops_read;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO sub2api_ops_read;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-  GRANT SELECT ON TABLES TO sub2api_ops_read;
+- 创建随机密码的只读角色，并授予当前及未来 `public` 业务表的读取权限。
+- 可选授予 `pg_monitor`，用于长事务、复制槽和 WAL 等只读诊断。
+- 创建独立清理角色，只授予固定白名单表的 `SELECT/DELETE`。
+- 为 `usage_group_rollup_state` 授予删除触发器所需的 `SELECT/UPDATE`，但不直接删除该表。
+- 加密保存受限连接并热切换；PostgreSQL 管理员密码只存在于本次请求内。
 
-CREATE ROLE sub2api_ops_maintenance LOGIN PASSWORD 'replace-me-too';
-GRANT CONNECT ON DATABASE sub2api TO sub2api_ops_maintenance;
-GRANT USAGE ON SCHEMA public TO sub2api_ops_maintenance;
-GRANT SELECT, DELETE ON TABLE
-  usage_logs,
-  usage_dashboard_hourly,
-  usage_dashboard_hourly_users,
-  usage_dashboard_daily,
-  usage_dashboard_daily_users,
-  ops_system_logs,
-  ops_error_logs,
-  ops_ingress_reject_aggregates,
-  ops_alert_events,
-  ops_system_metrics,
-  ops_metrics_hourly,
-  ops_metrics_daily
-TO sub2api_ops_maintenance;
-GRANT SELECT, UPDATE ON TABLE usage_group_rollup_state
-TO sub2api_ops_maintenance;
-```
+同名未知角色不会被接管，已拥有数据库对象的受管角色也不会被自动轮换。若旧版 PostgreSQL 向 `PUBLIC` 保留了 `public` Schema 建表权，初始化默认阻断；只有管理员明确勾选 Schema 安全加固后才会撤销这项同数据库范围的继承权限。Sub2API 升级新增表后可以再次运行初始化来轮换受管角色密码并补齐授权。已有企业最小权限角色仍可通过 `SUB2API_DATABASE_URL` 和 `SUB2API_MAINTENANCE_DATABASE_URL` 直接接入。
 
-最后一项权限由 Sub2API 的 `usage_logs` 删除触发器需要：删除分组用量后，它会后退原生分组汇总水位。运营中心不会直接删除 `usage_group_daily_rollups` 或 `usage_group_rollup_state`。如果线上尚无这些对象，不要自行创建，先确认迁移版本。
-
-读取 `pg_stat_activity`、`pg_replication_slots` 等诊断视图可能需要额外监控权限。缺少权限只会把相应诊断显示为不可用，不会扩大清理权限。
+完整首次部署、权限边界、配置备份和故障排查见[部署与操作手册](docs/deployment-operations.md)。
 
 ## 安全执行流程
 
@@ -156,7 +136,7 @@ TO sub2api_ops_maintenance;
 
 手动清理保留上述完整的目标勾选、预览、备份、双确认和专属确认短语。自动清理默认关闭；启用后按每日时间触发，同样先生成预览并执行覆盖检查，随后创建 Sub2API 原生备份，只有该备份完成时间晚于预览才会提交固定白名单清理。自动任务遇到无数据、Schema/聚合阻断、人工清理冲突、备份超时或已有运行时不会扩大删除范围。
 
-自动清理启用时，配置加载会强制要求：`OPERATIONS_CENTER_ENABLE_CLEANUP=true`、独立维护连接、`OPERATIONS_CENTER_REQUIRE_FRESH_BACKUP=true`，以及可用的 Sub2API 管理 API 地址。`local` 认证模式还必须提供持久管理员凭据；`sub2api` 模式允许使用当前 SSO Token，但无人值守可靠性受 Token 有效期和服务重启影响。默认自动目标不包含关键用量数据；需要时显式配置：
+自动清理可以在系统设置中启用。系统强制要求独立维护连接和新鲜备份硬闸门；`sub2api` 模式允许暂时使用当前 SSO Token，但无人值守可靠性受 Token 有效期和服务重启影响，建议在同一页面验证并加密保存管理员 Token。默认自动目标不包含关键用量数据；环境变量仍可作为高级部署覆盖：
 
 ```dotenv
 OPERATIONS_CENTER_AUTO_CLEANUP_ENABLED=true
@@ -201,6 +181,7 @@ docker compose --env-file compose.services.env config
 
 ## 文档
 
+- [部署与操作手册](docs/deployment-operations.md)
 - [清理范围报告](docs/cleanup-scope-report.md)
 - [统计口径](docs/metrics.md)
 - [最终保留策略](docs/retention-policy.md)

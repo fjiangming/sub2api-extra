@@ -83,6 +83,10 @@ function number(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function poolConfigured(pool) {
+  return Boolean(pool && (typeof pool.configured !== 'function' || pool.configured()));
+}
+
 function publicRun(run) {
   const { cancelRequested: _cancelRequested, ...result } = run;
   return result;
@@ -118,7 +122,7 @@ class RetentionService {
     return {
       generatedAt: now.toISOString(),
       cleanupEnabled: this.config.cleanupEnabled,
-      maintenanceConnectionConfigured: Boolean(this.maintenancePool),
+      maintenanceConnectionConfigured: poolConfigured(this.maintenancePool),
       requireFreshBackup: this.config.requireFreshBackup,
       executionMode: 'explicit-previewed-batched-database-cleanup',
       automaticSchedule: Boolean(this.config.automaticCleanup?.enabled),
@@ -464,7 +468,7 @@ class RetentionService {
   }
 
   async execute({ previewId, confirmationPhrase, acknowledgeImpact, acknowledgeDownstream, actor }) {
-    if (!this.config.cleanupEnabled || !this.maintenancePool) {
+    if (!this.config.cleanupEnabled || !poolConfigured(this.maintenancePool)) {
       throw new AppError('CLEANUP_DISABLED', '清理执行未启用或未配置独立维护连接', { status: 409 });
     }
     if (this.activeRunId) throw new AppError('CLEANUP_ALREADY_RUNNING', '已有清理正在执行', { status: 409 });
@@ -657,5 +661,6 @@ module.exports = {
   POLICY_DEFINITIONS,
   PERMANENTLY_PROTECTED,
   cutoffFor,
-  publicRun
+  publicRun,
+  poolConfigured
 };

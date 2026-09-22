@@ -1,8 +1,9 @@
 'use strict';
 
 const http = require('http');
-const { loadConfig } = require('./config');
+const { loadConfig, resolveDataDir } = require('./config');
 const { createDatabase } = require('./db');
+const { RuntimeSettingsStore } = require('./runtime-settings-store');
 const { AuthService } = require('./auth');
 const { SchemaInspector } = require('./schema-inspector');
 const { Sub2ApiClient } = require('./sub2api-client');
@@ -10,10 +11,13 @@ const { MetricsService } = require('./services/metrics-service');
 const { StorageService } = require('./services/storage-service');
 const { RetentionService } = require('./services/retention-service');
 const { CleanupScheduler } = require('./services/cleanup-scheduler');
+const { SystemSettingsService } = require('./services/system-settings-service');
 const { createApp } = require('./app');
 
 async function main() {
-  const config = loadConfig();
+  const settingsStore = new RuntimeSettingsStore(resolveDataDir());
+  const runtimeSettings = await settingsStore.initialize();
+  const config = loadConfig(process.env, runtimeSettings);
   const database = createDatabase(config);
   const sub2api = new Sub2ApiClient(config);
   const auth = new AuthService(config, {
@@ -31,7 +35,19 @@ async function main() {
     config
   });
   const scheduler = new CleanupScheduler({ retention, config });
-  const app = createApp({ config, database, auth, inspector, metrics, storage, retention, scheduler, sub2api });
+  const settings = new SystemSettingsService({
+    config,
+    database,
+    settingsStore,
+    inspector,
+    storage,
+    retention,
+    scheduler,
+    sub2api
+  });
+  const app = createApp({
+    config, database, auth, inspector, metrics, storage, retention, scheduler, sub2api, settings
+  });
   const server = http.createServer(app);
   server.requestTimeout = 120000;
   server.headersTimeout = 65000;

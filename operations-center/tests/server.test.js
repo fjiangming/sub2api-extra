@@ -26,6 +26,14 @@ function dependencies(config, auth) {
     },
     storage: { getStorage: async () => ({}) },
     scheduler: { getStatus: () => ({ enabled: false }) },
+    settings: {
+      getStatus: () => ({ setupRequired: false }),
+      runChecks: async () => ({ checks: [] }),
+      testDatabaseAdministrator: async () => ({ connected: true }),
+      provisionDatabase: async () => ({ configured: true }),
+      updateCleanup: async () => ({ enabled: false }),
+      updateSub2ApiCredentials: async () => ({ persistentAdminCredentialsConfigured: false })
+    },
     retention: {
       getPolicy: () => ({}), getBackupStatus: async () => ({}), startNativeBackup: async () => ({}),
       createPreview: async () => ({ id: 'preview' }), getPreview: () => ({}), execute: async () => ({}),
@@ -154,4 +162,83 @@ test('custom-menu token is exchanged for a local session and removed from the re
     body: '{}'
   });
   assert.equal(preview.status, 201);
+});
+
+test('system settings require authentication and CSRF before provisioning database roles', async (t) => {
+  const config = {
+    env: 'test', trustProxy: false, authMode: 'local', adminUser: 'admin', adminPassword: 'test-password-123',
+    sessionTtlMinutes: 30, cookieSecure: false, sub2apiTimezone: 'Asia/Shanghai',
+    financeTimezone: 'Asia/Shanghai', cleanupEnabled: false
+  };
+  const auth = new AuthService(config);
+  t.after(() => auth.close());
+  const deps = dependencies(config, auth);
+  let provisionCalls = 0;
+  deps.settings.provisionDatabase = async () => { provisionCalls += 1; return { configured: true }; };
+  const app = createApp(deps);
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  assert.equal((await fetch(`${base}/api/settings`)).status, 401);
+  const login = await fetch(`${base}/api/auth/login`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'test-password-123' })
+  });
+  const session = await login.json();
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const payload = {
+    host: 'database', port: 5432, database: 'sub2api', username: 'postgres', password: 'temporary-secret',
+    sslMode: 'disable', readRole: 'sub2api_ops_read', createMaintenance: true,
+    maintenanceRole: 'sub2api_ops_maintenance', grantMonitoring: true
+  };
+  const withoutCsrf = await fetch(`${base}/api/settings/database/provision`, {
+    method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(payload)
+  });
+  assert.equal(withoutCsrf.status, 403);
+  assert.equal(provisionCalls, 0);
+
+  const configured = await fetch(`${base}/api/settings/database/provision`, {
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': session.csrfToken },
+    body: JSON.stringify(payload)
+  });
+  assert.equal(configured.status, 201);
+  assert.equal(provisionCalls, 1);
+});
+
+test('server remains available for authenticated setup before a database is configured', async (t) => {
+  const config = {
+    env: 'test', trustProxy: false, authMode: 'local', adminUser: 'admin', adminPassword: 'test-password-123',
+    sessionTtlMinutes: 30, cookieSecure: false, sub2apiTimezone: 'Asia/Shanghai',
+    financeTimezone: 'Asia/Shanghai', cleanupEnabled: false
+  };
+  const auth = new AuthService(config);
+  t.after(() => auth.close());
+  const deps = dependencies(config, auth);
+  deps.database = {
+    configured: () => false,
+    ping: async () => { throw new Error('must not ping before setup'); },
+    maintenance: null
+  };
+  deps.settings.getStatus = () => ({ setupRequired: true, databaseSetupEnabled: true });
+  const server = http.createServer(createApp(deps));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  assert.equal((await fetch(`${base}/healthz`)).status, 200);
+  const readiness = await fetch(`${base}/readyz`);
+  assert.equal(readiness.status, 503);
+  assert.deepEqual(await readiness.json(), { status: 'setup_required', database: null });
+
+  const login = await fetch(`${base}/api/auth/login`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'test-password-123' })
+  });
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const status = await fetch(`${base}/api/settings`, { headers: { cookie } });
+  assert.equal(status.status, 200);
+  assert.equal((await status.json()).setupRequired, true);
 });

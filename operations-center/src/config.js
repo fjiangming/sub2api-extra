@@ -1,5 +1,6 @@
 'use strict';
 
+const path = require('path');
 const { z } = require('zod');
 
 const boolFromEnv = z.preprocess((value) => {
@@ -43,6 +44,8 @@ const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   OPERATIONS_CENTER_BIND_HOST: z.string().default('127.0.0.1'),
   OPERATIONS_CENTER_PORT: z.coerce.number().int().min(1).max(65535).default(9872),
+  OPERATIONS_CENTER_DATA_DIR: z.string().trim().min(1).default('./data'),
+  OPERATIONS_CENTER_DATABASE_SETUP_ENABLED: boolFromEnv.default(true),
   OPERATIONS_CENTER_AUTH_MODE: z.enum(['local', 'sub2api']).default('local'),
   OPERATIONS_CENTER_ADMIN_USER: z.string().trim().min(1).max(100).default('admin'),
   OPERATIONS_CENTER_ADMIN_PASSWORD: optionalPassword,
@@ -64,7 +67,7 @@ const schema = z.object({
   OPERATIONS_CENTER_AUTO_CLEANUP_TIME: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, '必须是 HH:mm 格式').default('03:30'),
   OPERATIONS_CENTER_AUTO_CLEANUP_TARGETS: automaticCleanupTargets,
   OPERATIONS_CENTER_AUTO_CLEANUP_BACKUP_WAIT_MINUTES: z.coerce.number().int().min(1).max(55).default(10),
-  SUB2API_DATABASE_URL: z.string().min(1),
+  SUB2API_DATABASE_URL: optionalString,
   SUB2API_MAINTENANCE_DATABASE_URL: optionalString,
   SUB2API_DATABASE_SSL: z.enum(['disable', 'require', 'verify-full']).default('disable'),
   SUB2API_TIMEZONE: z.string().trim().min(1).max(100).default('Asia/Shanghai'),
@@ -152,8 +155,56 @@ const schema = z.object({
   }
 });
 
-function loadConfig(env = process.env) {
-  const parsed = schema.safeParse(env);
+function runtimeEnvironment(env, runtime = {}) {
+  const merged = { ...env };
+  const database = runtime.database || {};
+  const cleanup = runtime.cleanup || {};
+  const retention = cleanup.retention || {};
+  if (runtime.database) {
+    merged.SUB2API_DATABASE_URL = database.readUrl || '';
+    merged.SUB2API_MAINTENANCE_DATABASE_URL = database.maintenanceUrl || '';
+    if (database.sslMode) merged.SUB2API_DATABASE_SSL = database.sslMode;
+  }
+  if (cleanup.enabled != null) merged.OPERATIONS_CENTER_ENABLE_CLEANUP = String(cleanup.enabled);
+  if (Object.keys(cleanup).length > 0) merged.OPERATIONS_CENTER_REQUIRE_FRESH_BACKUP = 'true';
+  if (cleanup.automaticEnabled != null) merged.OPERATIONS_CENTER_AUTO_CLEANUP_ENABLED = String(cleanup.automaticEnabled);
+  if (cleanup.automaticTime) merged.OPERATIONS_CENTER_AUTO_CLEANUP_TIME = cleanup.automaticTime;
+  if (Array.isArray(cleanup.automaticTargets)) {
+    merged.OPERATIONS_CENTER_AUTO_CLEANUP_TARGETS = cleanup.automaticTargets.join(',');
+  }
+  if (cleanup.backupWaitMinutes != null) {
+    merged.OPERATIONS_CENTER_AUTO_CLEANUP_BACKUP_WAIT_MINUTES = String(cleanup.backupWaitMinutes);
+  }
+  const retentionMappings = {
+    usageLogsDays: 'RETENTION_USAGE_LOGS_DAYS',
+    usageHourlyDays: 'RETENTION_USAGE_HOURLY_DAYS',
+    usageDailyDays: 'RETENTION_USAGE_DAILY_DAYS',
+    systemLogDays: 'RETENTION_SYSTEM_LOG_DAYS',
+    errorLogDays: 'RETENTION_ERROR_LOG_DAYS',
+    opsMetricDays: 'RETENTION_OPS_METRIC_DAYS'
+  };
+  for (const [key, name] of Object.entries(retentionMappings)) {
+    if (retention[key] != null) merged[name] = String(retention[key]);
+  }
+  const upstream = runtime.sub2api || {};
+  if (upstream.clearPersistentCredentials) {
+    merged.SUB2API_ADMIN_TOKEN = '';
+    merged.ADMIN_EMAIL = '';
+    merged.ADMIN_PASSWORD = '';
+  } else if (runtime.sub2api) {
+    merged.SUB2API_ADMIN_TOKEN = upstream.adminToken || '';
+    merged.ADMIN_EMAIL = upstream.adminEmail || '';
+    merged.ADMIN_PASSWORD = upstream.adminPassword || '';
+  }
+  return merged;
+}
+
+function resolveDataDir(env = process.env) {
+  return path.resolve(String(env.OPERATIONS_CENTER_DATA_DIR || './data'));
+}
+
+function loadConfig(env = process.env, runtime = {}) {
+  const parsed = schema.safeParse(runtimeEnvironment(env, runtime));
   if (!parsed.success) {
     const message = parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ');
     throw new Error(`operations-center 配置无效: ${message}`);
@@ -170,6 +221,8 @@ function loadConfig(env = process.env) {
     env: value.NODE_ENV,
     bindHost: value.OPERATIONS_CENTER_BIND_HOST,
     port: value.OPERATIONS_CENTER_PORT,
+    dataDir: path.resolve(value.OPERATIONS_CENTER_DATA_DIR),
+    databaseSetupEnabled: value.OPERATIONS_CENTER_DATABASE_SETUP_ENABLED,
     authMode: value.OPERATIONS_CENTER_AUTH_MODE,
     adminUser: value.OPERATIONS_CENTER_ADMIN_USER,
     adminPassword: value.OPERATIONS_CENTER_ADMIN_PASSWORD || '',
@@ -193,8 +246,12 @@ function loadConfig(env = process.env) {
       targets: value.OPERATIONS_CENTER_AUTO_CLEANUP_TARGETS,
       backupWaitMinutes: value.OPERATIONS_CENTER_AUTO_CLEANUP_BACKUP_WAIT_MINUTES
     },
-    databaseUrl: value.SUB2API_DATABASE_URL,
+    databaseUrl: value.SUB2API_DATABASE_URL || null,
+    databaseSource: runtime.database?.readUrl ? 'managed' : (value.SUB2API_DATABASE_URL ? 'environment' : 'none'),
     maintenanceDatabaseUrl: value.SUB2API_MAINTENANCE_DATABASE_URL || null,
+    maintenanceDatabaseSource: runtime.database?.maintenanceUrl
+      ? 'managed'
+      : (value.SUB2API_MAINTENANCE_DATABASE_URL ? 'environment' : 'none'),
     databaseSsl: value.SUB2API_DATABASE_SSL,
     sub2apiTimezone: value.SUB2API_TIMEZONE,
     financeTimezone: value.FINANCE_TIMEZONE,
@@ -204,6 +261,9 @@ function loadConfig(env = process.env) {
     sub2apiAdminToken: value.SUB2API_ADMIN_TOKEN || null,
     sub2apiAdminEmail: value.ADMIN_EMAIL || null,
     sub2apiAdminPassword: value.ADMIN_PASSWORD || null,
+    sub2apiCredentialSource: runtime.sub2api
+      ? (runtime.sub2api.clearPersistentCredentials ? 'session' : 'managed')
+      : (env.SUB2API_ADMIN_TOKEN || (env.ADMIN_EMAIL && env.ADMIN_PASSWORD) ? 'environment' : 'session'),
     sub2apiRequestTimeoutMs: value.SUB2API_REQUEST_TIMEOUT_MS,
     retention: {
       usageLogsDays: value.RETENTION_USAGE_LOGS_DAYS,
@@ -217,4 +277,4 @@ function loadConfig(env = process.env) {
   };
 }
 
-module.exports = { loadConfig, cleanupTargetIds };
+module.exports = { loadConfig, resolveDataDir, cleanupTargetIds };

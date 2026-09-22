@@ -10,7 +10,7 @@ COPY --from=dependencies /app/node_modules ./node_modules
 COPY package.json ./
 COPY src ./src
 COPY public ./public
-RUN chown -R node:node /app
+RUN mkdir -p /app/data && chown -R node:node /app
 USER node
 EXPOSE 9872
 CMD ["node", "src/server.js"]

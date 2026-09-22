@@ -41,6 +41,7 @@
         <button class="module-tab" data-view="storage" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="database"></i><span>存储容量</span></button>
         <button class="module-tab" data-view="retention" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="shield-check"></i><span>数据清理</span></button>
         <button class="module-tab" data-view="maintenance" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="wrench"></i><span>维护状态</span></button>
+        <button class="module-tab" data-view="settings" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="settings"></i><span>系统设置</span></button>
       </nav>
       <div class="header-account">
         <span class="user-chip"><i data-lucide="circle-user-round"></i><span id="admin-name"></span></span>
@@ -151,6 +152,99 @@
         <section id="view-maintenance" class="view" aria-labelledby="page-title">
           <div id="maintenance-metrics" class="metric-grid compact"></div>
           <section class="panel"><div class="panel-heading"><div><h2>Schema 能力</h2><p id="schema-checked-at"></p></div></div><div class="table-wrap"><table><thead><tr><th>对象</th><th>状态</th><th>分区</th><th>字段数</th></tr></thead><tbody id="schema-capabilities"></tbody></table></div></section>
+        </section>
+
+        <section id="view-settings" class="view" aria-labelledby="page-title">
+          <div id="settings-alerts" class="alert-stack"></div>
+          <div id="settings-metrics" class="metric-grid compact"></div>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div><h2>依赖检查</h2><p id="settings-checked-at">尚未检查</p></div>
+              <button id="settings-check-button" class="button secondary" type="button"><i data-lucide="list-checks"></i><span>运行检查</span></button>
+            </div>
+            <div class="table-wrap"><table><thead><tr><th>检查项</th><th>状态</th><th>结果</th></tr></thead><tbody id="settings-checks"></tbody></table></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div><h2>Sub2API 管理 API</h2><p id="sub2api-api-summary">交互式 SSO 不需要保存邮箱密码</p></div>
+              <span id="sub2api-credential-badge" class="badge neutral">读取中</span>
+            </div>
+            <form id="sub2api-credential-form" class="settings-form" autocomplete="off">
+              <div class="settings-grid">
+                <label>无人值守认证方式<select name="mode"><option value="session">仅使用当前 SSO 会话</option><option value="token">持久管理员 Token</option><option value="account">管理员邮箱和密码</option></select></label>
+                <label data-credential-field="token" hidden>管理员 Token<input name="token" type="password" autocomplete="new-password"></label>
+                <label data-credential-field="account" hidden>Sub2API 管理员邮箱<input name="email" type="email" autocomplete="username"></label>
+                <label data-credential-field="account" hidden>Sub2API 管理员密码<input name="password" type="password" autocomplete="new-password"></label>
+              </div>
+              <p id="sub2api-credential-error" class="form-error" role="alert" hidden></p>
+              <div class="form-actions"><button class="button primary" type="submit"><i data-lucide="key-round"></i><span>验证并保存</span></button></div>
+            </form>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div><h2>数据库访问</h2><p>一次性使用管理员连接创建受限角色，管理员密码不会保存</p></div>
+              <span id="database-setup-badge" class="badge neutral">未配置</span>
+            </div>
+            <div id="database-access-summary" class="schedule-summary"></div>
+            <form id="database-provision-form" class="settings-form" autocomplete="off">
+              <div class="settings-grid">
+                <label>数据库主机<input name="host" value="host.docker.internal" required></label>
+                <label>端口<input name="port" type="number" min="1" max="65535" value="5432" required></label>
+                <label>数据库名<input name="database" value="sub2api" required></label>
+                <label>PostgreSQL 管理员账号<input name="username" value="postgres" autocomplete="username" required></label>
+                <label>PostgreSQL 管理员密码<input name="password" type="password" autocomplete="new-password" required></label>
+                <label>SSL 模式<select name="sslMode"><option value="disable">关闭</option><option value="require">加密，不校验证书</option><option value="verify-full">加密并校验证书</option></select></label>
+                <label>只读角色名<input name="readRole" value="sub2api_ops_read" pattern="[A-Za-z_][A-Za-z0-9_]{0,62}" required></label>
+                <label>清理角色名<input name="maintenanceRole" value="sub2api_ops_maintenance" pattern="[A-Za-z_][A-Za-z0-9_]{0,62}" required></label>
+              </div>
+              <div class="settings-options">
+                <label class="check-row"><input name="createMaintenance" type="checkbox" checked><span>同时创建固定白名单清理角色</span></label>
+                <label class="check-row"><input name="grantMonitoring" type="checkbox"><span>允许只读角色查看 PostgreSQL 运行指标</span></label>
+                <label class="check-row"><input name="hardenPublicSchema" type="checkbox"><span>若存在旧默认权限，撤销本数据库 PUBLIC 的 public Schema 建表权</span></label>
+              </div>
+              <p id="database-setup-error" class="form-error" role="alert" hidden></p>
+              <div class="form-actions">
+                <button id="database-test-button" class="button secondary" type="button"><i data-lucide="plug-zap"></i><span>测试管理员连接</span></button>
+                <button id="database-provision-button" class="button primary" type="submit"><i data-lucide="user-round-cog"></i><span>创建受限账号并连接</span></button>
+              </div>
+            </form>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading"><div><h2>清理与保留设置</h2><p>更改立即生效，并持久化到加密运行配置</p></div></div>
+            <form id="cleanup-settings-form" class="settings-form">
+              <div class="settings-options">
+                <label class="check-row"><input name="enabled" type="checkbox"><span>允许执行已通过安全检查的清理任务</span></label>
+                <label class="check-row"><input name="automaticEnabled" type="checkbox"><span>启用每日自动清理</span></label>
+              </div>
+              <div class="settings-grid">
+                <label>自动执行时间<input name="automaticTime" type="time" value="03:30" required></label>
+                <label>备份等待分钟<input name="backupWaitMinutes" type="number" min="1" max="14" value="10" required></label>
+                <label>请求明细保留天数<input name="usageLogsDays" type="number" min="30" max="3650" required></label>
+                <label>小时汇总保留天数<input name="usageHourlyDays" type="number" min="30" max="3650" required></label>
+                <label>日汇总保留天数<input name="usageDailyDays" type="number" min="365" max="3650" required></label>
+                <label>系统日志保留天数<input name="systemLogDays" type="number" min="7" max="3650" required></label>
+                <label>错误日志保留天数<input name="errorLogDays" type="number" min="30" max="3650" required></label>
+                <label>运维指标保留天数<input name="opsMetricDays" type="number" min="7" max="3650" required></label>
+              </div>
+              <fieldset class="target-fieldset">
+                <legend>自动清理目标</legend>
+                <div class="target-options">
+                  <label class="check-row"><input name="automaticTargets" type="checkbox" value="usage_logs"><span>请求明细</span></label>
+                  <label class="check-row"><input name="automaticTargets" type="checkbox" value="usage_hourly"><span>小时汇总</span></label>
+                  <label class="check-row"><input name="automaticTargets" type="checkbox" value="usage_daily"><span>日汇总</span></label>
+                  <label class="check-row"><input name="automaticTargets" type="checkbox" value="system_logs"><span>系统日志</span></label>
+                  <label class="check-row"><input name="automaticTargets" type="checkbox" value="error_logs"><span>错误日志</span></label>
+                  <label class="check-row"><input name="automaticTargets" type="checkbox" value="ops_metrics"><span>运维指标</span></label>
+                </div>
+              </fieldset>
+              <p id="cleanup-settings-error" class="form-error" role="alert" hidden></p>
+              <div class="form-actions"><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存设置</span></button></div>
+            </form>
+          </section>
         </section>
       </main>
     </div>

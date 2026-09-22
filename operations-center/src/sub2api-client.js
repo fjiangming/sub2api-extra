@@ -12,6 +12,11 @@ function unwrap(payload) {
   return Object.prototype.hasOwnProperty.call(payload || {}, 'data') ? payload.data : payload;
 }
 
+function isAdminUser(user) {
+  const role = String(user?.role || '').toLowerCase();
+  return role === 'admin' || role === 'root' || user?.is_admin === true || user?.isAdmin === true;
+}
+
 class Sub2ApiClient {
   constructor(config, fetchImpl = globalThis.fetch) {
     this.config = config;
@@ -26,6 +31,51 @@ class Sub2ApiClient {
     return Boolean(this.config.sub2apiBaseUrl && (this.activeRuntimeToken() || this.token || (
       this.config.sub2apiAdminEmail && this.config.sub2apiAdminPassword
     )));
+  }
+
+  persistentCredentialsConfigured() {
+    return Boolean(this.config.sub2apiAdminToken || (
+      this.config.sub2apiAdminEmail && this.config.sub2apiAdminPassword
+    ));
+  }
+
+  setPersistentCredentials({ token = null, email = null, password = null } = {}) {
+    this.config.sub2apiAdminToken = token || null;
+    this.config.sub2apiAdminEmail = email || null;
+    this.config.sub2apiAdminPassword = password || null;
+    this.token = token || null;
+    this.tokenExpiresAt = this.token ? Number.POSITIVE_INFINITY : 0;
+    this.loginPromise = null;
+  }
+
+  async validateAdminCredentials(credentials) {
+    const previous = {
+      token: this.config.sub2apiAdminToken,
+      email: this.config.sub2apiAdminEmail,
+      password: this.config.sub2apiAdminPassword,
+      cachedToken: this.token,
+      tokenExpiresAt: this.tokenExpiresAt,
+      runtimeToken: this.runtimeToken
+    };
+    this.runtimeToken = null;
+    this.setPersistentCredentials(credentials);
+    try {
+      await this.login();
+      const data = unwrap(await this.raw('/api/v1/auth/me'));
+      const user = data?.user || data?.profile || data || {};
+      if (!isAdminUser(user)) {
+        throw new AppError('SUB2API_ADMIN_REQUIRED', '该凭据不属于 Sub2API 管理员', { status: 403 });
+      }
+      return { valid: true, user: user.username || user.email || user.name || String(user.id || 'admin') };
+    } finally {
+      this.config.sub2apiAdminToken = previous.token;
+      this.config.sub2apiAdminEmail = previous.email;
+      this.config.sub2apiAdminPassword = previous.password;
+      this.token = previous.cachedToken;
+      this.tokenExpiresAt = previous.tokenExpiresAt;
+      this.runtimeToken = previous.runtimeToken;
+      this.loginPromise = null;
+    }
   }
 
   activeRuntimeToken() {

@@ -11,8 +11,19 @@ const script = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), '
 test('primary modules use an accessible top tab bar', () => {
   assert.match(html, /<header class="module-header">/);
   assert.match(html, /<nav id="main-nav" class="module-tabs"[^>]*role="tablist">/);
-  assert.equal((html.match(/class="module-tab(?: active)?"/g) || []).length, 7);
+  assert.equal((html.match(/class="module-tab(?: active)?"/g) || []).length, 8);
   assert.doesNotMatch(html, /class="sidebar"|id="mobile-menu"/);
+});
+
+test('system settings exposes guarded database setup and cleanup configuration', () => {
+  assert.match(html, /data-view="settings"/);
+  assert.match(html, /id="database-provision-form"/);
+  assert.match(html, /id="database-test-button"/);
+  assert.match(html, /id="cleanup-settings-form"/);
+  assert.match(html, /id="sub2api-credential-form"/);
+  assert.match(script, /api\('\/api\/settings\/database\/provision'/);
+  assert.match(script, /api\('\/api\/settings\/sub2api-credentials'/);
+  assert.match(script, /settings\.setupRequired \? 'settings'/);
 });
 
 test('navigation keeps tab selection state and keyboard controls in sync', () => {

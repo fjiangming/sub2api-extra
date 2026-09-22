@@ -14,7 +14,8 @@ const state = {
   charts: new Map(),
   preview: null,
   policy: null,
-  runPoller: null
+  runPoller: null,
+  settings: null
 };
 
 const titles = {
@@ -24,7 +25,8 @@ const titles = {
   finance: '收款与入账',
   storage: '存储容量',
   retention: '数据清理',
-  maintenance: '维护状态'
+  maintenance: '维护状态',
+  settings: '系统设置'
 };
 
 const $ = (id) => document.getElementById(id);
@@ -178,7 +180,8 @@ function badge(status) {
     pending: ['neutral', '等待中'], partial: ['warning', '部分完成'], canceled: ['neutral', '已取消'],
     failed: ['error', '失败'], blocked: ['error', '已阻断'], skipped: ['neutral', '已跳过'],
     started: ['success', '已启动'], disabled: ['neutral', '未启用'], ready: ['success', '已就绪'],
-    available: ['success', '可用'], missing: ['error', '缺失']
+    available: ['success', '可用'], missing: ['error', '缺失'], passed: ['success', '通过'],
+    warning: ['warning', '需处理']
   };
   const [tone, label] = mapping[status] || ['neutral', status || '未知'];
   return `<span class="badge ${tone}">${escapeHtml(label)}</span>`;
@@ -646,6 +649,255 @@ async function loadMaintenance() {
   refreshIcons();
 }
 
+function settingField(label, value, note = '') {
+  return `<div class="schedule-field"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong>${note ? `<small>${escapeHtml(note)}</small>` : ''}</div>`;
+}
+
+function renderSettingsStatus(data) {
+  state.settings = data;
+  const read = data.database.read;
+  const maintenance = data.database.maintenance;
+  $('settings-metrics').innerHTML = [
+    metricCard('统计数据库', read.configured ? '已连接' : '待配置', read.connection?.user || '无读取角色', read.configured ? 'green' : 'red'),
+    metricCard('清理数据库', maintenance.configured ? '已隔离' : '未配置', maintenance.connection?.user || '无维护角色', maintenance.configured ? 'green' : 'amber'),
+    metricCard('登录模式', data.authentication.mode === 'sub2api' ? 'Sub2API SSO' : '独立登录', data.authentication.persistentAdminCredentialsConfigured ? '含持久 API 凭据' : '交互会话', 'blue'),
+    metricCard('自动清理', data.cleanup.automatic.enabled ? '已启用' : '未启用', data.cleanup.automatic.enabled ? `${data.cleanup.automatic.time} / ${data.cleanup.automatic.targets.length} 项` : '默认关闭', data.cleanup.automatic.enabled ? 'amber' : '')
+  ].join('');
+  const alerts = [];
+  if (data.setupRequired) {
+    alerts.push(alertHtml('warning', '尚未配置统计数据库。完成下方数据库访问初始化后，运营统计与存储诊断会立即可用。'));
+  }
+  if (read.configured && !maintenance.configured) {
+    alerts.push(alertHtml('info', '当前只具备读取能力；统计功能正常，任何数据删除都会被阻断。'));
+  }
+  if (data.cleanup.automatic.enabled && !data.authentication.persistentAdminCredentialsConfigured) {
+    alerts.push(alertHtml('warning', '自动清理当前依赖浏览器 SSO Token；Token 过期或服务重启后，备份阶段会安全失败且不会删除数据。'));
+  }
+  $('settings-alerts').innerHTML = alerts.join('');
+  $('database-setup-badge').className = `badge ${read.configured ? 'success' : 'warning'}`;
+  $('database-setup-badge').textContent = read.configured ? '已配置' : '待初始化';
+  $('database-access-summary').innerHTML = [
+    settingField('读取来源', read.source === 'managed' ? '页面托管' : read.source === 'environment' ? '部署配置' : '未配置'),
+    settingField('数据库', read.connection?.database || 'N/A', read.connection?.host ? `${read.connection.host}:${read.connection.port}` : ''),
+    settingField('读取角色', read.connection?.user || 'N/A'),
+    settingField('清理角色', maintenance.connection?.user || '未配置')
+  ].join('');
+  $('sub2api-api-summary').textContent = data.authentication.sub2apiBaseUrlConfigured
+    ? `管理 API 已配置${data.authentication.sub2apiPublicUrl ? ` / ${data.authentication.sub2apiPublicUrl}` : ''}`
+    : '部署尚未配置 Sub2API 管理 API 地址';
+  $('sub2api-credential-badge').className = `badge ${data.authentication.persistentAdminCredentialsConfigured ? 'success' : 'neutral'}`;
+  $('sub2api-credential-badge').textContent = data.authentication.persistentAdminCredentialsConfigured ? '持久认证' : '仅会话';
+  const credentialForm = $('sub2api-credential-form');
+  credentialForm.elements.mode.value = data.authentication.persistentCredentialType || 'session';
+  credentialForm.querySelector('button[type="submit"]').disabled = !data.authentication.sub2apiBaseUrlConfigured;
+  updateCredentialFields();
+
+  const databaseForm = $('database-provision-form');
+  $('database-test-button').disabled = !data.databaseSetupEnabled;
+  $('database-provision-button').disabled = !data.databaseSetupEnabled;
+  if (read.connection) {
+    databaseForm.elements.host.value = read.connection.host || databaseForm.elements.host.value;
+    databaseForm.elements.port.value = read.connection.port || databaseForm.elements.port.value;
+    databaseForm.elements.database.value = read.connection.database || databaseForm.elements.database.value;
+  }
+  const cleanupForm = $('cleanup-settings-form');
+  cleanupForm.elements.enabled.checked = data.cleanup.enabled;
+  cleanupForm.elements.enabled.disabled = !data.cleanup.maintenanceConnectionConfigured && !data.cleanup.enabled;
+  cleanupForm.elements.automaticEnabled.checked = data.cleanup.automatic.enabled;
+  cleanupForm.elements.automaticTime.value = data.cleanup.automatic.time;
+  cleanupForm.elements.backupWaitMinutes.max = Math.max(1, data.cleanup.previewTtlMinutes - 2);
+  cleanupForm.elements.backupWaitMinutes.value = data.cleanup.automatic.backupWaitMinutes;
+  for (const [name, value] of Object.entries(data.cleanup.retention)) {
+    if (cleanupForm.elements[name]) cleanupForm.elements[name].value = value;
+  }
+  const selected = new Set(data.cleanup.automatic.targets);
+  cleanupForm.querySelectorAll('input[name="automaticTargets"]').forEach((input) => {
+    input.checked = selected.has(input.value);
+  });
+  updateCleanupControlState();
+  refreshIcons();
+}
+
+async function loadSettings() {
+  setPageMeta('连接、权限、安全闸门与运行配置');
+  const data = await api('/api/settings');
+  renderSettingsStatus(data);
+  setConnection(!data.setupRequired, data.setupRequired ? '等待数据库配置' : '配置正常');
+  if (!$('settings-checks').children.length) {
+    $('settings-checks').innerHTML = emptyRow(3, '尚未运行依赖检查');
+  }
+}
+
+function databaseSetupPayload() {
+  const form = $('database-provision-form');
+  return {
+    host: form.elements.host.value.trim(),
+    port: Number(form.elements.port.value),
+    database: form.elements.database.value.trim(),
+    username: form.elements.username.value.trim(),
+    password: form.elements.password.value,
+    sslMode: form.elements.sslMode.value,
+    readRole: form.elements.readRole.value.trim(),
+    createMaintenance: form.elements.createMaintenance.checked,
+    maintenanceRole: form.elements.maintenanceRole.value.trim(),
+    grantMonitoring: form.elements.grantMonitoring.checked,
+    hardenPublicSchema: form.elements.hardenPublicSchema.checked
+  };
+}
+
+function showSettingsFormError(id, message = '') {
+  const node = $(id);
+  node.textContent = message;
+  node.hidden = !message;
+}
+
+async function testDatabaseAdministrator() {
+  const button = $('database-test-button');
+  button.disabled = true;
+  showSettingsFormError('database-setup-error');
+  try {
+    const result = await api('/api/settings/database/test', {
+      method: 'POST',
+      body: JSON.stringify(databaseSetupPayload())
+    });
+    const status = result.canCreateRoles && result.canGrantCurrentTables && result.publicSchemaAvailable;
+    toast(status ? `连接成功：${result.database} / ${result.user}` : '连接成功，但该账号缺少创建角色或授权能力', status ? '' : 'error');
+  } catch (error) {
+    showSettingsFormError('database-setup-error', error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function provisionDatabase(event) {
+  event.preventDefault();
+  const button = $('database-provision-button');
+  button.disabled = true;
+  showSettingsFormError('database-setup-error');
+  try {
+    const result = await api('/api/settings/database/provision', {
+      method: 'POST',
+      body: JSON.stringify(databaseSetupPayload())
+    });
+    $('database-provision-form').elements.password.value = '';
+    toast(result.schemaCompatible ? '受限数据库账号已创建并启用' : '账号已创建，但 Schema 兼容检查未通过', result.schemaCompatible ? '' : 'error');
+    await loadSettings();
+    await runSettingsChecks();
+  } catch (error) {
+    showSettingsFormError('database-setup-error', error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function runSettingsChecks() {
+  const button = $('settings-check-button');
+  button.disabled = true;
+  try {
+    const data = await api('/api/settings/checks', { method: 'POST', body: '{}' });
+    $('settings-checked-at').textContent = formatDateTime(data.generatedAt);
+    $('settings-checks').innerHTML = data.checks.map((check) => `
+      <tr><td>${escapeHtml(check.label)}</td><td>${badge(check.status)}</td><td>${escapeHtml(check.detail)}</td></tr>
+    `).join('') || emptyRow(3);
+    refreshIcons();
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function saveCleanupSettings(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  showSettingsFormError('cleanup-settings-error');
+  const numberField = (name) => Number(form.elements[name].value);
+  try {
+    await api('/api/settings/cleanup', {
+      method: 'PUT',
+      body: JSON.stringify({
+        enabled: form.elements.enabled.checked,
+        automaticEnabled: form.elements.automaticEnabled.checked,
+        automaticTime: form.elements.automaticTime.value,
+        automaticTargets: [...form.querySelectorAll('input[name="automaticTargets"]:checked')].map((input) => input.value),
+        backupWaitMinutes: numberField('backupWaitMinutes'),
+        retention: {
+          usageLogsDays: numberField('usageLogsDays'),
+          usageHourlyDays: numberField('usageHourlyDays'),
+          usageDailyDays: numberField('usageDailyDays'),
+          systemLogDays: numberField('systemLogDays'),
+          errorLogDays: numberField('errorLogDays'),
+          opsMetricDays: numberField('opsMetricDays')
+        }
+      })
+    });
+    toast('清理与保留设置已保存');
+    await loadSettings();
+  } catch (error) {
+    showSettingsFormError('cleanup-settings-error', error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function updateCredentialFields() {
+  const form = $('sub2api-credential-form');
+  const mode = form.elements.mode.value;
+  form.querySelectorAll('[data-credential-field]').forEach((label) => {
+    const visible = label.dataset.credentialField === mode;
+    label.hidden = !visible;
+    const input = label.querySelector('input');
+    if (input) input.required = visible;
+  });
+}
+
+function updateCleanupControlState() {
+  const form = $('cleanup-settings-form');
+  const executionEnabled = form.elements.enabled.checked;
+  form.elements.automaticEnabled.disabled = !executionEnabled;
+  if (!executionEnabled) form.elements.automaticEnabled.checked = false;
+}
+
+async function saveSub2ApiCredentials(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  showSettingsFormError('sub2api-credential-error');
+  const mode = form.elements.mode.value;
+  const payload = mode === 'token'
+    ? { mode, token: form.elements.token.value }
+    : mode === 'account'
+      ? { mode, email: form.elements.email.value.trim(), password: form.elements.password.value }
+      : { mode: 'session' };
+  try {
+    await api('/api/settings/sub2api-credentials', {
+      method: 'PUT',
+      body: JSON.stringify(payload)
+    });
+    form.elements.token.value = '';
+    form.elements.password.value = '';
+    toast(mode === 'session' ? '已改为仅使用当前 SSO 会话' : 'Sub2API 管理凭据已验证并加密保存');
+    await loadSettings();
+  } catch (error) {
+    showSettingsFormError('sub2api-credential-error', error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function navigateAfterAuthentication(initialView) {
+  try {
+    const settings = await api('/api/settings');
+    const view = settings.setupRequired ? 'settings' : (titles[initialView] ? initialView : 'overview');
+    navigate(view);
+  } catch {
+    navigate(titles[initialView] ? initialView : 'overview');
+  }
+}
+
 async function loadCurrentView(options = {}) {
   const loaders = {
     overview: loadOverview,
@@ -654,11 +906,12 @@ async function loadCurrentView(options = {}) {
     finance: loadFinance,
     storage: () => loadStorage(options.refresh),
     retention: loadRetention,
-    maintenance: loadMaintenance
+    maintenance: loadMaintenance,
+    settings: loadSettings
   };
   try {
     await loaders[state.currentView]();
-    if (state.currentView !== 'maintenance') setConnection(true, '数据源正常');
+    if (!['maintenance', 'settings'].includes(state.currentView)) setConnection(true, '数据源正常');
   } catch (error) {
     setConnection(false, '数据源异常');
     setPageMeta(error.message);
@@ -730,12 +983,12 @@ async function initialize() {
         body: '{}'
       });
       showApp(session);
-      navigate(titles[initialView] ? initialView : 'overview');
+      await navigateAfterAuthentication(initialView);
       return;
     }
     const session = await api('/api/auth/me');
     showApp(session);
-    navigate(titles[initialView] ? initialView : 'overview');
+    await navigateAfterAuthentication(initialView);
   } catch (error) {
     showLogin(ssoError ? ssoErrorMessage(ssoError) : '');
   }
@@ -752,7 +1005,7 @@ $('login-form').addEventListener('submit', async (event) => {
       body: JSON.stringify({ username: $('login-username').value, password: $('login-password').value })
     });
     showApp(session);
-    navigate('overview');
+    await navigateAfterAuthentication('overview');
   } catch (error) {
     $('login-error').textContent = error.message;
     $('login-error').hidden = false;
@@ -776,6 +1029,16 @@ $('storage-refresh').addEventListener('click', () => loadStorage(true).catch((er
 $('preview-button').addEventListener('click', createPreview);
 $('backup-button').addEventListener('click', triggerBackup);
 $('execute-button').addEventListener('click', executeCleanup);
+$('settings-check-button').addEventListener('click', runSettingsChecks);
+$('database-test-button').addEventListener('click', testDatabaseAdministrator);
+$('database-provision-form').addEventListener('submit', provisionDatabase);
+$('cleanup-settings-form').addEventListener('submit', saveCleanupSettings);
+$('sub2api-credential-form').addEventListener('submit', saveSub2ApiCredentials);
+$('sub2api-credential-form').elements.mode.addEventListener('change', updateCredentialFields);
+$('cleanup-settings-form').elements.enabled.addEventListener('change', updateCleanupControlState);
+$('database-provision-form').elements.createMaintenance.addEventListener('change', (event) => {
+  $('database-provision-form').elements.maintenanceRole.disabled = !event.currentTarget.checked;
+});
 window.addEventListener('resize', () => {
   state.charts.forEach((instance) => instance.resize());
   revealActiveTab();

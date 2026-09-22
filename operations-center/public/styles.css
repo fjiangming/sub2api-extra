@@ -286,6 +286,16 @@ tbody tr:hover { background: #fafbf9; }
 .check-row input { width: 16px; min-height: 16px; margin-top: 1px; }
 .execution-box .button { justify-self: start; }
 
+.settings-form { padding: 18px 16px; }
+.settings-grid { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 14px; }
+.settings-options { display: flex; flex-wrap: wrap; gap: 12px 24px; margin-top: 16px; }
+.settings-options .check-row { min-width: min(300px, 100%); }
+.form-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.target-fieldset { margin: 18px 0 0; padding: 12px 14px 14px; border: 1px solid var(--line); border-radius: 5px; }
+.target-fieldset legend { padding: 0 5px; color: #4c554f; font-size: 13px; font-weight: 700; }
+.target-options { display: grid; grid-template-columns: repeat(3, minmax(150px, 1fr)); gap: 11px 18px; }
+.settings-form .form-error { margin-top: 14px; }
+
 .run-list { padding: 4px 16px; }
 .run-row { display: grid; grid-template-columns: minmax(160px, 1fr) 120px 130px 130px auto; gap: 12px; align-items: center; min-height: 64px; border-bottom: 1px solid #edf0eb; }
 .run-row:last-child { border-bottom: 0; }
@@ -303,6 +313,7 @@ tbody tr:hover { background: #fafbf9; }
 @media (max-width: 1100px) {
   .metric-grid, .metric-grid.compact { grid-template-columns: repeat(3, minmax(140px, 1fr)); }
   .split-layout, .split-layout.equal { grid-template-columns: 1fr; }
+  .settings-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
 }
 
 @media (max-width: 760px) {
@@ -330,6 +341,9 @@ tbody tr:hover { background: #fafbf9; }
   .policy-row { grid-template-columns: 24px 1fr 74px; padding: 12px 0; }
   .policy-effect { grid-column: 2 / -1; }
   .execution-box { grid-template-columns: 1fr; }
+  .settings-grid, .target-options { grid-template-columns: 1fr; }
+  .settings-options { display: grid; gap: 12px; }
+  .form-actions .button { width: 100%; }
   .run-row { grid-template-columns: 1fr auto; padding: 10px 0; }
   .run-row > :nth-child(3), .run-row > :nth-child(4) { display: none; }
   .chart { height: 280px; }

@@ -33,7 +33,9 @@ class StorageService {
   }
 
   start() {
-    this.captureSample().catch((error) => console.error('[capacity] initial sample failed', error));
+    if (this.pool.configured?.() !== false) {
+      this.captureSample().catch((error) => console.error('[capacity] initial sample failed', error));
+    }
     this.timer = setInterval(() => {
       this.captureSample().catch((error) => console.error('[capacity] sample failed', error));
     }, this.config.capacitySampleIntervalMinutes * 60000);
@@ -43,6 +45,11 @@ class StorageService {
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+  }
+
+  reset() {
+    this.cache.clear();
+    this.samples = [];
   }
 
   async captureSample() {

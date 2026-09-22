@@ -60,3 +60,21 @@ test('a verified browser SSO token can temporarily authorize native backup calls
   client.clearRuntimeToken('browser-session-token');
   assert.equal(client.configured(), false);
 });
+
+test('persistent administrator credentials are verified without replacing the active configuration', async () => {
+  const client = new Sub2ApiClient({
+    sub2apiBaseUrl: 'https://sub2api.example',
+    sub2apiAdminToken: 'existing-fixed-token',
+    sub2apiAdminEmail: null,
+    sub2apiAdminPassword: null,
+    sub2apiRequestTimeoutMs: 1000
+  }, async (_url, options) => {
+    assert.equal(options.headers.authorization, 'Bearer candidate-admin-token');
+    return response(200, { code: 0, data: { id: 1, username: 'admin', role: 'admin' } });
+  });
+
+  const result = await client.validateAdminCredentials({ token: 'candidate-admin-token' });
+  assert.deepEqual(result, { valid: true, user: 'admin' });
+  assert.equal(client.config.sub2apiAdminToken, 'existing-fixed-token');
+  assert.equal(client.token, 'existing-fixed-token');
+});

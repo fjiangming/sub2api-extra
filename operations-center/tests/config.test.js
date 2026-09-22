@@ -54,6 +54,60 @@ test('local mode still requires an independent administrator password', () => {
   }), /local 认证模式/);
 });
 
+test('database can be configured after startup and managed settings override deployment placeholders', () => {
+  const initial = loadConfig({
+    NODE_ENV: 'test',
+    OPERATIONS_CENTER_ADMIN_PASSWORD: 'correct-horse-battery'
+  });
+  assert.equal(initial.databaseUrl, null);
+  assert.equal(initial.databaseSource, 'none');
+
+  const managed = loadConfig(baseEnv(), {
+    database: {
+      readUrl: 'postgresql://managed-reader@example.test/sub2api',
+      maintenanceUrl: 'postgresql://managed-cleaner@example.test/sub2api',
+      sslMode: 'require'
+    }
+  });
+  assert.match(managed.databaseUrl, /managed-reader/);
+  assert.equal(managed.databaseSource, 'managed');
+  assert.equal(managed.maintenanceDatabaseSource, 'managed');
+  assert.equal(managed.databaseSsl, 'require');
+
+  const managedReadOnly = loadConfig(baseEnv({
+    SUB2API_MAINTENANCE_DATABASE_URL: 'postgresql://old-cleaner@example.test/sub2api'
+  }), {
+    database: { readUrl: 'postgresql://managed-reader@example.test/sub2api', maintenanceUrl: null }
+  });
+  assert.equal(managedReadOnly.maintenanceDatabaseUrl, null);
+  assert.equal(managedReadOnly.maintenanceDatabaseSource, 'none');
+});
+
+test('managed credential settings can explicitly keep Sub2API account passwords optional', () => {
+  const config = loadConfig({
+    NODE_ENV: 'test',
+    OPERATIONS_CENTER_ADMIN_PASSWORD: 'correct-horse-battery',
+    ADMIN_EMAIL: 'deployment@example.test',
+    ADMIN_PASSWORD: 'deployment-password'
+  }, {
+    sub2api: { clearPersistentCredentials: true }
+  });
+  assert.equal(config.sub2apiAdminEmail, null);
+  assert.equal(config.sub2apiAdminPassword, null);
+  assert.equal(config.sub2apiCredentialSource, 'session');
+
+  const account = loadConfig({
+    NODE_ENV: 'test',
+    OPERATIONS_CENTER_ADMIN_PASSWORD: 'correct-horse-battery',
+    SUB2API_ADMIN_TOKEN: 'old-deployment-token'
+  }, {
+    sub2api: { adminToken: null, adminEmail: 'managed@example.test', adminPassword: 'managed-password' }
+  });
+  assert.equal(account.sub2apiAdminToken, null);
+  assert.equal(account.sub2apiAdminEmail, 'managed@example.test');
+  assert.equal(account.sub2apiCredentialSource, 'managed');
+});
+
 test('automatic cleanup requires the complete destructive safety configuration', () => {
   assert.throws(() => loadConfig(baseEnv({
     OPERATIONS_CENTER_AUTO_CLEANUP_ENABLED: 'true'

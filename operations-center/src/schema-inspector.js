@@ -37,6 +37,11 @@ class SchemaInspector {
     this.cachedAt = 0;
   }
 
+  reset() {
+    this.cached = null;
+    this.cachedAt = 0;
+  }
+
   async inspect({ refresh = false } = {}) {
     if (!refresh && this.cached && Date.now() - this.cachedAt < 300000) return this.cached;
     const names = [...REQUIRED_TABLES, ...OPTIONAL_TABLES];

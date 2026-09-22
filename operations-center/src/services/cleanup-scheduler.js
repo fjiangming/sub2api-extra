@@ -2,6 +2,7 @@
 
 const cron = require('node-cron');
 const { AppError } = require('../errors');
+const { poolConfigured } = require('./retention-service');
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -48,6 +49,12 @@ class CleanupScheduler {
     this.task = null;
   }
 
+  reconfigure() {
+    this.stop();
+    this.start();
+    return this.getStatus();
+  }
+
   nextRunAt() {
     const next = this.task?.getNextRun?.();
     return next ? next.toISOString() : null;
@@ -76,7 +83,7 @@ class CleanupScheduler {
       ready: Boolean(
         this.config.automaticCleanup.enabled &&
         this.config.cleanupEnabled &&
-        this.retention.maintenancePool &&
+        poolConfigured(this.retention.maintenancePool) &&
         this.retention.sub2api?.configured()
       ),
       running: this.running || cleanupRunning,
