@@ -71,6 +71,14 @@ function requestHeader(req, name) {
   return req.headers?.[String(name).toLowerCase()];
 }
 
+function sub2apiBaseUrls(config) {
+  return [...new Set([
+    config.sub2apiResolvedBaseUrl,
+    config.sub2apiBaseUrl,
+    config.sub2apiPublicUrl
+  ].filter(Boolean).map((value) => String(value).replace(/\/$/, '')))];
+}
+
 class AuthService {
   constructor(config, options = {}) {
     this.config = config;
@@ -307,37 +315,56 @@ class AuthService {
   }
 
   async trustedJson(endpoint, options = {}) {
-    if (!this.config.sub2apiBaseUrl) {
+    const baseUrls = sub2apiBaseUrls(this.config);
+    if (baseUrls.length === 0) {
       throw new AppError('SUB2API_URL_NOT_CONFIGURED', '未配置 SUB2API_BASE_URL', { status: 503 });
     }
-    const url = new URL(endpoint, `${this.config.sub2apiBaseUrl}/`);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.config.sub2apiRequestTimeoutMs || 15000);
-    try {
-      const response = await this.fetch(url, {
-        method: options.method || 'GET',
-        headers: {
-          accept: 'application/json',
-          ...(options.body == null ? {} : { 'content-type': 'application/json' }),
-          ...(options.headers || {})
-        },
-        body: options.body == null ? undefined : JSON.stringify(options.body),
-        redirect: 'error',
-        signal: controller.signal
-      });
-      const payload = await response.json().catch(() => null);
-      if (!response.ok) {
-        throw authFailure(payload || { message: `Sub2API 返回 ${response.status}` }, response.status);
+
+    let lastConnectionError = null;
+    for (const [index, baseUrl] of baseUrls.entries()) {
+      const url = new URL(endpoint, `${baseUrl}/`);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.config.sub2apiRequestTimeoutMs || 15000);
+      try {
+        const response = await this.fetch(url, {
+          method: options.method || 'GET',
+          headers: {
+            accept: 'application/json',
+            ...(options.body == null ? {} : { 'content-type': 'application/json' }),
+            ...(options.headers || {})
+          },
+          body: options.body == null ? undefined : JSON.stringify(options.body),
+          redirect: 'error',
+          signal: controller.signal
+        });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+          throw authFailure(payload || { message: `Sub2API 返回 ${response.status}` }, response.status);
+        }
+        if (payload == null || typeof payload !== 'object') {
+          throw new AppError('AUTH_UPSTREAM_INVALID_RESPONSE', 'Sub2API 认证服务返回了无效响应', {
+            status: 502
+          });
+        }
+        this.config.sub2apiResolvedBaseUrl = baseUrl;
+        return payload;
+      } catch (error) {
+        if (error instanceof AppError) throw error;
+        lastConnectionError = error;
+        if (index < baseUrls.length - 1) continue;
+      } finally {
+        clearTimeout(timeout);
       }
-      return payload;
-    } catch (error) {
-      if (error?.name === 'AbortError') {
-        throw new AppError('AUTH_UPSTREAM_TIMEOUT', '连接 Sub2API 认证服务超时', { status: 504 });
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeout);
     }
+
+    if (lastConnectionError?.name === 'AbortError') {
+      throw new AppError('AUTH_UPSTREAM_TIMEOUT', '连接 Sub2API 认证服务超时', { status: 504 });
+    }
+    throw new AppError(
+      'AUTH_UPSTREAM_UNAVAILABLE',
+      '无法连接 Sub2API 认证服务，请检查 SUB2API_BASE_URL、容器网络或反向代理',
+      { status: 503, expose: true }
+    );
   }
 }
 

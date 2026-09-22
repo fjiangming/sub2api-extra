@@ -17,6 +17,14 @@ function isAdminUser(user) {
   return role === 'admin' || role === 'root' || user?.is_admin === true || user?.isAdmin === true;
 }
 
+function sub2apiBaseUrls(config) {
+  return [...new Set([
+    config.sub2apiResolvedBaseUrl,
+    config.sub2apiBaseUrl,
+    config.sub2apiPublicUrl
+  ].filter(Boolean).map((value) => String(value).replace(/\/$/, '')))];
+}
+
 class Sub2ApiClient {
   constructor(config, fetchImpl = globalThis.fetch) {
     this.config = config;
@@ -133,49 +141,69 @@ class Sub2ApiClient {
   }
 
   async raw(path, options = {}, authenticated = true) {
-    if (!this.config.sub2apiBaseUrl) {
+    let baseUrls = sub2apiBaseUrls(this.config);
+    if (baseUrls.length === 0) {
       throw new AppError('SUB2API_URL_NOT_CONFIGURED', '未配置 SUB2API_BASE_URL', { status: 503 });
     }
     const token = authenticated ? await this.login() : null;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.config.sub2apiRequestTimeoutMs);
-    try {
-      const response = await this.fetch(`${this.config.sub2apiBaseUrl}${path}`, {
-        ...options,
-        headers: {
-          accept: 'application/json',
-          'content-type': 'application/json',
-          ...(token ? { authorization: `Bearer ${token}` } : {}),
-          ...(options.headers || {})
-        },
-        signal: controller.signal
-      });
-      const text = await response.text();
-      let payload = {};
-      try { payload = text ? JSON.parse(text) : {}; } catch { payload = { message: text }; }
-      if (!response.ok) {
-        if (response.status === 401 && authenticated) {
-          if (this.runtimeToken?.value === token) {
-            this.runtimeToken = null;
-          } else if (this.config.sub2apiAdminToken == null) {
-            this.token = null;
-            this.tokenExpiresAt = 0;
-          }
-        }
-        throw new AppError('SUB2API_REQUEST_FAILED', payload?.message || payload?.error?.message || `Sub2API 返回 ${response.status}`, {
-          status: response.status === 401 || response.status === 403 ? 409 : 502,
-          details: { upstreamStatus: response.status, upstreamCode: payload?.code || payload?.error?.code || null }
-        });
-      }
-      return payload;
-    } catch (error) {
-      if (error?.name === 'AbortError') {
-        throw new AppError('SUB2API_TIMEOUT', 'Sub2API 请求超时', { status: 504 });
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeout);
+    const method = String(options.method || 'GET').toUpperCase();
+    const mayRetryAtAnotherOrigin = ['GET', 'HEAD'].includes(method) || path === '/api/v1/auth/login';
+    baseUrls = sub2apiBaseUrls(this.config);
+    if (!mayRetryAtAnotherOrigin && baseUrls.length > 1 && !this.config.sub2apiResolvedBaseUrl) {
+      await this.raw('/api/v1/auth/me', {}, authenticated);
+      baseUrls = sub2apiBaseUrls(this.config);
     }
+
+    let lastConnectionError = null;
+    for (const [index, baseUrl] of baseUrls.entries()) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.config.sub2apiRequestTimeoutMs);
+      try {
+        const response = await this.fetch(`${baseUrl}${path}`, {
+          ...options,
+          headers: {
+            accept: 'application/json',
+            'content-type': 'application/json',
+            ...(token ? { authorization: `Bearer ${token}` } : {}),
+            ...(options.headers || {})
+          },
+          signal: controller.signal
+        });
+        const text = await response.text();
+        let payload = {};
+        try { payload = text ? JSON.parse(text) : {}; } catch { payload = { message: text }; }
+        if (!response.ok) {
+          if (response.status === 401 && authenticated) {
+            if (this.runtimeToken?.value === token) {
+              this.runtimeToken = null;
+            } else if (this.config.sub2apiAdminToken == null) {
+              this.token = null;
+              this.tokenExpiresAt = 0;
+            }
+          }
+          throw new AppError('SUB2API_REQUEST_FAILED', payload?.message || payload?.error?.message || `Sub2API 返回 ${response.status}`, {
+            status: response.status === 401 || response.status === 403 ? 409 : 502,
+            details: { upstreamStatus: response.status, upstreamCode: payload?.code || payload?.error?.code || null }
+          });
+        }
+        this.config.sub2apiResolvedBaseUrl = baseUrl;
+        return payload;
+      } catch (error) {
+        if (error instanceof AppError) throw error;
+        lastConnectionError = error;
+        if (mayRetryAtAnotherOrigin && index < baseUrls.length - 1) continue;
+        break;
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    if (lastConnectionError?.name === 'AbortError') {
+      throw new AppError('SUB2API_TIMEOUT', 'Sub2API 请求超时', { status: 504 });
+    }
+    throw new AppError('SUB2API_UNAVAILABLE', '无法连接 Sub2API，请检查服务地址和容器网络', {
+      status: 503
+    });
   }
 
   async getVersion() {

@@ -43,7 +43,7 @@ ADMIN_PASSWORD=
 SUB2API_ADMIN_TOKEN=
 ```
 
-`SUB2API_BASE_URL` 是运营中心容器访问 Sub2API 的地址；`SUB2API_PUBLIC_URL` 是浏览器访问 Sub2API 的公开地址。两者可能不同。
+`SUB2API_BASE_URL` 是运营中心容器访问 Sub2API 的首选地址；`SUB2API_PUBLIC_URL` 是浏览器访问 Sub2API 的公开地址。两者可能不同。首选地址发生 DNS、连接或超时故障时，认证与只读请求会回退到已配置的公开地址，并记住成功地址供后续写操作直接使用；响应不确定的写操作不会跨地址重放。如果服务器不能通过 `host.docker.internal:8080` 访问 Sub2API，可以直接把两项都设为 Sub2API 的公开 HTTPS 地址。
 
 使用独立登录时，把认证模式改为 `local`，并设置至少 16 位的 `OPERATIONS_CENTER_ADMIN_PASSWORD`。该密码属于运营中心，不是 Sub2API 邮箱密码。
 
@@ -203,6 +203,8 @@ Sub2API 数据库备份和覆盖恢复继续使用 Sub2API 原生功能。运营
 | 提示受管角色拥有数据库对象 | 更换新角色名；不要使用受管只读或清理角色创建对象 |
 | Schema 不兼容 | 确认连接的是 Sub2API 当前数据库，并完成 Sub2API 数据库迁移 |
 | SSO 返回会话绑定不兼容 | 关闭 Sub2API 会话绑定并重新登录，或使用 `local` 模式 |
+| SSO 或账号登录提示无法连接 Sub2API | 从运营中心容器检查 `SUB2API_BASE_URL`；若 `host.docker.internal` 不可达，将其改为与 `SUB2API_PUBLIC_URL` 相同的公开 HTTPS 地址并重建容器 |
+| SSO 提示登录状态无效，但供应商监控可用 | 分别向两个服务的 `/api/auth/sso` 提交无效测试 Token；运营中心返回 `AUTH_UPSTREAM_UNAVAILABLE` 表示网络/地址问题，返回 `AUTH_FAILED` 才表示已连通且 Token 被 Sub2API 拒绝 |
 | 自动清理在备份阶段失败 | 配置持久 Token/账号，检查原生备份权限、2FA 和最近备份状态 |
 | 删除后宿主机空间没有立即增加 | PostgreSQL 已获得内部可复用空间；普通 `DELETE` 不等于文件立即缩小 |
 

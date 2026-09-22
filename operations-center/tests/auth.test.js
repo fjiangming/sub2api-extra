@@ -125,6 +125,57 @@ test('Sub2API SSO rejects a non-administrator', async () => {
   }
 });
 
+test('Sub2API authentication falls back to the configured public URL on connection failure', async () => {
+  const accessToken = jwt({ sub: '42', role: 'admin', exp: Math.floor(Date.now() / 1000) + 3600 });
+  const requests = [];
+  const auth = new AuthService({
+    ...config,
+    authMode: 'sub2api',
+    sub2apiBaseUrl: 'http://sub2api.internal:8080',
+    sub2apiPublicUrl: 'https://sub2api.example.test',
+    sub2apiRequestTimeoutMs: 1000
+  }, {
+    fetchImpl: async (url) => {
+      requests.push(String(url));
+      if (String(url).startsWith('http://sub2api.internal:8080')) throw new TypeError('fetch failed');
+      return new Response(JSON.stringify({
+        code: 0, data: { id: 42, username: 'owner', role: 'admin' }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+  });
+  try {
+    const session = await auth.sso(request(), response(), accessToken);
+    assert.equal(session.user.name, 'owner');
+    assert.deepEqual(requests, [
+      'http://sub2api.internal:8080/api/v1/auth/me',
+      'https://sub2api.example.test/api/v1/auth/me'
+    ]);
+    assert.equal(auth.config.sub2apiResolvedBaseUrl, 'https://sub2api.example.test');
+  } finally {
+    auth.close();
+  }
+});
+
+test('Sub2API connection failures return a diagnosable application error', async () => {
+  const auth = new AuthService({
+    ...config,
+    authMode: 'sub2api',
+    sub2apiBaseUrl: 'http://sub2api.internal:8080',
+    sub2apiPublicUrl: 'https://sub2api.example.test',
+    sub2apiRequestTimeoutMs: 1000
+  }, {
+    fetchImpl: async () => { throw new TypeError('fetch failed'); }
+  });
+  try {
+    await assert.rejects(
+      auth.sso(request(), response(), 'diagnostic-invalid-token'),
+      (error) => error.code === 'AUTH_UPSTREAM_UNAVAILABLE' && error.status === 503
+    );
+  } finally {
+    auth.close();
+  }
+});
+
 test('cookie parser tolerates malformed encodings', () => {
   assert.deepEqual(parseCookies('a=1; broken=%E0%A4%A; oc_session=abc'), {
     a: '1', broken: '%E0%A4%A', oc_session: 'abc'

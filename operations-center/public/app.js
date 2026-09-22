@@ -115,14 +115,17 @@ async function api(path, options = {}) {
       ...(options.headers || {})
     }
   });
-  if (response.status === 401) {
+  const type = response.headers.get('content-type') || '';
+  const payload = response.status === 204
+    ? null
+    : type.includes('application/json') ? await response.json() : await response.text();
+  if (response.status === 401 && payload?.error?.code === 'AUTH_REQUIRED') {
     state.sessionToken = '';
+    state.csrfToken = '';
     browserSession.removeItem('operations-center.session');
     showLogin();
     throw new Error('登录已失效');
   }
-  const type = response.headers.get('content-type') || '';
-  const payload = type.includes('application/json') ? await response.json() : await response.text();
   if (!response.ok) {
     const error = new Error(payload?.error?.message || `请求失败 (${response.status})`);
     error.code = payload?.error?.code;
@@ -220,6 +223,8 @@ function ssoErrorMessage(code) {
     AUTH_FAILED: 'Sub2API 登录状态无效或已过期，请返回 Sub2API 重新登录后再打开。',
     ADMIN_REQUIRED: '当前 Sub2API 账号不是管理员，无法访问运营中心。',
     AUTH_UPSTREAM_TIMEOUT: '运营中心暂时无法连接 Sub2API，请稍后重试。',
+    AUTH_UPSTREAM_UNAVAILABLE: '运营中心无法连接 Sub2API。请检查部署配置中的 Sub2API 地址、容器网络或反向代理。',
+    AUTH_UPSTREAM_INVALID_RESPONSE: 'Sub2API 认证接口返回了无法识别的响应，请检查反向代理目标。',
     SUB2API_SESSION_BINDING_INCOMPATIBLE: 'Sub2API 已开启会话绑定，无法由运营中心校验登录状态。请关闭会话绑定并重新登录，或改用本地认证模式。',
     SSO_DISABLED: '当前运营中心未启用 Sub2API 单点登录。'
   };
@@ -990,7 +995,9 @@ async function initialize() {
     showApp(session);
     await navigateAfterAuthentication(initialView);
   } catch (error) {
-    showLogin(ssoError ? ssoErrorMessage(ssoError) : '');
+    showLogin(ssoError
+      ? ssoErrorMessage(ssoError)
+      : upstreamToken ? ssoErrorMessage(error.code) : '');
   }
 }
 

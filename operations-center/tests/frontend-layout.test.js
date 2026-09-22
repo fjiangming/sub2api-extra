@@ -47,4 +47,6 @@ test('embedded access exchanges the Sub2API token for a local session', () => {
   assert.match(script, /authorization: `Session \$\{state\.sessionToken\}`/);
   assert.match(script, /browserSession\.setItem\('operations-center\.session'/);
   assert.match(html, /id="sub2api-login-link"[^>]*target="_top"/);
+  assert.match(script, /payload\?\.error\?\.code === 'AUTH_REQUIRED'/);
+  assert.match(script, /AUTH_UPSTREAM_UNAVAILABLE: '运营中心无法连接 Sub2API/);
 });

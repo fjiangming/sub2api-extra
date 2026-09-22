@@ -245,7 +245,7 @@ SUB2API_MAINTENANCE_DATABASE_URL=
 OPERATIONS_CENTER_REQUIRE_FRESH_BACKUP=true
 ```
 
-运营中心数据库连接、权限初始化、依赖检查和清理计划均可在页面完成，详见[部署与操作手册](operations-center/docs/deployment-operations.md)。
+运营中心数据库连接、权限初始化、依赖检查和清理计划均可在页面完成。若服务器上的运营中心容器不能通过 `host.docker.internal:8080` 访问 Sub2API，请把 `SUB2API_BASE_URL` 改为与 `SUB2API_PUBLIC_URL` 相同的公开 HTTPS 地址；新版的认证与只读请求也会在内部地址发生连接故障时自动回退到该公开地址。详见[部署与操作手册](operations-center/docs/deployment-operations.md)。
 
 > 完整参数说明请参阅各模块的 `.env.example` 或模块 README。
 

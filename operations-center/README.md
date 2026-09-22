@@ -103,7 +103,7 @@ docker compose --env-file compose.services.env up -d --no-build operations-cente
 
 推荐把 `OPERATIONS_CENTER_AUTH_MODE` 设为 `sub2api`，然后在 Sub2API 管理后台的“设置 -> 自定义菜单”中添加运营中心公开地址，并将可见性限制为管理员。Sub2API 会把当前访问 Token 附加到 iframe 地址；运营中心向 `/api/v1/auth/me` 校验管理员身份后，立即换成自己的短期内存会话并从地址栏移除原始 Token。Token 和会话都不会写入数据库。
 
-跨域 HTTPS iframe 同时使用分区 Cookie 和页面会话令牌兜底。反向代理应传递 `X-Forwarded-Proto`；当 `SUB2API_BASE_URL` 是 `host.docker.internal` 等容器内地址时，必须另设浏览器可访问的 `SUB2API_PUBLIC_URL`。
+跨域 HTTPS iframe 同时使用分区 Cookie 和页面会话令牌兜底。反向代理应传递 `X-Forwarded-Proto`；当 `SUB2API_BASE_URL` 是 `host.docker.internal` 等容器内地址时，必须另设浏览器可访问的 `SUB2API_PUBLIC_URL`。内部地址发生 DNS、连接或超时故障时，认证与只读管理请求会安全回退到这个已配置的公开地址，并记住成功地址供后续写操作直接使用；收到明确的 HTTP 鉴权错误不会重试，响应不确定的写操作也不会跨地址重放。
 
 Sub2API 的会话绑定会校验登录浏览器的 IP 和 User-Agent，独立服务无法代替浏览器通过该校验。使用自定义菜单 SSO 时需要关闭会话绑定并重新登录；必须保留会话绑定时，请改用 `local` 模式。
 

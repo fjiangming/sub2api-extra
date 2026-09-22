@@ -78,3 +78,46 @@ test('persistent administrator credentials are verified without replacing the ac
   assert.equal(client.config.sub2apiAdminToken, 'existing-fixed-token');
   assert.equal(client.token, 'existing-fixed-token');
 });
+
+test('native API calls fall back to the public Sub2API URL after a connection failure', async () => {
+  const requests = [];
+  const client = new Sub2ApiClient({
+    sub2apiBaseUrl: 'http://sub2api.internal:8080',
+    sub2apiPublicUrl: 'https://sub2api.example',
+    sub2apiAdminToken: 'fixed-token',
+    sub2apiRequestTimeoutMs: 1000
+  }, async (url) => {
+    requests.push(url);
+    if (url.startsWith('http://sub2api.internal:8080')) throw new TypeError('fetch failed');
+    return response(200, { code: 0, data: { items: [{ id: 'b1' }] } });
+  });
+
+  assert.deepEqual(await client.listBackups(), [{ id: 'b1' }]);
+  assert.deepEqual(requests, [
+    'http://sub2api.internal:8080/api/v1/admin/backups',
+    'https://sub2api.example/api/v1/admin/backups'
+  ]);
+  assert.equal(client.config.sub2apiResolvedBaseUrl, 'https://sub2api.example');
+});
+
+test('mutating native API calls are not replayed across origins after an uncertain failure', async () => {
+  const requests = [];
+  const client = new Sub2ApiClient({
+    sub2apiBaseUrl: 'http://sub2api.internal:8080',
+    sub2apiPublicUrl: 'https://sub2api.example',
+    sub2apiAdminToken: 'fixed-token',
+    sub2apiRequestTimeoutMs: 1000
+  }, async (url) => {
+    requests.push(url);
+    if (url.endsWith('/api/v1/auth/me')) {
+      return response(200, { code: 0, data: { id: 1, username: 'admin', role: 'admin' } });
+    }
+    throw new TypeError('connection reset after request');
+  });
+
+  await assert.rejects(client.startBackup(), (error) => error.code === 'SUB2API_UNAVAILABLE');
+  assert.deepEqual(requests, [
+    'http://sub2api.internal:8080/api/v1/auth/me',
+    'http://sub2api.internal:8080/api/v1/admin/backups'
+  ]);
+});

@@ -189,10 +189,21 @@ function createApp({ config, database, auth, inspector, metrics, storage, retent
         'AUTH_FAILED',
         'ADMIN_REQUIRED',
         'AUTH_UPSTREAM_TIMEOUT',
+        'AUTH_UPSTREAM_UNAVAILABLE',
+        'AUTH_UPSTREAM_INVALID_RESPONSE',
         'SUB2API_SESSION_BINDING_INCOMPATIBLE',
         'SSO_DISABLED'
       ].includes(error?.code) ? error.code : 'AUTH_FAILED';
       search.set('sso_error', exposedCode);
+      if (config.env !== 'test') {
+        console.warn(JSON.stringify({
+          level: 'warn',
+          requestId: req.id,
+          message: 'Sub2API SSO exchange failed',
+          code: exposedCode,
+          remoteStatus: error?.details?.remoteStatus || null
+        }));
+      }
       return res.redirect(303, `${cleanPath}?${search}`);
     }
   }));
