@@ -30,6 +30,9 @@ jobs:
           - service: provider-monitor
             context: ./provider-monitor
             tag_prefix: provider-monitor-
+          - service: operations-center
+            context: ./operations-center
+            tag_prefix: operations-center-
     permissions:
       contents: read
       packages: write

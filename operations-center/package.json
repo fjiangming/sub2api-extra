@@ -1,0 +1,25 @@
+{
+  "name": "sub2api-operations-center",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Stateless operations analytics and retention control plane for Sub2API",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --env-file=.env src/server.js",
+    "dev": "node --env-file=.env --watch src/server.js",
+    "test": "node --test --test-concurrency=1 tests/*.test.js",
+    "check": "node --check src/server.js && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=20.18.1"
+  },
+  "dependencies": {
+    "echarts": "^6.0.0",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.1.0",
+    "helmet": "^8.1.0",
+    "lucide": "^0.544.0",
+    "pg": "^8.16.3",
+    "zod": "^4.1.11"
+  }
+}

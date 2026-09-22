@@ -1,0 +1,77 @@
+{
+  "unit": "usd_per_1m_tokens",
+  "pricing_mode": "merge",
+  "channel": {
+    "name": "国内模型统一定价",
+    "description": "国内模型共享基础价格、长上下文阶梯和峰谷倍率",
+    "status": "active",
+    "billing_model_source": "channel_mapped",
+    "restrict_models": false,
+    "groups": {
+      "mode": "merge",
+      "platforms": ["deepseek", "kimi", "zhipu", "minimax"],
+      "name_contains": ["通义", "豆包"],
+      "include_inactive": true
+    }
+  },
+  "rules": [
+    {
+      "platform": "deepseek",
+      "models": ["deepseek-chat", "deepseek-reasoner"],
+      "billing_mode": "token",
+      "input": 0.14,
+      "output": 0.28,
+      "cache_read": 0.014,
+      "long_context_tiers": [
+        {
+          "min_tokens": 32000,
+          "max_tokens": null,
+          "input_multiplier": 2,
+          "output_multiplier": 2,
+          "cache_read_multiplier": 2
+        }
+      ],
+      "time_pricing": {
+        "timezone": "Asia/Shanghai",
+        "weekdays_only": false,
+        "periods": [
+          {
+            "start_time": "00:00",
+            "end_time": "08:00",
+            "multiplier": 0.5
+          },
+          {
+            "start_time": "08:00",
+            "end_time": "22:00",
+            "multiplier": 1.2
+          },
+          {
+            "start_time": "22:00",
+            "end_time": "00:00",
+            "multiplier": 0.5
+          }
+        ]
+      }
+    },
+    {
+      "platform": "kimi",
+      "models": ["kimi-k2-*"],
+      "billing_mode": "token",
+      "input": 0.2,
+      "output": 0.8,
+      "cache_write": 0.25,
+      "cache_read": 0.05,
+      "fast_multiplier": 1.5,
+      "long_context_tiers": [
+        {
+          "min_tokens": 128000,
+          "max_tokens": null,
+          "input": 0.4,
+          "output": 1.6,
+          "cache_write": 0.5,
+          "cache_read": 0.1
+        }
+      ]
+    }
+  ]
+}

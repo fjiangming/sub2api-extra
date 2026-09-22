@@ -8,6 +8,7 @@ Sub2API 的可插拔扩展服务集合。每个功能作为独立模块运行，
 |------|-----------|:--------:|------|
 | **账号管理** | `ghcr.io/fjiangming/sub2api-extra:latest` | `9870` | [README](account-manager/README.md) |
 | **供应商监控** | `ghcr.io/fjiangming/sub2api-extra:provider-monitor-latest` | `9871` | [README](provider-monitor/README.md) |
+| **运营数据与存储管理中心** | `ghcr.io/fjiangming/sub2api-extra:operations-center-latest` | `9872` | [README](operations-center/README.md) |
 
 > 💡 后续新增的功能模块会持续补充到此表中。
 
@@ -30,13 +31,16 @@ sub2api-extra/
 ├── account-manager/
 │   ├── compose.yaml
 │   └── .env
-└── provider-monitor/
+├── provider-monitor/
+│   ├── compose.yaml
+│   └── .env
+└── operations-center/
     ├── compose.yaml
     └── .env
 ```
 
 ```bash
-mkdir -p sub2api-extra/account-manager sub2api-extra/provider-monitor
+mkdir -p sub2api-extra/account-manager sub2api-extra/provider-monitor sub2api-extra/operations-center
 cd sub2api-extra
 ```
 
@@ -50,13 +54,14 @@ name: sub2api-extra
 include:
   - ./account-manager/compose.yaml
   - ./provider-monitor/compose.yaml
+  - ./operations-center/compose.yaml
 ```
 
 #### `compose.services.env`（选择要启用的服务）
 
 ```dotenv
 # 逗号分隔的服务名；不需要的模块注释掉或去掉即可
-COMPOSE_PROFILES=account-manager,provider-monitor
+COMPOSE_PROFILES=account-manager,provider-monitor,operations-center
 ```
 
 > 只部署其中一个模块时，保留对应名称即可，例如 `COMPOSE_PROFILES=provider-monitor`。
@@ -113,6 +118,33 @@ services:
 volumes:
   provider-monitor-data:
     name: ${PROVIDER_MONITOR_DATA_VOLUME:-sub2api-extra_provider-monitor-data}
+```
+
+#### `operations-center/compose.yaml`
+
+```yaml
+services:
+  operations-center:
+    profiles: [operations-center]
+    image: ${OPERATIONS_CENTER_IMAGE:-ghcr.io/fjiangming/sub2api-extra:operations-center-latest}
+    container_name: ${OPERATIONS_CENTER_CONTAINER_NAME:-sub2api-operations-center}
+    restart: ${OPERATIONS_CENTER_RESTART_POLICY:-unless-stopped}
+    ports:
+      - "127.0.0.1:${OPERATIONS_CENTER_PORT:-9872}:9872"
+    environment:
+      OPERATIONS_CENTER_BIND_HOST: "0.0.0.0"
+      OPERATIONS_CENTER_PORT: "9872"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: ./.env
+        required: true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9872/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 ```
 
 ### 3. 配置模块环境变量
@@ -179,6 +211,35 @@ ADMIN_EMAIL=admin@example.com
 ADMIN_PASSWORD=替换为你的 Sub2API 管理员密码
 ```
 
+#### `operations-center/.env`
+
+```dotenv
+OPERATIONS_CENTER_IMAGE=ghcr.io/fjiangming/sub2api-extra:operations-center-latest
+OPERATIONS_CENTER_CONTAINER_NAME=sub2api-operations-center
+OPERATIONS_CENTER_RESTART_POLICY=unless-stopped
+OPERATIONS_CENTER_PORT=9872
+
+NODE_ENV=production
+OPERATIONS_CENTER_ADMIN_USER=admin
+OPERATIONS_CENTER_ADMIN_PASSWORD=替换为至少16个字符的随机密码
+
+# 统计使用只读角色；必须与 Sub2API 指向同一个 PostgreSQL 数据库
+SUB2API_DATABASE_URL=postgresql://sub2api_ops_read:替换密码@host.docker.internal:5432/sub2api
+SUB2API_DATABASE_SSL=disable
+SUB2API_TIMEZONE=Asia/Shanghai
+FINANCE_TIMEZONE=Asia/Shanghai
+
+# 用于检查版本并复用 Sub2API 原生备份能力
+SUB2API_BASE_URL=http://host.docker.internal:8080
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=替换为你的 Sub2API 管理员密码
+
+# 默认只读；启用删除前请按模块 README 创建独立受限维护角色
+OPERATIONS_CENTER_ENABLE_CLEANUP=false
+SUB2API_MAINTENANCE_DATABASE_URL=
+OPERATIONS_CENTER_REQUIRE_FRESH_BACKUP=true
+```
+
 > 完整参数说明请参阅各模块的 `.env.example` 或模块 README。
 
 ### 4. 拉取镜像并启动
@@ -224,6 +285,9 @@ ACCOUNT_MANAGER_IMAGE=ghcr.io/fjiangming/sub2api-extra:1.2.3
 
 # provider-monitor/.env
 PROVIDER_MONITOR_IMAGE=ghcr.io/fjiangming/sub2api-extra:provider-monitor-1.2.3
+
+# operations-center/.env
+OPERATIONS_CENTER_IMAGE=ghcr.io/fjiangming/sub2api-extra:operations-center-1.2.3
 ```
 
 ---
@@ -234,6 +298,7 @@ PROVIDER_MONITOR_IMAGE=ghcr.io/fjiangming/sub2api-extra:provider-monitor-1.2.3
 |------|----------|----------|
 | 账号管理 | `account-manager/.env` | [账号管理 README](account-manager/README.md) |
 | 供应商监控 | `provider-monitor/.env` | [供应商监控 README](provider-monitor/README.md) |
+| 运营数据与存储管理中心 | `operations-center/.env` | [运营中心 README](operations-center/README.md) |
 
 修改 `.env` 后需重建容器：
 
@@ -245,10 +310,10 @@ docker compose --env-file compose.services.env up -d --no-build --remove-orphans
 
 ## 🐳 Docker 镜像自动构建
 
-仓库中的 [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml) 会构建两个模块并发布到同一个公开 GHCR 包：
+仓库中的 [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml) 会构建三个模块并发布到同一个公开 GHCR 包：
 
-- 推送到 `main` 或 `master`：构建并推送分支标签和提交 SHA 标签；默认分支同时更新 `latest`、`provider-monitor-latest`。
-- 推送 `v*.*.*` 标签：额外生成账号管理的版本标签（如 `1.2.3`）和供应商监控标签（如 `provider-monitor-1.2.3`）。
+- 推送到 `main` 或 `master`：构建并推送分支标签和提交 SHA 标签；默认分支同时更新 `latest`、`provider-monitor-latest`、`operations-center-latest`。
+- 推送 `v*.*.*` 标签：额外生成账号管理、供应商监控和运营中心的版本标签，例如 `1.2.3`、`provider-monitor-1.2.3`、`operations-center-1.2.3`。
 - Pull Request：只执行双架构构建校验，不推送镜像。
 - Actions 页面可通过 `workflow_dispatch` 手动触发。
 

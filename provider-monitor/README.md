@@ -125,6 +125,72 @@ Gemini 账号测试接口可以转发自定义提示词。部分 Sub2API 版本�
 - `GET /api/account-monitor/probes`
 - `POST /api/account-monitor/probes`
 
+### 批量维护渠道模型价格
+
+[`pricing-template.example.json`](pricing-template.example.json) 可以把一份价格表同步为 Sub2API 渠道配置。脚本按 `channel.name` 查找渠道：存在时更新，不存在时创建。渠道内的价格由所有关联分组共享；分组自身存在同名 `model_pricing` 时仍会优先覆盖渠道价格，dry-run 的 `group_pricing_overrides` 会列出这些分组供清理。
+
+```bash
+# 仅预览渠道、价格及分组关联变化，不写入
+npm run pricing:sync -- --file pricing-template.json
+
+# 确认预览后创建或更新渠道
+npm run pricing:sync -- --file pricing-template.json --apply
+
+# 临时覆盖模板中的价格或分组关联模式
+npm run pricing:sync -- --file pricing-template.json --mode replace --apply
+npm run pricing:sync -- --file pricing-template.json --group-mode replace --apply
+```
+
+`pricing_mode: "merge"` 会替换模板覆盖到的模型，并保留渠道中不冲突的其它模型；`replace` 会以模板规则完全替换渠道价格。`channel.groups.mode` 同理：`merge` 保留原关联并加入新匹配分组，`replace` 只保留本次匹配结果。每个分组最多属于一个渠道；脚本发现匹配分组已在其它渠道时会在任何写入前停止。
+
+关联分组支持以下选择器，多个选择器之间是并集：
+
+```json
+{
+  "channel": {
+    "name": "国内模型统一定价",
+    "groups": {
+      "mode": "merge",
+      "ids": [3, 4],
+      "names": ["指定分组名"],
+      "name_contains": ["通义", "豆包"],
+      "platforms": ["deepseek", "kimi", "zhipu", "minimax"],
+      "include_inactive": true
+    }
+  }
+}
+```
+
+使用 `platforms` 或 `name_contains` 后，新建匹配分组只需重新运行脚本即可自动关联并继承渠道定价。通义、豆包等 OpenAI 兼容分组的规则必须填写分组实际使用的 `platform`（通常是 `openai`），不同平台的同名模型彼此隔离。
+
+价格单位推荐使用 `unit: "usd_per_1m_tokens"`，例如 `$0.14 / 1M tokens` 写成 `input: 0.14`，脚本会转换成 API 使用的每 token 价格；`per_request` 始终按每次请求的美元价格，不做转换。每条规则支持：
+
+- 模型精确名和末尾 `*` 通配符；
+- `input`、`output`、`cache_write`、`cache_write_1h`、`cache_read`、`image_input`、`image_output` 和 `per_request`；
+- `fast_multiplier`、`flex_multiplier`、`max_reasoning_effort_multiplier`；
+- `long_context_tiers`（也可写 API 原名 `intervals`），阶梯内可使用绝对价格或 `input/output/cache_write/cache_read_multiplier`；
+- token 模式的 `time_pricing` 峰谷倍率。
+
+长上下文区间沿用 Sub2API 的 `(min_tokens, max_tokens]` 语义，`max_tokens: null` 表示无上限。峰谷定价支持 IANA 时区、仅工作日和多个不重叠时段：
+
+```json
+{
+  "time_pricing": {
+    "timezone": "Asia/Shanghai",
+    "weekdays_only": false,
+    "periods": [
+      { "start_time": "00:00", "end_time": "08:00", "multiplier": 0.5 },
+      { "start_time": "08:00", "end_time": "22:00", "multiplier": 1.2 },
+      { "start_time": "22:00", "end_time": "00:00", "multiplier": 0.5 }
+    ]
+  }
+}
+```
+
+跨午夜时段必须像示例一样在 `00:00` 拆成两段。未覆盖的时段倍率为 `1`，分时倍率只适用于 token 计费规则。
+
+脚本通过 `POST /api/v1/admin/channels` 或 `PUT /api/v1/admin/channels/:id` 写入。更新已有渠道时，只提交模板管理的渠道字段、关联分组和 `model_pricing`，不会覆盖模型映射、功能配置或账号统计定价。认证沿用 Provider Monitor 环境变量：优先使用 `SUB2API_ADMIN_API_KEY`，也可使用 `SUB2API_ADMIN_TOKEN` 或 `ADMIN_EMAIL` / `ADMIN_PASSWORD`。
+
 ### Sub2API 供应商认证
 
 添加 Sub2API 供应商时支持三种模式：

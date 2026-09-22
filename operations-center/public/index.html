@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Sub2API 运营中心</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/vendor/echarts.js" defer></script>
+  <script src="/vendor/lucide.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div id="login-view" class="login-view" hidden>
+    <main class="login-panel" aria-labelledby="login-title">
+      <div class="brand-mark" aria-hidden="true"><i data-lucide="chart-no-axes-combined"></i></div>
+      <p class="product-name">Sub2API 运营中心</p>
+      <h1 id="login-title">管理员登录</h1>
+      <form id="login-form" novalidate>
+        <label>用户名<input id="login-username" name="username" autocomplete="username" required></label>
+        <label>密码<input id="login-password" name="password" type="password" autocomplete="current-password" required></label>
+        <p id="login-error" class="form-error" role="alert" hidden></p>
+        <button class="button primary full" type="submit"><i data-lucide="log-in"></i><span>登录</span></button>
+      </form>
+    </main>
+  </div>
+
+  <div id="app-shell" class="app-shell" hidden>
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark small" aria-hidden="true"><i data-lucide="chart-no-axes-combined"></i></div>
+        <div><strong>Sub2API</strong><span>运营中心</span></div>
+      </div>
+      <nav id="main-nav" aria-label="主导航">
+        <button class="nav-item active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>运营概览</span></button>
+        <button class="nav-item" data-view="usage"><i data-lucide="activity"></i><span>用量分析</span></button>
+        <button class="nav-item" data-view="users"><i data-lucide="users"></i><span>用户分析</span></button>
+        <button class="nav-item" data-view="finance"><i data-lucide="landmark"></i><span>收款与入账</span></button>
+        <button class="nav-item" data-view="storage"><i data-lucide="database"></i><span>存储容量</span></button>
+        <button class="nav-item" data-view="retention"><i data-lucide="shield-check"></i><span>数据清理</span></button>
+        <button class="nav-item" data-view="maintenance"><i data-lucide="wrench"></i><span>维护状态</span></button>
+      </nav>
+      <div class="sidebar-footer">
+        <span id="connection-dot" class="status-dot"></span>
+        <span id="connection-label">连接检查中</span>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <button id="mobile-menu" class="icon-button mobile-only" type="button" title="打开导航" aria-label="打开导航"><i data-lucide="menu"></i></button>
+        <div>
+          <h1 id="page-title">运营概览</h1>
+          <p id="page-meta">正在读取数据</p>
+        </div>
+        <div class="topbar-actions">
+          <button id="refresh-button" class="icon-button" type="button" title="刷新当前页面" aria-label="刷新当前页面"><i data-lucide="refresh-cw"></i></button>
+          <span id="admin-name" class="admin-name"></span>
+          <button id="logout-button" class="icon-button" type="button" title="退出登录" aria-label="退出登录"><i data-lucide="log-out"></i></button>
+        </div>
+      </header>
+
+      <main id="content" class="content">
+        <section id="view-overview" class="view active" aria-labelledby="page-title">
+          <div id="overview-alerts" class="alert-stack"></div>
+          <div id="overview-metrics" class="metric-grid"></div>
+          <div class="split-layout">
+            <section class="panel chart-panel">
+              <div class="panel-heading"><div><h2>近 30 天用量</h2><p id="overview-usage-meta">日汇总</p></div></div>
+              <div id="overview-chart" class="chart" aria-label="近 30 天用量趋势图"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-heading"><div><h2>本月实收</h2><p id="overview-finance-zone"></p></div></div>
+              <div id="overview-payments" class="compact-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="view-usage" class="view" aria-labelledby="page-title">
+          <form id="usage-filter" class="filter-bar">
+            <label>开始日期<input name="start" type="date" required></label>
+            <label>结束日期<input name="end" type="date" required></label>
+            <label>明细维度<select name="dimension"><option value="model">模型</option><option value="user">用户</option><option value="apiKey">API Key</option><option value="group">分组</option><option value="account">账号</option><option value="billing">计费类型</option></select></label>
+            <button class="button primary" type="submit"><i data-lucide="search"></i><span>查询</span></button>
+          </form>
+          <div id="usage-notices" class="alert-stack"></div>
+          <div id="usage-metrics" class="metric-grid compact"></div>
+          <section class="panel chart-panel"><div class="panel-heading"><div><h2>用量趋势</h2><p id="usage-zone"></p></div></div><div id="usage-chart" class="chart"></div></section>
+          <section class="panel"><div class="panel-heading"><div><h2>维度分布</h2><p>仅显示仍在线的请求明细</p></div></div><div class="table-wrap"><table><thead><tr><th>维度</th><th>请求</th><th>输入 Token</th><th>输出 Token</th><th>用户消费</th><th>平均耗时</th></tr></thead><tbody id="usage-dimensions"></tbody></table></div></section>
+        </section>
+
+        <section id="view-users" class="view" aria-labelledby="page-title">
+          <form id="users-filter" class="filter-bar">
+            <label>开始日期<input name="start" type="date" required></label>
+            <label>结束日期<input name="end" type="date" required></label>
+            <button class="button primary" type="submit"><i data-lucide="search"></i><span>查询</span></button>
+          </form>
+          <div id="users-metrics" class="metric-grid compact"></div>
+          <section class="panel chart-panel"><div class="panel-heading"><div><h2>活跃与新增</h2><p id="users-zone"></p></div></div><div id="users-chart" class="chart"></div></section>
+          <section class="panel"><div class="panel-heading"><div><h2>注册留存</h2><p>最近 90 天 cohort</p></div></div><div class="table-wrap"><table><thead><tr><th>注册日</th><th>注册人数</th><th>次日</th><th>7 日</th><th>30 日</th></tr></thead><tbody id="users-cohorts"></tbody></table></div></section>
+        </section>
+
+        <section id="view-finance" class="view" aria-labelledby="page-title">
+          <form id="finance-filter" class="filter-bar">
+            <label>开始日期<input name="start" type="date" required></label>
+            <label>结束日期<input name="end" type="date" required></label>
+            <button class="button primary" type="submit"><i data-lucide="search"></i><span>查询</span></button>
+          </form>
+          <div id="finance-notices" class="alert-stack"></div>
+          <div id="finance-metrics" class="metric-grid compact"></div>
+          <section class="panel chart-panel"><div class="panel-heading"><div><h2>实收与退款</h2><p id="finance-zone"></p></div></div><div id="finance-chart" class="chart"></div></section>
+          <div class="split-layout equal">
+            <section class="panel"><div class="panel-heading"><div><h2>现金汇总</h2><p>按币种与订单类型</p></div></div><div class="table-wrap"><table><thead><tr><th>币种</th><th>类型</th><th>订单</th><th>实收</th><th>退款估算</th><th>净额</th></tr></thead><tbody id="finance-summary"></tbody></table></div></section>
+            <section class="panel"><div class="panel-heading"><div><h2>额度入账</h2><p>不与现金实收相加</p></div></div><div class="table-wrap"><table><thead><tr><th>日期</th><th>来源</th><th>事件</th><th>额度</th></tr></thead><tbody id="finance-credits"></tbody></table></div></section>
+          </div>
+        </section>
+
+        <section id="view-storage" class="view" aria-labelledby="page-title">
+          <div id="storage-metrics" class="metric-grid compact"></div>
+          <div id="storage-notices" class="alert-stack"></div>
+          <section class="panel"><div class="panel-heading"><div><h2>关系占用</h2><p>表、索引与 TOAST，按总占用排序</p></div><button id="storage-refresh" class="button secondary" type="button"><i data-lucide="scan-search"></i><span>重新测量</span></button></div><div class="table-wrap"><table><thead><tr><th>表</th><th>属性</th><th>总占用</th><th>表数据</th><th>索引</th><th>估算活行</th><th>死行</th><th>最近 autovacuum</th></tr></thead><tbody id="storage-relations"></tbody></table></div></section>
+        </section>
+
+        <section id="view-retention" class="view" aria-labelledby="page-title">
+          <div id="retention-status" class="alert-stack"></div>
+          <section class="panel">
+            <div class="panel-heading"><div><h2>保留策略</h2><p>固定白名单，不接受自定义表或 SQL</p></div><button id="preview-button" class="button primary" type="button"><i data-lucide="file-search"></i><span>生成清理预览</span></button></div>
+            <div id="policy-list" class="policy-list"></div>
+          </section>
+          <section id="preview-panel" class="panel danger-panel" hidden>
+            <div class="panel-heading"><div><h2>清理预览</h2><p id="preview-meta"></p></div><button id="backup-button" class="button secondary" type="button"><i data-lucide="database-backup"></i><span>触发原生备份</span></button></div>
+            <div id="preview-alerts" class="alert-stack"></div>
+            <div class="table-wrap"><table><thead><tr><th>目标</th><th>截止时间</th><th>符合行数</th><th>逻辑体积估算</th><th>影响</th></tr></thead><tbody id="preview-targets"></tbody></table></div>
+            <div class="execution-box">
+              <label class="check-row"><input id="confirm-impact" type="checkbox"><span>已核对不可逆的功能与用户体验影响</span></label>
+              <label class="check-row"><input id="confirm-downstream" type="checkbox"><span>已确认下游同步水位安全，最近 30 天足以覆盖故障恢复</span></label>
+              <label>确认短语<input id="confirmation-phrase" autocomplete="off" placeholder="按预览结果输入"></label>
+              <button id="execute-button" class="button danger" type="button"><i data-lucide="trash-2"></i><span>执行已预览范围</span></button>
+            </div>
+          </section>
+          <section class="panel"><div class="panel-heading"><div><h2>最近运行</h2><p>进程内有上限记录</p></div></div><div id="cleanup-runs" class="run-list"></div></section>
+        </section>
+
+        <section id="view-maintenance" class="view" aria-labelledby="page-title">
+          <div id="maintenance-metrics" class="metric-grid compact"></div>
+          <section class="panel"><div class="panel-heading"><div><h2>Schema 能力</h2><p id="schema-checked-at"></p></div></div><div class="table-wrap"><table><thead><tr><th>对象</th><th>状态</th><th>分区</th><th>字段数</th></tr></thead><tbody id="schema-capabilities"></tbody></table></div></section>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+</body>
+</html>

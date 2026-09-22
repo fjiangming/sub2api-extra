@@ -5,3 +5,4 @@ name: sub2api-extra
 include:
   - ./account-manager/compose.yaml
   - ./provider-monitor/compose.yaml
+  - ./operations-center/compose.yaml
