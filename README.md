@@ -220,8 +220,10 @@ OPERATIONS_CENTER_RESTART_POLICY=unless-stopped
 OPERATIONS_CENTER_PORT=9872
 
 NODE_ENV=production
+OPERATIONS_CENTER_AUTH_MODE=sub2api
+# local 模式才需要以下独立账号密码
 OPERATIONS_CENTER_ADMIN_USER=admin
-OPERATIONS_CENTER_ADMIN_PASSWORD=替换为至少16个字符的随机密码
+OPERATIONS_CENTER_ADMIN_PASSWORD=
 
 # 统计使用只读角色；必须与 Sub2API 指向同一个 PostgreSQL 数据库
 SUB2API_DATABASE_URL=postgresql://sub2api_ops_read:替换密码@host.docker.internal:5432/sub2api
@@ -231,8 +233,11 @@ FINANCE_TIMEZONE=Asia/Shanghai
 
 # 用于检查版本并复用 Sub2API 原生备份能力
 SUB2API_BASE_URL=http://host.docker.internal:8080
-ADMIN_EMAIL=admin@example.com
-ADMIN_PASSWORD=替换为你的 Sub2API 管理员密码
+SUB2API_PUBLIC_URL=https://sub2api.example.com
+# 从 Sub2API 管理员自定义菜单进入时可全部留空；无人值守任务建议配置 Token 或账号密码
+SUB2API_ADMIN_TOKEN=
+ADMIN_EMAIL=
+ADMIN_PASSWORD=
 
 # 默认只读；启用删除前请按模块 README 创建独立受限维护角色
 OPERATIONS_CENTER_ENABLE_CLEANUP=false

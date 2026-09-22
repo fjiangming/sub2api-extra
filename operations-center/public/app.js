@@ -1,8 +1,15 @@
 'use strict';
 
+const browserSession = typeof sessionStorage === 'undefined'
+  ? { getItem: () => '', setItem: () => {}, removeItem: () => {} }
+  : sessionStorage;
+
 const state = {
   csrfToken: '',
+  sessionToken: browserSession.getItem('operations-center.session') || '',
   user: null,
+  authentication: null,
+  authConfig: null,
   currentView: 'overview',
   charts: new Map(),
   preview: null,
@@ -97,14 +104,18 @@ function setDefaultDates(formId, days = 30) {
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
+    credentials: 'same-origin',
     headers: {
       accept: 'application/json',
       ...(options.body ? { 'content-type': 'application/json' } : {}),
+      ...(state.sessionToken ? { authorization: `Session ${state.sessionToken}` } : {}),
       ...(state.csrfToken && options.method && options.method !== 'GET' ? { 'x-csrf-token': state.csrfToken } : {}),
       ...(options.headers || {})
     }
   });
   if (response.status === 401) {
+    state.sessionToken = '';
+    browserSession.removeItem('operations-center.session');
     showLogin();
     throw new Error('登录已失效');
   }
@@ -136,6 +147,18 @@ function setConnection(ok, text) {
   $('connection-label').textContent = text;
 }
 
+function revealActiveTab() {
+  requestAnimationFrame(() => {
+    const nav = $('main-nav');
+    const active = nav.querySelector('.module-tab.active');
+    if (!active) return;
+    const navRect = nav.getBoundingClientRect();
+    const activeRect = active.getBoundingClientRect();
+    if (activeRect.left < navRect.left + 8) nav.scrollLeft -= navRect.left + 8 - activeRect.left;
+    if (activeRect.right > navRect.right - 8) nav.scrollLeft += activeRect.right - navRect.right + 8;
+  });
+}
+
 function alertHtml(type, message) {
   const icons = { info: 'info', warning: 'triangle-alert', error: 'circle-x', success: 'circle-check' };
   return `<div class="alert ${type}">${icon(icons[type] || 'info')}<div>${escapeHtml(message)}</div></div>`;
@@ -153,13 +176,15 @@ function badge(status) {
   const mapping = {
     completed: ['success', '已完成'], running: ['warning', '执行中'], queued: ['neutral', '等待中'],
     pending: ['neutral', '等待中'], partial: ['warning', '部分完成'], canceled: ['neutral', '已取消'],
-    failed: ['error', '失败'], available: ['success', '可用'], missing: ['error', '缺失']
+    failed: ['error', '失败'], blocked: ['error', '已阻断'], skipped: ['neutral', '已跳过'],
+    started: ['success', '已启动'], disabled: ['neutral', '未启用'], ready: ['success', '已就绪'],
+    available: ['success', '可用'], missing: ['error', '缺失']
   };
   const [tone, label] = mapping[status] || ['neutral', status || '未知'];
   return `<span class="badge ${tone}">${escapeHtml(label)}</span>`;
 }
 
-function showLogin() {
+function showLogin(message = '') {
   if (state.runPoller) clearInterval(state.runPoller);
   state.runPoller = null;
   state.csrfToken = '';
@@ -167,17 +192,35 @@ function showLogin() {
   $('app-shell').hidden = true;
   $('login-view').hidden = false;
   $('login-password').value = '';
+  $('login-error').textContent = message;
+  $('login-error').hidden = !message;
   setTimeout(() => $('login-username').focus(), 0);
   refreshIcons();
 }
 
 function showApp(session) {
+  if (session.sessionToken) {
+    state.sessionToken = session.sessionToken;
+    browserSession.setItem('operations-center.session', session.sessionToken);
+  }
   state.csrfToken = session.csrfToken;
   state.user = session.user;
+  state.authentication = session.authentication || null;
   $('admin-name').textContent = session.user.name;
   $('login-view').hidden = true;
   $('app-shell').hidden = false;
   refreshIcons();
+}
+
+function ssoErrorMessage(code) {
+  const messages = {
+    AUTH_FAILED: 'Sub2API 登录状态无效或已过期，请返回 Sub2API 重新登录后再打开。',
+    ADMIN_REQUIRED: '当前 Sub2API 账号不是管理员，无法访问运营中心。',
+    AUTH_UPSTREAM_TIMEOUT: '运营中心暂时无法连接 Sub2API，请稍后重试。',
+    SUB2API_SESSION_BINDING_INCOMPATIBLE: 'Sub2API 已开启会话绑定，无法由运营中心校验登录状态。请关闭会话绑定并重新登录，或改用本地认证模式。',
+    SSO_DISABLED: '当前运营中心未启用 Sub2API 单点登录。'
+  };
+  return messages[code] || 'Sub2API 单点登录失败，请重新从管理员自定义菜单打开。';
 }
 
 function chart(id, option) {
@@ -394,8 +437,12 @@ async function loadStorage(refresh = false) {
 }
 
 async function loadRetention() {
-  setPageMeta('预览、备份、复核、分批执行');
-  const [policy, runs] = await Promise.all([api('/api/retention/policy'), api('/api/retention/runs')]);
+  setPageMeta('自动调度与手动预览、备份、复核、分批执行');
+  const [policy, automation, runs] = await Promise.all([
+    api('/api/retention/policy'),
+    api('/api/retention/automation'),
+    api('/api/retention/runs')
+  ]);
   state.policy = policy;
   const status = [];
   status.push(alertHtml(policy.cleanupEnabled ? 'success' : 'warning', policy.cleanupEnabled
@@ -403,6 +450,7 @@ async function loadRetention() {
     : '当前为只读模式。设置 OPERATIONS_CENTER_ENABLE_CLEANUP=true 并配置独立维护连接后才能执行。'));
   status.push(alertHtml('info', policy.nativeConfiguration.note));
   $('retention-status').innerHTML = status.join('');
+  renderAutomaticCleanup(automation, policy);
   $('policy-list').innerHTML = policy.policies.map((item) => `
     <label class="policy-row">
       <input type="checkbox" name="cleanup-target" value="${escapeHtml(item.id)}" checked>
@@ -413,6 +461,28 @@ async function loadRetention() {
   `).join('');
   renderRuns(runs.items);
   refreshIcons();
+}
+
+function renderAutomaticCleanup(automation, policy) {
+  const policyById = new Map(policy.policies.map((item) => [item.id, item.label]));
+  const displayStatus = !automation.enabled ? 'disabled' : automation.running ? 'running' : automation.ready ? 'ready' : 'blocked';
+  $('automatic-cleanup-badge').outerHTML = badge(displayStatus).replace('<span ', '<span id="automatic-cleanup-badge" ');
+  const phaseLabels = { idle: '等待计划', preview: '生成预览', backup: '等待备份', execute: '提交清理', cleanup: '分批清理中' };
+  const last = automation.lastAttempt;
+  const lastStatus = last?.cleanup?.status || last?.status;
+  const lastMessage = last?.cleanup?.error?.message || last?.error?.message || last?.reason ||
+    (last?.cleanup ? `已删除 ${formatInteger(last.cleanup.deletedRows)} 行` : last?.runId ? `运行 ${last.runId.slice(0, 12)}` : `符合 ${formatInteger(last?.eligibleRows)} 行`);
+  const lastDetail = last
+    ? `${badge(lastStatus)} <strong>${formatDateTime(last.cleanup?.finishedAt || last.finishedAt || last.startedAt)}</strong><small>${escapeHtml(lastMessage)}</small>`
+    : '<strong>尚无自动运行</strong><small>首次执行将在下一个计划时间触发</small>';
+  $('automatic-cleanup-summary').innerHTML = `
+    <div class="schedule-field"><span>当前状态</span><strong>${escapeHtml(automation.running ? phaseLabels[automation.phase] || automation.phase : automation.ready ? '等待计划' : automation.enabled ? '配置未就绪' : '未启用')}</strong></div>
+    <div class="schedule-field"><span>每日时间</span><strong>${escapeHtml(automation.schedule.time)} · ${escapeHtml(automation.schedule.timezone)}</strong></div>
+    <div class="schedule-field"><span>下次执行</span><strong>${automation.schedule.nextRunAt ? formatDateTime(automation.schedule.nextRunAt) : 'N/A'}</strong></div>
+    <div class="schedule-field"><span>备份等待上限</span><strong>${formatInteger(automation.backupWaitMinutes)} 分钟</strong></div>
+    <div class="schedule-field wide"><span>自动目标</span><strong>${automation.targets.map((id) => escapeHtml(policyById.get(id) || id)).join('、')}</strong></div>
+    <div class="schedule-field wide"><span>最近尝试</span>${lastDetail}</div>
+  `;
 }
 
 function renderPreview(preview) {
@@ -489,7 +559,11 @@ async function cancelRun(id) {
 
 async function downloadRun(id) {
   try {
-    const response = await fetch(`/api/retention/runs/${encodeURIComponent(id)}/report`);
+    const headers = state.sessionToken ? { authorization: `Session ${state.sessionToken}` } : {};
+    const response = await fetch(`/api/retention/runs/${encodeURIComponent(id)}/report`, {
+      headers,
+      credentials: 'same-origin'
+    });
     if (!response.ok) throw new Error('报告下载失败');
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
@@ -589,16 +663,24 @@ async function loadCurrentView(options = {}) {
     setConnection(false, '数据源异常');
     setPageMeta(error.message);
     toast(error.message, 'error');
+  } finally {
+    revealActiveTab();
   }
 }
 
 function navigate(view) {
   if (!titles[view]) return;
   state.currentView = view;
+  window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
   document.querySelectorAll('.view').forEach((node) => node.classList.toggle('active', node.id === `view-${view}`));
-  document.querySelectorAll('.nav-item').forEach((node) => node.classList.toggle('active', node.dataset.view === view));
+  document.querySelectorAll('.module-tab').forEach((node) => {
+    const active = node.dataset.view === view;
+    node.classList.toggle('active', active);
+    node.setAttribute('aria-selected', String(active));
+    node.tabIndex = active ? 0 : -1;
+  });
+  revealActiveTab();
   $('page-title').textContent = titles[view];
-  $('app-shell').classList.remove('menu-open');
   history.replaceState(null, '', `#${view}`);
   loadCurrentView();
 }
@@ -607,13 +689,55 @@ async function initialize() {
   setDefaultDates('usage-filter', 30);
   setDefaultDates('users-filter', 30);
   setDefaultDates('finance-filter', 30);
+  const hash = new URLSearchParams(location.hash.replace(/^#/, ''));
+  const redirectedSession = hash.get('oc_session');
+  const initialView = redirectedSession ? 'overview' : location.hash.slice(1);
+  if (redirectedSession) {
+    state.sessionToken = redirectedSession;
+    browserSession.setItem('operations-center.session', redirectedSession);
+    history.replaceState(null, '', `${location.pathname}${location.search}`);
+  }
+
+  const query = new URLSearchParams(location.search);
+  const ssoError = query.get('sso_error');
+  const upstreamToken = query.get('token') || query.get('access_token');
+  if (upstreamToken || ssoError) {
+    query.delete('token');
+    query.delete('access_token');
+    query.delete('sso_error');
+    const cleanQuery = query.toString();
+    history.replaceState(null, '', `${location.pathname}${cleanQuery ? `?${cleanQuery}` : ''}`);
+  }
   try {
+    state.authConfig = await api('/api/auth/config');
+    if (state.authConfig.ssoEnabled) {
+      $('login-hint').textContent = '请从已登录的 Sub2API 管理员自定义菜单进入';
+      if (state.authConfig.sub2apiUrl) {
+        $('sub2api-login-link').href = state.authConfig.sub2apiUrl;
+        $('sub2api-login-link').hidden = false;
+      }
+    }
+    if (ssoError) {
+      state.sessionToken = '';
+      browserSession.removeItem('operations-center.session');
+      showLogin(ssoErrorMessage(ssoError));
+      return;
+    }
+    if (upstreamToken) {
+      const session = await api('/api/auth/sso', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${upstreamToken}` },
+        body: '{}'
+      });
+      showApp(session);
+      navigate(titles[initialView] ? initialView : 'overview');
+      return;
+    }
     const session = await api('/api/auth/me');
     showApp(session);
-    const initial = location.hash.slice(1);
-    navigate(titles[initial] ? initial : 'overview');
-  } catch {
-    showLogin();
+    navigate(titles[initialView] ? initialView : 'overview');
+  } catch (error) {
+    showLogin(ssoError ? ssoErrorMessage(ssoError) : '');
   }
 }
 
@@ -639,11 +763,12 @@ $('login-form').addEventListener('submit', async (event) => {
 
 $('logout-button').addEventListener('click', async () => {
   try { await api('/api/auth/logout', { method: 'POST', body: '{}' }); } catch {}
+  state.sessionToken = '';
+  browserSession.removeItem('operations-center.session');
   showLogin();
 });
-document.querySelectorAll('.nav-item').forEach((button) => button.addEventListener('click', () => navigate(button.dataset.view)));
+document.querySelectorAll('.module-tab').forEach((button) => button.addEventListener('click', () => navigate(button.dataset.view)));
 $('refresh-button').addEventListener('click', () => loadCurrentView({ refresh: true }));
-$('mobile-menu').addEventListener('click', () => $('app-shell').classList.toggle('menu-open'));
 $('usage-filter').addEventListener('submit', (event) => { event.preventDefault(); loadUsage().catch((error) => toast(error.message, 'error')); });
 $('users-filter').addEventListener('submit', (event) => { event.preventDefault(); loadUsers().catch((error) => toast(error.message, 'error')); });
 $('finance-filter').addEventListener('submit', (event) => { event.preventDefault(); loadFinance().catch((error) => toast(error.message, 'error')); });
@@ -651,10 +776,26 @@ $('storage-refresh').addEventListener('click', () => loadStorage(true).catch((er
 $('preview-button').addEventListener('click', createPreview);
 $('backup-button').addEventListener('click', triggerBackup);
 $('execute-button').addEventListener('click', executeCleanup);
-window.addEventListener('resize', () => state.charts.forEach((instance) => instance.resize()));
+window.addEventListener('resize', () => {
+  state.charts.forEach((instance) => instance.resize());
+  revealActiveTab();
+});
 window.addEventListener('hashchange', () => {
   const view = location.hash.slice(1);
   if (titles[view] && view !== state.currentView) navigate(view);
+});
+document.addEventListener('keydown', (event) => {
+  const tab = event.target.closest?.('.module-tab[role="tab"]');
+  if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  const tabs = [...document.querySelectorAll('.module-tab[role="tab"]')].filter((item) => !item.disabled);
+  const currentIndex = tabs.indexOf(tab);
+  if (currentIndex < 0) return;
+  event.preventDefault();
+  const offset = event.key === 'ArrowRight' ? 1 : -1;
+  let nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : currentIndex + offset;
+  nextIndex = (nextIndex + tabs.length) % tabs.length;
+  tabs[nextIndex].focus();
+  tabs[nextIndex].click();
 });
 
 initialize();

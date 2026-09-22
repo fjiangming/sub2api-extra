@@ -18,16 +18,39 @@ class Sub2ApiClient {
     this.fetch = fetchImpl;
     this.token = config.sub2apiAdminToken;
     this.tokenExpiresAt = this.token ? Number.POSITIVE_INFINITY : 0;
+    this.runtimeToken = null;
     this.loginPromise = null;
   }
 
   configured() {
-    return Boolean(this.config.sub2apiBaseUrl && (this.token || (
+    return Boolean(this.config.sub2apiBaseUrl && (this.activeRuntimeToken() || this.token || (
       this.config.sub2apiAdminEmail && this.config.sub2apiAdminPassword
     )));
   }
 
+  activeRuntimeToken() {
+    if (this.runtimeToken?.expiresAt > Date.now() + 30000) return this.runtimeToken.value;
+    if (this.runtimeToken) this.runtimeToken = null;
+    return null;
+  }
+
+  setRuntimeToken(value, expiresAt) {
+    const token = String(value || '').trim();
+    if (!token) return;
+    this.runtimeToken = {
+      value: token,
+      expiresAt: Number(expiresAt) || Date.now() + 15 * 60000
+    };
+  }
+
+  clearRuntimeToken(value) {
+    if (!this.runtimeToken || (value && this.runtimeToken.value !== value)) return;
+    this.runtimeToken = null;
+  }
+
   async login() {
+    const runtimeToken = this.activeRuntimeToken();
+    if (runtimeToken) return runtimeToken;
     if (this.token && this.tokenExpiresAt > Date.now() + 30000) return this.token;
     if (!this.config.sub2apiBaseUrl || !this.config.sub2apiAdminEmail || !this.config.sub2apiAdminPassword) {
       throw new AppError('SUB2API_AUTH_NOT_CONFIGURED', '未配置 Sub2API 管理员凭据或令牌', { status: 503 });
@@ -81,9 +104,13 @@ class Sub2ApiClient {
       let payload = {};
       try { payload = text ? JSON.parse(text) : {}; } catch { payload = { message: text }; }
       if (!response.ok) {
-        if (response.status === 401 && authenticated && this.config.sub2apiAdminToken == null) {
-          this.token = null;
-          this.tokenExpiresAt = 0;
+        if (response.status === 401 && authenticated) {
+          if (this.runtimeToken?.value === token) {
+            this.runtimeToken = null;
+          } else if (this.config.sub2apiAdminToken == null) {
+            this.token = null;
+            this.tokenExpiresAt = 0;
+          }
         }
         throw new AppError('SUB2API_REQUEST_FAILED', payload?.message || payload?.error?.message || `Sub2API 返回 ${response.status}`, {
           status: response.status === 401 || response.status === 403 ? 409 : 502,

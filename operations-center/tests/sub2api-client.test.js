@@ -38,3 +38,25 @@ test('upstream errors do not leak a token', async () => {
     return true;
   });
 });
+
+test('a verified browser SSO token can temporarily authorize native backup calls', async () => {
+  const requests = [];
+  const client = new Sub2ApiClient({
+    sub2apiBaseUrl: 'https://sub2api.example',
+    sub2apiAdminToken: null,
+    sub2apiAdminEmail: null,
+    sub2apiAdminPassword: null,
+    sub2apiRequestTimeoutMs: 1000
+  }, async (url, options) => {
+    requests.push({ url, options });
+    return response(200, { code: 0, data: { id: 'backup-1' } });
+  });
+
+  assert.equal(client.configured(), false);
+  client.setRuntimeToken('browser-session-token', Date.now() + 3600000);
+  assert.equal(client.configured(), true);
+  await client.startBackup();
+  assert.equal(requests[0].options.headers.authorization, 'Bearer browser-session-token');
+  client.clearRuntimeToken('browser-session-token');
+  assert.equal(client.configured(), false);
+});

@@ -14,6 +14,7 @@
 - 存储诊断：数据库和关系大小、索引/TOAST、分区、死行、长事务、复制槽/WAL 占用及有上限的进程内容量样本。
 - 清理控制：固定白名单预览、精确行数、逻辑体积估算、聚合完整性复核、原生备份硬闸门、双重确认、小批事务、取消和 JSON 报告。
 - 原生能力复用：只核验或触发 Sub2API 已有 `.sql.gz`/S3 备份；不重复实现上传、下载或覆盖恢复。
+- 管理员 SSO：从 Sub2API 管理员自定义菜单打开时自动校验当前登录态，不要求在运营中心保存邮箱密码。
 
 ## 数据保留结果
 
@@ -66,20 +67,26 @@ docker compose --env-file compose.services.env up -d --no-build operations-cente
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `OPERATIONS_CENTER_ADMIN_USER` | `admin` | 本服务独立管理员账号 |
-| `OPERATIONS_CENTER_ADMIN_PASSWORD` | 无 | 必填；生产环境至少 16 个字符 |
+| `OPERATIONS_CENTER_AUTH_MODE` | `local` | `sub2api` 使用基座管理员 SSO；`local` 使用独立账号 |
+| `OPERATIONS_CENTER_ADMIN_USER` | `admin` | 仅 `local` 模式使用 |
+| `OPERATIONS_CENTER_ADMIN_PASSWORD` | 无 | 仅 `local` 模式必填；生产环境至少 16 个字符 |
 | `SUB2API_DATABASE_URL` | 无 | 只读 PostgreSQL 连接，必填 |
 | `SUB2API_DATABASE_SSL` | `disable` | `disable`、`require` 或 `verify-full` |
 | `SUB2API_TIMEZONE` | `Asia/Shanghai` | 必须与 Sub2API 全局 `timezone`/`TZ` 一致 |
 | `FINANCE_TIMEZONE` | `Asia/Shanghai` | 支付和入账报表自然日时区 |
-| `SUB2API_BASE_URL` | 无 | 原生版本和备份 API 地址 |
+| `SUB2API_BASE_URL` | 无 | 认证、原生版本和备份 API 的服务端地址 |
+| `SUB2API_PUBLIC_URL` | 同 `SUB2API_BASE_URL` | 管理员浏览器可访问的 Sub2API 地址及 iframe 来源 |
 | `SUB2API_ADMIN_TOKEN` | 无 | 可选的 Sub2API 管理员 JWT |
-| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | 无 | 未提供 token 时用于登录 Sub2API |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | 无 | 可选；无人值守调用需要持久认证时使用 |
 | `OPERATIONS_CENTER_ENABLE_CLEANUP` | `false` | 显式开启破坏性执行 |
 | `SUB2API_MAINTENANCE_DATABASE_URL` | 无 | 开启执行时必填，必须使用独立受限角色 |
 | `OPERATIONS_CENTER_REQUIRE_FRESH_BACKUP` | `true` | 要求成功备份的完成时间晚于本次预览 |
 | `OPERATIONS_CENTER_CLEANUP_BATCH_SIZE` | `5000` | 单事务最多删除行数 |
 | `OPERATIONS_CENTER_CLEANUP_MAX_ROWS` | `5000000` | 单次运行总删除上限 |
+| `OPERATIONS_CENTER_AUTO_CLEANUP_ENABLED` | `false` | 启用运营中心每日自动清理；要求全部执行与备份条件就绪 |
+| `OPERATIONS_CENTER_AUTO_CLEANUP_TIME` | `03:30` | 自动清理时间，`HH:mm`，按 `SUB2API_TIMEZONE` 解释 |
+| `OPERATIONS_CENTER_AUTO_CLEANUP_TARGETS` | `system_logs,error_logs,ops_metrics` | 自动目标 ID；关键用量目标必须显式加入 |
+| `OPERATIONS_CENTER_AUTO_CLEANUP_BACKUP_WAIT_MINUTES` | `10` | 等待预览后原生成功备份的最长时间 |
 | `RETENTION_USAGE_LOGS_DAYS` | `30` | 请求明细期限，不能小于 30 |
 | `RETENTION_USAGE_HOURLY_DAYS` | `30` | 小时汇总期限，不能小于 30 |
 | `RETENTION_USAGE_DAILY_DAYS` | `730` | 日汇总期限，不能小于 365 |
@@ -88,6 +95,16 @@ docker compose --env-file compose.services.env up -d --no-build operations-cente
 | `RETENTION_OPS_METRIC_DAYS` | `30` | 运维指标期限 |
 
 其余参数和示例见[.env.example](.env.example)。
+
+## Sub2API 单点登录
+
+推荐把 `OPERATIONS_CENTER_AUTH_MODE` 设为 `sub2api`，然后在 Sub2API 管理后台的“设置 -> 自定义菜单”中添加运营中心公开地址，并将可见性限制为管理员。Sub2API 会把当前访问 Token 附加到 iframe 地址；运营中心向 `/api/v1/auth/me` 校验管理员身份后，立即换成自己的短期内存会话并从地址栏移除原始 Token。Token 和会话都不会写入数据库。
+
+跨域 HTTPS iframe 同时使用分区 Cookie 和页面会话令牌兜底。反向代理应传递 `X-Forwarded-Proto`；当 `SUB2API_BASE_URL` 是 `host.docker.internal` 等容器内地址时，必须另设浏览器可访问的 `SUB2API_PUBLIC_URL`。
+
+Sub2API 的会话绑定会校验登录浏览器的 IP 和 User-Agent，独立服务无法代替浏览器通过该校验。使用自定义菜单 SSO 时需要关闭会话绑定并重新登录；必须保留会话绑定时，请改用 `local` 模式。
+
+`SUB2API_ADMIN_TOKEN`、`ADMIN_EMAIL` 和 `ADMIN_PASSWORD` 对交互式 SSO 均非必填。当前有效的 SSO Token 可以触发手动原生备份，也可暂时供自动清理使用；但它会过期且服务重启后丢失。要求每日自动清理长期无人值守时，仍应配置管理员 Token 或邮箱密码，否则认证不可用的场次会在备份阶段安全失败，不会执行删除。
 
 ## 数据库最小权限
 
@@ -137,7 +154,18 @@ TO sub2api_ops_maintenance;
 7. 通过 `tableoid + ctid`、`FOR UPDATE SKIP LOCKED` 和小事务分批删除；达到总行数上限或收到取消请求即停止。
 8. 运行结果保存在有上限的进程内存并输出到 stdout，可下载 JSON；服务重启后内存记录消失。
 
-服务不会自动定时执行破坏性清理。持续滚动保留建议同时在 Sub2API 中配置：
+手动清理保留上述完整的目标勾选、预览、备份、双确认和专属确认短语。自动清理默认关闭；启用后按每日时间触发，同样先生成预览并执行覆盖检查，随后创建 Sub2API 原生备份，只有该备份完成时间晚于预览才会提交固定白名单清理。自动任务遇到无数据、Schema/聚合阻断、人工清理冲突、备份超时或已有运行时不会扩大删除范围。
+
+自动清理启用时，配置加载会强制要求：`OPERATIONS_CENTER_ENABLE_CLEANUP=true`、独立维护连接、`OPERATIONS_CENTER_REQUIRE_FRESH_BACKUP=true`，以及可用的 Sub2API 管理 API 地址。`local` 认证模式还必须提供持久管理员凭据；`sub2api` 模式允许使用当前 SSO Token，但无人值守可靠性受 Token 有效期和服务重启影响。默认自动目标不包含关键用量数据；需要时显式配置：
+
+```dotenv
+OPERATIONS_CENTER_AUTO_CLEANUP_ENABLED=true
+OPERATIONS_CENTER_AUTO_CLEANUP_TIME=03:30
+OPERATIONS_CENTER_AUTO_CLEANUP_TARGETS=usage_logs,usage_hourly,usage_daily,system_logs,error_logs,ops_metrics
+OPERATIONS_CENTER_AUTO_CLEANUP_BACKUP_WAIT_MINUTES=10
+```
+
+运营中心调度状态只保存在进程内，服务重启后重新计算下次执行时间，不补跑已经错过的场次。持续滚动保留仍建议同时在 Sub2API 中配置，避免运营中心停机期间窗口失控：
 
 ```dotenv
 DASHBOARD_AGGREGATION_RETENTION_USAGE_LOGS_DAYS=30

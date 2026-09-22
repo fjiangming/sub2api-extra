@@ -121,7 +121,7 @@ class RetentionService {
       maintenanceConnectionConfigured: Boolean(this.maintenancePool),
       requireFreshBackup: this.config.requireFreshBackup,
       executionMode: 'explicit-previewed-batched-database-cleanup',
-      automaticSchedule: false,
+      automaticSchedule: Boolean(this.config.automaticCleanup?.enabled),
       policies: Object.entries(POLICY_DEFINITIONS).map(([id, definition]) => {
         const retentionDays = this.config.retention[definition.daysKey];
         return {

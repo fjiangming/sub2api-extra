@@ -31,6 +31,87 @@ test('invalid IANA timezone is rejected', () => {
   assert.throws(() => loadConfig(baseEnv({ SUB2API_TIMEZONE: 'Mars/Olympus' })), /IANA/);
 });
 
+test('Sub2API SSO mode does not require local or upstream account passwords', () => {
+  const config = loadConfig({
+    NODE_ENV: 'production',
+    OPERATIONS_CENTER_AUTH_MODE: 'sub2api',
+    SUB2API_BASE_URL: 'http://sub2api.internal:8080',
+    SUB2API_PUBLIC_URL: 'https://sub2api.example.test',
+    SUB2API_DATABASE_URL: 'postgresql://reader@example.test/sub2api'
+  });
+  assert.equal(config.authMode, 'sub2api');
+  assert.equal(config.adminPassword, '');
+  assert.equal(config.sub2apiAdminEmail, null);
+  assert.equal(config.sub2apiAdminPassword, null);
+  assert.equal(config.sub2apiPublicUrl, 'https://sub2api.example.test');
+});
+
+test('local mode still requires an independent administrator password', () => {
+  assert.throws(() => loadConfig({
+    NODE_ENV: 'production',
+    OPERATIONS_CENTER_AUTH_MODE: 'local',
+    SUB2API_DATABASE_URL: 'postgresql://reader@example.test/sub2api'
+  }), /local 认证模式/);
+});
+
+test('automatic cleanup requires the complete destructive safety configuration', () => {
+  assert.throws(() => loadConfig(baseEnv({
+    OPERATIONS_CENTER_AUTO_CLEANUP_ENABLED: 'true'
+  })), /OPERATIONS_CENTER_ENABLE_CLEANUP/);
+
+  assert.throws(() => loadConfig(baseEnv({
+    OPERATIONS_CENTER_AUTO_CLEANUP_ENABLED: 'true',
+    OPERATIONS_CENTER_ENABLE_CLEANUP: 'true',
+    SUB2API_MAINTENANCE_DATABASE_URL: 'postgresql://maintainer@example.test/sub2api',
+    OPERATIONS_CENTER_REQUIRE_FRESH_BACKUP: 'false'
+  })), /新鲜备份/);
+
+  const loaded = loadConfig(baseEnv({
+    OPERATIONS_CENTER_AUTO_CLEANUP_ENABLED: 'true',
+    OPERATIONS_CENTER_ENABLE_CLEANUP: 'true',
+    SUB2API_MAINTENANCE_DATABASE_URL: 'postgresql://maintainer@example.test/sub2api',
+    SUB2API_BASE_URL: 'https://sub2api.example.test',
+    SUB2API_ADMIN_TOKEN: 'managed-admin-token',
+    OPERATIONS_CENTER_AUTO_CLEANUP_TIME: '04:15',
+    OPERATIONS_CENTER_AUTO_CLEANUP_TARGETS: 'system_logs,ops_metrics,system_logs'
+  }));
+  assert.deepEqual(loaded.automaticCleanup, {
+    enabled: true,
+    time: '04:15',
+    targets: ['system_logs', 'ops_metrics'],
+    backupWaitMinutes: 10
+  });
+});
+
+test('automatic cleanup rejects unknown targets and backup waits beyond preview validity', () => {
+  assert.throws(() => loadConfig(baseEnv({
+    OPERATIONS_CENTER_AUTO_CLEANUP_TARGETS: 'system_logs,users'
+  })), /Invalid option/);
+  assert.throws(() => loadConfig(baseEnv({
+    OPERATIONS_CENTER_AUTO_CLEANUP_ENABLED: 'true',
+    OPERATIONS_CENTER_ENABLE_CLEANUP: 'true',
+    SUB2API_MAINTENANCE_DATABASE_URL: 'postgresql://maintainer@example.test/sub2api',
+    SUB2API_BASE_URL: 'https://sub2api.example.test',
+    SUB2API_ADMIN_TOKEN: 'managed-admin-token',
+    OPERATIONS_CENTER_PREVIEW_TTL_MINUTES: '10',
+    OPERATIONS_CENTER_AUTO_CLEANUP_BACKUP_WAIT_MINUTES: '9'
+  })), /预览有效期/);
+});
+
+test('SSO mode may start automatic cleanup without stored Sub2API account credentials', () => {
+  const loaded = loadConfig({
+    NODE_ENV: 'production',
+    OPERATIONS_CENTER_AUTH_MODE: 'sub2api',
+    SUB2API_DATABASE_URL: 'postgresql://reader@example.test/sub2api',
+    SUB2API_MAINTENANCE_DATABASE_URL: 'postgresql://maintainer@example.test/sub2api',
+    SUB2API_BASE_URL: 'https://sub2api.example.test',
+    OPERATIONS_CENTER_ENABLE_CLEANUP: 'true',
+    OPERATIONS_CENTER_AUTO_CLEANUP_ENABLED: 'true'
+  });
+  assert.equal(loaded.automaticCleanup.enabled, true);
+  assert.equal(loaded.sub2apiAdminToken, null);
+});
+
 test('date ranges are inclusive and bounded', () => {
   assert.deepEqual(parseDateRange({ start: '2026-09-01', end: '2026-09-30' }), {
     start: '2026-09-01',

@@ -6,11 +6,12 @@
 
 ```text
 浏览器
-  -> 本地管理员会话、CSRF、限流
+  -> Sub2API 管理员 SSO 或本地管理员、CSRF、限流
   -> operations-center:9872
        -> PostgreSQL 只读连接：统计、schema、容量、预览
        -> PostgreSQL 维护连接：仅固定白名单 DELETE
        -> Sub2API 管理 API：版本、原生备份记录、创建备份
+       -> 每日调度器：可选，复用同一预览/备份/执行链路
        -> 有上限内存：会话、查询缓存、容量样本、预览和运行报告
 ```
 
@@ -23,7 +24,7 @@ operations-center/
   public/                    # 单页管理工作台
   src/
     app.js                   # HTTP、安全中间件与 API
-    auth.js                  # 本地内存会话和 CSRF
+    auth.js                  # Sub2API SSO、本地内存会话和 CSRF
     config.js                # 环境变量验证
     db.js                    # 只读/维护连接池
     schema-inspector.js      # 表、列和分区能力识别
@@ -32,6 +33,7 @@ operations-center/
       metrics-service.js     # 用户、用量和资金统计
       storage-service.js     # 关系大小与容量诊断
       retention-service.js   # 保留策略、预览和批量清理
+      cleanup-scheduler.js   # 可选每日自动清理编排
     server.js
   tests/
   docs/
@@ -42,12 +44,13 @@ operations-center/
 
 ## 3. 身份与安全
 
-- 运营中心使用独立本地管理员账号，不把 Sub2API 管理员密码作为网页登录密码。
-- 登录比较使用定长哈希和 timing-safe 比较。
-- 会话 ID 与 CSRF token 使用加密随机数，仅存在内存。
-- Cookie 为 `HttpOnly`、`SameSite=Strict`，生产 HTTPS 应配置 `OPERATIONS_CENTER_COOKIE_SECURE=true`。
+- `sub2api` 模式校验自定义菜单附带的访问 Token 是否仍有效且属于管理员，再换取运营中心会话；也允许用户临时输入 Sub2API 凭据登录，但不保存凭据。
+- `local` 模式保留独立管理员账号，登录比较使用定长哈希和 timing-safe 比较。
+- Sub2API Token、会话 ID 与 CSRF token 仅存在内存；原始 Token 在首次交换后从 URL 删除。
+- HTTPS iframe 同时设置 `SameSite=Lax` Cookie、`SameSite=None; Partitioned` Cookie，并用 URL fragment 返回运营中心短期会话作为第三方 Cookie 受限时的兜底。
+- CSP `frame-ancestors` 只允许本服务和 `SUB2API_PUBLIC_URL`，不开放任意嵌入来源。
 - 登录接口每 IP 15 分钟最多 10 次。
-- Helmet 设置 CSP、禁止 iframe、对象和跨源脚本。
+- Helmet 设置 CSP，并禁止对象和跨源脚本。
 - 所有写接口要求登录和 CSRF；响应禁止缓存。
 - Sub2API 客户端只暴露固定版本和备份路径，不是通用管理 API 代理。
 
@@ -82,7 +85,9 @@ operations-center/
 | --- | --- |
 | `GET /healthz` | 进程存活 |
 | `GET /readyz` | 数据库就绪与延迟 |
-| `POST /api/auth/login` | 本地管理员登录 |
+| `GET /api/auth/config` | 公开的认证模式和返回地址 |
+| `POST /api/auth/sso` | 校验 Sub2API 管理员 Token 并交换本地会话 |
+| `POST /api/auth/login` | 当前模式下的本地或 Sub2API 凭据登录 |
 | `GET /api/auth/me` | 当前会话和 CSRF token |
 | `POST /api/auth/logout` | 注销 |
 | `GET /api/overview` | 运营概览 |
@@ -93,6 +98,7 @@ operations-center/
 | `GET /api/storage` | 容量、关系和维护信号 |
 | `GET /api/capabilities` | schema、版本和执行能力 |
 | `GET /api/retention/policy` | 固定保留策略与保护范围 |
+| `GET /api/retention/automation` | 自动调度配置、下次运行和最近尝试 |
 | `POST /api/retention/previews` | 生成有时效的清理预览 |
 | `POST /api/retention/backups` | 可选触发原生备份 |
 | `POST /api/retention/runs` | 双确认后执行预览 |
@@ -136,6 +142,18 @@ operations-center/
 
 不执行 DDL、TRUNCATE、VACUUM FULL、shell 或文件删除。
 
+### 6.5 自动调度
+
+- 只支持按 `SUB2API_TIMEZONE` 每日一个 `HH:mm` 时间点，不接受任意高频 cron 表达式。
+- 默认关闭，且自动目标默认只有普通日志、错误事件和运维指标。
+- 启用时强制要求全局清理开关、独立维护连接、Sub2API 管理 API 和新鲜备份硬闸门。
+- `sub2api` 模式可由当前有效 SSO Token 提供备份认证，因此邮箱密码不是启动必填项；Token 过期或重启丢失后，该场次会在备份前失败。长期无人值守需配置管理员 Token 或账号密码。
+- 每次先调用相同的 `createPreview`；无数据则跳过，任何 blocker 都直接终止。
+- 有超期数据时触发原生备份，轮询至出现完成时间不早于预览的成功记录，再调用相同的 `execute`。
+- 手动任务或另一个自动任务正在执行时跳过，不排队叠加。
+- `node-cron` 负责时区调度与单进程重叠保护，PostgreSQL advisory lock 仍是删除阶段的最终并发保护。
+- 重启后重新计算下一次计划时间，不补跑错过的场次；自动状态不写入业务数据库。
+
 ## 7. 状态持久化边界
 
 下列状态只在内存：
@@ -145,6 +163,7 @@ operations-center/
 - 容量增长样本
 - 最近 20 个预览
 - 最近 50 个清理运行
+- 最近一次自动调度尝试与当前阶段
 
 清理报告同时输出为结构化 stdout。服务重启后不会恢复或继续未完成的批次，也不会保留页面中的旧运行列表。需要长期审计时应接入现有日志平台，而不是在本服务新建无限增长表。
 
@@ -167,7 +186,7 @@ operations-center/
 
 - 不复制明细或永久总消费。
 - 不实现任意 SQL 控制台。
-- 不自动调度破坏性清理。
+- 不提供高频或任意 cron 表达式；自动清理仅允许按配置时区每日一次。
 - 不自动修改 Sub2API 配置或源码。
 - 不把数据库大小冒充文件系统可用空间。
 - 不管理 Redis、WAL、Docker、对象存储和备份文件生命周期。

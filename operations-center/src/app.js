@@ -9,8 +9,12 @@ const { z } = require('zod');
 const { asyncRoute, errorMiddleware, AppError } = require('./errors');
 
 const loginSchema = z.object({
-  username: z.string().min(1).max(100),
+  username: z.string().min(1).max(320).optional(),
+  email: z.string().min(1).max(320).optional(),
   password: z.string().min(1).max(1024)
+}).refine((value) => value.username || value.email, {
+  message: '请输入管理员账号或邮箱',
+  path: ['username']
 });
 
 const previewSchema = z.object({
@@ -35,7 +39,20 @@ function parse(schema, input) {
   return result.data;
 }
 
-function createApp({ config, database, auth, inspector, metrics, storage, retention, sub2api }) {
+function bearerToken(req) {
+  const authorization = String(req.get('authorization') || '');
+  return authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+}
+
+function frameAncestorSources(config) {
+  const sources = new Set(["'self'"]);
+  if (config.sub2apiPublicUrl) {
+    try { sources.add(new URL(config.sub2apiPublicUrl).origin); } catch {}
+  }
+  return [...sources];
+}
+
+function createApp({ config, database, auth, inspector, metrics, storage, retention, scheduler, sub2api }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -45,6 +62,7 @@ function createApp({ config, database, auth, inspector, metrics, storage, retent
     next();
   });
   app.use(helmet({
+    frameguard: false,
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
@@ -54,7 +72,7 @@ function createApp({ config, database, auth, inspector, metrics, storage, retent
         connectSrc: ["'self'"],
         objectSrc: ["'none'"],
         baseUri: ["'none'"],
-        frameAncestors: ["'none'"]
+        frameAncestors: frameAncestorSources(config)
       }
     }
   }));
@@ -74,29 +92,62 @@ function createApp({ config, database, auth, inspector, metrics, storage, retent
     message: { error: { code: 'LOGIN_RATE_LIMITED', message: '登录尝试过多，请稍后再试' } }
   });
 
+  app.get('/api/auth/config', (_req, res) => {
+    res.set('cache-control', 'no-store').json({
+      mode: config.authMode,
+      ssoEnabled: config.authMode === 'sub2api' && Boolean(config.sub2apiBaseUrl),
+      sub2apiUrl: config.sub2apiPublicUrl || null
+    });
+  });
+
+  app.post('/api/auth/sso', loginLimiter, asyncRoute(async (req, res) => {
+    const session = await auth.sso(req, res, bearerToken(req) || req.body?.token);
+    res.set('cache-control', 'no-store').json(session);
+  }));
+
   app.post('/api/auth/login', loginLimiter, asyncRoute(async (req, res) => {
     const body = parse(loginSchema, req.body);
-    const session = auth.login(body.username, body.password);
-    auth.setCookie(res, session);
-    res.set('cache-control', 'no-store').json({
-      user: { name: session.actor },
-      csrfToken: session.csrfToken,
-      expiresAt: new Date(session.expiresAt).toISOString()
-    });
+    const session = await auth.login(req, res, body);
+    res.set('cache-control', 'no-store').json(session);
+  }));
+
+  app.use(asyncRoute(async (req, res, next) => {
+    if (req.method !== 'GET' || req.path.startsWith('/api/') || req.path === '/healthz' || req.path === '/readyz') {
+      return next();
+    }
+    const token = String(req.query.token || req.query.access_token || '').trim();
+    if (!token) return next();
+    res.set('cache-control', 'no-store');
+    const search = new URLSearchParams();
+    const theme = String(req.query.theme || '').toLowerCase();
+    if (theme === 'dark' || theme === 'light') search.set('theme', theme);
+    const cleanPath = req.path === '/index.html' ? '/' : req.path;
+    try {
+      const session = await auth.sso(req, res, token);
+      return res.redirect(
+        303,
+        `${cleanPath}${search.size ? `?${search}` : ''}#oc_session=${encodeURIComponent(session.sessionToken)}`
+      );
+    } catch (error) {
+      const exposedCode = [
+        'AUTH_FAILED',
+        'ADMIN_REQUIRED',
+        'AUTH_UPSTREAM_TIMEOUT',
+        'SUB2API_SESSION_BINDING_INCOMPATIBLE',
+        'SSO_DISABLED'
+      ].includes(error?.code) ? error.code : 'AUTH_FAILED';
+      search.set('sso_error', exposedCode);
+      return res.redirect(303, `${cleanPath}?${search}`);
+    }
   }));
 
   const authenticated = auth.middleware();
   const csrf = auth.csrfMiddleware();
   app.get('/api/auth/me', authenticated, (req, res) => {
-    res.set('cache-control', 'no-store').json({
-      user: { name: req.auth.actor },
-      csrfToken: req.auth.csrfToken,
-      expiresAt: new Date(req.auth.expiresAt).toISOString()
-    });
+    res.set('cache-control', 'no-store').json(auth.publicSession(req.auth));
   });
   app.post('/api/auth/logout', authenticated, csrf, (req, res) => {
-    auth.logout(req);
-    auth.clearCookie(res);
+    auth.logout(req, res);
     res.status(204).end();
   });
 
@@ -128,11 +179,13 @@ function createApp({ config, database, auth, inspector, metrics, storage, retent
       configuredTimezone: config.sub2apiTimezone,
       financeTimezone: config.financeTimezone,
       cleanupEnabled: config.cleanupEnabled,
+      automaticCleanupEnabled: Boolean(config.automaticCleanup?.enabled),
       maintenanceConnectionConfigured: Boolean(database.maintenance)
     });
   }));
 
   api.get('/retention/policy', (_req, res) => res.json(retention.getPolicy()));
+  api.get('/retention/automation', (_req, res) => res.json(scheduler.getStatus()));
   api.get('/retention/backups/status', asyncRoute(async (_req, res) => res.json(await retention.getBackupStatus())));
   api.post('/retention/backups', csrf, asyncRoute(async (_req, res) => {
     const record = await retention.startNativeBackup();

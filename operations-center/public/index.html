@@ -16,47 +16,50 @@
       <div class="brand-mark" aria-hidden="true"><i data-lucide="chart-no-axes-combined"></i></div>
       <p class="product-name">Sub2API 运营中心</p>
       <h1 id="login-title">管理员登录</h1>
+      <p id="login-hint" class="login-hint">运营数据与存储管理</p>
       <form id="login-form" novalidate>
-        <label>用户名<input id="login-username" name="username" autocomplete="username" required></label>
+        <label>管理员账号或邮箱<input id="login-username" name="username" autocomplete="username" required></label>
         <label>密码<input id="login-password" name="password" type="password" autocomplete="current-password" required></label>
         <p id="login-error" class="form-error" role="alert" hidden></p>
         <button class="button primary full" type="submit"><i data-lucide="log-in"></i><span>登录</span></button>
+        <a id="sub2api-login-link" class="button full" target="_top" hidden><i data-lucide="external-link"></i><span>返回 Sub2API</span></a>
       </form>
     </main>
   </div>
 
   <div id="app-shell" class="app-shell" hidden>
-    <aside class="sidebar">
+    <header class="module-header">
       <div class="brand">
         <div class="brand-mark small" aria-hidden="true"><i data-lucide="chart-no-axes-combined"></i></div>
         <div><strong>Sub2API</strong><span>运营中心</span></div>
       </div>
-      <nav id="main-nav" aria-label="主导航">
-        <button class="nav-item active" data-view="overview"><i data-lucide="layout-dashboard"></i><span>运营概览</span></button>
-        <button class="nav-item" data-view="usage"><i data-lucide="activity"></i><span>用量分析</span></button>
-        <button class="nav-item" data-view="users"><i data-lucide="users"></i><span>用户分析</span></button>
-        <button class="nav-item" data-view="finance"><i data-lucide="landmark"></i><span>收款与入账</span></button>
-        <button class="nav-item" data-view="storage"><i data-lucide="database"></i><span>存储容量</span></button>
-        <button class="nav-item" data-view="retention"><i data-lucide="shield-check"></i><span>数据清理</span></button>
-        <button class="nav-item" data-view="maintenance"><i data-lucide="wrench"></i><span>维护状态</span></button>
+      <nav id="main-nav" class="module-tabs" aria-label="模块导航" role="tablist">
+        <button class="module-tab active" data-view="overview" role="tab" aria-selected="true" aria-controls="content" tabindex="0"><i data-lucide="layout-dashboard"></i><span>运营概览</span></button>
+        <button class="module-tab" data-view="usage" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="activity"></i><span>用量分析</span></button>
+        <button class="module-tab" data-view="users" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="users"></i><span>用户分析</span></button>
+        <button class="module-tab" data-view="finance" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="landmark"></i><span>收款与入账</span></button>
+        <button class="module-tab" data-view="storage" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="database"></i><span>存储容量</span></button>
+        <button class="module-tab" data-view="retention" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="shield-check"></i><span>数据清理</span></button>
+        <button class="module-tab" data-view="maintenance" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="wrench"></i><span>维护状态</span></button>
       </nav>
-      <div class="sidebar-footer">
-        <span id="connection-dot" class="status-dot"></span>
-        <span id="connection-label">连接检查中</span>
+      <div class="header-account">
+        <span class="user-chip"><i data-lucide="circle-user-round"></i><span id="admin-name"></span></span>
+        <button id="logout-button" class="icon-button" type="button" title="退出登录" aria-label="退出登录"><i data-lucide="log-out"></i></button>
       </div>
-    </aside>
+    </header>
 
     <div class="workspace">
       <header class="topbar">
-        <button id="mobile-menu" class="icon-button mobile-only" type="button" title="打开导航" aria-label="打开导航"><i data-lucide="menu"></i></button>
         <div>
           <h1 id="page-title">运营概览</h1>
           <p id="page-meta">正在读取数据</p>
         </div>
         <div class="topbar-actions">
+          <span id="connection-state" class="connection-state" title="数据源连接状态">
+            <span id="connection-dot" class="status-dot"></span>
+            <span id="connection-label">连接检查中</span>
+          </span>
           <button id="refresh-button" class="icon-button" type="button" title="刷新当前页面" aria-label="刷新当前页面"><i data-lucide="refresh-cw"></i></button>
-          <span id="admin-name" class="admin-name"></span>
-          <button id="logout-button" class="icon-button" type="button" title="退出登录" aria-label="退出登录"><i data-lucide="log-out"></i></button>
         </div>
       </header>
 
@@ -124,7 +127,11 @@
         <section id="view-retention" class="view" aria-labelledby="page-title">
           <div id="retention-status" class="alert-stack"></div>
           <section class="panel">
-            <div class="panel-heading"><div><h2>保留策略</h2><p>固定白名单，不接受自定义表或 SQL</p></div><button id="preview-button" class="button primary" type="button"><i data-lucide="file-search"></i><span>生成清理预览</span></button></div>
+            <div class="panel-heading"><div><h2>自动清理</h2><p>部署配置与最近调度状态</p></div><span id="automatic-cleanup-badge" class="badge neutral">读取中</span></div>
+            <div id="automatic-cleanup-summary" class="schedule-summary"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-heading"><div><h2>手动清理</h2><p>固定白名单，不接受自定义表或 SQL</p></div><button id="preview-button" class="button primary" type="button"><i data-lucide="file-search"></i><span>生成清理预览</span></button></div>
             <div id="policy-list" class="policy-list"></div>
           </section>
           <section id="preview-panel" class="panel danger-panel" hidden>
