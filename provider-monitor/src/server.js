@@ -723,34 +723,39 @@ function createApplication(options = {}) {
   const syncAccountMonitorData = async (payload = {}) => {
     const { providerManual = false, ...input } = payload;
     const base = await accountMonitor.sync(input);
-    const connectionIds = accountMonitor.mappedConnectionIds();
-    const results = new Array(connectionIds.length);
-    let cursor = 0;
-    const workers = Array.from(
-      { length: Math.min(config.globalConcurrency, connectionIds.length) },
-      async () => {
-        while (cursor < connectionIds.length) {
-          const index = cursor;
-          cursor += 1;
-          const connectionId = connectionIds[index];
-          try {
-            const result = await sync.run(connectionId, {
-              jobType: 'account_monitor_supplier_sync',
-              manual: Boolean(providerManual)
-            });
-            results[index] = { connectionId, status: result.status };
-          } catch (error) {
-            results[index] = {
-              connectionId,
-              status: 'failed',
-              errorCode: error?.code || 'PROVIDER_SYNC_FAILED',
-              errorMessage: redactText(error?.message || error).slice(0, 500)
-            };
+    const resultsByConnectionId = new Map();
+    const syncConnections = async (connectionIds) => {
+      const pending = [...new Set(connectionIds.filter(Boolean))];
+      const results = new Array(pending.length);
+      let cursor = 0;
+      const workers = Array.from(
+        { length: Math.min(config.globalConcurrency, pending.length) },
+        async () => {
+          while (cursor < pending.length) {
+            const index = cursor;
+            cursor += 1;
+            const connectionId = pending[index];
+            try {
+              const result = await sync.run(connectionId, {
+                jobType: 'account_monitor_supplier_sync',
+                manual: Boolean(providerManual)
+              });
+              results[index] = { connectionId, status: result.status };
+            } catch (error) {
+              results[index] = {
+                connectionId,
+                status: 'failed',
+                errorCode: error?.code || 'PROVIDER_SYNC_FAILED',
+                errorMessage: redactText(error?.message || error).slice(0, 500)
+              };
+            }
           }
         }
-      }
-    );
-    await Promise.all(workers);
+      );
+      await Promise.all(workers);
+      for (const result of results) resultsByConnectionId.set(result.connectionId, result);
+    };
+    await syncConnections(accountMonitor.mappedConnectionIds());
     let autoMapping = null;
     let mappingRefresh = null;
     if (accountMonitor.settings().autoMappingEnabled) {
@@ -765,6 +770,13 @@ function createApplication(options = {}) {
         };
       }
     }
+    await syncConnections(
+      Array.isArray(autoMapping?.items)
+        ? autoMapping.items
+          .filter((item) => item.status === 'created')
+          .map((item) => item.providerId)
+        : []
+    );
     if (!autoMapping?.comparisons) {
       try {
         mappingRefresh = await mappings.refreshComparisons({ force: true });
@@ -779,13 +791,14 @@ function createApplication(options = {}) {
     const keyProbeAutomationJobId = keyProbes.settings().autoControlEnabled
       ? queue.enqueue('key_probe_automation', { priority: -2 })
       : null;
+    const results = [...resultsByConnectionId.values()];
     return {
       ...base,
       autoMapping,
       mappingRefresh,
       keyProbeAutomationJobId,
       supplierSync: {
-        connectionCount: connectionIds.length,
+        connectionCount: resultsByConnectionId.size,
         succeeded: results.filter((item) => item?.status === 'succeeded').length,
         partial: results.filter((item) => item?.status === 'partial').length,
         failed: results.filter((item) => item?.status === 'failed').length,

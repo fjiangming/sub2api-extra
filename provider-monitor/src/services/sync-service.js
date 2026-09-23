@@ -129,11 +129,17 @@ class SyncService {
     const latestByIdentity = new Map(
       rows.filter((row) => row.latest_at).map((row) => [String(row.key_identity), row.latest_at])
     );
+    const truncatedRemoteIds = new Set(this.db.prepare(`
+      SELECT key.remote_id
+      FROM provider_request_key_sync_state state
+      JOIN remote_keys key ON key.id = state.key_id
+      WHERE state.connection_id = ? AND state.truncated = 1
+    `).all(connectionId).map((row) => String(row.remote_id)));
     const sinceByKey = {};
     for (const key of keys) {
       const keyIdentity = String(key.metadata?.identityHash || key.remoteId || '');
       const latest = Date.parse(latestByIdentity.get(keyIdentity) || '');
-      const timestamp = Number.isFinite(latest)
+      const timestamp = !truncatedRemoteIds.has(String(key.remoteId)) && Number.isFinite(latest)
         ? Math.max(oldest, latest - overlapMinutes * 60000)
         : oldest;
       sinceByKey[String(key.remoteId)] = new Date(timestamp).toISOString();

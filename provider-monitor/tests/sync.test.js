@@ -357,6 +357,7 @@ test('New API API Key mode monitors only the selected remote keys and their logs
 test('Sub2API account modes monitor only the selected remote keys', async (t) => {
   let failedUsageKeyId = null;
   const requestedUsageKeyIds = [];
+  const requestedUsageQueries = [];
   const server = http.createServer((req, res) => {
     if (req.url === '/api/v1/user/profile') {
       return json(res, { code: 0, data: { id: 7, username: 'sub2-user', balance: 20 } });
@@ -382,6 +383,7 @@ test('Sub2API account modes monitor only the selected remote keys', async (t) =>
       const url = new URL(req.url, 'http://provider.test');
       const keyId = url.searchParams.get('api_key_id');
       requestedUsageKeyIds.push(keyId);
+      requestedUsageQueries.push({ keyId, startDate: url.searchParams.get('start_date') });
       if (keyId === failedUsageKeyId) {
         res.writeHead(503, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ message: 'temporary usage failure' }));
@@ -490,6 +492,19 @@ test('Sub2API account modes monitor only the selected remote keys', async (t) =>
     { remote_id: '1', status: 'succeeded', total_count: 1 },
     { remote_id: '2', status: 'succeeded', total_count: 0 }
   ]);
+  context.db.prepare(`
+    UPDATE provider_request_key_sync_state SET truncated = 1
+    WHERE key_id = (
+      SELECT id FROM remote_keys WHERE connection_id = ? AND remote_id = '1'
+    )
+  `).run(provider.id);
+  requestedUsageQueries.length = 0;
+  await sync.run(provider.id);
+  const forcedBackfill = requestedUsageQueries.find((item) => item.keyId === '1');
+  assert.ok(forcedBackfill);
+  assert.ok(
+    Date.parse(`${forcedBackfill.startDate}T00:00:00.000Z`) <= Date.now() - 29 * 86400000
+  );
   failedUsageKeyId = '2';
   const partial = await sync.run(provider.id, { manual: true });
   assert.equal(partial.status, 'partial');

@@ -308,7 +308,14 @@ function insertLedgerEntry({
   return result.changes;
 }
 
-function reconcileRequestLogCoverage(db, connectionId, requestLogs, keys, capturedAt) {
+function reconcileRequestLogCoverage(
+  db,
+  connectionId,
+  requestLogs,
+  keys,
+  capturedAt,
+  counterRemoteKeyIds
+) {
   if (!requestLogs?.ok) return new Set();
   const contexts = keyContexts(db, connectionId);
   const supplied = Array.isArray(requestLogs.value?.keyCoverage)
@@ -335,6 +342,17 @@ function reconcileRequestLogCoverage(db, connectionId, requestLogs, keys, captur
     const key = contexts.get(remoteKeyId);
     if (!key) continue;
     const state = counterState.get(connectionId, key.keyIdentity);
+    const hasCounterAccounting = Boolean(state?.last_captured_at) ||
+      counterRemoteKeyIds.has(remoteKeyId);
+    if (!hasCounterAccounting) {
+      const changed = db.prepare(`
+        UPDATE provider_cost_ledger SET accounting_status = 'active', updated_at = ?
+        WHERE connection_id = ? AND key_id = ? AND source_type = 'request_log'
+          AND accounting_status = 'shadow'
+      `).run(capturedAt, connectionId, key.keyId).changes;
+      if (changed) affected.add(key.keyIdentity);
+      continue;
+    }
     const missesCounterStart = Boolean(
       state?.last_captured_at && row.coverageFrom &&
       Date.parse(row.coverageFrom) > Date.parse(state.last_captured_at)
@@ -349,6 +367,15 @@ function reconcileRequestLogCoverage(db, connectionId, requestLogs, keys, captur
       continue;
     }
     if (!row.coverageFrom || !row.coverageTo) continue;
+    const reactivated = db.prepare(`
+      UPDATE provider_cost_ledger SET accounting_status = 'active', updated_at = ?
+      WHERE connection_id = ? AND key_id = ? AND source_type = 'request_log'
+        AND accounting_status = 'shadow'
+        AND occurred_at >= ? AND occurred_at <= ?
+    `).run(
+      capturedAt, connectionId, key.keyId, row.coverageFrom, row.coverageTo
+    ).changes;
+    if (reactivated) affected.add(key.keyIdentity);
     const changed = db.prepare(`
       UPDATE provider_cost_ledger SET accounting_status = 'superseded', updated_at = ?
       WHERE connection_id = ? AND key_id = ? AND source_type = 'usage_counter'
@@ -368,6 +395,9 @@ function recordProviderUsageCounters({
   const cumulative = (usage || []).filter((item) => (
     item?.scope === 'key' && item.period === 'cumulative' && item.remoteSubjectId != null
   ));
+  const counterRemoteKeyIds = new Set(
+    cumulative.map((item) => String(item.remoteSubjectId))
+  );
   const coverage = requestLogCoverage(requestLogs, keys);
   const contexts = keyContexts(db, connectionId);
   const valuation = providerValuationContext(db, connectionId);
@@ -422,7 +452,7 @@ function recordProviderUsageCounters({
       updated_at = excluded.updated_at
   `);
   const affected = reconcileRequestLogCoverage(
-    db, connectionId, requestLogs, keys, capturedAt
+    db, connectionId, requestLogs, keys, capturedAt, counterRemoteKeyIds
   );
   let ledgerEntryCount = 0;
   let openingEntryCount = 0;

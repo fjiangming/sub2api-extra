@@ -535,6 +535,60 @@ test('Sub2API user session reads request logs separately for each remote API Key
   ]);
 });
 
+test('Sub2API request-log paging reuses idle key capacity without changing page size', async () => {
+  const requests = [];
+  const busyRows = Array.from({ length: 80 }, (_, index) => ({
+    id: 1000 + index,
+    api_key_id: 9,
+    request_id: `request-${1000 + index}`,
+    model: 'claude-test',
+    input_tokens: 10,
+    output_tokens: 2,
+    actual_cost: 0.001,
+    created_at: new Date(Date.UTC(2026, 7, 5, 12, 0, index)).toISOString()
+  }));
+  const adapter = new Sub2ApiAdapter(context('sub2api', (url) => {
+    if (url.pathname !== '/api/v1/usage') throw new Error(`Unexpected ${url.pathname}`);
+    const remoteKeyId = url.searchParams.get('api_key_id');
+    const page = Number(url.searchParams.get('page'));
+    const pageSize = Number(url.searchParams.get('page_size'));
+    requests.push({ remoteKeyId, page, pageSize });
+    const rows = remoteKeyId === '9' ? busyRows : [];
+    const offset = (page - 1) * pageSize;
+    return {
+      code: 0,
+      data: {
+        items: rows.slice(offset, offset + pageSize),
+        total: remoteKeyId === '9' && page === 1 ? 76 : rows.length
+      }
+    };
+  }, { credentials: { accessToken: 'access-token', tokenExpiresAt: Date.now() + 3600000 } }));
+
+  const result = await adapter.getRequestLogs({
+    lookbackDays: 7,
+    maxRecords: 100,
+    keys: [
+      { remoteId: '9', name: 'Busy' },
+      { remoteId: '10', name: 'Idle' }
+    ]
+  });
+
+  assert.equal(result.items.length, 80);
+  assert.equal(result.total, 80);
+  assert.equal(result.truncated, false);
+  assert.deepEqual(
+    requests.filter((item) => item.remoteKeyId === '9'),
+    [
+      { remoteKeyId: '9', page: 1, pageSize: 50 },
+      { remoteKeyId: '9', page: 2, pageSize: 50 }
+    ]
+  );
+  const coverage = result.keyCoverage.find((item) => item.remoteKeyId === '9');
+  assert.equal(coverage.status, 'succeeded');
+  assert.equal(coverage.total, 80);
+  assert.equal(coverage.truncated, false);
+});
+
 test('Sub2API API Key mode detects and reads self-scoped request logs', async () => {
   const requests = [];
   const adapter = new Sub2ApiAdapter(context('sub2api', (url, options) => {

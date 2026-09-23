@@ -1084,6 +1084,70 @@ test('account monitor HTTP API supports manual sync, filtering and probes', asyn
   assert.equal(invalidProbe.status, 400);
 });
 
+test('account monitor sync immediately refreshes suppliers created by auto-mapping', async (t) => {
+  const context = createTestContext();
+  const sub2api = {
+    authenticationStatus: () => ({ available: true, source: 'test' }),
+    adminToken: async () => 'test-admin-token'
+  };
+  const app = createApplication({
+    config: context.config,
+    db: context.db,
+    sub2api,
+    startBackground: false
+  });
+  const { accountMonitor, mappings, sync } = app.locals.services;
+  const supplierSyncs = [];
+  accountMonitor.sync = async () => ({ accountCount: 1 });
+  accountMonitor.mappedConnectionIds = () => [];
+  accountMonitor.settings = () => ({ autoMappingEnabled: true });
+  mappings.autoMappings = async () => ({
+    mode: 'apply',
+    summary: { created: 1 },
+    items: [{ status: 'created', providerId: 'new-provider' }],
+    comparisons: []
+  });
+  sync.run = async (connectionId) => {
+    supplierSyncs.push(connectionId);
+    return { status: 'succeeded' };
+  };
+
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await app.locals.close();
+    context.cleanup();
+  });
+
+  const login = await fetch(`${base}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'test-password' })
+  });
+  const session = await login.json();
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const response = await fetch(`${base}/api/account-monitor/sync?wait=true`, {
+    method: 'POST',
+    headers: {
+      Cookie: cookie,
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': session.csrfToken
+    },
+    body: '{}'
+  });
+
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.deepEqual(supplierSyncs, ['new-provider']);
+  assert.equal(result.supplierSync.connectionCount, 1);
+  assert.equal(result.supplierSync.succeeded, 1);
+  assert.deepEqual(result.supplierSync.results, [
+    { connectionId: 'new-provider', status: 'succeeded' }
+  ]);
+});
+
 test('capability scorer separates answers from exact instruction following', () => {
   assert.deepEqual(scoreChallenge(CHALLENGE_EXPECTED), {
     intelligenceScore: 100,

@@ -1160,7 +1160,11 @@ class Sub2ApiAdapter extends ProviderAdapter {
     }
 
     const queryableKeys = requestedKeys.slice(0, maxRecords);
-    const perKeyLimit = Math.max(1, Math.floor(maxRecords / queryableKeys.length));
+    const pageSize = Math.max(
+      1,
+      Math.min(100, Math.floor(maxRecords / queryableKeys.length))
+    );
+    const states = new Array(queryableKeys.length);
     const results = new Array(queryableKeys.length);
     let cursor = 0;
     const workerCount = Math.min(
@@ -1186,9 +1190,6 @@ class Sub2ApiAdapter extends ProviderAdapter {
               { status: 409, details: { remoteKeyId } }
             );
           }
-          const rows = [];
-          let total = null;
-          let hasTotal = false;
           const configuredEntry = gatewayApiKeyLogs
             ? configuredEntriesById.get(remoteKeyId)
             : null;
@@ -1199,8 +1200,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
               { status: 409, details: { remoteKeyId } }
             );
           }
-          for (let page = 1; rows.length < perKeyLimit; page += 1) {
-            const pageSize = Math.min(100, perKeyLimit - rows.length);
+          const requestPage = async (page) => {
             const query = new URLSearchParams({
               start_date: dateKey(keyStartAt, timeZone),
               end_date: endDate,
@@ -1220,35 +1220,23 @@ class Sub2ApiAdapter extends ProviderAdapter {
                   { headers: this.apiKeyHeaders(configuredEntry), retries: 1 }
                 )
               : await this.authenticatedRequest(`${endpoint}?${query.toString()}`, { retries: 1 });
-            const extracted = extractItems(response.data);
-            if (extracted.hasTotal) {
-              total = extracted.total;
-              hasTotal = true;
-            }
-            rows.push(...extracted.items.slice(0, perKeyLimit - rows.length));
-            if (
-              extracted.items.length === 0 ||
-              extracted.items.length < pageSize ||
-              (extracted.hasTotal && rows.length >= extracted.total)
-            ) break;
-          }
-          const items = rows.map((row) => normalizeRequestLog(row, key, {
-            validateRemoteKeyId: !gatewayApiKeyLogs
-          })).filter(Boolean);
-          const truncated = rows.length >= perKeyLimit && (!hasTotal || Number(total) > rows.length);
-          results[index] = {
-            ok: true,
-            items,
-            coverage: {
-              remoteKeyId,
-              status: 'succeeded',
-              coverageFrom: keyStartAt.toISOString(),
-              coverageTo,
-              truncated,
-              total: hasTotal ? total : rows.length,
-              errorCode: null,
-              errorMessage: null
-            }
+            return extractItems(response.data);
+          };
+          const firstPage = await requestPage(1);
+          const rows = firstPage.items.slice(0, pageSize);
+          states[index] = {
+            key,
+            remoteKeyId,
+            keyStartAt,
+            requestPage,
+            rows,
+            total: firstPage.hasTotal ? firstPage.total : null,
+            hasTotal: firstPage.hasTotal,
+            exhausted: firstPage.items.length < pageSize ||
+              (firstPage.hasTotal && rows.length >= firstPage.total),
+            limit: rows.length,
+            nextPage: 2,
+            failed: false
           };
         } catch (error) {
           results[index] = {
@@ -1270,6 +1258,131 @@ class Sub2ApiAdapter extends ProviderAdapter {
       }
     });
     await Promise.all(workers);
+
+    const successfulStates = states.filter(Boolean);
+    const refreshDemand = (state) => {
+      const reportedTotal = Number(state.total);
+      state.demand = state.hasTotal && Number.isFinite(reportedTotal)
+        ? Math.max(state.rows.length, Math.max(0, Math.trunc(reportedTotal)))
+        : state.exhausted ? state.rows.length : Number.POSITIVE_INFINITY;
+      state.limit = Math.min(state.limit, state.demand);
+    };
+    const allocateRemaining = () => {
+      let remaining = Math.max(
+        0,
+        maxRecords - successfulStates.reduce((sum, state) => sum + state.limit, 0)
+      );
+      let expandable = successfulStates.filter(
+        (state) => !state.failed && state.limit < state.demand
+      );
+      while (remaining > 0 && expandable.length > 0) {
+        const share = Math.max(1, Math.floor(remaining / expandable.length));
+        let allocated = 0;
+        for (const state of expandable) {
+          if (remaining <= 0) break;
+          const capacity = Number.isFinite(state.demand)
+            ? state.demand - state.limit
+            : remaining;
+          const increment = Math.min(share, capacity, remaining);
+          state.limit += increment;
+          remaining -= increment;
+          allocated += increment;
+        }
+        if (allocated === 0) break;
+        expandable = expandable.filter((state) => state.limit < state.demand);
+      }
+    };
+    for (const state of successfulStates) {
+      refreshDemand(state);
+      state.limit = Math.min(state.demand, pageSize);
+    }
+
+    while (true) {
+      for (const state of successfulStates) {
+        if (!state.failed) refreshDemand(state);
+      }
+      allocateRemaining();
+      const pendingStates = successfulStates.filter(
+        (state) => !state.failed && !state.exhausted && state.rows.length < state.limit
+      );
+      if (pendingStates.length === 0) break;
+
+      cursor = 0;
+      const pagingWorkers = Array.from(
+        { length: Math.min(workerCount, pendingStates.length) },
+        async () => {
+          while (cursor < pendingStates.length) {
+            const state = pendingStates[cursor];
+            cursor += 1;
+            const index = states.indexOf(state);
+            try {
+              while (!state.exhausted && state.rows.length < state.limit) {
+                const extracted = await state.requestPage(state.nextPage);
+                state.nextPage += 1;
+                if (extracted.hasTotal) {
+                  state.total = extracted.total;
+                  state.hasTotal = true;
+                }
+                state.rows.push(...extracted.items.slice(0, pageSize));
+                if (
+                  extracted.items.length === 0 ||
+                  extracted.items.length < pageSize ||
+                  (extracted.hasTotal && state.rows.length >= extracted.total)
+                ) {
+                  state.exhausted = true;
+                }
+              }
+            } catch (error) {
+              state.failed = true;
+              state.limit = 0;
+              results[index] = {
+                ok: false,
+                error,
+                items: [],
+                coverage: {
+                  remoteKeyId: state.remoteKeyId,
+                  status: 'unavailable',
+                  coverageFrom: null,
+                  coverageTo: null,
+                  truncated: false,
+                  total: null,
+                  errorCode: error?.code || 'REQUEST_LOG_UNAVAILABLE',
+                  errorMessage: String(error?.message || 'Sub2API request logs are unavailable')
+                }
+              };
+            }
+          }
+        }
+      );
+      await Promise.all(pagingWorkers);
+    }
+
+    for (const state of successfulStates) {
+      if (state.failed) continue;
+      const index = states.indexOf(state);
+      const retainedRows = state.rows.slice(0, state.limit);
+      const items = retainedRows.map((row) => normalizeRequestLog(row, state.key, {
+        validateRemoteKeyId: !gatewayApiKeyLogs
+      })).filter(Boolean);
+      const reportedTotal = Number(state.total);
+      const truncated = state.hasTotal && Number.isFinite(reportedTotal)
+        ? reportedTotal > retainedRows.length
+        : !state.exhausted && retainedRows.length >= state.limit;
+      results[index] = {
+        ok: true,
+        items,
+        coverage: {
+          remoteKeyId: state.remoteKeyId,
+          status: 'succeeded',
+          coverageFrom: state.keyStartAt.toISOString(),
+          coverageTo,
+          truncated,
+          total: state.hasTotal ? state.total : retainedRows.length,
+          errorCode: null,
+          errorMessage: null
+        }
+      };
+    }
 
     for (const key of requestedKeys.slice(queryableKeys.length)) {
       results.push({

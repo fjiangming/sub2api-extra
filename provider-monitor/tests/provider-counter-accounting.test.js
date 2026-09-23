@@ -277,6 +277,86 @@ test('API-key-only counters preserve deltas across rate, mapping, reset and key 
   assert.equal(mappedAccount.comparison.upstream.requestCount, 30);
   assert.equal(mappedAccount.comparison.cost.estimated, true);
   assert.equal(mappedAccount.comparison.cost.precisionSeconds, 600);
+
+  const fullyCoveredAt = new Date().toISOString();
+  checkpoint(fullyCoveredAt, 6, 60, {
+    identity: 'identity-v2',
+    requestLogs: {
+      ok: true,
+      value: {
+        keyCoverage: [{
+          remoteKeyId: 'manual-key',
+          status: 'succeeded',
+          truncated: false,
+          coverageFrom: t8,
+          coverageTo: fullyCoveredAt
+        }]
+      }
+    }
+  });
+  assert.equal(context.db.prepare(`
+    SELECT accounting_status FROM provider_cost_ledger
+    WHERE connection_id = ? AND source_log_id = 'partial-log'
+  `).get(provider.id).accounting_status, 'active');
+  assert.equal(context.db.prepare(`
+    SELECT accounting_status FROM provider_cost_ledger
+    WHERE connection_id = ? AND entry_kind = 'counter_delta'
+      AND key_identity = 'identity-v2'
+  `).get(provider.id).accounting_status, 'superseded');
+});
+
+test('truncated request logs stay active when no cumulative counter can replace them', (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const providers = new ProviderRepository(context.db, context.config);
+  const provider = providers.create({
+    name: 'Log-only Supplier',
+    adapterType: 'sub2api',
+    baseUrl: 'https://log-only.example',
+    authMode: 'token_pair',
+    credentials: { accessToken: 'access-token' }
+  });
+  const capturedAt = new Date().toISOString();
+  context.db.prepare(`
+    INSERT INTO remote_keys(
+      id, connection_id, remote_id, name, masked_key, status, currency,
+      unlimited, metadata_json, first_seen_at, last_seen_at
+    ) VALUES ('log-only-key', ?, 'manual-key', 'Manual Key', '',
+      'active', 'USD', 0, '{}', ?, ?)
+  `).run(provider.id, capturedAt, capturedAt);
+  context.db.prepare(`
+    INSERT INTO provider_cost_ledger(
+      connection_id, key_id, remote_key_id, key_identity, source_log_id, status,
+      currency, cost, request_count, occurred_at, ingested_at, updated_at,
+      accounting_status, first_observed_at, last_observed_at
+    ) VALUES (?, 'log-only-key', 'manual-key', 'manual-key', 'partial-log',
+      'success', 'USD', 1, 1, ?, ?, ?, 'shadow', ?, ?)
+  `).run(provider.id, capturedAt, capturedAt, capturedAt, capturedAt, capturedAt);
+
+  recordProviderUsageCounters({
+    db: context.db,
+    connectionId: provider.id,
+    usage: [],
+    keys: [{ remoteId: 'manual-key' }],
+    requestLogs: {
+      ok: true,
+      value: {
+        keyCoverage: [{
+          remoteKeyId: 'manual-key',
+          status: 'succeeded',
+          truncated: true,
+          coverageFrom: capturedAt,
+          coverageTo: capturedAt
+        }]
+      }
+    },
+    capturedAt
+  });
+
+  assert.equal(context.db.prepare(`
+    SELECT accounting_status FROM provider_cost_ledger
+    WHERE connection_id = ? AND source_log_id = 'partial-log'
+  `).get(provider.id).accounting_status, 'active');
 });
 
 test('an opening counter baseline exposes lifetime totals without inventing a window value', (t) => {
