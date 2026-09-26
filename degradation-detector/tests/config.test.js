@@ -29,6 +29,7 @@ test('runtime configuration only requires the Sub2API connection', (t) => {
   assert.equal(config.sub2apiBaseUrl, 'https://sub2api.example.test');
   assert.equal(config.scheduleTimezone, 'Asia/Shanghai');
   assert.equal(config.concurrency, 2);
+  assert.equal(config.requestTimeoutMs, 30 * 60 * 1000);
   assert.equal(config.tests, undefined);
   assert.equal(config.groupKeys, undefined);
 });

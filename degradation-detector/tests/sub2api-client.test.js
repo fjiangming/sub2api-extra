@@ -56,18 +56,18 @@ test('Undici header and body timeouts are classified as request timeouts', async
   for (const code of ['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_CONNECT_TIMEOUT']) {
     assert.equal(isTimeoutError({ cause: { code } }), true, code);
   }
-  assert.equal(timeoutMessage(600000), 'Sub2API 请求在 10 分钟内未完成');
+  assert.equal(timeoutMessage(1800000), 'Sub2API 请求在 30 分钟内未完成');
 
   const headersTimeout = new TypeError('fetch failed');
   headersTimeout.cause = { code: 'UND_ERR_HEADERS_TIMEOUT' };
   const api = new Sub2ApiClient({
     sub2apiBaseUrl: 'https://sub2api.example.test',
-    requestTimeoutMs: 600000,
+    requestTimeoutMs: 1800000,
     maxResponseBytes: 1024
   }, async () => { throw headersTimeout; });
   await assert.rejects(
     () => api.request('/v1/responses'),
-    (error) => error.code === 'SUB2API_TIMEOUT' && /10 分钟/.test(error.message)
+    (error) => error.code === 'SUB2API_TIMEOUT' && /30 分钟/.test(error.message)
   );
 });
 
