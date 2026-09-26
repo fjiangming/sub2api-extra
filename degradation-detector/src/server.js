@@ -197,7 +197,10 @@ async function adminConfigurationPayload(req, runtime) {
     });
   const settings = runtime.store.getServiceSettings();
   return {
-    schedule_time: settings.schedule_time,
+    schedule_time: settings.schedule_times[0],
+    schedule_mode: settings.schedule_mode,
+    schedule_times: settings.schedule_times,
+    schedule_interval_minutes: settings.schedule_interval_minutes,
     schedule_timezone: settings.schedule_timezone,
     updated_at: settings.updated_at / 1000,
     platforms
@@ -269,7 +272,9 @@ async function saveAdminConfiguration(req, runtime) {
   }
 
   runtime.store.saveAdminConfiguration({
-    scheduleTime: submitted.schedule_time,
+    scheduleMode: submitted.schedule_mode,
+    scheduleTimes: submitted.schedule_times,
+    scheduleIntervalMinutes: submitted.schedule_interval_minutes,
     scheduleTimezone: runtime.config.scheduleTimezone,
     updatedBy: String(req.auth.user.id),
     serviceOwnerId: runtime.config.serviceOwnerId,
@@ -288,7 +293,9 @@ function seedDemo(config, store, vault) {
     ['40', 'Gemini｜专属定制', 'gemini', 'degraded']
   ];
   store.saveAdminConfiguration({
-    scheduleTime: '09:00',
+    scheduleMode: 'daily',
+    scheduleTimes: ['09:00', '18:00'],
+    scheduleIntervalMinutes: 60,
     scheduleTimezone: config.scheduleTimezone,
     updatedBy: 'demo-user',
     serviceOwnerId: userId,
@@ -590,7 +597,10 @@ function createApp(config, overrides = {}) {
           id: platform,
           label: runtime.store.getPlatformTest(platform)?.label || platform
         })),
-        schedule_time: settings.schedule_time,
+        schedule_time: settings.schedule_times[0],
+        schedule_mode: settings.schedule_mode,
+        schedule_times: settings.schedule_times,
+        schedule_interval_minutes: settings.schedule_interval_minutes,
         schedule_timezone: settings.schedule_timezone,
         next_run_at: nextRunAt,
         server_time: Date.now() / 1000

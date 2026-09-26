@@ -500,7 +500,7 @@ class DetectionRunner {
       this.store.failRun(runId, {
         reason: `平台 ${monitor.platform} 已不在检测配置中`,
         errorCode: 'PLATFORM_CONFIG_REMOVED'
-      }, this.store.nextScheduledAt());
+      });
       return this.store.getRun(runId);
     }
     try {
@@ -536,7 +536,7 @@ class DetectionRunner {
         artifactName: artifact?.name || null,
         artifactMime: artifact?.mime || output.mime || null,
         previewToken
-      }, this.store.nextScheduledAt());
+      });
       const stalePaths = this.store.pruneRuns(currentMonitor.id, this.config.historyLimit);
       const artifactRoot = path.resolve(this.config.artifactDir);
       await Promise.all(stalePaths.map((filename) => {
@@ -553,7 +553,7 @@ class DetectionRunner {
         reason: `${appError.message}，本次不计入有效结果`,
         source: 'request_error',
         errorCode: appError.code
-      }, this.store.nextScheduledAt());
+      });
     } finally {
       if (run?.prompt) run.prompt = null;
     }

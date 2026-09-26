@@ -12,7 +12,8 @@ const apiTypes = [
 ];
 
 const outputTypes = ['text', 'html', 'image', 'file'];
-const reasoningEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+const reasoningEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const dailyTimeSchema = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/);
 
 const validationSchema = z.object({
   min_bytes: z.coerce.number().int().min(0).max(20 * 1024 * 1024).default(1),
@@ -68,11 +69,24 @@ const platformSelectionSchema = z.object({
 }).strict();
 
 const adminConfigurationSchema = z.object({
-  schedule_time: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+  schedule_mode: z.enum(['daily', 'interval']),
+  schedule_times: z.array(dailyTimeSchema).min(1).max(24),
+  schedule_interval_minutes: z.coerce.number().int().min(1).max(43200),
   platforms: z.array(platformSelectionSchema).max(64)
 }).strict().superRefine((value, context) => {
   const platforms = new Set();
   const groups = new Set();
+  const times = new Set();
+  value.schedule_times.forEach((time, timeIndex) => {
+    if (times.has(time)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['schedule_times', timeIndex],
+        message: '每日检测时间不能重复'
+      });
+    }
+    times.add(time);
+  });
   value.platforms.forEach((platform, platformIndex) => {
     if (platforms.has(platform.id)) {
       context.addIssue({
@@ -145,7 +159,18 @@ function validateTestConfig(platform, value) {
 }
 
 function validateAdminConfiguration(value) {
-  const result = adminConfigurationSchema.safeParse(value);
+  let candidate = value;
+  if (value && typeof value === 'object' && !Array.isArray(value)
+    && value.schedule_mode == null && value.schedule_time != null) {
+    const { schedule_time: legacyTime, ...rest } = value;
+    candidate = {
+      ...rest,
+      schedule_mode: 'daily',
+      schedule_times: [legacyTime],
+      schedule_interval_minutes: 60
+    };
+  }
+  const result = adminConfigurationSchema.safeParse(candidate);
   if (!result.success) {
     const detail = result.error.issues
       .map((issue) => `${issue.path.join('.') || 'root'}: ${issue.message}`)
@@ -154,6 +179,7 @@ function validateAdminConfiguration(value) {
   }
   return {
     ...result.data,
+    schedule_times: [...result.data.schedule_times].sort(),
     platforms: result.data.platforms.map((platform) => ({
       ...platform,
       test: validateTestConfig(platform.id, platform.test)

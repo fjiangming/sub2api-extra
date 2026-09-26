@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 const { validateTestConfig } = require('./config');
-const { nextDailyRunAt } = require('./schedule');
+const { nextScheduledRunAt, parseDailyTime } = require('./schedule');
 
 function nowMs() {
   return Date.now();
@@ -12,6 +12,34 @@ function nowMs() {
 
 function nullableNumber(value) {
   return value == null ? null : Number(value);
+}
+
+function storedSchedule(row) {
+  let times = [];
+  try {
+    const parsed = JSON.parse(row?.schedule_times_json || '[]');
+    if (Array.isArray(parsed)) {
+      times = parsed.map((time) => parseDailyTime(time).value);
+    }
+  } catch {
+    times = [];
+  }
+  if (times.length === 0) {
+    try {
+      times = [parseDailyTime(row?.schedule_time || '09:00').value];
+    } catch {
+      times = ['09:00'];
+    }
+  }
+  times = [...new Set(times)].sort().slice(0, 24);
+  const intervalMinutes = Number(row?.schedule_interval_minutes);
+  return {
+    mode: row?.schedule_mode === 'interval' ? 'interval' : 'daily',
+    times,
+    intervalMinutes: Number.isInteger(intervalMinutes) && intervalMinutes >= 1 && intervalMinutes <= 43200
+      ? intervalMinutes
+      : 60
+  };
 }
 
 function publicRun(row) {
@@ -118,6 +146,9 @@ class Store {
       CREATE TABLE IF NOT EXISTS service_settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         schedule_time TEXT NOT NULL,
+        schedule_mode TEXT NOT NULL DEFAULT 'daily',
+        schedule_times_json TEXT,
+        schedule_interval_minutes INTEGER NOT NULL DEFAULT 60,
         schedule_timezone TEXT NOT NULL,
         updated_by TEXT,
         updated_at INTEGER NOT NULL
@@ -149,11 +180,28 @@ class Store {
         ON runs(preview_token);
     `);
     this.#ensureColumn('monitors', 'key_fingerprint', 'TEXT');
+    this.#ensureColumn('service_settings', 'schedule_mode', "TEXT NOT NULL DEFAULT 'daily'");
+    this.#ensureColumn('service_settings', 'schedule_times_json', 'TEXT');
+    this.#ensureColumn('service_settings', 'schedule_interval_minutes', 'INTEGER NOT NULL DEFAULT 60');
     this.db.prepare(`
       INSERT OR IGNORE INTO service_settings (
-        id, schedule_time, schedule_timezone, updated_by, updated_at
-      ) VALUES (1, '09:00', ?, NULL, ?)
+        id, schedule_time, schedule_mode, schedule_times_json,
+        schedule_interval_minutes, schedule_timezone, updated_by, updated_at
+      ) VALUES (1, '09:00', 'daily', '["09:00"]', 60, ?, NULL, ?)
     `).run(this.config.scheduleTimezone, nowMs());
+    const settings = this.db.prepare('SELECT * FROM service_settings WHERE id = 1').get();
+    const schedule = storedSchedule(settings);
+    this.db.prepare(`
+      UPDATE service_settings SET
+        schedule_time = ?, schedule_mode = ?, schedule_times_json = ?,
+        schedule_interval_minutes = ?
+      WHERE id = 1
+    `).run(
+      schedule.times[0],
+      schedule.mode,
+      JSON.stringify(schedule.times),
+      schedule.intervalMinutes
+    );
   }
 
   close() {
@@ -161,12 +209,24 @@ class Store {
   }
 
   getServiceSettings() {
-    return this.db.prepare('SELECT * FROM service_settings WHERE id = 1').get();
+    const row = this.db.prepare('SELECT * FROM service_settings WHERE id = 1').get();
+    const schedule = storedSchedule(row);
+    const { schedule_times_json: omitted, ...settings } = row;
+    return {
+      ...settings,
+      schedule_mode: schedule.mode,
+      schedule_times: schedule.times,
+      schedule_interval_minutes: schedule.intervalMinutes
+    };
   }
 
   nextScheduledAt(from = nowMs()) {
     const settings = this.getServiceSettings();
-    return nextDailyRunAt(settings.schedule_time, from, settings.schedule_timezone);
+    return nextScheduledRunAt({
+      mode: settings.schedule_mode,
+      times: settings.schedule_times,
+      intervalMinutes: settings.schedule_interval_minutes
+    }, from, settings.schedule_timezone);
   }
 
   getPlatformConfig(platform) {
@@ -196,9 +256,18 @@ class Store {
     const transaction = this.db.transaction(() => {
       this.db.prepare(`
         UPDATE service_settings SET
-          schedule_time = ?, schedule_timezone = ?, updated_by = ?, updated_at = ?
+          schedule_time = ?, schedule_mode = ?, schedule_times_json = ?,
+          schedule_interval_minutes = ?, schedule_timezone = ?, updated_by = ?, updated_at = ?
         WHERE id = 1
-      `).run(input.scheduleTime, input.scheduleTimezone, input.updatedBy, timestamp);
+      `).run(
+        input.scheduleTimes[0],
+        input.scheduleMode,
+        JSON.stringify(input.scheduleTimes),
+        input.scheduleIntervalMinutes,
+        input.scheduleTimezone,
+        input.updatedBy,
+        timestamp
+      );
 
       this.db.prepare('UPDATE platform_configs SET enabled = 0').run();
       const upsertPlatform = this.db.prepare(`
@@ -250,7 +319,11 @@ class Store {
         WHERE user_id = ?
       `).run(timestamp, input.serviceOwnerId);
 
-      const nextRunAt = nextDailyRunAt(input.scheduleTime, timestamp, input.scheduleTimezone);
+      const nextRunAt = nextScheduledRunAt({
+        mode: input.scheduleMode,
+        times: input.scheduleTimes,
+        intervalMinutes: input.scheduleIntervalMinutes
+      }, timestamp, input.scheduleTimezone);
       for (const group of input.groups) {
         this.upsertMonitor({
           userId: input.serviceOwnerId,
@@ -456,11 +529,15 @@ class Store {
     return this.getRun(id);
   }
 
-  completeRun(id, result, nextRunAt = this.nextScheduledAt()) {
+  completeRun(id, result, nextRunAt) {
     const finishedAt = nowMs();
     const run = this.getRun(id);
     if (!run) throw new Error(`Run ${id} does not exist`);
     const startedAt = run.started_at || finishedAt;
+    const currentMonitor = this.getMonitorById(run.monitor_id);
+    const resolvedNextRunAt = nextRunAt !== undefined
+      ? nextRunAt
+      : (run.trigger_type === 'manual' ? currentMonitor?.next_run_at : this.nextScheduledAt(finishedAt));
     const transaction = this.db.transaction(() => {
       this.db.prepare(`
         UPDATE runs SET
@@ -489,13 +566,13 @@ class Store {
           next_run_at = CASE WHEN enabled = 1 THEN ? ELSE NULL END,
           updated_at = ?
         WHERE id = ?
-      `).run(finishedAt, nextRunAt, finishedAt, run.monitor_id);
+      `).run(finishedAt, resolvedNextRunAt ?? null, finishedAt, run.monitor_id);
     });
     transaction();
     return this.getRun(id);
   }
 
-  failRun(id, result, nextRunAt = this.nextScheduledAt()) {
+  failRun(id, result, nextRunAt) {
     return this.completeRun(id, {
       status: 'error',
       quality: null,

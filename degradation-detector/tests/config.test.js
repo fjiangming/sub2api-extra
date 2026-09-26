@@ -51,6 +51,10 @@ test('platform test validation covers regex and protocol-output combinations', (
   const parsed = validateTestConfig('openai', defaultTests.openai);
   assert.equal(parsed.output_type, 'html');
   assert.equal(parsed.max_output_tokens, 16384);
+  assert.equal(validateTestConfig('openai', {
+    ...defaultTests.openai,
+    reasoning_effort: 'max'
+  }).reasoning_effort, 'max');
 
   const invalidRegex = structuredClone(defaultTests.openai);
   invalidRegex.validation.required_patterns = ['['];
@@ -81,6 +85,29 @@ test('administrator configuration rejects duplicates and disabled-platform group
       { id: 'openai', enabled: false, test: openai, groups: [{ id: '1', enabled: true }] }
     ]
   }), /平台未启用/);
+
+  const interval = validateAdminConfiguration({
+    schedule_mode: 'interval',
+    schedule_times: ['18:30', '08:15'],
+    schedule_interval_minutes: 90,
+    platforms: []
+  });
+  assert.equal(interval.schedule_mode, 'interval');
+  assert.deepEqual(interval.schedule_times, ['08:15', '18:30']);
+  assert.equal(interval.schedule_interval_minutes, 90);
+
+  assert.throws(() => validateAdminConfiguration({
+    schedule_mode: 'daily',
+    schedule_times: ['09:00', '09:00'],
+    schedule_interval_minutes: 60,
+    platforms: []
+  }), /不能重复/);
+  assert.throws(() => validateAdminConfiguration({
+    schedule_mode: 'interval',
+    schedule_times: ['09:00'],
+    schedule_interval_minutes: 0,
+    platforms: []
+  }), /schedule_interval_minutes/);
 });
 
 test('default platform templates cover known and generic platforms', () => {

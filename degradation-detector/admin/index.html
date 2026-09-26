@@ -49,10 +49,35 @@
           <span class="section-icon"><i data-lucide="clock-3"></i></span>
           <div><h2 id="schedule-title">自动检测计划</h2><p id="schedule-next">Asia/Shanghai</p></div>
         </div>
-        <label class="time-field">
-          <span>每日执行时间</span>
-          <input id="schedule-time" type="time" required step="60">
-        </label>
+        <div class="schedule-editor">
+          <div class="schedule-mode-switch" role="radiogroup" aria-label="自动检测计划类型">
+            <label>
+              <input type="radio" name="schedule-mode" value="daily" checked>
+              <span><i data-lucide="calendar-clock"></i>固定时间</span>
+            </label>
+            <label>
+              <input type="radio" name="schedule-mode" value="interval">
+              <span><i data-lucide="timer-reset"></i>间隔执行</span>
+            </label>
+          </div>
+          <div id="schedule-daily-fields" class="schedule-fields">
+            <span class="schedule-field-label">每日执行</span>
+            <div id="schedule-times" class="schedule-times"></div>
+            <button id="schedule-time-add" class="icon-button schedule-time-add" type="button"
+              title="添加执行时间" aria-label="添加执行时间"><i data-lucide="plus"></i></button>
+          </div>
+          <div id="schedule-interval-fields" class="schedule-fields" hidden>
+            <span class="schedule-field-label">每隔</span>
+            <label class="interval-field">
+              <input id="schedule-interval-value" type="number" min="1" required aria-label="检测间隔">
+              <select id="schedule-interval-unit" aria-label="检测间隔单位">
+                <option value="minutes">分钟</option>
+                <option value="hours">小时</option>
+                <option value="days">天</option>
+              </select>
+            </label>
+          </div>
+        </div>
       </section>
 
       <section class="platform-workspace" aria-labelledby="platform-title">

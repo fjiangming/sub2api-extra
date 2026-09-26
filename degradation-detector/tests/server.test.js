@@ -53,7 +53,9 @@ function headers(auth, csrf = '') {
 
 function configuration(groups, scheduleTime = '07:45') {
   return {
-    schedule_time: scheduleTime,
+    schedule_mode: 'daily',
+    schedule_times: [scheduleTime, '19:15'],
+    schedule_interval_minutes: 90,
     platforms: [{
       id: 'openai',
       enabled: true,
@@ -171,6 +173,9 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   assert.equal(savedResponse.status, 200);
   const saved = await savedResponse.json();
   assert.equal(saved.schedule_time, '07:45');
+  assert.equal(saved.schedule_mode, 'daily');
+  assert.deepEqual(saved.schedule_times, ['07:45', '19:15']);
+  assert.equal(saved.schedule_interval_minutes, 90);
   assert.equal(saved.platforms[0].groups[0].key_configured, true);
   assert.equal(saved.platforms[0].groups[0].enabled, true);
   assert.doesNotMatch(JSON.stringify(saved), new RegExp(dedicatedKey));
@@ -188,6 +193,9 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   assert.deepEqual(results.groups.map((group) => group.id), ['1']);
   assert.deepEqual(results.platforms.map((platform) => platform.id), ['openai']);
   assert.equal(results.schedule_time, '07:45');
+  assert.equal(results.schedule_mode, 'daily');
+  assert.deepEqual(results.schedule_times, ['07:45', '19:15']);
+  assert.equal(results.schedule_interval_minutes, 90);
   assert.equal('can_operate' in results, false);
   assert.equal('key_configured' in results.groups[0], false);
   assert.equal('monitor_id' in results.groups[0], false);

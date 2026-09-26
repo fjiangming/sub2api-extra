@@ -104,6 +104,17 @@ function when(timestamp) {
   return new Date(timestamp * 1000).toLocaleString('zh-CN', { hour12: false });
 }
 
+function scheduleDescription(data = state.data) {
+  if (data?.schedule_mode === 'interval') {
+    const minutes = Number(data.schedule_interval_minutes) || 0;
+    if (minutes > 0 && minutes % 1440 === 0) return `每隔 ${minutes / 1440} 天`;
+    if (minutes > 0 && minutes % 60 === 0) return `每隔 ${minutes / 60} 小时`;
+    return `每隔 ${minutes || '--'} 分钟`;
+  }
+  const times = Array.isArray(data?.schedule_times) ? data.schedule_times : [];
+  return `每日 ${times.length ? times.join('、') : '--:--'}`;
+}
+
 function degradationSummary(totals) {
   const valid = Number(totals?.valid || 0);
   const failed = Math.max(0, valid - Number(totals?.passed || 0));
@@ -177,7 +188,7 @@ function renderGroups() {
 function renderPageMeta() {
   const enabled = (state.data?.groups || []).length;
   const next = state.data?.next_run_at ? ` · 下次 ${when(state.data.next_run_at)}` : '';
-  $('page-meta').textContent = `只读结果 · 每日 ${state.data.schedule_time || '--:--'} 检测 · ${enabled} 个分组已启用${next}`;
+  $('page-meta').textContent = `只读结果 · ${scheduleDescription()} 检测 · ${enabled} 个分组已启用${next}`;
 }
 
 async function refresh() {
@@ -309,7 +320,7 @@ function renderDialog(force) {
   const group = activeGroup();
   if (!group || !$('result-dialog').open) return;
   $('dialog-title').textContent = `降智检测 · ${group.name}`;
-  $('dialog-subtitle').textContent = `每日 ${state.data.schedule_time || '--:--'} 检测 · ${group.model} · ${outputLabels[group.output_type] || group.output_type}；单次作品不代表长期表现。`;
+  $('dialog-subtitle').textContent = `${scheduleDescription()} 检测 · ${group.model} · ${outputLabels[group.output_type] || group.output_type}；单次作品不代表长期表现。`;
   renderHistory(group);
   const run = group.history.find((item) => item.id === state.selectedRunId);
   if (!run) {

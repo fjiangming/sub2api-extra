@@ -60,7 +60,9 @@ function testConfig(t, overrides = {}) {
 function seedRuntime(runtime, groups, tests = defaultTests) {
   const platforms = [...new Set(groups.map((group) => group.platform))];
   runtime.store.saveAdminConfiguration({
-    scheduleTime: '09:30',
+    scheduleMode: 'daily',
+    scheduleTimes: ['09:30'],
+    scheduleIntervalMinutes: 60,
     scheduleTimezone: runtime.config.scheduleTimezone,
     updatedBy: 'test-admin',
     serviceOwnerId: runtime.config.serviceOwnerId,

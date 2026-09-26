@@ -38,12 +38,12 @@ Sub2API 菜单的角色可见性只负责入口展示，不能单独作为安全
 - 为平台配置模型、请求协议、提示词、输出类型、最大输出量和判定规则；
 - 查看该平台下 Sub2API 返回的全部分组，并选择允许检测的分组；
 - 为每个启用分组填写独立的完整专用 Key；
-- 配置 `Asia/Shanghai` 时区下每天固定的自动检测时间；
+- 配置 `Asia/Shanghai` 时区下每天一个或多个固定时间，或按分钟、小时、天设置检测间隔；
 - 使用已经保存的题目和分组专用 Key 发起单次立即检测。
 
-支持 OpenAI Responses、Chat Completions、Anthropic Messages、Gemini generateContent 和 Images Generations。输出可以是直接答案、HTML、图片或通用 Base64 文件；图片、文本、JSON、PDF、音视频可预览，其它文件可下载。
+支持 OpenAI Responses、Chat Completions、Anthropic Messages、Gemini generateContent 和 Images Generations。OpenAI 协议的推理强度支持 `minimal`、`low`、`medium`、`high`、`xhigh` 和 `max`。输出可以是直接答案、HTML、图片或通用 Base64 文件；图片、文本、JSON、PDF、音视频可预览，其它文件可下载。
 
-取消选择分组并保存后，该分组会停止调度，其专用 Key 会被清除，历史轻量判定继续保留。手动检测不会改变每天固定的下一次执行时间。
+取消选择分组并保存后，该分组会停止调度，其专用 Key 会被清除，历史轻量判定继续保留。手动检测不会改变自动计划中的下一次执行时间。
 
 ## 专用 Key
 
@@ -56,7 +56,13 @@ Key 提交后使用 AES-256-GCM 加密写入 SQLite，并绑定对应分组 ID�
 ## 环境变量
 
 从模板创建环境文件：
-
+services:
+  degradation-detector:
+    image: ghcr.io/fjiangming/sub2api-extra:degradation-detector-latest
+    container_name: sub2api-degradation-detector
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9873:9873"
 ```bash
 cp degradation-detector/.env.example degradation-detector/.env
 ```
@@ -67,7 +73,7 @@ cp degradation-detector/.env.example degradation-detector/.env
 SUB2API_BASE_URL=http://host.docker.internal:8080
 ```
 
-平台、检测题、分组、专用 Key 和每日检测时间不再从环境变量读取。旧版 `DEGRADATION_DETECTOR_GROUP_KEYS_JSON`、`DEGRADATION_DETECTOR_SUPPORTED_PLATFORMS`、`DEGRADATION_DETECTOR_TESTS_JSON` 和间隔配置会被忽略，需要由管理员在配置页重新保存。
+平台、检测题、分组、专用 Key 和自动检测计划不再从环境变量读取。旧版 `DEGRADATION_DETECTOR_GROUP_KEYS_JSON`、`DEGRADATION_DETECTOR_SUPPORTED_PLATFORMS`、`DEGRADATION_DETECTOR_TESTS_JSON` 和间隔配置会被忽略，需要由管理员在配置页重新保存。
 
 ## 部署
 
@@ -95,7 +101,7 @@ URL：https://detector.example.com/admin/config?token={token}&theme={theme}
 
 两个入口都兼容 `token` 与 `access_token` 参数名，并在换取本地短期会话后立即从地址栏移除上游 Token。管理入口会先在服务端验证 Token 对应用户确实仍为管理员，再创建本地会话和返回页面。生产环境使用 Secure 和 Partitioned Cookie；反向代理必须保留 HTTPS 协议信息。
 
-首次部署时结果页为空是正常状态。管理员从独立管理入口保存至少一个平台、分组及其专用 Key 后，该分组才会出现在只读结果页并进入每日调度。
+首次部署时结果页为空是正常状态。管理员从独立管理入口保存至少一个平台、分组及其专用 Key 后，该分组才会出现在只读结果页并进入自动调度。
 
 当前会话、SQLite 写入和调度器按单实例设计，请只运行一个服务副本。数据卷 `sub2api-extra_degradation-detector-data` 必须持久化。
 

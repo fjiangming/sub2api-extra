@@ -20,8 +20,9 @@ const apiLabels = {
 };
 const outputLabels = { text: '直接答案', html: 'HTML', image: '图片', file: '文件' };
 const reasoningLabels = {
-  none: '不指定', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'XHigh'
+  none: '不指定', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'XHigh', max: 'Max'
 };
+const intervalUnitMinutes = { minutes: 1, hours: 60, days: 1440 };
 
 function $(id) { return document.getElementById(id); }
 
@@ -86,6 +87,92 @@ function optionsHtml(values, selected, labels) {
   return values.map((value) => (
     `<option value="${escapeHtml(value)}"${value === selected ? ' selected' : ''}>${escapeHtml(labels[value] || value)}</option>`
   )).join('');
+}
+
+function intervalDisplay(totalMinutes) {
+  const minutes = Number(totalMinutes) || 60;
+  if (minutes % 1440 === 0) return { value: minutes / 1440, unit: 'days' };
+  if (minutes % 60 === 0) return { value: minutes / 60, unit: 'hours' };
+  return { value: minutes, unit: 'minutes' };
+}
+
+function updateIntervalLimit() {
+  const unit = $('schedule-interval-unit').value;
+  $('schedule-interval-value').max = String(Math.floor(43200 / intervalUnitMinutes[unit]));
+}
+
+function updateScheduleTimeButtons() {
+  const items = [...$('schedule-times').querySelectorAll('.schedule-time-item')];
+  items.forEach((item) => {
+    item.querySelector('[data-remove-time]').disabled = items.length <= 1;
+  });
+  $('schedule-time-add').disabled = items.length >= 24;
+}
+
+function addScheduleTime(value = '09:00', dirty = true) {
+  if ($('schedule-times').children.length >= 24) return;
+  const item = document.createElement('div');
+  item.className = 'schedule-time-item';
+  item.innerHTML = `
+    <input type="time" required step="60" value="${escapeHtml(value)}" aria-label="每日执行时间">
+    <button class="icon-button schedule-time-remove" type="button" data-remove-time
+      title="删除执行时间" aria-label="删除执行时间"><i data-lucide="x"></i></button>`;
+  const input = item.querySelector('input');
+  const remove = item.querySelector('[data-remove-time]');
+  input.addEventListener('input', markDirty);
+  input.addEventListener('change', markDirty);
+  remove.addEventListener('click', () => {
+    if ($('schedule-times').children.length <= 1) return;
+    item.remove();
+    updateScheduleTimeButtons();
+    markDirty();
+  });
+  $('schedule-times').append(item);
+  updateScheduleTimeButtons();
+  if (dirty) markDirty();
+  refreshIcons();
+}
+
+function suggestedScheduleTime() {
+  const values = [...$('schedule-times').querySelectorAll('input')]
+    .map((input) => input.value)
+    .filter(Boolean)
+    .sort();
+  if (values.length === 0) return '09:00';
+  const used = new Set(values);
+  const [hour, minute] = values.at(-1).split(':').map(Number);
+  for (let offset = 1; offset <= 24; offset += 1) {
+    const candidate = `${String((hour + offset) % 24).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    if (!used.has(candidate)) return candidate;
+  }
+  return '09:00';
+}
+
+function syncScheduleMode(dirty = false) {
+  const mode = document.querySelector('input[name="schedule-mode"]:checked')?.value || 'daily';
+  const daily = mode === 'daily';
+  $('schedule-daily-fields').hidden = !daily;
+  $('schedule-interval-fields').hidden = daily;
+  $('schedule-times').querySelectorAll('input').forEach((input) => { input.disabled = !daily; });
+  $('schedule-interval-value').disabled = daily;
+  $('schedule-interval-unit').disabled = daily;
+  if (dirty) markDirty();
+}
+
+function renderSchedule() {
+  const mode = state.data.schedule_mode === 'interval' ? 'interval' : 'daily';
+  const radio = document.querySelector(`input[name="schedule-mode"][value="${mode}"]`);
+  if (radio) radio.checked = true;
+  $('schedule-times').replaceChildren();
+  const times = Array.isArray(state.data.schedule_times) && state.data.schedule_times.length
+    ? state.data.schedule_times
+    : ['09:00'];
+  times.forEach((time) => addScheduleTime(time, false));
+  const interval = intervalDisplay(state.data.schedule_interval_minutes);
+  $('schedule-interval-value').value = String(interval.value);
+  $('schedule-interval-unit').value = interval.unit;
+  updateIntervalLimit();
+  syncScheduleMode(false);
 }
 
 function groupHtml(group, platformIndex, groupIndex) {
@@ -264,7 +351,7 @@ function render() {
   if (!platforms.some((platform) => platform.id === state.activePlatform)) {
     state.activePlatform = platforms[0]?.id || '';
   }
-  $('schedule-time').value = state.data.schedule_time || '09:00';
+  renderSchedule();
   $('schedule-next').textContent = state.data.schedule_timezone || 'Asia/Shanghai';
   $('platform-summary').textContent = `${platforms.length} 个平台 · ${platforms.reduce((sum, platform) => sum + platform.groups.length, 0)} 个分组`;
   $('platform-tabs').innerHTML = platforms.map((platform, index) => `
@@ -329,8 +416,16 @@ function collectPlatform(panel) {
 
 function collect() {
   if (!$('config-form').reportValidity()) return null;
+  const scheduleMode = document.querySelector('input[name="schedule-mode"]:checked')?.value || 'daily';
+  const scheduleTimes = [...new Set([...$('schedule-times').querySelectorAll('input')]
+    .map((input) => input.value)
+    .filter(Boolean))].sort();
+  const intervalMinutes = Number($('schedule-interval-value').value)
+    * intervalUnitMinutes[$('schedule-interval-unit').value];
   return {
-    schedule_time: $('schedule-time').value,
+    schedule_mode: scheduleMode,
+    schedule_times: scheduleTimes,
+    schedule_interval_minutes: intervalMinutes,
     platforms: [...document.querySelectorAll('.platform-panel')].map(collectPlatform)
   };
 }
@@ -417,7 +512,15 @@ $('config-form').addEventListener('submit', (event) => {
   event.preventDefault();
   save();
 });
-$('schedule-time').addEventListener('change', markDirty);
+document.querySelectorAll('input[name="schedule-mode"]').forEach((radio) => {
+  radio.addEventListener('change', () => syncScheduleMode(true));
+});
+$('schedule-time-add').addEventListener('click', () => addScheduleTime(suggestedScheduleTime()));
+$('schedule-interval-value').addEventListener('input', markDirty);
+$('schedule-interval-unit').addEventListener('change', () => {
+  updateIntervalLimit();
+  markDirty();
+});
 window.addEventListener('beforeunload', (event) => {
   if (!state.dirty) return;
   event.preventDefault();

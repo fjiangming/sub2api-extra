@@ -91,4 +91,36 @@ function nextDailyRunAt(dailyTime, from = Date.now(), timeZone = 'Asia/Shanghai'
   return candidate;
 }
 
-module.exports = { nextDailyRunAt, parseDailyTime, zonedDateTimeToUtc, zonedParts };
+function nextDailyTimesRunAt(dailyTimes, from = Date.now(), timeZone = 'Asia/Shanghai') {
+  if (!Array.isArray(dailyTimes) || dailyTimes.length === 0) {
+    throw new Error('每日检测时间至少需要一个时间点');
+  }
+  return Math.min(...dailyTimes.map((dailyTime) => nextDailyRunAt(dailyTime, from, timeZone)));
+}
+
+function nextIntervalRunAt(intervalMinutes, from = Date.now()) {
+  const minutes = Number(intervalMinutes);
+  const fromMs = Number(from);
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 43200) {
+    throw new Error('检测间隔必须是 1 到 43200 分钟之间的整数');
+  }
+  if (!Number.isFinite(fromMs)) throw new Error('调度基准时间无效');
+  return fromMs + minutes * 60 * 1000;
+}
+
+function nextScheduledRunAt(schedule, from = Date.now(), timeZone = 'Asia/Shanghai') {
+  if (schedule?.mode === 'interval') {
+    return nextIntervalRunAt(schedule.intervalMinutes, from);
+  }
+  return nextDailyTimesRunAt(schedule?.times, from, timeZone);
+}
+
+module.exports = {
+  nextDailyRunAt,
+  nextDailyTimesRunAt,
+  nextIntervalRunAt,
+  nextScheduledRunAt,
+  parseDailyTime,
+  zonedDateTimeToUtc,
+  zonedParts
+};

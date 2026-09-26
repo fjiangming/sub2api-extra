@@ -1,7 +1,7 @@
 .admin-shell { width: min(1240px, 100%); }
 .admin-header { padding-bottom: 16px; border-bottom: 1px solid var(--border-soft); }
 .back-button { margin-right: 2px; }
-.section-heading, .workspace-head, .time-field, .platform-title-row, .platform-title-copy,
+.section-heading, .workspace-head, .platform-title-row, .platform-title-copy,
 .platform-status, .group-row, .group-choice, .key-state, .group-controls, .form-actions {
   display: flex;
   align-items: center;
@@ -33,8 +33,37 @@
 }
 .section-icon svg { width: 18px; height: 18px; }
 
-.time-field { gap: 10px; color: var(--muted); font-size: 12px; }
-.time-field input { width: 130px; }
+.schedule-editor { display: grid; justify-items: end; gap: 9px; min-width: 0; }
+.schedule-mode-switch { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-soft); }
+.schedule-mode-switch label { cursor: pointer; }
+.schedule-mode-switch input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.schedule-mode-switch span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.schedule-mode-switch svg { width: 14px; height: 14px; }
+.schedule-mode-switch input:checked + span { color: var(--teal-strong); background: var(--surface); box-shadow: 0 1px 2px rgba(15, 23, 42, .08); }
+.schedule-mode-switch input:focus-visible + span { outline: 2px solid var(--teal); outline-offset: 1px; }
+.schedule-fields { display: flex; align-items: center; justify-content: flex-end; gap: 7px; min-width: 0; }
+.schedule-fields[hidden] { display: none; }
+.schedule-field-label { margin-right: 2px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.schedule-times { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; min-width: 0; }
+.schedule-time-item { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); overflow: hidden; }
+.schedule-time-item input { width: 104px; border: 0; border-radius: 0; }
+.schedule-time-item input:focus { outline-offset: -2px; }
+.schedule-time-remove { width: 32px; height: 36px; border: 0; border-left: 1px solid var(--border-soft); border-radius: 0; color: var(--muted); }
+.schedule-time-remove svg, .schedule-time-add svg { width: 15px; height: 15px; }
+.schedule-time-add { width: 38px; height: 38px; flex: 0 0 38px; }
+.interval-field { display: grid; grid-template-columns: 110px 88px; }
+.interval-field input { border-radius: 7px 0 0 7px; }
+.interval-field select { border-left: 0; border-radius: 0 7px 7px 0; }
 
 input, textarea, select {
   width: 100%;
@@ -162,6 +191,7 @@ input:disabled, textarea:disabled, select:disabled { opacity: .58; cursor: not-a
 .dark .group-row[data-selected="true"] { background: #102a28; }
 .dark input, .dark textarea, .dark select { border-color: #394b47; }
 .dark .platform-tab[aria-selected="true"] { border-color: #23514b; }
+.dark .schedule-mode-switch input:checked + span { background: #182a27; box-shadow: none; }
 
 @media (max-width: 900px) {
   .workspace-head { align-items: stretch; flex-direction: column; }
@@ -177,7 +207,10 @@ input:disabled, textarea:disabled, select:disabled { opacity: .58; cursor: not-a
   .admin-header .button span { display: none; }
   .admin-header .button { width: 38px; padding: 0; }
   .schedule-band { align-items: stretch; flex-direction: column; gap: 12px; }
-  .time-field { justify-content: space-between; }
+  .schedule-editor { justify-items: stretch; }
+  .schedule-mode-switch { align-self: flex-start; }
+  .schedule-fields { justify-content: flex-start; }
+  .schedule-times { justify-content: flex-start; }
   .workspace-head { margin-bottom: 10px; }
   .platform-title-row { align-items: flex-start; }
   .platform-status > span:last-child { display: none; }
@@ -189,6 +222,11 @@ input:disabled, textarea:disabled, select:disabled { opacity: .58; cursor: not-a
 }
 
 @media (max-width: 430px) {
+  .schedule-fields { align-items: flex-start; flex-wrap: wrap; }
+  .schedule-field-label { flex: 0 0 100%; }
+  .schedule-times { flex: 1 1 calc(100% - 45px); }
+  .schedule-time-item input { width: 100px; }
+  .interval-field { grid-template-columns: minmax(100px, 1fr) 82px; width: 100%; }
   .group-controls { align-items: stretch; flex-direction: column; }
   .run-group-button { width: 100%; justify-content: center; }
 }

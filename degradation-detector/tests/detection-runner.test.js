@@ -112,9 +112,11 @@ test('model requests use the configured gateway endpoint and API key', async () 
     model: 'gpt-image-test',
     prompt: 'draw an image',
     output_type: 'image',
+    reasoning_effort: 'max',
     max_output_tokens: 512
   }, 'group-key');
   assert.deepEqual(calls[1][2].tools, [{ type: 'image_generation' }]);
+  assert.deepEqual(calls[1][2].reasoning, { effort: 'max' });
 });
 
 test('execution decrypts the configured service key from the credential vault', async () => {

@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const Database = require('better-sqlite3');
 const { Store } = require('../src/store');
 const { testConfig } = require('./helpers');
 
@@ -21,6 +22,88 @@ const testCase = {
   prompt: 'hello',
   output_type: 'text'
 };
+
+function saveSchedule(store, config, overrides = {}) {
+  return store.saveAdminConfiguration({
+    scheduleMode: overrides.mode || 'daily',
+    scheduleTimes: overrides.times || ['09:30'],
+    scheduleIntervalMinutes: overrides.intervalMinutes || 60,
+    scheduleTimezone: config.scheduleTimezone,
+    updatedBy: 'test-admin',
+    serviceOwnerId: config.serviceOwnerId,
+    platforms: [],
+    groups: []
+  });
+}
+
+test('legacy single-time settings migrate to the multi-mode schedule', (t) => {
+  const config = testConfig(t);
+  const legacy = new Database(config.databasePath);
+  legacy.exec(`
+    CREATE TABLE service_settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      schedule_time TEXT NOT NULL,
+      schedule_timezone TEXT NOT NULL,
+      updated_by TEXT,
+      updated_at INTEGER NOT NULL
+    );
+    INSERT INTO service_settings VALUES (1, '17:25', 'Asia/Shanghai', 'legacy-admin', 1);
+  `);
+  legacy.close();
+
+  const store = new Store(config);
+  t.after(() => store.close());
+  const settings = store.getServiceSettings();
+  assert.equal(settings.schedule_mode, 'daily');
+  assert.deepEqual(settings.schedule_times, ['17:25']);
+  assert.equal(settings.schedule_interval_minutes, 60);
+});
+
+test('stored schedules support multiple daily times and intervals', (t) => {
+  const config = testConfig(t);
+  const store = new Store(config);
+  t.after(() => store.close());
+  const from = Date.parse('2026-09-26T02:00:00.000Z');
+
+  saveSchedule(store, config, { times: ['09:30', '18:45'] });
+  assert.equal(new Date(store.nextScheduledAt(from)).toISOString(), '2026-09-26T10:45:00.000Z');
+
+  saveSchedule(store, config, { mode: 'interval', intervalMinutes: 90 });
+  assert.equal(store.nextScheduledAt(from), from + 90 * 60 * 1000);
+});
+
+test('manual completion preserves the automatic next run while scheduled completion advances it', (t) => {
+  const config = testConfig(t);
+  const store = new Store(config);
+  t.after(() => store.close());
+  saveSchedule(store, config, { mode: 'interval', intervalMinutes: 30 });
+  const originalNextRunAt = Date.now() + 10 * 60 * 1000;
+  const currentMonitor = store.upsertMonitor({
+    userId: 'user-1',
+    groupId: 'group-1',
+    groupName: 'Group 1',
+    platform: 'openai',
+    enabled: true,
+    nextRunAt: originalNextRunAt
+  });
+
+  const manual = store.createRun(currentMonitor, testCase, 'manual');
+  store.markRunRunning(manual.id);
+  store.completeRun(manual.id, {
+    status: 'normal', quality: 'normal', reason: 'ok', source: 'test', outputText: 'ok'
+  });
+  assert.equal(store.getMonitorById(currentMonitor.id).next_run_at, originalNextRunAt);
+
+  const beforeCompletion = Date.now();
+  const scheduled = store.createRun(currentMonitor, testCase, 'scheduled');
+  store.markRunRunning(scheduled.id);
+  store.completeRun(scheduled.id, {
+    status: 'normal', quality: 'normal', reason: 'ok', source: 'test', outputText: 'ok'
+  });
+  const advanced = store.getMonitorById(currentMonitor.id).next_run_at;
+  assert.ok(advanced >= beforeCompletion + 30 * 60 * 1000);
+  assert.ok(advanced <= Date.now() + 30 * 60 * 1000);
+});
 
 test('unfinished runs are recovered after reopening the database', (t) => {
   const config = testConfig(t);
