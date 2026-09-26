@@ -1,6 +1,13 @@
 'use strict';
 
+const { Agent, fetch: undiciFetch } = require('undici');
 const { AppError } = require('./errors');
+
+const UNDICI_TIMEOUT_CODES = new Set([
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_CONNECT_TIMEOUT'
+]);
 
 function unwrap(payload) {
   if (payload?.success === false || (payload?.code != null && ![0, 200].includes(Number(payload.code)))) {
@@ -40,6 +47,18 @@ function errorMessage(payload, status) {
   return payload?.error?.message || payload?.message || `Sub2API 返回 HTTP ${status}`;
 }
 
+function isTimeoutError(error) {
+  return error?.name === 'AbortError' ||
+    UNDICI_TIMEOUT_CODES.has(error?.code) ||
+    UNDICI_TIMEOUT_CODES.has(error?.cause?.code);
+}
+
+function timeoutMessage(timeoutMs) {
+  const seconds = Math.max(1, Math.round(Number(timeoutMs) / 1000));
+  if (seconds % 60 === 0) return `Sub2API 请求在 ${seconds / 60} 分钟内未完成`;
+  return `Sub2API 请求在 ${seconds} 秒内未完成`;
+}
+
 function asItems(payload) {
   const data = unwrap(payload);
   if (Array.isArray(data)) return data;
@@ -49,9 +68,18 @@ function asItems(payload) {
 }
 
 class Sub2ApiClient {
-  constructor(config, fetchImpl = globalThis.fetch) {
+  constructor(config, fetchImpl) {
     this.config = config;
-    this.fetch = fetchImpl;
+    this.fetch = fetchImpl || undiciFetch;
+    this.dispatcher = fetchImpl ? null : new Agent({
+      connectTimeout: Math.min(config.requestTimeoutMs, 30000),
+      headersTimeout: config.requestTimeoutMs + 5000,
+      bodyTimeout: config.requestTimeoutMs + 5000
+    });
+  }
+
+  async close() {
+    await this.dispatcher?.close();
   }
 
   async request(path, options = {}) {
@@ -60,9 +88,10 @@ class Sub2ApiClient {
     }
     const url = new URL(path, `${this.config.sub2apiBaseUrl}/`);
     const controller = new AbortController();
+    const timeoutMs = options.timeoutMs || this.config.requestTimeoutMs;
     const timeout = setTimeout(
       () => controller.abort(),
-      options.timeoutMs || this.config.requestTimeoutMs
+      timeoutMs
     );
     try {
       const response = await this.fetch(url, {
@@ -75,7 +104,8 @@ class Sub2ApiClient {
         },
         body: options.body == null ? undefined : JSON.stringify(options.body),
         redirect: 'error',
-        signal: controller.signal
+        signal: controller.signal,
+        ...(this.dispatcher ? { dispatcher: this.dispatcher } : {})
       });
       const raw = await readLimited(response, options.maxBytes || this.config.maxResponseBytes);
       let payload = null;
@@ -101,8 +131,11 @@ class Sub2ApiClient {
       return payload || {};
     } catch (error) {
       if (error instanceof AppError) throw error;
-      if (error?.name === 'AbortError') {
-        throw new AppError('SUB2API_TIMEOUT', 'Sub2API 请求超时', { status: 504, retryable: true });
+      if (isTimeoutError(error)) {
+        throw new AppError('SUB2API_TIMEOUT', timeoutMessage(timeoutMs), {
+          status: 504,
+          retryable: true
+        });
       }
       throw new AppError('SUB2API_UNAVAILABLE', '无法连接 Sub2API', {
         status: 503,
@@ -159,4 +192,11 @@ class Sub2ApiClient {
   }
 }
 
-module.exports = { Sub2ApiClient, asItems, readLimited, unwrap };
+module.exports = {
+  Sub2ApiClient,
+  asItems,
+  isTimeoutError,
+  readLimited,
+  timeoutMessage,
+  unwrap
+};

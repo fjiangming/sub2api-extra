@@ -2,7 +2,13 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { Sub2ApiClient, asItems } = require('../src/sub2api-client');
+const { Agent, fetch: undiciFetch } = require('undici');
+const {
+  Sub2ApiClient,
+  asItems,
+  isTimeoutError,
+  timeoutMessage
+} = require('../src/sub2api-client');
 
 function client() {
   return new Sub2ApiClient({
@@ -44,4 +50,30 @@ test('group discovery uses only the ordinary user API contract', async () => {
     { id: '9', name: 'Group 9', platform: 'openai' }
   ]);
   assert.deepEqual(calls.map((call) => call.path), ['/api/v1/groups/available']);
+});
+
+test('Undici header and body timeouts are classified as request timeouts', async () => {
+  for (const code of ['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_CONNECT_TIMEOUT']) {
+    assert.equal(isTimeoutError({ cause: { code } }), true, code);
+  }
+  assert.equal(timeoutMessage(600000), 'Sub2API 请求在 10 分钟内未完成');
+
+  const headersTimeout = new TypeError('fetch failed');
+  headersTimeout.cause = { code: 'UND_ERR_HEADERS_TIMEOUT' };
+  const api = new Sub2ApiClient({
+    sub2apiBaseUrl: 'https://sub2api.example.test',
+    requestTimeoutMs: 600000,
+    maxResponseBytes: 1024
+  }, async () => { throw headersTimeout; });
+  await assert.rejects(
+    () => api.request('/v1/responses'),
+    (error) => error.code === 'SUB2API_TIMEOUT' && /10 分钟/.test(error.message)
+  );
+});
+
+test('the default Sub2API client extends Undici timeouts beyond the service deadline', async (t) => {
+  const api = client();
+  t.after(() => api.close());
+  assert.ok(api.dispatcher instanceof Agent);
+  assert.equal(api.fetch, undiciFetch);
 });

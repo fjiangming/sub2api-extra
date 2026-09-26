@@ -18,6 +18,7 @@
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.3.0",
     "lucide": "^1.24.0",
+    "undici": "^7.30.0",
     "zod": "^4.4.3"
   }
 }

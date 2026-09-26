@@ -690,6 +690,7 @@ async function main() {
     closing = true;
     server.close();
     await runtime.scheduler.close();
+    await runtime.sub2api.close?.();
     runtime.auth.close();
     runtime.store.close();
   };
