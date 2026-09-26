@@ -1,0 +1,33 @@
+services:
+  degradation-detector:
+    profiles: [degradation-detector]
+    image: ghcr.io/fjiangming/sub2api-extra:degradation-detector-latest
+    build:
+      context: .
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
+    container_name: sub2api-degradation-detector
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9873:9873"
+    environment:
+      NODE_ENV: "production"
+      PORT: "9873"
+      DEGRADATION_DETECTOR_BIND_HOST: "0.0.0.0"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: ./.env
+        required: true
+    volumes:
+      - degradation-detector-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9873/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  degradation-detector-data:
+    name: sub2api-extra_degradation-detector-data

@@ -6,3 +6,4 @@ include:
   - ./account-manager/compose.yaml
   - ./provider-monitor/compose.yaml
   - ./operations-center/compose.yaml
+  - ./degradation-detector/compose.yaml

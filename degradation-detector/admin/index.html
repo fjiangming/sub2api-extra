@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>降智检测配置</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/admin/config.css">
+  <script src="/vendor/lucide/lucide.min.js" defer></script>
+  <script src="/admin/config.js" defer></script>
+</head>
+<body>
+  <div id="loading-view" class="state-view">
+    <span class="spinner" aria-hidden="true"></span>
+    <p>正在读取检测配置</p>
+  </div>
+
+  <div id="error-view" class="state-view" hidden>
+    <span class="state-icon"><i data-lucide="shield-alert"></i></span>
+    <h1>无法打开管理页面</h1>
+    <p id="error-message"></p>
+    <a class="button" href="/results"><i data-lucide="arrow-left"></i><span>查看检测结果</span></a>
+  </div>
+
+  <main id="app-view" class="app-shell admin-shell" hidden>
+    <header class="page-header admin-header">
+      <div class="page-title">
+        <a class="icon-button back-button" href="/results" title="查看检测结果" aria-label="查看检测结果">
+          <i data-lucide="arrow-left"></i>
+        </a>
+        <span class="page-mark" aria-hidden="true"><i data-lucide="settings-2"></i></span>
+        <div>
+          <h1>降智检测配置</h1>
+          <p id="page-meta">管理员配置</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span class="user-chip"><i data-lucide="shield-check"></i><span id="user-name"></span></span>
+        <button id="save-button" class="button primary" type="submit" form="config-form">
+          <i data-lucide="save"></i><span>保存配置</span>
+        </button>
+      </div>
+    </header>
+
+    <form id="config-form" autocomplete="off">
+      <section class="schedule-band" aria-labelledby="schedule-title">
+        <div class="section-heading">
+          <span class="section-icon"><i data-lucide="clock-3"></i></span>
+          <div><h2 id="schedule-title">自动检测计划</h2><p id="schedule-next">Asia/Shanghai</p></div>
+        </div>
+        <label class="time-field">
+          <span>每日执行时间</span>
+          <input id="schedule-time" type="time" required step="60">
+        </label>
+      </section>
+
+      <section class="platform-workspace" aria-labelledby="platform-title">
+        <div class="workspace-head">
+          <div>
+            <h2 id="platform-title">被检平台与分组</h2>
+            <p id="platform-summary"></p>
+          </div>
+          <nav id="platform-tabs" class="platform-tabs" aria-label="被检平台"></nav>
+        </div>
+        <div id="platform-panels"></div>
+      </section>
+    </form>
+  </main>
+
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

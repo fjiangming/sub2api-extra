@@ -1,0 +1,23 @@
+{
+  "name": "sub2api-degradation-detector",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Permission-aware degradation detection service for Sub2API groups",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --env-file=.env src/server.js",
+    "dev": "node --env-file=.env --watch src/server.js",
+    "test": "node --test --test-concurrency=1 tests/*.test.js"
+  },
+  "engines": {
+    "node": ">=20.18.1"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.5.2",
+    "helmet": "^8.3.0",
+    "lucide": "^1.24.0",
+    "zod": "^4.4.3"
+  }
+}

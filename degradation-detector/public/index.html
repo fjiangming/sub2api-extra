@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>降智检测</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/vendor/lucide/lucide.min.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div id="loading-view" class="state-view">
+    <span class="spinner" aria-hidden="true"></span>
+    <p>正在读取分组</p>
+  </div>
+
+  <div id="error-view" class="state-view" hidden>
+    <span class="state-icon"><i data-lucide="circle-alert"></i></span>
+    <h1>无法打开降智检测</h1>
+    <p id="error-message"></p>
+    <button id="retry-button" class="button primary" type="button">
+      <i data-lucide="refresh-cw"></i><span>重试</span>
+    </button>
+  </div>
+
+  <main id="app-view" class="app-shell" hidden>
+    <header class="page-header">
+      <div class="page-title">
+        <span class="page-mark" aria-hidden="true"><i data-lucide="brain-circuit"></i></span>
+        <div>
+          <h1>降智检测</h1>
+          <p id="page-meta">正在同步检测状态</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span class="user-chip"><i data-lucide="circle-user-round"></i><span id="user-name"></span></span>
+        <button id="refresh-button" class="icon-button" type="button" title="刷新" aria-label="刷新">
+          <i data-lucide="refresh-cw"></i>
+        </button>
+      </div>
+    </header>
+
+    <section class="toolbar" aria-label="分组筛选">
+      <div class="select-control">
+        <i data-lucide="list-filter"></i>
+        <select id="platform-filter" aria-label="按平台筛选">
+          <option value="">全部平台</option>
+        </select>
+        <i data-lucide="chevron-down" class="select-chevron"></i>
+      </div>
+      <span id="group-count" class="group-count"></span>
+    </section>
+
+    <section id="group-grid" class="group-grid" aria-live="polite"></section>
+  </main>
+
+  <dialog id="result-dialog" class="yzai-pelican-modal" aria-labelledby="dialog-title">
+    <header class="yzai-pelican-head">
+      <div class="dialog-copy">
+        <h2 id="dialog-title"></h2>
+        <p id="dialog-subtitle" class="yzai-pelican-sub"></p>
+      </div>
+      <div class="dialog-actions">
+        <button id="dialog-close" class="icon-button" type="button" title="关闭" aria-label="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+    </header>
+    <div class="yzai-pelican-body">
+      <nav id="history-list" class="yzai-pelican-history" aria-label="最近 10 次检测"></nav>
+      <section id="result-detail" class="yzai-pelican-detail" aria-live="polite"></section>
+    </div>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

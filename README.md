@@ -9,6 +9,7 @@ Sub2API 的可插拔扩展服务集合。每个功能作为独立模块运行，
 | **账号管理** | `ghcr.io/fjiangming/sub2api-extra:latest` | `9870` | [README](account-manager/README.md) |
 | **供应商监控** | `ghcr.io/fjiangming/sub2api-extra:provider-monitor-latest` | `9871` | [README](provider-monitor/README.md) |
 | **运营数据与存储管理中心** | `ghcr.io/fjiangming/sub2api-extra:operations-center-latest` | `9872` | [README](operations-center/README.md) |
+| **降智检测** | `ghcr.io/fjiangming/sub2api-extra:degradation-detector-latest` | `9873` | [README](degradation-detector/README.md) |
 
 > 💡 后续新增的功能模块会持续补充到此表中。
 
@@ -34,13 +35,16 @@ sub2api-extra/
 ├── provider-monitor/
 │   ├── compose.yaml
 │   └── .env
-└── operations-center/
+├── operations-center/
+│   ├── compose.yaml
+│   └── .env
+└── degradation-detector/
     ├── compose.yaml
     └── .env
 ```
 
 ```bash
-mkdir -p sub2api-extra/account-manager sub2api-extra/provider-monitor sub2api-extra/operations-center
+mkdir -p sub2api-extra/account-manager sub2api-extra/provider-monitor sub2api-extra/operations-center sub2api-extra/degradation-detector
 cd sub2api-extra
 ```
 
@@ -55,13 +59,14 @@ include:
   - ./account-manager/compose.yaml
   - ./provider-monitor/compose.yaml
   - ./operations-center/compose.yaml
+  - ./degradation-detector/compose.yaml
 ```
 
 #### `compose.services.env`（选择要启用的服务）
 
 ```dotenv
 # 逗号分隔的服务名；不需要的模块注释掉或去掉即可
-COMPOSE_PROFILES=account-manager,provider-monitor,operations-center
+COMPOSE_PROFILES=account-manager,provider-monitor,operations-center,degradation-detector
 ```
 
 > 只部署其中一个模块时，保留对应名称即可，例如 `COMPOSE_PROFILES=provider-monitor`。
@@ -145,6 +150,40 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+```
+
+#### `degradation-detector/compose.yaml`
+
+```yaml
+services:
+  degradation-detector:
+    profiles: [degradation-detector]
+    image: ghcr.io/fjiangming/sub2api-extra:degradation-detector-latest
+    container_name: sub2api-degradation-detector
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9873:9873"
+    environment:
+      NODE_ENV: "production"
+      PORT: "9873"
+      DEGRADATION_DETECTOR_BIND_HOST: "0.0.0.0"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: ./.env
+        required: true
+    volumes:
+      - degradation-detector-data:/app/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9873/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  degradation-detector-data:
+    name: sub2api-extra_degradation-detector-data
 ```
 
 ### 3. 配置模块环境变量
@@ -247,6 +286,14 @@ OPERATIONS_CENTER_REQUIRE_FRESH_BACKUP=true
 
 运营中心数据库连接、权限初始化、依赖检查和清理计划均可在页面完成。若服务器上的运营中心容器不能通过 `host.docker.internal:8080` 访问 Sub2API，请把 `SUB2API_BASE_URL` 改为与 `SUB2API_PUBLIC_URL` 相同的公开 HTTPS 地址；新版的认证与只读请求也会在内部地址发生连接故障时自动回退到该公开地址。详见[部署与操作手册](operations-center/docs/deployment-operations.md)。
 
+#### `degradation-detector/.env`
+
+```dotenv
+SUB2API_BASE_URL=http://host.docker.internal:8080
+```
+
+被检平台、检测题、分组专用 Key 和每天固定检测时间均由管理员在独立管理页维护；`/results` 是无管理入口和检测按钮的只读结果页，`/admin/config` 由服务端实时限制为管理员访问。两个 Sub2API 自定义菜单的地址、凭据加密及文件预览说明见[降智检测 README](degradation-detector/README.md)。
+
 > 完整参数说明请参阅各模块的 `.env.example` 或模块 README。
 
 ### 4. 拉取镜像并启动
@@ -284,7 +331,7 @@ docker image prune -f  # (可选) 清理旧镜像
 
 ### 固定版本
 
-如需固定版本而不是跟随 `latest`，修改对应模块 `.env` 中的镜像地址：
+如需固定版本而不是跟随 `latest`，账号管理、供应商监控和运营中心修改对应模块 `.env` 中的镜像地址；降智检测直接修改 `degradation-detector/compose.yaml` 的 `image`：
 
 ```dotenv
 # account-manager/.env
@@ -295,6 +342,9 @@ PROVIDER_MONITOR_IMAGE=ghcr.io/fjiangming/sub2api-extra:provider-monitor-1.2.3
 
 # operations-center/.env
 OPERATIONS_CENTER_IMAGE=ghcr.io/fjiangming/sub2api-extra:operations-center-1.2.3
+
+# degradation-detector/compose.yaml
+image: ghcr.io/fjiangming/sub2api-extra:degradation-detector-1.2.3
 ```
 
 ---
@@ -306,8 +356,9 @@ OPERATIONS_CENTER_IMAGE=ghcr.io/fjiangming/sub2api-extra:operations-center-1.2.3
 | 账号管理 | `account-manager/.env` | [账号管理 README](account-manager/README.md) |
 | 供应商监控 | `provider-monitor/.env` | [供应商监控 README](provider-monitor/README.md) |
 | 运营数据与存储管理中心 | `operations-center/.env` | [运营中心 README](operations-center/README.md) |
+| 降智检测 | `degradation-detector/.env` | [降智检测 README](degradation-detector/README.md) |
 
-修改 `.env` 后需重建容器：
+修改连接环境变量后需重建容器；降智检测页面内的业务配置保存后立即生效：
 
 ```bash
 docker compose --env-file compose.services.env up -d --no-build --remove-orphans
@@ -317,10 +368,10 @@ docker compose --env-file compose.services.env up -d --no-build --remove-orphans
 
 ## 🐳 Docker 镜像自动构建
 
-仓库中的 [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml) 会构建三个模块并发布到同一个公开 GHCR 包：
+仓库中的 [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml) 会构建四个模块并发布到同一个公开 GHCR 包：
 
-- 推送到 `main` 或 `master`：构建并推送分支标签和提交 SHA 标签；默认分支同时更新 `latest`、`provider-monitor-latest`、`operations-center-latest`。
-- 推送 `v*.*.*` 标签：额外生成账号管理、供应商监控和运营中心的版本标签，例如 `1.2.3`、`provider-monitor-1.2.3`、`operations-center-1.2.3`。
+- 推送到 `main` 或 `master`：构建并推送分支标签和提交 SHA 标签；默认分支同时更新 `latest`、`provider-monitor-latest`、`operations-center-latest`、`degradation-detector-latest`。
+- 推送 `v*.*.*` 标签：额外生成四个模块的版本标签，例如 `1.2.3`、`provider-monitor-1.2.3`、`operations-center-1.2.3`、`degradation-detector-1.2.3`。
 - Pull Request：只执行双架构构建校验，不推送镜像。
 - Actions 页面可通过 `workflow_dispatch` 手动触发。
 

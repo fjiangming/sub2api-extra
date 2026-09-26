@@ -33,6 +33,9 @@ jobs:
           - service: operations-center
             context: ./operations-center
             tag_prefix: operations-center-
+          - service: degradation-detector
+            context: ./degradation-detector
+            tag_prefix: degradation-detector-
     permissions:
       contents: read
       packages: write
