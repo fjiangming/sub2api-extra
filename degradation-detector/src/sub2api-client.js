@@ -43,6 +43,64 @@ async function readLimited(response, maxBytes) {
   return Buffer.concat(chunks, total);
 }
 
+function parsePayload(raw) {
+  if (!raw || raw.length === 0) return null;
+  try {
+    return JSON.parse(raw.toString('utf8'));
+  } catch {
+    return { message: raw.toString('utf8').slice(0, 1000) };
+  }
+}
+
+async function readEventStream(response, maxBytes, onEvent) {
+  if (!response.body) {
+    throw new AppError('SUB2API_STREAM_EMPTY', 'Sub2API 没有返回流式响应内容', { status: 502 });
+  }
+
+  const decoder = new TextDecoder();
+  let pending = '';
+  let total = 0;
+  let events = 0;
+
+  const dispatch = async (block) => {
+    const data = block
+      .split(/\r\n|\r|\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).replace(/^ /, ''))
+      .join('\n');
+    if (!data || data.trim() === '[DONE]') return;
+
+    let event;
+    try {
+      event = JSON.parse(data);
+    } catch {
+      throw new AppError('SUB2API_STREAM_INVALID', 'Sub2API 返回了无效的流式事件', { status: 502 });
+    }
+    events += 1;
+    await onEvent(event);
+  };
+
+  for await (const chunk of response.body) {
+    const buffer = Buffer.from(chunk);
+    total += buffer.length;
+    if (total > maxBytes) {
+      try { await response.body.cancel(); } catch {}
+      throw new AppError('UPSTREAM_RESPONSE_TOO_LARGE', '上游响应超过大小限制', { status: 502 });
+    }
+    pending += decoder.decode(buffer, { stream: true });
+    let boundary;
+    while ((boundary = /\r\n\r\n|\n\n|\r\r/.exec(pending))) {
+      const block = pending.slice(0, boundary.index);
+      pending = pending.slice(boundary.index + boundary[0].length);
+      await dispatch(block);
+    }
+  }
+
+  pending += decoder.decode();
+  if (pending.trim()) await dispatch(pending);
+  return { bytes: total, events };
+}
+
 function errorMessage(payload, status) {
   return payload?.error?.message || payload?.message || `Sub2API 返回 HTTP ${status}`;
 }
@@ -108,14 +166,7 @@ class Sub2ApiClient {
         ...(this.dispatcher ? { dispatcher: this.dispatcher } : {})
       });
       const raw = await readLimited(response, options.maxBytes || this.config.maxResponseBytes);
-      let payload = null;
-      if (raw.length > 0) {
-        try {
-          payload = JSON.parse(raw.toString('utf8'));
-        } catch {
-          payload = { message: raw.toString('utf8').slice(0, 1000) };
-        }
-      }
+      const payload = parsePayload(raw);
       if (!response.ok) {
         const status = response.status === 401 ? 401 : response.status === 403 ? 403 : 502;
         throw new AppError(
@@ -141,6 +192,98 @@ class Sub2ApiClient {
         status: 503,
         retryable: true
       });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async requestEventStream(path, options = {}, onEvent = async () => {}) {
+    if (!this.config.sub2apiBaseUrl) {
+      throw new AppError('SUB2API_NOT_CONFIGURED', '未配置 SUB2API_BASE_URL', { status: 503 });
+    }
+    const url = new URL(path, `${this.config.sub2apiBaseUrl}/`);
+    const controller = new AbortController();
+    const timeoutMs = options.timeoutMs || this.config.requestTimeoutMs;
+    const maxBytes = options.maxBytes || this.config.maxResponseBytes;
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let receivedEvents = 0;
+
+    try {
+      const response = await this.fetch(url, {
+        method: options.method || 'GET',
+        headers: {
+          accept: 'text/event-stream',
+          ...(options.body == null ? {} : { 'content-type': 'application/json' }),
+          ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
+          ...(options.headers || {})
+        },
+        body: options.body == null ? undefined : JSON.stringify(options.body),
+        redirect: 'error',
+        signal: controller.signal,
+        ...(this.dispatcher ? { dispatcher: this.dispatcher } : {})
+      });
+
+      if (!response.ok) {
+        const payload = parsePayload(await readLimited(response, maxBytes));
+        const status = response.status === 401 ? 401 : response.status === 403 ? 403 : 502;
+        throw new AppError(
+          response.status === 401 ? 'SUB2API_AUTH_EXPIRED' : 'SUB2API_REQUEST_FAILED',
+          errorMessage(payload, response.status),
+          {
+            status,
+            retryable: response.status === 429 || (response.status >= 500 && response.status !== 524),
+            details: { upstreamStatus: response.status }
+          }
+        );
+      }
+
+      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('text/event-stream')) {
+        const payload = parsePayload(await readLimited(response, maxBytes));
+        if (payload?.object === 'response' || payload?.id) {
+          receivedEvents += 1;
+          await onEvent({
+            type: `response.${payload.status || 'completed'}`,
+            response: payload
+          });
+          return { bytes: Buffer.byteLength(JSON.stringify(payload)), events: 1, fallbackJson: true };
+        }
+        throw new AppError('SUB2API_STREAM_UNSUPPORTED', 'Sub2API 没有返回 Responses 流式事件', {
+          status: 502
+        });
+      }
+
+      return await readEventStream(response, maxBytes, async (event) => {
+        receivedEvents += 1;
+        await onEvent(event);
+      });
+    } catch (error) {
+      if (error instanceof AppError) {
+        error.responseStarted = receivedEvents > 0;
+        if (error.responseStarted && error.retryable) error.retryable = false;
+        throw error;
+      }
+      const responseStarted = receivedEvents > 0;
+      if (isTimeoutError(error)) {
+        const timeoutError = new AppError(
+          responseStarted ? 'SUB2API_STREAM_INTERRUPTED' : 'SUB2API_TIMEOUT',
+          responseStarted
+            ? 'Sub2API 流式响应中断；为避免重复消费，未重新提交本次推理'
+            : timeoutMessage(timeoutMs),
+          { status: 504, retryable: !responseStarted }
+        );
+        timeoutError.responseStarted = responseStarted;
+        throw timeoutError;
+      }
+      const unavailable = new AppError(
+        responseStarted ? 'SUB2API_STREAM_INTERRUPTED' : 'SUB2API_UNAVAILABLE',
+        responseStarted
+          ? 'Sub2API 流式响应中断；为避免重复消费，未重新提交本次推理'
+          : '无法连接 Sub2API',
+        { status: 503, retryable: !responseStarted }
+      );
+      unavailable.responseStarted = responseStarted;
+      throw unavailable;
     } finally {
       clearTimeout(timeout);
     }
@@ -190,12 +333,25 @@ class Sub2ApiClient {
       headers: options.headers
     });
   }
+
+  async gatewayEventStream(path, apiKey, body, onEvent, options = {}) {
+    return this.requestEventStream(path, {
+      method: 'POST',
+      token: apiKey,
+      body,
+      timeoutMs: options.timeoutMs || this.config.requestTimeoutMs,
+      maxBytes: options.maxBytes || this.config.maxResponseBytes,
+      headers: options.headers
+    }, onEvent);
+  }
 }
 
 module.exports = {
   Sub2ApiClient,
   asItems,
   isTimeoutError,
+  parsePayload,
+  readEventStream,
   readLimited,
   timeoutMessage,
   unwrap

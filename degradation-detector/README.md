@@ -43,7 +43,9 @@ Sub2API 菜单的角色可见性只负责入口展示，不能单独作为安全
 
 支持 OpenAI Responses、Chat Completions、Anthropic Messages、Gemini generateContent 和 Images Generations。OpenAI 协议的推理强度支持 `minimal`、`low`、`medium`、`high`、`xhigh` 和 `max`。输出可以是直接答案、HTML、图片或通用 Base64 文件；图片、文本、JSON、PDF、音视频可预览，其它文件可下载。
 
-模型请求遇到连接失败、请求超时、HTTP 429 或上游 5xx 时，会在单次检测的总时间预算内按 `1、2、4、8、16` 秒退避并最多自动重试 5 次。鉴权、配置和响应内容格式错误不会重试，避免无效请求持续产生消费。
+OpenAI Responses 检测使用 SSE 流式请求，并且只有收到 `response.completed` 后才会保存和展示答案；`response.incomplete`、`response.failed` 或没有完成标记的断流不会把残缺 HTML 当成有效结果。该方式已通过 Sub2API 公网入口实测，原本约 125 秒触发 `HTTP 524` 的完整 HTML 请求可以在同一次推理中持续接收事件并最终得到完整文档。
+
+在尚未收到任何模型流式事件时，连接失败、请求超时、HTTP 429 或可安全重试的上游 5xx 会在单次检测总时间预算内按 `1、2、4、8、16` 秒退避并最多自动重试 5 次。一旦收到 `response.created` 或其它模型事件，连接中断后不会重新提交推理，避免同一次任务重复计费。当前 Sub2API 对后台 Responses 和 `GET /v1/responses/{id}` 的实测结果分别为 `400` 和 `404`，因此服务不会假装可以恢复服务端任务；流式 `HTTP 524` 也不会盲目重试。鉴权、配置和响应格式错误同样不会重试。
 
 取消选择分组并保存后，该分组会停止调度，其专用 Key 会被清除，历史轻量判定继续保留。手动检测不会改变自动计划中的下一次执行时间。
 

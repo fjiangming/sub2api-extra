@@ -376,14 +376,67 @@ class DetectionRunner {
       const body = {
         model: test.model,
         input: [{ role: 'user', content: [{ type: 'input_text', text: test.prompt }] }],
-        stream: false,
+        stream: true,
         max_output_tokens: test.max_output_tokens
       };
       if (test.reasoning_effort && test.reasoning_effort !== 'none') {
         body.reasoning = { effort: test.reasoning_effort };
       }
       if (test.output_type === 'image') body.tools = [{ type: 'image_generation' }];
-      return this.sub2api.gatewayJson('/v1/responses', apiKey, body, common);
+      let responseId = '';
+      let outputText = '';
+      let terminalEvent = null;
+      await this.sub2api.gatewayEventStream('/v1/responses', apiKey, body, (event) => {
+        if (event?.type === 'response.created') {
+          responseId = String(event.response?.id || '');
+          console.info(JSON.stringify({
+            event: 'model_stream_started',
+            runId: options.context?.runId,
+            monitorId: options.context?.monitorId,
+            responseId: responseId || undefined
+          }));
+        }
+        if (event?.type === 'response.output_text.delta') outputText += String(event.delta || '');
+        if (['response.completed', 'response.failed', 'response.incomplete', 'error'].includes(event?.type)) {
+          terminalEvent = event;
+          responseId = String(event.response?.id || responseId || '');
+        }
+      }, common);
+
+      if (terminalEvent?.type === 'response.completed') {
+        const payload = terminalEvent.response || {};
+        if (outputText && !responseText(payload, 'responses')) payload.output_text = outputText;
+        console.info(JSON.stringify({
+          event: 'model_stream_completed',
+          runId: options.context?.runId,
+          monitorId: options.context?.monitorId,
+          responseId: responseId || undefined
+        }));
+        return payload;
+      }
+
+      if (terminalEvent?.type === 'response.incomplete') {
+        const reason = terminalEvent.response?.incomplete_details?.reason || 'unknown';
+        throw new AppError(
+          'MODEL_RESPONSE_INCOMPLETE',
+          `模型响应未完整完成（${reason}），未保存残缺输出`,
+          { status: 502, details: { responseId: responseId || null, reason } }
+        );
+      }
+
+      if (terminalEvent?.type === 'response.failed' || terminalEvent?.type === 'error') {
+        const message = terminalEvent.response?.error?.message || terminalEvent.message || '模型流式响应失败';
+        throw new AppError('MODEL_RESPONSE_FAILED', message, {
+          status: 502,
+          details: { responseId: responseId || null }
+        });
+      }
+
+      throw new AppError(
+        'MODEL_STREAM_INCOMPLETE',
+        '模型流式响应未收到完成标记；为避免展示残缺答案，未保存本次输出',
+        { status: 502, details: { responseId: responseId || null } }
+      );
     }
     if (test.api === 'chat_completions') {
       return this.sub2api.gatewayJson('/v1/chat/completions', apiKey, {
@@ -442,7 +495,10 @@ class DetectionRunner {
         throw lastError;
       }
       try {
-        const payload = await this.callModel(test, apiKey, { timeoutMs: Math.max(1, remainingMs) });
+        const payload = await this.callModel(test, apiKey, {
+          timeoutMs: Math.max(1, remainingMs),
+          context
+        });
         if (retryAttempts > 0) {
           console.info(JSON.stringify({
             event: 'model_request_retry_succeeded',
@@ -454,7 +510,7 @@ class DetectionRunner {
         return payload;
       } catch (error) {
         const delayMs = MODEL_REQUEST_RETRY_DELAYS_MS[retryAttempts];
-        const retryable = error?.retryable === true;
+        const retryable = error?.retryable === true && error?.responseStarted !== true;
         const withinBudget = Number.isFinite(delayMs) && this.now() + delayMs < deadline;
         if (!retryable || !withinBudget) {
           if (error && typeof error === 'object') error.retryAttempts = retryAttempts;

@@ -96,6 +96,16 @@ test('model requests use the configured gateway endpoint and API key', async () 
       gatewayJson: async (...args) => {
         calls.push(args);
         return { candidates: [] };
+      },
+      gatewayEventStream: async (...args) => {
+        calls.push(args);
+        const onEvent = args[3];
+        await onEvent({ type: 'response.created', response: { id: 'resp_test' } });
+        await onEvent({ type: 'response.output_text.delta', delta: '<html>streamed</html>' });
+        await onEvent({
+          type: 'response.completed',
+          response: { id: 'resp_test', object: 'response', status: 'completed', output: [] }
+        });
       }
     }
   });
@@ -109,7 +119,7 @@ test('model requests use the configured gateway endpoint and API key', async () 
   assert.equal(calls[0][1], 'group-key');
   assert.equal(calls[0][2].contents[0].parts[0].text, 'hello');
 
-  await runner.callModel({
+  const responsePayload = await runner.callModel({
     api: 'responses',
     model: 'gpt-image-test',
     prompt: 'draw an image',
@@ -119,6 +129,73 @@ test('model requests use the configured gateway endpoint and API key', async () 
   }, 'group-key');
   assert.deepEqual(calls[1][2].tools, [{ type: 'image_generation' }]);
   assert.deepEqual(calls[1][2].reasoning, { effort: 'max' });
+  assert.equal(calls[1][2].stream, true);
+  assert.equal(calls[1][2].store, undefined);
+  assert.equal(responsePayload.output_text, '<html>streamed</html>');
+});
+
+test('Responses streaming only returns output after a completed terminal event', async () => {
+  const runner = new DetectionRunner({
+    config: {
+      demoMode: false,
+      requestTimeoutMs: 60 * 1000,
+      maxResponseBytes: 1024 * 1024
+    },
+    store: {},
+    sub2api: {
+      gatewayEventStream: async (_path, _key, _body, onEvent) => {
+        await onEvent({ type: 'response.created', response: { id: 'resp_partial' } });
+        await onEvent({ type: 'response.output_text.delta', delta: '<html>partial' });
+      }
+    },
+    vault: {}
+  });
+
+  await assert.rejects(
+    () => runner.callModel({
+      api: 'responses',
+      model: 'gpt-test',
+      prompt: 'hello',
+      output_type: 'html',
+      max_output_tokens: 512
+    }, 'group-key'),
+    (error) => error.code === 'MODEL_STREAM_INCOMPLETE' && error.retryable === false
+  );
+});
+
+test('Responses streaming rejects explicitly incomplete model output', async () => {
+  const runner = new DetectionRunner({
+    config: {
+      demoMode: false,
+      requestTimeoutMs: 60 * 1000,
+      maxResponseBytes: 1024 * 1024
+    },
+    store: {},
+    sub2api: {
+      gatewayEventStream: async (_path, _key, _body, onEvent) => {
+        await onEvent({
+          type: 'response.incomplete',
+          response: {
+            id: 'resp_incomplete',
+            status: 'incomplete',
+            incomplete_details: { reason: 'max_output_tokens' }
+          }
+        });
+      }
+    },
+    vault: {}
+  });
+
+  await assert.rejects(
+    () => runner.callModel({
+      api: 'responses',
+      model: 'gpt-test',
+      prompt: 'hello',
+      output_type: 'html',
+      max_output_tokens: 512
+    }, 'group-key'),
+    (error) => error.code === 'MODEL_RESPONSE_INCOMPLETE' && /max_output_tokens/.test(error.message)
+  );
 });
 
 test('retryable model failures reconnect at most five times with backoff', async () => {
@@ -277,6 +354,35 @@ test('non-retryable model failures are returned without reconnecting', async () 
   await assert.rejects(
     () => runner.callModelWithRetry({}, 'group-key'),
     (error) => error.code === 'SUB2API_AUTH_EXPIRED' && error.retryAttempts === 0
+  );
+  assert.equal(attempts, 1);
+});
+
+test('a started streaming response is never resubmitted even when marked retryable', async () => {
+  let attempts = 0;
+  const runner = new DetectionRunner({
+    config: {
+      requestTimeoutMs: 60 * 1000,
+      maxResponseBytes: 1024 * 1024
+    },
+    store: {},
+    sub2api: {},
+    vault: {},
+    sleepFn: assert.fail
+  });
+  runner.callModel = async () => {
+    attempts += 1;
+    const error = new AppError('SUB2API_STREAM_INTERRUPTED', 'stream closed', {
+      status: 502,
+      retryable: true
+    });
+    error.responseStarted = true;
+    throw error;
+  };
+
+  await assert.rejects(
+    () => runner.callModelWithRetry({}, 'group-key'),
+    (error) => error.code === 'SUB2API_STREAM_INTERRUPTED' && error.retryAttempts === 0
   );
   assert.equal(attempts, 1);
 });

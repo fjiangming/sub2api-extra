@@ -2,11 +2,12 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { Agent, fetch: undiciFetch } = require('undici');
+const { Agent, Response, fetch: undiciFetch } = require('undici');
 const {
   Sub2ApiClient,
   asItems,
   isTimeoutError,
+  readEventStream,
   timeoutMessage
 } = require('../src/sub2api-client');
 
@@ -76,4 +77,94 @@ test('the default Sub2API client extends Undici timeouts beyond the service dead
   t.after(() => api.close());
   assert.ok(api.dispatcher instanceof Agent);
   assert.equal(api.fetch, undiciFetch);
+});
+
+test('SSE parsing handles split chunks, comments, and multi-line data', async () => {
+  const events = [];
+  const chunks = [
+    ': keep-alive\r\ndata: {"type":\r\n',
+    'data: "response.created","response":{"id":"resp_1"}}\r\n\r\n',
+    'data: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+  ];
+  const response = {
+    body: {
+      async *[Symbol.asyncIterator]() {
+        for (const chunk of chunks) yield Buffer.from(chunk);
+      },
+      cancel: async () => {}
+    }
+  };
+
+  const result = await readEventStream(response, 4096, async (event) => events.push(event));
+
+  assert.equal(result.events, 2);
+  assert.deepEqual(events.map((event) => event.type), ['response.created', 'response.completed']);
+  assert.equal(events[0].response.id, 'resp_1');
+});
+
+test('stream transport failures before the first event remain retryable', async () => {
+  const api = new Sub2ApiClient({
+    sub2apiBaseUrl: 'https://sub2api.example.test',
+    requestTimeoutMs: 1000,
+    maxResponseBytes: 1024
+  }, async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'text/event-stream' },
+    body: {
+      async *[Symbol.asyncIterator]() {
+        throw new Error('socket closed');
+      },
+      cancel: async () => {}
+    }
+  }));
+
+  await assert.rejects(
+    () => api.gatewayEventStream('/v1/responses', 'group-key', {}, async () => {}),
+    (error) => error.code === 'SUB2API_UNAVAILABLE' && error.retryable && !error.responseStarted
+  );
+});
+
+test('stream transport failures after response creation do not resubmit inference', async () => {
+  const seen = [];
+  const api = new Sub2ApiClient({
+    sub2apiBaseUrl: 'https://sub2api.example.test',
+    requestTimeoutMs: 1000,
+    maxResponseBytes: 4096
+  }, async () => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'text/event-stream' },
+    body: {
+      async *[Symbol.asyncIterator]() {
+        yield Buffer.from('data: {"type":"response.created","response":{"id":"resp_started"}}\n\n');
+        throw new Error('socket closed');
+      },
+      cancel: async () => {}
+    }
+  }));
+
+  await assert.rejects(
+    () => api.gatewayEventStream('/v1/responses', 'group-key', {}, async (event) => seen.push(event)),
+    (error) => error.code === 'SUB2API_STREAM_INTERRUPTED' &&
+      !error.retryable && error.responseStarted
+  );
+  assert.equal(seen[0].response.id, 'resp_started');
+});
+
+test('a streaming HTTP 524 is not blindly retried', async () => {
+  const api = new Sub2ApiClient({
+    sub2apiBaseUrl: 'https://sub2api.example.test',
+    requestTimeoutMs: 1000,
+    maxResponseBytes: 4096
+  }, async () => new Response(JSON.stringify({ message: 'timed out' }), {
+    status: 524,
+    headers: { 'content-type': 'application/json' }
+  }));
+
+  await assert.rejects(
+    () => api.gatewayEventStream('/v1/responses', 'group-key', {}, async () => {}),
+    (error) => error.code === 'SUB2API_REQUEST_FAILED' &&
+      error.retryable === false && error.details.upstreamStatus === 524
+  );
 });
