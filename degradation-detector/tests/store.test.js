@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
 const test = require('node:test');
 const Database = require('better-sqlite3');
 const { Store } = require('../src/store');
@@ -187,6 +189,60 @@ test('pruning expires old payloads without changing cumulative totals', (t) => {
   assert.equal(store.getRun(runIds[0]).output_text, null);
   assert.equal(store.getRun(runIds[1]).preview_token, null);
   assert.equal(store.getRun(runIds[2]).status, 'error');
+});
+
+test('history deletion is group-scoped and preserves active runs', (t) => {
+  const config = testConfig(t);
+  const store = new Store(config);
+  t.after(() => store.close());
+  const currentMonitor = monitor(store);
+  const artifactPath = path.join(config.artifactDir, 'history-result.txt');
+  fs.writeFileSync(artifactPath, 'artifact', 'utf8');
+
+  const first = store.createRun(currentMonitor, testCase, 'manual');
+  store.markRunRunning(first.id);
+  store.completeRun(first.id, {
+    status: 'normal', quality: 'normal', reason: 'first', source: 'test',
+    artifactPath, artifactName: 'history-result.txt', artifactMime: 'text/plain'
+  }, 60);
+  const second = store.createRun(currentMonitor, testCase, 'scheduled');
+  store.markRunRunning(second.id);
+  store.completeRun(second.id, {
+    status: 'degraded', quality: 'degraded', reason: 'second', source: 'test', outputText: 'second'
+  }, 60);
+  const active = store.createRun(currentMonitor, testCase, 'manual');
+
+  assert.deepEqual(store.historyStats('user-1', 'group-1'), { total: 3, deletable: 2 });
+  assert.deepEqual(store.historyCounts('user-1'), [{ group_id: 'group-1', count: 3 }]);
+  assert.deepEqual(
+    store.listHistoryPage('user-1', 'group-1', 2).map((run) => run.id),
+    [active.id, second.id]
+  );
+
+  const wrongGroup = store.deleteHistory('user-1', 'other-group', [first.id]);
+  assert.deepEqual(wrongGroup.missingIds, [first.id]);
+  assert.ok(store.getRun(first.id));
+  const activeResult = store.deleteHistory('user-1', 'group-1', [active.id]);
+  assert.deepEqual(activeResult.activeIds, [active.id]);
+  assert.ok(store.getRun(active.id));
+
+  const selected = store.deleteHistory('user-1', 'group-1', [first.id]);
+  assert.equal(selected.deleted, 1);
+  assert.deepEqual(selected.artifactPaths, [artifactPath]);
+  assert.equal(store.getRun(first.id), null);
+  assert.ok(store.getRun(second.id));
+
+  const cleared = store.deleteHistory('user-1', 'group-1');
+  assert.equal(cleared.deleted, 1);
+  assert.equal(store.getRun(second.id), null);
+  assert.ok(store.getRun(active.id));
+  assert.deepEqual(store.historyStats('user-1', 'group-1'), { total: 1, deletable: 0 });
+  assert.equal(store.getMonitor('user-1', 'group-1').last_run_at, null);
+
+  for (let index = 0; index < 100; index += 1) {
+    store.createRun(currentMonitor, testCase, 'manual');
+  }
+  assert.equal(store.listHistoryPage('user-1', 'group-1', 101).length, 101);
 });
 
 test('unavailable monitors are disabled, credentials cleared, and history retained', (t) => {

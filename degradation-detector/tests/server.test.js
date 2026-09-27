@@ -332,6 +332,7 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
 test('frontends keep authentication and administrator controls separated', () => {
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   const adminSource = fs.readFileSync(path.join(__dirname, '..', 'admin', 'app.js'), 'utf8');
+  const adminHtml = fs.readFileSync(path.join(__dirname, '..', 'admin', 'index.html'), 'utf8');
   assert.match(mainSource, /params\.get\('token'\) \|\| params\.get\('access_token'\)/);
   assert.match(mainSource, /\['token', 'access_token'\]/);
   assert.match(mainSource, /state\.sessionToken && !headers\.Authorization/);
@@ -347,7 +348,123 @@ test('frontends keep authentication and administrator controls separated', () =>
   assert.match(adminSource, /api\('\/api\/admin\/config'/);
   assert.match(adminSource, /\/api\/admin\/groups\/\$\{encodeURIComponent\(groupId\)\}\/runs/);
   assert.match(adminSource, /'X-CSRF-Token'/);
+  assert.match(adminSource, /method: 'DELETE'/);
+  assert.match(adminSource, /run_ids: ids/);
+  assert.match(adminHtml, /id="history-dialog"/);
+  assert.match(adminHtml, /id="history-delete-selected"/);
+  assert.match(adminHtml, /id="history-clear-all"/);
   assert.doesNotMatch(adminSource, /key_cipher|key_fingerprint/);
+});
+
+test('administrators can delete selected or all completed group history without crossing boundaries', async (t) => {
+  const config = testConfig(t);
+  const runner = { execute: async () => null };
+  const sub2api = new FakeSub2Api();
+  const { app, runtime } = createApp(config, { sub2api, runner, startScheduler: false });
+  const http = await listen(app);
+  t.after(async () => {
+    await http.close();
+    await runtime.scheduler.close();
+    runtime.auth.close();
+    runtime.store.close();
+  });
+
+  const admin = await session(http.baseUrl, 'token-a');
+  const ordinary = await session(http.baseUrl, 'token-b');
+  const saved = await fetch(`${http.baseUrl}/api/admin/config`, {
+    method: 'PUT',
+    headers: headers(admin, admin.csrfToken),
+    body: JSON.stringify(configuration([{
+      id: '1', enabled: true, key: 'sk-history-dedicated-12345678901234567890'
+    }]))
+  });
+  assert.equal(saved.status, 200);
+  const monitor = runtime.store.getMonitor(config.serviceOwnerId, '1');
+  const testCase = runtime.store.getPlatformTest('openai');
+  const artifactPath = path.join(config.artifactDir, 'history-api-result.txt');
+  fs.writeFileSync(artifactPath, 'history artifact', 'utf8');
+
+  const artifactRun = runtime.store.createRun(monitor, testCase, 'manual');
+  runtime.store.markRunRunning(artifactRun.id);
+  runtime.store.completeRun(artifactRun.id, {
+    status: 'normal', quality: 'normal', reason: 'artifact result', source: 'test',
+    artifactPath, artifactName: 'history-api-result.txt', artifactMime: 'text/plain',
+    previewToken: 'history_artifact_preview_token_12345'
+  }, runtime.store.nextScheduledAt());
+  const textRun = runtime.store.createRun(monitor, testCase, 'scheduled');
+  runtime.store.markRunRunning(textRun.id);
+  runtime.store.completeRun(textRun.id, {
+    status: 'degraded', quality: 'degraded', reason: 'text result', source: 'test', outputText: 'text'
+  }, runtime.store.nextScheduledAt());
+
+  const ordinaryList = await fetch(`${http.baseUrl}/api/admin/groups/1/runs`, { headers: headers(ordinary) });
+  assert.equal(ordinaryList.status, 403);
+  const missingCsrf = await fetch(`${http.baseUrl}/api/admin/groups/1/runs`, {
+    method: 'DELETE', headers: headers(admin), body: JSON.stringify({ run_ids: [artifactRun.id] })
+  });
+  assert.equal(missingCsrf.status, 403);
+  const ambiguousDelete = await fetch(`${http.baseUrl}/api/admin/groups/1/runs`, {
+    method: 'DELETE',
+    headers: headers(admin, admin.csrfToken),
+    body: JSON.stringify({ all: true, run_ids: [artifactRun.id] })
+  });
+  assert.equal(ambiguousDelete.status, 400);
+  assert.ok(runtime.store.getRun(artifactRun.id));
+  const list = await fetch(`${http.baseUrl}/api/admin/groups/1/runs?limit=1`, { headers: headers(admin) });
+  assert.equal(list.status, 200);
+  const firstPage = await list.json();
+  assert.equal(firstPage.total, 2);
+  assert.equal(firstPage.deletable_count, 2);
+  assert.equal(firstPage.runs.length, 1);
+  assert.equal(firstPage.next_cursor, textRun.id);
+
+  const crossGroup = await fetch(`${http.baseUrl}/api/admin/groups/3/runs`, {
+    method: 'DELETE',
+    headers: headers(admin, admin.csrfToken),
+    body: JSON.stringify({ run_ids: [artifactRun.id] })
+  });
+  assert.equal(crossGroup.status, 404);
+  assert.ok(runtime.store.getRun(artifactRun.id));
+
+  const selected = await fetch(`${http.baseUrl}/api/admin/groups/1/runs`, {
+    method: 'DELETE',
+    headers: headers(admin, admin.csrfToken),
+    body: JSON.stringify({ run_ids: [artifactRun.id] })
+  });
+  assert.equal(selected.status, 200);
+  assert.equal((await selected.json()).deleted, 1);
+  assert.equal(runtime.store.getRun(artifactRun.id), null);
+  assert.equal(fs.existsSync(artifactPath), false);
+  const revokedPreview = await fetch(`${http.baseUrl}/api/previews/history_artifact_preview_token_12345`, {
+    headers: headers(admin)
+  });
+  assert.equal(revokedPreview.status, 404);
+
+  const active = runtime.store.createRun(monitor, testCase, 'manual');
+  const activeDelete = await fetch(`${http.baseUrl}/api/admin/groups/1/runs`, {
+    method: 'DELETE',
+    headers: headers(admin, admin.csrfToken),
+    body: JSON.stringify({ run_ids: [active.id] })
+  });
+  assert.equal(activeDelete.status, 409);
+  const clearAll = await fetch(`${http.baseUrl}/api/admin/groups/1/runs`, {
+    method: 'DELETE',
+    headers: headers(admin, admin.csrfToken),
+    body: JSON.stringify({ all: true })
+  });
+  assert.equal(clearAll.status, 200);
+  const cleared = await clearAll.json();
+  assert.equal(cleared.deleted, 1);
+  assert.equal(cleared.total, 1);
+  assert.equal(cleared.deletable_count, 0);
+  assert.equal(runtime.store.getRun(textRun.id), null);
+  assert.ok(runtime.store.getRun(active.id));
+
+  const publicResults = await fetch(`${http.baseUrl}/api/results`, { headers: headers(admin) });
+  const group = (await publicResults.json()).groups.find((item) => item.id === '1');
+  assert.deepEqual(group.totals, { passed: 0, valid: 0, attempts: 0 });
+  assert.equal(group.history.length, 1);
+  assert.equal(group.history[0].status, 'queued');
 });
 
 test('artifact MIME values are normalized before being used as response headers', () => {

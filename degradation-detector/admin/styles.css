@@ -183,7 +183,62 @@ input:disabled, textarea:disabled, select:disabled { opacity: .58; cursor: not-a
 .key-state.configured { color: var(--green); }
 .run-group-button { flex: 0 0 auto; height: 38px; white-space: nowrap; }
 .run-group-button svg { width: 14px; height: 14px; }
+.history-group-button { flex: 0 0 auto; height: 38px; white-space: nowrap; }
+.history-group-button svg { width: 14px; height: 14px; }
+.history-group-button b { min-width: 15px; color: var(--teal-strong); font-size: 10px; font-variant-numeric: tabular-nums; }
 .empty-groups { padding: 48px 20px; color: var(--muted); text-align: center; }
+
+.history-modal, .confirm-modal {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.history-modal::backdrop, .confirm-modal::backdrop { background: rgba(15, 23, 42, .5); }
+.history-modal { width: min(820px, calc(100vw - 32px)); max-width: none; height: min(720px, calc(100dvh - 40px)); max-height: none; }
+.history-modal[open] { display: flex; flex-direction: column; }
+.history-modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 20px; border-bottom: 1px solid var(--border-soft); }
+.history-modal-head > div { min-width: 0; }
+.history-modal-head h2 { margin: 0; font-size: 17px; line-height: 1.4; overflow-wrap: anywhere; }
+.history-modal-head p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+.history-toolbar { display: flex; align-items: center; gap: 12px; min-height: 58px; padding: 10px 20px; border-bottom: 1px solid var(--border-soft); }
+.history-select-all { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.history-select-all input, .history-row > input { width: 17px; height: 17px; flex: 0 0 17px; padding: 0; accent-color: var(--teal); }
+.history-selection { margin-right: auto; color: var(--faint); font-size: 11px; white-space: nowrap; }
+.history-actions { display: flex; gap: 7px; }
+.button.danger { border-color: #fecaca; color: #b91c1c; background: #fff; }
+.button.danger:hover { border-color: #ef4444; color: #991b1b; background: #fef2f2; }
+.history-list { flex: 1; min-height: 0; overflow: auto; }
+.history-row { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 11px; padding: 14px 20px; border-bottom: 1px solid var(--border-soft); cursor: pointer; }
+.history-row:last-child { border-bottom: 0; }
+.history-row:hover { background: var(--surface-hover); }
+.history-row[data-deletable="false"] { cursor: not-allowed; }
+.history-row > input { margin-top: 2px; }
+.history-row-main { display: grid; gap: 5px; min-width: 0; }
+.history-row-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.history-row-title strong { font-size: 12px; font-variant-numeric: tabular-nums; }
+.history-row-reason { color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
+.history-row small { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.history-status { flex: 0 0 auto; font-size: 11px; font-weight: 700; }
+.history-status[data-status="normal"] { color: var(--green); }
+.history-status[data-status="degraded"] { color: var(--red); }
+.history-status[data-status="unknown"], .history-status[data-status="error"] { color: var(--amber); }
+.history-status[data-status="running"], .history-status[data-status="queued"] { color: var(--teal-strong); }
+.history-empty { display: grid; place-items: center; align-content: center; gap: 10px; min-height: 260px; padding: 32px; color: var(--muted); text-align: center; }
+.history-empty svg { width: 28px; height: 28px; color: var(--faint); }
+.history-empty p { margin: 0; }
+.history-empty.error { color: var(--red); }
+.history-modal-foot { display: flex; justify-content: center; min-height: 57px; padding: 10px 20px; border-top: 1px solid var(--border-soft); }
+
+.confirm-modal { width: min(430px, calc(100vw - 32px)); max-width: none; padding: 22px; }
+.confirm-modal[open] { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 14px; }
+.confirm-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 8px; color: #b91c1c; background: #fef2f2; }
+.confirm-icon svg { width: 19px; height: 19px; }
+.confirm-modal h2 { margin: 0; font-size: 16px; }
+.confirm-modal p { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.65; overflow-wrap: anywhere; }
+.confirm-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 
 .form-actions { justify-content: flex-end; padding: 18px; border-top: 1px solid var(--border-soft); }
 .save-state { margin-right: auto; color: var(--muted); font-size: 11px; }
@@ -192,6 +247,9 @@ input:disabled, textarea:disabled, select:disabled { opacity: .58; cursor: not-a
 .dark input, .dark textarea, .dark select { border-color: #394b47; }
 .dark .platform-tab[aria-selected="true"] { border-color: #23514b; }
 .dark .schedule-mode-switch input:checked + span { background: #182a27; box-shadow: none; }
+.dark .button.danger { border-color: #713232; color: #fca5a5; background: #2a1818; }
+.dark .button.danger:hover { border-color: #ef4444; color: #fecaca; background: #3a1d1d; }
+.dark .confirm-icon { color: #fca5a5; background: #2a1818; }
 
 @media (max-width: 900px) {
   .workspace-head { align-items: stretch; flex-direction: column; }
@@ -219,6 +277,9 @@ input:disabled, textarea:disabled, select:disabled { opacity: .58; cursor: not-a
   .group-row { flex-direction: column; }
   .group-choice, .group-controls { width: 100%; min-width: 0; }
   .key-state { justify-content: flex-start; }
+  .history-toolbar { align-items: stretch; flex-wrap: wrap; }
+  .history-actions { flex: 1 1 100%; }
+  .history-actions .button { flex: 1; }
 }
 
 @media (max-width: 430px) {
@@ -228,5 +289,7 @@ input:disabled, textarea:disabled, select:disabled { opacity: .58; cursor: not-a
   .schedule-time-item input { width: 100px; }
   .interval-field { grid-template-columns: minmax(100px, 1fr) 82px; width: 100%; }
   .group-controls { align-items: stretch; flex-direction: column; }
-  .run-group-button { width: 100%; justify-content: center; }
+  .run-group-button, .history-group-button { width: 100%; justify-content: center; }
+  .history-modal { width: calc(100vw - 16px); height: calc(100dvh - 24px); }
+  .history-modal-head, .history-toolbar, .history-row { padding-left: 14px; padding-right: 14px; }
 }

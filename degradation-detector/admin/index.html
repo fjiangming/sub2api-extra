@@ -93,6 +93,53 @@
     </form>
   </main>
 
+  <dialog id="history-dialog" class="history-modal" aria-labelledby="history-title">
+    <header class="history-modal-head">
+      <div>
+        <h2 id="history-title">历史检测记录</h2>
+        <p id="history-meta"></p>
+      </div>
+      <button id="history-close" class="icon-button" type="button" title="关闭" aria-label="关闭历史记录">
+        <i data-lucide="x"></i>
+      </button>
+    </header>
+    <div class="history-toolbar">
+      <label class="history-select-all">
+        <input id="history-select-all" type="checkbox">
+        <span>全选当前列表</span>
+      </label>
+      <span id="history-selection" class="history-selection">已选择 0 条</span>
+      <div class="history-actions">
+        <button id="history-delete-selected" class="button danger" type="button" disabled>
+          <i data-lucide="trash-2"></i><span>删除选中</span>
+        </button>
+        <button id="history-clear-all" class="button danger" type="button" disabled>
+          <i data-lucide="list-x"></i><span>清空该分组</span>
+        </button>
+      </div>
+    </div>
+    <div id="history-list" class="history-list" aria-live="polite"></div>
+    <footer class="history-modal-foot">
+      <button id="history-load-more" class="button" type="button" hidden>
+        <i data-lucide="chevrons-down"></i><span>加载更早记录</span>
+      </button>
+    </footer>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="confirm-modal" aria-labelledby="confirm-title">
+    <span class="confirm-icon" aria-hidden="true"><i data-lucide="triangle-alert"></i></span>
+    <div>
+      <h2 id="confirm-title">确认删除历史记录</h2>
+      <p id="confirm-message"></p>
+    </div>
+    <div class="confirm-actions">
+      <button id="confirm-cancel" class="button" type="button">取消</button>
+      <button id="confirm-accept" class="button danger" type="button">
+        <i data-lucide="trash-2"></i><span>确认删除</span>
+      </button>
+    </div>
+  </dialog>
+
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 </body>
 </html>

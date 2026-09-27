@@ -95,6 +95,15 @@ async function requireGroup(req, runtime) {
   return group;
 }
 
+async function requireAdminGroup(req, runtime) {
+  const group = (await discoverGroups(req, runtime))
+    .find((item) => String(item.id) === String(req.params.groupId));
+  if (!group) {
+    throw new AppError('GROUP_NOT_AVAILABLE', '该分组不存在或当前管理员无权管理', { status: 404 });
+  }
+  return group;
+}
+
 function requireConfiguredMonitor(group, runtime) {
   const monitor = runtime.store.getEnabledMonitor(runtime.config.serviceOwnerId, group.id);
   if (!monitor) {
@@ -212,6 +221,24 @@ function safeArtifactPath(config, filename) {
   return resolved.startsWith(`${root}${path.sep}`) ? resolved : null;
 }
 
+async function removeArtifactFiles(config, filenames) {
+  const paths = [...new Set(filenames.map((filename) => safeArtifactPath(config, filename)).filter(Boolean))];
+  await Promise.all(paths.map((filename) => fs.promises.rm(filename, { force: true }).catch((error) => {
+    console.error(JSON.stringify({
+      event: 'history_artifact_cleanup_failed',
+      code: error.code || 'UNKNOWN'
+    }));
+  })));
+}
+
+function adminHistoryRun(row) {
+  return {
+    ...publicRun(row),
+    trigger_type: row.trigger_type,
+    deletable: !['queued', 'running'].includes(row.status)
+  };
+}
+
 function publicTest(test) {
   if (!test) return null;
   const { platform: _platform, ...payload } = test;
@@ -237,6 +264,8 @@ async function adminConfigurationPayload(req, runtime) {
     .map((platform) => [platform.platform, platform]));
   const monitors = new Map(runtime.store.listMonitors(runtime.config.serviceOwnerId)
     .map((monitor) => [String(monitor.group_id), monitor]));
+  const historyCounts = new Map(runtime.store.historyCounts(runtime.config.serviceOwnerId)
+    .map((item) => [item.group_id, item.count]));
   const grouped = new Map();
   for (const group of discovered) {
     if (!grouped.has(group.platform)) grouped.set(group.platform, []);
@@ -263,7 +292,8 @@ async function adminConfigurationPayload(req, runtime) {
               status: group.status,
               rate_multiplier: group.rate_multiplier ?? null,
               enabled: Boolean(stored?.enabled && monitor?.enabled && keyConfigured),
-              key_configured: keyConfigured
+              key_configured: keyConfigured,
+              history_count: historyCounts.get(String(group.id)) || 0
             };
           })
       };
@@ -463,6 +493,7 @@ function createApp(config, overrides = {}) {
   const authLimiter = rateLimit({ windowMs: 60000, limit: 30, standardHeaders: true, legacyHeaders: false });
   const runLimiter = rateLimit({ windowMs: 60000, limit: 20, standardHeaders: true, legacyHeaders: false });
   const configLimiter = rateLimit({ windowMs: 60000, limit: 10, standardHeaders: true, legacyHeaders: false });
+  const historyLimiter = rateLimit({ windowMs: 60000, limit: 20, standardHeaders: true, legacyHeaders: false });
   const requireAuth = runtime.auth.middleware();
   const requireAdmin = runtime.auth.adminMiddleware();
   const requireCsrf = runtime.auth.csrfMiddleware();
@@ -707,6 +738,82 @@ function createApp(config, overrides = {}) {
       next(error);
     }
   });
+
+  app.get('/api/admin/groups/:groupId/runs', requireAuth, requireAdmin, async (req, res, next) => {
+    try {
+      setNoStore(res);
+      const group = await requireAdminGroup(req, runtime);
+      const rawBeforeId = String(req.query.before_id || '').trim();
+      const beforeId = rawBeforeId ? Number(rawBeforeId) : null;
+      if (rawBeforeId && (!/^[1-9][0-9]{0,15}$/.test(rawBeforeId) || !Number.isSafeInteger(beforeId))) {
+        throw new AppError('VALIDATION_ERROR', '历史记录游标无效', { status: 400 });
+      }
+      const limit = Math.floor(Math.max(1, Math.min(100, Number(req.query.limit) || 50)));
+      const rows = runtime.store.listHistoryPage(
+        config.serviceOwnerId,
+        group.id,
+        limit + 1,
+        beforeId
+      );
+      const page = rows.slice(0, limit);
+      const stats = runtime.store.historyStats(config.serviceOwnerId, group.id);
+      res.json({
+        group: { id: String(group.id), name: group.name, platform: group.platform },
+        runs: page.map(adminHistoryRun),
+        total: stats.total,
+        deletable_count: stats.deletable,
+        next_cursor: rows.length > limit ? page.at(-1)?.id || null : null
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete(
+    '/api/admin/groups/:groupId/runs',
+    requireAuth,
+    requireAdmin,
+    requireCsrf,
+    historyLimiter,
+    async (req, res, next) => {
+      try {
+        setNoStore(res);
+        const group = await requireAdminGroup(req, runtime);
+        const clearAll = req.body?.all === true;
+        const submittedIds = req.body?.run_ids;
+        const hasSubmittedIds = submittedIds !== undefined;
+        const validIds = Array.isArray(submittedIds) && submittedIds.length >= 1 && submittedIds.length <= 100 &&
+          submittedIds.every((id) => Number.isSafeInteger(id) && id > 0);
+        if ((clearAll && hasSubmittedIds) || (!clearAll && !validIds)) {
+          throw new AppError(
+            'VALIDATION_ERROR',
+            '必须选择 1 至 100 条历史记录，或明确清空该分组全部历史',
+            { status: 400 }
+          );
+        }
+        const result = runtime.store.deleteHistory(
+          config.serviceOwnerId,
+          group.id,
+          clearAll ? null : submittedIds
+        );
+        if (result.missingIds.length) {
+          throw new AppError('HISTORY_NOT_FOUND', '部分历史记录不存在或不属于该分组', { status: 404 });
+        }
+        if (result.activeIds.length) {
+          throw new AppError('HISTORY_ACTIVE', '正在排队或检测中的记录不能删除', { status: 409 });
+        }
+        await removeArtifactFiles(config, result.artifactPaths);
+        const stats = runtime.store.historyStats(config.serviceOwnerId, group.id);
+        res.json({
+          deleted: result.deleted,
+          total: stats.total,
+          deletable_count: stats.deletable
+        });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
 
   app.post('/api/admin/groups/:groupId/runs', requireAuth, requireAdmin, requireCsrf, runLimiter, async (req, res, next) => {
     try {

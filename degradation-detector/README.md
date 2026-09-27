@@ -9,6 +9,7 @@
 | 查看自己有权分组的共享检测结果 | 是 | 是 |
 | 在结果页修改配置或发起检测 | 否 | 否 |
 | 在管理页立即检测 | 是 | 否 |
+| 在管理页清理检测历史 | 是 | 否 |
 | 访问 `/admin/config` 及其页面资源 | 是 | 否 |
 | 读取或修改检测配置 | 是 | 否 |
 
@@ -40,6 +41,7 @@ Sub2API 菜单的角色可见性只负责入口展示，不能单独作为安全
 - 为每个启用分组填写独立的完整专用 Key；
 - 配置 `Asia/Shanghai` 时区下每天一个或多个固定时间，或按分钟、小时、天设置检测间隔；
 - 使用已经保存的题目和分组专用 Key 发起单次立即检测。
+- 按分组查看历史记录，勾选一条或多条记录批量删除，或清空该分组全部已结束记录；排队和检测中的任务不会被清理。
 
 支持 OpenAI Responses、Chat Completions、Anthropic Messages、Gemini generateContent 和 Images Generations。OpenAI 协议的推理强度支持 `minimal`、`low`、`medium`、`high`、`xhigh` 和 `max`。输出可以是直接答案、HTML、图片或通用 Base64 文件；图片、文本、JSON、PDF、音视频可预览，其它文件可下载。
 

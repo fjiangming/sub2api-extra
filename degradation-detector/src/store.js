@@ -612,6 +612,116 @@ class Store {
     `).all(String(userId), String(groupId), Number(limit));
   }
 
+  historyCounts(userId) {
+    return this.db.prepare(`
+      SELECT group_id, COUNT(*) AS count
+      FROM runs
+      WHERE user_id = ?
+      GROUP BY group_id
+    `).all(String(userId)).map((row) => ({
+      group_id: String(row.group_id),
+      count: Number(row.count || 0)
+    }));
+  }
+
+  historyStats(userId, groupId) {
+    const row = this.db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status NOT IN ('queued', 'running') THEN 1 ELSE 0 END) AS deletable
+      FROM runs
+      WHERE user_id = ? AND group_id = ?
+    `).get(String(userId), String(groupId));
+    return {
+      total: Number(row?.total || 0),
+      deletable: Number(row?.deletable || 0)
+    };
+  }
+
+  listHistoryPage(userId, groupId, limit, beforeId = null) {
+    const pageSize = Math.floor(Math.max(1, Math.min(101, Number(limit) || 50)));
+    if (beforeId == null) {
+      return this.db.prepare(`
+        SELECT * FROM runs
+        WHERE user_id = ? AND group_id = ?
+        ORDER BY id DESC LIMIT ?
+      `).all(String(userId), String(groupId), pageSize);
+    }
+    return this.db.prepare(`
+      SELECT * FROM runs
+      WHERE user_id = ? AND group_id = ? AND id < ?
+      ORDER BY id DESC LIMIT ?
+    `).all(String(userId), String(groupId), Number(beforeId), pageSize);
+  }
+
+  deleteHistory(userId, groupId, runIds = null) {
+    const owner = String(userId);
+    const group = String(groupId);
+    const all = runIds == null;
+    const requestedIds = all
+      ? []
+      : [...new Set(runIds.map((id) => Number(id)))];
+    if (!all && requestedIds.length === 0) {
+      return { deleted: 0, artifactPaths: [], missingIds: [], activeIds: [] };
+    }
+    let rows;
+    if (all) {
+      rows = this.db.prepare(`
+        SELECT id, status, artifact_path FROM runs
+        WHERE user_id = ? AND group_id = ? AND status NOT IN ('queued', 'running')
+        ORDER BY id DESC
+      `).all(owner, group);
+    } else {
+      const placeholders = requestedIds.map(() => '?').join(',');
+      rows = this.db.prepare(`
+        SELECT id, status, artifact_path FROM runs
+        WHERE user_id = ? AND group_id = ? AND id IN (${placeholders})
+        ORDER BY id DESC
+      `).all(owner, group, ...requestedIds);
+    }
+
+    const found = new Set(rows.map((row) => Number(row.id)));
+    const missingIds = all ? [] : requestedIds.filter((id) => !found.has(id));
+    const activeIds = rows
+      .filter((row) => ['queued', 'running'].includes(row.status))
+      .map((row) => Number(row.id));
+    if (missingIds.length || activeIds.length || rows.length === 0) {
+      return { deleted: 0, artifactPaths: [], missingIds, activeIds };
+    }
+
+    const ids = rows.map((row) => Number(row.id));
+    const remove = all
+      ? this.db.prepare(`
+          DELETE FROM runs
+          WHERE user_id = ? AND group_id = ? AND status NOT IN ('queued', 'running')
+        `)
+      : this.db.prepare(`
+          DELETE FROM runs
+          WHERE user_id = ? AND group_id = ? AND id IN (${ids.map(() => '?').join(',')})
+        `);
+    const updateMonitor = this.db.prepare(`
+      UPDATE monitors SET
+        last_run_at = (
+          SELECT MAX(COALESCE(finished_at, started_at, created_at))
+          FROM runs
+          WHERE monitor_id = monitors.id AND status NOT IN ('queued', 'running')
+        ),
+        updated_at = ?
+      WHERE user_id = ? AND group_id = ?
+    `);
+    const transaction = this.db.transaction(() => {
+      const result = all ? remove.run(owner, group) : remove.run(owner, group, ...ids);
+      updateMonitor.run(nowMs(), owner, group);
+      return result.changes;
+    });
+    return {
+      deleted: transaction(),
+      artifactPaths: rows.map((row) => row.artifact_path).filter(Boolean),
+      missingIds: [],
+      activeIds: []
+    };
+  }
+
   groupSummary(userId, groupId, historyLimit) {
     const monitor = this.getMonitor(userId, groupId);
     const totals = this.db.prepare(`

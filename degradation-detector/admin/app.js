@@ -8,7 +8,18 @@ const state = {
   activePlatform: '',
   dirty: false,
   saving: false,
-  runningGroups: new Set()
+  runningGroups: new Set(),
+  historyGroupId: null,
+  historyRuns: [],
+  historyTotal: 0,
+  historyDeletableCount: 0,
+  historyNextCursor: null,
+  historySelected: new Set(),
+  historyLoading: false,
+  historyDeleting: false,
+  historyError: '',
+  historyRequest: 0,
+  confirmResolve: null
 };
 
 const apiLabels = {
@@ -19,10 +30,16 @@ const apiLabels = {
   images_generations: 'Images Generations'
 };
 const outputLabels = { text: '直接答案', html: 'HTML', image: '图片', file: '文件' };
+const MAX_HISTORY_SELECTION = 100;
 const reasoningLabels = {
   none: '不指定', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'XHigh', max: 'Max'
 };
 const intervalUnitMinutes = { minutes: 1, hours: 60, days: 1440 };
+const statusLabels = {
+  normal: '正常', degraded: '疑似降智', unknown: '无法判定', error: '检测异常',
+  running: '检测中', queued: '等待检测'
+};
+const triggerLabels = { manual: '手动检测', scheduled: '自动检测', demo: '演示记录', test: '测试记录' };
 
 function $(id) { return document.getElementById(id); }
 
@@ -58,6 +75,11 @@ function toast(message, type = '') {
   item.textContent = message;
   $('toast-region').append(item);
   setTimeout(() => item.remove(), 4200);
+}
+
+function when(timestamp) {
+  if (!timestamp) return '等待开始';
+  return new Date(timestamp * 1000).toLocaleString('zh-CN', { hour12: false });
 }
 
 async function api(path, options = {}) {
@@ -201,6 +223,10 @@ function groupHtml(group, platformIndex, groupIndex) {
           title="立即检测 ${escapeHtml(group.name)}" ${group.enabled && configured ? '' : 'disabled'}>
           <i data-lucide="play"></i><span>立即检测</span>
         </button>
+        <button class="button history-group-button" type="button" data-history-button data-group-id="${escapeHtml(group.id)}"
+          title="管理 ${escapeHtml(group.name)} 的历史检测记录">
+          <i data-lucide="history"></i><span>历史</span><b data-history-count>${Number(group.history_count) || 0}</b>
+        </button>
       </div>
     </div>`;
 }
@@ -338,6 +364,9 @@ function bindPanel(panel) {
   });
   panel.querySelectorAll('[data-run-button]').forEach((button) => {
     button.addEventListener('click', () => triggerManualRun(button));
+  });
+  panel.querySelectorAll('[data-history-button]').forEach((button) => {
+    button.addEventListener('click', () => openHistory(button.dataset.groupId));
   });
   panel.querySelectorAll('input, textarea, select').forEach((control) => {
     control.addEventListener('input', markDirty);
@@ -482,6 +511,184 @@ async function triggerManualRun(button) {
   }
 }
 
+function configuredGroup(groupId) {
+  for (const platform of state.data?.platforms || []) {
+    const group = platform.groups.find((item) => String(item.id) === String(groupId));
+    if (group) return group;
+  }
+  return null;
+}
+
+function updateHistoryCount(groupId, count) {
+  const group = configuredGroup(groupId);
+  if (group) group.history_count = Number(count) || 0;
+  document.querySelectorAll('[data-history-button]').forEach((button) => {
+    if (String(button.dataset.groupId) !== String(groupId)) return;
+    button.querySelector('[data-history-count]').textContent = String(Number(count) || 0);
+  });
+}
+
+function historyStatus(status) {
+  return `<span class="history-status" data-status="${escapeHtml(status)}">${escapeHtml(statusLabels[status] || status)}</span>`;
+}
+
+function renderHistoryList() {
+  const list = $('history-list');
+  if (state.historyError) {
+    list.innerHTML = `<div class="history-empty error"><i data-lucide="circle-alert"></i><p>${escapeHtml(state.historyError)}</p></div>`;
+  } else if (state.historyLoading && state.historyRuns.length === 0) {
+    list.innerHTML = '<div class="history-empty"><span class="spinner" aria-hidden="true"></span><p>正在读取历史记录</p></div>';
+  } else if (state.historyRuns.length === 0) {
+    list.innerHTML = '<div class="history-empty"><i data-lucide="history"></i><p>该分组暂无历史检测记录</p></div>';
+  } else {
+    list.innerHTML = state.historyRuns.map((run) => `
+      <label class="history-row" data-status="${escapeHtml(run.status)}" data-deletable="${run.deletable === true}">
+        <input type="checkbox" data-history-run-id="${run.id}"
+          ${state.historySelected.has(run.id) ? 'checked' : ''} ${run.deletable && !state.historyDeleting ? '' : 'disabled'}>
+        <span class="history-row-main">
+          <span class="history-row-title"><strong>${escapeHtml(when(run.started))}</strong>${historyStatus(run.status)}</span>
+          <span class="history-row-reason">${escapeHtml(run.reason || (run.deletable ? '没有判定说明' : '任务尚未完成'))}</span>
+          <small>${escapeHtml(triggerLabels[run.trigger_type] || run.trigger_type || '检测任务')} · ${escapeHtml(run.model || '--')}${run.duration_ms == null ? '' : ` · ${(run.duration_ms / 1000).toFixed(1)} 秒`}</small>
+        </span>
+      </label>`).join('');
+    list.querySelectorAll('[data-history-run-id]').forEach((checkbox) => {
+      checkbox.addEventListener('change', () => {
+        const id = Number(checkbox.dataset.historyRunId);
+        if (checkbox.checked) {
+          if (state.historySelected.size >= MAX_HISTORY_SELECTION) {
+            checkbox.checked = false;
+            toast(`单次最多选择 ${MAX_HISTORY_SELECTION} 条，请分批删除或清空该分组`, 'error');
+          } else {
+            state.historySelected.add(id);
+          }
+        } else {
+          state.historySelected.delete(id);
+        }
+        updateHistorySelection();
+      });
+    });
+  }
+  $('history-load-more').hidden = !state.historyNextCursor;
+  $('history-load-more').disabled = state.historyLoading || state.historyDeleting;
+  updateHistorySelection();
+  refreshIcons();
+}
+
+function updateHistorySelection() {
+  const deletableIds = state.historyRuns.filter((run) => run.deletable).map((run) => run.id);
+  const selectedCount = deletableIds.filter((id) => state.historySelected.has(id)).length;
+  const selectAll = $('history-select-all');
+  selectAll.disabled = deletableIds.length === 0 || state.historyLoading || state.historyDeleting;
+  selectAll.checked = deletableIds.length > 0 && selectedCount === deletableIds.length;
+  selectAll.indeterminate = selectedCount > 0 && selectedCount < deletableIds.length;
+  $('history-selection').textContent = `已选择 ${selectedCount}/${MAX_HISTORY_SELECTION} 条`;
+  $('history-delete-selected').disabled = selectedCount === 0 || state.historyLoading || state.historyDeleting;
+  $('history-clear-all').disabled = state.historyDeletableCount === 0 || state.historyLoading || state.historyDeleting;
+}
+
+async function loadHistory(append = false) {
+  if (state.historyLoading || !state.historyGroupId) return;
+  const groupId = state.historyGroupId;
+  const requestId = ++state.historyRequest;
+  state.historyLoading = true;
+  if (!append) {
+    state.historyRuns = [];
+    state.historyNextCursor = null;
+    state.historySelected.clear();
+  }
+  state.historyError = '';
+  renderHistoryList();
+  try {
+    const cursor = append && state.historyNextCursor
+      ? `&before_id=${encodeURIComponent(state.historyNextCursor)}`
+      : '';
+    const payload = await api(`/api/admin/groups/${encodeURIComponent(groupId)}/runs?limit=50${cursor}`);
+    if (requestId !== state.historyRequest || groupId !== state.historyGroupId || !$('history-dialog').open) return;
+    state.historyRuns = append ? [...state.historyRuns, ...payload.runs] : payload.runs;
+    state.historyTotal = Number(payload.total) || 0;
+    state.historyDeletableCount = Number(payload.deletable_count) || 0;
+    state.historyNextCursor = payload.next_cursor;
+    $('history-title').textContent = `历史检测记录 · ${payload.group.name}`;
+    $('history-meta').textContent = `共 ${state.historyTotal} 条记录 · ${state.historyDeletableCount} 条可清理`;
+    updateHistoryCount(groupId, state.historyTotal);
+  } catch (error) {
+    if (requestId === state.historyRequest) {
+      if (append) toast(error.message, 'error');
+      else state.historyError = error.message;
+      if ([401, 403].includes(error.status)) showError('管理员身份已失效，请从 Sub2API 重新打开。');
+    }
+  } finally {
+    if (requestId === state.historyRequest) {
+      state.historyLoading = false;
+      renderHistoryList();
+    }
+  }
+}
+
+function openHistory(groupId) {
+  const group = configuredGroup(groupId);
+  state.historyGroupId = String(groupId);
+  state.historyRuns = [];
+  state.historyTotal = Number(group?.history_count) || 0;
+  state.historyDeletableCount = 0;
+  state.historyNextCursor = null;
+  state.historySelected.clear();
+  state.historyLoading = false;
+  state.historyError = '';
+  $('history-title').textContent = `历史检测记录 · ${group?.name || groupId}`;
+  $('history-meta').textContent = '正在读取记录';
+  $('history-dialog').showModal();
+  loadHistory(false);
+}
+
+function settleConfirmation(accepted) {
+  const resolve = state.confirmResolve;
+  if (!resolve) return;
+  state.confirmResolve = null;
+  $('confirm-dialog').close();
+  resolve(accepted);
+}
+
+function confirmDeletion(message, label) {
+  $('confirm-message').textContent = message;
+  $('confirm-accept').querySelector('span').textContent = label;
+  $('confirm-dialog').showModal();
+  refreshIcons();
+  return new Promise((resolve) => { state.confirmResolve = resolve; });
+}
+
+async function deleteHistory(clearAll) {
+  if (state.historyDeleting || !state.historyGroupId) return;
+  const ids = [...state.historySelected];
+  if (!clearAll && ids.length === 0) return;
+  const group = configuredGroup(state.historyGroupId);
+  const accepted = await confirmDeletion(
+    clearAll
+      ? `将永久删除“${group?.name || state.historyGroupId}”的 ${state.historyDeletableCount} 条已结束记录，正在执行的任务会保留。`
+      : `将永久删除选中的 ${ids.length} 条历史检测记录。`,
+    clearAll ? '确认清空' : '确认删除'
+  );
+  if (!accepted || !$('history-dialog').open) return;
+  state.historyDeleting = true;
+  renderHistoryList();
+  try {
+    const result = await api(`/api/admin/groups/${encodeURIComponent(state.historyGroupId)}/runs`, {
+      method: 'DELETE',
+      mutation: true,
+      body: clearAll ? { all: true } : { run_ids: ids }
+    });
+    updateHistoryCount(state.historyGroupId, result.total);
+    toast(result.deleted ? `已删除 ${result.deleted} 条历史记录` : '没有可删除的历史记录');
+    state.historyDeleting = false;
+    await loadHistory(false);
+  } catch (error) {
+    state.historyDeleting = false;
+    renderHistoryList();
+    toast(error.message, 'error');
+    if ([401, 403].includes(error.status)) showError('管理员身份已失效，请从 Sub2API 重新打开。');
+  }
+}
+
 async function initialize() {
   showView('loading');
   const theme = new URLSearchParams(location.search).get('theme');
@@ -520,6 +727,47 @@ $('schedule-interval-value').addEventListener('input', markDirty);
 $('schedule-interval-unit').addEventListener('change', () => {
   updateIntervalLimit();
   markDirty();
+});
+$('history-close').addEventListener('click', () => {
+  if (!state.historyDeleting) $('history-dialog').close();
+});
+$('history-load-more').addEventListener('click', () => loadHistory(true));
+$('history-select-all').addEventListener('change', (event) => {
+  const deletableRuns = state.historyRuns.filter((run) => run.deletable);
+  if (event.target.checked) {
+    let limitReached = false;
+    for (const run of deletableRuns) {
+      if (state.historySelected.has(run.id)) continue;
+      if (state.historySelected.size >= MAX_HISTORY_SELECTION) {
+        limitReached = true;
+        break;
+      }
+      state.historySelected.add(run.id);
+    }
+    if (limitReached) toast(`已选择前 ${MAX_HISTORY_SELECTION} 条，请分批删除或清空该分组`);
+  } else {
+    deletableRuns.forEach((run) => state.historySelected.delete(run.id));
+  }
+  renderHistoryList();
+});
+$('history-delete-selected').addEventListener('click', () => deleteHistory(false));
+$('history-clear-all').addEventListener('click', () => deleteHistory(true));
+$('history-dialog').addEventListener('close', () => {
+  state.historyRequest += 1;
+  state.historyGroupId = null;
+  state.historyRuns = [];
+  state.historySelected.clear();
+  state.historyLoading = false;
+  state.historyError = '';
+});
+$('history-dialog').addEventListener('cancel', (event) => {
+  if (state.historyDeleting) event.preventDefault();
+});
+$('confirm-cancel').addEventListener('click', () => settleConfirmation(false));
+$('confirm-accept').addEventListener('click', () => settleConfirmation(true));
+$('confirm-dialog').addEventListener('cancel', (event) => {
+  event.preventDefault();
+  settleConfirmation(false);
 });
 window.addEventListener('beforeunload', (event) => {
   if (!state.dirty) return;
