@@ -91,6 +91,9 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   const resultsPageHtml = await resultsPage.text();
   assert.match(resultsPageHtml, /降智检测/);
   assert.doesNotMatch(resultsPageHtml, /admin\/config|run-button|立即检测/);
+  const publicAssetVersion = resultsPageHtml.match(/\/styles\.css\?v=([a-f0-9]{12})/)?.[1];
+  assert.ok(publicAssetVersion);
+  assert.match(resultsPageHtml, new RegExp(`/app\\.js\\?v=${publicAssetVersion}`));
 
   const anonymousPage = await fetch(`${http.baseUrl}/admin/config`);
   assert.equal(anonymousPage.status, 401);
@@ -124,7 +127,11 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   const adminPage = await fetch(`${http.baseUrl}/admin/config`, { headers: headers(authA) });
   assert.equal(adminPage.status, 200);
   assert.match(adminPage.headers.get('cache-control'), /no-store/);
-  assert.match(await adminPage.text(), /降智检测配置/);
+  const adminPageHtml = await adminPage.text();
+  assert.match(adminPageHtml, /降智检测配置/);
+  assert.match(adminPageHtml, new RegExp(`/styles\\.css\\?v=${publicAssetVersion}`));
+  assert.match(adminPageHtml, new RegExp(`/admin/config\\.css\\?v=${publicAssetVersion}`));
+  assert.match(adminPageHtml, new RegExp(`/admin/config\\.js\\?v=${publicAssetVersion}`));
 
   const initialConfigResponse = await fetch(`${http.baseUrl}/api/admin/config`, { headers: headers(authA) });
   assert.equal(initialConfigResponse.status, 200);

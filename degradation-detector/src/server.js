@@ -129,6 +129,24 @@ function setNoStore(res) {
   res.setHeader('Pragma', 'no-cache');
 }
 
+function frontendAssetVersion(files) {
+  const hash = crypto.createHash('sha256');
+  for (const file of files) {
+    hash.update(path.basename(file));
+    hash.update('\0');
+    hash.update(fs.readFileSync(file));
+  }
+  return hash.digest('hex').slice(0, 12);
+}
+
+function versionFrontendAssets(html, version) {
+  return html
+    .replaceAll('href="/styles.css"', `href="/styles.css?v=${version}"`)
+    .replaceAll('src="/app.js"', `src="/app.js?v=${version}"`)
+    .replaceAll('href="/admin/config.css"', `href="/admin/config.css?v=${version}"`)
+    .replaceAll('src="/admin/config.js"', `src="/admin/config.js?v=${version}"`);
+}
+
 function normalizePreviewAncestors(values) {
   const origins = [];
   for (const value of Array.isArray(values) ? values : []) {
@@ -503,16 +521,30 @@ function createApp(config, overrides = {}) {
 
   const publicRoot = path.join(config.projectRoot, 'public');
   const adminRoot = path.join(config.projectRoot, 'admin');
-  const sendPublicFile = (filename) => (_req, res) => {
+  const assetVersion = frontendAssetVersion([
+    path.join(publicRoot, 'app.js'),
+    path.join(publicRoot, 'styles.css'),
+    path.join(adminRoot, 'app.js'),
+    path.join(adminRoot, 'styles.css')
+  ]);
+  const publicIndexHtml = versionFrontendAssets(
+    fs.readFileSync(path.join(publicRoot, 'index.html'), 'utf8'),
+    assetVersion
+  );
+  const adminIndexHtml = versionFrontendAssets(
+    fs.readFileSync(path.join(adminRoot, 'index.html'), 'utf8'),
+    assetVersion
+  );
+  const sendHtml = (html) => (_req, res) => {
     setNoStore(res);
-    res.sendFile(path.join(publicRoot, filename));
+    res.type('html').send(html);
   };
   const sendAdminFile = (filename) => (_req, res) => {
     setNoStore(res);
     res.sendFile(path.join(adminRoot, filename));
   };
 
-  app.get(['/', '/results', '/results/'], sendPublicFile('index.html'));
+  app.get(['/', '/index.html', '/results', '/results/'], sendHtml(publicIndexHtml));
 
   const establishAdminEntrySession = async (req, res, next) => {
     const accessToken = String(req.query.token || req.query.access_token || '').trim();
@@ -550,7 +582,7 @@ function createApp(config, overrides = {}) {
     establishAdminEntrySession,
     requireAuth,
     requireAdmin,
-    sendAdminFile('index.html')
+    sendHtml(adminIndexHtml)
   );
   app.get('/admin/config.js', requireAuth, requireAdmin, sendAdminFile('app.js'));
   app.get('/admin/config.css', requireAuth, requireAdmin, sendAdminFile('styles.css'));
