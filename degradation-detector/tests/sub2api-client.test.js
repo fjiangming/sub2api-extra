@@ -102,7 +102,7 @@ test('SSE parsing handles split chunks, comments, and multi-line data', async ()
   assert.equal(events[0].response.id, 'resp_1');
 });
 
-test('stream transport failures before the first event remain retryable', async () => {
+test('stream transport failures after successful HTTP headers do not resubmit inference', async () => {
   const api = new Sub2ApiClient({
     sub2apiBaseUrl: 'https://sub2api.example.test',
     requestTimeoutMs: 1000,
@@ -121,7 +121,37 @@ test('stream transport failures before the first event remain retryable', async 
 
   await assert.rejects(
     () => api.gatewayEventStream('/v1/responses', 'group-key', {}, async () => {}),
-    (error) => error.code === 'SUB2API_UNAVAILABLE' && error.retryable && !error.responseStarted
+    (error) => error.code === 'SUB2API_STREAM_INTERRUPTED' &&
+      !error.retryable && error.responseStarted
+  );
+});
+
+test('definite connection failures before sending inference remain retryable', async () => {
+  const connectError = new TypeError('fetch failed');
+  connectError.cause = { code: 'UND_ERR_CONNECT_TIMEOUT' };
+  const api = new Sub2ApiClient({
+    sub2apiBaseUrl: 'https://sub2api.example.test',
+    requestTimeoutMs: 1000,
+    maxResponseBytes: 1024
+  }, async () => { throw connectError; });
+
+  await assert.rejects(
+    () => api.gatewayEventStream('/v1/responses', 'group-key', {}, async () => {}),
+    (error) => error.code === 'SUB2API_TIMEOUT' && error.retryable && !error.responseStarted
+  );
+});
+
+test('ambiguous failures before response headers are not resubmitted', async () => {
+  const api = new Sub2ApiClient({
+    sub2apiBaseUrl: 'https://sub2api.example.test',
+    requestTimeoutMs: 1000,
+    maxResponseBytes: 1024
+  }, async () => { throw new TypeError('connection reset'); });
+
+  await assert.rejects(
+    () => api.gatewayEventStream('/v1/responses', 'group-key', {}, async () => {}),
+    (error) => error.code === 'SUB2API_STREAM_INTERRUPTED' &&
+      !error.retryable && error.responseStarted
   );
 });
 
@@ -166,5 +196,39 @@ test('a streaming HTTP 524 is not blindly retried', async () => {
     () => api.gatewayEventStream('/v1/responses', 'group-key', {}, async () => {}),
     (error) => error.code === 'SUB2API_REQUEST_FAILED' &&
       error.retryable === false && error.details.upstreamStatus === 524
+  );
+});
+
+test('an explicit streaming HTTP 503 remains retryable', async () => {
+  const api = new Sub2ApiClient({
+    sub2apiBaseUrl: 'https://sub2api.example.test',
+    requestTimeoutMs: 1000,
+    maxResponseBytes: 4096
+  }, async () => new Response(JSON.stringify({ message: 'overloaded' }), {
+    status: 503,
+    headers: { 'content-type': 'application/json' }
+  }));
+
+  await assert.rejects(
+    () => api.gatewayEventStream('/v1/responses', 'group-key', {}, async () => {}),
+    (error) => error.code === 'SUB2API_REQUEST_FAILED' &&
+      error.retryable && !error.responseStarted && error.details.upstreamStatus === 503
+  );
+});
+
+test('an ambiguous streaming HTTP 500 is not resubmitted', async () => {
+  const api = new Sub2ApiClient({
+    sub2apiBaseUrl: 'https://sub2api.example.test',
+    requestTimeoutMs: 1000,
+    maxResponseBytes: 4096
+  }, async () => new Response(JSON.stringify({ message: 'internal error' }), {
+    status: 500,
+    headers: { 'content-type': 'application/json' }
+  }));
+
+  await assert.rejects(
+    () => api.gatewayEventStream('/v1/responses', 'group-key', {}, async () => {}),
+    (error) => error.code === 'SUB2API_REQUEST_FAILED' &&
+      !error.retryable && !error.responseStarted && error.details.upstreamStatus === 500
   );
 });

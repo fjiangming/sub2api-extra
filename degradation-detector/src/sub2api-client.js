@@ -9,6 +9,15 @@ const UNDICI_TIMEOUT_CODES = new Set([
   'UND_ERR_CONNECT_TIMEOUT'
 ]);
 
+const SAFE_PRECONNECT_CODES = new Set([
+  'UND_ERR_CONNECT_TIMEOUT',
+  'ECONNREFUSED',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'ENOTFOUND',
+  'EAI_AGAIN'
+]);
+
 function unwrap(payload) {
   if (payload?.success === false || (payload?.code != null && ![0, 200].includes(Number(payload.code)))) {
     throw new AppError(
@@ -111,6 +120,10 @@ function isTimeoutError(error) {
     UNDICI_TIMEOUT_CODES.has(error?.cause?.code);
 }
 
+function isSafePreconnectError(error) {
+  return SAFE_PRECONNECT_CODES.has(error?.code) || SAFE_PRECONNECT_CODES.has(error?.cause?.code);
+}
+
 function timeoutMessage(timeoutMs) {
   const seconds = Math.max(1, Math.round(Number(timeoutMs) / 1000));
   if (seconds % 60 === 0) return `Sub2API 请求在 ${seconds / 60} 分钟内未完成`;
@@ -206,6 +219,7 @@ class Sub2ApiClient {
     const timeoutMs = options.timeoutMs || this.config.requestTimeoutMs;
     const maxBytes = options.maxBytes || this.config.maxResponseBytes;
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let requestAccepted = false;
     let receivedEvents = 0;
 
     try {
@@ -231,11 +245,12 @@ class Sub2ApiClient {
           errorMessage(payload, response.status),
           {
             status,
-            retryable: response.status === 429 || (response.status >= 500 && response.status !== 524),
+            retryable: response.status === 429 || response.status === 503,
             details: { upstreamStatus: response.status }
           }
         );
       }
+      requestAccepted = true;
 
       const contentType = String(response.headers.get('content-type') || '').toLowerCase();
       if (!contentType.includes('text/event-stream')) {
@@ -259,30 +274,35 @@ class Sub2ApiClient {
       });
     } catch (error) {
       if (error instanceof AppError) {
-        error.responseStarted = receivedEvents > 0;
+        error.responseStarted = requestAccepted || receivedEvents > 0;
         if (error.responseStarted && error.retryable) error.retryable = false;
         throw error;
       }
-      const responseStarted = receivedEvents > 0;
+      const responseStarted = requestAccepted || receivedEvents > 0;
+      const safeToRetry = !responseStarted && isSafePreconnectError(error);
       if (isTimeoutError(error)) {
         const timeoutError = new AppError(
-          responseStarted ? 'SUB2API_STREAM_INTERRUPTED' : 'SUB2API_TIMEOUT',
-          responseStarted
+          safeToRetry ? 'SUB2API_TIMEOUT' : 'SUB2API_STREAM_INTERRUPTED',
+          safeToRetry
+            ? timeoutMessage(timeoutMs)
+            : responseStarted
             ? 'Sub2API 流式响应中断；为避免重复消费，未重新提交本次推理'
-            : timeoutMessage(timeoutMs),
-          { status: 504, retryable: !responseStarted }
+            : 'Sub2API 请求状态未知；为避免重复消费，未重新提交本次推理',
+          { status: 504, retryable: safeToRetry }
         );
-        timeoutError.responseStarted = responseStarted;
+        timeoutError.responseStarted = !safeToRetry;
         throw timeoutError;
       }
       const unavailable = new AppError(
-        responseStarted ? 'SUB2API_STREAM_INTERRUPTED' : 'SUB2API_UNAVAILABLE',
-        responseStarted
+        safeToRetry ? 'SUB2API_UNAVAILABLE' : 'SUB2API_STREAM_INTERRUPTED',
+        safeToRetry
+          ? '无法连接 Sub2API'
+          : responseStarted
           ? 'Sub2API 流式响应中断；为避免重复消费，未重新提交本次推理'
-          : '无法连接 Sub2API',
-        { status: 503, retryable: !responseStarted }
+          : 'Sub2API 请求状态未知；为避免重复消费，未重新提交本次推理',
+        { status: 503, retryable: safeToRetry }
       );
-      unavailable.responseStarted = responseStarted;
+      unavailable.responseStarted = !safeToRetry;
       throw unavailable;
     } finally {
       clearTimeout(timeout);
@@ -349,6 +369,7 @@ class Sub2ApiClient {
 module.exports = {
   Sub2ApiClient,
   asItems,
+  isSafePreconnectError,
   isTimeoutError,
   parsePayload,
   readEventStream,
