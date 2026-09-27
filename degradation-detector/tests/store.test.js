@@ -61,6 +61,23 @@ test('legacy single-time settings migrate to the multi-mode schedule', (t) => {
   assert.equal(settings.schedule_interval_minutes, 60);
 });
 
+test('legacy runs migrate without inventing a reasoning effort snapshot', (t) => {
+  const config = testConfig(t);
+  const original = new Store(config);
+  const currentMonitor = monitor(original);
+  const run = original.createRun(currentMonitor, { ...testCase, reasoning_effort: 'high' }, 'manual');
+  original.close();
+
+  const legacy = new Database(config.databasePath);
+  legacy.exec('ALTER TABLE runs DROP COLUMN reasoning_effort');
+  legacy.close();
+
+  const migrated = new Store(config);
+  t.after(() => migrated.close());
+  assert.equal(migrated.getRun(run.id).reasoning_effort, null);
+  assert.equal(migrated.groupSummary('user-1', 'group-1', 10).history[0].reasoning_effort, null);
+});
+
 test('stored schedules support multiple daily times and intervals', (t) => {
   const config = testConfig(t);
   const store = new Store(config);
@@ -157,6 +174,23 @@ test('failed runs retain a machine-readable error code', (t) => {
   }, 60);
   assert.equal(failed.status, 'error');
   assert.equal(failed.error_code, 'UPSTREAM_FAILED');
+});
+
+test('runs snapshot the reasoning effort used for each detection', (t) => {
+  const config = testConfig(t);
+  const store = new Store(config);
+  t.after(() => store.close());
+  const currentMonitor = monitor(store);
+
+  const explicit = store.createRun(currentMonitor, { ...testCase, reasoning_effort: 'xhigh' }, 'manual');
+  const automatic = store.createRun(currentMonitor, testCase, 'scheduled');
+
+  assert.equal(explicit.reasoning_effort, 'xhigh');
+  assert.equal(automatic.reasoning_effort, 'none');
+  assert.deepEqual(
+    store.groupSummary('user-1', 'group-1', 10).history.map((run) => run.reasoning_effort),
+    ['none', 'xhigh']
+  );
 });
 
 test('pruning expires old payloads without changing cumulative totals', (t) => {

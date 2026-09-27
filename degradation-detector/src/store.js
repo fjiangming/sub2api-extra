@@ -55,6 +55,7 @@ function publicRun(row) {
     duration_ms: nullableNumber(row.duration_ms),
     output_type: row.output_type,
     model: row.model,
+    reasoning_effort: row.reasoning_effort || null,
     has_artifact: Boolean(row.artifact_path || (row.output_type === 'html' && row.output_text)),
     has_html: row.output_type === 'html' && Boolean(row.output_text)
   };
@@ -134,6 +135,7 @@ class Store {
         finished_at INTEGER,
         duration_ms INTEGER,
         output_type TEXT NOT NULL,
+        reasoning_effort TEXT,
         output_text TEXT,
         artifact_path TEXT,
         artifact_name TEXT,
@@ -180,6 +182,7 @@ class Store {
         ON runs(preview_token);
     `);
     this.#ensureColumn('monitors', 'key_fingerprint', 'TEXT');
+    this.#ensureColumn('runs', 'reasoning_effort', 'TEXT');
     this.#ensureColumn('service_settings', 'schedule_mode', "TEXT NOT NULL DEFAULT 'daily'");
     this.#ensureColumn('service_settings', 'schedule_times_json', 'TEXT');
     this.#ensureColumn('service_settings', 'schedule_interval_minutes', 'INTEGER NOT NULL DEFAULT 60');
@@ -504,8 +507,8 @@ class Store {
     const result = this.db.prepare(`
       INSERT INTO runs (
         monitor_id, user_id, group_id, platform, model, prompt, trigger_type,
-        status, output_type, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+        status, output_type, reasoning_effort, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
     `).run(
       monitor.id,
       monitor.user_id,
@@ -515,6 +518,7 @@ class Store {
       test.prompt,
       triggerType,
       test.output_type,
+      test.reasoning_effort || 'none',
       nowMs()
     );
     return this.getRun(result.lastInsertRowid);

@@ -69,6 +69,7 @@ function groupPayload(group, summary, runtime) {
     platform: group.platform,
     platform_label: test?.label || group.platform,
     model: test?.model || null,
+    reasoning_effort: test?.reasoning_effort || 'none',
     output_type: test?.output_type || null,
     next_run_at: monitor?.next_run_at == null ? null : monitor.next_run_at / 1000,
     totals: summary.totals,

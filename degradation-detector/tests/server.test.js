@@ -51,7 +51,7 @@ function headers(auth, csrf = '') {
   };
 }
 
-function configuration(groups, scheduleTime = '07:45') {
+function configuration(groups, scheduleTime = '07:45', testOverrides = {}) {
   return {
     schedule_mode: 'daily',
     schedule_times: [scheduleTime, '19:15'],
@@ -59,7 +59,7 @@ function configuration(groups, scheduleTime = '07:45') {
     platforms: [{
       id: 'openai',
       enabled: true,
-      test: defaultTests.openai,
+      test: { ...defaultTests.openai, ...testOverrides },
       groups
     }]
   };
@@ -170,7 +170,7 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
     body: JSON.stringify(configuration([
       { id: '1', enabled: true, key: dedicatedKey },
       { id: '3', enabled: false, key: '' }
-    ]))
+    ], '07:45', { reasoning_effort: 'xhigh' }))
   });
   assert.equal(savedResponse.status, 200);
   const saved = await savedResponse.json();
@@ -198,6 +198,7 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   assert.equal(results.schedule_mode, 'daily');
   assert.deepEqual(results.schedule_times, ['07:45', '19:15']);
   assert.equal(results.schedule_interval_minutes, 90);
+  assert.equal(results.groups[0].reasoning_effort, 'xhigh');
   assert.equal('can_operate' in results, false);
   assert.equal('key_configured' in results.groups[0], false);
   assert.equal('monitor_id' in results.groups[0], false);
@@ -260,6 +261,7 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   });
   assert.equal(sharedDetail.status, 200);
   const sharedPayload = await sharedDetail.json();
+  assert.equal(sharedPayload.reasoning_effort, 'xhigh');
   assert.equal(sharedPayload.html, '<!doctype html><html><body>shared</body></html>');
   assert.match(sharedPayload.preview_url, /^\/api\/previews\/preview_token_for_service_123456\?ancestors=.+&signature=.+/);
   const forbiddenDetail = await fetch(`${http.baseUrl}/api/results/${sharedRun.id}`, { headers: headers(authC) });
@@ -331,6 +333,7 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
 
 test('frontends keep authentication and administrator controls separated', () => {
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const mainStyles = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
   const adminSource = fs.readFileSync(path.join(__dirname, '..', 'admin', 'app.js'), 'utf8');
   const adminHtml = fs.readFileSync(path.join(__dirname, '..', 'admin', 'index.html'), 'utf8');
   assert.match(mainSource, /params\.get\('token'\) \|\| params\.get\('access_token'\)/);
@@ -350,6 +353,17 @@ test('frontends keep authentication and administrator controls separated', () =>
   assert.match(adminSource, /'X-CSRF-Token'/);
   assert.match(adminSource, /method: 'DELETE'/);
   assert.match(adminSource, /run_ids: ids/);
+  assert.match(mainSource, /reasoningLabel\(group\.reasoning_effort, '默认'\)/);
+  assert.match(mainSource, /recorded && recorded !== 'none' \? recorded : group\?\.reasoning_effort/);
+  assert.match(mainSource, /resultReasoningLabel\(run\)/);
+  assert.doesNotMatch(mainSource, /reasoningLabel\(run\.reasoning_effort\)/);
+  assert.doesNotMatch(mainSource, /未记录/);
+  assert.match(mainSource, /const HISTORY_CHART_LENGTH = 60/);
+  assert.match(mainSource, /<span>PAST \$\{group\.history\.length \|\| 0\} RESULTS<\/span><span>NOW<\/span>/);
+  assert.match(mainStyles, /\.history-chart\s*\{[^}]*display: flex;[^}]*gap: 2px;[^}]*height: 33px;/s);
+  assert.match(mainStyles, /\.history-point\[data-status="normal"\]\s*\{[^}]*height: 100%;[^}]*background: #10b981;/s);
+  assert.match(mainStyles, /\.dark \.history-point\[data-status="empty"\]\s*\{[^}]*background: #475569;/s);
+  assert.doesNotMatch(mainStyles, /\.dark \.history-point\s*\{/);
   assert.match(adminHtml, /id="history-dialog"/);
   assert.match(adminHtml, /id="history-delete-selected"/);
   assert.match(adminHtml, /id="history-clear-all"/);

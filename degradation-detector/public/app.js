@@ -25,6 +25,10 @@ const labels = {
 };
 
 const outputLabels = { text: '直接答案', html: 'HTML', image: '图片', file: '文件' };
+const reasoningLabels = {
+  none: '默认', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'XHigh', max: 'Max'
+};
+const HISTORY_CHART_LENGTH = 60;
 
 function $(id) { return document.getElementById(id); }
 
@@ -223,6 +227,17 @@ function platformIcon(platform) {
   return ({ openai: 'sparkles', anthropic: 'bot', gemini: 'gem', grok: 'orbit' })[platform] || 'cpu';
 }
 
+function reasoningLabel(value, missing = '默认') {
+  if (value == null || value === '') return missing;
+  return reasoningLabels[value] || String(value);
+}
+
+function resultReasoningLabel(run, group = activeGroup()) {
+  const recorded = run?.reasoning_effort;
+  const effective = recorded && recorded !== 'none' ? recorded : group?.reasoning_effort;
+  return reasoningLabel(effective, '默认');
+}
+
 function renderPlatformFilter() {
   const select = $('platform-filter');
   const current = state.platform;
@@ -233,11 +248,11 @@ function renderPlatformFilter() {
 }
 
 function historyChart(history) {
-  const runs = [...(history || [])].reverse().slice(-10);
-  const padding = Array.from({ length: Math.max(0, 10 - runs.length) }, () => null);
+  const runs = [...(history || [])].reverse().slice(-HISTORY_CHART_LENGTH);
+  const padding = Array.from({ length: Math.max(0, HISTORY_CHART_LENGTH - runs.length) }, () => null);
   return [...padding, ...runs].map((run) => {
     const status = run?.status || 'empty';
-    const title = run ? `${when(run.started)} · ${labels[status] || status}` : '暂无记录';
+    const title = run ? `${when(run.started)} · ${labels[status] || status}` : '';
     return `<span class="history-point" data-status="${escapeHtml(status)}" title="${escapeHtml(title)}"></span>`;
   }).join('');
 }
@@ -259,10 +274,10 @@ function renderGroups() {
       </div>
       <div class="group-model">
         <span title="${escapeHtml(group.model)}">${escapeHtml(group.model)}</span>
-        <span>${escapeHtml(outputLabels[group.output_type] || group.output_type)}</span>
+        <span title="推理强度：${escapeHtml(reasoningLabel(group.reasoning_effort, '默认'))} · 输出：${escapeHtml(outputLabels[group.output_type] || group.output_type)}">${escapeHtml(reasoningLabel(group.reasoning_effort, '默认'))} · ${escapeHtml(outputLabels[group.output_type] || group.output_type)}</span>
       </div>
       <div class="history-chart" aria-label="最近检测记录">${historyChart(group.history)}</div>
-      <div class="history-caption">PAST ${group.history.length || 0} RESULTS</div>
+      <div class="history-caption"><span>PAST ${group.history.length || 0} RESULTS</span><span>NOW</span></div>
       <div class="group-actions">
         <span class="degradation-total" title="累计疑似降智次数 / 有效判定次数；异常和无法判定不计入">降智率 <b>${escapeHtml(degradationSummary(group.totals))}</b></span>
         <button class="yzai-pelican-btn detect-button" type="button" data-group-id="${escapeHtml(group.id)}" aria-haspopup="dialog">
@@ -329,8 +344,12 @@ async function showRecord(run) {
   const requestId = ++state.detailRequest;
   clearPreviewUrls();
   const box = $('result-detail');
+  const duration = run.duration_ms == null ? '' : ` · 耗时：${(run.duration_ms / 1000).toFixed(1)} 秒`;
   box.innerHTML = `
-    <div class="yzai-pelican-meta">开始：${escapeHtml(when(run.started))} · 结束：${escapeHtml(run.finished ? when(run.finished) : '进行中')}</div>
+    <div class="yzai-pelican-meta">
+      <div>模型：${escapeHtml(run.model || '--')} · 推理强度：${escapeHtml(resultReasoningLabel(run))} · 输出：${escapeHtml(outputLabels[run.output_type] || run.output_type || '--')}</div>
+      <div>开始：${escapeHtml(when(run.started))} · 结束：${escapeHtml(run.finished ? when(run.finished) : '进行中')}${escapeHtml(duration)}</div>
+    </div>
     <p class="yzai-pelican-reason">${statusHtml(run.status)} · ${escapeHtml(run.reason || '正在生成与评估，请稍后查看。')}</p>
   `;
   if (['queued', 'running'].includes(run.status)) {
