@@ -86,6 +86,8 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
 
   const resultsPage = await fetch(`${http.baseUrl}/results`);
   assert.equal(resultsPage.status, 200);
+  assert.match(resultsPage.headers.get('content-security-policy'), /frame-src 'self'/);
+  assert.match(resultsPage.headers.get('content-security-policy'), /media-src 'self' blob:/);
   const resultsPageHtml = await resultsPage.text();
   assert.match(resultsPageHtml, /降智检测/);
   assert.doesNotMatch(resultsPageHtml, /admin\/config|run-button|立即检测/);
@@ -253,9 +255,13 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
     previewToken: 'preview_token_for_service_123456'
   }, runtime.store.nextScheduledAt());
 
-  const sharedDetail = await fetch(`${http.baseUrl}/api/results/${sharedRun.id}`, { headers: headers(authB) });
+  const sharedDetail = await fetch(`${http.baseUrl}/api/results/${sharedRun.id}`, {
+    headers: { ...headers(authB), 'x-preview-ancestors': '["https://aihub.example.test"]' }
+  });
   assert.equal(sharedDetail.status, 200);
-  assert.equal((await sharedDetail.json()).preview_url, '/api/previews/preview_token_for_service_123456');
+  const sharedPayload = await sharedDetail.json();
+  assert.equal(sharedPayload.html, '<!doctype html><html><body>shared</body></html>');
+  assert.match(sharedPayload.preview_url, /^\/api\/previews\/preview_token_for_service_123456\?ancestors=.+&signature=.+/);
   const forbiddenDetail = await fetch(`${http.baseUrl}/api/results/${sharedRun.id}`, { headers: headers(authC) });
   assert.equal(forbiddenDetail.status, 404);
   const anonymousPreview = await fetch(`${http.baseUrl}/api/previews/preview_token_for_service_123456`);
@@ -265,7 +271,52 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   const preview = await fetch(`${http.baseUrl}/api/previews/preview_token_for_service_123456`, { headers: headers(authB) });
   assert.equal(preview.status, 200);
   assert.equal(preview.headers.get('content-security-policy'), PREVIEW_CSP);
+  assert.match(PREVIEW_CSP, /frame-ancestors 'self'/);
   assert.match(await preview.text(), /<body>shared<\/body>/);
+  const embeddedPreview = await fetch(`${http.baseUrl}${sharedPayload.preview_url}`, { headers: headers(authB) });
+  assert.equal(embeddedPreview.status, 200);
+  assert.match(
+    embeddedPreview.headers.get('content-security-policy'),
+    /frame-ancestors 'self' https:\/\/aihub\.example\.test/
+  );
+  const crossSessionPreview = await fetch(`${http.baseUrl}${sharedPayload.preview_url}`, { headers: headers(authA) });
+  assert.equal(crossSessionPreview.status, 404);
+  const tamperedPreviewUrl = sharedPayload.preview_url.replace('ancestors=', 'ancestors=e30');
+  const tamperedPreview = await fetch(`${http.baseUrl}${tamperedPreviewUrl}`, { headers: headers(authB) });
+  assert.equal(tamperedPreview.status, 404);
+
+  fs.mkdirSync(config.artifactDir, { recursive: true });
+  const artifactPath = path.join(config.artifactDir, 'shared-result.txt');
+  fs.writeFileSync(artifactPath, 'shared artifact', 'utf8');
+  const artifactRun = runtime.store.createRun(monitor, {
+    ...runtime.store.getPlatformTest('openai'),
+    output_type: 'file'
+  }, 'test');
+  runtime.store.markRunRunning(artifactRun.id);
+  runtime.store.completeRun(artifactRun.id, {
+    status: 'normal',
+    quality: 'normal',
+    reason: 'ok',
+    source: 'test',
+    artifactPath,
+    artifactName: 'shared-result.txt',
+    artifactMime: 'text/plain',
+    previewToken: 'artifact_token_for_service_12345'
+  }, runtime.store.nextScheduledAt());
+
+  const artifactDetail = await fetch(`${http.baseUrl}/api/results/${artifactRun.id}`, { headers: headers(authB) });
+  assert.equal(artifactDetail.status, 200);
+  const artifactPayload = await artifactDetail.json();
+  assert.equal(artifactPayload.artifact.content_url, '/api/artifacts/artifact_token_for_service_12345');
+  assert.equal(artifactPayload.artifact.download_url, '/api/artifacts/artifact_token_for_service_12345?download=1');
+  const anonymousArtifact = await fetch(`${http.baseUrl}${artifactPayload.artifact.content_url}`);
+  assert.equal(anonymousArtifact.status, 401);
+  const forbiddenArtifact = await fetch(`${http.baseUrl}${artifactPayload.artifact.content_url}`, { headers: headers(authC) });
+  assert.equal(forbiddenArtifact.status, 404);
+  const artifact = await fetch(`${http.baseUrl}${artifactPayload.artifact.content_url}`, { headers: headers(authB) });
+  assert.equal(artifact.status, 200);
+  assert.equal(artifact.headers.get('content-type'), 'text/plain');
+  assert.equal(await artifact.text(), 'shared artifact');
 
   const disabledResponse = await fetch(`${http.baseUrl}/api/admin/config`, {
     method: 'PUT',
@@ -284,6 +335,12 @@ test('frontends keep authentication and administrator controls separated', () =>
   assert.match(mainSource, /params\.get\('token'\) \|\| params\.get\('access_token'\)/);
   assert.match(mainSource, /\['token', 'access_token'\]/);
   assert.match(mainSource, /state\.sessionToken && !headers\.Authorization/);
+  assert.match(mainSource, /URL\.createObjectURL/);
+  assert.match(mainSource, /window\.location\.ancestorOrigins/);
+  assert.match(mainSource, /X-Preview-Ancestors/);
+  assert.match(mainSource, /createPreviewFrame\(detail\.preview_url, title, 'allow-scripts'\)/);
+  assert.match(mainSource, /detail\.artifact\.content_url/);
+  assert.doesNotMatch(mainSource, /frame\.src = detail\.preview_url/);
   assert.doesNotMatch(mainSource, /canOperate|csrfToken|config-button|run-button|立即检测|\/api\/admin/);
   assert.doesNotMatch(mainSource, /\/monitor|monitor-toggle|打开即/);
   assert.match(adminSource, /session\.canOperate !== true/);

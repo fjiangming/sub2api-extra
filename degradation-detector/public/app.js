@@ -10,6 +10,7 @@ const state = {
   openerGroupId: null,
   selectedRunId: null,
   detailRequest: 0,
+  previewUrls: new Set(),
   refreshBusy: false,
   pollTimer: null
 };
@@ -57,13 +58,13 @@ function toast(message, type = '') {
   setTimeout(() => item.remove(), 4200);
 }
 
-async function api(path, options = {}) {
+async function authenticatedFetch(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (state.sessionToken && !headers.Authorization && !headers.authorization) {
     headers.Authorization = `Session ${state.sessionToken}`;
   }
   if (options.body != null) headers['Content-Type'] = 'application/json';
-  const response = await fetch(path, {
+  return fetch(path, {
     ...options,
     headers,
     cache: 'no-store',
@@ -71,6 +72,18 @@ async function api(path, options = {}) {
       ? options.body
       : JSON.stringify(options.body)
   });
+}
+
+async function responseError(response) {
+  const payload = await response.json().catch(() => ({}));
+  const error = new Error(payload?.error?.message || `请求失败 (${response.status})`);
+  error.code = payload?.error?.code;
+  error.status = response.status;
+  return error;
+}
+
+async function api(path, options = {}) {
+  const response = await authenticatedFetch(path, options);
   if (response.status === 204) return null;
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -80,6 +93,86 @@ async function api(path, options = {}) {
     throw error;
   }
   return payload;
+}
+
+async function authenticatedBlob(path) {
+  const response = await authenticatedFetch(path);
+  if (!response.ok) throw await responseError(response);
+  return response.blob();
+}
+
+function clearPreviewUrls() {
+  for (const url of state.previewUrls) URL.revokeObjectURL(url);
+  state.previewUrls.clear();
+}
+
+function previewUrl(blob) {
+  const url = URL.createObjectURL(blob);
+  state.previewUrls.add(url);
+  return url;
+}
+
+function embeddingAncestors() {
+  const candidates = [];
+  try {
+    candidates.push(...Array.from(window.location.ancestorOrigins || []));
+  } catch {
+    // Firefox does not expose ancestorOrigins; document.referrer is the fallback.
+  }
+  if (!candidates.length && document.referrer) candidates.push(document.referrer);
+  const origins = [];
+  for (const value of candidates) {
+    try {
+      const url = new URL(value);
+      if (!['http:', 'https:'].includes(url.protocol) || url.origin === location.origin) continue;
+      if (!origins.includes(url.origin)) origins.push(url.origin);
+      if (origins.length === 4) break;
+    } catch {
+      // A missing or malformed ancestor keeps the preview restricted to self.
+    }
+  }
+  return origins;
+}
+
+function createPreviewFrame(url, title, sandbox = '') {
+  const frame = document.createElement('iframe');
+  frame.className = 'yzai-pelican-frame';
+  frame.title = title;
+  frame.setAttribute('sandbox', sandbox);
+  frame.referrerPolicy = 'no-referrer';
+  frame.src = url;
+  return frame;
+}
+
+function createDownload(url, filename) {
+  const download = document.createElement('a');
+  download.className = 'yzai-pelican-btn';
+  download.href = url;
+  download.download = filename || '检测产物';
+  download.textContent = '下载文件';
+  return download;
+}
+
+function createArtifactPreview(blob, url, artifact, title, networkPreviewUrl) {
+  const mime = String(artifact.mime_type || blob.type || '').split(';')[0].toLowerCase();
+  if (mime.startsWith('image/')) {
+    const image = document.createElement('img');
+    image.className = 'yzai-pelican-artifact yzai-pelican-image';
+    image.src = url;
+    image.alt = artifact.name || title;
+    return image;
+  }
+  if (mime.startsWith('audio/') || mime.startsWith('video/')) {
+    const media = document.createElement(mime.startsWith('audio/') ? 'audio' : 'video');
+    media.className = `yzai-pelican-artifact ${mime.startsWith('audio/') ? 'yzai-pelican-audio' : 'yzai-pelican-video'}`;
+    media.src = url;
+    media.controls = true;
+    return media;
+  }
+  if (mime === 'application/pdf' && networkPreviewUrl) {
+    return createPreviewFrame(networkPreviewUrl, title, 'allow-scripts');
+  }
+  return null;
 }
 
 function setSession(session) {
@@ -234,6 +327,7 @@ function renderHistory(group) {
 
 async function showRecord(run) {
   const requestId = ++state.detailRequest;
+  clearPreviewUrls();
   const box = $('result-detail');
   box.innerHTML = `
     <div class="yzai-pelican-meta">开始：${escapeHtml(when(run.started))} · 结束：${escapeHtml(run.finished ? when(run.finished) : '进行中')}</div>
@@ -254,7 +348,10 @@ async function showRecord(run) {
   loading.textContent = '正在加载作品...';
   box.append(loading);
   try {
-    const detail = await api(`/api/results/${run.id}`);
+    const ancestors = embeddingAncestors();
+    const detail = await api(`/api/results/${run.id}`, {
+      headers: ancestors.length ? { 'X-Preview-Ancestors': JSON.stringify(ancestors) } : {}
+    });
     if (requestId !== state.detailRequest || !$('result-dialog').open) return;
     loading.remove();
     if (detail.output_type === 'text') {
@@ -268,19 +365,15 @@ async function showRecord(run) {
       box.append(pre);
       return;
     }
-    if (!detail.preview_url) {
-      box.insertAdjacentHTML('beforeend', '<p class="yzai-pelican-empty">作品已过期，判定记录仍然保留。</p>');
-      return;
-    }
     const controls = document.createElement('div');
     controls.className = 'yzai-pelican-controls';
-    const frame = document.createElement('iframe');
-    frame.className = 'yzai-pelican-frame';
-    frame.title = `${activeGroup()?.name || ''} 检测作品`;
-    frame.sandbox = 'allow-scripts';
-    frame.referrerPolicy = 'no-referrer';
-    frame.src = detail.preview_url;
+    const title = `${activeGroup()?.name || ''} 检测作品`;
     if (detail.output_type === 'html') {
+      if (detail.html == null || !detail.preview_url) {
+        box.insertAdjacentHTML('beforeend', '<p class="yzai-pelican-empty">作品已过期，判定记录仍然保留。</p>');
+        return;
+      }
+      const frame = createPreviewFrame(detail.preview_url, title, 'allow-scripts');
       const toggle = document.createElement('button');
       toggle.className = 'yzai-pelican-btn';
       toggle.type = 'button';
@@ -288,6 +381,7 @@ async function showRecord(run) {
       const code = document.createElement('pre');
       code.className = 'yzai-pelican-code';
       code.textContent = detail.html || '';
+      const previewSource = detail.preview_url;
       let source = false;
       toggle.addEventListener('click', () => {
         source = !source;
@@ -296,23 +390,43 @@ async function showRecord(run) {
           frame.replaceWith(code);
           frame.src = 'about:blank';
         } else {
+          frame.src = previewSource;
           code.replaceWith(frame);
-          frame.src = detail.preview_url;
         }
       });
       controls.append(toggle);
+      box.append(controls, frame);
+      return;
     }
-    if (detail.artifact?.download_url) {
-      const download = document.createElement('a');
-      download.className = 'yzai-pelican-btn';
-      download.href = detail.artifact.download_url;
-      download.textContent = '下载文件';
-      controls.append(download);
+    if (!detail.artifact?.content_url) {
+      box.insertAdjacentHTML('beforeend', '<p class="yzai-pelican-empty">作品已过期，判定记录仍然保留。</p>');
+      return;
     }
-    if (controls.childNodes.length) box.append(controls);
-    box.append(frame);
+    const blob = await authenticatedBlob(detail.artifact.content_url);
+    if (requestId !== state.detailRequest || !$('result-dialog').open) return;
+    const url = previewUrl(blob);
+    controls.append(createDownload(url, detail.artifact.name));
+    box.append(controls);
+    const artifactPreview = createArtifactPreview(blob, url, detail.artifact, title, detail.preview_url);
+    if (artifactPreview) {
+      box.append(artifactPreview);
+    } else if (String(detail.artifact.mime_type || blob.type).toLowerCase().startsWith('text/') ||
+               String(detail.artifact.mime_type || blob.type).toLowerCase().startsWith('application/json')) {
+      const code = document.createElement('pre');
+      code.className = 'yzai-pelican-code';
+      code.textContent = await blob.text();
+      if (requestId === state.detailRequest && $('result-dialog').open) box.append(code);
+    } else {
+      box.insertAdjacentHTML('beforeend', '<p class="yzai-pelican-empty">该文件类型不支持浏览器内预览，请下载后查看。</p>');
+    }
   } catch (error) {
-    if (requestId === state.detailRequest) loading.textContent = error.message;
+    if (requestId === state.detailRequest && $('result-dialog').open) {
+      loading.remove();
+      const message = document.createElement('p');
+      message.className = 'yzai-pelican-empty';
+      message.textContent = error.message;
+      box.append(message);
+    }
   }
 }
 
@@ -414,6 +528,7 @@ $('result-dialog').addEventListener('close', () => {
   const opener = state.opener;
   const openerGroupId = state.openerGroupId;
   state.detailRequest += 1;
+  clearPreviewUrls();
   state.activeGroupId = null;
   state.selectedRunId = null;
   state.opener = null;

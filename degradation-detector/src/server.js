@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
@@ -118,9 +119,81 @@ function setNoStore(res) {
   res.setHeader('Pragma', 'no-cache');
 }
 
-function previewHeaders(res) {
+function normalizePreviewAncestors(values) {
+  const origins = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    try {
+      const url = new URL(String(value));
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) continue;
+      if (url.origin === 'null' || origins.includes(url.origin)) continue;
+      origins.push(url.origin);
+      if (origins.length === 4) break;
+    } catch {
+      // Invalid origins are omitted so the response remains fail-closed at 'self'.
+    }
+  }
+  return origins;
+}
+
+function previewSignature(secret, token, encodedAncestors) {
+  return crypto.createHmac('sha256', String(secret))
+    .update(`${token}.${encodedAncestors}`)
+    .digest('base64url');
+}
+
+function signedPreviewUrl(req, token) {
+  let submitted = [];
+  const header = String(req.get('x-preview-ancestors') || '');
+  if (header && header.length <= 2048) {
+    try {
+      submitted = JSON.parse(header);
+    } catch {
+      submitted = [];
+    }
+  }
+  const ancestors = normalizePreviewAncestors(submitted);
+  const path = `/api/previews/${token}`;
+  if (!ancestors.length) return path;
+  const encoded = Buffer.from(JSON.stringify(ancestors)).toString('base64url');
+  const signature = previewSignature(req.auth.csrfToken, token, encoded);
+  return `${path}?ancestors=${encoded}&signature=${signature}`;
+}
+
+function authorizedPreviewAncestors(req, token) {
+  const encoded = String(req.query.ancestors || '');
+  const signature = String(req.query.signature || '');
+  if (!encoded && !signature) return [];
+  const invalid = () => {
+    throw new AppError('PREVIEW_NOT_FOUND', '预览不存在或已过期', { status: 404 });
+  };
+  if (!/^[a-zA-Z0-9_-]{4,2048}$/.test(encoded) || !/^[a-zA-Z0-9_-]{43}$/.test(signature)) invalid();
+  const expected = previewSignature(req.auth.csrfToken, token, encoded);
+  const actualBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  if (actualBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(actualBuffer, expectedBuffer)) invalid();
+  try {
+    const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+    const ancestors = normalizePreviewAncestors(parsed);
+    const canonical = Buffer.from(JSON.stringify(ancestors)).toString('base64url');
+    if (!Array.isArray(parsed) || ancestors.length !== parsed.length || canonical !== encoded) invalid();
+    return ancestors;
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    return invalid();
+  }
+}
+
+function previewContentSecurityPolicy(ancestors = []) {
+  if (!ancestors.length) return PREVIEW_CSP;
+  return PREVIEW_CSP.replace(
+    "frame-ancestors 'self'",
+    `frame-ancestors 'self' ${ancestors.join(' ')}`
+  );
+}
+
+function previewHeaders(res, ancestors = []) {
   setNoStore(res);
-  res.setHeader('Content-Security-Policy', PREVIEW_CSP);
+  res.setHeader('Content-Security-Policy', previewContentSecurityPolicy(ancestors));
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
 }
@@ -375,6 +448,7 @@ function createApp(config, overrides = {}) {
         imgSrc: ["'self'", 'data:', 'blob:'],
         connectSrc: ["'self'"],
         frameSrc: ["'self'"],
+        mediaSrc: ["'self'", 'blob:'],
         fontSrc: ["'self'", 'data:'],
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
@@ -457,7 +531,7 @@ function createApp(config, overrides = {}) {
       if (!await canAccessRun(req, runtime, run)) {
         throw new AppError('PREVIEW_NOT_FOUND', '预览不存在或已过期', { status: 404 });
       }
-      previewHeaders(res);
+      previewHeaders(res, authorizedPreviewAncestors(req, token));
       if (run.output_type === 'html' && run.output_text) {
         res.type('html').send(run.output_text);
         return;
@@ -624,9 +698,10 @@ function createApp(config, overrides = {}) {
         artifact: run.preview_token && run.artifact_path ? {
           name: run.artifact_name,
           mime_type: run.artifact_mime,
+          content_url: `/api/artifacts/${run.preview_token}`,
           download_url: `/api/artifacts/${run.preview_token}?download=1`
         } : null,
-        preview_url: run.preview_token ? `/api/previews/${run.preview_token}` : null
+        preview_url: run.preview_token ? signedPreviewUrl(req, run.preview_token) : null
       });
     } catch (error) {
       next(error);

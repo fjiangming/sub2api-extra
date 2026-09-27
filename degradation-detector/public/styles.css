@@ -351,6 +351,9 @@ button, select, input { color: inherit; }
 .yzai-pelican-reason { margin: 0 0 12px; font-size: 13px; overflow-wrap: anywhere; }
 .yzai-pelican-controls { display: flex; gap: 8px; margin-bottom: 12px; }
 .yzai-pelican-frame { width: 100%; flex: 1; min-height: 320px; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--surface-soft); }
+.yzai-pelican-artifact { display: block; width: 100%; flex: 1; min-height: 320px; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--surface-soft); }
+.yzai-pelican-image, .yzai-pelican-video { object-fit: contain; }
+.yzai-pelican-audio { flex: 0 0 64px; min-height: 64px; padding: 10px; }
 .yzai-pelican-code { display: block; flex: 1; margin: 0; padding: 16px; border-radius: 10px; background: var(--surface-soft); white-space: pre-wrap; overflow: auto; overflow-wrap: anywhere; font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .yzai-pelican-text { min-height: 180px; }
 .yzai-pelican-empty { padding: 36px 12px; color: var(--muted); text-align: center; }
