@@ -8,6 +8,12 @@ const net = require('net');
 const path = require('path');
 const { AppError } = require('./errors');
 
+const MODEL_REQUEST_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
+
+function wait(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
 function contentText(content) {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
@@ -329,14 +335,16 @@ function deterministicVerdict(test, output) {
 }
 
 class DetectionRunner {
-  constructor({ config, store, sub2api, vault }) {
+  constructor({ config, store, sub2api, vault, sleepFn = wait, nowFn = Date.now }) {
     this.config = config;
     this.store = store;
     this.sub2api = sub2api;
     this.vault = vault;
+    this.sleep = sleepFn;
+    this.now = nowFn;
   }
 
-  async callModel(test, apiKey) {
+  async callModel(test, apiKey, options = {}) {
     if (this.config.demoMode) {
       const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
         *{box-sizing:border-box}html,body{width:100%;height:100%;margin:0;overflow:hidden}
@@ -360,7 +368,10 @@ class DetectionRunner {
         return { candidates: [{ content: { parts: [{ text }] } }] };
       }
     }
-    const common = { timeoutMs: this.config.requestTimeoutMs, maxBytes: this.config.maxResponseBytes };
+    const common = {
+      timeoutMs: options.timeoutMs || this.config.requestTimeoutMs,
+      maxBytes: this.config.maxResponseBytes
+    };
     if (test.api === 'responses') {
       const body = {
         model: test.model,
@@ -413,6 +424,57 @@ class DetectionRunner {
       }, common);
     }
     throw new AppError('TEST_API_UNSUPPORTED', `不支持的检测协议: ${test.api}`, { status: 500 });
+  }
+
+  async callModelWithRetry(test, apiKey, context = {}) {
+    const configuredBudget = Number(this.config.requestTimeoutMs);
+    const budgetMs = Number.isFinite(configuredBudget) && configuredBudget > 0
+      ? configuredBudget
+      : 30 * 60 * 1000;
+    const deadline = this.now() + budgetMs;
+    let retryAttempts = 0;
+    let lastError = null;
+
+    while (true) {
+      const remainingMs = deadline - this.now();
+      if (remainingMs <= 0 && lastError) {
+        lastError.retryAttempts = retryAttempts;
+        throw lastError;
+      }
+      try {
+        const payload = await this.callModel(test, apiKey, { timeoutMs: Math.max(1, remainingMs) });
+        if (retryAttempts > 0) {
+          console.info(JSON.stringify({
+            event: 'model_request_retry_succeeded',
+            runId: context.runId,
+            monitorId: context.monitorId,
+            retryAttempts
+          }));
+        }
+        return payload;
+      } catch (error) {
+        const delayMs = MODEL_REQUEST_RETRY_DELAYS_MS[retryAttempts];
+        const retryable = error?.retryable === true;
+        const withinBudget = Number.isFinite(delayMs) && this.now() + delayMs < deadline;
+        if (!retryable || !withinBudget) {
+          if (error && typeof error === 'object') error.retryAttempts = retryAttempts;
+          throw error;
+        }
+
+        lastError = error;
+        retryAttempts += 1;
+        console.warn(JSON.stringify({
+          event: 'model_request_retry',
+          runId: context.runId,
+          monitorId: context.monitorId,
+          retryAttempt: retryAttempts,
+          maxRetries: MODEL_REQUEST_RETRY_DELAYS_MS.length,
+          delayMs,
+          code: error.code || 'UNKNOWN'
+        }));
+        await this.sleep(delayMs);
+      }
+    }
   }
 
   async remoteArtifact(urlValue) {
@@ -521,7 +583,10 @@ class DetectionRunner {
           { status: 409 }
         );
       }
-      const payload = await this.callModel(test, apiKey);
+      const payload = await this.callModelWithRetry(test, apiKey, {
+        runId,
+        monitorId: currentMonitor.id
+      });
       const output = await this.normalizeOutput(test, payload);
       const deterministic = deterministicVerdict(test, output);
       const verdict = await this.classify(test, output, deterministic);
@@ -549,8 +614,10 @@ class DetectionRunner {
       const appError = error instanceof AppError
         ? error
         : new AppError('DETECTION_FAILED', '检测执行失败', { status: 502 });
+      const retryAttempts = Number.isInteger(error?.retryAttempts) ? error.retryAttempts : 0;
+      const retryNote = retryAttempts > 0 ? `（已自动重试 ${retryAttempts} 次）` : '';
       return this.store.failRun(runId, {
-        reason: `${appError.message}，本次不计入有效结果`,
+        reason: `${appError.message}${retryNote}，本次不计入有效结果`,
         source: 'request_error',
         errorCode: appError.code
       });
@@ -562,6 +629,7 @@ class DetectionRunner {
 
 module.exports = {
   DetectionRunner,
+  MODEL_REQUEST_RETRY_DELAYS_MS,
   assertPublicHttps,
   contentText,
   decodeBase64,

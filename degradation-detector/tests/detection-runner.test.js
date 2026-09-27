@@ -2,8 +2,10 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { AppError } = require('../src/errors');
 const {
   DetectionRunner,
+  MODEL_REQUEST_RETRY_DELAYS_MS,
   assertPublicHttps,
   deterministicVerdict,
   extractHtml,
@@ -117,6 +119,166 @@ test('model requests use the configured gateway endpoint and API key', async () 
   }, 'group-key');
   assert.deepEqual(calls[1][2].tools, [{ type: 'image_generation' }]);
   assert.deepEqual(calls[1][2].reasoning, { effort: 'max' });
+});
+
+test('retryable model failures reconnect at most five times with backoff', async () => {
+  const delays = [];
+  let attempts = 0;
+  const runner = new DetectionRunner({
+    config: {
+      requestTimeoutMs: 60 * 1000,
+      maxResponseBytes: 1024 * 1024
+    },
+    store: {},
+    sub2api: {},
+    vault: {},
+    sleepFn: async (delayMs) => delays.push(delayMs)
+  });
+  runner.callModel = async () => {
+    attempts += 1;
+    throw new AppError('SUB2API_REQUEST_FAILED', 'upstream failed', {
+      status: 502,
+      retryable: true
+    });
+  };
+
+  await assert.rejects(
+    () => runner.callModelWithRetry({}, 'group-key', { runId: 9, monitorId: 3 }),
+    (error) => error.code === 'SUB2API_REQUEST_FAILED' && error.retryAttempts === 5
+  );
+  assert.equal(attempts, 6);
+  assert.deepEqual(delays, MODEL_REQUEST_RETRY_DELAYS_MS);
+});
+
+test('retryable model failures return normally after reconnecting succeeds', async () => {
+  const delays = [];
+  const timeouts = [];
+  let attempts = 0;
+  let now = 0;
+  const runner = new DetectionRunner({
+    config: {
+      requestTimeoutMs: 60 * 1000,
+      maxResponseBytes: 1024 * 1024
+    },
+    store: {},
+    sub2api: {},
+    vault: {},
+    nowFn: () => now,
+    sleepFn: async (delayMs) => {
+      delays.push(delayMs);
+      now += delayMs;
+    }
+  });
+  runner.callModel = async (_testCase, _apiKey, options) => {
+    attempts += 1;
+    timeouts.push(options.timeoutMs);
+    if (attempts < 3) {
+      throw new AppError('SUB2API_REQUEST_FAILED', 'upstream failed', {
+        status: 502,
+        retryable: true
+      });
+    }
+    return { output_text: 'reconnected' };
+  };
+
+  const payload = await runner.callModelWithRetry({}, 'group-key');
+
+  assert.deepEqual(payload, { output_text: 'reconnected' });
+  assert.equal(attempts, 3);
+  assert.deepEqual(delays, [1000, 2000]);
+  assert.deepEqual(timeouts, [60000, 59000, 57000]);
+});
+
+test('retryable model failures stop when the total time budget is exhausted', async () => {
+  const delays = [];
+  let attempts = 0;
+  let now = 0;
+  const runner = new DetectionRunner({
+    config: {
+      requestTimeoutMs: 1500,
+      maxResponseBytes: 1024 * 1024
+    },
+    store: {},
+    sub2api: {},
+    vault: {},
+    nowFn: () => now,
+    sleepFn: async (delayMs) => {
+      delays.push(delayMs);
+      now += delayMs;
+    }
+  });
+  runner.callModel = async () => {
+    attempts += 1;
+    throw new AppError('SUB2API_TIMEOUT', 'upstream timed out', {
+      status: 504,
+      retryable: true
+    });
+  };
+
+  await assert.rejects(
+    () => runner.callModelWithRetry({}, 'group-key'),
+    (error) => error.code === 'SUB2API_TIMEOUT' && error.retryAttempts === 1
+  );
+  assert.equal(attempts, 2);
+  assert.deepEqual(delays, [1000]);
+});
+
+test('a delayed backoff does not start a request after the total deadline', async () => {
+  const delays = [];
+  let attempts = 0;
+  let now = 0;
+  const runner = new DetectionRunner({
+    config: {
+      requestTimeoutMs: 1500,
+      maxResponseBytes: 1024 * 1024
+    },
+    store: {},
+    sub2api: {},
+    vault: {},
+    nowFn: () => now,
+    sleepFn: async (delayMs) => {
+      delays.push(delayMs);
+      now += delayMs + 1000;
+    }
+  });
+  runner.callModel = async () => {
+    attempts += 1;
+    throw new AppError('SUB2API_TIMEOUT', 'upstream timed out', {
+      status: 504,
+      retryable: true
+    });
+  };
+
+  await assert.rejects(
+    () => runner.callModelWithRetry({}, 'group-key'),
+    (error) => error.code === 'SUB2API_TIMEOUT' && error.retryAttempts === 1
+  );
+  assert.equal(attempts, 1);
+  assert.deepEqual(delays, [1000]);
+});
+
+test('non-retryable model failures are returned without reconnecting', async () => {
+  let attempts = 0;
+  const runner = new DetectionRunner({
+    config: {
+      requestTimeoutMs: 60 * 1000,
+      maxResponseBytes: 1024 * 1024
+    },
+    store: {},
+    sub2api: {},
+    vault: {},
+    sleepFn: assert.fail
+  });
+  runner.callModel = async () => {
+    attempts += 1;
+    throw new AppError('SUB2API_AUTH_EXPIRED', 'invalid key', { status: 401 });
+  };
+
+  await assert.rejects(
+    () => runner.callModelWithRetry({}, 'group-key'),
+    (error) => error.code === 'SUB2API_AUTH_EXPIRED' && error.retryAttempts === 0
+  );
+  assert.equal(attempts, 1);
 });
 
 test('execution decrypts the configured service key from the credential vault', async () => {

@@ -43,6 +43,8 @@ Sub2API 菜单的角色可见性只负责入口展示，不能单独作为安全
 
 支持 OpenAI Responses、Chat Completions、Anthropic Messages、Gemini generateContent 和 Images Generations。OpenAI 协议的推理强度支持 `minimal`、`low`、`medium`、`high`、`xhigh` 和 `max`。输出可以是直接答案、HTML、图片或通用 Base64 文件；图片、文本、JSON、PDF、音视频可预览，其它文件可下载。
 
+模型请求遇到连接失败、请求超时、HTTP 429 或上游 5xx 时，会在单次检测的总时间预算内按 `1、2、4、8、16` 秒退避并最多自动重试 5 次。鉴权、配置和响应内容格式错误不会重试，避免无效请求持续产生消费。
+
 取消选择分组并保存后，该分组会停止调度，其专用 Key 会被清除，历史轻量判定继续保留。手动检测不会改变自动计划中的下一次执行时间。
 
 ## 专用 Key
