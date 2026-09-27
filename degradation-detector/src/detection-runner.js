@@ -6,7 +6,9 @@ const fs = require('fs');
 const https = require('https');
 const net = require('net');
 const path = require('path');
+const { validationSchema } = require('./config');
 const { AppError } = require('./errors');
+const { evaluateOutput, imageDimensions } = require('./validation');
 
 const MODEL_REQUEST_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
 
@@ -148,38 +150,6 @@ function responseImage(payload) {
   return null;
 }
 
-function imageDimensions(buffer, mime) {
-  if (mime === 'image/png' && buffer.length >= 24 && buffer.subarray(1, 4).toString() === 'PNG') {
-    return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
-  }
-  if (mime === 'image/gif' && buffer.length >= 10) {
-    return { width: buffer.readUInt16LE(6), height: buffer.readUInt16LE(8) };
-  }
-  if (mime === 'image/jpeg' && buffer.length >= 4) {
-    let offset = 2;
-    while (offset + 9 < buffer.length) {
-      if (buffer[offset] !== 0xff) break;
-      const marker = buffer[offset + 1];
-      const length = buffer.readUInt16BE(offset + 2);
-      if ([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker)) {
-        return { width: buffer.readUInt16BE(offset + 7), height: buffer.readUInt16BE(offset + 5) };
-      }
-      if (length < 2) break;
-      offset += 2 + length;
-    }
-  }
-  if (mime === 'image/webp' && buffer.length >= 30 && buffer.subarray(0, 4).toString() === 'RIFF') {
-    const type = buffer.subarray(12, 16).toString();
-    if (type === 'VP8X') {
-      return {
-        width: 1 + buffer.readUIntLE(24, 3),
-        height: 1 + buffer.readUIntLE(27, 3)
-      };
-    }
-  }
-  return null;
-}
-
 function isPrivateAddress(address) {
   if (net.isIP(address) === 4) {
     const parts = address.split('.').map(Number);
@@ -276,62 +246,11 @@ function downloadPinnedHttps(url, address, timeoutMs, maxBytes) {
   });
 }
 
-function compilePattern(pattern, caseSensitive) {
-  try {
-    return new RegExp(pattern, caseSensitive ? '' : 'i');
-  } catch {
-    throw new AppError('VALIDATION_PATTERN_INVALID', `检测规则不是有效正则表达式: ${pattern}`, {
-      status: 500
-    });
-  }
-}
-
 function deterministicVerdict(test, output) {
-  const validation = test.validation || {};
-  const source = output.text != null ? String(output.text) : '';
-  const bytes = output.buffer ? output.buffer.length : Buffer.byteLength(source);
-  const failures = [];
-  if (bytes < Number(validation.min_bytes || 1)) {
-    failures.push(`输出仅 ${bytes} 字节，低于 ${validation.min_bytes || 1} 字节`);
-  }
-  for (const pattern of validation.required_patterns || []) {
-    if (!compilePattern(pattern, validation.case_sensitive).test(source)) {
-      failures.push(`缺少预期特征 ${pattern}`);
-    }
-  }
-  for (const pattern of validation.forbidden_patterns || []) {
-    if (compilePattern(pattern, validation.case_sensitive).test(source)) {
-      failures.push(`出现禁止特征 ${pattern}`);
-    }
-  }
-  if (test.output_type === 'html' && !/<html(?:\s|>)/i.test(source)) {
-    failures.push('没有返回完整 HTML 文档');
-  }
-  if (test.output_type === 'image') {
-    if (!String(output.mime || '').startsWith('image/')) failures.push('返回内容不是图片');
-    const dimensions = output.buffer ? imageDimensions(output.buffer, output.mime) : null;
-    if (!dimensions) failures.push('无法识别图片尺寸');
-    if (dimensions && validation.min_width && dimensions.width < validation.min_width) {
-      failures.push(`图片宽度 ${dimensions.width}px 低于 ${validation.min_width}px`);
-    }
-    if (dimensions && validation.min_height && dimensions.height < validation.min_height) {
-      failures.push(`图片高度 ${dimensions.height}px 低于 ${validation.min_height}px`);
-    }
-  }
-  if (failures.length > 0) {
-    return {
-      quality: 'degraded',
-      status: 'degraded',
-      reason: `规则判定为疑似降智：${failures.slice(0, 3).join('；')}；单次结果不能证明模型身份或整体能力`,
-      source: 'configured_validation'
-    };
-  }
-  return {
-    quality: 'normal',
-    status: 'normal',
-    reason: '规则判定为正常；单次结果不能证明模型身份或整体能力',
-    source: 'configured_validation'
-  };
+  return evaluateOutput({
+    ...test,
+    validation: validationSchema.parse(test.validation || {})
+  }, output);
 }
 
 class DetectionRunner {
@@ -652,6 +571,7 @@ class DetectionRunner {
         : null;
       const completed = this.store.completeRun(runId, {
         ...verdict,
+        validationResult: verdict.validationResult,
         outputText: output.text || null,
         artifactPath: artifact?.path || null,
         artifactName: artifact?.name || null,

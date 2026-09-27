@@ -38,6 +38,10 @@ function loadConfig(env = process.env) {
   }
 
   const sub2apiBaseUrl = normalizeUrl(env.SUB2API_BASE_URL, 'http://localhost:8080');
+  const integrationToken = String(env.PROVIDER_MONITOR_INTEGRATION_TOKEN || '').trim();
+  if (integrationToken && integrationToken.length < 32) {
+    throw new Error('PROVIDER_MONITOR_INTEGRATION_TOKEN must contain at least 32 characters when configured');
+  }
   const dataDir = resolveProjectPath(env.PROVIDER_MONITOR_DATA_DIR, 'data', projectRoot);
   const port = parseInteger(env.PORT, 9871, 1, 65535);
   const config = {
@@ -62,6 +66,7 @@ function loadConfig(env = process.env) {
     localAdminPasswordHash: String(env.PROVIDER_MONITOR_LOCAL_ADMIN_PASSWORD_HASH || ''),
     sessionTtlMinutes: parseInteger(env.PROVIDER_MONITOR_SESSION_TTL_MINUTES, 480, 15, 1440),
     providerMonitorPublicUrl: normalizeUrl(env.PROVIDER_MONITOR_PUBLIC_URL, ''),
+    integrationToken,
     rechargeLinkTtlMinutes: parseInteger(env.PROVIDER_MONITOR_RECHARGE_LINK_TTL_MINUTES, 60, 5, 1440),
     queryTimeoutMs: parseInteger(env.PROVIDER_MONITOR_QUERY_TIMEOUT_MS, 15000, 1000, 120000),
     maxResponseBytes: parseInteger(env.PROVIDER_MONITOR_MAX_RESPONSE_BYTES, 2 * 1024 * 1024, 1024, 20 * 1024 * 1024),

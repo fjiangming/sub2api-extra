@@ -640,6 +640,12 @@ function bearerToken(req) {
   return authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : null;
 }
 
+function secureTokenEqual(left, right) {
+  const leftHash = crypto.createHash('sha256').update(String(left || '')).digest();
+  const rightHash = crypto.createHash('sha256').update(String(right || '')).digest();
+  return crypto.timingSafeEqual(leftHash, rightHash) && Boolean(left) && Boolean(right);
+}
+
 function createApplication(options = {}) {
   const config = options.config || loadConfig();
   const db = options.db || createDatabase(config.databasePath);
@@ -980,6 +986,21 @@ function createApplication(options = {}) {
     } catch (error) {
       res.status(503).json({ status: 'not_ready', database: error.message });
     }
+  });
+  app.get('/api/integrations/providers', (req, res, next) => {
+    if (!secureTokenEqual(bearerToken(req), config.integrationToken)) {
+      return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({
+      items: providers.list().map((provider) => ({
+        id: provider.id,
+        name: provider.name,
+        adapterType: provider.adapter_type,
+        enabled: Boolean(provider.enabled),
+        currency: provider.threshold_currency || 'USD'
+      }))
+    });
   });
   app.get('/metrics', asyncRoute(async (_req, res) => {
     if (!config.metricsEnabled) return res.status(404).end();

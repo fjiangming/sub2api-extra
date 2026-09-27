@@ -52,6 +52,8 @@ test('platform test validation covers regex and protocol-output combinations', (
   const parsed = validateTestConfig('openai', defaultTests.openai);
   assert.equal(parsed.output_type, 'html');
   assert.equal(parsed.max_output_tokens, 16384);
+  assert.equal(parsed.validation.version, 2);
+  assert.deepEqual(parsed.validation.rules.map((rule) => rule.type), ['min_bytes', 'regex']);
   assert.equal(validateTestConfig('openai', {
     ...defaultTests.openai,
     reasoning_effort: 'max'
@@ -59,7 +61,19 @@ test('platform test validation covers regex and protocol-output combinations', (
 
   const invalidRegex = structuredClone(defaultTests.openai);
   invalidRegex.validation.required_patterns = ['['];
-  assert.throws(() => validateTestConfig('openai', invalidRegex), /无效检测正则/);
+  assert.throws(() => validateTestConfig('openai', invalidRegex), /正则表达式无效/);
+
+  const unsafeRegex = defaultPlatformTest('openai');
+  unsafeRegex.validation.rules[0] = {
+    id: 'unsafe', label: '危险正则', type: 'regex', severity: 'hard', weight: 10,
+    value: '(a+)+$', case_sensitive: false
+  };
+  assert.throws(() => validateTestConfig('openai', unsafeRegex), /超长计算/);
+
+  const invalidThresholds = defaultPlatformTest('openai');
+  invalidThresholds.validation.normal_threshold = 60;
+  invalidThresholds.validation.degraded_threshold = 60;
+  assert.throws(() => validateTestConfig('openai', invalidThresholds), /降智阈值必须小于正常阈值/);
 
   const invalidImage = structuredClone(defaultTests.openai);
   invalidImage.api = 'anthropic_messages';
@@ -113,6 +127,7 @@ test('administrator configuration rejects duplicates and disabled-platform group
 
 test('default platform templates cover known and generic platforms', () => {
   assert.equal(defaultPlatformTest('openai').api, 'responses');
+  assert.ok(defaultPlatformTest('openai').validation.rules.some((rule) => rule.type === 'html_selector'));
   assert.equal(defaultPlatformTest('anthropic').api, 'anthropic_messages');
   assert.equal(defaultPlatformTest('gemini').api, 'gemini_generate_content');
   assert.equal(defaultPlatformTest('custom').api, 'chat_completions');

@@ -24,6 +24,11 @@ const optionalPassword = z.preprocess(
   z.string().min(12).max(1024).optional()
 );
 
+const optionalIntegrationToken = z.preprocess(
+  (value) => value == null || String(value).trim() === '' ? undefined : String(value).trim(),
+  z.string().min(32).max(1024).optional()
+);
+
 const cleanupTargetIds = [
   'usage_logs',
   'usage_hourly',
@@ -78,6 +83,9 @@ const schema = z.object({
   ADMIN_EMAIL: optionalString,
   ADMIN_PASSWORD: optionalString,
   SUB2API_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(15000),
+  PROVIDER_MONITOR_BASE_URL: optionalUrl,
+  PROVIDER_MONITOR_INTEGRATION_TOKEN: optionalIntegrationToken,
+  PROVIDER_MONITOR_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(10000),
   RETENTION_USAGE_LOGS_DAYS: z.coerce.number().int().min(30).max(3650).default(30),
   RETENTION_USAGE_HOURLY_DAYS: z.coerce.number().int().min(30).max(3650).default(30),
   RETENTION_USAGE_DAILY_DAYS: z.coerce.number().int().min(365).max(3650).default(730),
@@ -265,6 +273,9 @@ function loadConfig(env = process.env, runtime = {}) {
       ? (runtime.sub2api.clearPersistentCredentials ? 'session' : 'managed')
       : (env.SUB2API_ADMIN_TOKEN || (env.ADMIN_EMAIL && env.ADMIN_PASSWORD) ? 'environment' : 'session'),
     sub2apiRequestTimeoutMs: value.SUB2API_REQUEST_TIMEOUT_MS,
+    providerMonitorBaseUrl: value.PROVIDER_MONITOR_BASE_URL?.replace(/\/$/, '') || null,
+    providerMonitorIntegrationToken: value.PROVIDER_MONITOR_INTEGRATION_TOKEN || null,
+    providerMonitorRequestTimeoutMs: value.PROVIDER_MONITOR_REQUEST_TIMEOUT_MS,
     retention: {
       usageLogsDays: value.RETENTION_USAGE_LOGS_DAYS,
       usageHourlyDays: value.RETENTION_USAGE_HOURLY_DAYS,

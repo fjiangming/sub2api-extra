@@ -279,6 +279,8 @@ PROVIDER_MONITOR_RECHARGE_LINK_TTL_MINUTES=60
 
 # === 加密密钥（必填，至少 32 字符） ===
 PROVIDER_MONITOR_SECRET=<粘贴上一步生成的随机值>
+# 可选：供运营中心只读同步供应商；两侧配置相同的随机值
+PROVIDER_MONITOR_INTEGRATION_TOKEN=
 
 # === Provider Monitor 认证方式 ===
 # sub2api：使用基座 Sub2API 管理员 SSO 登录
@@ -458,6 +460,8 @@ Sub2API 的"系统设置 -> 安全设置 -> 会话绑定"会把访问 Token 绑�
 HTTPS iframe 会同时设置普通 Cookie 和分区 Cookie，并在 URL Fragment 中返回一个本模块的临时会话令牌作为第三方 Cookie 受限时的兜底。原始 Sub2API Token 在首次请求后立即从地址栏移除。
 
 如果 `SUB2API_BASE_URL` 使用 `host.docker.internal` 或内网域名，必须单独配置浏览器可访问的 `SUB2API_PUBLIC_URL`。需要允许其他前端来源时，在"设置与备份 -> 系统参数"中维护准确的浏览器 Origin。
+
+运营中心的成本分析只需要供应商 ID、名称、适配器、启停状态和币种。两个服务都使用 Sub2API SSO 时可复用当前管理员会话；Provider Monitor 使用本地认证时，应在两个服务中配置相同的 `PROVIDER_MONITOR_INTEGRATION_TOKEN`。该 Token 至少 32 个字符，并且只授权 `GET /api/integrations/providers` 脱敏列表接口。
 
 ---
 

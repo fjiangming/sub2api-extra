@@ -74,6 +74,28 @@ const sub2ApiCredentialsSchema = z.discriminatedUnion('mode', [
   })
 ]);
 
+const expenseSchema = z.object({
+  kind: z.enum(['provider', 'custom']),
+  providerId: z.string().trim().min(1).max(100).optional().nullable(),
+  name: z.string().trim().max(120).optional().default(''),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  amount: z.number().finite().positive().max(1000000000000)
+    .refine((value) => Math.abs(value - Math.round(value * 100) / 100) < 1e-9, '金额最多保留两位小数'),
+  currency: z.string().trim().min(1).max(12).regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
+  note: z.string().trim().max(500).optional().default('')
+}).superRefine((value, context) => {
+  const parsedDate = new Date(`${value.date}T00:00:00.000Z`);
+  if (Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== value.date) {
+    context.addIssue({ code: 'custom', path: ['date'], message: '发生日期无效' });
+  }
+  if (value.kind === 'provider' && !value.providerId) {
+    context.addIssue({ code: 'custom', path: ['providerId'], message: '请选择供应商' });
+  }
+  if (value.kind === 'custom' && !value.name) {
+    context.addIssue({ code: 'custom', path: ['name'], message: '请输入支出项名称' });
+  }
+});
+
 function parse(schema, input) {
   const result = schema.safeParse(input);
   if (!result.success) {
@@ -98,7 +120,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, costAnalysis, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -230,6 +252,27 @@ function createApp({ config, database, auth, inspector, metrics, storage, retent
   api.get('/metrics/usage/dimensions', asyncRoute(async (req, res) => res.json(await metrics.getUsageDimensions(req.query))));
   api.get('/metrics/users', asyncRoute(async (req, res) => res.json(await metrics.getUsers(req.query))));
   api.get('/metrics/finance', asyncRoute(async (req, res) => res.json(await metrics.getFinance(req.query))));
+  api.get('/cost-analysis', asyncRoute(async (req, res) => res.json(await costAnalysis.getReport(req.query))));
+  api.get('/cost-analysis/providers', asyncRoute(async (req, res) => res.json(await costAnalysis.getProviders({
+    refresh: req.query.refresh === 'true',
+    accessToken: req.auth.upstreamAccessToken || null
+  }))));
+  api.get('/cost-analysis/expenses', (req, res) => res.json({
+    items: costAnalysis.listExpenses(req.query),
+    customItems: costAnalysis.listCustomItems()
+  }));
+  api.post('/cost-analysis/expenses', csrf, asyncRoute(async (req, res) => {
+    const input = parse(expenseSchema, req.body || {});
+    res.status(201).json(await costAnalysis.createExpense(input, req.auth.actor));
+  }));
+  api.put('/cost-analysis/expenses/:id', csrf, asyncRoute(async (req, res) => {
+    const input = parse(expenseSchema, req.body || {});
+    res.json(await costAnalysis.updateExpense(req.params.id, input, req.auth.actor));
+  }));
+  api.delete('/cost-analysis/expenses/:id', csrf, asyncRoute(async (req, res) => {
+    await costAnalysis.deleteExpense(req.params.id);
+    res.status(204).end();
+  }));
   api.get('/storage', asyncRoute(async (req, res) => res.json(await storage.getStorage({ refresh: req.query.refresh === 'true' }))));
   api.get('/capabilities', asyncRoute(async (_req, res) => {
     const schema = await inspector.inspect({ refresh: true });

@@ -14,6 +14,72 @@ function nullableNumber(value) {
   return value == null ? null : Number(value);
 }
 
+function reviewedStatus(row) {
+  const status = String(row?.manual_status || '');
+  return ['normal', 'degraded', 'unknown'].includes(status) ? status : null;
+}
+
+function publicReview(row) {
+  const status = reviewedStatus(row);
+  if (!status) return null;
+  return {
+    status,
+    automated_status: row.status,
+    reason: String(row.manual_reason || ''),
+    reviewed_at: row.manual_updated_at == null ? null : row.manual_updated_at / 1000
+  };
+}
+
+function parsedObject(value) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function publicValidationResult(row, includeRules = false) {
+  const parsed = parsedObject(row?.validation_result_json);
+  if (!parsed) return null;
+  const result = {
+    score: nullableNumber(row.score ?? parsed.score),
+    passed: Number(parsed.passed || 0),
+    total: Number(parsed.total || 0),
+    hard_failures: Number(parsed.hard_failures || 0),
+    integrity_failures: Array.isArray(parsed.integrity_failures)
+      ? parsed.integrity_failures.map(String).slice(0, 10)
+      : []
+  };
+  if (includeRules) {
+    result.rules = Array.isArray(parsed.results) ? parsed.results.slice(0, 50).map((rule) => ({
+      id: String(rule.id || '').slice(0, 64),
+      label: String(rule.label || '').slice(0, 80),
+      type: String(rule.type || '').slice(0, 40),
+      severity: rule.severity === 'soft' ? 'soft' : 'hard',
+      weight: Number(rule.weight || 0),
+      passed: rule.passed === true,
+      message: String(rule.message || '').slice(0, 500)
+    })) : [];
+  }
+  return result;
+}
+
+function testSnapshot(test) {
+  if (!test) return null;
+  return JSON.stringify({
+    model: test.model,
+    api: test.api,
+    prompt: test.prompt,
+    output_type: test.output_type,
+    reasoning_effort: test.reasoning_effort || 'none',
+    max_output_tokens: test.max_output_tokens,
+    mime_type: test.mime_type || null,
+    validation: test.validation || null
+  });
+}
+
 function storedSchedule(row) {
   let times = [];
   try {
@@ -44,18 +110,22 @@ function storedSchedule(row) {
 
 function publicRun(row) {
   if (!row) return null;
+  const review = publicReview(row);
   return {
     id: row.id,
     started: row.started_at == null ? null : row.started_at / 1000,
     finished: row.finished_at == null ? null : row.finished_at / 1000,
-    status: row.status,
-    quality: row.quality,
-    reason: row.reason,
+    status: review?.status || row.status,
+    quality: review?.status || row.quality,
+    reason: review ? `人工复核：${review.reason}` : row.reason,
     source: row.source,
     duration_ms: nullableNumber(row.duration_ms),
     output_type: row.output_type,
     model: row.model,
     reasoning_effort: row.reasoning_effort || null,
+    score: nullableNumber(row.score),
+    validation: publicValidationResult(row),
+    review,
     has_artifact: Boolean(row.artifact_path || (row.output_type === 'html' && row.output_text)),
     has_html: row.output_type === 'html' && Boolean(row.output_text)
   };
@@ -136,6 +206,14 @@ class Store {
         duration_ms INTEGER,
         output_type TEXT NOT NULL,
         reasoning_effort TEXT,
+        test_snapshot TEXT,
+        validation_snapshot TEXT,
+        validation_result_json TEXT,
+        score REAL,
+        manual_status TEXT,
+        manual_reason TEXT,
+        manual_updated_by TEXT,
+        manual_updated_at INTEGER,
         output_text TEXT,
         artifact_path TEXT,
         artifact_name TEXT,
@@ -183,6 +261,14 @@ class Store {
     `);
     this.#ensureColumn('monitors', 'key_fingerprint', 'TEXT');
     this.#ensureColumn('runs', 'reasoning_effort', 'TEXT');
+    this.#ensureColumn('runs', 'test_snapshot', 'TEXT');
+    this.#ensureColumn('runs', 'validation_snapshot', 'TEXT');
+    this.#ensureColumn('runs', 'validation_result_json', 'TEXT');
+    this.#ensureColumn('runs', 'score', 'REAL');
+    this.#ensureColumn('runs', 'manual_status', 'TEXT');
+    this.#ensureColumn('runs', 'manual_reason', 'TEXT');
+    this.#ensureColumn('runs', 'manual_updated_by', 'TEXT');
+    this.#ensureColumn('runs', 'manual_updated_at', 'INTEGER');
     this.#ensureColumn('service_settings', 'schedule_mode', "TEXT NOT NULL DEFAULT 'daily'");
     this.#ensureColumn('service_settings', 'schedule_times_json', 'TEXT');
     this.#ensureColumn('service_settings', 'schedule_interval_minutes', 'INTEGER NOT NULL DEFAULT 60');
@@ -507,8 +593,8 @@ class Store {
     const result = this.db.prepare(`
       INSERT INTO runs (
         monitor_id, user_id, group_id, platform, model, prompt, trigger_type,
-        status, output_type, reasoning_effort, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
+        status, output_type, reasoning_effort, test_snapshot, validation_snapshot, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)
     `).run(
       monitor.id,
       monitor.user_id,
@@ -519,6 +605,8 @@ class Store {
       triggerType,
       test.output_type,
       test.reasoning_effort || 'none',
+      testSnapshot(test),
+      test.validation ? JSON.stringify(test.validation) : null,
       nowMs()
     );
     return this.getRun(result.lastInsertRowid);
@@ -547,7 +635,8 @@ class Store {
         UPDATE runs SET
           status = ?, quality = ?, reason = ?, source = ?, finished_at = ?,
           duration_ms = ?, output_text = ?, artifact_path = ?, artifact_name = ?,
-          artifact_mime = ?, preview_token = ?, error_code = ?
+          artifact_mime = ?, preview_token = ?, error_code = ?,
+          validation_result_json = ?, score = ?
         WHERE id = ?
       `).run(
         result.status,
@@ -562,6 +651,8 @@ class Store {
         result.artifactMime || null,
         result.previewToken || null,
         result.errorCode || null,
+        result.validationResult ? JSON.stringify(result.validationResult) : null,
+        result.score == null ? null : Number(result.score),
         Number(id)
       );
       this.db.prepare(`
@@ -658,6 +749,43 @@ class Store {
     `).all(String(userId), String(groupId), Number(beforeId), pageSize);
   }
 
+  reviewRun(userId, groupId, runId, review, reviewedBy) {
+    const owner = String(userId);
+    const group = String(groupId);
+    const id = Number(runId);
+    const run = this.db.prepare(`
+      SELECT * FROM runs WHERE id = ? AND user_id = ? AND group_id = ?
+    `).get(id, owner, group);
+    if (!run) return { outcome: 'not_found', run: null };
+    if (!['normal', 'degraded', 'unknown'].includes(run.status)) {
+      return { outcome: 'not_reviewable', run };
+    }
+
+    const status = review?.status == null ? null : String(review.status);
+    const reason = status == null ? null : String(review.reason || '').trim();
+    if (status != null && !['normal', 'degraded', 'unknown'].includes(status)) {
+      throw new TypeError('Invalid manual review status');
+    }
+    if (status != null && (reason.length < 2 || reason.length > 500)) {
+      throw new TypeError('Invalid manual review reason');
+    }
+    const timestamp = status == null ? null : nowMs();
+    this.db.prepare(`
+      UPDATE runs SET
+        manual_status = ?, manual_reason = ?, manual_updated_by = ?, manual_updated_at = ?
+      WHERE id = ? AND user_id = ? AND group_id = ?
+    `).run(
+      status,
+      reason,
+      status == null ? null : String(reviewedBy),
+      timestamp,
+      id,
+      owner,
+      group
+    );
+    return { outcome: 'updated', run: this.getRun(id) };
+  }
+
   deleteHistory(userId, groupId, runIds = null) {
     const owner = String(userId);
     const group = String(groupId);
@@ -731,8 +859,8 @@ class Store {
     const totals = this.db.prepare(`
       SELECT
         COUNT(*) AS attempts,
-        SUM(CASE WHEN status IN ('normal', 'degraded') THEN 1 ELSE 0 END) AS valid,
-        SUM(CASE WHEN status = 'normal' THEN 1 ELSE 0 END) AS passed
+        SUM(CASE WHEN COALESCE(manual_status, status) IN ('normal', 'degraded') THEN 1 ELSE 0 END) AS valid,
+        SUM(CASE WHEN COALESCE(manual_status, status) = 'normal' THEN 1 ELSE 0 END) AS passed
       FROM runs
       WHERE user_id = ? AND group_id = ? AND status NOT IN ('queued', 'running')
     `).get(String(userId), String(groupId));
@@ -743,7 +871,54 @@ class Store {
         valid: Number(totals?.valid || 0),
         attempts: Number(totals?.attempts || 0)
       },
+      assessment: this.groupAssessment(userId, groupId, monitor),
       history: this.listHistory(userId, groupId, historyLimit).map(publicRun)
+    };
+  }
+
+  groupAssessment(userId, groupId, monitor = this.getMonitor(userId, groupId)) {
+    const test = this.getPlatformTest(monitor?.platform);
+    const confirmation = test?.validation?.confirmation || {
+      window: 3,
+      required_failures: 2,
+      recovery_passes: 2
+    };
+    const snapshot = testSnapshot(test);
+    const rows = this.db.prepare(`
+      SELECT COALESCE(manual_status, status) AS effective_status FROM runs
+      WHERE user_id = ? AND group_id = ?
+        AND COALESCE(manual_status, status) IN ('normal', 'degraded')
+        ${snapshot ? 'AND test_snapshot = ?' : ''}
+      ORDER BY id DESC LIMIT ?
+    `).all(
+      String(userId),
+      String(groupId),
+      ...(snapshot ? [snapshot] : []),
+      Number(confirmation.window)
+    );
+    const statuses = rows.map((row) => row.effective_status);
+    let consecutiveNormal = 0;
+    for (const status of statuses) {
+      if (status !== 'normal') break;
+      consecutiveNormal += 1;
+    }
+    const failures = statuses.filter((status) => status === 'degraded').length;
+    let status = 'unknown';
+    let reason = `最近 ${statuses.length}/${confirmation.window} 次有效检测尚不足以确认状态`;
+    if (consecutiveNormal >= confirmation.recovery_passes) {
+      status = 'normal';
+      reason = `最近连续 ${consecutiveNormal} 次有效检测正常`;
+    } else if (failures >= confirmation.required_failures) {
+      status = 'degraded';
+      reason = `最近 ${statuses.length} 次有效检测中有 ${failures} 次疑似降智`;
+    }
+    return {
+      status,
+      reason,
+      considered: statuses.length,
+      window: confirmation.window,
+      required_failures: confirmation.required_failures,
+      recovery_passes: confirmation.recovery_passes
     };
   }
 
@@ -769,4 +944,4 @@ class Store {
   }
 }
 
-module.exports = { Store, nowMs, publicRun, rowTest };
+module.exports = { Store, nowMs, publicRun, publicValidationResult, rowTest, testSnapshot };

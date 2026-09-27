@@ -15,7 +15,9 @@ const state = {
   preview: null,
   policy: null,
   runPoller: null,
-  settings: null
+  settings: null,
+  costProviders: [],
+  costExpenses: []
 };
 
 const titles = {
@@ -23,6 +25,7 @@ const titles = {
   usage: '用量分析',
   users: '用户分析',
   finance: '收款与入账',
+  costs: '成本分析',
   storage: '存储容量',
   retention: '数据清理',
   maintenance: '维护状态',
@@ -58,6 +61,10 @@ function formatDecimal(value, digits = 4) {
 function formatMoney(value, currency = '') {
   const amount = formatDecimal(value, 2);
   return currency ? `${amount} ${currency}` : amount;
+}
+
+function formatPercent(value) {
+  return value == null || !Number.isFinite(Number(value)) ? 'N/A' : `${formatDecimal(value, 2)}%`;
 }
 
 function formatBytes(value) {
@@ -419,6 +426,221 @@ async function loadFinance() {
     <tr><td>${escapeHtml(row.date)}</td><td>${escapeHtml(row.source)}</td><td class="numeric">${formatInteger(row.events)}</td><td class="numeric">${formatDecimal(row.credited_amount, 4)}</td></tr>
   `).join('') : emptyRow(4);
   refreshIcons();
+}
+
+function costKindLabel(kind) {
+  return kind === 'provider' ? '供应商' : '自定义';
+}
+
+function renderCostProviders(payload) {
+  state.costProviders = payload.items || [];
+  const form = $('cost-expense-form');
+  const selected = form.elements.providerId.value;
+  form.elements.providerId.innerHTML = state.costProviders.length
+    ? state.costProviders.map((provider) => `<option value="${escapeHtml(provider.id)}">${escapeHtml(provider.name)}</option>`).join('')
+    : '<option value="">暂无已同步供应商</option>';
+  if (state.costProviders.some((provider) => provider.id === selected)) form.elements.providerId.value = selected;
+
+  const sync = payload.sync || {};
+  $('cost-provider-meta').textContent = !payload.configured
+    ? '未配置服务地址'
+    : sync.syncedAt ? `${formatDateTime(sync.syncedAt)}${sync.status === 'error' ? ' · 同步异常' : ''}` : '等待首次同步';
+  $('cost-providers').innerHTML = state.costProviders.length ? state.costProviders.map((provider) => `
+    <tr>
+      <td><strong>${escapeHtml(provider.name)}</strong><div class="muted">${escapeHtml(provider.currency)}</div></td>
+      <td>${escapeHtml(provider.adapterType)}</td>
+      <td>${provider.enabled ? '<span class="badge success">启用</span>' : '<span class="badge neutral">停用</span>'}</td>
+      <td class="numeric"><button class="table-icon-button" type="button" data-cost-action="add-provider" data-provider-id="${escapeHtml(provider.id)}" title="录入供应商成本" aria-label="录入 ${escapeHtml(provider.name)} 的成本">${icon('plus')}</button></td>
+    </tr>
+  `).join('') : emptyRow(4, payload.configured ? '暂无供应商' : '未配置供应商监控');
+}
+
+function renderCostExpenses(items, currency, customItems = []) {
+  state.costExpenses = items;
+  $('cost-custom-names').innerHTML = customItems
+    .map((name) => `<option value="${escapeHtml(name)}"></option>`)
+    .join('');
+  $('cost-expense-count').textContent = `${formatInteger(items.length)} 笔`;
+  $('cost-expenses').innerHTML = items.length ? items.map((entry) => `
+    <tr>
+      <td>${escapeHtml(entry.date)}</td>
+      <td><strong>${escapeHtml(entry.name)}</strong></td>
+      <td>${escapeHtml(costKindLabel(entry.kind))}</td>
+      <td class="cost-note">${escapeHtml(entry.note || '-')}</td>
+      <td class="numeric">${escapeHtml(formatMoney(entry.amount, entry.currency || currency))}</td>
+      <td class="numeric table-actions">
+        <button class="table-icon-button" type="button" data-cost-action="edit" data-entry-id="${escapeHtml(entry.id)}" title="编辑支出" aria-label="编辑支出">${icon('pencil')}</button>
+        <button class="table-icon-button danger-text" type="button" data-cost-action="delete" data-entry-id="${escapeHtml(entry.id)}" title="删除支出" aria-label="删除支出">${icon('trash-2')}</button>
+      </td>
+    </tr>
+  `).join('') : emptyRow(6, '所选范围暂无支出');
+}
+
+async function loadCostAnalysis() {
+  setPageMeta('正在汇总充值收入与手工支出');
+  const form = $('cost-analysis-filter');
+  const query = {
+    ...formRange('cost-analysis-filter'),
+    granularity: form.elements.granularity.value,
+    currency: form.elements.currency.value.trim().toUpperCase()
+  };
+  form.elements.currency.value = query.currency;
+  const search = new URLSearchParams(query);
+  const [report, expenses, providers] = await Promise.all([
+    api(`/api/cost-analysis?${search}`),
+    api(`/api/cost-analysis/expenses?${search}`),
+    api('/api/cost-analysis/providers')
+  ]);
+
+  $('cost-analysis-metrics').innerHTML = [
+    metricCard('充值收入', formatMoney(report.summary.revenue, report.currency), `${formatInteger(report.summary.transactions)} 笔`, 'green'),
+    metricCard('支出', formatMoney(report.summary.expense, report.currency), `${formatInteger(report.summary.expenseCount)} 笔`, 'red'),
+    metricCard('利润', formatMoney(report.summary.profit, report.currency), report.summary.profit >= 0 ? '收入 - 支出' : '当前为亏损', report.summary.profit >= 0 ? 'blue' : 'red'),
+    metricCard('利润率', formatPercent(report.summary.margin), '利润 / 收入', 'amber'),
+    metricCard('平均充值', report.summary.averageTransaction == null ? 'N/A' : formatMoney(report.summary.averageTransaction, report.currency), '每笔已支付订单', 'green')
+  ].join('');
+  $('cost-analysis-zone').textContent = `${report.timezone} · ${report.range.start} 至 ${report.range.end} · ${report.currency}`;
+  $('cost-analysis-notices').innerHTML = [
+    ...report.caveats.map((message) => alertHtml('info', message)),
+    ...(providers.sync?.status === 'error' ? [alertHtml('warning', `供应商同步失败，当前使用上次快照：${providers.sync.error}`)] : [])
+  ].join('');
+
+  chart('cost-analysis-chart', {
+    legend: { top: 2, right: 10, data: ['充值收入', '支出', '利润'] },
+    xAxis: { type: 'category', data: report.periods.map((period) => period.label), axisLabel: { hideOverlap: true } },
+    yAxis: { type: 'value', splitLine: { lineStyle: { color: '#edf0eb' } } },
+    series: [
+      lineSeries('充值收入', report.periods.map((period) => period.revenue), '#176b4d'),
+      { name: '支出', type: 'bar', data: report.periods.map((period) => period.expense), itemStyle: { color: '#b05a3c' }, barMaxWidth: 28 },
+      lineSeries('利润', report.periods.map((period) => period.profit), '#2d5ea8')
+    ]
+  });
+
+  $('cost-breakdown').innerHTML = report.breakdown.length ? report.breakdown.map((row) => `
+    <tr><td><strong>${escapeHtml(row.name)}</strong></td><td>${escapeHtml(costKindLabel(row.kind))}</td><td class="numeric">${formatInteger(row.count)}</td><td class="numeric">${escapeHtml(formatMoney(row.amount, report.currency))}</td><td class="numeric">${formatPercent(row.percentage)}</td></tr>
+  `).join('') : emptyRow(5, '所选范围暂无成本');
+  $('cost-periods').innerHTML = report.periods.length ? report.periods.map((period) => `
+    <tr><td><strong>${escapeHtml(period.label)}</strong><div class="muted">${escapeHtml(period.start)} 至 ${escapeHtml(period.end)}</div></td><td class="numeric">${escapeHtml(formatMoney(period.revenue, report.currency))}</td><td class="numeric">${escapeHtml(formatMoney(period.expense, report.currency))}</td><td class="numeric ${period.profit < 0 ? 'negative-value' : ''}">${escapeHtml(formatMoney(period.profit, report.currency))}</td><td class="numeric">${formatPercent(period.margin)}</td><td class="numeric">${formatInteger(period.transactions)}</td></tr>
+  `).join('') : emptyRow(6);
+  renderCostProviders(providers);
+  renderCostExpenses(expenses.items || [], report.currency, expenses.customItems || []);
+  setPageMeta(`更新于 ${formatDateTime(new Date())} · ${report.periods.length} 个统计周期`);
+  refreshIcons();
+}
+
+function updateCostExpenseFields() {
+  const kind = $('cost-expense-form').elements.kind.value;
+  document.querySelectorAll('[data-expense-field="provider"]').forEach((node) => { node.hidden = kind !== 'provider'; });
+  document.querySelectorAll('[data-expense-field="custom"]').forEach((node) => { node.hidden = kind !== 'custom'; });
+  $('cost-expense-form').elements.providerId.required = kind === 'provider';
+  $('cost-expense-form').elements.name.required = kind === 'custom';
+}
+
+function openCostExpenseEditor(entry = null, providerId = null) {
+  const form = $('cost-expense-form');
+  form.reset();
+  form.elements.id.value = entry?.id || '';
+  form.elements.kind.value = entry?.kind || (providerId || state.costProviders.length ? 'provider' : 'custom');
+  form.elements.providerId.value = entry?.providerId || providerId || state.costProviders[0]?.id || '';
+  const provider = state.costProviders.find((item) => item.id === form.elements.providerId.value);
+  form.elements.name.value = entry?.kind === 'custom' ? entry.name : '';
+  form.elements.date.value = entry?.date || todayString();
+  form.elements.amount.value = entry?.amount ?? '';
+  form.elements.currency.value = entry?.currency || provider?.currency || $('cost-analysis-filter').elements.currency.value || 'CNY';
+  form.elements.note.value = entry?.note || '';
+  $('cost-expense-editor-title').textContent = entry ? '编辑支出' : '新增支出';
+  $('cost-expense-error').hidden = true;
+  updateCostExpenseFields();
+  $('cost-expense-editor').hidden = false;
+  refreshIcons();
+  form.elements[form.elements.kind.value === 'custom' ? 'name' : 'amount'].focus();
+  $('cost-expense-editor').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function updateCostProviderCurrency() {
+  const form = $('cost-expense-form');
+  const provider = state.costProviders.find((item) => item.id === form.elements.providerId.value);
+  if (form.elements.kind.value === 'provider' && provider?.currency) {
+    form.elements.currency.value = provider.currency;
+  }
+}
+
+function closeCostExpenseEditor() {
+  $('cost-expense-editor').hidden = true;
+  $('cost-expense-form').reset();
+  $('cost-expense-error').hidden = true;
+}
+
+async function saveCostExpense(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  button.disabled = true;
+  $('cost-expense-error').hidden = true;
+  const id = form.elements.id.value;
+  const payload = {
+    kind: form.elements.kind.value,
+    providerId: form.elements.kind.value === 'provider' ? form.elements.providerId.value : null,
+    name: form.elements.kind.value === 'custom' ? form.elements.name.value.trim() : '',
+    date: form.elements.date.value,
+    amount: Number(form.elements.amount.value),
+    currency: form.elements.currency.value.trim().toUpperCase(),
+    note: form.elements.note.value.trim()
+  };
+  try {
+    await api(id ? `/api/cost-analysis/expenses/${encodeURIComponent(id)}` : '/api/cost-analysis/expenses', {
+      method: id ? 'PUT' : 'POST',
+      body: JSON.stringify(payload)
+    });
+    closeCostExpenseEditor();
+    toast(id ? '支出记录已更新' : '支出记录已新增');
+    await loadCostAnalysis();
+  } catch (error) {
+    $('cost-expense-error').textContent = error.message;
+    $('cost-expense-error').hidden = false;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function syncCostProviders() {
+  const button = $('cost-provider-sync');
+  button.disabled = true;
+  try {
+    const providers = await api('/api/cost-analysis/providers?refresh=true');
+    renderCostProviders(providers);
+    if (providers.sync?.status === 'error') throw new Error(providers.sync.error || '供应商同步失败');
+    toast(`已同步 ${formatInteger(providers.items.length)} 个供应商`);
+    refreshIcons();
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function handleCostTableAction(event) {
+  const button = event.target.closest('[data-cost-action]');
+  if (!button) return;
+  if (button.dataset.costAction === 'add-provider') {
+    openCostExpenseEditor(null, button.dataset.providerId);
+    return;
+  }
+  const entry = state.costExpenses.find((item) => item.id === button.dataset.entryId);
+  if (!entry) return;
+  if (button.dataset.costAction === 'edit') {
+    openCostExpenseEditor(entry);
+    return;
+  }
+  if (button.dataset.costAction === 'delete' && window.confirm(`确认删除“${entry.name}”的这笔支出？`)) {
+    try {
+      await api(`/api/cost-analysis/expenses/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
+      toast('支出记录已删除');
+      await loadCostAnalysis();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+  }
 }
 
 async function loadStorage(refresh = false) {
@@ -909,6 +1131,7 @@ async function loadCurrentView(options = {}) {
     usage: loadUsage,
     users: loadUsers,
     finance: loadFinance,
+    costs: loadCostAnalysis,
     storage: () => loadStorage(options.refresh),
     retention: loadRetention,
     maintenance: loadMaintenance,
@@ -947,6 +1170,7 @@ async function initialize() {
   setDefaultDates('usage-filter', 30);
   setDefaultDates('users-filter', 30);
   setDefaultDates('finance-filter', 30);
+  setDefaultDates('cost-analysis-filter', 30);
   const hash = new URLSearchParams(location.hash.replace(/^#/, ''));
   const redirectedSession = hash.get('oc_session');
   const initialView = redirectedSession ? 'overview' : location.hash.slice(1);
@@ -1032,6 +1256,16 @@ $('refresh-button').addEventListener('click', () => loadCurrentView({ refresh: t
 $('usage-filter').addEventListener('submit', (event) => { event.preventDefault(); loadUsage().catch((error) => toast(error.message, 'error')); });
 $('users-filter').addEventListener('submit', (event) => { event.preventDefault(); loadUsers().catch((error) => toast(error.message, 'error')); });
 $('finance-filter').addEventListener('submit', (event) => { event.preventDefault(); loadFinance().catch((error) => toast(error.message, 'error')); });
+$('cost-analysis-filter').addEventListener('submit', (event) => { event.preventDefault(); loadCostAnalysis().catch((error) => toast(error.message, 'error')); });
+$('cost-expense-add').addEventListener('click', () => openCostExpenseEditor());
+$('cost-expense-form').addEventListener('submit', saveCostExpense);
+$('cost-expense-form').elements.kind.addEventListener('change', updateCostExpenseFields);
+$('cost-expense-form').elements.providerId.addEventListener('change', updateCostProviderCurrency);
+$('cost-expense-cancel').addEventListener('click', closeCostExpenseEditor);
+$('cost-expense-cancel-icon').addEventListener('click', closeCostExpenseEditor);
+$('cost-provider-sync').addEventListener('click', syncCostProviders);
+$('cost-providers').addEventListener('click', handleCostTableAction);
+$('cost-expenses').addEventListener('click', handleCostTableAction);
 $('storage-refresh').addEventListener('click', () => loadStorage(true).catch((error) => toast(error.message, 'error')));
 $('preview-button').addEventListener('click', createPreview);
 $('backup-button').addEventListener('click', triggerBackup);

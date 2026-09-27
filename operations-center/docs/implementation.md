@@ -2,7 +2,7 @@
 
 ## 1. 架构
 
-`operations-center` 已实现为独立 Node.js 20+、Express 5 服务。它不导入 `account-manager` 或 `provider-monitor` 内部模块，不共用 SQLite，也不挂业务数据卷。
+`operations-center` 已实现为独立 Node.js 20+、Express 5 服务。它不导入 `account-manager` 或 `provider-monitor` 内部模块，也不共用 SQLite；唯一新增的本地业务数据是管理员维护的成本台账。
 
 ```text
 浏览器
@@ -11,12 +11,14 @@
        -> PostgreSQL 只读连接：统计、schema、容量、预览
        -> PostgreSQL 维护连接：仅固定白名单 DELETE
        -> Sub2API 管理 API：版本、原生备份记录、创建备份
+       -> Provider Monitor API：脱敏供应商目录
        -> 每日调度器：可选，复用同一预览/备份/执行链路
        -> 加密运行配置：受限连接、清理设置、可选持久 API 凭据
+       -> 本地成本台账：供应商成本、自定义支出和供应商快照
        -> 有上限内存：会话、查询缓存、容量样本、预览和运行报告
 ```
 
-业务事实始终留在 Sub2API。服务没有迁移文件、业务表、消息队列或额外 Redis。加密运行配置不包含运营统计或清理历史数据。
+Sub2API 的用户、订单和用量事实始终留在 Sub2API；运营中心只持久化无法从上游获得的手工成本。服务没有迁移数据库、消息队列或额外 Redis。加密运行配置不包含运营统计或清理历史数据。
 
 ## 2. 目录
 
@@ -27,11 +29,14 @@ operations-center/
     app.js                   # HTTP、安全中间件与 API
     auth.js                  # Sub2API SSO、本地内存会话和 CSRF
     config.js                # 环境变量验证
+    cost-ledger-store.js     # 原子持久化的手工成本台账
     db.js                    # 只读/维护连接池
+    provider-monitor-client.js # 供应商目录客户端
     runtime-settings-store.js # AES-256-GCM 运行配置
     schema-inspector.js      # 表、列和分区能力识别
     sub2api-client.js        # 固定路径的版本/备份 API 客户端
     services/
+      cost-analysis-service.js # 充值收入、手工成本和利润分析
       metrics-service.js     # 用户、用量和资金统计
       storage-service.js     # 关系大小与容量诊断
       retention-service.js   # 保留策略、预览和批量清理
@@ -100,6 +105,9 @@ operations-center/
 | `GET /api/metrics/usage/dimensions` | 近 30 天维度统计 |
 | `GET /api/metrics/users` | 用户活跃、激活和留存 |
 | `GET /api/metrics/finance` | 实收、退款估算和额度入账 |
+| `GET /api/cost-analysis` | 日/周/月/年收支与利润 |
+| `GET /api/cost-analysis/providers` | 供应商快照与同步状态 |
+| `GET/POST/PUT/DELETE /api/cost-analysis/expenses` | 手工支出台账查询与维护 |
 | `GET /api/storage` | 容量、关系和维护信号 |
 | `GET /api/capabilities` | schema、版本和执行能力 |
 | `GET /api/settings` | 脱敏的连接、认证和清理配置状态 |
@@ -177,6 +185,13 @@ operations-center/
 - 最近一次自动调度尝试与当前阶段
 
 清理报告同时输出为结构化 stdout。服务重启后不会恢复或继续未完成的批次，也不会保留页面中的旧运行列表。需要长期审计时应接入现有日志平台，而不是在本服务新建无限增长表。
+
+下列状态持久化在 `OPERATIONS_CENTER_DATA_DIR`：
+
+- 加密运行配置和密钥
+- 有上限的手工成本台账与脱敏供应商快照
+
+成本台账必须随数据卷备份；它不包含 Sub2API 订单、用量副本或供应商凭据。
 
 ## 8. 备份复用
 

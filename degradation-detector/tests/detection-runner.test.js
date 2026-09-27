@@ -61,7 +61,80 @@ test('deterministic verdict distinguishes complete and degraded output', () => {
   assert.equal(normal.status, 'normal');
   const degraded = deterministicVerdict(testCase, { text: '<html><body>short</body></html>' });
   assert.equal(degraded.status, 'degraded');
-  assert.match(degraded.reason, /缺少预期特征/);
+  assert.match(degraded.reason, /未通过/);
+  assert.equal(degraded.validationResult.hard_failures, 1);
+});
+
+test('scored rules distinguish normal, unknown, degraded, and incomplete output', () => {
+  const testCase = {
+    output_type: 'html',
+    validation: {
+      version: 2,
+      normal_threshold: 80,
+      degraded_threshold: 50,
+      confirmation: { window: 3, required_failures: 2, recovery_passes: 2 },
+      rules: [
+        { id: 'svg', label: 'SVG 场景', type: 'html_selector', severity: 'hard', weight: 50, value: 'svg[viewBox]', min_count: 1, case_sensitive: false },
+        { id: 'animation', label: '动画', type: 'contains', severity: 'soft', weight: 30, value: '@keyframes', case_sensitive: false },
+        { id: 'size', label: '长度', type: 'min_bytes', severity: 'soft', weight: 20, threshold: 40, case_sensitive: false }
+      ]
+    }
+  };
+  const normal = deterministicVerdict(testCase, {
+    text: '<html><style>@keyframes ride{to{opacity:1}}</style><svg viewBox="0 0 10 10"></svg></html>'
+  });
+  assert.equal(normal.status, 'normal');
+  assert.equal(normal.score, 100);
+
+  const unknown = deterministicVerdict(testCase, {
+    text: '<html><body>enough content for size check <svg viewBox="0 0 10 10"></svg></body></html>'
+  });
+  assert.equal(unknown.status, 'unknown');
+  assert.equal(unknown.score, 70);
+
+  const degraded = deterministicVerdict(testCase, {
+    text: '<html><style>@keyframes ride{to{opacity:1}}</style><div>not svg</div></html>'
+  });
+  assert.equal(degraded.status, 'degraded');
+  assert.equal(degraded.validationResult.hard_failures, 1);
+
+  const incomplete = deterministicVerdict(testCase, { text: 'plain text only' });
+  assert.equal(incomplete.status, 'unknown');
+  assert.equal(incomplete.source, 'builtin_integrity');
+});
+
+test('exact text and JSON Schema rules validate prompt-specific answers', () => {
+  const exact = deterministicVerdict({
+    output_type: 'text',
+    validation: {
+      version: 2,
+      normal_threshold: 90,
+      degraded_threshold: 50,
+      confirmation: { window: 3, required_failures: 2, recovery_passes: 2 },
+      rules: [
+        { id: 'answer', label: '答案', type: 'exact_text', severity: 'hard', weight: 100, value: '1161', case_sensitive: false }
+      ]
+    }
+  }, { text: '1161', mime: 'text/plain' });
+  assert.equal(exact.status, 'normal');
+
+  const json = deterministicVerdict({
+    output_type: 'text',
+    validation: {
+      version: 2,
+      normal_threshold: 90,
+      degraded_threshold: 50,
+      confirmation: { window: 3, required_failures: 2, recovery_passes: 2 },
+      rules: [
+        {
+          id: 'schema', label: '结构', type: 'json_schema', severity: 'hard', weight: 100,
+          value: JSON.stringify({ type: 'object', required: ['answer'], properties: { answer: { const: 1161 } } }),
+          case_sensitive: false
+        }
+      ]
+    }
+  }, { text: '{"answer": 1161}', mime: 'application/json' });
+  assert.equal(json.status, 'normal');
 });
 
 test('image dimensions and private network checks fail closed', async () => {

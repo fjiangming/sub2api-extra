@@ -19,6 +19,8 @@ const state = {
   historyDeleting: false,
   historyError: '',
   historyRequest: 0,
+  reviewRunId: null,
+  reviewSaving: false,
   confirmResolve: null
 };
 
@@ -30,6 +32,19 @@ const apiLabels = {
   images_generations: 'Images Generations'
 };
 const outputLabels = { text: '直接答案', html: 'HTML', image: '图片', file: '文件' };
+const validationTypeLabels = {
+  min_bytes: '最小字节数',
+  max_bytes: '最大字节数',
+  exact_text: '精确文本',
+  contains: '包含文本',
+  regex: '匹配正则',
+  not_regex: '禁止正则',
+  html_selector: 'HTML 选择器',
+  json_schema: 'JSON Schema',
+  mime_type: 'MIME 类型',
+  image_dimensions: '图片尺寸'
+};
+const severityLabels = { hard: '核心规则', soft: '辅助规则' };
 const MAX_HISTORY_SELECTION = 100;
 const reasoningLabels = {
   none: '不指定', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'XHigh', max: 'Max'
@@ -231,6 +246,63 @@ function groupHtml(group, platformIndex, groupIndex) {
     </div>`;
 }
 
+function validationRuleParametersHtml(rule) {
+  const type = rule.type || 'contains';
+  if (['min_bytes', 'max_bytes'].includes(type)) {
+    return `<label class="field"><span>字节数</span><input data-rule-param="threshold" type="number" min="0" max="20971520" required value="${escapeHtml(rule.threshold ?? '')}"></label>`;
+  }
+  if (['exact_text', 'contains', 'regex', 'not_regex'].includes(type)) {
+    const multiline = ['regex', 'not_regex'].includes(type);
+    return `
+      <label class="field rule-value"><span>${multiline ? '正则表达式' : '预期文本'}</span>${multiline
+        ? `<textarea data-rule-param="value" required maxlength="50000">${escapeHtml(rule.value || '')}</textarea>`
+        : `<input data-rule-param="value" required maxlength="50000" value="${escapeHtml(rule.value || '')}">`}</label>
+      <label class="check-field rule-case"><input data-rule-param="case_sensitive" type="checkbox" ${rule.case_sensitive ? 'checked' : ''}><span>区分大小写</span></label>`;
+  }
+  if (type === 'html_selector') {
+    return `
+      <label class="field rule-value"><span>CSS 选择器</span><input data-rule-param="value" required maxlength="1000" value="${escapeHtml(rule.value || '')}" placeholder="#pelican、svg[viewBox]、.wheel"></label>
+      <label class="field"><span>最少数量</span><input data-rule-param="min_count" type="number" min="0" max="10000" required value="${escapeHtml(rule.min_count ?? 1)}"></label>
+      <label class="field"><span>最多数量</span><input data-rule-param="max_count" type="number" min="0" max="10000" value="${escapeHtml(rule.max_count ?? '')}" placeholder="不限"></label>`;
+  }
+  if (type === 'json_schema') {
+    return `<label class="field rule-value"><span>JSON Schema</span><textarea data-rule-param="value" required maxlength="50000" spellcheck="false">${escapeHtml(rule.value || '{\n  "type": "object"\n}')}</textarea></label>`;
+  }
+  if (type === 'mime_type') {
+    return `<label class="field rule-value"><span>MIME 类型</span><input data-rule-param="value" required maxlength="200" value="${escapeHtml(rule.value || '')}" placeholder="image/png 或 image/*"></label>`;
+  }
+  return `
+    <label class="field"><span>最小宽度</span><input data-rule-param="min_width" type="number" min="1" max="16384" value="${escapeHtml(rule.min_width ?? '')}" placeholder="可选"></label>
+    <label class="field"><span>最小高度</span><input data-rule-param="min_height" type="number" min="1" max="16384" value="${escapeHtml(rule.min_height ?? '')}" placeholder="可选"></label>
+    <label class="field"><span>最大宽度</span><input data-rule-param="max_width" type="number" min="1" max="16384" value="${escapeHtml(rule.max_width ?? '')}" placeholder="可选"></label>
+    <label class="field"><span>最大高度</span><input data-rule-param="max_height" type="number" min="1" max="16384" value="${escapeHtml(rule.max_height ?? '')}" placeholder="可选"></label>`;
+}
+
+function validationRuleHtml(rule) {
+  return `
+    <div class="validation-rule" data-rule-id="${escapeHtml(rule.id)}">
+      <div class="rule-main">
+        <label class="field rule-label"><span>规则名称</span><input data-rule-field="label" required maxlength="80" value="${escapeHtml(rule.label || '')}"></label>
+        <label class="field"><span>规则类型</span><select data-rule-field="type">${optionsHtml(Object.keys(validationTypeLabels), rule.type, validationTypeLabels)}</select></label>
+        <label class="field"><span>判定级别</span><select data-rule-field="severity">${optionsHtml(Object.keys(severityLabels), rule.severity || 'hard', severityLabels)}</select></label>
+        <label class="field"><span>权重</span><input data-rule-field="weight" type="number" min="1" max="100" required value="${escapeHtml(rule.weight ?? 10)}"></label>
+        <button class="icon-button rule-remove" type="button" data-remove-rule title="删除规则" aria-label="删除规则"><i data-lucide="trash-2"></i></button>
+      </div>
+      <div class="rule-parameters">${validationRuleParametersHtml(rule)}</div>
+    </div>`;
+}
+
+function newValidationRule(type = 'contains') {
+  return {
+    id: `rule_${crypto.randomUUID().replaceAll('-', '')}`,
+    label: validationTypeLabels[type] || '新规则',
+    type,
+    severity: 'hard',
+    weight: 10,
+    case_sensitive: false
+  };
+}
+
 function platformPanelHtml(platform, index) {
   const test = platform.test || {};
   const validation = test.validation || {};
@@ -260,16 +332,19 @@ function platformPanelHtml(platform, index) {
             <label class="field"><span>最大输出 Token</span><input data-test="max_output_tokens" type="number" min="64" max="131072" required value="${escapeHtml(test.max_output_tokens || 16384)}"></label>
             <label class="field field-wide"><span>检测提示词</span><textarea class="prompt-input" data-test="prompt" required maxlength="100000">${escapeHtml(test.prompt || '')}</textarea></label>
             <label class="field field-wide"><span>文件 MIME 类型</span><input data-test="mime_type" maxlength="200" value="${escapeHtml(test.mime_type || '')}" placeholder="可选"></label>
-            <details class="validation-details">
-              <summary>判定规则</summary>
-              <div class="validation-grid">
-                <label class="field"><span>最小字节数</span><input data-validation="min_bytes" type="number" min="0" max="20971520" required value="${escapeHtml(validation.min_bytes ?? 1)}"></label>
-                <label class="check-field"><input data-validation="case_sensitive" type="checkbox" ${validation.case_sensitive ? 'checked' : ''}><span>正则区分大小写</span></label>
-                <label class="field field-wide"><span>必须匹配的正则（每行一条）</span><textarea class="pattern-input" data-validation="required_patterns">${escapeHtml((validation.required_patterns || []).join('\n'))}</textarea></label>
-                <label class="field field-wide"><span>禁止匹配的正则（每行一条）</span><textarea class="pattern-input" data-validation="forbidden_patterns">${escapeHtml((validation.forbidden_patterns || []).join('\n'))}</textarea></label>
-                <label class="field"><span>图片最小宽度</span><input data-validation="min_width" type="number" min="1" max="16384" value="${escapeHtml(validation.min_width || '')}" placeholder="可选"></label>
-                <label class="field"><span>图片最小高度</span><input data-validation="min_height" type="number" min="1" max="16384" value="${escapeHtml(validation.min_height || '')}" placeholder="可选"></label>
+            <details class="validation-details" open>
+              <summary>判定规则 <span>${(validation.rules || []).length} 条</span></summary>
+              <div class="validation-policy">
+                <label class="field"><span>正常分数线</span><input data-validation="normal_threshold" type="number" min="1" max="100" required value="${escapeHtml(validation.normal_threshold ?? 80)}"></label>
+                <label class="field"><span>降智分数线</span><input data-validation="degraded_threshold" type="number" min="0" max="99" required value="${escapeHtml(validation.degraded_threshold ?? 50)}"></label>
+                <label class="field"><span>观察最近次数</span><input data-confirmation="window" type="number" min="1" max="10" required value="${escapeHtml(validation.confirmation?.window ?? 3)}"></label>
+                <label class="field"><span>确认降智次数</span><input data-confirmation="required_failures" type="number" min="1" max="10" required value="${escapeHtml(validation.confirmation?.required_failures ?? 2)}"></label>
+                <label class="field"><span>恢复连续正常次数</span><input data-confirmation="recovery_passes" type="number" min="1" max="10" required value="${escapeHtml(validation.confirmation?.recovery_passes ?? 2)}"></label>
               </div>
+              <div class="validation-rules" data-validation-rules>
+                ${(validation.rules || []).map(validationRuleHtml).join('')}
+              </div>
+              <button class="button rule-add" type="button" data-add-rule><i data-lucide="plus"></i><span>添加规则</span></button>
             </details>
           </div>
         </section>
@@ -343,6 +418,42 @@ function updatePlatform(index) {
   refreshIcons();
 }
 
+function updateValidationRuleCount(details) {
+  const count = details.querySelectorAll('.validation-rule').length;
+  details.querySelector('summary span').textContent = `${count} 条`;
+}
+
+function bindValidationEditor(panel) {
+  const details = panel.querySelector('.validation-details');
+  details.addEventListener('input', markDirty);
+  details.addEventListener('change', (event) => {
+    const typeSelect = event.target.closest('[data-rule-field="type"]');
+    if (typeSelect) {
+      const row = typeSelect.closest('.validation-rule');
+      row.querySelector('.rule-parameters').innerHTML = validationRuleParametersHtml({ type: typeSelect.value });
+    }
+    markDirty();
+  });
+  details.addEventListener('click', (event) => {
+    const remove = event.target.closest('[data-remove-rule]');
+    if (remove) {
+      remove.closest('.validation-rule').remove();
+      updateValidationRuleCount(details);
+      markDirty();
+      return;
+    }
+    if (event.target.closest('[data-add-rule]')) {
+      details.querySelector('[data-validation-rules]').insertAdjacentHTML(
+        'beforeend',
+        validationRuleHtml(newValidationRule())
+      );
+      updateValidationRuleCount(details);
+      markDirty();
+      refreshIcons();
+    }
+  });
+}
+
 function bindPanel(panel) {
   const index = Number(panel.dataset.platformIndex);
   panel.querySelector('[data-platform-enabled]').addEventListener('change', () => {
@@ -368,6 +479,7 @@ function bindPanel(panel) {
   panel.querySelectorAll('[data-history-button]').forEach((button) => {
     button.addEventListener('click', () => openHistory(button.dataset.groupId));
   });
+  bindValidationEditor(panel);
   panel.querySelectorAll('input, textarea, select').forEach((control) => {
     control.addEventListener('input', markDirty);
     control.addEventListener('change', markDirty);
@@ -399,12 +511,37 @@ function render() {
   refreshIcons();
 }
 
-function lines(value) {
-  return String(value || '').split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
+function optionalNumber(input) {
+  return !input || input.value === '' ? undefined : Number(input.value);
 }
 
-function optionalNumber(input) {
-  return input.value === '' ? undefined : Number(input.value);
+function collectValidationRule(row) {
+  const type = row.querySelector('[data-rule-field="type"]').value;
+  const rule = {
+    id: row.dataset.ruleId,
+    label: row.querySelector('[data-rule-field="label"]').value.trim(),
+    type,
+    severity: row.querySelector('[data-rule-field="severity"]').value,
+    weight: Number(row.querySelector('[data-rule-field="weight"]').value),
+    case_sensitive: row.querySelector('[data-rule-param="case_sensitive"]')?.checked === true
+  };
+  if (['min_bytes', 'max_bytes'].includes(type)) {
+    rule.threshold = Number(row.querySelector('[data-rule-param="threshold"]').value);
+  } else if (['exact_text', 'contains', 'regex', 'not_regex', 'html_selector', 'json_schema', 'mime_type'].includes(type)) {
+    rule.value = row.querySelector('[data-rule-param="value"]').value;
+  }
+  if (type === 'html_selector') {
+    rule.min_count = Number(row.querySelector('[data-rule-param="min_count"]').value);
+    const maximum = optionalNumber(row.querySelector('[data-rule-param="max_count"]'));
+    if (maximum !== undefined) rule.max_count = maximum;
+  }
+  if (type === 'image_dimensions') {
+    for (const name of ['min_width', 'min_height', 'max_width', 'max_height']) {
+      const value = optionalNumber(row.querySelector(`[data-rule-param="${name}"]`));
+      if (value !== undefined) rule[name] = value;
+    }
+  }
+  return rule;
 }
 
 function collectPlatform(panel) {
@@ -413,8 +550,6 @@ function collectPlatform(panel) {
   const enabled = panel.querySelector('[data-platform-enabled]').checked;
   const reasoning = panel.querySelector('[data-test="reasoning_effort"]').value;
   const mime = panel.querySelector('[data-test="mime_type"]').value.trim();
-  const minWidth = optionalNumber(panel.querySelector('[data-validation="min_width"]'));
-  const minHeight = optionalNumber(panel.querySelector('[data-validation="min_height"]'));
   const test = {
     label: panel.querySelector('[data-test="label"]').value.trim(),
     model: panel.querySelector('[data-test="model"]').value.trim(),
@@ -425,12 +560,15 @@ function collectPlatform(panel) {
     max_output_tokens: Number(panel.querySelector('[data-test="max_output_tokens"]').value),
     ...(mime ? { mime_type: mime } : {}),
     validation: {
-      min_bytes: Number(panel.querySelector('[data-validation="min_bytes"]').value),
-      required_patterns: lines(panel.querySelector('[data-validation="required_patterns"]').value),
-      forbidden_patterns: lines(panel.querySelector('[data-validation="forbidden_patterns"]').value),
-      case_sensitive: panel.querySelector('[data-validation="case_sensitive"]').checked,
-      ...(minWidth === undefined ? {} : { min_width: minWidth }),
-      ...(minHeight === undefined ? {} : { min_height: minHeight })
+      version: 2,
+      normal_threshold: Number(panel.querySelector('[data-validation="normal_threshold"]').value),
+      degraded_threshold: Number(panel.querySelector('[data-validation="degraded_threshold"]').value),
+      confirmation: {
+        window: Number(panel.querySelector('[data-confirmation="window"]').value),
+        required_failures: Number(panel.querySelector('[data-confirmation="required_failures"]').value),
+        recovery_passes: Number(panel.querySelector('[data-confirmation="recovery_passes"]').value)
+      },
+      rules: [...panel.querySelectorAll('.validation-rule')].map(collectValidationRule)
     }
   };
   const groups = [...panel.querySelectorAll('.group-row')].map((row, groupIndex) => ({
@@ -541,16 +679,28 @@ function renderHistoryList() {
   } else if (state.historyRuns.length === 0) {
     list.innerHTML = '<div class="history-empty"><i data-lucide="history"></i><p>该分组暂无历史检测记录</p></div>';
   } else {
-    list.innerHTML = state.historyRuns.map((run) => `
-      <label class="history-row" data-status="${escapeHtml(run.status)}" data-deletable="${run.deletable === true}">
+    list.innerHTML = state.historyRuns.map((run) => {
+      const taskMeta = `${escapeHtml(triggerLabels[run.trigger_type] || run.trigger_type || '检测任务')} · ${escapeHtml(run.model || '--')}${run.duration_ms == null ? '' : ` · ${(run.duration_ms / 1000).toFixed(1)} 秒`}`;
+      const reviewMeta = run.review
+        ? `<small><span class="history-reviewed"><i data-lucide="badge-check"></i>人工复核</span> · 自动判定：${escapeHtml(statusLabels[run.automatic_status] || run.automatic_status)} · ${escapeHtml(run.automatic_reason || '没有自动判定说明')}</small>`
+        : '';
+      return `
+      <div class="history-row" data-status="${escapeHtml(run.status)}" data-deletable="${run.deletable === true}">
         <input type="checkbox" data-history-run-id="${run.id}"
+          aria-label="选择 ${escapeHtml(when(run.started))} 的检测记录"
           ${state.historySelected.has(run.id) ? 'checked' : ''} ${run.deletable && !state.historyDeleting ? '' : 'disabled'}>
         <span class="history-row-main">
           <span class="history-row-title"><strong>${escapeHtml(when(run.started))}</strong>${historyStatus(run.status)}</span>
           <span class="history-row-reason">${escapeHtml(run.reason || (run.deletable ? '没有判定说明' : '任务尚未完成'))}</span>
-          <small>${escapeHtml(triggerLabels[run.trigger_type] || run.trigger_type || '检测任务')} · ${escapeHtml(run.model || '--')}${run.duration_ms == null ? '' : ` · ${(run.duration_ms / 1000).toFixed(1)} 秒`}</small>
+          <small>${taskMeta}</small>
+          ${reviewMeta}
         </span>
-      </label>`).join('');
+        <button class="button history-review-button" type="button" data-review-run-id="${run.id}"
+          ${run.reviewable && !state.historyDeleting ? '' : 'disabled'} title="${run.reviewable ? '人工复核检测状态' : '该记录不能人工复核'}">
+          <i data-lucide="${run.review ? 'badge-check' : 'clipboard-check'}"></i><span>${run.review ? '修改复核' : '人工复核'}</span>
+        </button>
+      </div>`;
+    }).join('');
     list.querySelectorAll('[data-history-run-id]').forEach((checkbox) => {
       checkbox.addEventListener('change', () => {
         const id = Number(checkbox.dataset.historyRunId);
@@ -566,6 +716,9 @@ function renderHistoryList() {
         }
         updateHistorySelection();
       });
+    });
+    list.querySelectorAll('[data-review-run-id]').forEach((button) => {
+      button.addEventListener('click', () => openReview(Number(button.dataset.reviewRunId)));
     });
   }
   $('history-load-more').hidden = !state.historyNextCursor;
@@ -639,6 +792,75 @@ function openHistory(groupId) {
   $('history-meta').textContent = '正在读取记录';
   $('history-dialog').showModal();
   loadHistory(false);
+}
+
+function reviewRun() {
+  return state.historyRuns.find((run) => run.id === state.reviewRunId) || null;
+}
+
+function setReviewSaving(saving) {
+  state.reviewSaving = saving;
+  $('review-dialog').querySelectorAll('input, textarea, button').forEach((control) => {
+    control.disabled = saving;
+  });
+  const run = reviewRun();
+  $('review-clear').disabled = saving || !run?.review;
+  $('review-save').classList.toggle('busy', saving);
+}
+
+function closeReview() {
+  if (state.reviewSaving) return;
+  if ($('review-dialog').open) $('review-dialog').close();
+  state.reviewRunId = null;
+}
+
+function openReview(runId) {
+  const run = state.historyRuns.find((item) => item.id === runId);
+  if (!run?.reviewable || state.historyDeleting) return;
+  state.reviewRunId = run.id;
+  $('review-meta').textContent = `${when(run.started)} · 记录 #${run.id}${run.review?.reviewed_at ? ` · 上次复核 ${when(run.review.reviewed_at)}` : ''}`;
+  $('review-automatic-status').innerHTML = historyStatus(run.automatic_status);
+  $('review-automatic-reason').textContent = run.automatic_reason || '没有自动判定说明';
+  const selectedStatus = run.review?.status || run.automatic_status;
+  document.querySelectorAll('input[name="review-status"]').forEach((input) => {
+    input.checked = input.value === selectedStatus;
+  });
+  $('review-reason').value = run.review?.reason || '';
+  setReviewSaving(false);
+  $('review-dialog').showModal();
+  refreshIcons();
+}
+
+async function submitReview(clearing = false) {
+  if (state.reviewSaving || !state.historyGroupId || !state.reviewRunId) return;
+  if (!clearing && !$('review-form').reportValidity()) return;
+  const status = document.querySelector('input[name="review-status"]:checked')?.value;
+  const reason = $('review-reason').value.trim();
+  setReviewSaving(true);
+  try {
+    const payload = await api(
+      `/api/admin/groups/${encodeURIComponent(state.historyGroupId)}/runs/${state.reviewRunId}/review`,
+      {
+        method: 'PATCH',
+        mutation: true,
+        body: clearing ? { status: null } : { status, reason }
+      }
+    );
+    const index = state.historyRuns.findIndex((run) => run.id === payload.run.id);
+    if (index >= 0) state.historyRuns[index] = payload.run;
+    state.reviewSaving = false;
+    $('review-dialog').close();
+    state.reviewRunId = null;
+    renderHistoryList();
+    toast(clearing ? '已撤销人工复核，恢复自动判定' : '人工复核已保存');
+  } catch (error) {
+    setReviewSaving(false);
+    toast(error.message, 'error');
+    if ([401, 403].includes(error.status)) {
+      closeReview();
+      showError('管理员身份已失效，请从 Sub2API 重新打开。');
+    }
+  }
 }
 
 function settleConfirmation(accepted) {
@@ -753,6 +975,7 @@ $('history-select-all').addEventListener('change', (event) => {
 $('history-delete-selected').addEventListener('click', () => deleteHistory(false));
 $('history-clear-all').addEventListener('click', () => deleteHistory(true));
 $('history-dialog').addEventListener('close', () => {
+  closeReview();
   state.historyRequest += 1;
   state.historyGroupId = null;
   state.historyRuns = [];
@@ -761,7 +984,21 @@ $('history-dialog').addEventListener('close', () => {
   state.historyError = '';
 });
 $('history-dialog').addEventListener('cancel', (event) => {
-  if (state.historyDeleting) event.preventDefault();
+  if (state.historyDeleting || state.reviewSaving) event.preventDefault();
+});
+$('review-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  submitReview(false);
+});
+$('review-clear').addEventListener('click', () => submitReview(true));
+$('review-cancel').addEventListener('click', closeReview);
+$('review-close').addEventListener('click', closeReview);
+$('review-dialog').addEventListener('close', () => {
+  state.reviewRunId = null;
+  state.reviewSaving = false;
+});
+$('review-dialog').addEventListener('cancel', (event) => {
+  if (state.reviewSaving) event.preventDefault();
 });
 $('confirm-cancel').addEventListener('click', () => settleConfirmation(false));
 $('confirm-accept').addEventListener('click', () => settleConfirmation(true));

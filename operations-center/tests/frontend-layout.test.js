@@ -11,8 +11,22 @@ const script = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), '
 test('primary modules use an accessible top tab bar', () => {
   assert.match(html, /<header class="module-header">/);
   assert.match(html, /<nav id="main-nav" class="module-tabs"[^>]*role="tablist">/);
-  assert.equal((html.match(/class="module-tab(?: active)?"/g) || []).length, 8);
+  assert.equal((html.match(/class="module-tab(?: active)?"/g) || []).length, 9);
   assert.doesNotMatch(html, /class="sidebar"|id="mobile-menu"/);
+});
+
+test('cost analysis exposes period reporting, provider sync and an editable expense ledger', () => {
+  assert.match(html, /data-view="costs"/);
+  assert.match(html, /id="cost-analysis-filter"/);
+  assert.match(html, /id="cost-expense-form"/);
+  assert.match(html, /id="cost-provider-sync"/);
+  assert.match(html, /id="cost-periods"/);
+  assert.match(script, /api\(`\/api\/cost-analysis\?\$\{search\}`\)/);
+  assert.match(script, /api\('\/api\/cost-analysis\/providers\?refresh=true'\)/);
+  assert.match(script, /method: id \? 'PUT' : 'POST'/);
+  assert.match(script, /method: 'DELETE'/);
+  assert.match(script, /entry\?\.currency \|\| provider\?\.currency/);
+  assert.match(script, /providerId\.addEventListener\('change', updateCostProviderCurrency\)/);
 });
 
 test('system settings exposes guarded database setup and cleanup configuration', () => {

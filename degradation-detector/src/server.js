@@ -9,10 +9,10 @@ const { rateLimit } = require('express-rate-limit');
 const { AuthService, isAdminUser } = require('./auth');
 const { defaultPlatformTest, loadConfig, validateAdminConfiguration } = require('./config');
 const { CredentialVault } = require('./credential-vault');
-const { DetectionRunner } = require('./detection-runner');
+const { DetectionRunner, deterministicVerdict } = require('./detection-runner');
 const { AppError, publicError } = require('./errors');
 const { Scheduler } = require('./scheduler');
-const { Store, publicRun } = require('./store');
+const { Store, publicRun, publicValidationResult } = require('./store');
 const { Sub2ApiClient } = require('./sub2api-client');
 
 const PREVIEW_CSP = [
@@ -73,6 +73,7 @@ function groupPayload(group, summary, runtime) {
     output_type: test?.output_type || null,
     next_run_at: monitor?.next_run_at == null ? null : monitor.next_run_at / 1000,
     totals: summary.totals,
+    assessment: summary.assessment,
     history: summary.history
   };
 }
@@ -251,9 +252,17 @@ async function removeArtifactFiles(config, filenames) {
 }
 
 function adminHistoryRun(row) {
+  const payload = publicRun(row);
   return {
-    ...publicRun(row),
+    ...payload,
     trigger_type: row.trigger_type,
+    automatic_status: row.status,
+    automatic_reason: row.reason,
+    reviewable: ['normal', 'degraded', 'unknown'].includes(row.status),
+    review: payload.review ? {
+      ...payload.review,
+      reviewed_by: String(row.manual_updated_by || '')
+    } : null,
     deletable: !['queued', 'running'].includes(row.status)
   };
 }
@@ -446,16 +455,17 @@ function seedDemo(config, store, vault) {
     store.markRunRunning(run.id);
     const isHtml = test.output_type === 'html';
     const html = isHtml ? `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
-      html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#bfe9f4;font-family:system-ui}
-      .road{position:absolute;inset:70% 0 0;background:#374b59}.bird{position:relative;font-size:88px;animation:ride 1.2s ease-in-out infinite}
-      .bike{font-size:120px;margin-top:-30px}@keyframes ride{50%{transform:translateY(-8px)}}
-    </style></head><body><div class="road"></div><main><div class="bird">🦤</div><div class="bike">🚲</div></main></body></html>` : '1161';
+      html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#bfe9f4}.scene{width:min(820px,94vw)}
+      #pelican{animation:ride 1.2s ease-in-out infinite;transform-origin:center}.wheel{animation:spin 1s linear infinite;transform-box:fill-box;transform-origin:center}
+      @keyframes ride{50%{transform:translateY(-8px) rotate(-1deg)}}@keyframes spin{to{transform:rotate(360deg)}}
+    </style></head><body><svg class="scene" viewBox="0 0 800 440" role="img" aria-label="鹈鹕骑自行车动画">
+      <rect width="800" height="440" fill="#dff7fb"/><path d="M0 350H800" stroke="#334155" stroke-width="16"/>
+      <g id="bicycle" fill="none" stroke="#0f766e" stroke-width="12"><circle class="wheel" cx="270" cy="330" r="76"/><circle class="wheel" cx="560" cy="330" r="76"/><path d="M270 330l105-120 95 120H270l72-115h128l90 115M470 210l52-34M375 210l-30-28"/></g>
+      <g id="pelican"><ellipse cx="410" cy="150" rx="105" ry="70" fill="#f8fafc" stroke="#334155" stroke-width="7"/><circle cx="500" cy="102" r="48" fill="#f8fafc" stroke="#334155" stroke-width="7"/><path d="M530 100l132 34-126 32z" fill="#fbbf24"/><circle cx="512" cy="88" r="6" fill="#172133"/><path d="M360 160q55 52 105 5" fill="#cbd5e1"/><path d="M382 205l-12 54M455 208l34 52" stroke="#334155" stroke-width="10"/></g>
+    </svg></body></html>` : (status === 'normal' ? '1161' : '1160');
+    const verdict = deterministicVerdict(test, { text: html, mime: isHtml ? 'text/html' : 'text/plain' });
     store.completeRun(run.id, {
-      status,
-      quality: status,
-      reason: status === 'normal'
-        ? '规则判定为正常；单次结果不能证明模型身份或整体能力'
-        : '规则判定为疑似降智：缺少预期细节；单次结果不能证明模型身份或整体能力',
+      ...verdict,
       source: 'demo_fixture',
       outputText: html,
       artifactMime: isHtml ? 'text/html' : 'text/plain',
@@ -757,6 +767,7 @@ function createApp(config, overrides = {}) {
       }
       res.json({
         ...publicRun(run),
+        validation: publicValidationResult(run, true),
         html: run.output_type === 'html' ? run.output_text : null,
         text: run.output_type === 'text' ? run.output_text : null,
         artifact: run.preview_token && run.artifact_path ? {
@@ -801,6 +812,60 @@ function createApp(config, overrides = {}) {
       next(error);
     }
   });
+
+  app.patch(
+    '/api/admin/groups/:groupId/runs/:runId/review',
+    requireAuth,
+    requireAdmin,
+    requireCsrf,
+    historyLimiter,
+    async (req, res, next) => {
+      try {
+        setNoStore(res);
+        const group = await requireAdminGroup(req, runtime);
+        const rawRunId = String(req.params.runId || '').trim();
+        const runId = Number(rawRunId);
+        if (!/^[1-9][0-9]{0,15}$/.test(rawRunId) || !Number.isSafeInteger(runId)) {
+          throw new AppError('VALIDATION_ERROR', '检测记录编号无效', { status: 400 });
+        }
+
+        const body = req.body;
+        if (!body || typeof body !== 'object' || Array.isArray(body) ||
+            Object.keys(body).some((key) => !['status', 'reason'].includes(key))) {
+          throw new AppError('VALIDATION_ERROR', '人工复核参数无效', { status: 400 });
+        }
+        const clearing = body.status === null;
+        const status = clearing ? null : String(body.status || '');
+        const reason = String(body.reason || '').trim();
+        if (!clearing && !['normal', 'degraded', 'unknown'].includes(status)) {
+          throw new AppError('VALIDATION_ERROR', '人工状态只能设为正常、疑似降智或无法判定', { status: 400 });
+        }
+        if (!clearing && (reason.length < 2 || reason.length > 500)) {
+          throw new AppError('VALIDATION_ERROR', '人工复核理由需要填写 2 至 500 个字符', { status: 400 });
+        }
+        if (clearing && reason) {
+          throw new AppError('VALIDATION_ERROR', '撤销人工复核时不能提交复核理由', { status: 400 });
+        }
+
+        const result = runtime.store.reviewRun(
+          config.serviceOwnerId,
+          group.id,
+          runId,
+          { status, reason },
+          req.auth.user.id
+        );
+        if (result.outcome === 'not_found') {
+          throw new AppError('RESULT_NOT_FOUND', '检测记录不存在或不属于该分组', { status: 404 });
+        }
+        if (result.outcome === 'not_reviewable') {
+          throw new AppError('RESULT_NOT_REVIEWABLE', '只有已完成且产生判定的记录可以人工复核', { status: 409 });
+        }
+        res.json({ run: adminHistoryRun(result.run) });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
 
   app.delete(
     '/api/admin/groups/:groupId/runs',

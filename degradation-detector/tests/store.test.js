@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const test = require('node:test');
 const Database = require('better-sqlite3');
+const { validateTestConfig } = require('../src/config');
 const { Store } = require('../src/store');
 const { testConfig } = require('./helpers');
 
@@ -191,6 +192,168 @@ test('runs snapshot the reasoning effort used for each detection', (t) => {
     store.groupSummary('user-1', 'group-1', 10).history.map((run) => run.reasoning_effort),
     ['none', 'xhigh']
   );
+});
+
+test('runs snapshot validation configuration and expose sanitized rule evidence', (t) => {
+  const config = testConfig(t);
+  const store = new Store(config);
+  t.after(() => store.close());
+  const currentMonitor = monitor(store);
+  const validation = {
+    version: 2,
+    normal_threshold: 80,
+    degraded_threshold: 50,
+    confirmation: { window: 3, required_failures: 2, recovery_passes: 2 },
+    rules: [
+      { id: 'answer', label: '答案正确', type: 'exact_text', severity: 'hard', weight: 100, value: '1161', case_sensitive: false }
+    ]
+  };
+  const run = store.createRun(currentMonitor, { ...testCase, validation }, 'manual');
+  store.markRunRunning(run.id);
+  store.completeRun(run.id, {
+    status: 'normal', quality: 'normal', score: 100, reason: 'ok', source: 'configured_validation_v2',
+    validationResult: {
+      version: 2, score: 100, passed: 1, total: 1, hard_failures: 0, integrity_failures: [],
+      results: [{ id: 'answer', label: '答案正确', type: 'exact_text', severity: 'hard', weight: 100, passed: true, message: '通过' }]
+    },
+    outputText: '1161'
+  }, 60);
+
+  const stored = store.getRun(run.id);
+  assert.deepEqual(JSON.parse(stored.validation_snapshot), validation);
+  assert.equal(JSON.parse(stored.test_snapshot).prompt, 'hello');
+  assert.equal(stored.score, 100);
+  assert.deepEqual(store.groupSummary('user-1', 'group-1', 10).history[0].validation, {
+    score: 100,
+    passed: 1,
+    total: 1,
+    hard_failures: 0,
+    integrity_failures: []
+  });
+});
+
+test('group assessment requires repeated failures and repeated recovery passes', (t) => {
+  const config = testConfig(t);
+  const store = new Store(config);
+  t.after(() => store.close());
+  const currentMonitor = monitor(store);
+  const complete = (status) => {
+    const run = store.createRun(currentMonitor, testCase, 'manual');
+    store.markRunRunning(run.id);
+    store.completeRun(run.id, {
+      status, quality: status, reason: status, source: 'test', outputText: status
+    }, 60);
+  };
+
+  complete('degraded');
+  assert.equal(store.groupAssessment('user-1', 'group-1').status, 'unknown');
+  complete('degraded');
+  assert.equal(store.groupAssessment('user-1', 'group-1').status, 'degraded');
+  complete('normal');
+  assert.equal(store.groupAssessment('user-1', 'group-1').status, 'degraded');
+  complete('normal');
+  assert.equal(store.groupAssessment('user-1', 'group-1').status, 'normal');
+});
+
+test('manual reviews preserve automatic verdicts and drive effective summaries', (t) => {
+  const config = testConfig(t);
+  const store = new Store(config);
+  t.after(() => store.close());
+  const currentMonitor = monitor(store);
+  const completed = [];
+  for (let index = 0; index < 2; index += 1) {
+    const run = store.createRun(currentMonitor, testCase, 'manual');
+    store.markRunRunning(run.id);
+    completed.push(store.completeRun(run.id, {
+      status: 'degraded', quality: 'degraded', reason: `automatic-${index}`, source: 'test', outputText: 'bad'
+    }, 60));
+  }
+  assert.equal(store.groupAssessment('user-1', 'group-1').status, 'degraded');
+
+  const reviewed = store.reviewRun('user-1', 'group-1', completed[1].id, {
+    status: 'normal', reason: '人工确认内容完整'
+  }, 'admin-1');
+  assert.equal(reviewed.outcome, 'updated');
+  assert.equal(reviewed.run.status, 'degraded');
+  assert.equal(reviewed.run.manual_status, 'normal');
+  assert.equal(reviewed.run.manual_updated_by, 'admin-1');
+
+  const summary = store.groupSummary('user-1', 'group-1', 10);
+  assert.deepEqual(summary.totals, { passed: 1, valid: 2, attempts: 2 });
+  assert.equal(summary.assessment.status, 'unknown');
+  assert.equal(summary.history[0].status, 'normal');
+  assert.equal(summary.history[0].quality, 'normal');
+  assert.equal(summary.history[0].reason, '人工复核：人工确认内容完整');
+  assert.deepEqual(summary.history[0].review, {
+    status: 'normal',
+    automated_status: 'degraded',
+    reason: '人工确认内容完整',
+    reviewed_at: reviewed.run.manual_updated_at / 1000
+  });
+
+  store.reviewRun('user-1', 'group-1', completed[0].id, {
+    status: 'normal', reason: '第二次人工确认'
+  }, 'admin-1');
+  assert.equal(store.groupAssessment('user-1', 'group-1').status, 'normal');
+
+  const cleared = store.reviewRun('user-1', 'group-1', completed[1].id, {
+    status: null, reason: ''
+  }, 'admin-1');
+  assert.equal(cleared.run.manual_status, null);
+  assert.equal(store.groupSummary('user-1', 'group-1', 10).history[0].status, 'degraded');
+  assert.equal(store.reviewRun('user-1', 'other-group', completed[0].id, {
+    status: 'normal', reason: '越界尝试'
+  }, 'admin-1').outcome, 'not_found');
+
+  const active = store.createRun(currentMonitor, testCase, 'manual');
+  assert.equal(store.reviewRun('user-1', 'group-1', active.id, {
+    status: 'normal', reason: '任务尚未结束'
+  }, 'admin-1').outcome, 'not_reviewable');
+});
+
+test('changing the active test configuration resets confirmation evidence', (t) => {
+  const config = testConfig(t);
+  const store = new Store(config);
+  t.after(() => store.close());
+  const validation = {
+    version: 2,
+    normal_threshold: 80,
+    degraded_threshold: 50,
+    confirmation: { window: 3, required_failures: 2, recovery_passes: 2 },
+    rules: [{ id: 'answer', label: '答案', type: 'exact_text', severity: 'hard', weight: 100, value: 'ok', case_sensitive: false }]
+  };
+  const saveTest = (prompt) => store.saveAdminConfiguration({
+    scheduleMode: 'daily',
+    scheduleTimes: ['09:30'],
+    scheduleIntervalMinutes: 60,
+    scheduleTimezone: config.scheduleTimezone,
+    updatedBy: 'test-admin',
+    serviceOwnerId: config.serviceOwnerId,
+    platforms: [{
+      id: 'openai', enabled: true, groups: [],
+      test: validateTestConfig('openai', {
+        model: 'gpt-test', api: 'responses', prompt, output_type: 'text',
+        max_output_tokens: 256, validation
+      })
+    }],
+    groups: []
+  });
+
+  saveTest('first prompt');
+  const currentMonitor = monitor(store);
+  const activeTest = store.getPlatformTest('openai');
+  for (let index = 0; index < 2; index += 1) {
+    const run = store.createRun(currentMonitor, activeTest, 'manual');
+    store.markRunRunning(run.id);
+    store.completeRun(run.id, {
+      status: 'degraded', quality: 'degraded', reason: 'failed', source: 'test', outputText: 'bad'
+    }, 60);
+  }
+  assert.equal(store.groupAssessment('user-1', 'group-1').status, 'degraded');
+
+  saveTest('second prompt');
+  assert.equal(store.groupAssessment('user-1', 'group-1').status, 'unknown');
+  assert.equal(store.groupAssessment('user-1', 'group-1').considered, 0);
 });
 
 test('pruning expires old payloads without changing cumulative totals', (t) => {

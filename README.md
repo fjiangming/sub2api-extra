@@ -241,6 +241,8 @@ PROVIDER_MONITOR_SECRET=替换为至少32个字符的随机字符串
 PROVIDER_MONITOR_AUTH_MODE=local
 PROVIDER_MONITOR_LOCAL_ADMIN_USER=admin
 PROVIDER_MONITOR_LOCAL_ADMIN_PASSWORD=替换为你的本地管理员密码
+# 可选：Provider Monitor 使用 local 认证时，供运营中心只读同步供应商
+PROVIDER_MONITOR_INTEGRATION_TOKEN=替换为至少32个字符的共享随机字符串
 
 # 基座 Sub2API；local 模式下仍需独立配置以下连接与管理员凭据
 SUB2API_BASE_URL=http://host.docker.internal:8080
@@ -277,6 +279,10 @@ SUB2API_PUBLIC_URL=https://sub2api.example.com
 SUB2API_ADMIN_TOKEN=
 ADMIN_EMAIL=
 ADMIN_PASSWORD=
+
+# 成本分析供应商同步；Token 与 provider-monitor/.env 保持一致
+PROVIDER_MONITOR_BASE_URL=http://provider-monitor:9871
+PROVIDER_MONITOR_INTEGRATION_TOKEN=替换为至少32个字符的共享随机字符串
 
 # 默认只读；系统设置可以创建独立受限维护角色并启用清理
 OPERATIONS_CENTER_ENABLE_CLEANUP=false

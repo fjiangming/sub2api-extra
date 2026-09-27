@@ -42,6 +42,23 @@ test('the server listens on port 9871 by default and supports an environment ove
   assert.equal(loadConfig({ ...baseEnv, PORT: '4321' }).port, 4321);
 });
 
+test('the operations-center integration token is optional but must be strong when configured', () => {
+  const baseEnv = {
+    PROVIDER_MONITOR_SECRET: 'integration-config-secret-0123456789abcdef',
+    PROVIDER_MONITOR_AUTH_MODE: 'local',
+    PROVIDER_MONITOR_LOCAL_ADMIN_PASSWORD: 'test-password'
+  };
+  assert.equal(loadConfig(baseEnv).integrationToken, '');
+  assert.equal(loadConfig({
+    ...baseEnv,
+    PROVIDER_MONITOR_INTEGRATION_TOKEN: 'provider-integration-token-0123456789abcdef'
+  }).integrationToken, 'provider-integration-token-0123456789abcdef');
+  assert.throws(
+    () => loadConfig({ ...baseEnv, PROVIDER_MONITOR_INTEGRATION_TOKEN: 'too-short' }),
+    /PROVIDER_MONITOR_INTEGRATION_TOKEN/
+  );
+});
+
 test('all retention settings support a one-day minimum', (t) => {
   const retentionEnv = {
     PROVIDER_MONITOR_RAW_SNAPSHOT_RETENTION_DAYS: '1',

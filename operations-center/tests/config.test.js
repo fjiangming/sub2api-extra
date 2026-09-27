@@ -182,3 +182,16 @@ test('timezone date does not silently use UTC', () => {
   assert.equal(dateInTimezone('UTC', instant), '2026-09-20');
   assert.equal(dateInTimezone('Asia/Shanghai', instant), '2026-09-21');
 });
+
+test('provider monitor integration accepts a normalized URL and requires a strong shared token', () => {
+  const config = loadConfig(baseEnv({
+    PROVIDER_MONITOR_BASE_URL: 'http://provider-monitor:9871/',
+    PROVIDER_MONITOR_INTEGRATION_TOKEN: 'provider-integration-token-0123456789abcdef',
+    PROVIDER_MONITOR_REQUEST_TIMEOUT_MS: '5000'
+  }));
+  assert.equal(config.providerMonitorBaseUrl, 'http://provider-monitor:9871');
+  assert.equal(config.providerMonitorRequestTimeoutMs, 5000);
+  assert.throws(() => loadConfig(baseEnv({
+    PROVIDER_MONITOR_INTEGRATION_TOKEN: 'too-short'
+  })), /PROVIDER_MONITOR_INTEGRATION_TOKEN/);
+});

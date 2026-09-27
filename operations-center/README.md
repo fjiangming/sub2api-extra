@@ -1,6 +1,6 @@
 # Sub2API 运营数据与存储管理中心
 
-`operations-center` 是 `sub2api-extra` 中的独立轻状态服务，默认监听 `9872`。它直接读取 Sub2API PostgreSQL 业务表与原生聚合表，不修改 Sub2API 源码，不建立业务数据副本，也不创建新的永久扣费账本；本地只保存加密后的运行配置。
+`operations-center` 是 `sub2api-extra` 中的独立轻状态服务，默认监听 `9872`。它直接读取 Sub2API PostgreSQL 业务表与原生聚合表，不修改 Sub2API 源码，不建立业务数据副本，也不创建新的永久扣费账本；本地保存加密后的运行配置和独立的手工成本台账。
 
 当前实现基于 Sub2API `d2e319b2a17006122cd2d53d828c44a0bf21bd9b` 之后的最新 schema 完成核对。线上接入时仍会检查实际表结构；未知或缺失 schema 会阻断清理。
 
@@ -11,6 +11,7 @@
 - 近 30 天维度统计：模型、用户、API Key、分组、账号与计费类型。
 - 用户分析：活跃/新增趋势、首次观测活跃、7 日激活、D1/D7/D30 注册 cohort。
 - 资金分析：支付实收、退款估算、净额、余额入账来源、异常订单提示；现金与额度不会相加。
+- 成本分析：按日、周、月、年汇总充值收入、手工支出、利润与利润率；支持同步供应商后分别录入成本，以及维护自定义支出项。
 - 存储诊断：数据库和关系大小、索引/TOAST、分区、死行、长事务、复制槽/WAL 占用及有上限的进程内容量样本。
 - 清理控制：固定白名单预览、精确行数、逻辑体积估算、聚合完整性复核、原生备份硬闸门、双重确认、小批事务、取消和 JSON 报告。
 - 原生能力复用：只核验或触发 Sub2API 已有 `.sql.gz`/S3 备份；不重复实现上传、下载或覆盖恢复。
@@ -81,6 +82,8 @@ docker compose --env-file compose.services.env up -d --no-build operations-cente
 | `SUB2API_PUBLIC_URL` | 同 `SUB2API_BASE_URL` | 管理员浏览器可访问的 Sub2API 地址及 iframe 来源 |
 | `SUB2API_ADMIN_TOKEN` | 无 | 可选的 Sub2API 管理员 JWT |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | 无 | 可选；无人值守调用需要持久认证时使用 |
+| `PROVIDER_MONITOR_BASE_URL` | 无 | 供应商监控服务端地址；Compose 网络通常为 `http://provider-monitor:9871` |
+| `PROVIDER_MONITOR_INTEGRATION_TOKEN` | 无 | 可选的只读服务间 Token；Provider Monitor 使用本地认证时需要配置相同值 |
 | `OPERATIONS_CENTER_ENABLE_CLEANUP` | `false` | 显式开启破坏性执行 |
 | `SUB2API_MAINTENANCE_DATABASE_URL` | 无 | 可选高级覆盖；页面可以自动创建独立受限清理角色 |
 | `OPERATIONS_CENTER_REQUIRE_FRESH_BACKUP` | `true` | 要求成功备份的完成时间晚于本次预览 |
@@ -104,6 +107,12 @@ docker compose --env-file compose.services.env up -d --no-build operations-cente
 推荐把 `OPERATIONS_CENTER_AUTH_MODE` 设为 `sub2api`，然后在 Sub2API 管理后台的“设置 -> 自定义菜单”中添加运营中心公开地址，并将可见性限制为管理员。Sub2API 会把当前访问 Token 附加到 iframe 地址；运营中心向 `/api/v1/auth/me` 校验管理员身份后，立即换成自己的短期内存会话并从地址栏移除原始 Token。Token 和会话都不会写入数据库。
 
 跨域 HTTPS iframe 同时使用分区 Cookie 和页面会话令牌兜底。反向代理应传递 `X-Forwarded-Proto`；当 `SUB2API_BASE_URL` 是 `host.docker.internal` 等容器内地址时，必须另设浏览器可访问的 `SUB2API_PUBLIC_URL`。内部地址发生 DNS、连接或超时故障时，认证与只读管理请求会安全回退到这个已配置的公开地址，并记住成功地址供后续写操作直接使用；收到明确的 HTTP 鉴权错误不会重试，响应不确定的写操作也不会跨地址重放。
+
+## 成本台账与供应商同步
+
+成本台账写入 `OPERATIONS_CENTER_DATA_DIR/cost-ledger.json`，使用原子替换并随运营中心数据卷持久化；它不写入 Sub2API 数据库。供应商记录只保存 ID、名称、适配器、状态和币种快照，不复制供应商凭据。已有支出保留录入时的供应商名称，因此供应商被改名或删除后历史报表仍可复核。
+
+Provider Monitor 使用 `sub2api` 认证时，运营中心会用当前管理员 SSO Token 换取短期会话并读取供应商。Provider Monitor 使用 `local` 认证或需要无人值守同步时，在两个服务中配置相同的 `PROVIDER_MONITOR_INTEGRATION_TOKEN`；Token 至少 32 个字符，只能访问脱敏后的供应商列表接口。同步失败时页面保留上次成功快照，自定义支出仍可录入。
 
 Sub2API 的会话绑定会校验登录浏览器的 IP 和 User-Agent，独立服务无法代替浏览器通过该校验。使用自定义菜单 SSO 时需要关闭会话绑定并重新登录；必须保留会话绑定时，请改用 `local` 模式。
 
@@ -184,6 +193,7 @@ docker compose --env-file compose.services.env config
 - [部署与操作手册](docs/deployment-operations.md)
 - [清理范围报告](docs/cleanup-scope-report.md)
 - [统计口径](docs/metrics.md)
+- [成本分析设计与口径](docs/cost-analysis.md)
 - [最终保留策略](docs/retention-policy.md)
 - [存储与影响分析](docs/storage-retention.md)
 - [实现与运行边界](docs/implementation.md)

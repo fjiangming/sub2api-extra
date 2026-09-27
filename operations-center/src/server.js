@@ -4,10 +4,13 @@ const http = require('http');
 const { loadConfig, resolveDataDir } = require('./config');
 const { createDatabase } = require('./db');
 const { RuntimeSettingsStore } = require('./runtime-settings-store');
+const { CostLedgerStore } = require('./cost-ledger-store');
 const { AuthService } = require('./auth');
 const { SchemaInspector } = require('./schema-inspector');
 const { Sub2ApiClient } = require('./sub2api-client');
+const { ProviderMonitorClient } = require('./provider-monitor-client');
 const { MetricsService } = require('./services/metrics-service');
+const { CostAnalysisService } = require('./services/cost-analysis-service');
 const { StorageService } = require('./services/storage-service');
 const { RetentionService } = require('./services/retention-service');
 const { CleanupScheduler } = require('./services/cleanup-scheduler');
@@ -20,12 +23,23 @@ async function main() {
   const config = loadConfig(process.env, runtimeSettings);
   const database = createDatabase(config);
   const sub2api = new Sub2ApiClient(config);
+  const providerMonitor = new ProviderMonitorClient(config);
+  const costStore = new CostLedgerStore(config.dataDir);
+  await costStore.initialize();
   const auth = new AuthService(config, {
     onAdminToken: (token, expiresAt) => sub2api.setRuntimeToken(token, expiresAt),
     onAdminTokenCleared: (token) => sub2api.clearRuntimeToken(token)
   });
   const inspector = new SchemaInspector(database.read);
   const metrics = new MetricsService(database.read, inspector, config);
+  const costAnalysis = new CostAnalysisService({
+    pool: database.read,
+    inspector,
+    config,
+    store: costStore,
+    providerMonitor,
+    sub2api
+  });
   const storage = new StorageService(database.read, inspector, config);
   const retention = new RetentionService({
     readPool: database.read,
@@ -46,7 +60,7 @@ async function main() {
     sub2api
   });
   const app = createApp({
-    config, database, auth, inspector, metrics, storage, retention, scheduler, sub2api, settings
+    config, database, auth, inspector, metrics, costAnalysis, storage, retention, scheduler, sub2api, settings
   });
   const server = http.createServer(app);
   server.requestTimeout = 120000;

@@ -24,6 +24,12 @@ function dependencies(config, auth) {
       getOverview: async () => ({}), getUsage: async () => ({}), getUsageDimensions: async () => ({}),
       getUsers: async () => ({}), getFinance: async () => ({})
     },
+    costAnalysis: {
+      getReport: async () => ({}), getProviders: async () => ({ items: [] }),
+      listExpenses: () => [], listCustomItems: () => [],
+      createExpense: async (input) => input, updateExpense: async (_id, input) => input,
+      deleteExpense: async () => ({})
+    },
     storage: { getStorage: async () => ({}) },
     scheduler: { getStatus: () => ({ enabled: false }) },
     settings: {
@@ -241,4 +247,61 @@ test('server remains available for authenticated setup before a database is conf
   const status = await fetch(`${base}/api/settings`, { headers: { cookie } });
   assert.equal(status.status, 200);
   assert.equal((await status.json()).setupRequired, true);
+});
+
+test('cost analysis API exposes reports and guards expense mutations', async (t) => {
+  const config = {
+    env: 'test', trustProxy: false, authMode: 'local', adminUser: 'admin', adminPassword: 'test-password-123',
+    sessionTtlMinutes: 30, cookieSecure: false, sub2apiTimezone: 'Asia/Shanghai',
+    financeTimezone: 'Asia/Shanghai', cleanupEnabled: false
+  };
+  const auth = new AuthService(config);
+  t.after(() => auth.close());
+  const deps = dependencies(config, auth);
+  const calls = [];
+  deps.costAnalysis.getReport = async (query) => ({ currency: query.currency });
+  deps.costAnalysis.createExpense = async (input, actor) => { calls.push({ input, actor }); return { id: 'e1', ...input }; };
+  const server = http.createServer(createApp(deps));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  assert.equal((await fetch(`${base}/api/cost-analysis`)).status, 401);
+  const login = await fetch(`${base}/api/auth/login`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'test-password-123' })
+  });
+  const session = await login.json();
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const report = await fetch(`${base}/api/cost-analysis?currency=CNY`, { headers: { cookie } });
+  assert.equal(report.status, 200);
+  assert.deepEqual(await report.json(), { currency: 'CNY' });
+
+  const payload = JSON.stringify({
+    kind: 'custom', name: 'Hosting', date: '2026-09-27', amount: 20.5, currency: 'CNY', note: ''
+  });
+  const withoutCsrf = await fetch(`${base}/api/cost-analysis/expenses`, {
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/json' },
+    body: payload
+  });
+  assert.equal(withoutCsrf.status, 403);
+  assert.equal(calls.length, 0);
+  const created = await fetch(`${base}/api/cost-analysis/expenses`, {
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': session.csrfToken },
+    body: payload
+  });
+  assert.equal(created.status, 201);
+  assert.equal(calls[0].actor, 'admin');
+
+  const invalid = await fetch(`${base}/api/cost-analysis/expenses`, {
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': session.csrfToken },
+    body: JSON.stringify({
+      kind: 'custom', name: 'Hosting', date: '2026-02-31', amount: 0.001, currency: 'CNY', note: ''
+    })
+  });
+  assert.equal(invalid.status, 400);
+  assert.equal(calls.length, 1);
 });

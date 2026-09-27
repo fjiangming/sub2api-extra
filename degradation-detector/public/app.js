@@ -219,6 +219,35 @@ function degradationSummary(totals) {
   return `${rate}% · ${failed} / ${valid} 次`;
 }
 
+function validationEvidenceHtml(validation, manuallyReviewed = false) {
+  if (!validation) return '';
+  const score = validation.score == null ? '无法评分' : `${validation.score} 分`;
+  const integrity = (validation.integrity_failures || []).map((message) => `
+    <li data-passed="false"><i data-lucide="circle-alert"></i><span><strong>完整性检查</strong><small>${escapeHtml(message)}</small></span></li>`).join('');
+  const rules = (validation.rules || []).map((rule) => `
+    <li data-passed="${rule.passed === true}">
+      <i data-lucide="${rule.passed ? 'circle-check' : 'circle-x'}"></i>
+      <span><strong>${escapeHtml(rule.label)}</strong><small>${escapeHtml(rule.message)} · ${rule.severity === 'hard' ? '核心规则' : '辅助规则'} · 权重 ${Number(rule.weight) || 0}</small></span>
+    </li>`).join('');
+  return `
+    <section class="validation-evidence">
+      <header><span>${manuallyReviewed ? '自动判定证据' : '判定证据'}</span><strong>${escapeHtml(score)} · ${Number(validation.passed) || 0}/${Number(validation.total) || 0} 条通过</strong></header>
+      ${(integrity || rules) ? `<ul>${integrity}${rules}</ul>` : '<p>该历史记录没有逐条规则数据。</p>'}
+    </section>`;
+}
+
+function reviewNoticeHtml(review) {
+  if (!review) return '';
+  return `
+    <section class="manual-review-notice">
+      <i data-lucide="badge-check"></i>
+      <div>
+        <strong>人工复核结论</strong>
+        <p>原自动状态为“${escapeHtml(labels[review.automated_status] || review.automated_status)}”${review.reviewed_at ? `，复核于 ${escapeHtml(when(review.reviewed_at))}` : ''}。</p>
+      </div>
+    </section>`;
+}
+
 function activeGroup() {
   return state.data?.groups.find((group) => String(group.id) === String(state.activeGroupId)) || null;
 }
@@ -252,7 +281,7 @@ function historyChart(history) {
   const padding = Array.from({ length: Math.max(0, HISTORY_CHART_LENGTH - runs.length) }, () => null);
   return [...padding, ...runs].map((run) => {
     const status = run?.status || 'empty';
-    const title = run ? `${when(run.started)} · ${labels[status] || status}` : '';
+    const title = run ? `${when(run.started)} · ${labels[status] || status}${run.review ? ' · 人工复核' : ''}` : '';
     return `<span class="history-point" data-status="${escapeHtml(status)}" title="${escapeHtml(title)}"></span>`;
   }).join('');
 }
@@ -275,6 +304,9 @@ function renderGroups() {
       <div class="group-model">
         <span title="${escapeHtml(group.model)}">${escapeHtml(group.model)}</span>
         <span title="推理强度：${escapeHtml(reasoningLabel(group.reasoning_effort, '默认'))} · 输出：${escapeHtml(outputLabels[group.output_type] || group.output_type)}">${escapeHtml(reasoningLabel(group.reasoning_effort, '默认'))} · ${escapeHtml(outputLabels[group.output_type] || group.output_type)}</span>
+      </div>
+      <div class="assessment-line" title="${escapeHtml(group.assessment?.reason || '暂无综合判定')}">
+        <span>综合判定</span>${statusHtml(group.assessment?.status || 'unknown')}
       </div>
       <div class="history-chart" aria-label="最近检测记录">${historyChart(group.history)}</div>
       <div class="history-caption"><span>PAST ${group.history.length || 0} RESULTS</span><span>NOW</span></div>
@@ -329,7 +361,7 @@ function renderHistory(group) {
     <button type="button" data-run-id="${run.id}" aria-current="${run.id === state.selectedRunId}">
       <strong>${escapeHtml(when(run.started))}</strong>
       ${statusHtml(run.status)}
-      <small>${escapeHtml(run.model || group.model)}${run.duration_ms ? ` · ${(run.duration_ms / 1000).toFixed(1)} 秒` : ''}</small>
+      <small>${run.review ? '<span class="manual-review-label"><i data-lucide="badge-check"></i>人工复核</span> · ' : ''}${escapeHtml(run.model || group.model)}${run.score == null ? '' : ` · 自动 ${run.score} 分`}${run.duration_ms ? ` · ${(run.duration_ms / 1000).toFixed(1)} 秒` : ''}</small>
     </button>
   `).join('');
   list.querySelectorAll('button').forEach((button) => {
@@ -345,12 +377,14 @@ async function showRecord(run) {
   clearPreviewUrls();
   const box = $('result-detail');
   const duration = run.duration_ms == null ? '' : ` · 耗时：${(run.duration_ms / 1000).toFixed(1)} 秒`;
+  const score = run.score == null ? '' : ` · ${run.review ? '自动规则评分' : '规则评分'}：${run.score} 分`;
   box.innerHTML = `
     <div class="yzai-pelican-meta">
       <div>模型：${escapeHtml(run.model || '--')} · 推理强度：${escapeHtml(resultReasoningLabel(run))} · 输出：${escapeHtml(outputLabels[run.output_type] || run.output_type || '--')}</div>
-      <div>开始：${escapeHtml(when(run.started))} · 结束：${escapeHtml(run.finished ? when(run.finished) : '进行中')}${escapeHtml(duration)}</div>
+      <div>开始：${escapeHtml(when(run.started))} · 结束：${escapeHtml(run.finished ? when(run.finished) : '进行中')}${escapeHtml(duration)}${escapeHtml(score)}</div>
     </div>
     <p class="yzai-pelican-reason">${statusHtml(run.status)} · ${escapeHtml(run.reason || '正在生成与评估，请稍后查看。')}</p>
+    ${reviewNoticeHtml(run.review)}
   `;
   if (['queued', 'running'].includes(run.status)) {
     box.insertAdjacentHTML('beforeend', '<div class="yzai-pelican-empty">检测进行中，完成后自动更新。</div>');
@@ -373,6 +407,8 @@ async function showRecord(run) {
     });
     if (requestId !== state.detailRequest || !$('result-dialog').open) return;
     loading.remove();
+    box.insertAdjacentHTML('beforeend', validationEvidenceHtml(detail.validation, Boolean(detail.review)));
+    refreshIcons();
     if (detail.output_type === 'text') {
       if (detail.text == null) {
         box.insertAdjacentHTML('beforeend', '<p class="yzai-pelican-empty">作品已过期，判定记录仍然保留。</p>');
@@ -459,7 +495,7 @@ function renderDialog(force) {
   if (!run) {
     $('result-detail').innerHTML = '<p class="yzai-pelican-empty">暂无检测记录。</p>';
   } else {
-    const key = `${run.id}:${run.status}`;
+    const key = `${run.id}:${run.status}:${run.review?.reviewed_at || ''}`;
     if (force || $('result-dialog').dataset.record !== key) {
       $('result-dialog').dataset.record = key;
       showRecord(run);

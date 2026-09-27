@@ -56,7 +56,7 @@ docker compose --env-file compose.services.env pull operations-center
 docker compose --env-file compose.services.env up -d --no-build operations-center
 ```
 
-Compose 会创建 `operations-center-data` 命名卷，用于保存加密后的运行配置和本机配置密钥。容器根文件系统仍为只读，不挂载 Docker socket。
+Compose 会创建 `operations-center-data` 命名卷，用于保存加密后的运行配置、本机配置密钥和手工成本台账。容器根文件系统仍为只读，不挂载 Docker socket。
 
 ### Node.js
 
@@ -66,7 +66,7 @@ npm ci
 npm start
 ```
 
-本地运行默认把加密配置保存在 `operations-center/data`，可以通过 `OPERATIONS_CENTER_DATA_DIR` 改变位置。
+本地运行默认把加密配置和手工成本台账保存在 `operations-center/data`，可以通过 `OPERATIONS_CENTER_DATA_DIR` 改变位置。
 
 ## 5. 接入 Sub2API 菜单
 
@@ -150,12 +150,13 @@ Sub2API 升级后如果新增了统计表或白名单表，可以再次执行同
 
 ## 8. 加密配置与备份
 
-运行配置包含受限数据库连接和可选 Sub2API 管理凭据，使用 AES-256-GCM 加密。数据目录中有两个配套文件：
+运行配置包含受限数据库连接和可选 Sub2API 管理凭据，使用 AES-256-GCM 加密。数据目录中包含：
 
 - `settings.enc.json`：密文配置。
 - `settings.key`：本实例随机生成的 256 位密钥。
+- `cost-ledger.json`：权限为 `0600` 的手工成本与脱敏供应商快照。
 
-迁移或备份运营中心配置时必须同时保护并迁移整个数据卷。只有密文没有密钥无法恢复；同时泄露密文和密钥等同于泄露其中的受限凭据。数据卷不包含 Sub2API 业务数据或数据库备份。
+迁移或备份运营中心时必须同时保护并迁移整个数据卷。只有密文没有密钥无法恢复；同时泄露密文和密钥等同于泄露其中的受限凭据。数据卷包含手工成本，但不包含 Sub2API 业务数据副本或数据库备份。
 
 Sub2API 数据库备份和覆盖恢复继续使用 Sub2API 原生功能。运营中心只触发或核验原生备份，不另外复制数据库。
 

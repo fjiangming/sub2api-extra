@@ -251,13 +251,50 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   assert.equal(runtime.store.getMonitor('user-a', '1'), null);
 
   const monitor = runtime.store.getMonitor(config.serviceOwnerId, '1');
-  const sharedRun = runtime.store.createRun(monitor, runtime.store.getPlatformTest('openai'), 'test');
+  const sharedTest = {
+    ...runtime.store.getPlatformTest('openai'),
+    prompt: 'private prompt must never be returned',
+    validation: {
+      version: 2,
+      normal_threshold: 90,
+      degraded_threshold: 50,
+      confirmation: { window: 3, required_failures: 2, recovery_passes: 2 },
+      rules: [{
+        id: 'private_rule',
+        label: '公开规则名称',
+        type: 'contains',
+        severity: 'hard',
+        weight: 100,
+        value: 'private rule value must never be returned',
+        case_sensitive: false
+      }]
+    }
+  };
+  const sharedRun = runtime.store.createRun(monitor, sharedTest, 'test');
   runtime.store.markRunRunning(sharedRun.id);
   runtime.store.completeRun(sharedRun.id, {
     status: 'normal',
     quality: 'normal',
+    score: 100,
     reason: 'ok',
     source: 'test',
+    validationResult: {
+      version: 2,
+      score: 100,
+      passed: 1,
+      total: 1,
+      hard_failures: 0,
+      integrity_failures: [],
+      results: [{
+        id: 'private_rule',
+        label: '公开规则名称',
+        type: 'contains',
+        severity: 'hard',
+        weight: 100,
+        passed: true,
+        message: '已包含预期文本'
+      }]
+    },
     outputText: '<!doctype html><html><body>shared</body></html>',
     artifactMime: 'text/html',
     previewToken: 'preview_token_for_service_123456'
@@ -270,6 +307,11 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   const sharedPayload = await sharedDetail.json();
   assert.equal(sharedPayload.reasoning_effort, 'xhigh');
   assert.equal(sharedPayload.html, '<!doctype html><html><body>shared</body></html>');
+  assert.equal(sharedPayload.validation.score, 100);
+  assert.equal(sharedPayload.validation.rules[0].label, '公开规则名称');
+  assert.equal('test_snapshot' in sharedPayload, false);
+  assert.equal('validation_snapshot' in sharedPayload, false);
+  assert.doesNotMatch(JSON.stringify(sharedPayload), /private prompt|private rule value/);
   assert.match(sharedPayload.preview_url, /^\/api\/previews\/preview_token_for_service_123456\?ancestors=.+&signature=.+/);
   const forbiddenDetail = await fetch(`${http.baseUrl}/api/results/${sharedRun.id}`, { headers: headers(authC) });
   assert.equal(forbiddenDetail.status, 404);
@@ -343,6 +385,7 @@ test('frontends keep authentication and administrator controls separated', () =>
   const mainStyles = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
   const adminSource = fs.readFileSync(path.join(__dirname, '..', 'admin', 'app.js'), 'utf8');
   const adminHtml = fs.readFileSync(path.join(__dirname, '..', 'admin', 'index.html'), 'utf8');
+  const adminStyles = fs.readFileSync(path.join(__dirname, '..', 'admin', 'styles.css'), 'utf8');
   assert.match(mainSource, /params\.get\('token'\) \|\| params\.get\('access_token'\)/);
   assert.match(mainSource, /\['token', 'access_token'\]/);
   assert.match(mainSource, /state\.sessionToken && !headers\.Authorization/);
@@ -363,6 +406,7 @@ test('frontends keep authentication and administrator controls separated', () =>
   assert.match(mainSource, /reasoningLabel\(group\.reasoning_effort, '默认'\)/);
   assert.match(mainSource, /recorded && recorded !== 'none' \? recorded : group\?\.reasoning_effort/);
   assert.match(mainSource, /resultReasoningLabel\(run\)/);
+  assert.match(mainSource, /run\.review\?\.reviewed_at/);
   assert.doesNotMatch(mainSource, /reasoningLabel\(run\.reasoning_effort\)/);
   assert.doesNotMatch(mainSource, /未记录/);
   assert.match(mainSource, /const HISTORY_CHART_LENGTH = 60/);
@@ -374,6 +418,13 @@ test('frontends keep authentication and administrator controls separated', () =>
   assert.match(adminHtml, /id="history-dialog"/);
   assert.match(adminHtml, /id="history-delete-selected"/);
   assert.match(adminHtml, /id="history-clear-all"/);
+  assert.match(adminHtml, /id="review-dialog"/);
+  assert.match(adminHtml, /id="review-reason"/);
+  assert.match(adminSource, /method: 'PATCH'/);
+  assert.match(adminSource, /\/runs\/\$\{state\.reviewRunId\}\/review/);
+  assert.match(mainSource, /人工复核结论/);
+  assert.match(adminStyles, /\.review-status-options\s*\{[^}]*grid-template-columns: repeat\(3,/s);
+  assert.match(adminStyles, /@media \(max-width: 430px\)[\s\S]*\.review-status-options \{ grid-template-columns: minmax\(0, 1fr\); \}/);
   assert.doesNotMatch(adminSource, /key_cipher|key_fingerprint/);
 });
 
@@ -486,6 +537,113 @@ test('administrators can delete selected or all completed group history without 
   assert.deepEqual(group.totals, { passed: 0, valid: 0, attempts: 0 });
   assert.equal(group.history.length, 1);
   assert.equal(group.history[0].status, 'queued');
+});
+
+test('only administrators can review completed verdicts within their group boundary', async (t) => {
+  const config = testConfig(t);
+  const runner = { execute: async () => null };
+  const sub2api = new FakeSub2Api();
+  const { app, runtime } = createApp(config, { sub2api, runner, startScheduler: false });
+  const http = await listen(app);
+  t.after(async () => {
+    await http.close();
+    await runtime.scheduler.close();
+    runtime.auth.close();
+    runtime.store.close();
+  });
+
+  const admin = await session(http.baseUrl, 'token-a');
+  const ordinary = await session(http.baseUrl, 'token-b');
+  const saved = await fetch(`${http.baseUrl}/api/admin/config`, {
+    method: 'PUT',
+    headers: headers(admin, admin.csrfToken),
+    body: JSON.stringify(configuration([{
+      id: '1', enabled: true, key: 'sk-review-dedicated-12345678901234567890'
+    }]))
+  });
+  assert.equal(saved.status, 200);
+  const monitor = runtime.store.getMonitor(config.serviceOwnerId, '1');
+  const testCase = runtime.store.getPlatformTest('openai');
+  const run = runtime.store.createRun(monitor, testCase, 'manual');
+  runtime.store.markRunRunning(run.id);
+  runtime.store.completeRun(run.id, {
+    status: 'degraded', quality: 'degraded', reason: 'automatic verdict', source: 'test',
+    outputText: '<!doctype html><html><body>review me</body></html>', artifactMime: 'text/html'
+  }, runtime.store.nextScheduledAt());
+  const endpoint = `${http.baseUrl}/api/admin/groups/1/runs/${run.id}/review`;
+
+  const ordinaryReview = await fetch(endpoint, {
+    method: 'PATCH', headers: headers(ordinary, ordinary.csrfToken),
+    body: JSON.stringify({ status: 'normal', reason: '普通用户越权尝试' })
+  });
+  assert.equal(ordinaryReview.status, 403);
+  const missingCsrf = await fetch(endpoint, {
+    method: 'PATCH', headers: headers(admin),
+    body: JSON.stringify({ status: 'normal', reason: '缺少 CSRF' })
+  });
+  assert.equal(missingCsrf.status, 403);
+  const crossGroup = await fetch(`${http.baseUrl}/api/admin/groups/3/runs/${run.id}/review`, {
+    method: 'PATCH', headers: headers(admin, admin.csrfToken),
+    body: JSON.stringify({ status: 'normal', reason: '跨分组尝试' })
+  });
+  assert.equal(crossGroup.status, 404);
+  const invalidStatus = await fetch(endpoint, {
+    method: 'PATCH', headers: headers(admin, admin.csrfToken),
+    body: JSON.stringify({ status: 'error', reason: '试图伪造异常状态' })
+  });
+  assert.equal(invalidStatus.status, 400);
+  const missingReason = await fetch(endpoint, {
+    method: 'PATCH', headers: headers(admin, admin.csrfToken),
+    body: JSON.stringify({ status: 'normal', reason: '' })
+  });
+  assert.equal(missingReason.status, 400);
+
+  const active = runtime.store.createRun(monitor, testCase, 'manual');
+  const activeReview = await fetch(`${http.baseUrl}/api/admin/groups/1/runs/${active.id}/review`, {
+    method: 'PATCH', headers: headers(admin, admin.csrfToken),
+    body: JSON.stringify({ status: 'normal', reason: '任务还未完成' })
+  });
+  assert.equal(activeReview.status, 409);
+
+  const reviewedResponse = await fetch(endpoint, {
+    method: 'PATCH', headers: headers(admin, admin.csrfToken),
+    body: JSON.stringify({ status: 'normal', reason: '人工确认作品满足题目要求' })
+  });
+  assert.equal(reviewedResponse.status, 200);
+  const reviewed = (await reviewedResponse.json()).run;
+  assert.equal(reviewed.status, 'normal');
+  assert.equal(reviewed.automatic_status, 'degraded');
+  assert.equal(reviewed.automatic_reason, 'automatic verdict');
+  assert.equal(reviewed.review.reason, '人工确认作品满足题目要求');
+  assert.equal(reviewed.review.reviewed_by, 'user-a');
+  assert.equal(runtime.store.getRun(run.id).status, 'degraded');
+  assert.equal(runtime.store.getRun(run.id).manual_status, 'normal');
+
+  const publicResults = await fetch(`${http.baseUrl}/api/results`, { headers: headers(ordinary) });
+  assert.equal(publicResults.status, 200);
+  const publicGroup = (await publicResults.json()).groups.find((item) => item.id === '1');
+  const publicRun = publicGroup.history.find((item) => item.id === run.id);
+  assert.equal(publicRun.status, 'normal');
+  assert.equal(publicRun.review.automated_status, 'degraded');
+  assert.equal('reviewed_by' in publicRun.review, false);
+  assert.deepEqual(publicGroup.totals, { passed: 1, valid: 1, attempts: 1 });
+
+  const publicDetail = await fetch(`${http.baseUrl}/api/results/${run.id}`, { headers: headers(ordinary) });
+  assert.equal(publicDetail.status, 200);
+  const detail = await publicDetail.json();
+  assert.equal(detail.status, 'normal');
+  assert.equal(detail.reason, '人工复核：人工确认作品满足题目要求');
+  assert.equal('reviewed_by' in detail.review, false);
+
+  const clearedResponse = await fetch(endpoint, {
+    method: 'PATCH', headers: headers(admin, admin.csrfToken),
+    body: JSON.stringify({ status: null })
+  });
+  assert.equal(clearedResponse.status, 200);
+  const cleared = (await clearedResponse.json()).run;
+  assert.equal(cleared.status, 'degraded');
+  assert.equal(cleared.review, null);
+  assert.equal(runtime.store.getRun(run.id).manual_status, null);
 });
 
 test('artifact MIME values are normalized before being used as response headers', () => {

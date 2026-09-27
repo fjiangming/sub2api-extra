@@ -1,6 +1,9 @@
 'use strict';
 
 const path = require('path');
+const Ajv = require('ajv');
+const { load: loadHtml } = require('cheerio');
+const safeRegex = require('safe-regex2');
 const { z } = require('zod');
 
 const apiTypes = [
@@ -13,16 +16,172 @@ const apiTypes = [
 
 const outputTypes = ['text', 'html', 'image', 'file'];
 const reasoningEfforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const validationRuleTypes = [
+  'min_bytes',
+  'max_bytes',
+  'exact_text',
+  'contains',
+  'regex',
+  'not_regex',
+  'html_selector',
+  'json_schema',
+  'mime_type',
+  'image_dimensions'
+];
 const dailyTimeSchema = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/);
 
-const validationSchema = z.object({
+const legacyValidationSchema = z.object({
   min_bytes: z.coerce.number().int().min(0).max(20 * 1024 * 1024).default(1),
   required_patterns: z.array(z.string().min(1).max(1000)).max(50).default([]),
   forbidden_patterns: z.array(z.string().min(1).max(1000)).max(50).default([]),
   case_sensitive: z.boolean().default(false),
   min_width: z.coerce.number().int().min(1).max(16384).optional(),
   min_height: z.coerce.number().int().min(1).max(16384).optional()
-}).strict().default({});
+}).strict();
+
+const validationRuleSchema = z.object({
+  id: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/),
+  label: z.string().trim().min(1).max(80),
+  type: z.enum(validationRuleTypes),
+  severity: z.enum(['hard', 'soft']).default('hard'),
+  weight: z.coerce.number().int().min(1).max(100).default(10),
+  value: z.string().max(50000).optional(),
+  threshold: z.coerce.number().int().min(0).max(20 * 1024 * 1024).optional(),
+  case_sensitive: z.boolean().default(false),
+  min_count: z.coerce.number().int().min(0).max(10000).optional(),
+  max_count: z.coerce.number().int().min(0).max(10000).optional(),
+  min_width: z.coerce.number().int().min(1).max(16384).optional(),
+  min_height: z.coerce.number().int().min(1).max(16384).optional(),
+  max_width: z.coerce.number().int().min(1).max(16384).optional(),
+  max_height: z.coerce.number().int().min(1).max(16384).optional()
+}).strict().superRefine((rule, context) => {
+  const requireValue = ['exact_text', 'contains', 'regex', 'not_regex', 'html_selector', 'json_schema', 'mime_type'];
+  if (requireValue.includes(rule.type) && !String(rule.value || '').trim()) {
+    context.addIssue({ code: 'custom', path: ['value'], message: '该规则必须填写匹配内容' });
+  }
+  if (['min_bytes', 'max_bytes'].includes(rule.type) && rule.threshold == null) {
+    context.addIssue({ code: 'custom', path: ['threshold'], message: '该规则必须填写字节数' });
+  }
+  if (rule.type === 'html_selector') {
+    try {
+      loadHtml('<!doctype html><html><body></body></html>')(rule.value);
+    } catch (error) {
+      context.addIssue({ code: 'custom', path: ['value'], message: `CSS 选择器无效: ${error.message}` });
+    }
+    const minimum = rule.min_count ?? 1;
+    if (rule.max_count != null && rule.max_count < minimum) {
+      context.addIssue({ code: 'custom', path: ['max_count'], message: '最大数量不能小于最小数量' });
+    }
+  }
+  if (['regex', 'not_regex'].includes(rule.type) && rule.value) {
+    try {
+      const expression = new RegExp(rule.value, rule.case_sensitive ? '' : 'i');
+      if (!safeRegex(expression)) {
+        context.addIssue({ code: 'custom', path: ['value'], message: '正则可能造成超长计算，请简化表达式' });
+      }
+    } catch (error) {
+      context.addIssue({ code: 'custom', path: ['value'], message: `正则表达式无效: ${error.message}` });
+    }
+  }
+  if (rule.type === 'json_schema' && rule.value) {
+    try {
+      const schema = JSON.parse(rule.value);
+      new Ajv({ strict: false, allErrors: false, validateFormats: false }).compile(schema);
+    } catch (error) {
+      context.addIssue({ code: 'custom', path: ['value'], message: `JSON Schema 无效: ${error.message}` });
+    }
+  }
+  if (rule.type === 'image_dimensions' && [
+    rule.min_width, rule.min_height, rule.max_width, rule.max_height
+  ].every((value) => value == null)) {
+    context.addIssue({ code: 'custom', path: ['min_width'], message: '至少填写一个图片尺寸限制' });
+  }
+  if (rule.min_width != null && rule.max_width != null && rule.max_width < rule.min_width) {
+    context.addIssue({ code: 'custom', path: ['max_width'], message: '最大宽度不能小于最小宽度' });
+  }
+  if (rule.min_height != null && rule.max_height != null && rule.max_height < rule.min_height) {
+    context.addIssue({ code: 'custom', path: ['max_height'], message: '最大高度不能小于最小高度' });
+  }
+});
+
+const confirmationSchema = z.object({
+  window: z.coerce.number().int().min(1).max(10).default(3),
+  required_failures: z.coerce.number().int().min(1).max(10).default(2),
+  recovery_passes: z.coerce.number().int().min(1).max(10).default(2)
+}).strict().superRefine((value, context) => {
+  if (value.required_failures > value.window) {
+    context.addIssue({ code: 'custom', path: ['required_failures'], message: '确认失败次数不能大于观察次数' });
+  }
+  if (value.recovery_passes > value.window) {
+    context.addIssue({ code: 'custom', path: ['recovery_passes'], message: '恢复通过次数不能大于观察次数' });
+  }
+});
+
+const validationPolicySchema = z.object({
+  version: z.literal(2).default(2),
+  normal_threshold: z.coerce.number().int().min(1).max(100).default(80),
+  degraded_threshold: z.coerce.number().int().min(0).max(99).default(50),
+  rules: z.array(validationRuleSchema).max(50).default([]),
+  confirmation: confirmationSchema.default({ window: 3, required_failures: 2, recovery_passes: 2 })
+}).strict().superRefine((value, context) => {
+  if (value.degraded_threshold >= value.normal_threshold) {
+    context.addIssue({
+      code: 'custom',
+      path: ['degraded_threshold'],
+      message: '降智阈值必须小于正常阈值'
+    });
+  }
+  const ids = new Set();
+  value.rules.forEach((rule, index) => {
+    if (ids.has(rule.id)) {
+      context.addIssue({ code: 'custom', path: ['rules', index, 'id'], message: '规则 ID 不能重复' });
+    }
+    ids.add(rule.id);
+  });
+});
+
+function migrateLegacyValidation(value) {
+  const legacy = legacyValidationSchema.parse(value || {});
+  const rules = [];
+  if (legacy.min_bytes > 0) {
+    rules.push({
+      id: 'legacy_min_bytes', label: `输出不少于 ${legacy.min_bytes} 字节`, type: 'min_bytes',
+      severity: 'hard', weight: 10, threshold: legacy.min_bytes, case_sensitive: false
+    });
+  }
+  legacy.required_patterns.forEach((pattern, index) => rules.push({
+    id: `legacy_required_${index + 1}`, label: `必须匹配正则 ${index + 1}`, type: 'regex',
+    severity: 'hard', weight: 10, value: pattern, case_sensitive: legacy.case_sensitive
+  }));
+  legacy.forbidden_patterns.forEach((pattern, index) => rules.push({
+    id: `legacy_forbidden_${index + 1}`, label: `禁止匹配正则 ${index + 1}`, type: 'not_regex',
+    severity: 'hard', weight: 10, value: pattern, case_sensitive: legacy.case_sensitive
+  }));
+  if (legacy.min_width != null || legacy.min_height != null) {
+    rules.push({
+      id: 'legacy_image_dimensions', label: '图片尺寸达到要求', type: 'image_dimensions',
+      severity: 'hard', weight: 10, case_sensitive: false,
+      ...(legacy.min_width == null ? {} : { min_width: legacy.min_width }),
+      ...(legacy.min_height == null ? {} : { min_height: legacy.min_height })
+    });
+  }
+  return {
+    version: 2,
+    normal_threshold: 80,
+    degraded_threshold: 50,
+    rules,
+    confirmation: { window: 3, required_failures: 2, recovery_passes: 2 }
+  };
+}
+
+const validationSchema = z.preprocess((value) => {
+  if (value && typeof value === 'object' && !Array.isArray(value) &&
+      ('version' in value || 'rules' in value)) {
+    return value;
+  }
+  const legacy = legacyValidationSchema.safeParse(value || {});
+  return legacy.success ? migrateLegacyValidation(legacy.data) : value;
+}, validationPolicySchema);
 
 const testSchema = z.object({
   label: z.string().trim().min(1).max(80).optional(),
@@ -53,6 +212,22 @@ const testSchema = z.object({
       message: 'image 输出只支持 images_generations、responses 或 gemini_generate_content'
     });
   }
+  value.validation.rules.forEach((rule, index) => {
+    if (rule.type === 'html_selector' && value.output_type !== 'html') {
+      context.addIssue({
+        code: 'custom',
+        path: ['validation', 'rules', index, 'type'],
+        message: 'HTML 选择器只能用于 HTML 输出'
+      });
+    }
+    if (rule.type === 'image_dimensions' && value.output_type !== 'image') {
+      context.addIssue({
+        code: 'custom',
+        path: ['validation', 'rules', index, 'type'],
+        message: '图片尺寸只能用于图片输出'
+      });
+    }
+  });
 });
 
 const groupSelectionSchema = z.object({
@@ -145,16 +320,6 @@ function validateTestConfig(platform, value) {
       .join('; ');
     throw new Error(`平台 ${platform} 的检测配置无效: ${detail}`);
   }
-  for (const pattern of [
-    ...result.data.validation.required_patterns,
-    ...result.data.validation.forbidden_patterns
-  ]) {
-    try {
-      new RegExp(pattern, result.data.validation.case_sensitive ? '' : 'i');
-    } catch (error) {
-      throw new Error(`平台 ${platform} 包含无效检测正则: ${error.message}`);
-    }
-  }
   return { ...result.data, platform };
 }
 
@@ -194,15 +359,32 @@ function defaultPlatformTest(platformName) {
       label: 'OpenAI',
       model: 'gpt-6-astra',
       api: 'responses',
-      prompt: '请只输出一个完整 HTML 文件，制作一只鹈鹕骑自行车的二维循环动画。不要使用外部资源。',
+      prompt: [
+        '创建一个完整、可直接在浏览器打开的 HTML 文件，使用内联 SVG 绘制一只鹈鹕骑自行车的二维循环动画。',
+        '只输出 HTML 源码，不要使用 Markdown 代码块，不要解释。',
+        'SVG 必须设置 viewBox；鹈鹕主体使用 id="pelican"，自行车主体使用 id="bicycle"，两个车轮使用 class="wheel"。',
+        '至少使用一组 CSS @keyframes，让鹈鹕、自行车或车轮产生持续循环动画。',
+        '所有 HTML、CSS 和 SVG 必须内联，不得引用任何外部脚本、图片、字体或网络资源。'
+      ].join('\n'),
       output_type: 'html',
       reasoning_effort: 'medium',
       max_output_tokens: 16384,
       validation: {
-        min_bytes: 4000,
-        required_patterns: ['<!doctype html', '<style', '<svg|<canvas|<script'],
-        forbidden_patterns: ['```'],
-        case_sensitive: false
+        version: 2,
+        normal_threshold: 90,
+        degraded_threshold: 60,
+        confirmation: { window: 3, required_failures: 2, recovery_passes: 2 },
+        rules: [
+          { id: 'html_size', label: 'HTML 内容完整度', type: 'min_bytes', severity: 'soft', weight: 10, threshold: 4000, case_sensitive: false },
+          { id: 'html_document', label: '完整 HTML 文档', type: 'html_selector', severity: 'hard', weight: 10, value: 'html', min_count: 1, case_sensitive: false },
+          { id: 'svg_scene', label: '带 viewBox 的 SVG 场景', type: 'html_selector', severity: 'hard', weight: 15, value: 'svg[viewBox]', min_count: 1, case_sensitive: false },
+          { id: 'pelican', label: '鹈鹕主体', type: 'html_selector', severity: 'hard', weight: 20, value: '#pelican', min_count: 1, case_sensitive: false },
+          { id: 'bicycle', label: '自行车主体', type: 'html_selector', severity: 'hard', weight: 20, value: '#bicycle', min_count: 1, case_sensitive: false },
+          { id: 'wheels', label: '两个自行车车轮', type: 'html_selector', severity: 'hard', weight: 10, value: '.wheel', min_count: 2, case_sensitive: false },
+          { id: 'keyframes', label: '定义 CSS 关键帧', type: 'contains', severity: 'hard', weight: 7, value: '@keyframes', case_sensitive: false },
+          { id: 'animation', label: '应用 CSS 动画', type: 'regex', severity: 'hard', weight: 8, value: 'animation(?:-name)?\\s*:', case_sensitive: false },
+          { id: 'offline', label: '不引用外部资源', type: 'html_selector', severity: 'hard', weight: 10, value: '[src^="http"], [href^="http"], [src^="//"], [href^="//"]', min_count: 0, max_count: 0, case_sensitive: false }
+        ]
       }
     },
     anthropic: {
@@ -213,10 +395,13 @@ function defaultPlatformTest(platformName) {
       output_type: 'text',
       max_output_tokens: 256,
       validation: {
-        min_bytes: 4,
-        required_patterns: ['^1161$'],
-        forbidden_patterns: [],
-        case_sensitive: false
+        version: 2,
+        normal_threshold: 90,
+        degraded_threshold: 50,
+        confirmation: { window: 3, required_failures: 2, recovery_passes: 2 },
+        rules: [
+          { id: 'exact_answer', label: '答案等于 1161', type: 'exact_text', severity: 'hard', weight: 100, value: '1161', case_sensitive: false }
+        ]
       }
     },
     gemini: {
@@ -227,10 +412,13 @@ function defaultPlatformTest(platformName) {
       output_type: 'text',
       max_output_tokens: 256,
       validation: {
-        min_bytes: 4,
-        required_patterns: ['^1161$'],
-        forbidden_patterns: [],
-        case_sensitive: false
+        version: 2,
+        normal_threshold: 90,
+        degraded_threshold: 50,
+        confirmation: { window: 3, required_failures: 2, recovery_passes: 2 },
+        rules: [
+          { id: 'exact_answer', label: '答案等于 1161', type: 'exact_text', severity: 'hard', weight: 100, value: '1161', case_sensitive: false }
+        ]
       }
     }
   };
@@ -242,10 +430,13 @@ function defaultPlatformTest(platformName) {
     output_type: 'text',
     max_output_tokens: 256,
     validation: {
-      min_bytes: 4,
-      required_patterns: ['^1161$'],
-      forbidden_patterns: [],
-      case_sensitive: false
+      version: 2,
+      normal_threshold: 90,
+      degraded_threshold: 50,
+      confirmation: { window: 3, required_failures: 2, recovery_passes: 2 },
+      rules: [
+        { id: 'exact_answer', label: '答案等于 1161', type: 'exact_text', severity: 'hard', weight: 100, value: '1161', case_sensitive: false }
+      ]
     }
   });
 }
@@ -307,6 +498,8 @@ module.exports = {
   parseInteger,
   reasoningEfforts,
   testSchema,
+  validationRuleSchema,
+  validationRuleTypes,
   validateAdminConfiguration,
   validateTestConfig,
   validationSchema

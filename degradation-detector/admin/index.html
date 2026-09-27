@@ -126,6 +126,57 @@
     </footer>
   </dialog>
 
+  <dialog id="review-dialog" class="review-modal" aria-labelledby="review-title">
+    <form id="review-form">
+      <header class="review-modal-head">
+        <div>
+          <h2 id="review-title">人工复核检测状态</h2>
+          <p id="review-meta"></p>
+        </div>
+        <button id="review-close" class="icon-button" type="button" title="关闭" aria-label="关闭人工复核">
+          <i data-lucide="x"></i>
+        </button>
+      </header>
+      <div class="review-modal-body">
+        <section class="review-automatic" aria-labelledby="review-automatic-title">
+          <div><span id="review-automatic-title">自动判定</span><span id="review-automatic-status"></span></div>
+          <p id="review-automatic-reason"></p>
+        </section>
+        <fieldset class="review-status-field">
+          <legend>人工状态</legend>
+          <div class="review-status-options">
+            <label data-status="normal">
+              <input type="radio" name="review-status" value="normal" required>
+              <span><i data-lucide="circle-check"></i>正常</span>
+            </label>
+            <label data-status="degraded">
+              <input type="radio" name="review-status" value="degraded" required>
+              <span><i data-lucide="circle-x"></i>疑似降智</span>
+            </label>
+            <label data-status="unknown">
+              <input type="radio" name="review-status" value="unknown" required>
+              <span><i data-lucide="circle-help"></i>无法判定</span>
+            </label>
+          </div>
+        </fieldset>
+        <label class="field review-reason-field">
+          <span>复核理由</span>
+          <textarea id="review-reason" required minlength="2" maxlength="500"></textarea>
+        </label>
+      </div>
+      <footer class="review-modal-foot">
+        <button id="review-clear" class="button" type="button">
+          <i data-lucide="rotate-ccw"></i><span>撤销人工复核</span>
+        </button>
+        <span></span>
+        <button id="review-cancel" class="button" type="button">取消</button>
+        <button id="review-save" class="button primary" type="submit">
+          <i data-lucide="check"></i><span>保存复核</span>
+        </button>
+      </footer>
+    </form>
+  </dialog>
+
   <dialog id="confirm-dialog" class="confirm-modal" aria-labelledby="confirm-title">
     <span class="confirm-icon" aria-hidden="true"><i data-lucide="triangle-alert"></i></span>
     <div>
