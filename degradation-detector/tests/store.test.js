@@ -255,6 +255,37 @@ test('group assessment requires repeated failures and repeated recovery passes',
   assert.equal(store.groupAssessment('user-1', 'group-1').status, 'normal');
 });
 
+test('group assessment establishes and retains normal before degradation is confirmed', (t) => {
+  const config = testConfig(t);
+  const store = new Store(config);
+  t.after(() => store.close());
+  const currentMonitor = monitor(store);
+  const complete = (status) => {
+    const run = store.createRun(currentMonitor, testCase, 'manual');
+    store.markRunRunning(run.id);
+    store.completeRun(run.id, {
+      status, quality: status, reason: status, source: 'test', outputText: status
+    }, 60);
+  };
+
+  complete('normal');
+  assert.deepEqual(store.groupAssessment('user-1', 'group-1'), {
+    status: 'normal',
+    reason: '最近一次有效检测正常',
+    considered: 1,
+    window: 3,
+    required_failures: 2,
+    recovery_passes: 2
+  });
+
+  complete('degraded');
+  assert.equal(store.groupAssessment('user-1', 'group-1').status, 'normal');
+  assert.match(store.groupAssessment('user-1', 'group-1').reason, /尚未达到 2 次确认条件/);
+
+  complete('degraded');
+  assert.equal(store.groupAssessment('user-1', 'group-1').status, 'degraded');
+});
+
 test('manual reviews preserve automatic verdicts and drive effective summaries', (t) => {
   const config = testConfig(t);
   const store = new Store(config);
@@ -280,7 +311,7 @@ test('manual reviews preserve automatic verdicts and drive effective summaries',
 
   const summary = store.groupSummary('user-1', 'group-1', 10);
   assert.deepEqual(summary.totals, { passed: 1, valid: 2, attempts: 2 });
-  assert.equal(summary.assessment.status, 'unknown');
+  assert.equal(summary.assessment.status, 'normal');
   assert.equal(summary.history[0].status, 'normal');
   assert.equal(summary.history[0].quality, 'normal');
   assert.equal(summary.history[0].reason, '人工复核：人工确认内容完整');

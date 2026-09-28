@@ -230,10 +230,22 @@ function validationEvidenceHtml(validation, manuallyReviewed = false) {
       <span><strong>${escapeHtml(rule.label)}</strong><small>${escapeHtml(rule.message)} · ${rule.severity === 'hard' ? '核心规则' : '辅助规则'} · 权重 ${Number(rule.weight) || 0}</small></span>
     </li>`).join('');
   return `
-    <section class="validation-evidence">
-      <header><span>${manuallyReviewed ? '自动判定证据' : '判定证据'}</span><strong>${escapeHtml(score)} · ${Number(validation.passed) || 0}/${Number(validation.total) || 0} 条通过</strong></header>
-      ${(integrity || rules) ? `<ul>${integrity}${rules}</ul>` : '<p>该历史记录没有逐条规则数据。</p>'}
-    </section>`;
+    <details class="validation-evidence">
+      <summary>
+        <span class="validation-evidence-title"><i data-lucide="list-checks"></i>${manuallyReviewed ? '自动判定证据' : '判定证据'}</span>
+        <span class="validation-evidence-summary"><strong>${escapeHtml(score)} · ${Number(validation.passed) || 0}/${Number(validation.total) || 0} 条通过</strong><i data-lucide="chevron-down"></i></span>
+      </summary>
+      <div class="validation-evidence-content">
+        ${(integrity || rules) ? `<ul>${integrity}${rules}</ul>` : '<p>该历史记录没有逐条规则数据。</p>'}
+      </div>
+    </details>`;
+}
+
+function resultReason(run) {
+  const reason = run.reason || '正在生成与评估，请稍后查看。';
+  if (run.status !== 'normal') return reason;
+  const caveat = '规则判定为正常；单次结果不能证明模型身份或整体能力';
+  return reason.includes(caveat) ? reason : `${reason.replace(/[；;。\s]+$/u, '')}；${caveat}`;
 }
 
 function reviewNoticeHtml(review) {
@@ -376,6 +388,7 @@ async function showRecord(run) {
   const requestId = ++state.detailRequest;
   clearPreviewUrls();
   const box = $('result-detail');
+  box.classList.remove('yzai-pelican-detail--html');
   const duration = run.duration_ms == null ? '' : ` · 耗时：${(run.duration_ms / 1000).toFixed(1)} 秒`;
   const score = run.score == null ? '' : ` · ${run.review ? '自动规则评分' : '规则评分'}：${run.score} 分`;
   box.innerHTML = `
@@ -383,7 +396,7 @@ async function showRecord(run) {
       <div>模型：${escapeHtml(run.model || '--')} · 推理强度：${escapeHtml(resultReasoningLabel(run))} · 输出：${escapeHtml(outputLabels[run.output_type] || run.output_type || '--')}</div>
       <div>开始：${escapeHtml(when(run.started))} · 结束：${escapeHtml(run.finished ? when(run.finished) : '进行中')}${escapeHtml(duration)}${escapeHtml(score)}</div>
     </div>
-    <p class="yzai-pelican-reason">${statusHtml(run.status)} · ${escapeHtml(run.reason || '正在生成与评估，请稍后查看。')}</p>
+    <p class="yzai-pelican-reason">${statusHtml(run.status)} · ${escapeHtml(resultReason(run))}</p>
     ${reviewNoticeHtml(run.review)}
   `;
   if (['queued', 'running'].includes(run.status)) {
@@ -428,6 +441,8 @@ async function showRecord(run) {
         box.insertAdjacentHTML('beforeend', '<p class="yzai-pelican-empty">作品已过期，判定记录仍然保留。</p>');
         return;
       }
+      box.classList.add('yzai-pelican-detail--html');
+      controls.classList.add('yzai-pelican-controls--html');
       const frame = createPreviewFrame(detail.preview_url, title, 'allow-scripts');
       const toggle = document.createElement('button');
       toggle.className = 'yzai-pelican-btn';

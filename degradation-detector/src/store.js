@@ -889,28 +889,62 @@ class Store {
       WHERE user_id = ? AND group_id = ?
         AND COALESCE(manual_status, status) IN ('normal', 'degraded')
         ${snapshot ? 'AND test_snapshot = ?' : ''}
-      ORDER BY id DESC LIMIT ?
+      ORDER BY id ASC
     `).all(
       String(userId),
       String(groupId),
-      ...(snapshot ? [snapshot] : []),
-      Number(confirmation.window)
+      ...(snapshot ? [snapshot] : [])
     );
-    const statuses = rows.map((row) => row.effective_status);
+    const allStatuses = rows.map((row) => row.effective_status);
+    const statuses = allStatuses.slice(-Number(confirmation.window));
+    let status = 'unknown';
+    let evidence = [];
+    let recoveryStreak = 0;
+
+    for (const current of allStatuses) {
+      if (status === 'degraded') {
+        recoveryStreak = current === 'normal' ? recoveryStreak + 1 : 0;
+        if (recoveryStreak >= confirmation.recovery_passes) {
+          status = 'normal';
+          evidence = [];
+          recoveryStreak = 0;
+        }
+        continue;
+      }
+
+      evidence.push(current);
+      evidence = evidence.slice(-Number(confirmation.window));
+      const failures = evidence.filter((item) => item === 'degraded').length;
+      if (failures >= confirmation.required_failures) {
+        status = 'degraded';
+        evidence = [];
+        recoveryStreak = 0;
+      } else if (status === 'unknown' && current === 'normal') {
+        status = 'normal';
+      }
+    }
+
     let consecutiveNormal = 0;
-    for (const status of statuses) {
-      if (status !== 'normal') break;
+    for (let index = statuses.length - 1; index >= 0; index -= 1) {
+      if (statuses[index] !== 'normal') break;
       consecutiveNormal += 1;
     }
     const failures = statuses.filter((status) => status === 'degraded').length;
-    let status = 'unknown';
-    let reason = `最近 ${statuses.length}/${confirmation.window} 次有效检测尚不足以确认状态`;
-    if (consecutiveNormal >= confirmation.recovery_passes) {
-      status = 'normal';
-      reason = `最近连续 ${consecutiveNormal} 次有效检测正常`;
-    } else if (failures >= confirmation.required_failures) {
-      status = 'degraded';
-      reason = `最近 ${statuses.length} 次有效检测中有 ${failures} 次疑似降智`;
+    let reason = '暂无与当前检测配置匹配的有效结果';
+    if (status === 'normal') {
+      if (statuses.at(-1) === 'degraded') {
+        reason = `综合状态保持正常；最近 ${statuses.length} 次有效检测中有 ${failures} 次疑似降智，尚未达到 ${confirmation.required_failures} 次确认条件`;
+      } else {
+        reason = consecutiveNormal > 1
+          ? `最近连续 ${consecutiveNormal} 次有效检测正常`
+          : '最近一次有效检测正常';
+      }
+    } else if (status === 'degraded') {
+      reason = consecutiveNormal > 0
+        ? `综合状态仍为疑似降智；已连续 ${consecutiveNormal}/${confirmation.recovery_passes} 次有效检测正常`
+        : `综合状态为疑似降智；需连续 ${confirmation.recovery_passes} 次有效检测正常后恢复`;
+    } else if (statuses.length > 0) {
+      reason = `最近 ${statuses.length} 次有效检测中有 ${failures} 次疑似降智，尚未达到 ${confirmation.required_failures} 次确认条件`;
     }
     return {
       status,

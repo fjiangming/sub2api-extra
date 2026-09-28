@@ -407,6 +407,12 @@ test('frontends keep authentication and administrator controls separated', () =>
   assert.match(mainSource, /recorded && recorded !== 'none' \? recorded : group\?\.reasoning_effort/);
   assert.match(mainSource, /resultReasoningLabel\(run\)/);
   assert.match(mainSource, /run\.review\?\.reviewed_at/);
+  assert.match(mainSource, /<details class="validation-evidence">/);
+  assert.doesNotMatch(mainSource, /<details class="validation-evidence"\s+open/);
+  assert.match(mainSource, /规则判定为正常；单次结果不能证明模型身份或整体能力/);
+  assert.match(mainSource, /controls\.classList\.add\('yzai-pelican-controls--html'\)/);
+  assert.match(mainStyles, /\.yzai-pelican-controls--html\s*\{[^}]*position: absolute;/s);
+  assert.match(mainStyles, /\.yzai-pelican-frame\s*\{[^}]*height: clamp\(420px, calc\(64dvh - 12px\), 668px\);/s);
   assert.doesNotMatch(mainSource, /reasoningLabel\(run\.reasoning_effort\)/);
   assert.doesNotMatch(mainSource, /未记录/);
   assert.match(mainSource, /const HISTORY_CHART_LENGTH = 60/);

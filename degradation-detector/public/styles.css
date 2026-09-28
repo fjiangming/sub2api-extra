@@ -296,9 +296,9 @@ button, select, input { color: inherit; }
   padding: 0;
   border: 1px solid var(--border);
   border-radius: 16px;
-  width: min(1200px, calc(100vw - 40px));
+  width: min(1320px, calc(100vw - 32px));
   max-width: none;
-  height: min(840px, calc(100dvh - 48px));
+  height: min(960px, calc(100dvh - 24px));
   max-height: none;
   color: var(--text);
   background: var(--surface);
@@ -349,27 +349,38 @@ button, select, input { color: inherit; }
 .yzai-pelican-status[data-status="unknown"], .yzai-pelican-status[data-status="error"] { color: var(--amber); }
 .yzai-pelican-status[data-status="running"], .yzai-pelican-status[data-status="queued"] { color: var(--teal-strong); }
 
-.yzai-pelican-detail { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; padding: 18px; }
+.yzai-pelican-detail { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: auto; padding: 18px; }
 .yzai-pelican-meta { display: grid; gap: 3px; margin-bottom: 10px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.yzai-pelican-detail--html .yzai-pelican-meta { padding-right: 104px; }
 .yzai-pelican-reason { margin: 0 0 12px; font-size: 13px; overflow-wrap: anywhere; }
 .manual-review-notice { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; margin: 0 0 14px; padding: 10px 0; border-top: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); }
 .manual-review-notice > svg { width: 16px; height: 16px; margin-top: 1px; color: var(--teal-strong); }
 .manual-review-notice strong { display: block; color: var(--teal-strong); font-size: 12px; }
 .manual-review-notice p { margin: 3px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
-.validation-evidence { margin: 0 0 14px; border-top: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); }
-.validation-evidence header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; color: var(--muted); font-size: 11px; }
-.validation-evidence header strong { color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; }
+.validation-evidence { flex: 0 0 auto; margin: 0 0 14px; border-top: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); }
+.validation-evidence summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 42px; padding: 10px 0; color: var(--muted); font-size: 11px; cursor: pointer; list-style: none; }
+.validation-evidence summary::-webkit-details-marker { display: none; }
+.validation-evidence summary:focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; border-radius: 4px; }
+.validation-evidence-title, .validation-evidence-summary { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+.validation-evidence-title svg { width: 15px; height: 15px; color: var(--teal-strong); }
+.validation-evidence-summary { justify-content: flex-end; text-align: right; }
+.validation-evidence-summary strong { color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; }
+.validation-evidence-summary svg { width: 14px; height: 14px; flex: 0 0 auto; transition: transform .16s ease; }
+.validation-evidence[open] .validation-evidence-summary svg { transform: rotate(180deg); }
+.validation-evidence-content { border-top: 1px solid var(--border-soft); }
 .validation-evidence ul { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
 .validation-evidence li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 8px; padding: 9px 0; border-top: 1px solid var(--border-soft); }
+.validation-evidence li:first-child { border-top: 0; }
 .validation-evidence li > svg { width: 16px; height: 16px; margin-top: 1px; color: var(--red); }
 .validation-evidence li[data-passed="true"] > svg { color: var(--green); }
 .validation-evidence li span { min-width: 0; }
 .validation-evidence li strong { display: block; font-size: 12px; overflow-wrap: anywhere; }
 .validation-evidence li small { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
-.validation-evidence > p { margin: 0; padding: 10px 0; border-top: 1px solid var(--border-soft); color: var(--muted); font-size: 11px; }
-.yzai-pelican-controls { display: flex; gap: 8px; margin-bottom: 12px; }
-.yzai-pelican-frame { width: 100%; flex: 1; min-height: 320px; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--surface-soft); }
-.yzai-pelican-artifact { display: block; width: 100%; flex: 1; min-height: 320px; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--surface-soft); }
+.validation-evidence-content > p { margin: 0; padding: 10px 0; color: var(--muted); font-size: 11px; }
+.yzai-pelican-controls { display: flex; flex: 0 0 auto; gap: 8px; margin-bottom: 12px; }
+.yzai-pelican-controls--html { position: absolute; z-index: 1; top: 18px; right: 18px; margin: 0; }
+.yzai-pelican-frame { display: block; width: 100%; height: clamp(420px, calc(64dvh - 12px), 668px); flex: 0 0 auto; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--surface-soft); }
+.yzai-pelican-artifact { display: block; width: 100%; height: clamp(420px, 64dvh, 680px); flex: 0 0 auto; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--surface-soft); }
 .yzai-pelican-image, .yzai-pelican-video { object-fit: contain; }
 .yzai-pelican-audio { flex: 0 0 64px; min-height: 64px; padding: 10px; }
 .yzai-pelican-code { display: block; flex: 1; margin: 0; padding: 16px; border-radius: 10px; background: var(--surface-soft); white-space: pre-wrap; overflow: auto; overflow-wrap: anywhere; font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
@@ -444,7 +455,11 @@ button, select, input { color: inherit; }
   .yzai-pelican-history { display: flex; flex: 0 0 auto; gap: 8px; max-height: 132px; padding: 10px; border-right: 0; border-bottom: 1px solid var(--border-soft); }
   .yzai-pelican-history button { min-width: 174px; margin: 0; padding: 10px; }
   .yzai-pelican-detail { flex: 1; padding: 12px; }
-  .yzai-pelican-frame { min-height: 300px; }
+  .yzai-pelican-detail--html .yzai-pelican-meta { padding-right: 0; }
+  .yzai-pelican-controls--html { position: static; margin-bottom: 12px; }
+  .validation-evidence summary { align-items: flex-start; }
+  .validation-evidence-summary { flex-direction: row; flex-wrap: nowrap; }
+  .yzai-pelican-frame, .yzai-pelican-artifact { height: clamp(360px, 58dvh, 560px); }
 }
 
 @media (prefers-reduced-motion: reduce) {
