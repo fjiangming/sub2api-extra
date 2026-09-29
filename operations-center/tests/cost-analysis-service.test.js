@@ -31,7 +31,7 @@ async function createService(t, rows = [], balance = { user_balance: '0', balanc
   return { service, store, queries };
 }
 
-test('cost analysis aggregates every used redemption, manual income and expenses by Monday-based weeks', async (t) => {
+test('cost analysis aggregates used monetary balance records, manual income and expenses by Monday-based weeks', async (t) => {
   const { service, store, queries } = await createService(t, [
     { date: '2026-09-01', transactions: '2', revenue: '100.00' },
     { date: '2026-09-08', transactions: '1', revenue: '50.00' }
@@ -87,7 +87,8 @@ test('cost analysis aggregates every used redemption, manual income and expenses
   assert.match(queries[0].sql, /used_at >=/);
   assert.match(queries[0].sql, /used_at IS NOT NULL/);
   assert.match(queries[0].sql, /status = 'used'/);
-  assert.doesNotMatch(queries[0].sql, /\btype\s*(?:=|IN\s*\()/i);
+  assert.match(queries[0].sql, /type IN \('balance', 'admin_balance'\)/);
+  assert.doesNotMatch(queries[0].sql, /concurrency|subscription|invitation/);
   assert.match(queries[0].sql, /\$4 = 'CNY'/);
   assert.doesNotMatch(queries[0].sql, /payment_orders|pay_amount|\bJOIN\b/);
   assert.deepEqual(queries[0].params, ['2026-09-01', '2026-09-11', 'Asia/Shanghai', 'CNY']);
@@ -98,7 +99,7 @@ test('cost analysis aggregates every used redemption, manual income and expenses
   assert.equal(queries[1].params, undefined);
 });
 
-test('automatic income preserves signed values while counting each used redemption row once', async (t) => {
+test('automatic income preserves signed balance adjustments while counting each selected row once', async (t) => {
   const { service, queries } = await createService(t, [
     { date: '2026-09-15', transactions: '4', revenue: '125.50' },
     { date: '2026-09-16', transactions: '1', revenue: '-25.50' }
@@ -117,9 +118,12 @@ test('automatic income preserves signed values while counting each used redempti
   );
   assert.match(queries[0].sql, /COUNT\(\*\)/);
   assert.match(queries[0].sql, /SUM\(value\)/);
-  assert.doesNotMatch(queries[0].sql, /\bJOIN\b|\bUNION\b|\btype\b/i);
-  assert.match(report.caveats[0], /所有已使用记录/);
-  assert.match(report.caveats[1], /负数记录会冲减自动收入/);
+  assert.match(queries[0].sql, /type IN \('balance', 'admin_balance'\)/);
+  assert.doesNotMatch(queries[0].sql, /\bJOIN\b|\bUNION\b/i);
+  assert.match(report.caveats[0], /balance、admin_balance/);
+  assert.match(report.caveats[1], /订阅和邀请记录不是金额/);
+  assert.match(report.caveats[2], /负数记录会冲减自动收入/);
+  assert.match(report.caveats[2], /不必然代表现金实收/);
 });
 
 test('cost analysis requires redeem codes and users for automatic income and current balance', async (t) => {
