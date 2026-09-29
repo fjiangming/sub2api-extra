@@ -8,7 +8,7 @@ const path = require('node:path');
 const { CostLedgerStore } = require('../src/cost-ledger-store');
 const { CostAnalysisService, createPeriods, periodStart } = require('../src/services/cost-analysis-service');
 
-async function createService(t, rows = [], balance = { user_balance: '0', balance_users: '0' }) {
+async function createService(t, rows = [], balance = { user_balance: '0', balance_users: '0' }, resolveRows = null) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'operations-center-cost-analysis-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const store = new CostLedgerStore(directory);
@@ -18,6 +18,8 @@ async function createService(t, rows = [], balance = { user_balance: '0', balanc
     pool: {
       async query(sql, params) {
         queries.push({ sql, params });
+        const resolved = await resolveRows?.(sql, params);
+        if (resolved !== undefined) return { rows: resolved };
         if (/FROM users/.test(sql)) return { rows: [balance] };
         return { rows };
       }
@@ -82,7 +84,7 @@ test('cost analysis aggregates used monetary balance records, manual income and 
   assert.deepEqual(report.periods.map((row) => row.label), ['09-01 ~ 09-06', '09-07 ~ 09-10']);
   assert.deepEqual(report.breakdown.map((row) => [row.name, row.amount]), [['服务器', 40], ['Provider One', 30]]);
   assert.deepEqual(report.incomeBreakdown, [{ name: '项目回款', amount: 30, count: 2, percentage: 100 }]);
-  assert.match(queries[0].sql, /SUM\(value\)/);
+  assert.match(queries[0].sql, /SUM\(r\.value\)/);
   assert.match(queries[0].sql, /FROM redeem_codes/);
   assert.match(queries[0].sql, /used_at >=/);
   assert.match(queries[0].sql, /used_at IS NOT NULL/);
@@ -117,7 +119,7 @@ test('automatic income preserves signed balance adjustments while counting each 
     [['2026-09-15', 125.5], ['2026-09-16', -25.5]]
   );
   assert.match(queries[0].sql, /COUNT\(\*\)/);
-  assert.match(queries[0].sql, /SUM\(value\)/);
+  assert.match(queries[0].sql, /SUM\(r\.value\)/);
   assert.match(queries[0].sql, /type IN \('balance', 'admin_balance'\)/);
   assert.doesNotMatch(queries[0].sql, /\bJOIN\b|\bUNION\b/i);
   assert.match(report.caveats[0], /balance、admin_balance/);
@@ -142,6 +144,132 @@ test('cost analysis requires redeem codes and users for automatic income and cur
       error.message === '缺少必要数据表：redeem_codes' && error.status === 503
   );
   assert.deepEqual(required, ['redeem_codes', 'users']);
+  assert.equal(queries.length, 0);
+});
+
+test('automatic income user audit paginates searchable user totals without losing bigint ids', async (t) => {
+  const { service, queries } = await createService(t, [], undefined, (sql) => {
+    if (/WITH user_totals AS/.test(sql)) {
+      return [{ total_users: '2', transactions: '4', total_income: '125.50' }];
+    }
+    if (/SELECT r\.used_by::text AS user_id/.test(sql)) {
+      return [
+        {
+          user_id: '9007199254740993', email: 'large@example.com', username: 'Large ID',
+          user_deleted: false, user_missing: false, transactions: '3', total_income: '150.50',
+          first_used_at: '2026-09-01T00:00:00.000Z', last_used_at: '2026-09-20T00:00:00.000Z'
+        },
+        {
+          user_id: null, email: null, username: null, user_deleted: false, user_missing: false,
+          transactions: '1', total_income: '-25.00', first_used_at: '2026-09-10T00:00:00.000Z',
+          last_used_at: '2026-09-10T00:00:00.000Z'
+        }
+      ];
+    }
+    return undefined;
+  });
+
+  const result = await service.getAutomaticIncomeUsers({
+    start: '2026-09-01', end: '2026-09-30', currency: 'cny', search: 'large', page: '2', pageSize: '20'
+  });
+
+  assert.deepEqual(result.summary, { users: 2, transactions: 4, totalIncome: 125.5 });
+  assert.deepEqual(result.pagination, {
+    page: 2, pageSize: 20, total: 2, totalPages: 1, hasPrevious: true, hasNext: false
+  });
+  assert.equal(result.items[0].userId, '9007199254740993');
+  assert.equal(result.items[0].userKey, '9007199254740993');
+  assert.equal(result.items[1].userKey, 'unassigned');
+  assert.equal(result.items[1].missing, true);
+  assert.equal(result.items[1].totalIncome, -25);
+  assert.equal(queries.length, 2);
+  for (const query of queries) {
+    assert.match(query.sql, /r\.status = 'used'/);
+    assert.match(query.sql, /r\.type IN \('balance', 'admin_balance'\)/);
+    assert.match(query.sql, /\$4 = 'CNY'/);
+    assert.match(query.sql, /u\.email[\s\S]*u\.username[\s\S]*r\.used_by::text/);
+  }
+  assert.deepEqual(queries[0].params, ['2026-09-01', '2026-10-01', 'Asia/Shanghai', 'CNY', 'large']);
+  assert.deepEqual(queries[1].params, ['2026-09-01', '2026-10-01', 'Asia/Shanghai', 'CNY', 'large', 20, 20]);
+});
+
+test('automatic income user drilldown returns every selected redeem record and missing-user bucket', async (t) => {
+  const { service, queries } = await createService(t, [], undefined, (sql, params) => {
+    if (/SELECT COUNT\(\*\) AS transactions/.test(sql)) {
+      return [{
+        transactions: '2', total_income: '75.25', first_used_at: '2026-09-03T01:00:00.000Z',
+        last_used_at: '2026-09-04T02:00:00.000Z'
+      }];
+    }
+    if (/SELECT r\.id::text AS id/.test(sql)) {
+      return [
+        {
+          id: '42', code: 'PAID-CODE', type: 'balance', value: '100.25', notes: 'online recharge',
+          used_at: '2026-09-04T02:00:00.000Z', created_at: '2026-09-04T01:00:00.000Z'
+        },
+        {
+          id: '41', code: 'ADMIN-ADJUST', type: 'admin_balance', value: '-25', notes: 'correction',
+          used_at: '2026-09-03T01:00:00.000Z', created_at: '2026-09-03T00:00:00.000Z'
+        }
+      ];
+    }
+    if (/SELECT id::text AS id, email/.test(sql) && params[0] === '9007199254740993') {
+      return [{ id: '9007199254740993', email: 'audit@example.com', username: 'Auditor', deleted_at: null }];
+    }
+    return undefined;
+  });
+
+  const detail = await service.getAutomaticIncomeRecords('9007199254740993', {
+    start: '2026-09-01', end: '2026-09-30', currency: 'CNY', page: 1, pageSize: 20
+  });
+  assert.equal(detail.user.userId, '9007199254740993');
+  assert.equal(detail.user.username, 'Auditor');
+  assert.deepEqual(detail.summary, {
+    transactions: 2,
+    totalIncome: 75.25,
+    firstUsedAt: '2026-09-03T01:00:00.000Z',
+    lastUsedAt: '2026-09-04T02:00:00.000Z'
+  });
+  assert.deepEqual(detail.items.map((row) => [row.id, row.type, row.value]), [
+    ['42', 'balance', 100.25], ['41', 'admin_balance', -25]
+  ]);
+  for (const query of queries.slice(0, 2)) {
+    assert.match(query.sql, /r\.status = 'used'/);
+    assert.match(query.sql, /r\.type IN \('balance', 'admin_balance'\)/);
+    assert.match(query.sql, /r\.used_by = \$5::bigint/);
+    assert.equal(query.params[4], '9007199254740993');
+  }
+
+  queries.length = 0;
+  const missing = await service.getAutomaticIncomeRecords('unassigned', {
+    start: '2026-09-01', end: '2026-09-30', currency: 'CNY'
+  });
+  assert.equal(missing.user.userId, null);
+  assert.equal(missing.user.userKey, 'unassigned');
+  assert.equal(missing.user.missing, true);
+  assert.equal(queries.length, 2);
+  assert.equal(queries[0].params[4], null);
+  assert.match(queries[0].sql, /r\.used_by IS NULL/);
+});
+
+test('automatic income audit rejects invalid pagination, search and user ids before querying', async (t) => {
+  const { service, queries } = await createService(t);
+  await assert.rejects(
+    service.getAutomaticIncomeUsers({ page: 0 }),
+    (error) => error.code === 'INVALID_PAGINATION' && error.status === 400
+  );
+  await assert.rejects(
+    service.getAutomaticIncomeUsers({ search: 'x'.repeat(101) }),
+    (error) => error.code === 'INVALID_SEARCH' && error.status === 400
+  );
+  await assert.rejects(
+    service.getAutomaticIncomeRecords('1 OR 1=1', {}),
+    (error) => error.code === 'INVALID_USER_ID' && error.status === 400
+  );
+  await assert.rejects(
+    service.getAutomaticIncomeRecords('9223372036854775808', {}),
+    (error) => error.code === 'INVALID_USER_ID' && error.status === 400
+  );
   assert.equal(queries.length, 0);
 });
 

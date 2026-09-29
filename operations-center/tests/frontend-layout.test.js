@@ -45,6 +45,13 @@ test('cost analysis exposes reporting plus editable income and expense ledgers',
   assert.match(script, /metricCard\('实际利润'/);
   assert.match(html, /<th class="numeric">自动收入<\/th>/);
   assert.match(html, /<th class="numeric">兑换笔数<\/th>/);
+  assert.match(html, /id="cost-auto-income-page"/);
+  assert.match(html, /id="cost-auto-user-search"/);
+  assert.match(html, /id="cost-auto-users"/);
+  assert.match(html, /id="cost-auto-records"/);
+  assert.match(script, /data-cost-auto-income-open/);
+  assert.match(script, /\/api\/cost-analysis\/automatic-income\/users/);
+  assert.match(script, /data-cost-auto-user-detail/);
   assert.match(script, /refreshCostAnalysisAfterMutation/);
   assert.doesNotMatch(script, /updateCostProviderCurrency/);
 });

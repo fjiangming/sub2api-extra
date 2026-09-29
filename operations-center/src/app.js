@@ -269,6 +269,12 @@ function createApp({ config, database, auth, inspector, metrics, costAnalysis, s
   api.get('/metrics/users', asyncRoute(async (req, res) => res.json(await metrics.getUsers(req.query))));
   api.get('/metrics/finance', asyncRoute(async (req, res) => res.json(await metrics.getFinance(req.query))));
   api.get('/cost-analysis', asyncRoute(async (req, res) => res.json(await costAnalysis.getReport(req.query))));
+  api.get('/cost-analysis/automatic-income/users', asyncRoute(async (req, res) => {
+    res.json(await costAnalysis.getAutomaticIncomeUsers(req.query));
+  }));
+  api.get('/cost-analysis/automatic-income/users/:userKey/records', asyncRoute(async (req, res) => {
+    res.json(await costAnalysis.getAutomaticIncomeRecords(req.params.userKey, req.query));
+  }));
   api.get('/cost-analysis/providers', asyncRoute(async (req, res) => res.json(await costAnalysis.getProviders({
     refresh: req.query.refresh === 'true',
     accessToken: req.auth.upstreamAccessToken || null

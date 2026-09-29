@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Sub2API 运营中心</title>
-  <link rel="stylesheet" href="/styles.css?v=20260929-3">
+  <link rel="stylesheet" href="/styles.css?v=20260930-1">
   <script src="/vendor/echarts.js" defer></script>
   <script src="/vendor/lucide.js" defer></script>
   <script src="/cost-analysis-ui.js?v=20260929-3" defer></script>
-  <script src="/app.js?v=20260930-1" defer></script>
+  <script src="/app.js?v=20260930-2" defer></script>
 </head>
 <body>
   <div id="login-view" class="login-view" hidden>
@@ -205,6 +205,56 @@
           <section class="panel">
             <div class="panel-heading"><div><h2>支出台账</h2><p id="cost-expense-count">0 笔</p></div></div>
             <div class="table-wrap"><table class="wide-table"><thead><tr><th>日期</th><th>支出项</th><th>类型</th><th>备注</th><th class="numeric">金额</th><th class="numeric">操作</th></tr></thead><tbody id="cost-expenses"></tbody></table></div>
+          </section>
+
+          <section id="cost-auto-income-page" class="drilldown-page" aria-labelledby="cost-auto-income-title" hidden>
+            <header class="drilldown-heading">
+              <button id="cost-auto-income-close" class="icon-button" type="button" title="返回成本分析" aria-label="返回成本分析"><i data-lucide="arrow-left"></i></button>
+              <div>
+                <p class="drilldown-eyebrow">成本分析</p>
+                <h2 id="cost-auto-income-title">自动收入复核</h2>
+                <p id="cost-auto-income-meta">读取中</p>
+              </div>
+            </header>
+
+            <div id="cost-auto-users-view">
+              <form id="cost-auto-user-search" class="filter-bar drilldown-filter" role="search">
+                <label>搜索用户<input name="search" type="search" maxlength="100" placeholder="邮箱、用户名或用户 ID"></label>
+                <label>每页<select name="pageSize"><option value="20">20 条</option><option value="50">50 条</option><option value="100">100 条</option></select></label>
+                <button class="button primary" type="submit"><i data-lucide="search"></i><span>搜索</span></button>
+                <button id="cost-auto-user-search-reset" class="icon-button" type="button" title="清空搜索" aria-label="清空搜索"><i data-lucide="x"></i></button>
+              </form>
+
+              <section class="panel">
+                <div class="panel-heading"><div><h3>兑换用户</h3><p id="cost-auto-user-summary">读取中</p></div></div>
+                <div class="table-wrap"><table class="wide-table automatic-income-users-table"><thead><tr><th>用户</th><th>状态</th><th class="numeric">兑换笔数</th><th>最近兑换</th><th class="numeric">收入总额</th><th class="numeric">操作</th></tr></thead><tbody id="cost-auto-users"></tbody></table></div>
+                <nav class="pagination-bar" aria-label="兑换用户分页">
+                  <span id="cost-auto-users-page-label">第 1 页</span>
+                  <div>
+                    <button id="cost-auto-users-previous" class="icon-button" type="button" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button>
+                    <button id="cost-auto-users-next" class="icon-button" type="button" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button>
+                  </div>
+                </nav>
+              </section>
+            </div>
+
+            <div id="cost-auto-records-view" hidden>
+              <div class="drilldown-subheading">
+                <button id="cost-auto-records-back" class="icon-button" type="button" title="返回用户列表" aria-label="返回用户列表"><i data-lucide="arrow-left"></i></button>
+                <div><h3 id="cost-auto-record-user">兑换记录</h3><p id="cost-auto-record-user-meta"></p></div>
+              </div>
+              <section class="panel">
+                <div class="panel-heading"><div><h3>兑换明细</h3><p id="cost-auto-record-summary">读取中</p></div></div>
+                <div class="table-wrap"><table class="wide-table automatic-income-records-table"><thead><tr><th>记录 ID</th><th>使用时间</th><th>类型</th><th>兑换码</th><th>备注</th><th>生成时间</th><th class="numeric">金额</th></tr></thead><tbody id="cost-auto-records"></tbody></table></div>
+                <nav class="pagination-bar" aria-label="兑换记录分页">
+                  <span id="cost-auto-records-page-label">第 1 页</span>
+                  <div>
+                    <button id="cost-auto-records-previous" class="icon-button" type="button" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button>
+                    <button id="cost-auto-records-next" class="icon-button" type="button" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button>
+                  </div>
+                </nav>
+              </section>
+            </div>
           </section>
         </section>
 

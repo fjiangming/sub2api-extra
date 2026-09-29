@@ -19,7 +19,23 @@ const state = {
   costProviders: [],
   costIncomes: [],
   costExpenses: [],
-  costCaveats: []
+  costCaveats: [],
+  costMainPageMeta: '',
+  costAutomaticIncome: {
+    active: false,
+    query: null,
+    users: [],
+    userSearch: '',
+    userPage: 1,
+    userPageSize: 20,
+    userPagination: null,
+    userRequestId: 0,
+    selectedUserKey: null,
+    recordPage: 1,
+    recordPageSize: 20,
+    recordPagination: null,
+    recordRequestId: 0
+  }
 };
 
 const titles = {
@@ -60,8 +76,8 @@ function formatDecimal(value, digits = 4) {
   return new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: digits }).format(number);
 }
 
-function formatMoney(value, currency = '') {
-  const amount = formatDecimal(value, 2);
+function formatMoney(value, currency = '', digits = 2) {
+  const amount = formatDecimal(value, digits);
   return currency ? `${amount} ${currency}` : amount;
 }
 
@@ -87,10 +103,13 @@ function formatDuration(ms) {
   return value >= 1000 ? `${formatDecimal(value / 1000, 2)} s` : `${formatDecimal(value, 0)} ms`;
 }
 
-function formatDateTime(value) {
+function formatDateTime(value, timezone = '') {
   if (!value) return 'N/A';
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false });
+  if (Number.isNaN(date.getTime())) return String(value);
+  const options = { hour12: false };
+  if (timezone) options.timeZone = timezone;
+  return date.toLocaleString('zh-CN', options);
 }
 
 function todayString() {
@@ -180,6 +199,10 @@ function alertHtml(type, message) {
 
 function metricCard(label, value, foot = '', tone = '') {
   return `<article class="metric-card ${tone}"><div class="metric-label">${escapeHtml(label)}</div><div class="metric-value">${escapeHtml(value)}</div><div class="metric-foot">${escapeHtml(foot)}</div></article>`;
+}
+
+function automaticIncomeMetricCard(value, foot) {
+  return `<button class="metric-card metric-card-action green" type="button" data-cost-auto-income-open aria-label="查看自动收入用户与兑换明细"><div class="metric-label">自动收入</div><div class="metric-value">${escapeHtml(value)}</div><div class="metric-foot">${escapeHtml(foot)}</div>${icon('chevron-right')}</button>`;
 }
 
 function emptyRow(columns, text = '暂无数据') {
@@ -511,8 +534,7 @@ function renderCostAnalysisNotices(providers) {
   ].join('');
 }
 
-async function loadCostAnalysis() {
-  setPageMeta('正在汇总自动收入、手工收入与支出');
+function costAnalysisQuery() {
   const form = $('cost-analysis-filter');
   const query = {
     ...formRange('cost-analysis-filter'),
@@ -520,6 +542,211 @@ async function loadCostAnalysis() {
     currency: form.elements.currency.value.trim().toUpperCase()
   };
   form.elements.currency.value = query.currency;
+  return query;
+}
+
+function automaticIncomeUserLabel(user) {
+  if (user.missing) return '关联用户缺失';
+  return user.username || user.email || `用户 ${user.userId}`;
+}
+
+function automaticIncomeUserMeta(user) {
+  const values = [];
+  if (user.userId) values.push(`ID ${user.userId}`);
+  if (user.email && user.username && user.email !== user.username) values.push(user.email);
+  if (user.missing) values.push(user.userId ? '用户记录不存在' : 'used_by 为空');
+  return values.join(' · ');
+}
+
+function automaticIncomeTypeLabel(type) {
+  return type === 'admin_balance' ? '管理员余额调整' : type === 'balance' ? '余额' : type;
+}
+
+function setAutomaticIncomePagination(prefix, pagination) {
+  const totalPages = Math.max(1, pagination.totalPages || 0);
+  const first = pagination.total ? (pagination.page - 1) * pagination.pageSize + 1 : 0;
+  const last = Math.min(pagination.page * pagination.pageSize, pagination.total);
+  $(`${prefix}-page-label`).textContent = `第 ${pagination.page} / ${totalPages} 页 · ${first}-${last} / ${formatInteger(pagination.total)} 条`;
+  $(`${prefix}-previous`).disabled = !pagination.hasPrevious;
+  $(`${prefix}-next`).disabled = !pagination.hasNext;
+}
+
+function automaticIncomeSearchParams({ page, pageSize, search = '' }) {
+  const query = state.costAutomaticIncome.query;
+  return new URLSearchParams({
+    start: query.start,
+    end: query.end,
+    currency: query.currency,
+    page: String(page),
+    pageSize: String(pageSize),
+    ...(search ? { search } : {})
+  });
+}
+
+function showAutomaticIncomeUsers() {
+  const drilldown = state.costAutomaticIncome;
+  drilldown.selectedUserKey = null;
+  drilldown.recordRequestId += 1;
+  $('cost-auto-records-view').hidden = true;
+  $('cost-auto-users-view').hidden = false;
+  $('page-title').textContent = '自动收入复核';
+  const query = drilldown.query;
+  setPageMeta(`${query.start} 至 ${query.end} · ${query.currency}`);
+  window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+}
+
+function closeAutomaticIncomeDrilldown({ restoreHeader = true } = {}) {
+  const drilldown = state.costAutomaticIncome;
+  if (!drilldown.active) return;
+  drilldown.active = false;
+  drilldown.query = null;
+  drilldown.selectedUserKey = null;
+  drilldown.userRequestId += 1;
+  drilldown.recordRequestId += 1;
+  $('view-costs').classList.remove('cost-drilldown-active');
+  $('cost-auto-income-page').hidden = true;
+  $('cost-auto-records-view').hidden = true;
+  $('cost-auto-users-view').hidden = false;
+  if (restoreHeader) {
+    $('page-title').textContent = titles.costs;
+    setPageMeta(state.costMainPageMeta || '自动收入、手工收入与支出');
+  }
+}
+
+async function loadAutomaticIncomeUsers() {
+  const drilldown = state.costAutomaticIncome;
+  if (!drilldown.active || !drilldown.query) return;
+  const requestId = ++drilldown.userRequestId;
+  $('cost-auto-users').innerHTML = emptyRow(6, '正在读取兑换用户');
+  $('cost-auto-users-previous').disabled = true;
+  $('cost-auto-users-next').disabled = true;
+  const search = automaticIncomeSearchParams({
+    page: drilldown.userPage,
+    pageSize: drilldown.userPageSize,
+    search: drilldown.userSearch
+  });
+  let data;
+  try {
+    data = await api(`/api/cost-analysis/automatic-income/users?${search}`);
+  } catch (error) {
+    if (requestId === drilldown.userRequestId) {
+      $('cost-auto-users').innerHTML = emptyRow(6, error.message);
+      $('cost-auto-user-summary').textContent = '读取失败';
+    }
+    throw error;
+  }
+  if (requestId !== drilldown.userRequestId || !drilldown.active) return;
+  if (data.pagination.totalPages > 0 && drilldown.userPage > data.pagination.totalPages) {
+    drilldown.userPage = data.pagination.totalPages;
+    await loadAutomaticIncomeUsers();
+    return;
+  }
+  drilldown.users = data.items || [];
+  drilldown.userPagination = data.pagination;
+  $('cost-auto-income-meta').textContent = `${data.timezone} · ${data.range.start} 至 ${data.range.end} · ${data.currency}`;
+  $('cost-auto-user-summary').textContent = `${formatInteger(data.summary.users)} 个用户归属 · ${formatInteger(data.summary.transactions)} 笔兑换 · ${formatMoney(data.summary.totalIncome, data.currency, 8)}`;
+  $('cost-auto-users').innerHTML = drilldown.users.length ? drilldown.users.map((user) => {
+    const status = user.missing
+      ? '<span class="badge warning">关联缺失</span>'
+      : user.deleted ? '<span class="badge neutral">已删除</span>' : '<span class="badge success">现有用户</span>';
+    return `
+      <tr>
+        <td><strong>${escapeHtml(automaticIncomeUserLabel(user))}</strong><div class="muted">${escapeHtml(automaticIncomeUserMeta(user))}</div></td>
+        <td>${status}</td>
+        <td class="numeric">${formatInteger(user.transactions)}</td>
+        <td>${formatDateTime(user.lastUsedAt, data.timezone)}</td>
+        <td class="numeric ${user.totalIncome < 0 ? 'negative-value' : ''}">${escapeHtml(formatMoney(user.totalIncome, data.currency, 8))}</td>
+        <td class="numeric"><button class="button secondary compact" type="button" data-cost-auto-user-detail data-user-key="${escapeHtml(user.userKey)}"><span>详情</span>${icon('chevron-right')}</button></td>
+      </tr>
+    `;
+  }).join('') : emptyRow(6, drilldown.userSearch ? '没有匹配的兑换用户' : '所选范围暂无自动收入');
+  setAutomaticIncomePagination('cost-auto-users', data.pagination);
+  $('page-title').textContent = '自动收入复核';
+  setPageMeta(`${data.range.start} 至 ${data.range.end} · ${data.currency} · ${formatInteger(data.summary.users)} 个用户归属`);
+  refreshIcons();
+}
+
+async function openAutomaticIncomeDrilldown() {
+  const drilldown = state.costAutomaticIncome;
+  const query = costAnalysisQuery();
+  drilldown.active = true;
+  drilldown.query = { start: query.start, end: query.end, currency: query.currency };
+  drilldown.users = [];
+  drilldown.userSearch = '';
+  drilldown.userPage = 1;
+  drilldown.userPageSize = 20;
+  drilldown.selectedUserKey = null;
+  drilldown.recordPage = 1;
+  drilldown.recordPageSize = 20;
+  $('cost-auto-user-search').reset();
+  $('cost-auto-user-search').elements.pageSize.value = '20';
+  $('view-costs').classList.add('cost-drilldown-active');
+  $('cost-auto-income-page').hidden = false;
+  showAutomaticIncomeUsers();
+  await loadAutomaticIncomeUsers();
+}
+
+async function loadAutomaticIncomeRecords() {
+  const drilldown = state.costAutomaticIncome;
+  if (!drilldown.active || !drilldown.selectedUserKey) return;
+  const requestId = ++drilldown.recordRequestId;
+  $('cost-auto-records').innerHTML = emptyRow(7, '正在读取兑换明细');
+  $('cost-auto-records-previous').disabled = true;
+  $('cost-auto-records-next').disabled = true;
+  const search = automaticIncomeSearchParams({
+    page: drilldown.recordPage,
+    pageSize: drilldown.recordPageSize
+  });
+  let data;
+  try {
+    data = await api(`/api/cost-analysis/automatic-income/users/${encodeURIComponent(drilldown.selectedUserKey)}/records?${search}`);
+  } catch (error) {
+    if (requestId === drilldown.recordRequestId) {
+      $('cost-auto-records').innerHTML = emptyRow(7, error.message);
+      $('cost-auto-record-summary').textContent = '读取失败';
+    }
+    throw error;
+  }
+  if (requestId !== drilldown.recordRequestId || !drilldown.active) return;
+  if (data.pagination.totalPages > 0 && drilldown.recordPage > data.pagination.totalPages) {
+    drilldown.recordPage = data.pagination.totalPages;
+    await loadAutomaticIncomeRecords();
+    return;
+  }
+  drilldown.recordPagination = data.pagination;
+  $('cost-auto-record-user').textContent = automaticIncomeUserLabel(data.user);
+  $('cost-auto-record-user-meta').textContent = automaticIncomeUserMeta(data.user);
+  $('cost-auto-record-summary').textContent = `${formatInteger(data.summary.transactions)} 笔兑换 · ${formatMoney(data.summary.totalIncome, data.currency, 8)} · ${data.timezone}`;
+  $('cost-auto-records').innerHTML = data.items.length ? data.items.map((record) => `
+    <tr>
+      <td>${escapeHtml(record.id)}</td>
+      <td>${formatDateTime(record.usedAt, data.timezone)}</td>
+      <td>${escapeHtml(automaticIncomeTypeLabel(record.type))}</td>
+      <td><code class="redeem-code" title="${escapeHtml(record.code)}">${escapeHtml(record.code)}</code></td>
+      <td class="cost-note">${escapeHtml(record.notes || '-')}</td>
+      <td>${formatDateTime(record.createdAt, data.timezone)}</td>
+      <td class="numeric ${record.value < 0 ? 'negative-value' : ''}">${escapeHtml(formatMoney(record.value, data.currency, 8))}</td>
+    </tr>
+  `).join('') : emptyRow(7, '所选范围暂无兑换记录');
+  setAutomaticIncomePagination('cost-auto-records', data.pagination);
+  $('page-title').textContent = '兑换记录详情';
+  setPageMeta(`${data.range.start} 至 ${data.range.end} · ${data.currency} · ${formatInteger(data.summary.transactions)} 笔`);
+  refreshIcons();
+}
+
+async function openAutomaticIncomeRecords(userKey) {
+  const drilldown = state.costAutomaticIncome;
+  drilldown.selectedUserKey = userKey;
+  drilldown.recordPage = 1;
+  $('cost-auto-users-view').hidden = true;
+  $('cost-auto-records-view').hidden = false;
+  window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  await loadAutomaticIncomeRecords();
+}
+
+async function loadCostAnalysis() {
+  setPageMeta('正在汇总自动收入、手工收入与支出');
+  const query = costAnalysisQuery();
   const search = new URLSearchParams(query);
   const [report, incomes, expenses, providers] = await Promise.all([
     api(`/api/cost-analysis?${search}`),
@@ -534,7 +761,7 @@ async function loadCostAnalysis() {
   const balanceApplies = report.summary.userBalance != null;
   const actualProfit = report.summary.actualProfit;
   $('cost-analysis-metrics').innerHTML = [
-    metricCard('自动收入', formatMoney(report.summary.automaticRevenue, report.currency), `${formatInteger(report.summary.transactions)} 笔兑换 · 平均 ${averageAutomaticIncome}`, 'green'),
+    automaticIncomeMetricCard(formatMoney(report.summary.automaticRevenue, report.currency), `${formatInteger(report.summary.transactions)} 笔兑换 · 平均 ${averageAutomaticIncome}`),
     metricCard('手工收入', formatMoney(report.summary.manualRevenue, report.currency), `${formatInteger(report.summary.incomeCount)} 笔`, 'amber'),
     metricCard('总收入', formatMoney(report.summary.revenue, report.currency), '自动收入 + 手工收入', 'blue'),
     metricCard('支出', formatMoney(report.summary.expense, report.currency), `${formatInteger(report.summary.expenseCount)} 笔`, 'red'),
@@ -572,7 +799,8 @@ async function loadCostAnalysis() {
   renderCostProviders(providers);
   renderCostIncomes(incomes.items || [], report.currency, incomes.customItems || []);
   renderCostExpenses(expenses.items || [], report.currency, expenses.customItems || []);
-  setPageMeta(`更新于 ${formatDateTime(new Date())} · ${report.periods.length} 个统计周期`);
+  state.costMainPageMeta = `更新于 ${formatDateTime(new Date())} · ${report.periods.length} 个统计周期`;
+  setPageMeta(state.costMainPageMeta);
   refreshIcons();
 }
 
@@ -1275,7 +1503,9 @@ async function loadCurrentView(options = {}) {
     usage: loadUsage,
     users: loadUsers,
     finance: loadFinance,
-    costs: loadCostAnalysis,
+    costs: state.costAutomaticIncome.active
+      ? (state.costAutomaticIncome.selectedUserKey ? loadAutomaticIncomeRecords : loadAutomaticIncomeUsers)
+      : loadCostAnalysis,
     storage: () => loadStorage(options.refresh),
     retention: loadRetention,
     maintenance: loadMaintenance,
@@ -1295,6 +1525,7 @@ async function loadCurrentView(options = {}) {
 
 function navigate(view) {
   if (!titles[view]) return;
+  if (state.costAutomaticIncome.active) closeAutomaticIncomeDrilldown({ restoreHeader: false });
   state.currentView = view;
   window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
   document.querySelectorAll('.view').forEach((node) => node.classList.toggle('active', node.id === `view-${view}`));
@@ -1401,6 +1632,61 @@ $('usage-filter').addEventListener('submit', (event) => { event.preventDefault()
 $('users-filter').addEventListener('submit', (event) => { event.preventDefault(); loadUsers().catch((error) => toast(error.message, 'error')); });
 $('finance-filter').addEventListener('submit', (event) => { event.preventDefault(); loadFinance().catch((error) => toast(error.message, 'error')); });
 $('cost-analysis-filter').addEventListener('submit', (event) => { event.preventDefault(); loadCostAnalysis().catch((error) => toast(error.message, 'error')); });
+$('cost-analysis-metrics').addEventListener('click', (event) => {
+  if (!event.target.closest('[data-cost-auto-income-open]')) return;
+  openAutomaticIncomeDrilldown().catch((error) => toast(error.message, 'error'));
+});
+$('cost-auto-income-close').addEventListener('click', () => closeAutomaticIncomeDrilldown());
+$('cost-auto-user-search').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const drilldown = state.costAutomaticIncome;
+  drilldown.userSearch = event.currentTarget.elements.search.value.trim();
+  drilldown.userPage = 1;
+  loadAutomaticIncomeUsers().catch((error) => toast(error.message, 'error'));
+});
+$('cost-auto-user-search-reset').addEventListener('click', () => {
+  const drilldown = state.costAutomaticIncome;
+  $('cost-auto-user-search').elements.search.value = '';
+  drilldown.userSearch = '';
+  drilldown.userPage = 1;
+  loadAutomaticIncomeUsers().catch((error) => toast(error.message, 'error'));
+});
+$('cost-auto-user-search').elements.pageSize.addEventListener('change', (event) => {
+  const drilldown = state.costAutomaticIncome;
+  drilldown.userPageSize = Number(event.currentTarget.value);
+  drilldown.userPage = 1;
+  loadAutomaticIncomeUsers().catch((error) => toast(error.message, 'error'));
+});
+$('cost-auto-users-previous').addEventListener('click', () => {
+  const drilldown = state.costAutomaticIncome;
+  if (drilldown.userPage <= 1) return;
+  drilldown.userPage -= 1;
+  loadAutomaticIncomeUsers().catch((error) => toast(error.message, 'error'));
+});
+$('cost-auto-users-next').addEventListener('click', () => {
+  const drilldown = state.costAutomaticIncome;
+  if (!drilldown.userPagination?.hasNext) return;
+  drilldown.userPage += 1;
+  loadAutomaticIncomeUsers().catch((error) => toast(error.message, 'error'));
+});
+$('cost-auto-users').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-cost-auto-user-detail]');
+  if (!button) return;
+  openAutomaticIncomeRecords(button.dataset.userKey).catch((error) => toast(error.message, 'error'));
+});
+$('cost-auto-records-back').addEventListener('click', showAutomaticIncomeUsers);
+$('cost-auto-records-previous').addEventListener('click', () => {
+  const drilldown = state.costAutomaticIncome;
+  if (drilldown.recordPage <= 1) return;
+  drilldown.recordPage -= 1;
+  loadAutomaticIncomeRecords().catch((error) => toast(error.message, 'error'));
+});
+$('cost-auto-records-next').addEventListener('click', () => {
+  const drilldown = state.costAutomaticIncome;
+  if (!drilldown.recordPagination?.hasNext) return;
+  drilldown.recordPage += 1;
+  loadAutomaticIncomeRecords().catch((error) => toast(error.message, 'error'));
+});
 $('cost-income-add').addEventListener('click', () => openCostIncomeEditor());
 $('cost-income-form').addEventListener('submit', saveCostIncome);
 $('cost-income-cancel').addEventListener('click', closeCostIncomeEditor);

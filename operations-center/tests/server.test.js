@@ -27,6 +27,8 @@ function dependencies(config, auth) {
     },
     costAnalysis: {
       getReport: async () => ({}), getProviders: async () => ({ items: [] }),
+      getAutomaticIncomeUsers: async () => ({ items: [] }),
+      getAutomaticIncomeRecords: async () => ({ items: [] }),
       listExpenses: () => [], listCustomItems: () => [],
       createExpense: async (input) => input, updateExpense: async (_id, input) => input,
       deleteExpense: async () => ({}),
@@ -288,6 +290,14 @@ test('cost analysis API exposes reports and guards income and expense mutations'
   const deps = dependencies(config, auth);
   const calls = [];
   deps.costAnalysis.getReport = async (query) => ({ currency: query.currency });
+  deps.costAnalysis.getAutomaticIncomeUsers = async (query) => {
+    calls.push({ operation: 'automatic-users', query });
+    return { items: [{ userId: '7' }], pagination: { page: Number(query.page) } };
+  };
+  deps.costAnalysis.getAutomaticIncomeRecords = async (userKey, query) => {
+    calls.push({ operation: 'automatic-records', userKey, query });
+    return { user: { userKey }, items: [{ id: '99' }] };
+  };
   deps.costAnalysis.listExpenses = (query) => {
     calls.push({ operation: 'list', query });
     return [{ id: 'e1', currency: query.currency }];
@@ -329,6 +339,7 @@ test('cost analysis API exposes reports and guards income and expense mutations'
   const base = `http://127.0.0.1:${server.address().port}`;
 
   assert.equal((await fetch(`${base}/api/cost-analysis`)).status, 401);
+  assert.equal((await fetch(`${base}/api/cost-analysis/automatic-income/users`)).status, 401);
   assert.equal((await fetch(`${base}/api/cost-analysis/incomes`)).status, 401);
   const login = await fetch(`${base}/api/auth/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -339,6 +350,13 @@ test('cost analysis API exposes reports and guards income and expense mutations'
   const report = await fetch(`${base}/api/cost-analysis?currency=CNY`, { headers: { cookie } });
   assert.equal(report.status, 200);
   assert.deepEqual(await report.json(), { currency: 'CNY' });
+  const automaticUsers = await fetch(`${base}/api/cost-analysis/automatic-income/users?start=2026-09-01&end=2026-09-30&page=2`, { headers: { cookie } });
+  assert.equal(automaticUsers.status, 200);
+  assert.deepEqual(await automaticUsers.json(), { items: [{ userId: '7' }], pagination: { page: 2 } });
+  const automaticRecords = await fetch(`${base}/api/cost-analysis/automatic-income/users/unassigned/records?currency=CNY`, { headers: { cookie } });
+  assert.equal(automaticRecords.status, 200);
+  assert.deepEqual(await automaticRecords.json(), { user: { userKey: 'unassigned' }, items: [{ id: '99' }] });
+  assert.equal(calls.find((call) => call.operation === 'automatic-records').userKey, 'unassigned');
   const expenses = await fetch(`${base}/api/cost-analysis/expenses?currency=USD`, { headers: { cookie } });
   assert.equal(expenses.status, 200);
   assert.deepEqual((await expenses.json()).items, [{ id: 'e1', currency: 'USD' }]);

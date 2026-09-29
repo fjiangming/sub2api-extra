@@ -9,6 +9,14 @@ const {
 } = require('./metrics-service');
 
 const GRANULARITIES = new Set(['day', 'week', 'month', 'year']);
+const AUTOMATIC_INCOME_FILTER_SQL = `
+  r.used_at >= $1::date::timestamp AT TIME ZONE $3
+  AND r.used_at < $2::date::timestamp AT TIME ZONE $3
+  AND r.used_at IS NOT NULL
+  AND r.status = 'used'
+  AND r.type IN ('balance', 'admin_balance')
+  AND $4 = 'CNY'
+`;
 
 function amountFromMinor(value) {
   return number(value) / 100;
@@ -94,6 +102,46 @@ function parseReportInput(input, config) {
     throw new AppError('INVALID_CURRENCY', '币种格式无效', { status: 400 });
   }
   return { range, granularity, currency };
+}
+
+function parsePagination(input = {}) {
+  const page = input.page == null || input.page === '' ? 1 : Number(input.page);
+  const pageSize = input.pageSize == null || input.pageSize === '' ? 20 : Number(input.pageSize);
+  if (!Number.isInteger(page) || page < 1 || page > 1000000 ||
+      !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+    throw new AppError('INVALID_PAGINATION', '分页参数无效', { status: 400 });
+  }
+  return { page, pageSize, offset: (page - 1) * pageSize };
+}
+
+function parseAutomaticIncomeInput(input, config) {
+  const report = parseReportInput(input, config);
+  const pagination = parsePagination(input);
+  const search = String(input.search || '').trim();
+  if (search.length > 100) {
+    throw new AppError('INVALID_SEARCH', '搜索内容不能超过 100 个字符', { status: 400 });
+  }
+  return { ...report, ...pagination, search };
+}
+
+function parseAutomaticIncomeUserKey(value) {
+  const key = String(value || '').trim();
+  if (key === 'unassigned') return { userKey: key, userId: null };
+  if (!/^[1-9]\d{0,18}$/.test(key) || BigInt(key) > 9223372036854775807n) {
+    throw new AppError('INVALID_USER_ID', '用户 ID 无效', { status: 400 });
+  }
+  return { userKey: key, userId: key };
+}
+
+function paginationResult(page, pageSize, total) {
+  return {
+    page,
+    pageSize,
+    total,
+    totalPages: Math.ceil(total / pageSize),
+    hasPrevious: page > 1,
+    hasNext: page * pageSize < total
+  };
 }
 
 class CostAnalysisService {
@@ -204,27 +252,180 @@ class CostAnalysisService {
     return publicEntry(await this.store.deleteIncomeEntry(id));
   }
 
+  async getAutomaticIncomeUsers(input = {}) {
+    const { range, currency, page, pageSize, offset, search } = parseAutomaticIncomeInput(input, this.config);
+    await this.#requireAutomaticIncomeTables();
+    const params = [
+      range.start, range.endExclusive, this.config.financeTimezone, currency,
+      search, pageSize, offset
+    ];
+    const searchSql = `
+      AND (
+        $5 = ''
+        OR COALESCE(u.email, '') ILIKE '%' || $5 || '%'
+        OR COALESCE(u.username, '') ILIKE '%' || $5 || '%'
+        OR COALESCE(r.used_by::text, '') ILIKE '%' || $5 || '%'
+        OR (r.used_by IS NULL AND '关联用户缺失' ILIKE '%' || $5 || '%')
+      )
+    `;
+    const [summaryResult, usersResult] = await Promise.all([
+      this.pool.query(`
+        WITH user_totals AS (
+          SELECT r.used_by,
+                 COUNT(*) AS transactions,
+                 COALESCE(SUM(r.value), 0) AS total_income
+          FROM redeem_codes r
+          LEFT JOIN users u ON u.id = r.used_by
+          WHERE ${AUTOMATIC_INCOME_FILTER_SQL}
+            ${searchSql}
+          GROUP BY r.used_by
+        )
+        SELECT COUNT(*) AS total_users,
+               COALESCE(SUM(transactions), 0) AS transactions,
+               COALESCE(SUM(total_income), 0) AS total_income
+        FROM user_totals
+      `, params.slice(0, 5)),
+      this.pool.query(`
+        SELECT r.used_by::text AS user_id,
+               MAX(u.email) AS email,
+               MAX(NULLIF(u.username, '')) AS username,
+               (MAX(u.deleted_at) IS NOT NULL) AS user_deleted,
+               (r.used_by IS NOT NULL AND MAX(u.id) IS NULL) AS user_missing,
+               COUNT(*) AS transactions,
+               COALESCE(SUM(r.value), 0) AS total_income,
+               MIN(r.used_at) AS first_used_at,
+               MAX(r.used_at) AS last_used_at
+        FROM redeem_codes r
+        LEFT JOIN users u ON u.id = r.used_by
+        WHERE ${AUTOMATIC_INCOME_FILTER_SQL}
+          ${searchSql}
+        GROUP BY r.used_by
+        ORDER BY total_income DESC, last_used_at DESC NULLS LAST, r.used_by ASC NULLS LAST
+        LIMIT $6 OFFSET $7
+      `, params)
+    ]);
+    const summary = summaryResult.rows[0] || {};
+    const totalUsers = number(summary.total_users);
+    return {
+      range,
+      currency,
+      timezone: this.config.financeTimezone,
+      search,
+      summary: {
+        users: totalUsers,
+        transactions: number(summary.transactions),
+        totalIncome: Number(number(summary.total_income).toFixed(8))
+      },
+      pagination: paginationResult(page, pageSize, totalUsers),
+      items: usersResult.rows.map((row) => ({
+        userKey: row.user_id == null ? 'unassigned' : String(row.user_id),
+        userId: row.user_id == null ? null : String(row.user_id),
+        email: row.email || null,
+        username: row.username || null,
+        deleted: row.user_deleted === true || row.user_deleted === 'true',
+        missing: row.user_id == null || row.user_missing === true || row.user_missing === 'true',
+        transactions: number(row.transactions),
+        totalIncome: Number(number(row.total_income).toFixed(8)),
+        firstUsedAt: row.first_used_at || null,
+        lastUsedAt: row.last_used_at || null
+      }))
+    };
+  }
+
+  async getAutomaticIncomeRecords(userKey, input = {}) {
+    const { range, currency, page, pageSize, offset } = parseAutomaticIncomeInput(input, this.config);
+    const user = parseAutomaticIncomeUserKey(userKey);
+    await this.#requireAutomaticIncomeTables();
+    const params = [
+      range.start, range.endExclusive, this.config.financeTimezone, currency,
+      user.userId, pageSize, offset
+    ];
+    const userFilterSql = `
+      AND (($5::bigint IS NULL AND r.used_by IS NULL) OR r.used_by = $5::bigint)
+    `;
+    const [summaryResult, recordsResult, userResult] = await Promise.all([
+      this.pool.query(`
+        SELECT COUNT(*) AS transactions,
+               COALESCE(SUM(r.value), 0) AS total_income,
+               MIN(r.used_at) AS first_used_at,
+               MAX(r.used_at) AS last_used_at
+        FROM redeem_codes r
+        WHERE ${AUTOMATIC_INCOME_FILTER_SQL}
+          ${userFilterSql}
+      `, params.slice(0, 5)),
+      this.pool.query(`
+        SELECT r.id::text AS id,
+               r.code,
+               r.type,
+               r.value,
+               r.notes,
+               r.used_at,
+               r.created_at
+        FROM redeem_codes r
+        WHERE ${AUTOMATIC_INCOME_FILTER_SQL}
+          ${userFilterSql}
+        ORDER BY r.used_at DESC, r.id DESC
+        LIMIT $6 OFFSET $7
+      `, params),
+      user.userId == null
+        ? Promise.resolve({ rows: [] })
+        : this.pool.query(`
+            SELECT id::text AS id, email, NULLIF(username, '') AS username, deleted_at
+            FROM users
+            WHERE id = $1::bigint
+          `, [user.userId])
+    ]);
+    const summary = summaryResult.rows[0] || {};
+    const total = number(summary.transactions);
+    const userRow = userResult.rows[0];
+    return {
+      range,
+      currency,
+      timezone: this.config.financeTimezone,
+      user: userRow ? {
+        userKey: String(userRow.id),
+        userId: String(userRow.id),
+        email: userRow.email || null,
+        username: userRow.username || null,
+        deleted: Boolean(userRow.deleted_at),
+        missing: false
+      } : {
+        userKey: user.userKey,
+        userId: user.userId,
+        email: null,
+        username: null,
+        deleted: false,
+        missing: true
+      },
+      summary: {
+        transactions: total,
+        totalIncome: Number(number(summary.total_income).toFixed(8)),
+        firstUsedAt: summary.first_used_at || null,
+        lastUsedAt: summary.last_used_at || null
+      },
+      pagination: paginationResult(page, pageSize, total),
+      items: recordsResult.rows.map((row) => ({
+        id: String(row.id),
+        code: row.code,
+        type: row.type,
+        value: Number(number(row.value).toFixed(8)),
+        notes: row.notes || '',
+        usedAt: row.used_at || null,
+        createdAt: row.created_at || null
+      }))
+    };
+  }
+
   async getReport(input = {}) {
     const { range, granularity, currency } = parseReportInput(input, this.config);
-    const missing = await this.inspector.requireTables(['redeem_codes', 'users']);
-    if (missing.length) {
-      throw new AppError('SCHEMA_INCOMPATIBLE', `缺少必要数据表：${missing.join(', ')}`, {
-        status: 503,
-        details: { missing }
-      });
-    }
+    await this.#requireAutomaticIncomeTables();
     const [automaticIncomeResult, balanceResult] = await Promise.all([
       this.pool.query(`
-        SELECT (used_at AT TIME ZONE $3)::date::text AS date,
+        SELECT (r.used_at AT TIME ZONE $3)::date::text AS date,
                COUNT(*) AS transactions,
-               COALESCE(SUM(value), 0) AS revenue
-        FROM redeem_codes
-        WHERE used_at >= $1::date::timestamp AT TIME ZONE $3
-          AND used_at < $2::date::timestamp AT TIME ZONE $3
-          AND used_at IS NOT NULL
-          AND status = 'used'
-          AND type IN ('balance', 'admin_balance')
-          AND $4 = 'CNY'
+               COALESCE(SUM(r.value), 0) AS revenue
+        FROM redeem_codes r
+        WHERE ${AUTOMATIC_INCOME_FILTER_SQL}
         GROUP BY 1 ORDER BY 1
       `, [range.start, range.endExclusive, this.config.financeTimezone, currency]),
       this.pool.query(`
@@ -377,6 +578,16 @@ class CostAnalysisService {
     };
   }
 
+  async #requireAutomaticIncomeTables() {
+    const missing = await this.inspector.requireTables(['redeem_codes', 'users']);
+    if (missing.length) {
+      throw new AppError('SCHEMA_INCOMPATIBLE', `缺少必要数据表：${missing.join(', ')}`, {
+        status: 503,
+        details: { missing }
+      });
+    }
+  }
+
   #normalizeExpense(input, existing) {
     const kind = input.kind;
     if (!['provider', 'custom'].includes(kind)) {
@@ -442,6 +653,8 @@ module.exports = {
   CostAnalysisService,
   amountFromMinor,
   createPeriods,
+  parseAutomaticIncomeInput,
+  parseAutomaticIncomeUserKey,
   parseReportInput,
   periodStart,
   publicEntry
