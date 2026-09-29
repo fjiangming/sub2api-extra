@@ -77,12 +77,106 @@ test('period helpers cover partial month and year ranges without dropping bounda
   );
 });
 
+test('day, month and year reports keep revenue and expenses in the correct periods', async (t) => {
+  const { service } = await createService(t, [
+    { date: '2025-12-20', transactions: '1', revenue: '10.00' },
+    { date: '2025-12-31', transactions: '1', revenue: '20.00' },
+    { date: '2026-01-01', transactions: '1', revenue: '30.00' },
+    { date: '2026-02-02', transactions: '1', revenue: '40.00' }
+  ]);
+  for (const [date, amount] of [
+    ['2025-12-20', 1], ['2025-12-31', 2], ['2026-01-01', 3], ['2026-02-02', 4]
+  ]) {
+    await service.createExpense({
+      kind: 'custom', name: 'Infrastructure', date, amount, currency: 'CNY', note: ''
+    }, 'admin');
+  }
+
+  const daily = await service.getReport({
+    start: '2026-01-01', end: '2026-01-02', granularity: 'day', currency: 'CNY'
+  });
+  assert.deepEqual(daily.periods.map((row) => [row.start, row.revenue, row.expense]), [
+    ['2026-01-01', 30, 3], ['2026-01-02', 0, 0]
+  ]);
+
+  const monthly = await service.getReport({
+    start: '2025-12-20', end: '2026-02-02', granularity: 'month', currency: 'CNY'
+  });
+  assert.deepEqual(monthly.periods.map((row) => [row.label, row.revenue, row.expense]), [
+    ['2025-12', 30, 3], ['2026-01', 30, 3], ['2026-02', 40, 4]
+  ]);
+
+  const yearly = await service.getReport({
+    start: '2025-12-20', end: '2026-02-02', granularity: 'year', currency: 'CNY'
+  });
+  assert.deepEqual(yearly.periods.map((row) => [row.label, row.revenue, row.expense]), [
+    ['2025', 30, 3], ['2026', 70, 7]
+  ]);
+});
+
+test('currency isolation and expense-only losses produce a null margin', async (t) => {
+  const { service } = await createService(t);
+  await service.createExpense({
+    kind: 'custom', name: 'USD Hosting', date: '2026-09-20', amount: 25,
+    currency: 'USD', note: 'monthly'
+  }, 'admin');
+  await service.createExpense({
+    kind: 'custom', name: 'USD Domain', date: '2026-09-10', amount: 5,
+    currency: 'USD', note: ''
+  }, 'admin');
+  await service.createExpense({
+    kind: 'custom', name: 'CNY Hosting', date: '2026-09-15', amount: 99,
+    currency: 'CNY', note: ''
+  }, 'admin');
+
+  const report = await service.getReport({
+    start: '2026-09-01', end: '2026-09-30', granularity: 'month', currency: 'usd'
+  });
+  assert.deepEqual(report.summary, {
+    revenue: 0,
+    expense: 30,
+    profit: -30,
+    margin: null,
+    transactions: 0,
+    expenseCount: 2,
+    averageTransaction: null
+  });
+  assert.equal(report.periods[0].margin, null);
+  assert.deepEqual(report.breakdown.map((row) => row.name), ['USD Hosting', 'USD Domain']);
+  assert.deepEqual(
+    service.listExpenses({ start: '2026-09-01', end: '2026-09-30', currency: 'usd' })
+      .map((entry) => [entry.date, entry.currency]),
+    [['2026-09-20', 'USD'], ['2026-09-10', 'USD']]
+  );
+});
+
+test('invalid report inputs fail before querying Sub2API', async (t) => {
+  const { service, queries } = await createService(t);
+  await assert.rejects(
+    service.getReport({ start: '2026-02-31', end: '2026-03-01', currency: 'CNY' }),
+    (error) => error.code === 'INVALID_DATE_RANGE' && error.status === 400
+  );
+  await assert.rejects(
+    service.getReport({ start: '2026-03-01', end: '2026-03-02', granularity: 'quarter', currency: 'CNY' }),
+    (error) => error.code === 'INVALID_GRANULARITY' && error.status === 400
+  );
+  await assert.rejects(
+    service.getReport({ start: '2026-03-01', end: '2026-03-02', currency: '$$$' }),
+    (error) => error.code === 'INVALID_CURRENCY' && error.status === 400
+  );
+  assert.equal(queries.length, 0);
+});
+
 test('provider expenses require a synchronized provider while custom expenses remain independent', async (t) => {
   const { service } = await createService(t);
   await assert.rejects(service.createExpense({
     kind: 'provider', providerId: 'missing', name: '', date: '2026-09-01', amount: 10,
     currency: 'CNY', note: ''
   }, 'admin'), (error) => error.code === 'COST_PROVIDER_NOT_FOUND');
+  await assert.rejects(service.createExpense({
+    kind: 'custom', name: 'Invalid date', date: '0000-01-01', amount: 10,
+    currency: 'CNY', note: ''
+  }, 'admin'), (error) => error.code === 'COST_DATE_INVALID');
   const entry = await service.createExpense({
     kind: 'custom', name: '域名', date: '2026-09-01', amount: 10.25, currency: 'cny', note: ''
   }, 'admin');

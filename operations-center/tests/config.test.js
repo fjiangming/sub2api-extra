@@ -174,6 +174,9 @@ test('date ranges are inclusive and bounded', () => {
     days: 30
   });
   assert.throws(() => parseDateRange({ start: '2026-10-01', end: '2026-09-30' }), /结束日期/);
+  assert.throws(() => parseDateRange({ start: '2026-02-31', end: '2026-03-01' }), /真实/);
+  assert.throws(() => parseDateRange({ start: '0000-01-01', end: '0000-01-02' }), /真实/);
+  assert.throws(() => parseDateRange({ start: ['2026-09-01', '2026-09-02'], end: '2026-09-30' }), /格式/);
   assert.throws(() => parseDateRange({ start: '2020-01-01', end: '2026-01-01' }, { maxDays: 30 }), /最多 30 天/);
 });
 

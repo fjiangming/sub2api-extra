@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const { createApp } = require('../src/app');
 const { AuthService } = require('../src/auth');
+const { AppError } = require('../src/errors');
 
 function jwt(claims) {
   return [
@@ -260,7 +261,23 @@ test('cost analysis API exposes reports and guards expense mutations', async (t)
   const deps = dependencies(config, auth);
   const calls = [];
   deps.costAnalysis.getReport = async (query) => ({ currency: query.currency });
-  deps.costAnalysis.createExpense = async (input, actor) => { calls.push({ input, actor }); return { id: 'e1', ...input }; };
+  deps.costAnalysis.listExpenses = (query) => {
+    calls.push({ operation: 'list', query });
+    return [{ id: 'e1', currency: query.currency }];
+  };
+  deps.costAnalysis.createExpense = async (input, actor) => {
+    calls.push({ operation: 'create', input, actor });
+    return { id: 'e1', ...input };
+  };
+  deps.costAnalysis.updateExpense = async (id, input, actor) => {
+    if (id === 'missing') throw new AppError('COST_ENTRY_NOT_FOUND', '支出记录不存在', { status: 404 });
+    calls.push({ operation: 'update', id, input, actor });
+    return { id, ...input };
+  };
+  deps.costAnalysis.deleteExpense = async (id) => {
+    if (id === 'missing') throw new AppError('COST_ENTRY_NOT_FOUND', '支出记录不存在', { status: 404 });
+    calls.push({ operation: 'delete', id });
+  };
   const server = http.createServer(createApp(deps));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
@@ -276,6 +293,9 @@ test('cost analysis API exposes reports and guards expense mutations', async (t)
   const report = await fetch(`${base}/api/cost-analysis?currency=CNY`, { headers: { cookie } });
   assert.equal(report.status, 200);
   assert.deepEqual(await report.json(), { currency: 'CNY' });
+  const expenses = await fetch(`${base}/api/cost-analysis/expenses?currency=USD`, { headers: { cookie } });
+  assert.equal(expenses.status, 200);
+  assert.deepEqual((await expenses.json()).items, [{ id: 'e1', currency: 'USD' }]);
 
   const payload = JSON.stringify({
     kind: 'custom', name: 'Hosting', date: '2026-09-27', amount: 20.5, currency: 'CNY', note: ''
@@ -286,14 +306,14 @@ test('cost analysis API exposes reports and guards expense mutations', async (t)
     body: payload
   });
   assert.equal(withoutCsrf.status, 403);
-  assert.equal(calls.length, 0);
+  assert.equal(calls.filter((call) => call.operation === 'create').length, 0);
   const created = await fetch(`${base}/api/cost-analysis/expenses`, {
     method: 'POST',
     headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': session.csrfToken },
     body: payload
   });
   assert.equal(created.status, 201);
-  assert.equal(calls[0].actor, 'admin');
+  assert.equal(calls.find((call) => call.operation === 'create').actor, 'admin');
 
   const invalid = await fetch(`${base}/api/cost-analysis/expenses`, {
     method: 'POST',
@@ -303,5 +323,42 @@ test('cost analysis API exposes reports and guards expense mutations', async (t)
     })
   });
   assert.equal(invalid.status, 400);
-  assert.equal(calls.length, 1);
+  assert.equal(calls.filter((call) => call.operation === 'create').length, 1);
+
+  const putWithoutCsrf = await fetch(`${base}/api/cost-analysis/expenses/e1`, {
+    method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: payload
+  });
+  assert.equal(putWithoutCsrf.status, 403);
+  assert.equal(calls.filter((call) => call.operation === 'update').length, 0);
+  const updated = await fetch(`${base}/api/cost-analysis/expenses/e1`, {
+    method: 'PUT',
+    headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': session.csrfToken },
+    body: payload
+  });
+  assert.equal(updated.status, 200);
+  assert.equal((await updated.json()).id, 'e1');
+  assert.equal(calls.find((call) => call.operation === 'update').actor, 'admin');
+
+  const missingUpdate = await fetch(`${base}/api/cost-analysis/expenses/missing`, {
+    method: 'PUT',
+    headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': session.csrfToken },
+    body: payload
+  });
+  assert.equal(missingUpdate.status, 404);
+
+  const deleteWithoutCsrf = await fetch(`${base}/api/cost-analysis/expenses/e1`, {
+    method: 'DELETE', headers: { cookie }
+  });
+  assert.equal(deleteWithoutCsrf.status, 403);
+  assert.equal(calls.filter((call) => call.operation === 'delete').length, 0);
+  const deleted = await fetch(`${base}/api/cost-analysis/expenses/e1`, {
+    method: 'DELETE', headers: { cookie, 'x-csrf-token': session.csrfToken }
+  });
+  assert.equal(deleted.status, 204);
+  assert.deepEqual(calls.find((call) => call.operation === 'delete'), { operation: 'delete', id: 'e1' });
+
+  const missingDelete = await fetch(`${base}/api/cost-analysis/expenses/missing`, {
+    method: 'DELETE', headers: { cookie, 'x-csrf-token': session.csrfToken }
+  });
+  assert.equal(missingDelete.status, 404);
 });

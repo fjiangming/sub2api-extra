@@ -17,7 +17,8 @@ const state = {
   runPoller: null,
   settings: null,
   costProviders: [],
-  costExpenses: []
+  costExpenses: [],
+  costCaveats: []
 };
 
 const titles = {
@@ -476,6 +477,15 @@ function renderCostExpenses(items, currency, customItems = []) {
   `).join('') : emptyRow(6, '所选范围暂无支出');
 }
 
+function renderCostAnalysisNotices(providers) {
+  $('cost-analysis-notices').innerHTML = [
+    ...state.costCaveats.map((message) => alertHtml('info', message)),
+    ...(providers.sync?.status === 'error'
+      ? [alertHtml('warning', `供应商同步失败，当前使用上次快照：${providers.sync.error}`)]
+      : [])
+  ].join('');
+}
+
 async function loadCostAnalysis() {
   setPageMeta('正在汇总充值收入与手工支出');
   const form = $('cost-analysis-filter');
@@ -500,10 +510,8 @@ async function loadCostAnalysis() {
     metricCard('平均充值', report.summary.averageTransaction == null ? 'N/A' : formatMoney(report.summary.averageTransaction, report.currency), '每笔已支付订单', 'green')
   ].join('');
   $('cost-analysis-zone').textContent = `${report.timezone} · ${report.range.start} 至 ${report.range.end} · ${report.currency}`;
-  $('cost-analysis-notices').innerHTML = [
-    ...report.caveats.map((message) => alertHtml('info', message)),
-    ...(providers.sync?.status === 'error' ? [alertHtml('warning', `供应商同步失败，当前使用上次快照：${providers.sync.error}`)] : [])
-  ].join('');
+  state.costCaveats = report.caveats || [];
+  renderCostAnalysisNotices(providers);
 
   chart('cost-analysis-chart', {
     legend: { top: 2, right: 10, data: ['充值收入', '支出', '利润'] },
@@ -571,6 +579,23 @@ function closeCostExpenseEditor() {
   $('cost-expense-error').hidden = true;
 }
 
+function costExpenseSavedMessage(id, focus) {
+  const message = id ? '支出记录已更新' : '支出记录已新增';
+  const changes = [];
+  if (focus.currencyChanged) changes.push(`已切换至 ${focus.currency}`);
+  if (focus.dateChanged) changes.push(`已定位到 ${focus.date}`);
+  return changes.length ? `${message}，${changes.join('，')}` : message;
+}
+
+async function refreshCostAnalysisAfterMutation(action) {
+  try {
+    await loadCostAnalysis();
+  } catch (error) {
+    setPageMeta(`${action}，但数据刷新失败`);
+    toast(`${action}，但刷新失败：${error.message}`, 'error');
+  }
+}
+
 async function saveCostExpense(event) {
   event.preventDefault();
   const form = event.currentTarget;
@@ -587,20 +612,25 @@ async function saveCostExpense(event) {
     currency: form.elements.currency.value.trim().toUpperCase(),
     note: form.elements.note.value.trim()
   };
+  let saved = null;
   try {
-    await api(id ? `/api/cost-analysis/expenses/${encodeURIComponent(id)}` : '/api/cost-analysis/expenses', {
+    saved = await api(id ? `/api/cost-analysis/expenses/${encodeURIComponent(id)}` : '/api/cost-analysis/expenses', {
       method: id ? 'PUT' : 'POST',
       body: JSON.stringify(payload)
     });
-    closeCostExpenseEditor();
-    toast(id ? '支出记录已更新' : '支出记录已新增');
-    await loadCostAnalysis();
   } catch (error) {
     $('cost-expense-error').textContent = error.message;
     $('cost-expense-error').hidden = false;
   } finally {
     button.disabled = false;
   }
+  if (!saved) return;
+
+  const focus = window.CostAnalysisUi.focusExpenseFilter($('cost-analysis-filter').elements, saved);
+  const message = costExpenseSavedMessage(id, focus);
+  closeCostExpenseEditor();
+  toast(message);
+  await refreshCostAnalysisAfterMutation(message);
 }
 
 async function syncCostProviders() {
@@ -609,6 +639,7 @@ async function syncCostProviders() {
   try {
     const providers = await api('/api/cost-analysis/providers?refresh=true');
     renderCostProviders(providers);
+    renderCostAnalysisNotices(providers);
     if (providers.sync?.status === 'error') throw new Error(providers.sync.error || '供应商同步失败');
     toast(`已同步 ${formatInteger(providers.items.length)} 个供应商`);
     refreshIcons();
@@ -635,11 +666,12 @@ async function handleCostTableAction(event) {
   if (button.dataset.costAction === 'delete' && window.confirm(`确认删除“${entry.name}”的这笔支出？`)) {
     try {
       await api(`/api/cost-analysis/expenses/${encodeURIComponent(entry.id)}`, { method: 'DELETE' });
-      toast('支出记录已删除');
-      await loadCostAnalysis();
     } catch (error) {
       toast(error.message, 'error');
+      return;
     }
+    toast('支出记录已删除');
+    await refreshCostAnalysisAfterMutation('支出记录已删除');
   }
 }
 
@@ -1259,7 +1291,10 @@ $('finance-filter').addEventListener('submit', (event) => { event.preventDefault
 $('cost-analysis-filter').addEventListener('submit', (event) => { event.preventDefault(); loadCostAnalysis().catch((error) => toast(error.message, 'error')); });
 $('cost-expense-add').addEventListener('click', () => openCostExpenseEditor());
 $('cost-expense-form').addEventListener('submit', saveCostExpense);
-$('cost-expense-form').elements.kind.addEventListener('change', updateCostExpenseFields);
+$('cost-expense-form').elements.kind.addEventListener('change', () => {
+  updateCostExpenseFields();
+  updateCostProviderCurrency();
+});
 $('cost-expense-form').elements.providerId.addEventListener('change', updateCostProviderCurrency);
 $('cost-expense-cancel').addEventListener('click', closeCostExpenseEditor);
 $('cost-expense-cancel-icon').addEventListener('click', closeCostExpenseEditor);

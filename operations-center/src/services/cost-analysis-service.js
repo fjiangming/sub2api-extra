@@ -270,7 +270,8 @@ class CostAnalysisService {
     const currency = String(input.currency).trim().toUpperCase();
     const amount = Number(input.amount);
     const amountMinor = Math.round(amount * 100);
-    const parsedDate = new Date(`${input.date}T00:00:00.000Z`);
+    const date = String(input.date || '');
+    const parsedDate = new Date(`${date}T00:00:00.000Z`);
     if (!['provider', 'custom'].includes(kind)) {
       throw new AppError('COST_KIND_INVALID', '支出类型无效', { status: 400 });
     }
@@ -278,7 +279,8 @@ class CostAnalysisService {
         Math.abs(amount - amountMinor / 100) >= 1e-9) {
       throw new AppError('COST_AMOUNT_INVALID', '支出金额必须大于零且最多保留两位小数', { status: 400 });
     }
-    if (Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== input.date) {
+    if (date.startsWith('0000-') || Number.isNaN(parsedDate.getTime()) ||
+        parsedDate.toISOString().slice(0, 10) !== date) {
       throw new AppError('COST_DATE_INVALID', '支出发生日期无效', { status: 400 });
     }
     if (!/^[A-Z][A-Z0-9_-]{0,11}$/.test(currency)) {
@@ -301,7 +303,7 @@ class CostAnalysisService {
       kind,
       providerId,
       name,
-      date: input.date,
+      date,
       amountMinor,
       currency,
       note: String(input.note || '').trim()

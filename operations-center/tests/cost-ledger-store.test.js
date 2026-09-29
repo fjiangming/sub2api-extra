@@ -44,3 +44,39 @@ test('provider sync failures retain the last successful snapshot', async (t) => 
   assert.equal(store.providers().sync.status, 'error');
   assert.equal(store.providers().sync.error, 'connection failed');
 });
+
+test('concurrent ledger writes are serialized without losing entries', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'operations-center-costs-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const store = new CostLedgerStore(directory);
+  await store.initialize();
+
+  const created = await Promise.all(Array.from({ length: 40 }, (_, index) => store.createEntry({
+    kind: 'custom',
+    providerId: null,
+    name: `Expense ${index}`,
+    date: `2026-09-${String(index % 28 + 1).padStart(2, '0')}`,
+    amountMinor: index + 1,
+    currency: index % 2 ? 'USD' : 'CNY',
+    note: '',
+    createdBy: 'admin',
+    updatedBy: 'admin'
+  })));
+
+  assert.equal(store.entries().length, 40);
+  assert.equal(new Set(created.map((entry) => entry.id)).size, 40);
+  await Promise.all(created.map((entry, index) => store.updateEntry(entry.id, {
+    amountMinor: 1000 + index,
+    updatedBy: 'operator'
+  })));
+
+  const reloaded = new CostLedgerStore(directory);
+  await reloaded.initialize();
+  const entries = reloaded.entries();
+  assert.equal(entries.length, 40);
+  assert.equal(entries.every((entry) => entry.updatedBy === 'operator'), true);
+  assert.deepEqual(
+    entries.map((entry) => entry.amountMinor).sort((left, right) => left - right),
+    Array.from({ length: 40 }, (_, index) => 1000 + index)
+  );
+});

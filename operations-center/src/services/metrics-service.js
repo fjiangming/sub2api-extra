@@ -35,14 +35,19 @@ function parseDateRange(input = {}, options = {}) {
   const maxDays = options.maxDays || 730;
   const defaultDays = options.defaultDays || 30;
   const today = options.today || isoDate(new Date());
-  const start = input.start || addUtcDays(today, -(defaultDays - 1));
-  const end = input.end || today;
+  const start = input.start ? String(input.start) : addUtcDays(today, -(defaultDays - 1));
+  const end = input.end ? String(input.end) : today;
   if (!DATE_RE.test(start) || !DATE_RE.test(end)) {
     throw new AppError('INVALID_DATE_RANGE', '日期格式必须为 YYYY-MM-DD', { status: 400 });
   }
   const startTime = Date.parse(`${start}T00:00:00.000Z`);
   const endTime = Date.parse(`${end}T00:00:00.000Z`);
-  if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime < startTime) {
+  const validStart = Number.isFinite(startTime) && isoDate(new Date(startTime)) === start && !start.startsWith('0000-');
+  const validEnd = Number.isFinite(endTime) && isoDate(new Date(endTime)) === end && !end.startsWith('0000-');
+  if (!validStart || !validEnd) {
+    throw new AppError('INVALID_DATE_RANGE', '日期必须是真实的 YYYY-MM-DD 日期', { status: 400 });
+  }
+  if (endTime < startTime) {
     throw new AppError('INVALID_DATE_RANGE', '结束日期不能早于开始日期', { status: 400 });
   }
   const days = Math.floor((endTime - startTime) / 86400000) + 1;

@@ -85,7 +85,8 @@ const expenseSchema = z.object({
   note: z.string().trim().max(500).optional().default('')
 }).superRefine((value, context) => {
   const parsedDate = new Date(`${value.date}T00:00:00.000Z`);
-  if (Number.isNaN(parsedDate.getTime()) || parsedDate.toISOString().slice(0, 10) !== value.date) {
+  if (value.date.startsWith('0000-') || Number.isNaN(parsedDate.getTime()) ||
+      parsedDate.toISOString().slice(0, 10) !== value.date) {
     context.addIssue({ code: 'custom', path: ['date'], message: '发生日期无效' });
   }
   if (value.kind === 'provider' && !value.providerId) {
