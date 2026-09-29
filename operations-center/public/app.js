@@ -550,11 +550,10 @@ function openCostExpenseEditor(entry = null, providerId = null) {
   form.elements.id.value = entry?.id || '';
   form.elements.kind.value = entry?.kind || (providerId || state.costProviders.length ? 'provider' : 'custom');
   form.elements.providerId.value = entry?.providerId || providerId || state.costProviders[0]?.id || '';
-  const provider = state.costProviders.find((item) => item.id === form.elements.providerId.value);
   form.elements.name.value = entry?.kind === 'custom' ? entry.name : '';
   form.elements.date.value = entry?.date || todayString();
   form.elements.amount.value = entry?.amount ?? '';
-  form.elements.currency.value = entry?.currency || provider?.currency || $('cost-analysis-filter').elements.currency.value || 'CNY';
+  form.elements.currency.value = window.CostAnalysisUi.expenseEditorCurrency(entry);
   form.elements.note.value = entry?.note || '';
   $('cost-expense-editor-title').textContent = entry ? '编辑支出' : '新增支出';
   $('cost-expense-error').hidden = true;
@@ -563,14 +562,6 @@ function openCostExpenseEditor(entry = null, providerId = null) {
   refreshIcons();
   form.elements[form.elements.kind.value === 'custom' ? 'name' : 'amount'].focus();
   $('cost-expense-editor').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-}
-
-function updateCostProviderCurrency() {
-  const form = $('cost-expense-form');
-  const provider = state.costProviders.find((item) => item.id === form.elements.providerId.value);
-  if (form.elements.kind.value === 'provider' && provider?.currency) {
-    form.elements.currency.value = provider.currency;
-  }
 }
 
 function closeCostExpenseEditor() {
@@ -1291,11 +1282,7 @@ $('finance-filter').addEventListener('submit', (event) => { event.preventDefault
 $('cost-analysis-filter').addEventListener('submit', (event) => { event.preventDefault(); loadCostAnalysis().catch((error) => toast(error.message, 'error')); });
 $('cost-expense-add').addEventListener('click', () => openCostExpenseEditor());
 $('cost-expense-form').addEventListener('submit', saveCostExpense);
-$('cost-expense-form').elements.kind.addEventListener('change', () => {
-  updateCostExpenseFields();
-  updateCostProviderCurrency();
-});
-$('cost-expense-form').elements.providerId.addEventListener('change', updateCostProviderCurrency);
+$('cost-expense-form').elements.kind.addEventListener('change', updateCostExpenseFields);
 $('cost-expense-cancel').addEventListener('click', closeCostExpenseEditor);
 $('cost-expense-cancel-icon').addEventListener('click', closeCostExpenseEditor);
 $('cost-provider-sync').addEventListener('click', syncCostProviders);

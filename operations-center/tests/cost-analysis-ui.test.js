@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { focusExpenseFilter } = require('../public/cost-analysis-ui');
+const { expenseEditorCurrency, focusExpenseFilter } = require('../public/cost-analysis-ui');
 
 function fields({ start = '2026-09-01', end = '2026-09-30', currency = 'CNY' } = {}) {
   return {
@@ -11,6 +11,11 @@ function fields({ start = '2026-09-01', end = '2026-09-30', currency = 'CNY' } =
     currency: { value: currency }
   };
 }
+
+test('new expenses default to CNY while edits retain their recorded currency', () => {
+  assert.equal(expenseEditorCurrency(null), 'CNY');
+  assert.equal(expenseEditorCurrency({ currency: 'usd' }), 'USD');
+});
 
 test('saved expense switches the report currency so a provider cost remains visible', () => {
   const elements = fields();

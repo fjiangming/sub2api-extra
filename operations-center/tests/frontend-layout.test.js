@@ -26,10 +26,10 @@ test('cost analysis exposes period reporting, provider sync and an editable expe
   assert.match(script, /api\('\/api\/cost-analysis\/providers\?refresh=true'\)/);
   assert.match(script, /method: id \? 'PUT' : 'POST'/);
   assert.match(script, /method: 'DELETE'/);
-  assert.match(script, /entry\?\.currency \|\| provider\?\.currency/);
+  assert.match(script, /CostAnalysisUi\.expenseEditorCurrency\(entry\)/);
   assert.match(script, /CostAnalysisUi\.focusExpenseFilter/);
   assert.match(script, /refreshCostAnalysisAfterMutation/);
-  assert.match(script, /providerId\.addEventListener\('change', updateCostProviderCurrency\)/);
+  assert.doesNotMatch(script, /updateCostProviderCurrency/);
 });
 
 test('system settings exposes guarded database setup and cleanup configuration', () => {

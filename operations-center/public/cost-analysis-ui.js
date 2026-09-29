@@ -3,6 +3,10 @@
 const CostAnalysisUi = (() => {
   const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
+  function expenseEditorCurrency(entry) {
+    return String(entry?.currency || 'CNY').trim().toUpperCase() || 'CNY';
+  }
+
   function focusExpenseFilter(elements, entry) {
     const currency = String(entry?.currency || '').trim().toUpperCase();
     const date = String(entry?.date || '').trim();
@@ -23,7 +27,7 @@ const CostAnalysisUi = (() => {
     return { currency, date, currencyChanged, dateChanged };
   }
 
-  return { focusExpenseFilter };
+  return { expenseEditorCurrency, focusExpenseFilter };
 })();
 
 if (typeof window !== 'undefined') window.CostAnalysisUi = CostAnalysisUi;
