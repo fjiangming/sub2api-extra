@@ -1542,12 +1542,13 @@ class AccountMonitorService {
       `);
       const insertSample = this.db.prepare(`
         INSERT INTO sub2api_account_request_samples(
-          source_log_id, user_id, account_id, request_id, model, upstream_model,
+          source_log_id, sample_source, user_id, account_id, request_id, model, upstream_model,
           model_mapping_chain, request_type, stream, duration_ms, first_token_ms,
           input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
           actual_cost, created_at, ingested_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, 'business_usage', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_log_id) DO UPDATE SET
+          sample_source = 'business_usage',
           user_id = excluded.user_id,
           account_id = excluded.account_id, request_id = excluded.request_id,
           model = excluded.model, upstream_model = excluded.upstream_model,

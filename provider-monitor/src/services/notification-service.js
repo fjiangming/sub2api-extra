@@ -27,11 +27,21 @@ function notificationMessage(event, markdown = false) {
   return `${event.message}\n充值链接：${rechargeUrl}`;
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 class NotificationService {
-  constructor({ db, config, rechargeLinks = null }) {
+  constructor({ db, config, rechargeLinks = null, mailer = nodemailer }) {
     this.db = db;
     this.config = config;
     this.rechargeLinks = rechargeLinks;
+    this.mailer = mailer;
   }
 
   listChannels() {
@@ -151,13 +161,21 @@ class NotificationService {
     };
   }
 
-  async dispatch(event) {
+  async dispatch(event, options = {}) {
+    const selectedIds = Array.isArray(options.channelIds)
+      ? [...new Set(options.channelIds.map((id) => String(id || '').trim()).filter(Boolean))]
+      : null;
+    if (selectedIds && selectedIds.length === 0) return [];
+    const selectedClause = selectedIds
+      ? `AND c.id IN (${selectedIds.map(() => '?').join(', ')})`
+      : '';
     const channels = this.db.prepare(`
       SELECT c.*, e.payload AS credential_payload
       FROM notification_channels c
       LEFT JOIN encrypted_credentials e ON e.id = c.credential_id
       WHERE c.enabled = 1
-    `).all();
+        ${selectedClause}
+    `).all(...(selectedIds || []));
     if (channels.length === 0) return [];
     const deliveryEvent = this.#prepareDeliveryEvent(event).event;
     return Promise.allSettled(
@@ -261,9 +279,8 @@ class NotificationService {
   }
 
   async #send(type, config, credentials, event) {
-    const title = config.titlePrefix
-      ? `${config.titlePrefix} ${event.severity.toUpperCase()}`
-      : `Provider Monitor ${event.severity.toUpperCase()}`;
+    const eventTitle = event.title || `Provider Monitor ${event.severity.toUpperCase()}`;
+    const title = config.titlePrefix ? `${config.titlePrefix} ${eventTitle}` : eventTitle;
     const message = notificationMessage(event);
     if (type === 'webhook') {
       return this.#postJson(config.url, {
@@ -355,24 +372,47 @@ class NotificationService {
       return this.#postJson(config.url || credentials.webhookUrl, payload);
     }
     if (type === 'email') {
+      const port = Number(config.port || config.smtpPort || this.config.smtp.port || 587);
+      const useTLS = config.useTLS ?? config.smtpUseTLS;
+      const secure = config.secure ?? config.smtpSecure ??
+        (useTLS == null ? this.config.smtp.secure : Boolean(useTLS) && port === 465);
       const smtp = {
         host: config.host || config.smtpHost || this.config.smtp.host,
-        port: Number(config.port || config.smtpPort || this.config.smtp.port || 587),
-        secure: config.secure ?? config.smtpSecure ?? this.config.smtp.secure,
-        user: config.user || config.smtpUser || this.config.smtp.user,
-        from: config.from || config.smtpFrom || this.config.smtp.from
+        port,
+        secure: Boolean(secure),
+        requireTLS: config.requireTLS ?? (Boolean(useTLS) && !secure),
+        user: config.user || config.smtpUser || credentials.username || this.config.smtp.user,
+        password: credentials.password || this.config.smtp.password,
+        from: config.from || config.smtpFrom || this.config.smtp.from,
+        fromName: config.fromName || config.smtpFromName || ''
       };
-      const transporter = nodemailer.createTransport({
+      if (!smtp.host || !config.to || (!smtp.from && !smtp.user)) {
+        throw new AppError('EMAIL_CONFIG_INVALID', 'Email channel requires an SMTP host, sender and recipient', {
+          status: 400
+        });
+      }
+      const transporter = this.mailer.createTransport({
         host: smtp.host,
         port: smtp.port,
         secure: smtp.secure,
-        auth: smtp.user ? { user: smtp.user, pass: credentials.password || smtp.password } : undefined
+        requireTLS: smtp.requireTLS,
+        auth: smtp.user ? { user: smtp.user, pass: smtp.password } : undefined,
+        connectionTimeout: 10000,
+        greetingTimeout: 10000,
+        socketTimeout: 20000,
+        tls: { minVersion: 'TLSv1.2', servername: smtp.host }
       });
+      const triggeredAt = event.triggered_at || nowIso();
+      const plainText = `${message}\n\n触发时间：${triggeredAt}`;
       await transporter.sendMail({
-        from: smtp.from || smtp.user,
+        from: smtp.fromName
+          ? { name: smtp.fromName, address: smtp.from || smtp.user }
+          : smtp.from || smtp.user,
         to: config.to,
         subject: title,
-        text: `${message}\n\nTriggered at: ${event.triggered_at}`
+        text: plainText,
+        html: `<p>${escapeHtml(message).replace(/\n/g, '<br>')}</p>` +
+          `<p><strong>触发时间：</strong>${escapeHtml(triggeredAt)}</p>`
       });
       return;
     }

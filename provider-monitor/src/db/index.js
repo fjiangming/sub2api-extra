@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 29;
+const SCHEMA_VERSION = 30;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -566,6 +566,8 @@ CREATE INDEX IF NOT EXISTS sub2api_monitored_account_lookup
 
 CREATE TABLE IF NOT EXISTS sub2api_account_request_samples (
   source_log_id TEXT PRIMARY KEY,
+  sample_source TEXT NOT NULL DEFAULT 'business_usage'
+    CHECK (sample_source = 'business_usage'),
   user_id TEXT,
   account_id TEXT NOT NULL REFERENCES sub2api_monitored_accounts(account_id) ON DELETE CASCADE,
   request_id TEXT,
@@ -957,6 +959,20 @@ CREATE INDEX IF NOT EXISTS sub2api_key_probe_action_account_lookup
   ON sub2api_key_probe_actions(account_id, created_at DESC);
 
 INSERT OR IGNORE INTO sub2api_key_probe_settings(id, updated_at)
+VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+
+CREATE TABLE IF NOT EXISTS sub2api_key_ttft_alert_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled INTEGER NOT NULL DEFAULT 0,
+  window_minutes INTEGER NOT NULL DEFAULT 5,
+  sample_count INTEGER NOT NULL DEFAULT 10,
+  threshold_ms INTEGER NOT NULL DEFAULT 8000,
+  cooldown_minutes INTEGER NOT NULL DEFAULT 60,
+  channel_ids_json TEXT NOT NULL DEFAULT '[]',
+  updated_at TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO sub2api_key_ttft_alert_settings(id, updated_at)
 VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
 CREATE TABLE IF NOT EXISTS sub2api_mappings (
@@ -2373,6 +2389,47 @@ function migrateKeyProbeAutomationV29(db) {
   ).run(nowIso());
 }
 
+function migrateKeyTtftAlertsV30(db) {
+  const migrated = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 30'
+  ).get();
+  if (migrated) return;
+  const sampleColumns = new Set(
+    db.prepare('PRAGMA table_info(sub2api_account_request_samples)').all()
+      .map((column) => column.name)
+  );
+  if (!sampleColumns.has('sample_source')) {
+    db.exec(`
+      ALTER TABLE sub2api_account_request_samples
+      ADD COLUMN sample_source TEXT NOT NULL DEFAULT 'business_usage'
+        CHECK (sample_source = 'business_usage');
+    `);
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS sub2api_business_ttft_sample_lookup
+      ON sub2api_account_request_samples(
+        sample_source, account_id, created_at DESC, source_log_id DESC
+      ) WHERE stream = 1 AND first_token_ms > 0;
+
+    CREATE TABLE IF NOT EXISTS sub2api_key_ttft_alert_settings (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      enabled INTEGER NOT NULL DEFAULT 0,
+      window_minutes INTEGER NOT NULL DEFAULT 5,
+      sample_count INTEGER NOT NULL DEFAULT 10,
+      threshold_ms INTEGER NOT NULL DEFAULT 8000,
+      cooldown_minutes INTEGER NOT NULL DEFAULT 60,
+      channel_ids_json TEXT NOT NULL DEFAULT '[]',
+      updated_at TEXT NOT NULL
+    );
+
+    INSERT OR IGNORE INTO sub2api_key_ttft_alert_settings(id, updated_at)
+    VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+  `);
+  db.prepare(
+    'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (30, ?)'
+  ).run(nowIso());
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -2408,6 +2465,7 @@ function createDatabase(databasePath) {
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (28, ?)'
     ).run(nowIso());
     migrateKeyProbeAutomationV29(db);
+    migrateKeyTtftAlertsV30(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

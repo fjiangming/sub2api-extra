@@ -324,6 +324,17 @@ tbody tr:hover { background: #fafbfa; }
 .key-probe-settings-grid { overflow-y: auto; }
 .key-probe-settings-grid textarea { min-height: 92px; }
 .key-probe-model-empty { display: block; padding: 14px; }
+.notification-channel-options { border: 1px solid var(--line); border-radius: 6px; display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; }
+.notification-channel-option { min-width: 0; min-height: 56px; padding: 10px 12px; display: grid; grid-template-columns: 18px 18px minmax(0, 1fr); gap: 9px; align-items: center; border-bottom: 1px solid var(--line); cursor: pointer; }
+.notification-channel-option:nth-child(odd) { border-right: 1px solid var(--line); }
+.notification-channel-option input { width: 17px; height: 17px; min-height: 0; padding: 0; accent-color: var(--accent); }
+.notification-channel-option > svg { width: 17px; color: var(--muted); }
+.notification-channel-option span { min-width: 0; display: grid; gap: 3px; }
+.notification-channel-option strong, .notification-channel-option small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notification-channel-option strong { font-size: 12px; }
+.notification-channel-option small { color: var(--muted); font-size: 10px; }
+.notification-channel-empty { grid-column: 1 / -1; min-height: 56px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.notification-channel-empty svg { width: 17px; }
 .key-probe-history-body { min-height: 180px; padding: 0 18px 18px; overflow-y: auto; }
 .key-probe-action-history { margin-top: 14px; }
 .key-probe-action-history h3 { margin: 0 0 8px; font-size: 13px; }
@@ -758,6 +769,8 @@ details summary { padding: 13px 18px; cursor: pointer; font-weight: 650; font-si
   .key-probe-platform-filter { align-items: stretch; flex-direction: column; gap: 6px; }
   .key-probe-platform-filter select { width: 100%; }
   .key-probe-filters .search-box, .key-probe-filters select, .key-probe-filters .button { width: 100%; }
+  .notification-channel-options { grid-template-columns: 1fr; }
+  .notification-channel-option:nth-child(odd) { border-right: 0; }
   .key-probe-history-run summary { grid-template-columns: auto minmax(0, 1fr); }
   .key-probe-history-run summary span:nth-child(3), .key-probe-history-run summary span:nth-child(4) { grid-column: 2; }
   .account-monitor-view-tabs { width: 100%; }

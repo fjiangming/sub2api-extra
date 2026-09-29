@@ -6,7 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
-test('schema v29 migration preserves mappings and adds Key probe automation fields', (t) => {
+test('schema v30 migration preserves mappings and adds business TTFT alert provenance', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
   let db = createDatabase(databasePath);
@@ -153,6 +153,7 @@ test('schema v29 migration preserves mappings and adds Key probe automation fiel
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 27').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 28').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 29').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 30').get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());
   assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'recharge_url'));
@@ -165,6 +166,7 @@ test('schema v29 migration preserves mappings and adds Key probe automation fiel
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_key_probe_batches'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_key_probe_samples'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_key_probe_actions'").get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_key_ttft_alert_settings'").get());
   const keyProbeSettingColumns = new Set(
     db.prepare('PRAGMA table_info(sub2api_key_probe_settings)').all().map((column) => column.name)
   );
@@ -190,6 +192,16 @@ test('schema v29 migration preserves mappings and adds Key probe automation fiel
   assert.equal(
     db.prepare('PRAGMA table_info(sub2api_account_request_samples)').all().some((column) => column.name === 'user_id'),
     true
+  );
+  assert.equal(
+    db.prepare('PRAGMA table_info(sub2api_account_request_samples)').all()
+      .some((column) => column.name === 'sample_source'),
+    true
+  );
+  assert.equal(
+    db.prepare("SELECT sample_source FROM sub2api_account_request_samples WHERE source_log_id = 'legacy-base-log'").get()
+      .sample_source,
+    'business_usage'
   );
   assert.equal(
     db.prepare('PRAGMA table_info(sub2api_account_cost_ledger)').all().some((column) => column.name === 'user_id'),

@@ -138,6 +138,11 @@ test('Key status tab exposes centralized probes, filters and per-key controls', 
 
   assert.match(index, /data-view="key-status"[\s\S]*?<span>Key 状态<\/span>/);
   assert.match(index, /id="key-probe-settings-dialog"/);
+  assert.match(index, /id="key-ttft-alert-dialog"/);
+  assert.match(index, /name="windowMinutes"[^>]+min="1" max="1440"/);
+  assert.match(index, /name="sampleCount"[^>]+max="1000"/);
+  assert.match(index, /name="thresholdMs"[^>]+min="100"/);
+  assert.match(index, /data-action="manage-notification-channels"/);
   assert.match(index, /name="sampleCount"[^>]+min="1" max="5"/);
   assert.match(index, /name="promptsSimple"/);
   assert.match(index, /name="promptsMedium"/);
@@ -158,6 +163,9 @@ test('Key status tab exposes centralized probes, filters and per-key controls', 
   assert.match(source, /field === 'platform'\) state\.keyProbeFilters\.groupId = ''/);
   assert.match(source, /业务首字（近 10 条）/);
   assert.match(source, /\/api\/key-probes\/automation\/run/);
+  assert.match(source, /\/api\/key-ttft-alerts\/config/);
+  assert.match(source, /data-key-ttft-alert-channel/);
+  assert.match(source, /data-action="evaluate-key-ttft-alerts"/);
   assert.match(styles, /\.badge\.critical/);
   assert.match(styles, /\.key-probe-row\.health-critical/);
   assert.match(styles, /\.key-probe-group-tabs/);

@@ -389,7 +389,8 @@ class KeyProbeService {
           ) AS row_number
         FROM sub2api_account_request_samples sample
         LEFT JOIN last_action ON last_action.account_id = sample.account_id
-        WHERE sample.stream = 1 AND sample.first_token_ms > 0
+        WHERE sample.sample_source = 'business_usage'
+          AND sample.stream = 1 AND sample.first_token_ms > 0
           AND (last_action.changed_at IS NULL OR sample.created_at > last_action.changed_at)
       )
       SELECT account_id, COUNT(*) AS sample_count,

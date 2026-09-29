@@ -36,6 +36,7 @@ const { RetentionService } = require('./services/retention-service');
 const { SimulationService } = require('./services/simulation-service');
 const { AccountMonitorService } = require('./services/account-monitor-service');
 const { KeyProbeService } = require('./services/key-probe-service');
+const { KeyTtftAlertService } = require('./services/key-ttft-alert-service');
 const { GrossProfitService } = require('./services/gross-profit-service');
 const {
   RechargeLinkService,
@@ -175,6 +176,14 @@ const keyProbeRunSchema = z.object({
   accountIds: z.array(z.union([z.string().trim().min(1).max(80), z.number().int().nonnegative()])).max(5000).optional(),
   platforms: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
   concurrency: z.number().int().min(1).max(10).optional()
+});
+const keyTtftAlertSettingsSchema = z.object({
+  enabled: z.boolean().optional(),
+  windowMinutes: z.number().int().min(1).max(1440).optional(),
+  sampleCount: z.number().int().min(1).max(1000).optional(),
+  thresholdMs: z.number().int().min(100).max(600000).optional(),
+  cooldownMinutes: z.number().int().min(1).max(10080).optional(),
+  channelIds: z.array(z.string().trim().min(1).max(80)).max(100).optional()
 });
 const sub2apiAdminApiKeySchema = z.object({
   adminApiKey: z.string().trim().min(16).max(4096)
@@ -666,6 +675,7 @@ function createApplication(options = {}) {
   );
   const accountMonitor = new AccountMonitorService({ db, config, sub2api, http });
   const keyProbes = new KeyProbeService({ db, config, sub2api, http });
+  const keyTtftAlerts = new KeyTtftAlertService({ db, notifications });
   const grossProfit = new GrossProfitService({ db, config });
   const mappings = new MappingService({ db, config, sub2api, http });
   const automation = new AutomationService({ db, config, sub2api, mappings, notifications });
@@ -797,12 +807,16 @@ function createApplication(options = {}) {
     const keyProbeAutomationJobId = keyProbes.settings().autoControlEnabled
       ? queue.enqueue('key_probe_automation', { priority: -2 })
       : null;
+    const keyTtftAlertJobId = keyTtftAlerts.settings().enabled
+      ? queue.enqueue('key_ttft_alert_evaluation', { priority: -2 })
+      : null;
     const results = [...resultsByConnectionId.values()];
     return {
       ...base,
       autoMapping,
       mappingRefresh,
       keyProbeAutomationJobId,
+      keyTtftAlertJobId,
       supplierSync: {
         connectionCount: resultsByConnectionId.size,
         succeeded: results.filter((item) => item?.status === 'succeeded').length,
@@ -855,6 +869,7 @@ function createApplication(options = {}) {
     if (accountCount === 0) await accountMonitor.sync({ lookbackDays: 1 });
     return keyProbes.reconcileAutomation();
   });
+  queue.register('key_ttft_alert_evaluation', () => keyTtftAlerts.evaluate());
 
   const app = express();
   app.disable('x-powered-by');
@@ -2004,6 +2019,31 @@ function createApplication(options = {}) {
     return res.status(202).json({ jobId });
   }));
 
+  api.get('/key-ttft-alerts/config', (_req, res) => res.json({
+    settings: keyTtftAlerts.settings(),
+    channels: notifications.listChannels()
+  }));
+  api.put('/key-ttft-alerts/config', (req, res) => {
+    const settings = keyTtftAlerts.saveSettings(
+      validate(keyTtftAlertSettingsSchema, req.body || {})
+    );
+    audit(db, req, 'key_ttft_alert.settings_update', 'key_ttft_alert', null, { settings });
+    res.json({ settings });
+  });
+  api.post('/key-ttft-alerts/evaluate', asyncRoute(async (req, res) => {
+    if (req.query.wait === 'true') {
+      const result = await keyTtftAlerts.evaluate();
+      audit(db, req, 'key_ttft_alert.evaluate', 'key_ttft_alert', null, result);
+      return res.json(result);
+    }
+    const jobId = queue.enqueue('key_ttft_alert_evaluation', {
+      priority: 15,
+      dedupe: false
+    });
+    audit(db, req, 'key_ttft_alert.evaluate_enqueue', 'key_ttft_alert', null, { jobId });
+    return res.status(202).json({ jobId });
+  }));
+
   api.get('/sub2api/channels', asyncRoute(async (_req, res) => res.json(await mappings.channels())));
   api.get('/sub2api/groups', asyncRoute(async (_req, res) => res.json(await mappings.groups())));
   api.get('/sub2api/status', (_req, res) => res.json(mappings.status()));
@@ -2307,6 +2347,10 @@ function createApplication(options = {}) {
     if (!keyProbes.settings().autoControlEnabled) return null;
     return queue.enqueue('key_probe_automation', { priority: -2 });
   };
+  const enqueueKeyTtftAlerts = () => {
+    if (!keyTtftAlerts.settings().enabled) return null;
+    return queue.enqueue('key_ttft_alert_evaluation', { priority: -2 });
+  };
   const startBackground = () => {
     if (backgroundStarted) return;
     backgroundStarted = true;
@@ -2324,6 +2368,7 @@ function createApplication(options = {}) {
     }
     enqueueDueKeyProbes();
     enqueueKeyProbeAutomation();
+    enqueueKeyTtftAlerts();
     cronTasks.push(cron.schedule('* * * * *', () => {
       const due = db.prepare(`
         SELECT id FROM provider_connections
@@ -2343,6 +2388,7 @@ function createApplication(options = {}) {
       }
       enqueueDueKeyProbes();
       enqueueKeyProbeAutomation();
+      enqueueKeyTtftAlerts();
     }, { timezone: config.timezone }));
     cronTasks.push(cron.schedule('17 3 * * *', () => {
       queue.enqueue('snapshot_retention', { priority: -5 });
@@ -2390,7 +2436,7 @@ function createApplication(options = {}) {
     config, db, providers, queries, notifications, alerts, automation, analysis,
     keyHealth, catalog, checkins, mappings, credentials, transfers, sub2api,
     metrics, auth, queue, sync, detection, backups, retention, rechargeLinks,
-    simulations, accountMonitor, keyProbes, grossProfit
+    simulations, accountMonitor, keyProbes, keyTtftAlerts, grossProfit
   };
   app.locals.startBackground = startBackground;
   app.locals.close = close;
