@@ -29,7 +29,10 @@ function dependencies(config, auth) {
       getReport: async () => ({}), getProviders: async () => ({ items: [] }),
       listExpenses: () => [], listCustomItems: () => [],
       createExpense: async (input) => input, updateExpense: async (_id, input) => input,
-      deleteExpense: async () => ({})
+      deleteExpense: async () => ({}),
+      listIncomes: () => [], listIncomeItems: () => [],
+      createIncome: async (input) => input, updateIncome: async (_id, input) => input,
+      deleteIncome: async () => ({})
     },
     storage: { getStorage: async () => ({}) },
     scheduler: { getStatus: () => ({ enabled: false }) },
@@ -274,7 +277,7 @@ test('mutable frontend assets revalidate and HTML is never cached', async (t) =>
   assert.equal(fallback.headers.get('cache-control'), 'no-store');
 });
 
-test('cost analysis API exposes reports and guards expense mutations', async (t) => {
+test('cost analysis API exposes reports and guards income and expense mutations', async (t) => {
   const config = {
     env: 'test', trustProxy: false, authMode: 'local', adminUser: 'admin', adminPassword: 'test-password-123',
     sessionTtlMinutes: 30, cookieSecure: false, sub2apiTimezone: 'Asia/Shanghai',
@@ -302,12 +305,31 @@ test('cost analysis API exposes reports and guards expense mutations', async (t)
     if (id === 'missing') throw new AppError('COST_ENTRY_NOT_FOUND', '支出记录不存在', { status: 404 });
     calls.push({ operation: 'delete', id });
   };
+  deps.costAnalysis.listIncomes = (query) => {
+    calls.push({ operation: 'income-list', query });
+    return [{ id: 'i1', currency: query.currency }];
+  };
+  deps.costAnalysis.listIncomeItems = () => ['Consulting'];
+  deps.costAnalysis.createIncome = async (input, actor) => {
+    calls.push({ operation: 'income-create', input, actor });
+    return { id: 'i1', ...input };
+  };
+  deps.costAnalysis.updateIncome = async (id, input, actor) => {
+    if (id === 'missing') throw new AppError('COST_INCOME_NOT_FOUND', '手工收入记录不存在', { status: 404 });
+    calls.push({ operation: 'income-update', id, input, actor });
+    return { id, ...input };
+  };
+  deps.costAnalysis.deleteIncome = async (id) => {
+    if (id === 'missing') throw new AppError('COST_INCOME_NOT_FOUND', '手工收入记录不存在', { status: 404 });
+    calls.push({ operation: 'income-delete', id });
+  };
   const server = http.createServer(createApp(deps));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const base = `http://127.0.0.1:${server.address().port}`;
 
   assert.equal((await fetch(`${base}/api/cost-analysis`)).status, 401);
+  assert.equal((await fetch(`${base}/api/cost-analysis/incomes`)).status, 401);
   const login = await fetch(`${base}/api/auth/login`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'admin', password: 'test-password-123' })
@@ -320,6 +342,12 @@ test('cost analysis API exposes reports and guards expense mutations', async (t)
   const expenses = await fetch(`${base}/api/cost-analysis/expenses?currency=USD`, { headers: { cookie } });
   assert.equal(expenses.status, 200);
   assert.deepEqual((await expenses.json()).items, [{ id: 'e1', currency: 'USD' }]);
+  const incomes = await fetch(`${base}/api/cost-analysis/incomes?currency=EUR`, { headers: { cookie } });
+  assert.equal(incomes.status, 200);
+  assert.deepEqual(await incomes.json(), {
+    items: [{ id: 'i1', currency: 'EUR' }],
+    customItems: ['Consulting']
+  });
 
   const payload = JSON.stringify({
     kind: 'custom', name: 'Hosting', date: '2026-09-27', amount: 20.5, currency: 'CNY', note: ''
@@ -385,4 +413,71 @@ test('cost analysis API exposes reports and guards expense mutations', async (t)
     method: 'DELETE', headers: { cookie, 'x-csrf-token': session.csrfToken }
   });
   assert.equal(missingDelete.status, 404);
+
+  const incomePayload = JSON.stringify({
+    name: 'Consulting', date: '2026-09-28', amount: 88.5, currency: 'cny', note: 'manual'
+  });
+  const incomeWithoutCsrf = await fetch(`${base}/api/cost-analysis/incomes`, {
+    method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: incomePayload
+  });
+  assert.equal(incomeWithoutCsrf.status, 403);
+  assert.equal(calls.filter((call) => call.operation === 'income-create').length, 0);
+
+  const incomeCreated = await fetch(`${base}/api/cost-analysis/incomes`, {
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': session.csrfToken },
+    body: incomePayload
+  });
+  assert.equal(incomeCreated.status, 201);
+  assert.equal((await incomeCreated.json()).id, 'i1');
+  assert.equal(calls.find((call) => call.operation === 'income-create').actor, 'admin');
+
+  const invalidIncome = await fetch(`${base}/api/cost-analysis/incomes`, {
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': session.csrfToken },
+    body: JSON.stringify({ name: '', date: '2026-02-31', amount: 0.001, currency: '$$$', note: '' })
+  });
+  assert.equal(invalidIncome.status, 400);
+  assert.equal(calls.filter((call) => call.operation === 'income-create').length, 1);
+
+  const incomePutWithoutCsrf = await fetch(`${base}/api/cost-analysis/incomes/i1`, {
+    method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: incomePayload
+  });
+  assert.equal(incomePutWithoutCsrf.status, 403);
+  assert.equal(calls.filter((call) => call.operation === 'income-update').length, 0);
+
+  const incomeUpdated = await fetch(`${base}/api/cost-analysis/incomes/i1`, {
+    method: 'PUT',
+    headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': session.csrfToken },
+    body: incomePayload
+  });
+  assert.equal(incomeUpdated.status, 200);
+  assert.equal((await incomeUpdated.json()).id, 'i1');
+  assert.equal(calls.find((call) => call.operation === 'income-update').actor, 'admin');
+
+  const missingIncomeUpdate = await fetch(`${base}/api/cost-analysis/incomes/missing`, {
+    method: 'PUT',
+    headers: { cookie, 'content-type': 'application/json', 'x-csrf-token': session.csrfToken },
+    body: incomePayload
+  });
+  assert.equal(missingIncomeUpdate.status, 404);
+
+  const incomeDeleteWithoutCsrf = await fetch(`${base}/api/cost-analysis/incomes/i1`, {
+    method: 'DELETE', headers: { cookie }
+  });
+  assert.equal(incomeDeleteWithoutCsrf.status, 403);
+  assert.equal(calls.filter((call) => call.operation === 'income-delete').length, 0);
+
+  const incomeDeleted = await fetch(`${base}/api/cost-analysis/incomes/i1`, {
+    method: 'DELETE', headers: { cookie, 'x-csrf-token': session.csrfToken }
+  });
+  assert.equal(incomeDeleted.status, 204);
+  assert.deepEqual(calls.find((call) => call.operation === 'income-delete'), {
+    operation: 'income-delete', id: 'i1'
+  });
+
+  const missingIncomeDelete = await fetch(`${base}/api/cost-analysis/incomes/missing`, {
+    method: 'DELETE', headers: { cookie, 'x-csrf-token': session.csrfToken }
+  });
+  assert.equal(missingIncomeDelete.status, 404);
 });

@@ -3,11 +3,11 @@
 const CostAnalysisUi = (() => {
   const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
-  function expenseEditorCurrency(entry) {
+  function entryEditorCurrency(entry) {
     return String(entry?.currency || 'CNY').trim().toUpperCase() || 'CNY';
   }
 
-  function focusExpenseFilter(elements, entry) {
+  function focusLedgerEntryFilter(elements, entry) {
     const currency = String(entry?.currency || '').trim().toUpperCase();
     const date = String(entry?.date || '').trim();
     const currentCurrency = String(elements.currency.value || '').trim().toUpperCase();
@@ -27,7 +27,12 @@ const CostAnalysisUi = (() => {
     return { currency, date, currencyChanged, dateChanged };
   }
 
-  return { expenseEditorCurrency, focusExpenseFilter };
+  return {
+    entryEditorCurrency,
+    focusLedgerEntryFilter,
+    expenseEditorCurrency: entryEditorCurrency,
+    focusExpenseFilter: focusLedgerEntryFilter
+  };
 })();
 
 if (typeof window !== 'undefined') window.CostAnalysisUi = CostAnalysisUi;

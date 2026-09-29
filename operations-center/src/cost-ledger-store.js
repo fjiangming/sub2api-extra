@@ -5,13 +5,15 @@ const fs = require('fs/promises');
 const path = require('path');
 const { AppError } = require('./errors');
 
-const VERSION = 1;
+const VERSION = 2;
+const LEGACY_VERSION = 1;
 const MAX_ENTRIES = 50000;
 
 function emptyLedger() {
   return {
     version: VERSION,
     entries: [],
+    incomes: [],
     providers: [],
     providerSync: {
       status: 'never',
@@ -22,20 +24,44 @@ function emptyLedger() {
   };
 }
 
-function validLedger(value) {
-  if (!value || value.version !== VERSION || !Array.isArray(value.entries) ||
-      !Array.isArray(value.providers) || !value.providerSync || typeof value.providerSync !== 'object') {
-    return false;
-  }
-  const validEntry = (entry) => entry && typeof entry.id === 'string' &&
-    ['provider', 'custom'].includes(entry.kind) && typeof entry.name === 'string' &&
+function validBaseEntry(entry) {
+  return entry && typeof entry.id === 'string' && typeof entry.name === 'string' &&
     /^\d{4}-\d{2}-\d{2}$/.test(entry.date) && Number.isSafeInteger(entry.amountMinor) &&
     entry.amountMinor > 0 && typeof entry.currency === 'string' && typeof entry.createdAt === 'string' &&
     typeof entry.updatedAt === 'string';
-  const validProvider = (provider) => provider && typeof provider.id === 'string' &&
-    typeof provider.name === 'string';
-  return value.entries.length <= MAX_ENTRIES && value.entries.every(validEntry) &&
-    value.providers.every(validProvider) && typeof value.providerSync.status === 'string';
+}
+
+function validExpense(entry) {
+  return validBaseEntry(entry) && ['provider', 'custom'].includes(entry.kind);
+}
+
+function validProvider(provider) {
+  return provider && typeof provider.id === 'string' && typeof provider.name === 'string';
+}
+
+function validSharedLedger(value) {
+  return value && Array.isArray(value.entries) && Array.isArray(value.providers) &&
+    value.providerSync && typeof value.providerSync === 'object' &&
+    value.entries.every(validExpense) && value.providers.every(validProvider) &&
+    typeof value.providerSync.status === 'string';
+}
+
+function migrateLedger(value) {
+  if (!validSharedLedger(value)) return null;
+  if (value.version === LEGACY_VERSION && value.entries.length <= MAX_ENTRIES) {
+    return { ...value, version: VERSION, incomes: [] };
+  }
+  if (value.version !== VERSION || !Array.isArray(value.incomes) ||
+      !value.incomes.every(validBaseEntry) || value.entries.length + value.incomes.length > MAX_ENTRIES) {
+    return null;
+  }
+  return value;
+}
+
+function assertCapacity(state) {
+  if (state.entries.length + state.incomes.length >= MAX_ENTRIES) {
+    throw new AppError('COST_LEDGER_LIMIT_REACHED', `收支台账最多保存 ${MAX_ENTRIES} 条记录`, { status: 409 });
+  }
 }
 
 class CostLedgerStore {
@@ -49,9 +75,11 @@ class CostLedgerStore {
   async initialize() {
     await fs.mkdir(this.dataDir, { recursive: true, mode: 0o700 });
     try {
-      const value = JSON.parse(await fs.readFile(this.filePath, 'utf8'));
-      if (!validLedger(value)) throw new Error('unsupported cost ledger format');
-      this.state = value;
+      const stored = JSON.parse(await fs.readFile(this.filePath, 'utf8'));
+      const migrated = migrateLedger(stored);
+      if (!migrated) throw new Error('unsupported cost ledger format');
+      this.state = migrated;
+      if (stored.version !== VERSION) await this.#write(this.state);
     } catch (error) {
       if (error.code !== 'ENOENT') {
         throw new AppError('COST_LEDGER_INVALID', '成本台账文件损坏或版本不受支持', { expose: false });
@@ -69,6 +97,10 @@ class CostLedgerStore {
     return structuredClone(this.state.entries);
   }
 
+  incomeEntries() {
+    return structuredClone(this.state.incomes);
+  }
+
   providers() {
     return {
       items: structuredClone(this.state.providers),
@@ -78,9 +110,7 @@ class CostLedgerStore {
 
   async createEntry(input) {
     return this.#update((state) => {
-      if (state.entries.length >= MAX_ENTRIES) {
-        throw new AppError('COST_LEDGER_LIMIT_REACHED', `成本台账最多保存 ${MAX_ENTRIES} 条记录`, { status: 409 });
-      }
+      assertCapacity(state);
       const now = new Date().toISOString();
       const entry = {
         id: crypto.randomUUID(),
@@ -116,6 +146,48 @@ class CostLedgerStore {
         throw new AppError('COST_ENTRY_NOT_FOUND', '支出记录不存在', { status: 404 });
       }
       const [removed] = state.entries.splice(index, 1);
+      return removed;
+    });
+  }
+
+  async createIncomeEntry(input) {
+    return this.#update((state) => {
+      assertCapacity(state);
+      const now = new Date().toISOString();
+      const entry = {
+        id: crypto.randomUUID(),
+        ...input,
+        createdAt: now,
+        updatedAt: now
+      };
+      state.incomes.push(entry);
+      return entry;
+    });
+  }
+
+  async updateIncomeEntry(id, input) {
+    return this.#update((state) => {
+      const index = state.incomes.findIndex((entry) => entry.id === id);
+      if (index < 0) {
+        throw new AppError('COST_INCOME_NOT_FOUND', '手工收入记录不存在', { status: 404 });
+      }
+      state.incomes[index] = {
+        ...state.incomes[index],
+        ...input,
+        id,
+        updatedAt: new Date().toISOString()
+      };
+      return state.incomes[index];
+    });
+  }
+
+  async deleteIncomeEntry(id) {
+    return this.#update((state) => {
+      const index = state.incomes.findIndex((entry) => entry.id === id);
+      if (index < 0) {
+        throw new AppError('COST_INCOME_NOT_FOUND', '手工收入记录不存在', { status: 404 });
+      }
+      const [removed] = state.incomes.splice(index, 1);
       return removed;
     });
   }
@@ -166,4 +238,4 @@ class CostLedgerStore {
   }
 }
 
-module.exports = { CostLedgerStore, emptyLedger, MAX_ENTRIES };
+module.exports = { CostLedgerStore, emptyLedger, migrateLedger, MAX_ENTRIES };

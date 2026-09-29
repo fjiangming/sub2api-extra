@@ -2,7 +2,12 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { expenseEditorCurrency, focusExpenseFilter } = require('../public/cost-analysis-ui');
+const {
+  entryEditorCurrency,
+  expenseEditorCurrency,
+  focusLedgerEntryFilter,
+  focusExpenseFilter
+} = require('../public/cost-analysis-ui');
 
 function fields({ start = '2026-09-01', end = '2026-09-30', currency = 'CNY' } = {}) {
   return {
@@ -12,9 +17,24 @@ function fields({ start = '2026-09-01', end = '2026-09-30', currency = 'CNY' } =
   };
 }
 
-test('new expenses default to CNY while edits retain their recorded currency', () => {
+test('new income and expenses default to CNY while edits retain their recorded currency', () => {
+  assert.equal(entryEditorCurrency(null), 'CNY');
+  assert.equal(entryEditorCurrency({ currency: 'usd' }), 'USD');
   assert.equal(expenseEditorCurrency(null), 'CNY');
   assert.equal(expenseEditorCurrency({ currency: 'usd' }), 'USD');
+});
+
+test('saved income uses the shared ledger filter focus behavior', () => {
+  const elements = fields();
+  const result = focusLedgerEntryFilter(elements, { date: '2026-10-05', currency: 'usd' });
+
+  assert.deepEqual(result, {
+    currency: 'USD', date: '2026-10-05', currencyChanged: true, dateChanged: true
+  });
+  assert.deepEqual(
+    [elements.start.value, elements.end.value, elements.currency.value],
+    ['2026-10-05', '2026-10-05', 'USD']
+  );
 });
 
 test('saved expense switches the report currency so a provider cost remains visible', () => {

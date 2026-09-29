@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Sub2API 运营中心</title>
-  <link rel="stylesheet" href="/styles.css?v=20260929-2">
+  <link rel="stylesheet" href="/styles.css?v=20260929-3">
   <script src="/vendor/echarts.js" defer></script>
   <script src="/vendor/lucide.js" defer></script>
-  <script src="/cost-analysis-ui.js?v=20260929-2" defer></script>
-  <script src="/app.js?v=20260929-2" defer></script>
+  <script src="/cost-analysis-ui.js?v=20260929-3" defer></script>
+  <script src="/app.js?v=20260929-3" defer></script>
 </head>
 <body>
   <div id="login-view" class="login-view" hidden>
@@ -128,8 +128,28 @@
             <label>统计粒度<select name="granularity"><option value="day">按日</option><option value="week">按周</option><option value="month">按月</option><option value="year">按年</option></select></label>
             <label>币种<input name="currency" value="CNY" maxlength="12" pattern="[A-Za-z][A-Za-z0-9_-]*" required></label>
             <button class="button primary" type="submit"><i data-lucide="search"></i><span>查询</span></button>
+            <button id="cost-income-add" class="button secondary" type="button"><i data-lucide="plus"></i><span>新增收入</span></button>
             <button id="cost-expense-add" class="button secondary" type="button"><i data-lucide="plus"></i><span>新增支出</span></button>
           </form>
+
+          <section id="cost-income-editor" class="panel" hidden>
+            <div class="panel-heading"><div><h2 id="cost-income-editor-title">新增收入</h2><p>手工收入台账</p></div><button id="cost-income-cancel-icon" class="icon-button" type="button" title="关闭编辑" aria-label="关闭编辑"><i data-lucide="x"></i></button></div>
+            <form id="cost-income-form" class="settings-form">
+              <input name="id" type="hidden">
+              <div class="cost-expense-grid">
+                <label>收入项名称<input name="name" maxlength="120" list="cost-income-names" required><datalist id="cost-income-names"></datalist></label>
+                <label>发生日期<input name="date" type="date" required></label>
+                <label>金额<input name="amount" type="number" min="0.01" max="1000000000000" step="0.01" inputmode="decimal" required></label>
+                <label>币种<input name="currency" value="CNY" maxlength="12" pattern="[A-Za-z][A-Za-z0-9_-]*" required></label>
+                <label class="cost-note-field">备注<input name="note" maxlength="500"></label>
+              </div>
+              <p id="cost-income-error" class="form-error" role="alert" hidden></p>
+              <div class="form-actions">
+                <button class="button primary" type="submit"><i data-lucide="save"></i><span>保存收入</span></button>
+                <button id="cost-income-cancel" class="button secondary" type="button"><span>取消</span></button>
+              </div>
+            </form>
+          </section>
 
           <section id="cost-expense-editor" class="panel" hidden>
             <div class="panel-heading"><div><h2 id="cost-expense-editor-title">新增支出</h2><p>手工成本台账</p></div><button id="cost-expense-cancel-icon" class="icon-button" type="button" title="关闭编辑" aria-label="关闭编辑"><i data-lucide="x"></i></button></div>
@@ -153,23 +173,33 @@
           </section>
 
           <div id="cost-analysis-notices" class="alert-stack"></div>
-          <div id="cost-analysis-metrics" class="metric-grid"></div>
+          <div id="cost-analysis-metrics" class="metric-grid compact"></div>
           <section class="panel chart-panel"><div class="panel-heading"><div><h2>收支与利润趋势</h2><p id="cost-analysis-zone"></p></div></div><div id="cost-analysis-chart" class="chart"></div></section>
 
           <div class="split-layout equal">
             <section class="panel">
-              <div class="panel-heading"><div><h2>成本构成</h2><p>按支出项汇总</p></div></div>
-              <div class="table-wrap"><table><thead><tr><th>支出项</th><th>类型</th><th class="numeric">笔数</th><th class="numeric">金额</th><th class="numeric">占比</th></tr></thead><tbody id="cost-breakdown"></tbody></table></div>
+              <div class="panel-heading"><div><h2>手工收入构成</h2><p>按收入项汇总</p></div></div>
+              <div class="table-wrap"><table><thead><tr><th>收入项</th><th class="numeric">笔数</th><th class="numeric">金额</th><th class="numeric">占比</th></tr></thead><tbody id="cost-income-breakdown"></tbody></table></div>
             </section>
             <section class="panel">
-              <div class="panel-heading"><div><h2>供应商</h2><p id="cost-provider-meta">尚未同步</p></div><button id="cost-provider-sync" class="button secondary" type="button"><i data-lucide="refresh-cw"></i><span>同步</span></button></div>
-              <div class="table-wrap"><table><thead><tr><th>供应商</th><th>适配器</th><th>状态</th><th class="numeric">操作</th></tr></thead><tbody id="cost-providers"></tbody></table></div>
+              <div class="panel-heading"><div><h2>成本构成</h2><p>按支出项汇总</p></div></div>
+              <div class="table-wrap"><table><thead><tr><th>支出项</th><th>类型</th><th class="numeric">笔数</th><th class="numeric">金额</th><th class="numeric">占比</th></tr></thead><tbody id="cost-breakdown"></tbody></table></div>
             </section>
           </div>
 
           <section class="panel">
-            <div class="panel-heading"><div><h2>周期明细</h2><p>充值收入减手工支出</p></div></div>
-            <div class="table-wrap"><table class="wide-table"><thead><tr><th>周期</th><th class="numeric">充值收入</th><th class="numeric">支出</th><th class="numeric">利润</th><th class="numeric">利润率</th><th class="numeric">充值笔数</th></tr></thead><tbody id="cost-periods"></tbody></table></div>
+            <div class="panel-heading"><div><h2>供应商</h2><p id="cost-provider-meta">尚未同步</p></div><button id="cost-provider-sync" class="button secondary" type="button"><i data-lucide="refresh-cw"></i><span>同步</span></button></div>
+            <div class="table-wrap"><table><thead><tr><th>供应商</th><th>适配器</th><th>状态</th><th class="numeric">操作</th></tr></thead><tbody id="cost-providers"></tbody></table></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading"><div><h2>周期明细</h2><p>自动充值、手工收入与支出</p></div></div>
+            <div class="table-wrap"><table class="wide-table"><thead><tr><th>周期</th><th class="numeric">自动充值</th><th class="numeric">手工收入</th><th class="numeric">总收入</th><th class="numeric">支出</th><th class="numeric">利润</th><th class="numeric">利润率</th><th class="numeric">充值笔数</th></tr></thead><tbody id="cost-periods"></tbody></table></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading"><div><h2>手工收入台账</h2><p id="cost-income-count">0 笔</p></div></div>
+            <div class="table-wrap"><table class="wide-table"><thead><tr><th>日期</th><th>收入项</th><th>备注</th><th class="numeric">金额</th><th class="numeric">操作</th></tr></thead><tbody id="cost-incomes"></tbody></table></div>
           </section>
 
           <section class="panel">

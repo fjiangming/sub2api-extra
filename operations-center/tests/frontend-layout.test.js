@@ -15,19 +15,27 @@ test('primary modules use an accessible top tab bar', () => {
   assert.doesNotMatch(html, /class="sidebar"|id="mobile-menu"/);
 });
 
-test('cost analysis exposes period reporting, provider sync and an editable expense ledger', () => {
+test('cost analysis exposes reporting plus editable income and expense ledgers', () => {
   assert.match(html, /data-view="costs"/);
   assert.match(html, /id="cost-analysis-filter"/);
+  assert.match(html, /id="cost-income-add"/);
+  assert.match(html, /id="cost-income-form"/);
+  assert.match(html, /id="cost-income-breakdown"/);
+  assert.match(html, /id="cost-incomes"/);
   assert.match(html, /id="cost-expense-form"/);
   assert.match(html, /id="cost-provider-sync"/);
   assert.match(html, /id="cost-periods"/);
   assert.match(html, /<script src="\/cost-analysis-ui\.js\?v=[^"]+" defer><\/script>[\s\S]*<script src="\/app\.js\?v=[^"]+" defer><\/script>/);
   assert.match(script, /api\(`\/api\/cost-analysis\?\$\{search\}`\)/);
+  assert.match(script, /api\(`\/api\/cost-analysis\/incomes\?\$\{search\}`\)/);
   assert.match(script, /api\('\/api\/cost-analysis\/providers\?refresh=true'\)/);
+  assert.match(script, /\/api\/cost-analysis\/incomes/);
   assert.match(script, /method: id \? 'PUT' : 'POST'/);
   assert.match(script, /method: 'DELETE'/);
-  assert.match(script, /CostAnalysisUi\.expenseEditorCurrency\(entry\)/);
-  assert.match(script, /CostAnalysisUi\.focusExpenseFilter/);
+  assert.match(script, /CostAnalysisUi\.entryEditorCurrency\(entry\)/);
+  assert.match(script, /CostAnalysisUi\.focusLedgerEntryFilter/);
+  assert.match(script, /report\.summary\.automaticRevenue/);
+  assert.match(script, /report\.summary\.manualRevenue/);
   assert.match(script, /refreshCostAnalysisAfterMutation/);
   assert.doesNotMatch(script, /updateCostProviderCurrency/);
 });

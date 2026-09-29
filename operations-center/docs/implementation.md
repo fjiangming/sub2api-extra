@@ -2,7 +2,7 @@
 
 ## 1. 架构
 
-`operations-center` 已实现为独立 Node.js 20+、Express 5 服务。它不导入 `account-manager` 或 `provider-monitor` 内部模块，也不共用 SQLite；唯一新增的本地业务数据是管理员维护的成本台账。
+`operations-center` 已实现为独立 Node.js 20+、Express 5 服务。它不导入 `account-manager` 或 `provider-monitor` 内部模块，也不共用 SQLite；唯一新增的本地业务数据是管理员维护的手工收支台账。
 
 ```text
 浏览器
@@ -14,11 +14,11 @@
        -> Provider Monitor API：脱敏供应商目录
        -> 每日调度器：可选，复用同一预览/备份/执行链路
        -> 加密运行配置：受限连接、清理设置、可选持久 API 凭据
-       -> 本地成本台账：供应商成本、自定义支出和供应商快照
+       -> 本地成本台账：手工收入、供应商成本、自定义支出和供应商快照
        -> 有上限内存：会话、查询缓存、容量样本、预览和运行报告
 ```
 
-Sub2API 的用户、订单和用量事实始终留在 Sub2API；运营中心只持久化无法从上游获得的手工成本。服务没有迁移数据库、消息队列或额外 Redis。加密运行配置不包含运营统计或清理历史数据。
+Sub2API 的用户、订单和用量事实始终留在 Sub2API；运营中心只持久化无法从上游获得的手工收入和支出。服务没有迁移数据库、消息队列或额外 Redis。加密运行配置不包含运营统计或清理历史数据。
 
 ## 2. 目录
 
@@ -29,14 +29,14 @@ operations-center/
     app.js                   # HTTP、安全中间件与 API
     auth.js                  # Sub2API SSO、本地内存会话和 CSRF
     config.js                # 环境变量验证
-    cost-ledger-store.js     # 原子持久化的手工成本台账
+    cost-ledger-store.js     # 原子持久化的手工收支台账
     db.js                    # 只读/维护连接池
     provider-monitor-client.js # 供应商目录客户端
     runtime-settings-store.js # AES-256-GCM 运行配置
     schema-inspector.js      # 表、列和分区能力识别
     sub2api-client.js        # 固定路径的版本/备份 API 客户端
     services/
-      cost-analysis-service.js # 充值收入、手工成本和利润分析
+      cost-analysis-service.js # 自动/手工收入、手工成本和利润分析
       metrics-service.js     # 用户、用量和资金统计
       storage-service.js     # 关系大小与容量诊断
       retention-service.js   # 保留策略、预览和批量清理
@@ -107,6 +107,7 @@ operations-center/
 | `GET /api/metrics/finance` | 实收、退款估算和额度入账 |
 | `GET /api/cost-analysis` | 日/周/月/年收支与利润 |
 | `GET /api/cost-analysis/providers` | 供应商快照与同步状态 |
+| `GET/POST/PUT/DELETE /api/cost-analysis/incomes` | 手工收入台账查询与维护 |
 | `GET/POST/PUT/DELETE /api/cost-analysis/expenses` | 手工支出台账查询与维护 |
 | `GET /api/storage` | 容量、关系和维护信号 |
 | `GET /api/capabilities` | schema、版本和执行能力 |
@@ -189,9 +190,9 @@ operations-center/
 下列状态持久化在 `OPERATIONS_CENTER_DATA_DIR`：
 
 - 加密运行配置和密钥
-- 有上限的手工成本台账与脱敏供应商快照
+- 有上限的手工收支台账与脱敏供应商快照
 
-成本台账必须随数据卷备份；它不包含 Sub2API 订单、用量副本或供应商凭据。
+成本台账必须随数据卷备份；它不包含 Sub2API 订单、用量副本或供应商凭据。v1 文件在启动时自动迁移为包含收入列表的 v2，不要手工删除或重建该文件。
 
 ## 8. 备份复用
 

@@ -97,6 +97,21 @@ const expenseSchema = z.object({
   }
 });
 
+const incomeSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  amount: z.number().finite().positive().max(1000000000000)
+    .refine((value) => Math.abs(value - Math.round(value * 100) / 100) < 1e-9, '金额最多保留两位小数'),
+  currency: z.string().trim().min(1).max(12).regex(/^[A-Za-z][A-Za-z0-9_-]*$/),
+  note: z.string().trim().max(500).optional().default('')
+}).superRefine((value, context) => {
+  const parsedDate = new Date(`${value.date}T00:00:00.000Z`);
+  if (value.date.startsWith('0000-') || Number.isNaN(parsedDate.getTime()) ||
+      parsedDate.toISOString().slice(0, 10) !== value.date) {
+    context.addIssue({ code: 'custom', path: ['date'], message: '发生日期无效' });
+  }
+});
+
 function parse(schema, input) {
   const result = schema.safeParse(input);
   if (!result.success) {
@@ -272,6 +287,22 @@ function createApp({ config, database, auth, inspector, metrics, costAnalysis, s
   }));
   api.delete('/cost-analysis/expenses/:id', csrf, asyncRoute(async (req, res) => {
     await costAnalysis.deleteExpense(req.params.id);
+    res.status(204).end();
+  }));
+  api.get('/cost-analysis/incomes', (req, res) => res.json({
+    items: costAnalysis.listIncomes(req.query),
+    customItems: costAnalysis.listIncomeItems()
+  }));
+  api.post('/cost-analysis/incomes', csrf, asyncRoute(async (req, res) => {
+    const input = parse(incomeSchema, req.body || {});
+    res.status(201).json(await costAnalysis.createIncome(input, req.auth.actor));
+  }));
+  api.put('/cost-analysis/incomes/:id', csrf, asyncRoute(async (req, res) => {
+    const input = parse(incomeSchema, req.body || {});
+    res.json(await costAnalysis.updateIncome(req.params.id, input, req.auth.actor));
+  }));
+  api.delete('/cost-analysis/incomes/:id', csrf, asyncRoute(async (req, res) => {
+    await costAnalysis.deleteIncome(req.params.id);
     res.status(204).end();
   }));
   api.get('/storage', asyncRoute(async (req, res) => res.json(await storage.getStorage({ refresh: req.query.refresh === 'true' }))));
