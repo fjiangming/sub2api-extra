@@ -30,7 +30,7 @@ async function createService(t, rows = []) {
   return { service, store, queries };
 }
 
-test('cost analysis aggregates automatic revenue, manual income and expenses by Monday-based weeks', async (t) => {
+test('cost analysis aggregates used balance redemptions, manual income and expenses by Monday-based weeks', async (t) => {
   const { service, store, queries } = await createService(t, [
     { date: '2026-09-01', transactions: '2', revenue: '100.00' },
     { date: '2026-09-08', transactions: '1', revenue: '50.00' }
@@ -77,8 +77,33 @@ test('cost analysis aggregates automatic revenue, manual income and expenses by 
   assert.deepEqual(report.periods.map((row) => row.label), ['09-01 ~ 09-06', '09-07 ~ 09-10']);
   assert.deepEqual(report.breakdown.map((row) => [row.name, row.amount]), [['服务器', 40], ['Provider One', 30]]);
   assert.deepEqual(report.incomeBreakdown, [{ name: '项目回款', amount: 30, count: 2, percentage: 100 }]);
-  assert.match(queries[0].sql, /SUM\(pay_amount\)/);
+  assert.match(queries[0].sql, /SUM\(value\)/);
+  assert.match(queries[0].sql, /FROM redeem_codes/);
+  assert.match(queries[0].sql, /used_at >=/);
+  assert.match(queries[0].sql, /status = 'used'/);
+  assert.match(queries[0].sql, /type = 'balance'/);
+  assert.match(queries[0].sql, /\$4 = 'CNY'/);
+  assert.doesNotMatch(queries[0].sql, /payment_orders|pay_amount|\bJOIN\b/);
   assert.deepEqual(queries[0].params, ['2026-09-01', '2026-09-11', 'Asia/Shanghai', 'CNY']);
+});
+
+test('cost analysis requires only redeem codes for automatic income', async (t) => {
+  const { service, queries } = await createService(t);
+  let required;
+  service.inspector = {
+    requireTables: async (names) => {
+      required = names;
+      return ['redeem_codes'];
+    }
+  };
+
+  await assert.rejects(
+    service.getReport({ start: '2026-09-01', end: '2026-09-30', currency: 'CNY' }),
+    (error) => error.code === 'SCHEMA_INCOMPATIBLE' &&
+      error.message === '缺少必要数据表：redeem_codes' && error.status === 503
+  );
+  assert.deepEqual(required, ['redeem_codes']);
+  assert.equal(queries.length, 0);
 });
 
 test('period helpers cover partial month and year ranges without dropping boundaries', () => {
@@ -139,7 +164,7 @@ test('day, month and year reports keep revenue and expenses in the correct perio
   ]);
 });
 
-test('currency isolation includes manual-only income without changing average recharge', async (t) => {
+test('currency isolation includes manual-only income without changing the automatic-income average', async (t) => {
   const { service } = await createService(t);
   await service.createExpense({
     kind: 'custom', name: 'USD Hosting', date: '2026-09-20', amount: 25,

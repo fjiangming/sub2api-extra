@@ -508,7 +508,7 @@ function renderCostAnalysisNotices(providers) {
 }
 
 async function loadCostAnalysis() {
-  setPageMeta('正在汇总自动充值、手工收入与支出');
+  setPageMeta('正在汇总自动收入、手工收入与支出');
   const form = $('cost-analysis-filter');
   const query = {
     ...formRange('cost-analysis-filter'),
@@ -524,13 +524,13 @@ async function loadCostAnalysis() {
     api('/api/cost-analysis/providers')
   ]);
 
-  const averageRecharge = report.summary.averageTransaction == null
+  const averageAutomaticIncome = report.summary.averageTransaction == null
     ? 'N/A'
     : formatMoney(report.summary.averageTransaction, report.currency);
   $('cost-analysis-metrics').innerHTML = [
-    metricCard('自动充值', formatMoney(report.summary.automaticRevenue, report.currency), `${formatInteger(report.summary.transactions)} 笔 · 平均 ${averageRecharge}`, 'green'),
+    metricCard('自动收入', formatMoney(report.summary.automaticRevenue, report.currency), `${formatInteger(report.summary.transactions)} 笔兑换 · 平均 ${averageAutomaticIncome}`, 'green'),
     metricCard('手工收入', formatMoney(report.summary.manualRevenue, report.currency), `${formatInteger(report.summary.incomeCount)} 笔`, 'amber'),
-    metricCard('总收入', formatMoney(report.summary.revenue, report.currency), '自动充值 + 手工收入', 'blue'),
+    metricCard('总收入', formatMoney(report.summary.revenue, report.currency), '自动收入 + 手工收入', 'blue'),
     metricCard('支出', formatMoney(report.summary.expense, report.currency), `${formatInteger(report.summary.expenseCount)} 笔`, 'red'),
     metricCard('利润', formatMoney(report.summary.profit, report.currency), report.summary.profit >= 0 ? '总收入 - 支出' : '当前为亏损', report.summary.profit >= 0 ? 'blue' : 'red'),
     metricCard('利润率', formatPercent(report.summary.margin), '利润 / 总收入', 'amber')
@@ -540,11 +540,11 @@ async function loadCostAnalysis() {
   renderCostAnalysisNotices(providers);
 
   chart('cost-analysis-chart', {
-    legend: { top: 2, right: 10, data: ['自动充值', '手工收入', '支出', '利润'] },
+    legend: { top: 2, right: 10, data: ['自动收入', '手工收入', '支出', '利润'] },
     xAxis: { type: 'category', data: report.periods.map((period) => period.label), axisLabel: { hideOverlap: true } },
     yAxis: { type: 'value', splitLine: { lineStyle: { color: '#edf0eb' } } },
     series: [
-      lineSeries('自动充值', report.periods.map((period) => period.automaticRevenue), '#176b4d'),
+      lineSeries('自动收入', report.periods.map((period) => period.automaticRevenue), '#176b4d'),
       lineSeries('手工收入', report.periods.map((period) => period.manualRevenue), '#c28a32'),
       { name: '支出', type: 'bar', data: report.periods.map((period) => period.expense), itemStyle: { color: '#b05a3c' }, barMaxWidth: 28 },
       lineSeries('利润', report.periods.map((period) => period.profit), '#2d5ea8')

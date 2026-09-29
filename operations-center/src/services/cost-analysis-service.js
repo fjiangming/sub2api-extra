@@ -2,7 +2,6 @@
 
 const { AppError } = require('../errors');
 const {
-  CURRENCY_SQL,
   addUtcDays,
   dateInTimezone,
   parseDateRange,
@@ -207,21 +206,24 @@ class CostAnalysisService {
 
   async getReport(input = {}) {
     const { range, granularity, currency } = parseReportInput(input, this.config);
-    const missing = await this.inspector.requireTables(['payment_orders']);
+    const missing = await this.inspector.requireTables(['redeem_codes']);
     if (missing.length) {
-      throw new AppError('SCHEMA_INCOMPATIBLE', '缺少必要数据表：payment_orders', {
+      throw new AppError('SCHEMA_INCOMPATIBLE', '缺少必要数据表：redeem_codes', {
         status: 503,
         details: { missing }
       });
     }
     const { rows } = await this.pool.query(`
-      SELECT (paid_at AT TIME ZONE $3)::date::text AS date,
+      SELECT (used_at AT TIME ZONE $3)::date::text AS date,
              COUNT(*) AS transactions,
-             COALESCE(SUM(pay_amount), 0) AS revenue
-      FROM payment_orders
-      WHERE paid_at >= $1::date::timestamp AT TIME ZONE $3
-        AND paid_at < $2::date::timestamp AT TIME ZONE $3
-        AND ${CURRENCY_SQL} = $4
+             COALESCE(SUM(value), 0) AS revenue
+      FROM redeem_codes
+      WHERE used_at >= $1::date::timestamp AT TIME ZONE $3
+        AND used_at < $2::date::timestamp AT TIME ZONE $3
+        AND used_at IS NOT NULL
+        AND status = 'used'
+        AND type = 'balance'
+        AND $4 = 'CNY'
       GROUP BY 1 ORDER BY 1
     `, [range.start, range.endExclusive, this.config.financeTimezone, currency]);
 
@@ -338,8 +340,9 @@ class CostAnalysisService {
       breakdown,
       incomeBreakdown,
       caveats: [
-        '自动收入按 Sub2API 已支付订单的 pay_amount 统计，手工收入按收入台账的发生日期归集。',
-        '总收入为自动充值收入与手工收入之和；平均充值仅使用自动充值收入计算。',
+        '自动收入按 Sub2API 兑换页面中已使用的余额兑换记录统计，以 used_at 归属日期；每条兑换记录只统计一次。',
+        '兑换记录没有币种字段，自动收入统一按 CNY 归集；其他币种报表仅包含对应币种的手工收支。',
+        '支付订单不会与兑换记录叠加；总收入为自动收入与手工收入之和，平均金额仅使用自动收入计算。',
         '支出按手工台账的发生日期归集；不同币种不会自动换算。',
         '利润为总收入减手工支出，不包含税费，也不扣除退款估算。'
       ]

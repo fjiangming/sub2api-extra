@@ -36,6 +36,8 @@ test('cost analysis exposes reporting plus editable income and expense ledgers',
   assert.match(script, /CostAnalysisUi\.focusLedgerEntryFilter/);
   assert.match(script, /report\.summary\.automaticRevenue/);
   assert.match(script, /report\.summary\.manualRevenue/);
+  assert.match(html, /<th class="numeric">自动收入<\/th>/);
+  assert.match(html, /<th class="numeric">兑换笔数<\/th>/);
   assert.match(script, /refreshCostAnalysisAfterMutation/);
   assert.doesNotMatch(script, /updateCostProviderCurrency/);
 });
