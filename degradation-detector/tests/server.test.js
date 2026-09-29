@@ -171,13 +171,25 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   assert.equal((await duplicateResponse.json()).error.code, 'DETECTION_KEY_DUPLICATED');
 
   const dedicatedKey = 'sk-service-group-1-1234567890';
+  const validation = structuredClone(initialConfig.platforms[0].test.validation);
+  validation.svg_math = { enabled: true, samples: 12, pass_ratio: 0.9 };
+  validation.rules.push({
+    id: 'foot_contact', label: '脚踏接触', type: 'svg_geometry', severity: 'hard', weight: 20,
+    geometry_operation: 'distance_lte', source_selector: '#left-foot', target_selector: '#left-pedal',
+    reference_selector: '#front-wheel', geometry_threshold: 0.08, case_sensitive: false
+  });
+  const groupTest = structuredClone(initialConfig.platforms[0].test);
+  groupTest.label = 'OpenAI 独立分组';
+  groupTest.model = 'gpt-group-specific';
+  groupTest.prompt = 'group-specific prompt';
+  groupTest.reasoning_effort = 'max';
   const savedResponse = await fetch(`${http.baseUrl}/api/admin/config`, {
     method: 'PUT',
     headers: headers(authA, authA.csrfToken),
     body: JSON.stringify(configuration([
-      { id: '1', enabled: true, key: dedicatedKey },
+      { id: '1', enabled: true, key: dedicatedKey, test: groupTest },
       { id: '3', enabled: false, key: '' }
-    ], '07:45', { reasoning_effort: 'xhigh' }))
+    ], '07:45', { reasoning_effort: 'xhigh', validation }))
   });
   assert.equal(savedResponse.status, 200);
   const saved = await savedResponse.json();
@@ -187,6 +199,13 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   assert.equal(saved.schedule_interval_minutes, 90);
   assert.equal(saved.platforms[0].groups[0].key_configured, true);
   assert.equal(saved.platforms[0].groups[0].enabled, true);
+  assert.equal(saved.platforms[0].groups[0].test.model, 'gpt-group-specific');
+  assert.equal(saved.platforms[0].groups[0].test.reasoning_effort, 'max');
+  assert.deepEqual(saved.platforms[0].test.validation.svg_math, {
+    enabled: true, samples: 12, pass_ratio: 0.9
+  });
+  assert.equal(saved.platforms[0].test.validation.rules.at(-1).type, 'svg_geometry');
+  assert.equal(runtime.store.getPlatformTest('openai').validation.rules.at(-1).geometry_threshold, 0.08);
   assert.doesNotMatch(JSON.stringify(saved), new RegExp(dedicatedKey));
 
   const storedMonitor = runtime.store.getMonitor(config.serviceOwnerId, '1');
@@ -194,7 +213,8 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   assert.notEqual(storedMonitor.key_cipher, dedicatedKey);
   assert.notEqual(storedMonitor.key_fingerprint, dedicatedKey);
   assert.equal(runtime.vault.decrypt('1', storedMonitor.key_cipher), dedicatedKey);
-  assert.equal(runtime.store.getMonitor(config.serviceOwnerId, '3'), null);
+  assert.equal(runtime.store.getMonitorTest(storedMonitor).model, 'gpt-group-specific');
+  assert.equal(runtime.store.getMonitor(config.serviceOwnerId, '3').enabled, 0);
 
   const resultsResponse = await fetch(`${http.baseUrl}/api/results`, { headers: headers(authA) });
   assert.equal(resultsResponse.status, 200);
@@ -205,7 +225,8 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   assert.equal(results.schedule_mode, 'daily');
   assert.deepEqual(results.schedule_times, ['07:45', '19:15']);
   assert.equal(results.schedule_interval_minutes, 90);
-  assert.equal(results.groups[0].reasoning_effort, 'xhigh');
+  assert.equal(results.groups[0].model, 'gpt-group-specific');
+  assert.equal(results.groups[0].reasoning_effort, 'max');
   assert.equal('can_operate' in results, false);
   assert.equal('key_configured' in results.groups[0], false);
   assert.equal('monitor_id' in results.groups[0], false);
@@ -248,6 +269,7 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
     method: 'POST', headers: headers(authA, authA.csrfToken), body: '{}'
   });
   assert.equal(accepted.status, 202);
+  assert.equal((await accepted.json()).model, 'gpt-group-specific');
   assert.equal(runtime.store.getMonitor('user-a', '1'), null);
 
   const monitor = runtime.store.getMonitor(config.serviceOwnerId, '1');
@@ -258,6 +280,7 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
       version: 2,
       normal_threshold: 90,
       degraded_threshold: 50,
+      svg_math: { enabled: true, samples: 12, pass_ratio: 0.9 },
       confirmation: { window: 3, required_failures: 2, recovery_passes: 2 },
       rules: [{
         id: 'private_rule',
@@ -266,6 +289,17 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
         severity: 'hard',
         weight: 100,
         value: 'private rule value must never be returned',
+        case_sensitive: false
+      }, {
+        id: 'private_geometry',
+        label: '脚踏接触证据',
+        type: 'svg_geometry',
+        severity: 'hard',
+        weight: 100,
+        geometry_operation: 'distance_lte',
+        source_selector: '#private-foot-selector',
+        target_selector: '#private-pedal-selector',
+        geometry_threshold: 2,
         case_sensitive: false
       }]
     }
@@ -282,8 +316,9 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
       version: 2,
       score: 100,
       passed: 1,
-      total: 1,
+      total: 2,
       hard_failures: 0,
+      indeterminate: 1,
       integrity_failures: [],
       results: [{
         id: 'private_rule',
@@ -293,6 +328,15 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
         weight: 100,
         passed: true,
         message: '已包含预期文本'
+      }, {
+        id: 'private_geometry',
+        label: '脚踏接触证据',
+        type: 'svg_geometry',
+        severity: 'hard',
+        weight: 100,
+        passed: false,
+        indeterminate: true,
+        message: '检测到不支持的动画，无法计算'
       }]
     },
     outputText: '<!doctype html><html><body>shared</body></html>',
@@ -308,10 +352,12 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   assert.equal(sharedPayload.reasoning_effort, 'xhigh');
   assert.equal(sharedPayload.html, '<!doctype html><html><body>shared</body></html>');
   assert.equal(sharedPayload.validation.score, 100);
+  assert.equal(sharedPayload.validation.indeterminate, 1);
   assert.equal(sharedPayload.validation.rules[0].label, '公开规则名称');
+  assert.equal(sharedPayload.validation.rules[1].indeterminate, true);
   assert.equal('test_snapshot' in sharedPayload, false);
   assert.equal('validation_snapshot' in sharedPayload, false);
-  assert.doesNotMatch(JSON.stringify(sharedPayload), /private prompt|private rule value/);
+  assert.doesNotMatch(JSON.stringify(sharedPayload), /private prompt|private rule value|private-foot-selector|private-pedal-selector/);
   assert.match(sharedPayload.preview_url, /^\/api\/previews\/preview_token_for_service_123456\?ancestors=.+&signature=.+/);
   const forbiddenDetail = await fetch(`${http.baseUrl}/api/results/${sharedRun.id}`, { headers: headers(authC) });
   assert.equal(forbiddenDetail.status, 404);
@@ -413,6 +459,15 @@ test('frontends keep authentication and administrator controls separated', () =>
   assert.match(mainSource, /controls\.classList\.add\('yzai-pelican-controls--html'\)/);
   assert.match(mainStyles, /\.yzai-pelican-controls--html\s*\{[^}]*position: absolute;/s);
   assert.match(mainStyles, /\.yzai-pelican-frame\s*\{[^}]*height: clamp\(420px, calc\(64dvh - 12px\), 668px\);/s);
+  assert.match(adminSource, /svg_geometry: 'SVG 数学关系'/);
+  assert.match(adminSource, /data-svg-math="enabled"/);
+  assert.match(adminSource, /geometry_threshold/);
+  assert.match(adminSource, /geometryTargetOperations/);
+  assert.match(adminSource, /target\.required = needsTarget/);
+  assert.match(adminHtml, /id="group-config-dialog"/);
+  assert.match(adminSource, /group\.test = collectTest/);
+  assert.match(adminHtml, /恢复平台默认/);
+  assert.match(adminStyles, /\.group-config-modal/);
   assert.doesNotMatch(mainSource, /reasoningLabel\(run\.reasoning_effort\)/);
   assert.doesNotMatch(mainSource, /未记录/);
   assert.match(mainSource, /const HISTORY_CHART_LENGTH = 60/);

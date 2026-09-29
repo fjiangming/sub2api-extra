@@ -52,6 +52,7 @@ function publicValidationResult(row, includeRules = false) {
       ? parsed.integrity_failures.map(String).slice(0, 10)
       : []
   };
+  if (Number(parsed.indeterminate) > 0) result.indeterminate = Number(parsed.indeterminate);
   if (includeRules) {
     result.rules = Array.isArray(parsed.results) ? parsed.results.slice(0, 50).map((rule) => ({
       id: String(rule.id || '').slice(0, 64),
@@ -60,6 +61,7 @@ function publicValidationResult(row, includeRules = false) {
       severity: rule.severity === 'soft' ? 'soft' : 'hard',
       weight: Number(rule.weight || 0),
       passed: rule.passed === true,
+      indeterminate: rule.indeterminate === true,
       message: String(rule.message || '').slice(0, 500)
     })) : [];
   }
@@ -150,6 +152,21 @@ function rowTest(row) {
   }
 }
 
+function rowMonitorTest(row) {
+  if (!row?.test_config_json) return null;
+  try {
+    return validateTestConfig(row.platform, JSON.parse(row.test_config_json));
+  } catch {
+    return null;
+  }
+}
+
+function storedTestConfig(test) {
+  if (!test) return null;
+  const { platform: _platform, ...config } = test;
+  return JSON.stringify(config);
+}
+
 class Store {
   constructor(config) {
     this.config = config;
@@ -180,6 +197,7 @@ class Store {
         platform TEXT NOT NULL,
         key_cipher TEXT,
         key_fingerprint TEXT,
+        test_config_json TEXT,
         enabled INTEGER NOT NULL DEFAULT 1,
         last_run_at INTEGER,
         next_run_at INTEGER,
@@ -260,6 +278,7 @@ class Store {
         ON runs(preview_token);
     `);
     this.#ensureColumn('monitors', 'key_fingerprint', 'TEXT');
+    this.#ensureColumn('monitors', 'test_config_json', 'TEXT');
     this.#ensureColumn('runs', 'reasoning_effort', 'TEXT');
     this.#ensureColumn('runs', 'test_snapshot', 'TEXT');
     this.#ensureColumn('runs', 'validation_snapshot', 'TEXT');
@@ -340,6 +359,17 @@ class Store {
     return config.test;
   }
 
+  getMonitorTestOverride(monitor) {
+    return rowMonitorTest(monitor);
+  }
+
+  getMonitorTest(monitor, enabledOnly = true) {
+    if (!monitor) return null;
+    const platform = this.getPlatformConfig(monitor.platform);
+    if (!platform || (enabledOnly && !platform.enabled)) return null;
+    return this.getMonitorTestOverride(monitor) || platform.test;
+  }
+
   saveAdminConfiguration(input) {
     const timestamp = nowMs();
     const transaction = this.db.transaction(() => {
@@ -414,6 +444,7 @@ class Store {
         intervalMinutes: input.scheduleIntervalMinutes
       }, timestamp, input.scheduleTimezone);
       for (const group of input.groups) {
+        const groupEnabled = group.enabled !== false;
         this.upsertMonitor({
           userId: input.serviceOwnerId,
           groupId: group.id,
@@ -421,11 +452,12 @@ class Store {
           platform: group.platform,
           keyCipher: group.keyCipher,
           keyFingerprint: group.keyFingerprint,
-          enabled: true,
-          nextRunAt
+          testConfigJson: storedTestConfig(group.test),
+          enabled: groupEnabled,
+          nextRunAt: groupEnabled ? nextRunAt : null
         });
       }
-      return { nextRunAt, groupsEnabled: input.groups.length };
+      return { nextRunAt, groupsEnabled: input.groups.filter((group) => group.enabled !== false).length };
     });
     return transaction();
   }
@@ -491,16 +523,20 @@ class Store {
     const keyFingerprint = input.keyFingerprint === undefined
       ? existing?.key_fingerprint || null
       : input.keyFingerprint;
+    const testConfigJson = input.testConfigJson === undefined
+      ? existing?.test_config_json || null
+      : input.testConfigJson;
     this.db.prepare(`
       INSERT INTO monitors (
         user_id, group_id, group_name, platform, key_cipher, key_fingerprint,
-        enabled, next_run_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        test_config_json, enabled, next_run_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(user_id, group_id) DO UPDATE SET
         group_name = excluded.group_name,
         platform = excluded.platform,
         key_cipher = excluded.key_cipher,
         key_fingerprint = excluded.key_fingerprint,
+        test_config_json = excluded.test_config_json,
         enabled = excluded.enabled,
         next_run_at = excluded.next_run_at,
         updated_at = excluded.updated_at
@@ -511,6 +547,7 @@ class Store {
       String(input.platform),
       keyCipher,
       keyFingerprint,
+      testConfigJson,
       input.enabled === false ? 0 : 1,
       input.enabled === false ? null : (input.nextRunAt ?? timestamp),
       existing?.created_at || timestamp,
@@ -877,7 +914,7 @@ class Store {
   }
 
   groupAssessment(userId, groupId, monitor = this.getMonitor(userId, groupId)) {
-    const test = this.getPlatformTest(monitor?.platform);
+    const test = this.getMonitorTest(monitor);
     const confirmation = test?.validation?.confirmation || {
       window: 3,
       required_failures: 2,
@@ -978,4 +1015,13 @@ class Store {
   }
 }
 
-module.exports = { Store, nowMs, publicRun, publicValidationResult, rowTest, testSnapshot };
+module.exports = {
+  Store,
+  nowMs,
+  publicRun,
+  publicValidationResult,
+  rowMonitorTest,
+  rowTest,
+  storedTestConfig,
+  testSnapshot
+};

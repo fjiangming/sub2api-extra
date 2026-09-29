@@ -24,9 +24,23 @@ const validationRuleTypes = [
   'regex',
   'not_regex',
   'html_selector',
+  'svg_geometry',
   'json_schema',
   'mime_type',
   'image_dimensions'
+];
+const svgGeometryOperations = [
+  'distance_lte',
+  'above',
+  'below',
+  'left_of',
+  'right_of',
+  'aligned_x',
+  'aligned_y',
+  'inside_viewbox',
+  'motion_gte',
+  'rotation_gte',
+  'loop_distance_lte'
 ];
 const dailyTimeSchema = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/);
 
@@ -53,7 +67,12 @@ const validationRuleSchema = z.object({
   min_width: z.coerce.number().int().min(1).max(16384).optional(),
   min_height: z.coerce.number().int().min(1).max(16384).optional(),
   max_width: z.coerce.number().int().min(1).max(16384).optional(),
-  max_height: z.coerce.number().int().min(1).max(16384).optional()
+  max_height: z.coerce.number().int().min(1).max(16384).optional(),
+  geometry_operation: z.enum(svgGeometryOperations).optional(),
+  source_selector: z.string().trim().min(1).max(1000).optional(),
+  target_selector: z.string().trim().min(1).max(1000).optional(),
+  reference_selector: z.string().trim().min(1).max(1000).optional(),
+  geometry_threshold: z.coerce.number().min(0).max(1000000).optional()
 }).strict().superRefine((rule, context) => {
   const requireValue = ['exact_text', 'contains', 'regex', 'not_regex', 'html_selector', 'json_schema', 'mime_type'];
   if (requireValue.includes(rule.type) && !String(rule.value || '').trim()) {
@@ -71,6 +90,33 @@ const validationRuleSchema = z.object({
     const minimum = rule.min_count ?? 1;
     if (rule.max_count != null && rule.max_count < minimum) {
       context.addIssue({ code: 'custom', path: ['max_count'], message: '最大数量不能小于最小数量' });
+    }
+  }
+  if (rule.type === 'svg_geometry') {
+    if (!rule.geometry_operation) {
+      context.addIssue({ code: 'custom', path: ['geometry_operation'], message: '必须选择 SVG 数学关系' });
+    }
+    if (!rule.source_selector) {
+      context.addIssue({ code: 'custom', path: ['source_selector'], message: '必须填写源元素选择器' });
+    }
+    const needsTarget = ['distance_lte', 'above', 'below', 'left_of', 'right_of', 'aligned_x', 'aligned_y']
+      .includes(rule.geometry_operation);
+    if (needsTarget && !rule.target_selector) {
+      context.addIssue({ code: 'custom', path: ['target_selector'], message: '该数学关系必须填写目标元素选择器' });
+    }
+    if (rule.geometry_threshold == null) {
+      context.addIssue({ code: 'custom', path: ['geometry_threshold'], message: '必须填写数学判定阈值' });
+    }
+    for (const field of ['source_selector', 'target_selector', 'reference_selector']) {
+      if (!rule[field]) continue;
+      try {
+        loadHtml('<!doctype html><html><body><svg></svg></body></html>')(rule[field]);
+      } catch (error) {
+        context.addIssue({ code: 'custom', path: [field], message: `CSS 选择器无效: ${error.message}` });
+      }
+    }
+    if (rule.geometry_operation === 'rotation_gte' && rule.reference_selector) {
+      context.addIssue({ code: 'custom', path: ['reference_selector'], message: '旋转角度规则不能使用尺寸参照元素' });
     }
   }
   if (['regex', 'not_regex'].includes(rule.type) && rule.value) {
@@ -117,10 +163,17 @@ const confirmationSchema = z.object({
   }
 });
 
+const svgMathSchema = z.object({
+  enabled: z.boolean().default(false),
+  samples: z.coerce.number().int().min(2).max(24).default(12),
+  pass_ratio: z.coerce.number().min(0.5).max(1).default(0.9)
+}).strict();
+
 const validationPolicySchema = z.object({
   version: z.literal(2).default(2),
   normal_threshold: z.coerce.number().int().min(1).max(100).default(80),
   degraded_threshold: z.coerce.number().int().min(0).max(99).default(50),
+  svg_math: svgMathSchema.optional(),
   rules: z.array(validationRuleSchema).max(50).default([]),
   confirmation: confirmationSchema.default({ window: 3, required_failures: 2, recovery_passes: 2 })
 }).strict().superRefine((value, context) => {
@@ -213,11 +266,11 @@ const testSchema = z.object({
     });
   }
   value.validation.rules.forEach((rule, index) => {
-    if (rule.type === 'html_selector' && value.output_type !== 'html') {
+    if (['html_selector', 'svg_geometry'].includes(rule.type) && value.output_type !== 'html') {
       context.addIssue({
         code: 'custom',
         path: ['validation', 'rules', index, 'type'],
-        message: 'HTML 选择器只能用于 HTML 输出'
+        message: `${rule.type === 'svg_geometry' ? 'SVG 数学关系' : 'HTML 选择器'}只能用于 HTML 输出`
       });
     }
     if (rule.type === 'image_dimensions' && value.output_type !== 'image') {
@@ -228,12 +281,20 @@ const testSchema = z.object({
       });
     }
   });
+  if (value.validation.svg_math?.enabled && value.output_type !== 'html') {
+    context.addIssue({
+      code: 'custom',
+      path: ['validation', 'svg_math', 'enabled'],
+      message: 'SVG 数学检测只能用于 HTML 输出'
+    });
+  }
 });
 
 const groupSelectionSchema = z.object({
   id: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,99}$/),
   enabled: z.boolean(),
-  key: z.string().max(8192).optional()
+  key: z.string().max(8192).optional(),
+  test: testSchema.optional()
 }).strict();
 
 const platformSelectionSchema = z.object({
@@ -347,7 +408,11 @@ function validateAdminConfiguration(value) {
     schedule_times: [...result.data.schedule_times].sort(),
     platforms: result.data.platforms.map((platform) => ({
       ...platform,
-      test: validateTestConfig(platform.id, platform.test)
+      test: validateTestConfig(platform.id, platform.test),
+      groups: platform.groups.map((group) => ({
+        ...group,
+        ...(group.test ? { test: validateTestConfig(`${platform.id} / 分组 ${group.id}`, group.test) } : {})
+      }))
     }))
   };
 }

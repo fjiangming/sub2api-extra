@@ -93,6 +93,35 @@
     </form>
   </main>
 
+  <dialog id="group-config-dialog" class="group-config-modal" aria-labelledby="group-config-title">
+    <form id="group-config-form">
+      <header class="group-config-modal-head">
+        <div>
+          <h2 id="group-config-title">分组独立检测配置</h2>
+          <p id="group-config-meta"></p>
+        </div>
+        <button id="group-config-close" class="icon-button" type="button" title="关闭" aria-label="关闭分组检测配置">
+          <i data-lucide="x"></i>
+        </button>
+      </header>
+      <div class="group-config-notice">
+        <i data-lucide="git-branch"></i>
+        <p>保存独立配置后，该分组不再继承平台默认检测题；恢复默认可重新跟随平台配置。</p>
+      </div>
+      <div id="group-config-editor" class="group-config-modal-body"></div>
+      <footer class="group-config-modal-foot">
+        <button id="group-config-inherit" class="button" type="button">
+          <i data-lucide="undo-2"></i><span>恢复平台默认</span>
+        </button>
+        <span></span>
+        <button id="group-config-cancel" class="button" type="button">取消</button>
+        <button id="group-config-apply" class="button primary" type="submit">
+          <i data-lucide="check"></i><span>应用独立配置</span>
+        </button>
+      </footer>
+    </form>
+  </dialog>
+
   <dialog id="history-dialog" class="history-modal" aria-labelledby="history-title">
     <header class="history-modal-head">
       <div>

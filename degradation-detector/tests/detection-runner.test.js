@@ -103,6 +103,55 @@ test('scored rules distinguish normal, unknown, degraded, and incomplete output'
   assert.equal(incomplete.source, 'builtin_integrity');
 });
 
+test('SVG math is opt-in, contributes normal evidence, and fails closed when unsupported', () => {
+  const html = '<html><body><svg viewBox="0 0 200 120"><circle id="wheel" cx="100" cy="80" r="30"/><circle id="foot" cx="100" cy="60" r="2"/><circle id="pedal" cx="102" cy="60" r="2"/></svg></body></html>';
+  const geometryRule = {
+    id: 'contact', label: '脚踏接触', type: 'svg_geometry', severity: 'hard', weight: 60,
+    geometry_operation: 'distance_lte', source_selector: '#foot', target_selector: '#pedal',
+    reference_selector: '#wheel', geometry_threshold: 0.1, case_sensitive: false
+  };
+  const base = {
+    output_type: 'html',
+    validation: {
+      version: 2,
+      normal_threshold: 80,
+      degraded_threshold: 50,
+      confirmation: { window: 3, required_failures: 2, recovery_passes: 2 },
+      rules: [
+        { id: 'svg', label: 'SVG', type: 'html_selector', severity: 'hard', weight: 40, value: 'svg[viewBox]', min_count: 1, case_sensitive: false },
+        geometryRule
+      ]
+    }
+  };
+
+  const disabled = deterministicVerdict(base, { text: html });
+  assert.equal(disabled.status, 'normal');
+  assert.equal(disabled.score, 100);
+  assert.equal(disabled.validationResult.total, 1);
+
+  const enabled = structuredClone(base);
+  enabled.validation.svg_math = { enabled: true, samples: 12, pass_ratio: 0.9 };
+  const normal = deterministicVerdict(enabled, { text: html });
+  assert.equal(normal.status, 'normal');
+  assert.equal(normal.validationResult.total, 2);
+  assert.equal(normal.validationResult.results[1].passed, true);
+
+  const unsupported = deterministicVerdict(enabled, { text: html.replace('<body>', '<body><script>void 0</script>') });
+  assert.equal(unsupported.status, 'unknown');
+  assert.equal(unsupported.score, 100);
+  assert.equal(unsupported.validationResult.indeterminate, 1);
+  assert.equal(unsupported.validationResult.results[1].indeterminate, true);
+  assert.match(unsupported.reason, /数学证据无法计算/);
+
+  const mathOnly = structuredClone(enabled);
+  mathOnly.validation.rules = [geometryRule];
+  const mathOnlyUnsupported = deterministicVerdict(mathOnly, {
+    text: html.replace('<body>', '<body><script>void 0</script>')
+  });
+  assert.equal(mathOnlyUnsupported.score, null);
+  assert.match(mathOnlyUnsupported.reason, /规则评分 无法计算/);
+});
+
 test('exact text and JSON Schema rules validate prompt-specific answers', () => {
   const exact = deterministicVerdict({
     output_type: 'text',
@@ -476,7 +525,7 @@ test('execution decrypts the configured service key from the credential vault', 
   const store = {
     markRunRunning: () => ({ id: 7, prompt: 'test prompt' }),
     getMonitorById: () => currentMonitor,
-    getPlatformTest: () => ({ platform: 'openai', output_type: 'text' }),
+    getMonitorTest: () => ({ platform: 'openai', output_type: 'text' }),
     nextScheduledAt: () => 123456789,
     completeRun: (_id, result) => {
       completed = result;

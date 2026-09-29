@@ -36,9 +36,9 @@ class Scheduler {
     if (this.closed) throw new AppError('SCHEDULER_CLOSED', '检测调度器正在关闭', { status: 503 });
     const existing = this.store.activeRun(monitor.user_id, monitor.group_id);
     if (existing) return publicRun(existing);
-    const test = this.store.getPlatformTest(monitor.platform);
+    const test = this.store.getMonitorTest(monitor);
     if (!test) {
-      throw new AppError('PLATFORM_NOT_SUPPORTED', `平台 ${monitor.platform} 未配置检测题`, { status: 409 });
+      throw new AppError('PLATFORM_NOT_SUPPORTED', `分组 ${monitor.group_name} 未配置检测题`, { status: 409 });
     }
     if (!monitor.enabled || !monitor.key_cipher || !monitor.key_fingerprint) {
       throw new AppError('GROUP_NOT_CONFIGURED', '该分组未启用检测或缺少专用 Key', { status: 409 });

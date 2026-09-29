@@ -61,8 +61,8 @@ function platformGroups(groups, runtime) {
 }
 
 function groupPayload(group, summary, runtime) {
-  const test = runtime.store.getPlatformTest(group.platform);
   const monitor = summary.monitor;
+  const test = runtime.store.getMonitorTest(monitor);
   return {
     id: group.id,
     name: group.name,
@@ -314,6 +314,7 @@ async function adminConfigurationPayload(req, runtime) {
           .map((group) => {
             const monitor = monitors.get(String(group.id));
             const keyConfigured = credentialUsable(runtime, monitor);
+            const groupTest = runtime.store.getMonitorTestOverride(monitor);
             return {
               id: String(group.id),
               name: group.name,
@@ -321,6 +322,7 @@ async function adminConfigurationPayload(req, runtime) {
               rate_multiplier: group.rate_multiplier ?? null,
               enabled: Boolean(stored?.enabled && monitor?.enabled && keyConfigured),
               key_configured: keyConfigured,
+              test: publicTest(groupTest),
               history_count: historyCounts.get(String(group.id)) || 0
             };
           })
@@ -355,7 +357,7 @@ async function saveAdminConfiguration(req, runtime) {
   }
 
   const fingerprints = new Set();
-  const selectedGroups = [];
+  const configuredGroups = [];
   for (const platform of submitted.platforms) {
     if (!availablePlatforms.has(platform.id)) {
       throw new AppError('PLATFORM_NOT_AVAILABLE', `平台 ${platform.id} 不存在或当前管理员无权配置`, { status: 400 });
@@ -370,6 +372,15 @@ async function saveAdminConfiguration(req, runtime) {
         if (submittedKey) {
           throw new AppError('VALIDATION_ERROR', '未启用的分组不能提交专用 Key', { status: 400 });
         }
+        configuredGroups.push({
+          id: String(group.id),
+          name: group.name,
+          platform: group.platform,
+          keyCipher: null,
+          keyFingerprint: null,
+          test: selection.test ? publicTest(selection.test) : null,
+          enabled: false
+        });
         continue;
       }
       const existing = runtime.store.getMonitor(runtime.config.serviceOwnerId, group.id);
@@ -392,12 +403,14 @@ async function saveAdminConfiguration(req, runtime) {
         throw new AppError('DETECTION_KEY_DUPLICATED', '不同分组不能重复使用同一个专用 Key', { status: 400 });
       }
       fingerprints.add(keyFingerprint);
-      selectedGroups.push({
+      configuredGroups.push({
         id: String(group.id),
         name: group.name,
         platform: group.platform,
         keyCipher,
-        keyFingerprint
+        keyFingerprint,
+        test: selection.test ? publicTest(selection.test) : null,
+        enabled: true
       });
     }
   }
@@ -410,7 +423,7 @@ async function saveAdminConfiguration(req, runtime) {
     updatedBy: String(req.auth.user.id),
     serviceOwnerId: runtime.config.serviceOwnerId,
     platforms: submitted.platforms,
-    groups: selectedGroups
+    groups: configuredGroups
   });
   return adminConfigurationPayload(req, runtime);
 }
@@ -443,13 +456,14 @@ function seedDemo(config, store, vault) {
         name: groupName,
         platform,
         keyCipher: vault.encrypt(groupId, key),
-        keyFingerprint: vault.fingerprint(key)
+        keyFingerprint: vault.fingerprint(key),
+        enabled: true
       };
     })
   });
   for (const [groupId, groupName, platform, status] of seed) {
     const monitor = store.getMonitor(userId, groupId);
-    const test = store.getPlatformTest(platform);
+    const test = store.getMonitorTest(monitor);
     if (!test || store.listHistory(userId, groupId, 1).length > 0) continue;
     const run = store.createRun(monitor, test, 'demo');
     store.markRunRunning(run.id);

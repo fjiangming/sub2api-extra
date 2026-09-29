@@ -79,6 +79,20 @@ test('legacy runs migrate without inventing a reasoning effort snapshot', (t) =>
   assert.equal(migrated.groupSummary('user-1', 'group-1', 10).history[0].reasoning_effort, null);
 });
 
+test('legacy monitor tables migrate to support group-specific tests', (t) => {
+  const config = testConfig(t);
+  const original = new Store(config);
+  original.close();
+  const legacy = new Database(config.databasePath);
+  legacy.exec('ALTER TABLE monitors DROP COLUMN test_config_json');
+  legacy.close();
+
+  const migrated = new Store(config);
+  t.after(() => migrated.close());
+  const columns = migrated.db.prepare('PRAGMA table_info(monitors)').all().map((column) => column.name);
+  assert.ok(columns.includes('test_config_json'));
+});
+
 test('stored schedules support multiple daily times and intervals', (t) => {
   const config = testConfig(t);
   const store = new Store(config);
@@ -90,6 +104,58 @@ test('stored schedules support multiple daily times and intervals', (t) => {
 
   saveSchedule(store, config, { mode: 'interval', intervalMinutes: 90 });
   assert.equal(store.nextScheduledAt(from), from + 90 * 60 * 1000);
+});
+
+test('group tests override platform defaults and survive disabled scheduling', (t) => {
+  const config = testConfig(t);
+  const store = new Store(config);
+  t.after(() => store.close());
+  const validation = {
+    min_bytes: 1,
+    required_patterns: [],
+    forbidden_patterns: [],
+    case_sensitive: false
+  };
+  const platformTest = validateTestConfig('openai', {
+    label: 'OpenAI', model: 'gpt-platform', api: 'responses', prompt: 'platform prompt',
+    output_type: 'text', max_output_tokens: 256, validation
+  });
+  const groupTest = validateTestConfig('openai', {
+    label: 'OpenAI Group 1', model: 'gpt-group', api: 'responses', prompt: 'group prompt',
+    output_type: 'text', reasoning_effort: 'max', max_output_tokens: 512, validation
+  });
+  const save = (group) => store.saveAdminConfiguration({
+    scheduleMode: 'daily', scheduleTimes: ['09:30'], scheduleIntervalMinutes: 60,
+    scheduleTimezone: config.scheduleTimezone, updatedBy: 'test-admin',
+    serviceOwnerId: config.serviceOwnerId,
+    platforms: [{ id: 'openai', enabled: true, test: platformTest, groups: [] }],
+    groups: [group]
+  });
+
+  save({
+    id: 'group-1', name: 'Group 1', platform: 'openai', enabled: true,
+    keyCipher: 'v1.cipher', keyFingerprint: 'fingerprint', test: groupTest
+  });
+  let current = store.getMonitor(config.serviceOwnerId, 'group-1');
+  assert.equal(store.getMonitorTest(current).model, 'gpt-group');
+  assert.equal(store.getMonitorTestOverride(current).reasoning_effort, 'max');
+
+  save({
+    id: 'group-1', name: 'Group 1', platform: 'openai', enabled: false,
+    keyCipher: null, keyFingerprint: null, test: groupTest
+  });
+  current = store.getMonitor(config.serviceOwnerId, 'group-1');
+  assert.equal(current.enabled, 0);
+  assert.equal(current.key_cipher, null);
+  assert.equal(store.getMonitorTestOverride(current).model, 'gpt-group');
+
+  save({
+    id: 'group-1', name: 'Group 1', platform: 'openai', enabled: true,
+    keyCipher: 'v1.cipher', keyFingerprint: 'fingerprint', test: null
+  });
+  current = store.getMonitor(config.serviceOwnerId, 'group-1');
+  assert.equal(store.getMonitorTestOverride(current), null);
+  assert.equal(store.getMonitorTest(current).model, 'gpt-platform');
 });
 
 test('manual completion preserves the automatic next run while scheduled completion advances it', (t) => {

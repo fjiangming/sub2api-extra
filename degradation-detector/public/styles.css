@@ -373,6 +373,7 @@ button, select, input { color: inherit; }
 .validation-evidence li:first-child { border-top: 0; }
 .validation-evidence li > svg { width: 16px; height: 16px; margin-top: 1px; color: var(--red); }
 .validation-evidence li[data-passed="true"] > svg { color: var(--green); }
+.validation-evidence li[data-passed="unknown"] > svg { color: var(--amber); }
 .validation-evidence li span { min-width: 0; }
 .validation-evidence li strong { display: block; font-size: 12px; overflow-wrap: anywhere; }
 .validation-evidence li small { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }

@@ -79,7 +79,8 @@ function seedRuntime(runtime, groups, tests = defaultTests) {
         name: group.name,
         platform: group.platform,
         keyCipher: runtime.vault.encrypt(group.id, key),
-        keyFingerprint: runtime.vault.fingerprint(key)
+        keyFingerprint: runtime.vault.fingerprint(key),
+        enabled: true
       };
     })
   });

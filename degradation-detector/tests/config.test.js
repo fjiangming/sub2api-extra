@@ -79,6 +79,25 @@ test('platform test validation covers regex and protocol-output combinations', (
   invalidImage.api = 'anthropic_messages';
   invalidImage.output_type = 'image';
   assert.throws(() => validateTestConfig('openai', invalidImage), /image 输出只支持/);
+
+  const geometry = defaultPlatformTest('openai');
+  geometry.validation.svg_math = { enabled: true, samples: 12, pass_ratio: 0.9 };
+  geometry.validation.rules.push({
+    id: 'feet', label: '脚踏接触', type: 'svg_geometry', severity: 'hard', weight: 20,
+    geometry_operation: 'distance_lte', source_selector: '#left-foot', target_selector: '#left-pedal',
+    reference_selector: '#front-wheel', geometry_threshold: 0.08, case_sensitive: false
+  });
+  const parsedGeometry = validateTestConfig('openai', geometry);
+  assert.equal(parsedGeometry.validation.svg_math.enabled, true);
+  assert.equal(parsedGeometry.validation.rules.at(-1).geometry_threshold, 0.08);
+
+  const missingTarget = structuredClone(geometry);
+  delete missingTarget.validation.rules.at(-1).target_selector;
+  assert.throws(() => validateTestConfig('openai', missingTarget), /目标元素选择器/);
+
+  const nonHtmlGeometry = structuredClone(geometry);
+  nonHtmlGeometry.output_type = 'text';
+  assert.throws(() => validateTestConfig('openai', nonHtmlGeometry), /SVG 数学关系只能用于 HTML 输出/);
 });
 
 test('administrator configuration rejects duplicates and disabled-platform groups', () => {
@@ -123,6 +142,39 @@ test('administrator configuration rejects duplicates and disabled-platform group
     schedule_interval_minutes: 0,
     platforms: []
   }), /schedule_interval_minutes/);
+});
+
+test('administrator configuration accepts and validates independent group tests', () => {
+  const platformTest = defaultPlatformTest('openai');
+  const groupTest = structuredClone(platformTest);
+  groupTest.model = 'gpt-group-specific';
+  groupTest.reasoning_effort = 'max';
+  groupTest.prompt = 'Return the group-specific answer.';
+  const parsed = validateAdminConfiguration({
+    schedule_mode: 'daily',
+    schedule_times: ['09:00'],
+    schedule_interval_minutes: 60,
+    platforms: [{
+      id: 'openai',
+      enabled: true,
+      test: platformTest,
+      groups: [{ id: '1', enabled: true, key: 'sk-test-group-specific-1234567890', test: groupTest }]
+    }]
+  });
+  assert.equal(parsed.platforms[0].groups[0].test.model, 'gpt-group-specific');
+  assert.equal(parsed.platforms[0].groups[0].test.reasoning_effort, 'max');
+
+  const invalid = structuredClone(groupTest);
+  invalid.model = '';
+  assert.throws(() => validateAdminConfiguration({
+    schedule_mode: 'daily',
+    schedule_times: ['09:00'],
+    schedule_interval_minutes: 60,
+    platforms: [{
+      id: 'openai', enabled: true, test: platformTest,
+      groups: [{ id: '1', enabled: true, test: invalid }]
+    }]
+  }), /groups\.0\.test\.model/);
 });
 
 test('default platform templates cover known and generic platforms', () => {

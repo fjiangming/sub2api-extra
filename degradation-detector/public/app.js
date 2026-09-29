@@ -225,8 +225,8 @@ function validationEvidenceHtml(validation, manuallyReviewed = false) {
   const integrity = (validation.integrity_failures || []).map((message) => `
     <li data-passed="false"><i data-lucide="circle-alert"></i><span><strong>完整性检查</strong><small>${escapeHtml(message)}</small></span></li>`).join('');
   const rules = (validation.rules || []).map((rule) => `
-    <li data-passed="${rule.passed === true}">
-      <i data-lucide="${rule.passed ? 'circle-check' : 'circle-x'}"></i>
+    <li data-passed="${rule.indeterminate ? 'unknown' : rule.passed === true}">
+      <i data-lucide="${rule.indeterminate ? 'circle-help' : rule.passed ? 'circle-check' : 'circle-x'}"></i>
       <span><strong>${escapeHtml(rule.label)}</strong><small>${escapeHtml(rule.message)} · ${rule.severity === 'hard' ? '核心规则' : '辅助规则'} · 权重 ${Number(rule.weight) || 0}</small></span>
     </li>`).join('');
   return `

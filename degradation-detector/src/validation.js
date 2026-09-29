@@ -2,6 +2,7 @@
 
 const Ajv = require('ajv');
 const { load: loadHtml } = require('cheerio');
+const { createSvgMathEvaluator } = require('./svg-math');
 
 const ajv = new Ajv({ strict: false, allErrors: true, validateFormats: false });
 
@@ -115,6 +116,7 @@ function evaluateRule(rule, context) {
     severity: rule.severity,
     weight: rule.weight,
     passed: false,
+    indeterminate: false,
     message: ''
   };
 
@@ -151,6 +153,18 @@ function evaluateRule(rule, context) {
       result.passed = countRequirement(rule, count);
       const maximum = rule.max_count == null ? '' : `，最多 ${rule.max_count} 个`;
       result.message = `匹配到 ${count} 个元素，要求至少 ${rule.min_count ?? 1} 个${maximum}`;
+      break;
+    }
+    case 'svg_geometry': {
+      const evaluated = context.svgMath?.evaluate(rule);
+      if (!evaluated) {
+        result.indeterminate = true;
+        result.message = 'SVG 数学检测未开启';
+      } else {
+        result.passed = evaluated.passed === true;
+        result.indeterminate = evaluated.indeterminate === true;
+        result.message = evaluated.message;
+      }
       break;
     }
     case 'json_schema': {
@@ -193,6 +207,8 @@ function evaluateOutput(test, output) {
   const integrity = validateOutputIntegrity(test, output);
   const policy = test.validation || {};
   const rules = Array.isArray(policy.rules) ? policy.rules : [];
+  const mathEnabled = test.output_type === 'html' && policy.svg_math?.enabled === true;
+  const activeRules = rules.filter((rule) => rule.type !== 'svg_geometry' || mathEnabled);
   if (!integrity.ok) {
     return {
       quality: 'unknown',
@@ -204,19 +220,21 @@ function evaluateOutput(test, output) {
         version: 2,
         score: null,
         passed: 0,
-        total: rules.length,
+        total: activeRules.length,
         hard_failures: 0,
         integrity_failures: integrity.failures,
         results: []
       }
     };
   }
-  if (rules.length === 0) {
+  if (activeRules.length === 0) {
     return {
       quality: 'unknown',
       status: 'unknown',
       score: null,
-      reason: '响应完整，但没有配置题目判定规则，无法判断模型能力',
+      reason: rules.length > 0
+        ? '响应完整，但 SVG 数学检测未开启且没有其他判定规则，无法判断模型能力'
+        : '响应完整，但没有配置题目判定规则，无法判断模型能力',
       source: 'configured_validation_v2',
       validationResult: {
         version: 2, score: null, passed: 0, total: 0, hard_failures: 0, integrity_failures: [], results: []
@@ -230,21 +248,32 @@ function evaluateOutput(test, output) {
     bytes: integrity.bytes,
     html: loadHtml(integrity.source, {}, false),
     xmlHtml: loadHtml(integrity.source, { xmlMode: true }, false),
-    dimensions: imageDimensions(output.buffer, output.mime)
+    dimensions: imageDimensions(output.buffer, output.mime),
+    svgMath: null
   };
-  const results = rules.map((rule) => evaluateRule(rule, context));
-  const totalWeight = results.reduce((sum, rule) => sum + rule.weight, 0);
-  const passedWeight = results.reduce((sum, rule) => sum + (rule.passed ? rule.weight : 0), 0);
+  if (mathEnabled && activeRules.some((rule) => rule.type === 'svg_geometry')) {
+    context.svgMath = createSvgMathEvaluator(context.html, integrity.source, policy.svg_math);
+  }
+  const results = activeRules.map((rule) => evaluateRule(rule, context));
+  const scorableResults = results.filter((rule) => !rule.indeterminate);
+  const totalWeight = scorableResults.reduce((sum, rule) => sum + rule.weight, 0);
+  const passedWeight = scorableResults.reduce((sum, rule) => sum + (rule.passed ? rule.weight : 0), 0);
   const score = totalWeight > 0 ? Math.round((passedWeight / totalWeight) * 100) : null;
-  const hardFailures = results.filter((rule) => !rule.passed && rule.severity === 'hard');
-  const failures = results.filter((rule) => !rule.passed);
+  const indeterminateRules = results.filter((rule) => rule.indeterminate);
+  const hardFailures = results.filter((rule) => !rule.indeterminate && !rule.passed && rule.severity === 'hard');
+  const failures = results.filter((rule) => !rule.indeterminate && !rule.passed);
   let status;
-  if (hardFailures.length > 0 || score <= policy.degraded_threshold) status = 'degraded';
+  if (hardFailures.length > 0) status = 'degraded';
+  else if (indeterminateRules.length > 0) status = 'unknown';
+  else if (score <= policy.degraded_threshold) status = 'degraded';
   else if (score >= policy.normal_threshold) status = 'normal';
   else status = 'unknown';
 
   const failedLabels = failures.slice(0, 3).map((rule) => rule.label).join('、');
-  const reason = status === 'normal'
+  const scoreLabel = score == null ? '无法计算' : `${score} 分`;
+  const reason = indeterminateRules.length > 0 && hardFailures.length === 0
+    ? `规则评分 ${scoreLabel}，数学证据无法计算：${indeterminateRules.slice(0, 2).map((rule) => rule.label).join('、')}`
+    : status === 'normal'
     ? `规则评分 ${score} 分，题目要求已通过`
     : status === 'degraded'
       ? `规则评分 ${score} 分，未通过：${failedLabels || '核心规则'}`
@@ -261,6 +290,7 @@ function evaluateOutput(test, output) {
       passed: results.filter((rule) => rule.passed).length,
       total: results.length,
       hard_failures: hardFailures.length,
+      indeterminate: indeterminateRules.length,
       integrity_failures: [],
       results
     }

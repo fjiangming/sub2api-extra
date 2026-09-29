@@ -532,7 +532,7 @@ class DetectionRunner {
   async execute(runId, monitor) {
     const run = this.store.markRunRunning(runId);
     const currentMonitor = this.store.getMonitorById(monitor.id);
-    const test = currentMonitor && this.store.getPlatformTest(currentMonitor.platform);
+    const test = currentMonitor && this.store.getMonitorTest(currentMonitor);
     if (!currentMonitor?.enabled || !test) {
       this.store.failRun(runId, {
         reason: `平台 ${monitor.platform} 已不在检测配置中`,
