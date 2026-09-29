@@ -335,7 +335,7 @@ test('email channels use authenticated TLS settings and send TTFT details', asyn
     },
     credentials: { password: 'smtp-secret' }
   });
-  const triggeredAt = new Date().toISOString();
+  const triggeredAt = '2026-09-29T14:35:00.031Z';
   context.db.prepare(`
     INSERT INTO alert_events(
       id, subject_type, subject_id, status, severity, message,
@@ -369,5 +369,7 @@ test('email channels use authenticated TLS settings and send TTFT details', asyn
     address: 'monitor@example.com'
   });
   assert.match(messages[0].text, /Key #88 平均首字过高/);
-  assert.match(messages[0].html, /触发时间/);
+  assert.match(messages[0].text, /触发时间：2026-09-29 22:35:00（北京时间）/);
+  assert.match(messages[0].html, /触发时间：<\/strong>2026-09-29 22:35:00（北京时间）/);
+  assert.doesNotMatch(messages[0].text, /2026-09-29T14:35:00\.031Z/);
 });

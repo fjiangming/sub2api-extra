@@ -36,6 +36,34 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+function formatNotificationTime(value, configuredTimezone) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return String(value || '');
+  let timezone = configuredTimezone || 'Asia/Shanghai';
+  let parts;
+  const options = {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  };
+  try {
+    parts = new Intl.DateTimeFormat('en-CA', options).formatToParts(date);
+  } catch {
+    timezone = 'Asia/Shanghai';
+    parts = new Intl.DateTimeFormat('en-CA', { ...options, timeZone: timezone }).formatToParts(date);
+  }
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const timestamp = `${values.year}-${values.month}-${values.day} ` +
+    `${values.hour}:${values.minute}:${values.second}`;
+  const timezoneLabel = timezone === 'Asia/Shanghai' ? '北京时间' : timezone;
+  return `${timestamp}（${timezoneLabel}）`;
+}
+
 class NotificationService {
   constructor({ db, config, rechargeLinks = null, mailer = nodemailer }) {
     this.db = db;
@@ -402,7 +430,10 @@ class NotificationService {
         socketTimeout: 20000,
         tls: { minVersion: 'TLSv1.2', servername: smtp.host }
       });
-      const triggeredAt = event.triggered_at || nowIso();
+      const triggeredAt = formatNotificationTime(
+        event.triggered_at || nowIso(),
+        this.config.timezone
+      );
       const plainText = `${message}\n\n触发时间：${triggeredAt}`;
       await transporter.sendMail({
         from: smtp.fromName

@@ -254,6 +254,9 @@ SMTP 密码放在凭据 JSON 中并加密保存：
 }
 ```
 
+邮件正文中的触发时间按 `PROVIDER_MONITOR_TIMEZONE` 格式化；默认
+`Asia/Shanghai`，显示为北京时间而不是 UTC ISO 时间。
+
 相关 API：`GET/PUT /api/key-ttft-alerts/config`、`POST /api/key-ttft-alerts/evaluate`。
 
 ---
