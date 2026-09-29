@@ -463,6 +463,45 @@ HTTPS iframe 会同时设置普通 Cookie 和分区 Cookie，并在 URL Fragment
 
 运营中心的成本分析只需要供应商 ID、名称、适配器、启停状态和币种。两个服务都使用 Sub2API SSO 时可复用当前管理员会话；Provider Monitor 使用本地认证时，应在两个服务中配置相同的 `PROVIDER_MONITOR_INTEGRATION_TOKEN`。该 Token 至少 32 个字符，并且只授权 `GET /api/integrations/providers` 脱敏列表接口。
 
+### 运营中心供应商同步
+
+在 Windows CMD 中执行以下单行命令生成共享 Token：
+
+```cmd
+powershell -NoProfile -Command "$b=New-Object byte[] 32;$r=[Security.Cryptography.RandomNumberGenerator]::Create();$r.GetBytes($b);$r.Dispose();-join($b|ForEach-Object{$_.ToString('x2')})"
+```
+
+该命令输出 64 位十六进制字符串。它是运营中心只读集成凭据，应与用于数据库凭据加密的 `PROVIDER_MONITOR_SECRET` 分开生成。将同一个值写入两侧：
+
+```dotenv
+# provider-monitor/.env
+PROVIDER_MONITOR_INTEGRATION_TOKEN=<生成的64位Token>
+
+# operations-center/.env
+PROVIDER_MONITOR_BASE_URL=http://provider-monitor:9871
+PROVIDER_MONITOR_INTEGRATION_TOKEN=<同一个64位Token>
+```
+
+通过仓库根目录的同一个 Compose 项目启动时，`provider-monitor` 是 Docker 内部 DNS 服务名，默认内部地址为 `http://provider-monitor:9871`。内部端口取 `provider-monitor/.env` 的 `PORT`，与宿主机端口映射 `PROVIDER_MONITOR_PORT` 无关。根目录 `compose.services.env` 至少应启用两个 profile：
+
+```env
+COMPOSE_PROFILES=provider-monitor,operations-center
+```
+
+可从正在运行的运营中心容器验证内部地址：
+
+```powershell
+docker compose --env-file compose.services.env exec operations-center node -e "fetch('http://provider-monitor:9871/healthz').then(async r => { console.log(r.status, await r.text()); process.exit(r.ok ? 0 : 1) }).catch(e => { console.error(e.message); process.exit(1) })"
+```
+
+返回 HTTP `200` 表示可以使用内部地址。`ENOTFOUND` 通常表示两个服务不在同一 Docker 网络，`ECONNREFUSED` 通常表示服务未启动或内部端口不正确。不同 Compose 项目默认网络隔离，需要显式配置共享外部网络，或在 `operations-center/.env` 中改用运营中心容器可访问的域名：
+
+```dotenv
+PROVIDER_MONITOR_BASE_URL=https://monitor.example.com
+```
+
+域名方式要求 DNS 可解析、HTTPS 证书有效，并由反向代理保留 `Authorization` 请求头且正确转发 `/api/*`。同一 Compose 网络中优先使用内部地址。Token 轮换时必须同步更新两个 `.env` 并重启 Provider Monitor 和运营中心。
+
 ---
 
 ## 分组与倍率对照

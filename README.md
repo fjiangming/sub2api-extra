@@ -290,6 +290,20 @@ SUB2API_MAINTENANCE_DATABASE_URL=
 OPERATIONS_CENTER_REQUIRE_FRESH_BACKUP=true
 ```
 
+成本分析同步供应商时，建议为两个服务单独生成一个共享只读 Token。在 Windows CMD 中执行：
+
+```cmd
+powershell -NoProfile -Command "$b=New-Object byte[] 32;$r=[Security.Cryptography.RandomNumberGenerator]::Create();$r.GetBytes($b);$r.Dispose();-join($b|ForEach-Object{$_.ToString('x2')})"
+```
+
+将输出同时写入 `provider-monitor/.env` 和 `operations-center/.env` 的 `PROVIDER_MONITOR_INTEGRATION_TOKEN`，不要与 `PROVIDER_MONITOR_SECRET` 复用。同一根 Compose 项目中使用 `http://provider-monitor:9871`；不同 Compose 网络则使用共享外部网络或运营中心容器可访问的 HTTPS 域名。以下命令返回 HTTP `200` 时，说明内部地址可用：
+
+```powershell
+docker compose --env-file compose.services.env exec operations-center node -e "fetch('http://provider-monitor:9871/healthz').then(async r => { console.log(r.status, await r.text()); process.exit(r.ok ? 0 : 1) }).catch(e => { console.error(e.message); process.exit(1) })"
+```
+
+域名反向代理必须转发 `/api/*` 并保留 `Authorization` 请求头。完整说明见[运营中心 README](operations-center/README.md#供应商同步配置)和[供应商监控 README](provider-monitor/README.md#运营中心供应商同步)。
+
 运营中心数据库连接、权限初始化、依赖检查和清理计划均可在页面完成。若服务器上的运营中心容器不能通过 `host.docker.internal:8080` 访问 Sub2API，请把 `SUB2API_BASE_URL` 改为与 `SUB2API_PUBLIC_URL` 相同的公开 HTTPS 地址；新版的认证与只读请求也会在内部地址发生连接故障时自动回退到该公开地址。详见[部署与操作手册](operations-center/docs/deployment-operations.md)。
 
 #### `degradation-detector/.env`

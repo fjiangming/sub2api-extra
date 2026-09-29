@@ -114,6 +114,53 @@ docker compose --env-file compose.services.env up -d --no-build operations-cente
 
 Provider Monitor 使用 `sub2api` 认证时，运营中心会用当前管理员 SSO Token 换取短期会话并读取供应商。Provider Monitor 使用 `local` 认证或需要无人值守同步时，在两个服务中配置相同的 `PROVIDER_MONITOR_INTEGRATION_TOKEN`；Token 至少 32 个字符，只能访问脱敏后的供应商列表接口。同步失败时页面保留上次成功快照，自定义支出仍可录入。
 
+### 供应商同步配置
+
+在 Windows CMD 中执行以下单行命令，生成 32 字节随机数对应的 64 位十六进制 Token：
+
+```cmd
+powershell -NoProfile -Command "$b=New-Object byte[] 32;$r=[Security.Cryptography.RandomNumberGenerator]::Create();$r.GetBytes($b);$r.Dispose();-join($b|ForEach-Object{$_.ToString('x2')})"
+```
+
+Token 应与 `PROVIDER_MONITOR_SECRET` 分开生成，不要复用。把同一个新 Token 分别写入两个服务的配置文件：
+
+```dotenv
+# operations-center/.env
+PROVIDER_MONITOR_BASE_URL=http://provider-monitor:9871
+PROVIDER_MONITOR_INTEGRATION_TOKEN=<生成的64位Token>
+PROVIDER_MONITOR_REQUEST_TIMEOUT_MS=10000
+```
+
+```dotenv
+# provider-monitor/.env
+PROVIDER_MONITOR_INTEGRATION_TOKEN=<同一个64位Token>
+```
+
+两个服务均使用 Sub2API SSO 时可以不配置共享 Token，但无人值守同步或 Provider Monitor 使用 `local` 认证时必须配置。更换 Token 时需要同时更新两个文件并重启两个服务。
+
+通过仓库根目录的同一个 Compose 项目启动两个服务时，它们共享默认网络，内部地址使用 Compose 服务名和容器内部端口：
+
+```env
+COMPOSE_PROFILES=provider-monitor,operations-center
+PROVIDER_MONITOR_BASE_URL=http://provider-monitor:9871
+```
+
+`9871` 是 Provider Monitor 的容器内部 `PORT`，不是宿主机的 `PROVIDER_MONITOR_PORT` 映射值。如果修改了 `provider-monitor/.env` 中的 `PORT`，这里也要使用修改后的内部端口。可在仓库根目录执行以下命令验证连通性：
+
+```powershell
+docker compose --env-file compose.services.env exec operations-center node -e "fetch('http://provider-monitor:9871/healthz').then(async r => { console.log(r.status, await r.text()); process.exit(r.ok ? 0 : 1) }).catch(e => { console.error(e.message); process.exit(1) })"
+```
+
+返回 HTTP `200` 即可使用内部地址。`ENOTFOUND` 表示服务名无法解析或两个容器不在同一网络，`ECONNREFUSED` 表示 Provider Monitor 未启动或内部端口不正确。两个服务由不同 Compose 项目启动时，默认不能使用 `provider-monitor`，需要加入同一个外部 Docker 网络，或改用运营中心容器可访问的域名。
+
+域名可以直接作为服务端地址：
+
+```dotenv
+PROVIDER_MONITOR_BASE_URL=https://monitor.example.com
+```
+
+域名必须能从运营中心容器解析和访问，HTTPS 证书必须有效，反向代理需要把 `/api/*` 转发到 Provider Monitor，并保留 `Authorization` 请求头。两个服务在同一 Compose 网络时优先使用内部地址，避免供应商同步绕行公网和反向代理。
+
 Sub2API 的会话绑定会校验登录浏览器的 IP 和 User-Agent，独立服务无法代替浏览器通过该校验。使用自定义菜单 SSO 时需要关闭会话绑定并重新登录；必须保留会话绑定时，请改用 `local` 模式。
 
 `SUB2API_ADMIN_TOKEN`、`ADMIN_EMAIL` 和 `ADMIN_PASSWORD` 对交互式 SSO 均非必填。当前有效的 SSO Token 可以触发手动原生备份，也可暂时供自动清理使用；但它会过期且服务重启后丢失。要求每日自动清理长期无人值守时，可在系统设置中验证并加密保存管理员 Token 或邮箱密码，否则认证不可用的场次会在备份阶段安全失败，不会执行删除。
