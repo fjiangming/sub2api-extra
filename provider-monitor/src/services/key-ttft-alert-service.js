@@ -39,7 +39,6 @@ class KeyTtftAlertService {
     ).get();
     return {
       enabled: Boolean(row.enabled),
-      windowMinutes: row.window_minutes,
       sampleCount: row.sample_count,
       thresholdMs: row.threshold_ms,
       cooldownMinutes: row.cooldown_minutes,
@@ -53,7 +52,6 @@ class KeyTtftAlertService {
     const current = this.settings();
     const next = {
       enabled: input.enabled ?? current.enabled,
-      windowMinutes: input.windowMinutes ?? current.windowMinutes,
       sampleCount: input.sampleCount ?? current.sampleCount,
       thresholdMs: input.thresholdMs ?? current.thresholdMs,
       cooldownMinutes: input.cooldownMinutes ?? current.cooldownMinutes,
@@ -61,7 +59,6 @@ class KeyTtftAlertService {
         ? current.channelIds
         : normalizeChannelIds(input.channelIds)
     };
-    next.windowMinutes = integerInRange(next.windowMinutes, '监控窗口', 1, 1440);
     next.sampleCount = integerInRange(next.sampleCount, '采样记录条数', 1, 1000);
     next.thresholdMs = integerInRange(next.thresholdMs, '平均首字阈值', 100, 600000);
     next.cooldownMinutes = integerInRange(next.cooldownMinutes, '提醒冷却时间', 1, 10080);
@@ -82,12 +79,11 @@ class KeyTtftAlertService {
     }
     this.db.prepare(`
       UPDATE sub2api_key_ttft_alert_settings SET
-        enabled = ?, window_minutes = ?, sample_count = ?, threshold_ms = ?,
-        cooldown_minutes = ?, channel_ids_json = ?, updated_at = ?
+        enabled = ?, sample_count = ?, threshold_ms = ?, cooldown_minutes = ?,
+        channel_ids_json = ?, updated_at = ?
       WHERE id = 1
     `).run(
       next.enabled ? 1 : 0,
-      next.windowMinutes,
       next.sampleCount,
       next.thresholdMs,
       next.cooldownMinutes,
@@ -98,40 +94,42 @@ class KeyTtftAlertService {
     return this.settings();
   }
 
-  #metrics(settings, windowStart, evaluatedAt) {
-    return this.db.prepare(`
-      WITH ranked AS (
-        SELECT sample.account_id, sample.first_token_ms, sample.created_at,
-          sample.source_log_id,
-          ROW_NUMBER() OVER (
-            PARTITION BY sample.account_id
-            ORDER BY sample.created_at DESC, sample.source_log_id DESC
-          ) AS row_number
-        FROM sub2api_account_request_samples sample
-        JOIN sub2api_monitored_accounts account
-          ON account.account_id = sample.account_id
-        WHERE sample.sample_source = '${SAMPLE_SOURCE}'
-          AND sample.stream = 1
-          AND sample.first_token_ms > 0
-          AND sample.created_at >= ?
-          AND sample.created_at <= ?
-          AND account.missing_since IS NULL
-      )
-      SELECT ranked.account_id, account.name AS account_name,
-        account.platform, account.status AS account_status,
-        COUNT(*) AS sample_count,
-        AVG(ranked.first_token_ms) AS avg_first_token_ms,
-        MIN(ranked.first_token_ms) AS min_first_token_ms,
-        MAX(ranked.first_token_ms) AS max_first_token_ms,
-        MAX(ranked.created_at) AS last_request_at
-      FROM ranked
-      JOIN sub2api_monitored_accounts account
-        ON account.account_id = ranked.account_id
-      WHERE ranked.row_number <= ?
-      GROUP BY ranked.account_id, account.name, account.platform, account.status
-      HAVING COUNT(*) >= ?
-      ORDER BY avg_first_token_ms DESC, ranked.account_id
-    `).all(windowStart, evaluatedAt, settings.sampleCount, settings.sampleCount);
+  #metrics(settings) {
+    const accounts = this.db.prepare(`
+      SELECT account_id, name, platform, status
+      FROM sub2api_monitored_accounts
+      WHERE missing_since IS NULL
+    `).all();
+    const latestSamples = this.db.prepare(`
+      SELECT first_token_ms, created_at
+      FROM sub2api_account_request_samples
+      WHERE sample_source = ? AND account_id = ?
+        AND stream = 1 AND first_token_ms > 0
+      ORDER BY created_at DESC, source_log_id DESC
+      LIMIT ?
+    `);
+    const metrics = [];
+    for (const account of accounts) {
+      const samples = latestSamples.all(SAMPLE_SOURCE, account.account_id, settings.sampleCount);
+      if (samples.length < settings.sampleCount) continue;
+      const values = samples.map((sample) => Number(sample.first_token_ms));
+      metrics.push({
+        account_id: account.account_id,
+        account_name: account.name,
+        platform: account.platform,
+        account_status: account.status,
+        sample_count: samples.length,
+        avg_first_token_ms: values.reduce((sum, value) => sum + value, 0) / values.length,
+        min_first_token_ms: Math.min(...values),
+        max_first_token_ms: Math.max(...values),
+        first_request_at: samples.at(-1).created_at,
+        last_request_at: samples[0].created_at
+      });
+    }
+    return metrics.sort((left, right) =>
+      right.avg_first_token_ms - left.avg_first_token_ms ||
+      String(left.account_id).localeCompare(String(right.account_id))
+    );
   }
 
   #eventFingerprint(accountId) {
@@ -156,7 +154,7 @@ class KeyTtftAlertService {
     return count;
   }
 
-  async #applyMetric(metric, settings, evaluatedAt, windowStart) {
+  async #applyMetric(metric, settings, evaluatedAt) {
     const accountId = String(metric.account_id);
     const fingerprint = this.#eventFingerprint(accountId);
     const existing = this.db.prepare(
@@ -168,7 +166,7 @@ class KeyTtftAlertService {
     const shouldNotify = !existing || existing.status === 'resolved' || cooldownElapsed;
     const eventId = existing?.id || crypto.randomUUID();
     const averageMs = Math.round(Number(metric.avg_first_token_ms));
-    const message = `Key“${metric.account_name}”（#${accountId}）最近 ${settings.windowMinutes} 分钟的 ` +
+    const message = `Key“${metric.account_name}”（#${accountId}）最新 ` +
       `${metric.sample_count} 条真实业务流式请求平均首字为 ${milliseconds(averageMs)}，` +
       `超过阈值 ${milliseconds(settings.thresholdMs)}。`;
     const details = {
@@ -179,15 +177,15 @@ class KeyTtftAlertService {
       accountName: metric.account_name,
       platform: metric.platform,
       accountStatus: metric.account_status,
-      windowMinutes: settings.windowMinutes,
-      windowStart,
-      windowEnd: evaluatedAt,
+      sampleSelection: 'latest_business_requests',
+      evaluatedAt,
       sampleCount: metric.sample_count,
       configuredSampleCount: settings.sampleCount,
       averageFirstTokenMs: averageMs,
       minimumFirstTokenMs: metric.min_first_token_ms,
       maximumFirstTokenMs: metric.max_first_token_ms,
       thresholdMs: settings.thresholdMs,
+      firstRequestAt: metric.first_request_at,
       lastRequestAt: metric.last_request_at
     };
     const status = existing?.status === 'acknowledged' ? 'acknowledged' : 'active';
@@ -236,12 +234,10 @@ class KeyTtftAlertService {
     const settings = this.settings();
     const timestamp = Number.isFinite(options.at) ? options.at : Date.now();
     const evaluatedAt = new Date(timestamp).toISOString();
-    const windowStart = new Date(timestamp - settings.windowMinutes * 60000).toISOString();
     if (!settings.enabled) {
       return {
         enabled: false,
         evaluatedAt,
-        windowStart,
         evaluatedKeys: 0,
         matchedKeys: 0,
         notified: 0,
@@ -250,19 +246,18 @@ class KeyTtftAlertService {
         events: []
       };
     }
-    const metrics = this.#metrics(settings, windowStart, evaluatedAt);
+    const metrics = this.#metrics(settings);
     const matched = metrics.filter(
       (metric) => Number(metric.avg_first_token_ms) > settings.thresholdMs
     );
     const matchedAccountIds = new Set(matched.map((metric) => String(metric.account_id)));
     const results = [];
     for (const metric of matched) {
-      results.push(await this.#applyMetric(metric, settings, evaluatedAt, windowStart));
+      results.push(await this.#applyMetric(metric, settings, evaluatedAt));
     }
     return {
       enabled: true,
       evaluatedAt,
-      windowStart,
       evaluatedKeys: metrics.length,
       matchedKeys: matched.length,
       notified: results.filter((result) => result.notified).length,

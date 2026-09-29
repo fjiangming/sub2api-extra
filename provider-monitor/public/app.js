@@ -1865,7 +1865,7 @@ function openKeyTtftAlertSettings() {
   const { settings } = alertConfig;
   const form = $('#key-ttft-alert-form');
   form.elements.enabled.checked = settings.enabled;
-  for (const field of ['windowMinutes', 'sampleCount', 'thresholdMs', 'cooldownMinutes']) {
+  for (const field of ['sampleCount', 'thresholdMs', 'cooldownMinutes']) {
     form.elements[field].value = settings[field];
   }
   const selected = new Set(settings.channelIds || []);
@@ -4922,7 +4922,6 @@ $('#key-ttft-alert-form').addEventListener('submit', async (event) => {
       method: 'PUT',
       body: {
         enabled: form.elements.enabled.checked,
-        windowMinutes: Number(form.elements.windowMinutes.value),
         sampleCount: Number(form.elements.sampleCount.value),
         thresholdMs: Number(form.elements.thresholdMs.value),
         cooldownMinutes: Number(form.elements.cooldownMinutes.value),
