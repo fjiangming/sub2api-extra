@@ -27,6 +27,26 @@ function milliseconds(value) {
   return number >= 1000 ? `${(number / 1000).toFixed(2)} 秒` : `${number} 毫秒`;
 }
 
+function sampleFingerprint(metric) {
+  const sourceLogId = String(metric.last_request_source_log_id || '');
+  const createdAt = String(metric.last_request_at || '');
+  if (!sourceLogId && !createdAt) return null;
+  return crypto.createHash('sha256').update(`${createdAt}\0${sourceLogId}`).digest('hex');
+}
+
+function hasNewRequestSinceNotification(metric, existingDetails) {
+  const currentFingerprint = sampleFingerprint(metric);
+  const notifiedFingerprint = existingDetails.lastNotifiedSampleFingerprint || null;
+  if (currentFingerprint && notifiedFingerprint) {
+    return currentFingerprint !== notifiedFingerprint;
+  }
+  const currentAt = Date.parse(metric.last_request_at);
+  const notifiedAt = Date.parse(
+    existingDetails.lastNotifiedRequestAt || existingDetails.lastRequestAt
+  );
+  return Number.isFinite(currentAt) && (!Number.isFinite(notifiedAt) || currentAt > notifiedAt);
+}
+
 class KeyTtftAlertService {
   constructor({ db, notifications }) {
     this.db = db;
@@ -123,7 +143,9 @@ class KeyTtftAlertService {
         AVG(ranked.first_token_ms) AS avg_first_token_ms,
         MIN(ranked.first_token_ms) AS min_first_token_ms,
         MAX(ranked.first_token_ms) AS max_first_token_ms,
-        MAX(ranked.created_at) AS last_request_at
+        MAX(CASE WHEN ranked.row_number = 1 THEN ranked.created_at END) AS last_request_at,
+        MAX(CASE WHEN ranked.row_number = 1 THEN ranked.source_log_id END)
+          AS last_request_source_log_id
       FROM ranked
       JOIN sub2api_monitored_accounts account
         ON account.account_id = ranked.account_id
@@ -162,12 +184,23 @@ class KeyTtftAlertService {
     const existing = this.db.prepare(
       'SELECT * FROM alert_events WHERE fingerprint = ?'
     ).get(fingerprint);
+    const existingDetails = parseJson(existing?.details_json, {});
     const cooldownElapsed = existing?.status === 'active' &&
       Date.parse(evaluatedAt) - Date.parse(existing.triggered_at) >=
         settings.cooldownMinutes * 60000;
-    const shouldNotify = !existing || existing.status === 'resolved' || cooldownElapsed;
+    const hasNewRequest = !existing || existing.status === 'resolved' ||
+      hasNewRequestSinceNotification(metric, existingDetails);
+    const shouldNotify = !existing || existing.status === 'resolved' ||
+      (cooldownElapsed && hasNewRequest);
     const eventId = existing?.id || crypto.randomUUID();
     const averageMs = Math.round(Number(metric.avg_first_token_ms));
+    const currentSampleFingerprint = sampleFingerprint(metric);
+    const lastNotifiedRequestAt = shouldNotify
+      ? metric.last_request_at
+      : existingDetails.lastNotifiedRequestAt || existingDetails.lastRequestAt || null;
+    const lastNotifiedSampleFingerprint = shouldNotify
+      ? currentSampleFingerprint
+      : existingDetails.lastNotifiedSampleFingerprint || null;
     const message = `Key“${metric.account_name}”（#${accountId}）最近 ${settings.windowMinutes} 分钟的 ` +
       `${metric.sample_count} 条真实业务流式请求平均首字为 ${milliseconds(averageMs)}，` +
       `超过阈值 ${milliseconds(settings.thresholdMs)}。`;
@@ -188,7 +221,9 @@ class KeyTtftAlertService {
       minimumFirstTokenMs: metric.min_first_token_ms,
       maximumFirstTokenMs: metric.max_first_token_ms,
       thresholdMs: settings.thresholdMs,
-      lastRequestAt: metric.last_request_at
+      lastRequestAt: metric.last_request_at,
+      lastNotifiedRequestAt,
+      lastNotifiedSampleFingerprint
     };
     const status = existing?.status === 'acknowledged' ? 'acknowledged' : 'active';
     const triggeredAt = shouldNotify ? evaluatedAt : existing.triggered_at;

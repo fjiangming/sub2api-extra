@@ -153,23 +153,81 @@ test('TTFT alerts enforce sample count, cooldown and automatic resolution', asyn
   insertBusinessSamples(context.db, 'cooldown-key', [3000], now + 1000, 'ready');
   assert.equal((await service.evaluate({ at: now + 2000 })).notified, 1);
   assert.equal((await service.evaluate({ at: now + 5 * 60000 })).notified, 0);
+
+  insertBusinessSamples(context.db, 'cooldown-key', [3000], now + 6 * 60000, 'new-high');
+  assert.equal((await service.evaluate({ at: now + 7 * 60000 })).renotified, 0);
   assert.equal((await service.evaluate({ at: now + 11 * 60000 })).renotified, 1);
+  assert.equal((await service.evaluate({ at: now + 22 * 60000 })).renotified, 0);
   assert.equal(notifications.deliveries.length, 2);
 
   insertBusinessSamples(
     context.db,
     'cooldown-key',
     [200, 300, 400],
-    now + 12 * 60000,
+    now + 25 * 60000,
     'recovered'
   );
-  const recovered = await service.evaluate({ at: now + 13 * 60000 });
+  const recovered = await service.evaluate({ at: now + 26 * 60000 });
   assert.equal(recovered.matchedKeys, 0);
   assert.equal(recovered.resolved, 1);
   assert.equal(
     context.db.prepare('SELECT status FROM alert_events').get().status,
     'resolved'
   );
+});
+
+test('legacy TTFT events wait for a newer business request before repeating', async (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const now = Date.parse('2026-09-29T10:00:00.000Z');
+  const channelId = '44444444-4444-4444-8444-444444444444';
+  insertAccount(context.db, 'legacy-event-key', 'Legacy event key');
+  insertChannel(context.db, channelId);
+  insertBusinessSamples(context.db, 'legacy-event-key', [3000, 3000, 3000], now, 'legacy');
+  const lastRequestAt = context.db.prepare(`
+    SELECT MAX(created_at) AS value FROM sub2api_account_request_samples
+    WHERE account_id = 'legacy-event-key'
+  `).get().value;
+  context.db.prepare(`
+    INSERT INTO alert_events(
+      id, subject_type, subject_id, status, severity, message,
+      fingerprint, details_json, triggered_at
+    ) VALUES ('legacy-ttft-event', 'sub2api_key', 'legacy-event-key',
+      'active', 'warning', 'legacy event', ?, ?, ?)
+  `).run(
+    'sub2api-business-ttft:legacy-event-key',
+    JSON.stringify({ lastRequestAt }),
+    new Date(now - 10 * 60000).toISOString()
+  );
+  const notifications = notificationRecorder();
+  const service = new KeyTtftAlertService({ db: context.db, notifications });
+  service.saveSettings({
+    enabled: true,
+    windowMinutes: 30,
+    sampleCount: 3,
+    thresholdMs: 1000,
+    cooldownMinutes: 5,
+    channelIds: [channelId]
+  });
+
+  assert.equal((await service.evaluate({ at: now })).notified, 0);
+  assert.equal(notifications.deliveries.length, 0);
+  const migratedDetails = JSON.parse(
+    context.db.prepare("SELECT details_json FROM alert_events WHERE id = 'legacy-ttft-event'").get()
+      .details_json
+  );
+  assert.equal(migratedDetails.lastNotifiedRequestAt, lastRequestAt);
+
+  insertBusinessSamples(
+    context.db,
+    'legacy-event-key',
+    [3000],
+    now + 60000,
+    'legacy-new'
+  );
+  const repeated = await service.evaluate({ at: now + 2 * 60000 });
+  assert.equal(repeated.renotified, 1);
+  assert.equal(notifications.deliveries.length, 1);
 });
 
 test('business request sample provenance rejects active-probe sources', (t) => {
