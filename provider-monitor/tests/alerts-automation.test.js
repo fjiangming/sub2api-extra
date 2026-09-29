@@ -131,16 +131,20 @@ test('signed composite-rate alert filters one Sub2API group and dispatches notif
     groupName: 'Other', differenceRatio: -0.2, compositeRate: 1.25, baseRate: 1
   });
   const deliveries = [];
+  const notificationChannelId = '11111111-1111-4111-8111-111111111111';
   const alerts = new AlertService({
     db: context.db,
     config: context.config,
     queries: new QueryService(context.db, context.config),
-    notifications: { dispatch: async (event) => deliveries.push(event) }
+    notifications: { dispatch: async (event, options) => deliveries.push({ event, options }) }
   });
   const rule = alerts.saveRule({
     name: 'Target group negative margin', ruleType: 'rate_mismatch', connectionId: provider.id,
     threshold: -5, cooldownMinutes: 60, enabled: true,
-    config: { comparisonOperator: 'lt', groupId: 7 }
+    config: {
+      comparisonOperator: 'lt', groupId: 7,
+      notificationChannelIds: [notificationChannelId]
+    }
   });
 
   await alerts.evaluateConnection(provider.id);
@@ -158,7 +162,8 @@ test('signed composite-rate alert filters one Sub2API group and dispatches notif
     'Margin Provider 映射分组“Target”的综合倍率偏差命中条件：-8.00% < -5.00%。'
   );
   assert.equal(deliveries.length, 1);
-  assert.equal(deliveries[0].id, events[0].id);
+  assert.equal(deliveries[0].event.id, events[0].id);
+  assert.deepEqual(deliveries[0].options.channelIds, [notificationChannelId]);
 
   context.db.prepare(`
     UPDATE sub2api_mapping_states
@@ -170,7 +175,8 @@ test('signed composite-rate alert filters one Sub2API group and dispatches notif
   events = alerts.listEvents();
   assert.equal(events[0].status, 'resolved');
   assert.equal(deliveries.length, 2);
-  assert.equal(deliveries[1].severity, 'info');
+  assert.equal(deliveries[1].event.severity, 'info');
+  assert.deepEqual(deliveries[1].options.channelIds, [notificationChannelId]);
 });
 
 test('provider balance thresholds deduplicate alerts and suppress recovery notifications', async (t) => {
@@ -271,10 +277,15 @@ test('low balance alert sends the configured recharge link to WeCom', async (t) 
   });
   insertSnapshot(context.db, provider.id, 3);
   const notifications = new NotificationService({ db: context.db, config: context.config });
-  notifications.save({
+  const channel = notifications.save({
     name: 'WeCom test', type: 'wecom', enabled: true,
     config: { url: `http://127.0.0.1:${receiver.address().port}` }
   });
+  notifications.save({
+    name: 'Unused WeCom', type: 'wecom', enabled: true,
+    config: { url: `http://127.0.0.1:${receiver.address().port}` }
+  });
+  context.config.builtInBalanceAlertChannelIds = [channel.id];
   const alerts = new AlertService({
     db: context.db,
     config: context.config,
@@ -327,6 +338,7 @@ test('low balance alert sends the configured recharge link to personal WeChat th
     config: { baseUrl: `http://127.0.0.1:${receiver.address().port}/` },
     credentials: { sendKey: 'SCT_TEST_KEY' }
   });
+  context.config.builtInBalanceAlertChannelIds = [channel.id];
   const alerts = new AlertService({
     db: context.db,
     config: context.config,
@@ -344,6 +356,61 @@ test('low balance alert sends the configured recharge link to personal WeChat th
   assert.equal(context.db.prepare("SELECT status FROM notification_deliveries LIMIT 1").get().status, 'delivered');
   responseCode = 1;
   await assert.rejects(notifications.test(channel.id), /Server酱 rejected the notification: rejected/);
+});
+
+test('deleting a global notification channel clears every feature route', (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const notifications = new NotificationService({ db: context.db, config: context.config });
+  const channel = notifications.save({
+    name: 'Shared route', type: 'webhook', config: { url: 'https://alerts.example.test' }
+  });
+  const now = new Date().toISOString();
+  const config = JSON.stringify({ notificationChannelIds: [channel.id] });
+  context.db.prepare(`
+    INSERT INTO alert_rules(
+      id, name, enabled, rule_type, scope, config_json, created_at, updated_at
+    ) VALUES ('routed-alert', 'Routed alert', 1, 'sync_failed', 'account', ?, ?, ?)
+  `).run(config, now, now);
+  context.db.prepare(`
+    INSERT INTO automation_rules(
+      id, name, enabled, dry_run, trigger_type, config_json, created_at, updated_at
+    ) VALUES ('routed-automation', 'Routed automation', 1, 1, 'low_balance', ?, ?, ?)
+  `).run(JSON.stringify({
+    action: 'disable_sub2api_account', accountIds: [1], notifyOnAction: true,
+    notificationChannelIds: [channel.id]
+  }), now, now);
+  context.db.prepare(`
+    UPDATE sub2api_key_ttft_alert_settings
+    SET channel_ids_json = ?, updated_at = ? WHERE id = 1
+  `).run(JSON.stringify([channel.id]), now);
+  context.db.prepare(`
+    INSERT INTO settings(key, value_json, updated_at)
+    VALUES ('builtInBalanceAlertChannelIds', ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
+  `).run(JSON.stringify([channel.id]), now);
+
+  notifications.delete(channel.id);
+
+  assert.deepEqual(
+    JSON.parse(context.db.prepare("SELECT config_json FROM alert_rules WHERE id = 'routed-alert'").get().config_json)
+      .notificationChannelIds,
+    []
+  );
+  assert.deepEqual(
+    JSON.parse(context.db.prepare("SELECT config_json FROM automation_rules WHERE id = 'routed-automation'").get().config_json)
+      .notificationChannelIds,
+    []
+  );
+  assert.deepEqual(
+    JSON.parse(context.db.prepare('SELECT channel_ids_json FROM sub2api_key_ttft_alert_settings WHERE id = 1').get().channel_ids_json),
+    []
+  );
+  assert.deepEqual(
+    JSON.parse(context.db.prepare("SELECT value_json FROM settings WHERE key = 'builtInBalanceAlertChannelIds'").get().value_json),
+    []
+  );
+  assert.equal(notifications.listChannels().length, 0);
 });
 
 test('automation defaults to dry run and deduplicates repeated account actions', async (t) => {
@@ -628,12 +695,13 @@ test('automation rules with notify-on-action alert through channels and survive 
   });
   insertSnapshot(context.db, provider.id, 1);
   const dispatched = [];
+  const notificationChannelId = '22222222-2222-4222-8222-222222222222';
   const automation = new AutomationService({
     db: context.db,
     config: context.config,
     notifications: {
-      async dispatch(event) {
-        dispatched.push(event);
+      async dispatch(event, options) {
+        dispatched.push({ event, options });
         throw new Error('channel down');
       }
     }
@@ -643,21 +711,23 @@ test('automation rules with notify-on-action alert through channels and survive 
     connectionId: provider.id,
     config: {
       currency: 'USD', threshold: 2, accountIds: [7],
-      action: 'disable_sub2api_account', notifyOnAction: true
+      action: 'disable_sub2api_account', notifyOnAction: true,
+      notificationChannelIds: [notificationChannelId]
     }
   });
   const actions = await automation.evaluateConnection(provider.id);
   assert.equal(actions.length, 1);
   assert.equal(actions[0].status, 'dry_run');
   assert.equal(dispatched.length, 1);
-  assert.equal(dispatched[0].id, null);
-  assert.equal(dispatched[0].severity, 'info');
+  assert.equal(dispatched[0].event.id, null);
+  assert.equal(dispatched[0].event.severity, 'info');
   assert.equal(
-    dispatched[0].message,
+    dispatched[0].event.message,
     '[演练] 自动化规则「Disable low balance account」已触发：低余额，计划执行「停用 Sub2API 账号 #7」'
   );
-  assert.equal(dispatched[0].details.dryRun, true);
-  assert.equal(dispatched[0].details.targetId, 7);
+  assert.equal(dispatched[0].event.details.dryRun, true);
+  assert.equal(dispatched[0].event.details.targetId, 7);
+  assert.deepEqual(dispatched[0].options.channelIds, [notificationChannelId]);
   assert.equal(automation.listActions()[0].status, 'dry_run');
   assert.equal((await automation.evaluateConnection(provider.id)).length, 0);
   assert.equal(dispatched.length, 1);

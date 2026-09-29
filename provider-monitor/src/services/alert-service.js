@@ -252,7 +252,10 @@ class AlertService {
       notify_on_recovery: false,
       config_json: stringifyJson({
         implicitBalanceLevel: definition.level,
-        severity: definition.severity
+        severity: definition.severity,
+        notificationChannelIds: Array.isArray(this.config.builtInBalanceAlertChannelIds)
+          ? this.config.builtInBalanceAlertChannelIds
+          : []
       })
     }));
     const events = [];
@@ -594,6 +597,12 @@ class AlertService {
   async #applyEvaluation(provider, rule, evaluation) {
     const fingerprint = `${rule.id}:${provider.id}:${evaluation.subjectType}:${evaluation.subjectId}`;
     const existing = this.db.prepare('SELECT * FROM alert_events WHERE fingerprint = ?').get(fingerprint);
+    const config = parseJson(rule.config_json, {});
+    const deliveryOptions = {
+      channelIds: Array.isArray(config.notificationChannelIds)
+        ? config.notificationChannelIds
+        : []
+    };
     if (!evaluation.matched) {
       if (existing && existing.status !== 'resolved') {
         this.db.prepare(`
@@ -606,7 +615,7 @@ class AlertService {
             message: `${provider.name} 已恢复：${localizeLegacyAlertMessage(existing.message)}`,
             triggered_at: nowIso(),
             details: { recoveredFrom: existing.severity, originalTriggeredAt: existing.triggered_at }
-          });
+          }, deliveryOptions);
         }
         return { ...existing, status: 'resolved' };
       }
@@ -615,7 +624,6 @@ class AlertService {
 
     const now = nowIso();
     const eventId = existing?.id || crypto.randomUUID();
-    const config = parseJson(rule.config_json, {});
     const renotifyWhileActive = rule.renotify_while_active !== false;
     const cooldownElapsed = renotifyWhileActive && existing?.status === 'active' &&
       Date.now() - Date.parse(existing.triggered_at) >= Number(rule.cooldown_minutes || 60) * 60000;
@@ -656,7 +664,9 @@ class AlertService {
       triggered_at: shouldNotify ? now : existing.triggered_at,
       details: evaluation.details || {}
     };
-    if (shouldNotify && !this.#maintenanceActive(provider.id)) await this.notifications.dispatch(event);
+    if (shouldNotify && !this.#maintenanceActive(provider.id)) {
+      await this.notifications.dispatch(event, deliveryOptions);
+    }
     return event;
   }
 }

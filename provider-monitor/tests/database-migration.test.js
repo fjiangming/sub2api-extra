@@ -6,7 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
-test('schema v30 migration preserves mappings and adds business TTFT alert provenance', (t) => {
+test('schema v31 migration preserves mappings and makes notification routing explicit', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
   let db = createDatabase(databasePath);
@@ -15,6 +15,26 @@ test('schema v30 migration preserves mappings and adds business TTFT alert prove
     fs.rmSync(directory, { recursive: true, force: true });
   });
   const now = nowIso();
+  db.prepare(`
+    INSERT INTO notification_channels(
+      id, name, type, enabled, config_json, created_at, updated_at
+    ) VALUES ('notification-route', 'Personal WeChat', 'serverchan', 1, '{}', ?, ?)
+  `).run(now, now);
+  db.prepare(`
+    INSERT INTO alert_rules(
+      id, name, enabled, rule_type, scope, consecutive_matches,
+      cooldown_minutes, config_json, created_at, updated_at
+    ) VALUES ('legacy-alert-rule', 'Legacy alert', 1, 'sync_failed', 'account', 1,
+      60, '{}', ?, ?)
+  `).run(now, now);
+  db.prepare(`
+    INSERT INTO automation_rules(
+      id, name, enabled, dry_run, trigger_type, config_json, created_at, updated_at
+    ) VALUES ('legacy-notifying-automation', 'Legacy notifying automation', 1, 1,
+      'low_balance', ?, ?, ?)
+  `).run(JSON.stringify({
+    action: 'disable_sub2api_account', accountIds: [21], notifyOnAction: true
+  }), now, now);
   db.prepare(`INSERT INTO encrypted_credentials(id, payload, created_at) VALUES ('credential', 'encrypted', ?)`).run(now);
   db.prepare(`
     INSERT INTO provider_connections(
@@ -140,6 +160,7 @@ test('schema v30 migration preserves mappings and adds business TTFT alert prove
     INSERT INTO reconciliation_runs(
       id, mapping_id, status, period_start, period_end, details_json, created_at
     ) VALUES ('duplicate-reconciliation', 'mapping-duplicate', 'succeeded', '${now}', '${now}', '{}', '${now}');
+    DELETE FROM settings WHERE key = 'builtInBalanceAlertChannelIds';
     DELETE FROM schema_migrations;
     INSERT INTO schema_migrations(version, applied_at) VALUES (8, '${now}');
   `);
@@ -154,6 +175,7 @@ test('schema v30 migration preserves mappings and adds business TTFT alert prove
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 28').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 29').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 30').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 31').get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());
   assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'recharge_url'));
@@ -282,6 +304,20 @@ test('schema v30 migration preserves mappings and adds business TTFT alert prove
   assert.deepEqual(migratedConfig.accountIds, []);
   assert.deepEqual(migratedConfig.legacyChannelIds, [11]);
   assert.equal(migratedConfig.migrationNotice, 'account_targets_required');
+  assert.deepEqual(
+    JSON.parse(db.prepare("SELECT config_json FROM alert_rules WHERE id = 'legacy-alert-rule'").get().config_json)
+      .notificationChannelIds,
+    ['notification-route']
+  );
+  assert.deepEqual(
+    JSON.parse(db.prepare("SELECT config_json FROM automation_rules WHERE id = 'legacy-notifying-automation'").get().config_json)
+      .notificationChannelIds,
+    ['notification-route']
+  );
+  assert.deepEqual(
+    JSON.parse(db.prepare("SELECT value_json FROM settings WHERE key = 'builtInBalanceAlertChannelIds'").get().value_json),
+    ['notification-route']
+  );
   assert.deepEqual(db.pragma('foreign_key_check'), []);
   const migratedProbe = db.prepare(`
     SELECT suite, intelligence_score, instruction_score, details_json

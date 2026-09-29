@@ -90,6 +90,36 @@ test('all retention inputs allow a one-day minimum', () => {
   }
 });
 
+test('notification channels are managed globally and selected per feature', () => {
+  const { context, source } = createBrowserContext();
+  const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const automationSource = source.slice(
+    source.indexOf('async function renderAutomation()'),
+    source.indexOf('const ALERT_RULE_TYPE_LABELS')
+  );
+  context.testNotificationRoot = {
+    querySelectorAll() {
+      return [{ value: 'email-channel' }, { value: 'wechat-channel' }];
+    }
+  };
+
+  assert.match(source, /const notificationChannelsPanel = .*<h2>通知通道<\/h2>/);
+  assert.match(source, /id="built-in-balance-alert-routing-form"/);
+  assert.doesNotMatch(automationSource, /<h2>通知通道<\/h2>/);
+  assert.match(index, /id="alert-rule-notification-channels"/);
+  assert.match(index, /id="automation-notification-channels"/);
+  assert.match(source, /config\.notificationChannelIds = selectedNotificationChannelIds\(form, 'alert-rule'\)/);
+  assert.match(source, /notificationChannelIds: selectedNotificationChannelIds\(form, 'automation'\)/);
+  assert.match(source, /await navigate\('settings'\)/);
+  assert.deepEqual(
+    JSON.parse(vm.runInContext(
+      "JSON.stringify(selectedNotificationChannelIds(testNotificationRoot, 'feature'))",
+      context
+    )),
+    ['email-channel', 'wechat-channel']
+  );
+});
+
 test('account quality exposes metric and dual-source comparison rules from the dashboard', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
@@ -164,7 +194,7 @@ test('Key status tab exposes centralized probes, filters and per-key controls', 
   assert.match(source, /业务首字（近 10 条）/);
   assert.match(source, /\/api\/key-probes\/automation\/run/);
   assert.match(source, /\/api\/key-ttft-alerts\/config/);
-  assert.match(source, /data-key-ttft-alert-channel/);
+  assert.match(source, /selectedNotificationChannelIds\(form, 'key-ttft-alert'\)/);
   assert.match(source, /data-action="evaluate-key-ttft-alerts"/);
   assert.match(styles, /\.badge\.critical/);
   assert.match(styles, /\.key-probe-row\.health-critical/);
@@ -915,7 +945,9 @@ test('alert rule form only enables fields used by the selected type', () => {
   assert.equal(controls.comparisonOperator.required, true);
   assert.equal(controls.groupId.required, false);
   assert.equal(ratePayload.threshold, -5);
-  assert.deepEqual(ratePayload.config, { comparisonOperator: 'lt', groupId: 7 });
+  assert.deepEqual(ratePayload.config, {
+    comparisonOperator: 'lt', groupId: 7, notificationChannelIds: []
+  });
 
   controls.ruleType.value = 'sync_failed';
   vm.runInContext('updateAlertRuleFields(testAlertRuleForm)', context);
@@ -1062,7 +1094,15 @@ test('automation payload separates account targets and builds scheduled mapping 
     onMatchAction: { value: 'disable_sub2api_account' },
     webhookUrl: { value: 'https://recharge.example/hook' }
   };
-  context.automationForm = { elements };
+  const notificationChannelId = '22222222-2222-4222-8222-222222222222';
+  context.automationForm = {
+    elements,
+    querySelectorAll(selector) {
+      return selector === '[data-notification-channel="automation"]:checked'
+        ? [{ value: notificationChannelId }]
+        : [];
+    }
+  };
 
   const payload = JSON.parse(vm.runInContext('JSON.stringify(automationPayload(automationForm))', context));
 
@@ -1095,6 +1135,7 @@ test('automation payload separates account targets and builds scheduled mapping 
   assert.equal(scheduledPayload.config.cooldownMinutes, 360);
   assert.equal(scheduledPayload.config.contractPauseHours, 24);
   assert.equal(scheduledPayload.config.notifyOnAction, true);
+  assert.deepEqual(scheduledPayload.config.notificationChannelIds, [notificationChannelId]);
   assert.match(index, /name="notifyOnAction"/);
   assert.match(index, /动作触发时通知/);
   assert.match(index, /name="scheduledConditionType"/);

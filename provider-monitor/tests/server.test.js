@@ -204,7 +204,32 @@ test('HTTP API enforces login and CSRF while serving the operational frontend', 
     })
   });
   assert.equal(createServerChan.status, 201);
-  assert.equal((await createServerChan.json()).type, 'serverchan');
+  const serverChan = await createServerChan.json();
+  assert.equal(serverChan.type, 'serverchan');
+
+  const notifyingRuleWithoutRoute = await fetch(`${base}/api/automation-rules`, {
+    method: 'POST',
+    headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
+    body: JSON.stringify({
+      name: 'Missing notification route', triggerType: 'low_balance', enabled: true, dryRun: true,
+      config: {
+        action: 'trigger_recharge_webhook', threshold: 20, currency: 'USD',
+        webhookUrl: 'https://recharge.example/hook', notifyOnAction: true
+      }
+    })
+  });
+  assert.equal(notifyingRuleWithoutRoute.status, 400);
+
+  const routedAlertRule = await fetch(`${base}/api/alert-rules`, {
+    method: 'POST',
+    headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
+    body: JSON.stringify({
+      name: 'Routed sync failures', ruleType: 'sync_failed', enabled: true,
+      config: { notificationChannelIds: [serverChan.id] }
+    })
+  });
+  assert.equal(routedAlertRule.status, 201);
+  assert.deepEqual((await routedAlertRule.json()).config.notificationChannelIds, [serverChan.id]);
 
   const createRechargeRule = await fetch(`${base}/api/automation-rules`, {
     method: 'POST',

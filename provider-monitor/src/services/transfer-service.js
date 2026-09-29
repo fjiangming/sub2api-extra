@@ -37,6 +37,7 @@ const SETTING_DEFAULTS = {
   notificationRetentionDays: 180,
   assetChangeRetentionDays: 180,
   keyHealthConcurrency: 3,
+  builtInBalanceAlertChannelIds: [],
   providerMonitorPublicUrl: '',
   rechargeLinkTtlMinutes: 60
 };
@@ -47,11 +48,13 @@ const RUNTIME_SETTING_KEYS = new Set([
   'staleAfterMinutes', 'rawSnapshotRetentionDays', 'snapshotRetentionDays',
   'jobRetentionDays', 'auditRetentionDays', 'notificationRetentionDays',
   'assetChangeRetentionDays', 'keyHealthConcurrency', 'providerMonitorPublicUrl',
-  'rechargeLinkTtlMinutes'
+  'rechargeLinkTtlMinutes', 'builtInBalanceAlertChannelIds'
 ]);
 
 const BOOLEAN_SETTINGS = new Set(['automationEnabled', 'allowPrivateNetworks']);
-const LIST_SETTINGS = new Set(['allowedOrigins', 'allowedHosts']);
+const LIST_SETTINGS = new Set([
+  'allowedOrigins', 'allowedHosts', 'builtInBalanceAlertChannelIds'
+]);
 const INTEGER_SETTINGS = {
   sessionTtlMinutes: [15, 1440],
   queryTimeoutMs: [1000, 120000],
@@ -182,6 +185,7 @@ function runtimeDefaults(config) {
     notificationRetentionDays: config.notificationRetentionDays,
     assetChangeRetentionDays: config.assetChangeRetentionDays,
     keyHealthConcurrency: config.keyHealthConcurrency,
+    builtInBalanceAlertChannelIds: normalizeStringList(config.builtInBalanceAlertChannelIds),
     providerMonitorPublicUrl: config.providerMonitorPublicUrl,
     rechargeLinkTtlMinutes: config.rechargeLinkTtlMinutes
   };

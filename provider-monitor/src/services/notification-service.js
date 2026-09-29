@@ -64,6 +64,12 @@ function formatNotificationTime(value, configuredTimezone) {
   return `${timestamp}（${timezoneLabel}）`;
 }
 
+function removeChannelId(values, channelId) {
+  if (!Array.isArray(values)) return { changed: false, values };
+  const next = values.filter((value) => String(value) !== String(channelId));
+  return { changed: next.length !== values.length, values: next };
+}
+
 class NotificationService {
   constructor({ db, config, rechargeLinks = null, mailer = nodemailer }) {
     this.db = db;
@@ -161,6 +167,39 @@ class NotificationService {
     `).get(id);
     if (!channel) throw new AppError('CHANNEL_NOT_FOUND', 'Notification channel was not found', { status: 404 });
     this.db.transaction(() => {
+      const now = nowIso();
+      for (const table of ['alert_rules', 'automation_rules']) {
+        const update = this.db.prepare(
+          `UPDATE ${table} SET config_json = ?, updated_at = ? WHERE id = ?`
+        );
+        for (const row of this.db.prepare(`SELECT id, config_json FROM ${table}`).all()) {
+          const config = parseJson(row.config_json, {});
+          const result = removeChannelId(config.notificationChannelIds, id);
+          if (!result.changed) continue;
+          config.notificationChannelIds = result.values;
+          update.run(stringifyJson(config), now, row.id);
+        }
+      }
+      const ttft = this.db.prepare(
+        'SELECT channel_ids_json FROM sub2api_key_ttft_alert_settings WHERE id = 1'
+      ).get();
+      const ttftChannels = removeChannelId(parseJson(ttft?.channel_ids_json, []), id);
+      if (ttftChannels.changed) {
+        this.db.prepare(`
+          UPDATE sub2api_key_ttft_alert_settings
+          SET channel_ids_json = ?, updated_at = ? WHERE id = 1
+        `).run(stringifyJson(ttftChannels.values, []), now);
+      }
+      const builtIn = this.db.prepare(`
+        SELECT value_json FROM settings WHERE key = 'builtInBalanceAlertChannelIds'
+      `).get();
+      const builtInChannels = removeChannelId(parseJson(builtIn?.value_json, []), id);
+      if (builtInChannels.changed) {
+        this.db.prepare(`
+          UPDATE settings SET value_json = ?, updated_at = ?
+          WHERE key = 'builtInBalanceAlertChannelIds'
+        `).run(stringifyJson(builtInChannels.values, []), now);
+      }
       this.db.prepare('DELETE FROM notification_channels WHERE id = ?').run(id);
       if (channel.credential_id) {
         this.db.prepare('DELETE FROM encrypted_credentials WHERE id = ?').run(channel.credential_id);

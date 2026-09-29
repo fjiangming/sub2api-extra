@@ -641,6 +641,10 @@ class AutomationService {
           ...(execution.targetId == null ? {} : { targetId: execution.targetId }),
           ...(execution.workflowContext?.condition ? { condition: execution.workflowContext.condition } : {})
         }
+      }, {
+        channelIds: Array.isArray(config.notificationChannelIds)
+          ? config.notificationChannelIds
+          : []
       });
     } catch {
       // The action already completed; notification failures are recorded per channel and must not fail it.

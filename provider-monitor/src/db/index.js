@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 30;
+const SCHEMA_VERSION = 31;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -2430,6 +2430,44 @@ function migrateKeyTtftAlertsV30(db) {
   ).run(nowIso());
 }
 
+function migrateNotificationRoutingV31(db) {
+  const migrated = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 31'
+  ).get();
+  if (migrated) return;
+  const migratedAt = nowIso();
+  const channelIds = db.prepare('SELECT id FROM notification_channels ORDER BY created_at, id')
+    .all()
+    .map((row) => String(row.id));
+  const updateConfig = (table, rows, predicate = () => true) => {
+    const update = db.prepare(`UPDATE ${table} SET config_json = ?, updated_at = ? WHERE id = ?`);
+    for (const row of rows) {
+      const config = parseJson(row.config_json, {});
+      if (!predicate(config) || Array.isArray(config.notificationChannelIds)) continue;
+      config.notificationChannelIds = channelIds;
+      update.run(stringifyJson(config), migratedAt, row.id);
+    }
+  };
+
+  db.transaction(() => {
+    updateConfig('alert_rules', db.prepare('SELECT id, config_json FROM alert_rules').all());
+    updateConfig(
+      'automation_rules',
+      db.prepare('SELECT id, config_json FROM automation_rules').all(),
+      (config) => config.notifyOnAction === true
+    );
+    if (channelIds.length > 0) {
+      db.prepare(`
+        INSERT OR IGNORE INTO settings(key, value_json, updated_at)
+        VALUES ('builtInBalanceAlertChannelIds', ?, ?)
+      `).run(stringifyJson(channelIds, []), migratedAt);
+    }
+    db.prepare(
+      'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (31, ?)'
+    ).run(migratedAt);
+  })();
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -2466,6 +2504,7 @@ function createDatabase(databasePath) {
     ).run(nowIso());
     migrateKeyProbeAutomationV29(db);
     migrateKeyTtftAlertsV30(db);
+    migrateNotificationRoutingV31(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

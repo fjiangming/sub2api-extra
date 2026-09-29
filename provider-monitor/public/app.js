@@ -102,10 +102,10 @@ const VIEW_META = {
   'account-monitor': ['账号质量', '真实请求性能、缓存效率与主动能力检测'],
   'key-status': ['Key 状态', '所有上游 Key 的定时请求延迟与可用性'],
   integrations: ['Sub2API 联动', '分组映射、签到、对账与健康联动'],
-  automation: ['规则与自动化', '告警事件、通知与受控动作'],
+  automation: ['规则与自动化', '告警事件与受控动作'],
   tests: ['测试中心', '模拟通知、充值入口与移动端跳转'],
   activity: ['运行记录', '检查、任务与审计日志'],
-  settings: ['设置与备份', '运行参数、凭据生命周期与数据迁移']
+  settings: ['设置与备份', '运行参数、通知通道、凭据生命周期与数据迁移']
 };
 const CREDENTIAL_FIELDS = {
   sub2api: [['email', '邮箱', 'text'], ['password', '密码', 'password'], ['accessToken', 'Access Token', 'password'], ['refreshToken', 'Refresh Token', 'password']],
@@ -1859,6 +1859,29 @@ function openKeyProbeSettings() {
   icons();
 }
 
+function notificationChannelOptionsHtml(channels, selectedIds, scope) {
+  const selected = new Set((selectedIds || []).map(String));
+  const visibleChannels = (channels || []).filter(
+    (channel) => channel.enabled || selected.has(String(channel.id))
+  );
+  if (!visibleChannels.length) {
+    return '<div class="notification-channel-empty"><i data-lucide="bell-off"></i><span>暂无可用通知通道</span></div>';
+  }
+  return visibleChannels.map((channel) => {
+    const icon = channel.type === 'email' ? 'mail' : 'send';
+    const target = channel.type === 'email' && channel.config?.to
+      ? ` · ${channel.config.to}`
+      : '';
+    const status = channel.enabled ? '' : ' · 已停用';
+    return `<label class="notification-channel-option"><input type="checkbox" data-notification-channel="${escapeHtml(scope)}" value="${escapeHtml(channel.id)}" ${selected.has(String(channel.id)) ? 'checked' : ''}><i data-lucide="${icon}"></i><span><strong>${escapeHtml(channel.name)}</strong><small>${escapeHtml(channel.type)}${escapeHtml(target)}${status}</small></span></label>`;
+  }).join('');
+}
+
+function selectedNotificationChannelIds(form, scope) {
+  return $$(`[data-notification-channel="${scope}"]:checked`, form)
+    .map((input) => input.value);
+}
+
 function openKeyTtftAlertSettings() {
   const alertConfig = state.keyTtftAlerts;
   if (!alertConfig?.settings) return;
@@ -1868,17 +1891,11 @@ function openKeyTtftAlertSettings() {
   for (const field of ['windowMinutes', 'sampleCount', 'thresholdMs', 'cooldownMinutes']) {
     form.elements[field].value = settings[field];
   }
-  const selected = new Set(settings.channelIds || []);
-  const channels = (alertConfig.channels || []).filter((channel) => channel.enabled);
-  $('#key-ttft-alert-channels').innerHTML = channels.length
-    ? channels.map((channel) => {
-        const icon = channel.type === 'email' ? 'mail' : 'send';
-        const target = channel.type === 'email' && channel.config?.to
-          ? ` · ${channel.config.to}`
-          : '';
-        return `<label class="notification-channel-option"><input type="checkbox" data-key-ttft-alert-channel value="${escapeHtml(channel.id)}" ${selected.has(String(channel.id)) ? 'checked' : ''}><i data-lucide="${icon}"></i><span><strong>${escapeHtml(channel.name)}</strong><small>${escapeHtml(channel.type)}${escapeHtml(target)}</small></span></label>`;
-      }).join('')
-    : '<div class="notification-channel-empty"><i data-lucide="bell-off"></i><span>暂无已启用的通知渠道</span></div>';
+  $('#key-ttft-alert-channels').innerHTML = notificationChannelOptionsHtml(
+    alertConfig.channels,
+    settings.channelIds,
+    'key-ttft-alert'
+  );
   $('#key-ttft-alert-error').textContent = '';
   $('#key-ttft-alert-dialog').showModal();
   icons();
@@ -2387,18 +2404,20 @@ async function renderIntegrations() {
 }
 
 async function renderSettings() {
-  const [settings, backups, lifecycle, targets, remoteRuns, sub2apiStatus, adminApiKeyStatus] = await Promise.all([
+  const [settings, backups, lifecycle, targets, remoteRuns, sub2apiStatus, adminApiKeyStatus, channels] = await Promise.all([
     api('/api/settings'), api('/api/backups'), api('/api/credentials/lifecycle'),
     api('/api/backup-targets'), api('/api/backup-runs?limit=100'), api('/api/sub2api/status'),
-    api('/api/sub2api/admin-api-key')
+    api('/api/sub2api/admin-api-key'), api('/api/notification-channels')
   ]);
   state.settings = settings;
   state.backupTargets = targets.items;
+  state.channels = channels.items;
   setTopActions(`<button class="button" data-action="open-import"><i data-lucide="file-input"></i><span>导入</span></button><button class="button" data-action="download" data-url="/api/exports/config" data-filename="provider-monitor-config.json"><i data-lucide="download"></i><span>导出配置</span></button><button class="button primary" data-action="create-backup"><i data-lucide="database-backup"></i><span>在线备份</span></button>`);
   const backupRows = backups.items.map((item) => `<tr><td class="mono">${escapeHtml(item.filename)}</td><td class="numeric">${formatNumber(item.size / 1024 / 1024, 2)} MB</td><td>${formatDate(item.createdAt)}</td></tr>`).join('');
   const lifecycleRows = lifecycle.items.map((item) => `<tr><td class="primary-cell"><strong>${escapeHtml(item.providerName)}</strong><small>${escapeHtml(item.fields.map((field) => field.name).join(', '))}</small></td><td>${badge(item.expiryStatus)}</td><td>${formatDate(item.rotatedAt || item.createdAt)}</td><td>${formatDate(item.expiresAt)}</td><td class="actions-cell"><button class="icon-button small" data-action="rotate-credential" data-id="${item.providerId}" title="轮换凭据" aria-label="轮换凭据"><i data-lucide="rotate-cw"></i></button></td></tr>`).join('');
   const targetRows = targets.items.map((item) => `<tr><td class="primary-cell"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.type)} · ${escapeHtml(item.credentialFields.map((field) => field.name).join(', ') || '无凭据')}</small></td><td>${badge(item.enabled ? 'enabled' : 'disabled')}</td><td>${item.lastStatus ? badge(item.lastStatus) : '-'}</td><td>${formatDate(item.lastBackupAt)}</td><td class="actions-cell"><button class="icon-button small" data-action="test-backup-target" data-id="${item.id}" title="测试并上传备份" aria-label="测试并上传备份"><i data-lucide="cloud-upload"></i></button><button class="icon-button small" data-action="edit-backup-target" data-id="${item.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-backup-target" data-id="${item.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></td></tr>`).join('');
   const remoteRunRows = remoteRuns.items.map((item) => `<tr><td>${escapeHtml(item.target_name || '已删除目标')}</td><td>${badge(item.status)}</td><td class="mono">${escapeHtml(item.filename)}</td><td class="numeric">${formatNumber((item.size || 0) / 1024 / 1024, 2)} MB</td><td>${formatDate(item.completed_at || item.created_at)}</td></tr>`).join('');
+  const channelRows = state.channels.map((channel) => `<tr><td class="primary-cell"><strong>${escapeHtml(channel.name)}</strong><small>${escapeHtml(channel.type)}</small></td><td>${channel.enabled ? badge('enabled') : badge('disabled')}</td><td>${channel.credentialFields.map((field) => escapeHtml(field.name)).join(', ') || '-'}</td><td class="actions-cell"><button class="icon-button small" data-action="test-channel" data-id="${channel.id}" title="测试" aria-label="测试"><i data-lucide="send"></i></button><button class="icon-button small" data-action="edit-channel" data-id="${channel.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-channel" data-id="${channel.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></td></tr>`).join('');
   const authStatus = sub2apiStatus.authentication?.available ? badge('healthy', sub2apiStatus.authentication.source) : badge('failed', '缺少凭据');
   const securityPanel = state.authentication?.passwordChangeSupported
     ? `<div class="section-header"><h2>管理员安全</h2></div><div class="panel"><div class="panel-body security-setting-row"><div class="security-setting-copy"><strong>本地管理员密码</strong><small>${escapeHtml(state.user?.name || 'admin')} · ${state.authentication.passwordChangedAt ? `最近修改 ${escapeHtml(formatDate(state.authentication.passwordChangedAt))}` : '尚未在网页中修改'}</small></div><button class="button" type="button" data-action="change-password"><i data-lucide="key-round"></i><span>修改密码</span></button></div></div>`
@@ -2434,11 +2453,13 @@ async function renderSettings() {
     <label><span>通知记录保留（天）</span><input name="notificationRetentionDays" type="number" min="1" max="3650" value="${settings.notificationRetentionDays}"></label>
     <label><span>配置漂移保留（天）</span><input name="assetChangeRetentionDays" type="number" min="1" max="3650" value="${settings.assetChangeRetentionDays}"></label>
   </div></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="button" data-action="save-system-settings"><i data-lucide="save"></i><span>保存系统参数</span></button></footer></form></section>`;
+  const notificationChannelsPanel = `<section class="section"><div class="section-header"><h2>通知通道</h2><div class="section-actions"><button class="button small primary" data-action="add-channel"><i data-lucide="plus"></i><span>添加通道</span></button></div></div>${channelRows ? `<div class="table-wrap"><table><thead><tr><th>通道</th><th>状态</th><th>凭据</th><th></th></tr></thead><tbody>${channelRows}</tbody></table></div>` : emptyState('send', '暂无通知通道', '添加 Webhook、Telegram、Gotify、Bark、个人微信或邮件')}<form class="panel section" id="built-in-balance-alert-routing-form"><div class="panel-header"><h2>内置余额预警</h2></div><div class="panel-body"><div class="notification-channel-options">${notificationChannelOptionsHtml(state.channels, settings.builtInBalanceAlertChannelIds, 'built-in-balance-alert')}</div></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存通道路由</span></button></footer></form></section>`;
   $('#main-content').innerHTML = `<section class="base-instance-bar"><div><span class="status-dot ${sub2apiStatus.authentication?.available ? 'healthy' : 'warning'}"></span><strong>基座 Sub2API</strong><small>${escapeHtml(sub2apiStatus.publicUrl || sub2apiStatus.baseUrl || '未配置')} · 最近检查 ${escapeHtml(timeAgo(sub2apiStatus.lastCheckedAt))}</small></div><div>${authStatus}</div></section><div class="split-layout"><form class="panel" id="settings-form"><div class="panel-header"><h2>运行设置</h2></div><div class="form-grid"><label><span>显示币种</span><input name="displayCurrency" value="${escapeHtml(settings.displayCurrency)}"></label><label><span>预测最短跨度（小时）</span><input name="forecastMinSpanHours" type="number" min="1" value="${settings.forecastMinSpanHours}"></label><label><span>对账容差</span><input name="reconciliationToleranceRatio" type="number" min="0" step="0.01" value="${settings.reconciliationToleranceRatio}"></label><label><span>综合倍率偏差容差</span><input name="sub2apiRateToleranceRatio" type="number" min="0" step="0.01" value="${settings.sub2apiRateToleranceRatio}"></label><label><span>价格刷新（小时）</span><input name="catalogRefreshHours" type="number" min="1" value="${settings.catalogRefreshHours}"></label><label><span>异常跌幅（%）</span><input name="anomalyDropPercent" type="number" min="1" value="${settings.anomalyDropPercent}"></label><label><span>异常突增倍数</span><input name="anomalySpikeMultiplier" type="number" min="1" step="0.1" value="${settings.anomalySpikeMultiplier}"></label><label class="span-2"><span>汇率（JSON）</span><textarea name="currencyRates" rows="4">${escapeHtml(JSON.stringify(settings.currencyRates, null, 2))}</textarea></label><label class="span-2"><span>官方模型单价（USD / 1M，JSON）</span><textarea name="officialModelPrices" rows="10">${escapeHtml(JSON.stringify(settings.officialModelPrices || {}, null, 2))}</textarea></label></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存设置</span></button></footer></form><div>${securityPanel}${adminApiKeyPanel}<div class="section-header section"><h2>数据导出</h2></div><div class="panel"><div class="panel-body action-grid"><button class="button" data-action="download" data-url="/api/exports/balances.csv" data-filename="provider-monitor-balances.csv"><i data-lucide="wallet-cards"></i><span>余额 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/usage.csv" data-filename="provider-monitor-usage.csv"><i data-lucide="activity"></i><span>用量 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/alerts.csv" data-filename="provider-monitor-alerts.csv"><i data-lucide="bell"></i><span>告警 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/env" data-filename="provider-monitor-import.env"><i data-lucide="file-code-2"></i><span>环境变量模板</span></button><button class="button" data-action="export-disaster"><i data-lucide="lock-keyhole"></i><span>加密灾备包</span></button></div></div><div class="section-header section"><h2>SQLite 备份</h2></div><div class="table-wrap">${backupRows ? `<table><thead><tr><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${backupRows}</tbody></table>` : emptyState('database-backup', '暂无备份', '创建在线一致性备份')}</div></div></div><section class="section"><div class="section-header"><h2>远端备份目标</h2><div class="section-actions"><button class="button small" data-action="run-remote-backups"><i data-lucide="cloud-upload"></i><span>立即备份</span></button><button class="button small primary" data-action="add-backup-target"><i data-lucide="plus"></i><span>添加目标</span></button></div></div><div class="table-wrap">${targetRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>最近结果</th><th>最近备份</th><th></th></tr></thead><tbody>${targetRows}</tbody></table>` : emptyState('cloud-upload', '暂无远端目标', '添加本地目录、WebDAV 或 S3 兼容目标')}</div></section><section class="section"><div class="section-header"><h2>远端备份记录</h2></div><div class="table-wrap">${remoteRunRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${remoteRunRows}</tbody></table>` : emptyState('history', '暂无远端备份记录', '执行远端备份后显示')}</div></section><section class="section"><div class="section-header"><h2>凭据生命周期</h2></div><div class="table-wrap">${lifecycleRows ? `<table><thead><tr><th>供应商 / 字段</th><th>到期状态</th><th>最近轮换</th><th>凭据到期</th><th></th></tr></thead><tbody>${lifecycleRows}</tbody></table>` : emptyState('key-round', '暂无凭据', '添加供应商后显示')}</div></section>`;
-  $('.split-layout', $('#main-content')).insertAdjacentHTML('afterend', systemSettingsPanel);
+  $('.split-layout', $('#main-content')).insertAdjacentHTML('afterend', `${systemSettingsPanel}${notificationChannelsPanel}`);
   $('#settings-form').addEventListener('submit', saveSettings);
   $('#sub2api-admin-api-key-form').addEventListener('submit', saveSub2ApiAdminApiKey);
   $('#system-settings-form').addEventListener('submit', saveSystemSettings);
+  $('#built-in-balance-alert-routing-form').addEventListener('submit', saveBuiltInBalanceAlertRouting);
 }
 
 function openBackupTarget(target = null) {
@@ -2564,6 +2585,26 @@ async function saveSystemSettings(eventOrForm) {
     state.settings = settings;
     toast('系统参数已保存');
   } catch (error) { toast(error.message, 'error'); }
+}
+
+async function saveBuiltInBalanceAlertRouting(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  try {
+    const settings = await api('/api/settings', {
+      method: 'PUT',
+      body: {
+        builtInBalanceAlertChannelIds: selectedNotificationChannelIds(
+          form,
+          'built-in-balance-alert'
+        )
+      }
+    });
+    state.settings = settings;
+    toast('内置余额预警通道路由已保存');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
 }
 
 async function renderTrends() {
@@ -2911,7 +2952,6 @@ async function renderAutomation() {
   setTopActions(`<button class="button" data-action="evaluate-alerts" title="立即评估告警" aria-label="立即评估告警"><i data-lucide="scan-line"></i><span>立即评估</span></button><button class="button" data-action="add-alert-rule" title="添加告警规则" aria-label="添加告警规则"><i data-lucide="bell-plus"></i><span>告警规则</span></button><button class="button primary" data-action="add-automation" title="添加自动化规则" aria-label="添加自动化规则"><i data-lucide="workflow"></i><span>自动化规则</span></button>`);
   const ruleRows = rules.map(unifiedRuleRow).join('');
   const eventList = state.alerts.map((event) => `<div class="alert-item"><span class="alert-symbol ${event.severity === 'error' ? 'error' : ''}"><i data-lucide="${event.severity === 'error' ? 'octagon-alert' : 'triangle-alert'}"></i></span><div><p>${escapeHtml(event.message)}</p><small>${formatDate(event.triggered_at)} · ${escapeHtml(alertSeverityLabel(event.severity))}</small></div><div>${badge(event.status)}${event.status === 'active' ? `<button class="icon-button small" data-action="ack-alert" data-id="${event.id}" title="确认告警" aria-label="确认告警"><i data-lucide="check"></i></button>` : ''}</div></div>`).join('');
-  const channelRows = state.channels.map((channel) => `<tr><td class="primary-cell"><strong>${escapeHtml(channel.name)}</strong><small>${escapeHtml(channel.type)}</small></td><td>${channel.enabled ? badge('enabled') : badge('disabled')}</td><td>${channel.credentialFields.map((field) => escapeHtml(field.name)).join(', ') || '-'}</td><td class="actions-cell"><button class="icon-button small" data-action="test-channel" data-id="${channel.id}" title="测试" aria-label="测试"><i data-lucide="send"></i></button><button class="icon-button small" data-action="edit-channel" data-id="${channel.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-channel" data-id="${channel.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></td></tr>`).join('');
   const actionRows = state.automationActions.map((action) => {
     const rollback = action.status === 'succeeded' && !action.rolled_back_at &&
       automationActionCanRollback(action.action_type)
@@ -2922,7 +2962,7 @@ async function renderAutomation() {
   }).join('');
   const activeAlerts = state.alerts.filter((event) => event.status === 'active').length;
   const failedActions = state.automationActions.filter((action) => action.status === 'failed').length;
-  $('#main-content').innerHTML = `<div class="status-summary" aria-label="规则与自动化摘要">${badge('info', `告警规则 ${state.alertRules.length}`)}${badge('enabled', `自动化规则 ${state.automationRules.length}`)}${badge(activeAlerts ? 'warning' : 'healthy', `活动告警 ${activeAlerts}`)}${badge(failedActions ? 'failed' : 'healthy', `失败动作 ${failedActions}`)}</div><div class="section-header"><h2>规则</h2></div><div class="table-wrap">${ruleRows ? `<table><thead><tr><th>规则</th><th>触发条件</th><th>动作</th><th>范围</th><th>模式</th><th>状态</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table>` : emptyState('workflow', '暂无规则', '添加告警规则或自动化规则')}</div><section class="section split-layout"><div class="panel"><div class="panel-header"><h2>告警事件</h2></div><div class="alert-list">${eventList || emptyState('bell-off', '暂无告警', '当前没有触发中的风险事件')}</div></div><div class="panel"><div class="panel-header"><h2>通知通道</h2><div class="panel-actions"><button class="icon-button small" data-action="add-channel" title="添加通知通道" aria-label="添加通知通道"><i data-lucide="plus"></i></button></div></div>${channelRows ? `<div class="table-wrap"><table><thead><tr><th>通道</th><th>状态</th><th>凭据</th><th></th></tr></thead><tbody>${channelRows}</tbody></table></div>` : emptyState('send', '暂无通知通道', '添加 Webhook、Telegram、Gotify、Bark 或邮件')}</div></section><section class="section"><div class="section-header"><h2>动作记录</h2></div><div class="table-wrap">${actionRows ? `<table><thead><tr><th>动作</th><th>结果</th><th>演练</th><th>目标 / 结果</th><th>时间</th><th></th></tr></thead><tbody>${actionRows}</tbody></table>` : emptyState('history', '暂无动作', '触发自动化规则后将在此记录')}</div></section>`;
+  $('#main-content').innerHTML = `<div class="status-summary" aria-label="规则与自动化摘要">${badge('info', `告警规则 ${state.alertRules.length}`)}${badge('enabled', `自动化规则 ${state.automationRules.length}`)}${badge(activeAlerts ? 'warning' : 'healthy', `活动告警 ${activeAlerts}`)}${badge(failedActions ? 'failed' : 'healthy', `失败动作 ${failedActions}`)}</div><div class="section-header"><h2>规则</h2></div><div class="table-wrap">${ruleRows ? `<table><thead><tr><th>规则</th><th>触发条件</th><th>动作</th><th>通知</th><th>范围</th><th>模式</th><th>状态</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table>` : emptyState('workflow', '暂无规则', '添加告警规则或自动化规则')}</div><section class="section"><div class="panel"><div class="panel-header"><h2>告警事件</h2></div><div class="alert-list">${eventList || emptyState('bell-off', '暂无告警', '当前没有触发中的风险事件')}</div></div></section><section class="section"><div class="section-header"><h2>动作记录</h2></div><div class="table-wrap">${actionRows ? `<table><thead><tr><th>动作</th><th>结果</th><th>演练</th><th>目标 / 结果</th><th>时间</th><th></th></tr></thead><tbody>${actionRows}</tbody></table>` : emptyState('history', '暂无动作', '触发自动化规则后将在此记录')}</div></section>`;
 }
 
 const ALERT_RULE_TYPE_LABELS = {
@@ -3042,6 +3082,17 @@ function automationRuleActionLabel(rule) {
     : action;
 }
 
+function ruleNotificationSummary(rule) {
+  if (rule.kind === 'automation' && rule.config?.notifyOnAction !== true) return '关闭';
+  const ids = Array.isArray(rule.config?.notificationChannelIds)
+    ? rule.config.notificationChannelIds.map(String)
+    : [];
+  if (!ids.length) return rule.kind === 'alert' ? '仅站内事件' : '未选择';
+  const names = ids.map((id) => state.channels.find((channel) => String(channel.id) === id)?.name)
+    .filter(Boolean);
+  return names.length ? names.join('、') : '通道已删除';
+}
+
 function unifiedRuleRow(rule) {
   const alertRule = rule.kind === 'alert';
   const triggerLabel = alertRule
@@ -3062,7 +3113,7 @@ function unifiedRuleRow(rule) {
   const actions = alertRule
     ? `<button class="icon-button small" data-action="edit-alert-rule" data-id="${rule.id}" title="编辑告警规则" aria-label="编辑告警规则"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-alert-rule" data-id="${rule.id}" title="删除告警规则" aria-label="删除告警规则"><i data-lucide="trash-2"></i></button>`
     : `<button class="icon-button small" data-action="dry-run-automation" data-id="${rule.id}" title="预览执行条件" aria-label="预览执行条件"><i data-lucide="scan-search"></i></button><button class="icon-button small" data-action="edit-automation" data-id="${rule.id}" title="编辑自动化规则" aria-label="编辑自动化规则"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-automation" data-id="${rule.id}" title="删除自动化规则" aria-label="删除自动化规则"><i data-lucide="trash-2"></i></button>`;
-  return `<tr data-rule-kind="${rule.kind}"><td class="primary-cell"><strong>${escapeHtml(rule.name)}</strong><small>${alertRule ? '告警规则' : '自动化规则'}</small></td><td class="primary-cell rule-trigger-cell"><strong>${escapeHtml(triggerLabel)}</strong>${triggerDetail ? `<small>${escapeHtml(triggerDetail)}</small>` : ''}</td><td>${escapeHtml(alertRule ? automationActionLabel(rule.actionType) : automationRuleActionLabel(rule))}</td><td class="primary-cell"><strong>${escapeHtml(providerName)}</strong>${scope ? `<small>${escapeHtml(scope)}</small>` : ''}</td><td>${mode}</td><td>${rule.enabled ? badge('enabled') : badge('disabled')}</td><td class="actions-cell">${actions}</td></tr>`;
+  return `<tr data-rule-kind="${rule.kind}"><td class="primary-cell"><strong>${escapeHtml(rule.name)}</strong><small>${alertRule ? '告警规则' : '自动化规则'}</small></td><td class="primary-cell rule-trigger-cell"><strong>${escapeHtml(triggerLabel)}</strong>${triggerDetail ? `<small>${escapeHtml(triggerDetail)}</small>` : ''}</td><td>${escapeHtml(alertRule ? automationActionLabel(rule.actionType) : automationRuleActionLabel(rule))}</td><td>${escapeHtml(ruleNotificationSummary(rule))}</td><td class="primary-cell"><strong>${escapeHtml(providerName)}</strong>${scope ? `<small>${escapeHtml(scope)}</small>` : ''}</td><td>${mode}</td><td>${rule.enabled ? badge('enabled') : badge('disabled')}</td><td class="actions-cell">${actions}</td></tr>`;
 }
 
 function automationActionTarget(action) {
@@ -4023,6 +4074,11 @@ function openAlertRule(rule = null) {
   form.elements.threshold.value = rule?.threshold ?? ''; form.elements.currency.value = rule?.currency || 'USD';
   form.elements.comparisonOperator.value = rule?.config?.comparisonOperator || (rule ? 'abs_gt' : 'lt');
   form.elements.consecutiveMatches.value = rule?.consecutive_matches || 1; form.elements.cooldownMinutes.value = rule?.cooldown_minutes || 60;
+  $('#alert-rule-notification-channels').innerHTML = notificationChannelOptionsHtml(
+    state.channels,
+    rule?.config?.notificationChannelIds,
+    'alert-rule'
+  );
   form.elements.enabled.checked = rule?.enabled ?? true; updateAlertRuleFields(); $('#alert-rule-dialog').showModal(); icons();
 }
 
@@ -4037,6 +4093,7 @@ function alertRulePayload(form) {
     delete config.comparisonOperator;
     delete config.groupId;
   }
+  config.notificationChannelIds = selectedNotificationChannelIds(form, 'alert-rule');
   return {
     name: form.elements.name.value.trim(),
     ruleType: form.elements.ruleType.value,
@@ -4081,6 +4138,11 @@ function openAutomation(rule = null) {
   form.elements.webhookUrl.value = rule?.config?.webhookUrl || '';
   form.elements.enabled.checked = rule?.enabled ?? false; form.elements.dryRun.checked = rule?.dryRun ?? true;
   form.elements.notifyOnAction.checked = rule?.config?.notifyOnAction ?? false;
+  $('#automation-notification-channels').innerHTML = notificationChannelOptionsHtml(
+    state.channels,
+    rule?.config?.notificationChannelIds,
+    'automation'
+  );
   updateAutomationActionFields(form);
   $('#automation-dialog').showModal(); icons();
 }
@@ -4107,11 +4169,13 @@ function updateAutomationActionFields(form = $('#automation-form')) {
   const accountField = form.querySelector('[data-automation-account-field]');
   const channelField = form.querySelector('[data-automation-channel-field]');
   const webhookField = form.querySelector('[data-automation-webhook-field]');
+  const notificationField = form.querySelector('[data-automation-notification-field]');
   const scheduleField = form.querySelector('[data-automation-schedule-field]');
   const scheduledConditionSelector = form.querySelector('[data-automation-scheduled-condition-selector]');
   accountField.hidden = !usesAccountIds;
   channelField.hidden = !usesChannelIds;
   webhookField.hidden = !usesWebhook;
+  notificationField.hidden = !form.elements.notifyOnAction.checked;
   scheduleField.hidden = !scheduled;
   scheduledConditionSelector.hidden = !scheduled;
   for (const field of form.querySelectorAll('[data-automation-scheduled-condition-field]')) {
@@ -4180,6 +4244,9 @@ function automationPayload(form) {
       contractPauseHours: Number(form.elements.contractPauseHours.value),
       dailyMaximumActions: Number(form.elements.dailyMaximumActions.value),
       notifyOnAction: form.elements.notifyOnAction.checked,
+      ...(form.elements.notifyOnAction.checked ? {
+        notificationChannelIds: selectedNotificationChannelIds(form, 'automation')
+      } : {}),
       ...(!scheduled && form.elements.webhookUrl.value ? { webhookUrl: form.elements.webhookUrl.value } : {})
     }
   };
@@ -4308,8 +4375,8 @@ async function handleAction(button) {
       trackKeyProbeJob(result.jobId, '业务首字提醒评估').catch((error) => toast(error.message, 'error'));
     }
     if (action === 'manage-notification-channels') {
-      $('#key-ttft-alert-dialog').close();
-      await navigate('automation');
+      button.closest('dialog')?.close();
+      await navigate('settings');
     }
     if (action === 'open-key-probe-settings') openKeyProbeSettings();
     if (action === 'sync-key-probes') {
@@ -4515,7 +4582,7 @@ async function handleAction(button) {
     if (action === 'ack-alert') { await api(`/api/alerts/${id}/acknowledge`, { method: 'POST' }); toast('告警已确认'); navigate('automation'); }
     if (action === 'add-channel') openChannel();
     if (action === 'edit-channel') openChannel(state.channels.find((c) => c.id === id));
-    if (action === 'delete-channel' && confirm('删除该通知通道？')) { await api(`/api/notification-channels/${id}`, { method: 'DELETE' }); toast('通道已删除'); navigate('automation'); }
+    if (action === 'delete-channel' && confirm('删除该通知通道？')) { await api(`/api/notification-channels/${id}`, { method: 'DELETE' }); toast('通道已删除'); navigate('settings'); }
     if (action === 'test-channel') { await api(`/api/notification-channels/${id}/test`, { method: 'POST' }); toast('测试通知已发送'); }
     if (action === 'regenerate-mobile-preview') {
       const form = $('#recharge-alert-test-form');
@@ -4899,6 +4966,7 @@ $('#alert-rule-form')?.elements?.connectionId?.addEventListener('change', () => 
 $('#automation-form')?.elements?.action?.addEventListener('change', (event) => updateAutomationActionFields(event.target.form));
 $('#automation-form')?.elements?.triggerType?.addEventListener('change', (event) => updateAutomationActionFields(event.target.form));
 $('#automation-form')?.elements?.scheduledConditionType?.addEventListener('change', (event) => updateAutomationActionFields(event.target.form));
+$('#automation-form')?.elements?.notifyOnAction?.addEventListener('change', (event) => updateAutomationActionFields(event.target.form));
 
 $('#provider-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const id = form.elements.id.value;
@@ -4916,8 +4984,7 @@ $('#key-ttft-alert-form').addEventListener('submit', async (event) => {
   submit.disabled = true;
   $('#key-ttft-alert-error').textContent = '';
   try {
-    const channelIds = $$('[data-key-ttft-alert-channel]:checked', form)
-      .map((input) => input.value);
+    const channelIds = selectedNotificationChannelIds(form, 'key-ttft-alert');
     const result = await api('/api/key-ttft-alerts/config', {
       method: 'PUT',
       body: {
@@ -5080,7 +5147,7 @@ $('#notification-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const id = form.elements.id.value;
   try {
     const payload = { name: form.elements.name.value, type: form.elements.type.value, enabled: form.elements.enabled.checked, config: JSON.parse(form.elements.config.value || '{}'), credentials: JSON.parse(form.elements.credentials.value || '{}') };
-    await api(id ? `/api/notification-channels/${id}` : '/api/notification-channels', { method: id ? 'PUT' : 'POST', body: payload }); $('#notification-dialog').close(); toast('通知通道已保存'); navigate('automation');
+    await api(id ? `/api/notification-channels/${id}` : '/api/notification-channels', { method: id ? 'PUT' : 'POST', body: payload }); $('#notification-dialog').close(); toast('通知通道已保存'); navigate('settings');
   } catch (error) { toast(error.message, 'error'); }
 });
 

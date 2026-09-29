@@ -138,6 +138,10 @@ test('system settings persist runtime policy and update the shared config object
     auditRetentionDays: 500,
     notificationRetentionDays: 200,
     assetChangeRetentionDays: 220,
+    builtInBalanceAlertChannelIds: [
+      '11111111-1111-4111-8111-111111111111',
+      '11111111-1111-4111-8111-111111111111'
+    ],
     providerMonitorPublicUrl: 'https://monitor.example.com/',
     rechargeLinkTtlMinutes: 30,
     officialModelPrices: {
@@ -153,11 +157,17 @@ test('system settings persist runtime policy and update the shared config object
   });
   assert.deepEqual(settings.allowedOrigins, ['https://console.example']);
   assert.deepEqual(settings.allowedHosts, ['supplier.internal', '10.0.0.8']);
+  assert.deepEqual(settings.builtInBalanceAlertChannelIds, [
+    '11111111-1111-4111-8111-111111111111'
+  ]);
   assert.equal(context.config.automationEnabled, true);
   assert.equal(context.config.allowPrivateNetworks, true);
   assert.equal(context.config.sessionTtlMinutes, 90);
   assert.equal(context.config.maxResponseBytes, 3145728);
   assert.equal(context.config.assetChangeRetentionDays, 220);
+  assert.deepEqual(context.config.builtInBalanceAlertChannelIds, [
+    '11111111-1111-4111-8111-111111111111'
+  ]);
   assert.equal(context.config.providerMonitorPublicUrl, 'https://monitor.example.com');
   assert.equal(context.config.rechargeLinkTtlMinutes, 30);
 
@@ -177,6 +187,9 @@ test('system settings persist runtime policy and update the shared config object
   assert.equal(restartedConfig.automationEnabled, true);
   assert.deepEqual(restartedConfig.allowedOrigins, ['https://console.example']);
   assert.deepEqual(restartedConfig.allowedHosts, ['supplier.internal', '10.0.0.8']);
+  assert.deepEqual(restartedConfig.builtInBalanceAlertChannelIds, [
+    '11111111-1111-4111-8111-111111111111'
+  ]);
   assert.equal(restartedConfig.providerMonitorPublicUrl, 'https://monitor.example.com');
 });
 

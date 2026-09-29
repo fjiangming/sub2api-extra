@@ -208,6 +208,10 @@ const alertRuleThresholdTypes = new Set([
 ]);
 const alertRuleCurrencyTypes = new Set(['low_balance', 'runway_below']);
 const rateDifferenceOperators = new Set(['abs_gt', 'lt', 'lte', 'gt', 'gte']);
+const notificationChannelIdsSchema = z.array(z.string().uuid()).max(100);
+const alertRuleConfigSchema = z.object({
+  notificationChannelIds: notificationChannelIdsSchema.optional()
+}).passthrough();
 const alertRuleBaseSchema = z.object({
   name: z.string().trim().min(1).max(120),
   enabled: z.boolean().optional(),
@@ -222,7 +226,7 @@ const alertRuleBaseSchema = z.object({
   threshold: z.number().finite().optional().nullable(),
   consecutiveMatches: z.number().int().min(1).max(20).optional(),
   cooldownMinutes: z.number().int().min(1).max(10080).optional(),
-  config: z.record(z.string(), z.any()).optional()
+  config: alertRuleConfigSchema.optional()
 });
 const validateAlertRuleFields = (input, context) => {
   if (alertRuleThresholdTypes.has(input.ruleType) && input.threshold == null) {
@@ -302,6 +306,7 @@ const automationConfigSchema = z.object({
   dailyMaximumActions: z.number().int().min(1).max(1000).optional(),
   contractPauseHours: z.number().min(1).max(720).optional(),
   notifyOnAction: z.boolean().optional(),
+  notificationChannelIds: notificationChannelIdsSchema.optional(),
   webhookUrl: z.string().url().optional()
 }).passthrough().superRefine((config, context) => {
   if (automationAccountActions.has(config.action) && !config.accountIds?.length) {
@@ -323,6 +328,13 @@ const automationConfigSchema = z.object({
       code: 'custom',
       path: ['webhookUrl'],
       message: 'Recharge webhook URL is required'
+    });
+  }
+  if (config.notifyOnAction === true && !config.notificationChannelIds?.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['notificationChannelIds'],
+      message: 'At least one notification channel is required when action notifications are enabled'
     });
   }
   if (config.action === 'rebuild_sub2api_mappings' && config.scheduleIntervalMinutes == null) {

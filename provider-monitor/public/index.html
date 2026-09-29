@@ -132,9 +132,13 @@
         <label data-alert-field="currency"><span>币种</span><input name="currency" value="USD" maxlength="12"></label>
         <label data-alert-field="consecutiveMatches"><span>连续次数</span><input name="consecutiveMatches" type="number" min="1" max="20" value="1"></label>
         <label><span>冷却（分钟）</span><input name="cooldownMinutes" type="number" min="1" max="10080" value="60" required></label>
+        <div class="span-2">
+          <span class="field-group-label">通知通道</span>
+          <div id="alert-rule-notification-channels" class="notification-channel-options"></div>
+        </div>
         <label class="toggle-field"><input name="enabled" type="checkbox" checked><span>启用</span></label>
       </div>
-      <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存</span></button></footer>
+      <footer class="dialog-actions"><button class="button" type="button" data-action="manage-notification-channels"><i data-lucide="radio-tower"></i><span>管理通道</span></button><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存</span></button></footer>
     </form>
   </dialog>
 
@@ -179,8 +183,12 @@
         <label class="toggle-field"><input name="enabled" type="checkbox"><span>启用规则</span></label>
         <label class="toggle-field"><input name="dryRun" type="checkbox" checked><span>演练模式</span></label>
         <label class="toggle-field"><input name="notifyOnAction" type="checkbox"><span>动作触发时通知</span></label>
+        <div class="span-2" data-automation-notification-field hidden>
+          <span class="field-group-label">动作通知通道</span>
+          <div id="automation-notification-channels" class="notification-channel-options"></div>
+        </div>
       </div>
-      <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存</span></button></footer>
+      <footer class="dialog-actions"><button class="button" type="button" data-action="manage-notification-channels"><i data-lucide="radio-tower"></i><span>管理通道</span></button><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存</span></button></footer>
     </form>
   </dialog>
 
@@ -295,12 +303,12 @@
         <label><span>平均首字阈值（毫秒）</span><input name="thresholdMs" type="number" min="100" max="600000" required></label>
         <label><span>重复提醒冷却（分钟）</span><input name="cooldownMinutes" type="number" min="1" max="10080" required></label>
         <div class="span-2">
-          <span class="field-group-label">通知渠道</span>
+          <span class="field-group-label">通知通道</span>
           <div id="key-ttft-alert-channels" class="notification-channel-options"></div>
         </div>
       </div>
       <p class="form-error" id="key-ttft-alert-error" role="alert"></p>
-      <footer class="dialog-actions"><button class="button" type="button" data-action="manage-notification-channels"><i data-lucide="radio-tower"></i><span>管理渠道</span></button><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存</span></button></footer>
+      <footer class="dialog-actions"><button class="button" type="button" data-action="manage-notification-channels"><i data-lucide="radio-tower"></i><span>管理通道</span></button><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存</span></button></footer>
     </form>
   </dialog>
 
