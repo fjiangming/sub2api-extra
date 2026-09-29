@@ -223,7 +223,6 @@ class CostAnalysisService {
           AND used_at < $2::date::timestamp AT TIME ZONE $3
           AND used_at IS NOT NULL
           AND status = 'used'
-          AND type = 'balance'
           AND $4 = 'CNY'
         GROUP BY 1 ORDER BY 1
       `, [range.start, range.endExclusive, this.config.financeTimezone, currency]),
@@ -363,12 +362,15 @@ class CostAnalysisService {
       breakdown,
       incomeBreakdown,
       caveats: [
-        '自动收入按 Sub2API 兑换页面中已使用的余额兑换记录统计，以 used_at 归属日期；每条兑换记录只统计一次。',
+        '自动收入按 Sub2API 兑换页面中所有已使用记录的 value 统计，不限制兑换类型，并以 used_at 归属日期；每条兑换记录只统计一次。',
+        '管理员余额增加会增加自动收入，管理员扣减余额等负数记录会冲减自动收入；未使用、禁用或过期记录不计入。',
+        '同一笔线下充值若已录入手工收入，请删除对应手工记录，避免与管理员余额调整记录重复统计。',
         '兑换记录没有币种字段，自动收入统一按 CNY 归集；其他币种报表仅包含对应币种的手工收支。',
         '支付订单不会与兑换记录叠加；总收入为自动收入与手工收入之和，平均金额仅使用自动收入计算。',
         '支出按手工台账的发生日期归集；不同币种不会自动换算。',
         '利润为总收入减手工支出，不包含税费，也不扣除退款估算。',
-        '用户总余额是当前未删除用户的 balance 合计并排除 ID 1；实际利润为利润减用户总余额，余额是当前快照且不随查询日期回溯。'
+        '用户总余额是当前未删除用户的 balance 合计并排除 ID 1；实际利润为利润减用户总余额，余额是当前快照且不随查询日期回溯。',
+        '自动收入直接依赖 Sub2API 当前兑换记录；源记录被删除后，历史报表会同步减少。'
       ]
     };
   }
