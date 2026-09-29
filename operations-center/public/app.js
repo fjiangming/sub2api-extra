@@ -277,11 +277,14 @@ async function loadOverview() {
   setPageMeta('正在读取运营汇总');
   $('overview-metrics').innerHTML = Array.from({ length: 5 }, (_, i) => metricCard('读取中', '...', '', ['green', 'blue', 'amber'][i % 3])).join('');
   const [overview, usage] = await Promise.all([api('/api/overview'), api('/api/metrics/usage')]);
+  const spendMonthMeta = overview.usage.spend_month_complete === false
+    ? 'actual_cost · 不含 ID 1 · 明细不完整'
+    : 'actual_cost · 不含 ID 1';
   $('overview-metrics').innerHTML = [
     metricCard('今日用量活跃', formatInteger(overview.activity.dau), `${overview.timezones.usage} 自然日`, 'green'),
     metricCard('本月用量活跃', formatInteger(overview.activity.mau), '自然月去重', 'blue'),
     metricCard('今日请求', formatInteger(overview.usage.requests_today), `日汇总至 ${formatDateTime(overview.usage.computed_at)}`, 'amber'),
-    metricCard('本月用户消费', formatDecimal(overview.usage.spend_month, 4), 'actual_cost', 'red'),
+    metricCard('本月用户消费', formatDecimal(overview.usage.spend_month, 4), spendMonthMeta, 'red'),
     metricCard('当前可用用户', formatInteger(overview.users.available_users), `本月新增 ${formatInteger(overview.users.new_month)}`, 'green')
   ].join('');
   $('overview-usage-meta').textContent = `${usage.timezone} · ${usage.range.start} 至 ${usage.range.end}`;
@@ -303,6 +306,7 @@ async function loadOverview() {
   `).join('') : '<div class="compact-row"><div class="grow"><strong>本月暂无支付</strong><span>paid_at 口径</span></div></div>';
   const alerts = [];
   if (!overview.coverage.daily_from) alerts.push(alertHtml('warning', '日汇总当前没有可用数据。'));
+  if (overview.usage.spend_month_complete === false) alerts.push(alertHtml('warning', '本月逐请求明细少于日汇总请求数；消费已排除 ID 1，但可能少计已清理的其他用户明细。'));
   if (usage.trend.some((row) => row.available === false)) alerts.push(alertHtml('warning', '所选范围存在无汇总桶日期；它们显示为空缺，不会自动当作 0。'));
   $('overview-alerts').innerHTML = alerts.join('');
   setPageMeta(`更新于 ${formatDateTime(overview.generatedAt)} · 用量 ${overview.timezones.usage} · 资金 ${overview.timezones.finance}`);

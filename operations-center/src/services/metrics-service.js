@@ -96,7 +96,7 @@ class MetricsService {
 
   async getOverview() {
     return this.cached('overview', async () => {
-      await this.require(['users', 'usage_dashboard_daily', 'usage_dashboard_daily_users', 'payment_orders']);
+      await this.require(['users', 'usage_logs', 'usage_dashboard_daily', 'usage_dashboard_daily_users', 'payment_orders']);
       const [users, activity, usage, payments, coverage] = await Promise.all([
         this.pool.query(`
           SELECT COUNT(*) AS total_users,
@@ -126,6 +126,13 @@ class MetricsService {
           )
         `, [this.config.sub2apiTimezone]),
         this.pool.query(`
+          WITH month_detail AS (
+            SELECT COUNT(*) AS detail_requests_month,
+                   COALESCE(SUM(actual_cost) FILTER (WHERE user_id <> 1), 0) AS spend_month
+            FROM usage_logs
+            WHERE created_at >= date_trunc('month', NOW() AT TIME ZONE $1) AT TIME ZONE $1
+              AND created_at < (date_trunc('month', NOW() AT TIME ZONE $1) + INTERVAL '1 month') AT TIME ZONE $1
+          )
           SELECT COALESCE(SUM(total_requests) FILTER (
                    WHERE bucket_date = (NOW() AT TIME ZONE $1)::date
                  ), 0) AS requests_today,
@@ -135,9 +142,8 @@ class MetricsService {
                  COALESCE(SUM(total_requests) FILTER (
                    WHERE bucket_date >= date_trunc('month', NOW() AT TIME ZONE $1)::date
                  ), 0) AS requests_month,
-                 COALESCE(SUM(actual_cost) FILTER (
-                   WHERE bucket_date >= date_trunc('month', NOW() AT TIME ZONE $1)::date
-                 ), 0) AS spend_month,
+                 (SELECT spend_month FROM month_detail) AS spend_month,
+                 (SELECT detail_requests_month FROM month_detail) AS detail_requests_month,
                  MAX(computed_at) AS computed_at
           FROM usage_dashboard_daily
           WHERE bucket_date >= date_trunc('month', NOW() AT TIME ZONE $1)::date
@@ -166,12 +172,18 @@ class MetricsService {
           FROM usage_dashboard_daily
         `)
       ]);
+      const usageSummary = numericRow(usage.rows[0], [
+        'requests_today', 'spend_today', 'requests_month', 'spend_month', 'detail_requests_month'
+      ]);
+      usageSummary.spend_month_complete = usageSummary.detail_requests_month >= usageSummary.requests_month;
+      usageSummary.spend_month_excluded_user_id = 1;
+      delete usageSummary.detail_requests_month;
       return {
         generatedAt: new Date().toISOString(),
         timezones: { usage: this.config.sub2apiTimezone, finance: this.config.financeTimezone },
         users: numericRow(users.rows[0], ['total_users', 'retained_users', 'available_users', 'new_today', 'new_month']),
         activity: numericRow(activity.rows[0], ['dau', 'mau', 'active_7d', 'active_30d']),
-        usage: numericRow(usage.rows[0], ['requests_today', 'spend_today', 'requests_month', 'spend_month']),
+        usage: usageSummary,
         payments: payments.rows.map((row) => numericRow(row, ['paid_today', 'paid_month', 'orders_month'])),
         coverage: coverage.rows[0]
       };
