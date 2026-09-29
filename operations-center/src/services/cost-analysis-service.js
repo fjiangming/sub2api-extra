@@ -206,26 +206,36 @@ class CostAnalysisService {
 
   async getReport(input = {}) {
     const { range, granularity, currency } = parseReportInput(input, this.config);
-    const missing = await this.inspector.requireTables(['redeem_codes']);
+    const missing = await this.inspector.requireTables(['redeem_codes', 'users']);
     if (missing.length) {
-      throw new AppError('SCHEMA_INCOMPATIBLE', '缺少必要数据表：redeem_codes', {
+      throw new AppError('SCHEMA_INCOMPATIBLE', `缺少必要数据表：${missing.join(', ')}`, {
         status: 503,
         details: { missing }
       });
     }
-    const { rows } = await this.pool.query(`
-      SELECT (used_at AT TIME ZONE $3)::date::text AS date,
-             COUNT(*) AS transactions,
-             COALESCE(SUM(value), 0) AS revenue
-      FROM redeem_codes
-      WHERE used_at >= $1::date::timestamp AT TIME ZONE $3
-        AND used_at < $2::date::timestamp AT TIME ZONE $3
-        AND used_at IS NOT NULL
-        AND status = 'used'
-        AND type = 'balance'
-        AND $4 = 'CNY'
-      GROUP BY 1 ORDER BY 1
-    `, [range.start, range.endExclusive, this.config.financeTimezone, currency]);
+    const [automaticIncomeResult, balanceResult] = await Promise.all([
+      this.pool.query(`
+        SELECT (used_at AT TIME ZONE $3)::date::text AS date,
+               COUNT(*) AS transactions,
+               COALESCE(SUM(value), 0) AS revenue
+        FROM redeem_codes
+        WHERE used_at >= $1::date::timestamp AT TIME ZONE $3
+          AND used_at < $2::date::timestamp AT TIME ZONE $3
+          AND used_at IS NOT NULL
+          AND status = 'used'
+          AND type = 'balance'
+          AND $4 = 'CNY'
+        GROUP BY 1 ORDER BY 1
+      `, [range.start, range.endExclusive, this.config.financeTimezone, currency]),
+      this.pool.query(`
+        SELECT COALESCE(SUM(balance), 0) AS user_balance,
+               COUNT(*) AS balance_users
+        FROM users
+        WHERE id <> 1
+          AND deleted_at IS NULL
+      `)
+    ]);
+    const rows = automaticIncomeResult.rows;
 
     const periods = createPeriods(range, granularity);
     const periodMap = new Map(periods.map((period) => [period.key, period]));
@@ -304,6 +314,15 @@ class CostAnalysisService {
     const revenue = Number((automaticRevenue + manualRevenue).toFixed(2));
     expense = Number(expense.toFixed(2));
     const profit = Number((revenue - expense).toFixed(2));
+    const balanceApplies = currency === 'CNY';
+    const userBalance = balanceApplies
+      ? Number(number(balanceResult.rows[0]?.user_balance).toFixed(2))
+      : null;
+    const balanceUsers = balanceApplies ? number(balanceResult.rows[0]?.balance_users) : null;
+    const actualProfit = balanceApplies ? Number((profit - userBalance).toFixed(2)) : null;
+    const actualMargin = balanceApplies && revenue
+      ? Number((actualProfit / revenue * 100).toFixed(2))
+      : null;
     const breakdown = [...breakdownMap.values()]
       .map((row) => ({
         ...row,
@@ -331,6 +350,10 @@ class CostAnalysisService {
         expense,
         profit,
         margin: revenue ? Number((profit / revenue * 100).toFixed(2)) : null,
+        userBalance,
+        balanceUsers,
+        actualProfit,
+        actualMargin,
         transactions,
         incomeCount: incomes.length,
         expenseCount: expenses.length,
@@ -344,7 +367,8 @@ class CostAnalysisService {
         '兑换记录没有币种字段，自动收入统一按 CNY 归集；其他币种报表仅包含对应币种的手工收支。',
         '支付订单不会与兑换记录叠加；总收入为自动收入与手工收入之和，平均金额仅使用自动收入计算。',
         '支出按手工台账的发生日期归集；不同币种不会自动换算。',
-        '利润为总收入减手工支出，不包含税费，也不扣除退款估算。'
+        '利润为总收入减手工支出，不包含税费，也不扣除退款估算。',
+        '用户总余额是当前未删除用户的 balance 合计并排除 ID 1；实际利润为利润减用户总余额，余额是当前快照且不随查询日期回溯。'
       ]
     };
   }

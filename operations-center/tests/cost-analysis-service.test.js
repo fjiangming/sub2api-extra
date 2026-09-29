@@ -8,7 +8,7 @@ const path = require('node:path');
 const { CostLedgerStore } = require('../src/cost-ledger-store');
 const { CostAnalysisService, createPeriods, periodStart } = require('../src/services/cost-analysis-service');
 
-async function createService(t, rows = []) {
+async function createService(t, rows = [], balance = { user_balance: '0', balance_users: '0' }) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'operations-center-cost-analysis-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const store = new CostLedgerStore(directory);
@@ -18,6 +18,7 @@ async function createService(t, rows = []) {
     pool: {
       async query(sql, params) {
         queries.push({ sql, params });
+        if (/FROM users/.test(sql)) return { rows: [balance] };
         return { rows };
       }
     },
@@ -34,7 +35,7 @@ test('cost analysis aggregates used balance redemptions, manual income and expen
   const { service, store, queries } = await createService(t, [
     { date: '2026-09-01', transactions: '2', revenue: '100.00' },
     { date: '2026-09-08', transactions: '1', revenue: '50.00' }
-  ]);
+  ], { user_balance: '25.00', balance_users: '4' });
   await store.replaceProviders([{
     id: 'provider-1', name: 'Provider One', adapterType: 'custom', enabled: true, currency: 'CNY'
   }]);
@@ -62,6 +63,10 @@ test('cost analysis aggregates used balance redemptions, manual income and expen
     expense: 70,
     profit: 110,
     margin: 61.11,
+    userBalance: 25,
+    balanceUsers: 4,
+    actualProfit: 85,
+    actualMargin: 47.22,
     transactions: 3,
     incomeCount: 2,
     expenseCount: 2,
@@ -85,9 +90,14 @@ test('cost analysis aggregates used balance redemptions, manual income and expen
   assert.match(queries[0].sql, /\$4 = 'CNY'/);
   assert.doesNotMatch(queries[0].sql, /payment_orders|pay_amount|\bJOIN\b/);
   assert.deepEqual(queries[0].params, ['2026-09-01', '2026-09-11', 'Asia/Shanghai', 'CNY']);
+  assert.match(queries[1].sql, /SUM\(balance\)/);
+  assert.match(queries[1].sql, /FROM users/);
+  assert.match(queries[1].sql, /id <> 1/);
+  assert.match(queries[1].sql, /deleted_at IS NULL/);
+  assert.equal(queries[1].params, undefined);
 });
 
-test('cost analysis requires only redeem codes for automatic income', async (t) => {
+test('cost analysis requires redeem codes and users for automatic income and current balance', async (t) => {
   const { service, queries } = await createService(t);
   let required;
   service.inspector = {
@@ -102,7 +112,7 @@ test('cost analysis requires only redeem codes for automatic income', async (t) 
     (error) => error.code === 'SCHEMA_INCOMPATIBLE' &&
       error.message === '缺少必要数据表：redeem_codes' && error.status === 503
   );
-  assert.deepEqual(required, ['redeem_codes']);
+  assert.deepEqual(required, ['redeem_codes', 'users']);
   assert.equal(queries.length, 0);
 });
 
@@ -165,7 +175,7 @@ test('day, month and year reports keep revenue and expenses in the correct perio
 });
 
 test('currency isolation includes manual-only income without changing the automatic-income average', async (t) => {
-  const { service } = await createService(t);
+  const { service } = await createService(t, [], { user_balance: '10', balance_users: '2' });
   await service.createExpense({
     kind: 'custom', name: 'USD Hosting', date: '2026-09-20', amount: 25,
     currency: 'USD', note: 'monthly'
@@ -195,6 +205,10 @@ test('currency isolation includes manual-only income without changing the automa
     expense: 30,
     profit: 20,
     margin: 40,
+    userBalance: null,
+    balanceUsers: null,
+    actualProfit: null,
+    actualMargin: null,
     transactions: 0,
     incomeCount: 1,
     expenseCount: 2,
@@ -220,6 +234,10 @@ test('currency isolation includes manual-only income without changing the automa
   assert.equal(expenseOnly.summary.revenue, 0);
   assert.equal(expenseOnly.summary.profit, -99);
   assert.equal(expenseOnly.summary.margin, null);
+  assert.equal(expenseOnly.summary.userBalance, 10);
+  assert.equal(expenseOnly.summary.balanceUsers, 2);
+  assert.equal(expenseOnly.summary.actualProfit, -109);
+  assert.equal(expenseOnly.summary.actualMargin, null);
 });
 
 test('invalid report inputs fail before querying Sub2API', async (t) => {

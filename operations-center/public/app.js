@@ -527,13 +527,17 @@ async function loadCostAnalysis() {
   const averageAutomaticIncome = report.summary.averageTransaction == null
     ? 'N/A'
     : formatMoney(report.summary.averageTransaction, report.currency);
+  const balanceApplies = report.summary.userBalance != null;
+  const actualProfit = report.summary.actualProfit;
   $('cost-analysis-metrics').innerHTML = [
     metricCard('自动收入', formatMoney(report.summary.automaticRevenue, report.currency), `${formatInteger(report.summary.transactions)} 笔兑换 · 平均 ${averageAutomaticIncome}`, 'green'),
     metricCard('手工收入', formatMoney(report.summary.manualRevenue, report.currency), `${formatInteger(report.summary.incomeCount)} 笔`, 'amber'),
     metricCard('总收入', formatMoney(report.summary.revenue, report.currency), '自动收入 + 手工收入', 'blue'),
     metricCard('支出', formatMoney(report.summary.expense, report.currency), `${formatInteger(report.summary.expenseCount)} 笔`, 'red'),
     metricCard('利润', formatMoney(report.summary.profit, report.currency), report.summary.profit >= 0 ? '总收入 - 支出' : '当前为亏损', report.summary.profit >= 0 ? 'blue' : 'red'),
-    metricCard('利润率', formatPercent(report.summary.margin), '利润 / 总收入', 'amber')
+    metricCard('利润率', formatPercent(report.summary.margin), '利润 / 总收入', 'amber'),
+    metricCard('用户总余额', balanceApplies ? formatMoney(report.summary.userBalance, report.currency) : 'N/A', balanceApplies ? `${formatInteger(report.summary.balanceUsers)} 位现有用户 · 不含 ID 1` : '仅适用于 CNY', 'amber'),
+    metricCard('实际利润', actualProfit == null ? 'N/A' : formatMoney(actualProfit, report.currency), actualProfit == null ? '仅适用于 CNY' : `利润 - 用户余额 · 利润率 ${formatPercent(report.summary.actualMargin)}`, actualProfit != null && actualProfit < 0 ? 'red' : 'blue')
   ].join('');
   $('cost-analysis-zone').textContent = `${report.timezone} · ${report.range.start} 至 ${report.range.end} · ${report.currency}`;
   state.costCaveats = report.caveats || [];
