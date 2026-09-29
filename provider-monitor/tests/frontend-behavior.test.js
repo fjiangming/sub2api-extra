@@ -139,7 +139,7 @@ test('Key status tab exposes centralized probes, filters and per-key controls', 
   assert.match(index, /data-view="key-status"[\s\S]*?<span>Key 状态<\/span>/);
   assert.match(index, /id="key-probe-settings-dialog"/);
   assert.match(index, /id="key-ttft-alert-dialog"/);
-  assert.doesNotMatch(index, /name="windowMinutes"/);
+  assert.match(index, /name="windowMinutes"[^>]+min="1" max="1440"/);
   assert.match(index, /name="sampleCount"[^>]+max="1000"/);
   assert.match(index, /name="thresholdMs"[^>]+min="100"/);
   assert.match(index, /data-action="manage-notification-channels"/);

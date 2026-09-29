@@ -83,7 +83,7 @@ function notificationRecorder() {
   };
 }
 
-test('TTFT alerts use latest real business request logs regardless of age', async (t) => {
+test('TTFT alerts use only real business request logs and selected channels', async (t) => {
   const context = createTestContext();
   t.after(() => context.cleanup());
   const now = Date.parse('2026-09-29T08:00:00.000Z');
@@ -93,8 +93,7 @@ test('TTFT alerts use latest real business request logs regardless of age', asyn
   insertAccount(context.db, 'probe-only', 'Probe only');
   insertChannel(context.db, emailChannelId);
   insertChannel(context.db, unusedChannelId, 'Unused channel');
-  const oldSampleTime = now - 24 * 60 * 60000;
-  insertBusinessSamples(context.db, 'business-slow', [2400, 2600, 2800], oldSampleTime);
+  insertBusinessSamples(context.db, 'business-slow', [2400, 2600, 2800], now);
   insertBusinessSamples(context.db, 'probe-only', [300, 400, 500], now);
   insertActiveProbeSample(
     context.db,
@@ -106,6 +105,7 @@ test('TTFT alerts use latest real business request logs regardless of age', asyn
   const service = new KeyTtftAlertService({ db: context.db, notifications });
   service.saveSettings({
     enabled: true,
+    windowMinutes: 5,
     sampleCount: 3,
     thresholdMs: 2000,
     cooldownMinutes: 60,
@@ -121,8 +121,6 @@ test('TTFT alerts use latest real business request logs regardless of age', asyn
   assert.deepEqual(notifications.deliveries[0].options.channelIds, [emailChannelId]);
   assert.equal(notifications.deliveries[0].event.details.sampleSource, SAMPLE_SOURCE);
   assert.equal(notifications.deliveries[0].event.details.accountId, 'business-slow');
-  assert.equal(notifications.deliveries[0].event.details.sampleSelection, 'latest_business_requests');
-  assert.equal('windowMinutes' in notifications.deliveries[0].event.details, false);
   assert.match(notifications.deliveries[0].event.message, /真实业务流式请求/);
   assert.deepEqual(
     context.db.prepare('SELECT subject_id FROM alert_events').all(),
@@ -141,6 +139,7 @@ test('TTFT alerts enforce sample count, cooldown and automatic resolution', asyn
   const service = new KeyTtftAlertService({ db: context.db, notifications });
   service.saveSettings({
     enabled: true,
+    windowMinutes: 30,
     sampleCount: 3,
     thresholdMs: 1000,
     cooldownMinutes: 10,
@@ -244,12 +243,7 @@ test('business TTFT alert HTTP API saves channels and supports immediate evaluat
   });
   const configBody = await config.json();
   assert.equal(configBody.settings.sampleSource, 'business_usage');
-  assert.equal('windowMinutes' in configBody.settings, false);
-  assert.equal(
-    context.db.prepare('SELECT window_minutes FROM sub2api_key_ttft_alert_settings WHERE id = 1').get()
-      .window_minutes,
-    5
-  );
+  assert.equal(configBody.settings.windowMinutes, 8);
   assert.equal(configBody.channels[0].name, 'TTFT webhook');
 
   const evaluation = await fetch(`${base}/api/key-ttft-alerts/evaluate?wait=true`, {

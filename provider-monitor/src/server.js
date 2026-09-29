@@ -179,6 +179,7 @@ const keyProbeRunSchema = z.object({
 });
 const keyTtftAlertSettingsSchema = z.object({
   enabled: z.boolean().optional(),
+  windowMinutes: z.number().int().min(1).max(1440).optional(),
   sampleCount: z.number().int().min(1).max(1000).optional(),
   thresholdMs: z.number().int().min(100).max(600000).optional(),
   cooldownMinutes: z.number().int().min(1).max(10080).optional(),
