@@ -346,8 +346,18 @@ function createApp({ config, database, auth, inspector, metrics, costAnalysis, s
   const echartsDir = path.dirname(require.resolve('echarts/package.json'));
   app.get('/vendor/lucide.js', (_req, res) => res.sendFile(path.join(lucideDir, 'dist', 'umd', 'lucide.js')));
   app.get('/vendor/echarts.js', (_req, res) => res.sendFile(path.join(echartsDir, 'dist', 'echarts.min.js')));
-  app.use(express.static(publicDir, { index: false, etag: true, maxAge: config.env === 'production' ? '1h' : 0 }));
-  app.get('*splat', (_req, res) => res.sendFile(path.join(publicDir, 'index.html')));
+  app.use(express.static(publicDir, {
+    index: false,
+    etag: true,
+    maxAge: 0,
+    setHeaders(res, filePath) {
+      res.setHeader('Cache-Control', path.basename(filePath) === 'index.html' ? 'no-store' : 'no-cache');
+    }
+  }));
+  app.get('*splat', (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.sendFile(path.join(publicDir, 'index.html'));
+  });
 
   app.use(errorMiddleware);
   return app;

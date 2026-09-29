@@ -250,6 +250,30 @@ test('server remains available for authenticated setup before a database is conf
   assert.equal((await status.json()).setupRequired, true);
 });
 
+test('mutable frontend assets revalidate and HTML is never cached', async (t) => {
+  const config = {
+    env: 'production', trustProxy: false, authMode: 'local', adminUser: 'admin', adminPassword: 'test-password-123',
+    sessionTtlMinutes: 30, cookieSecure: false, sub2apiTimezone: 'Asia/Shanghai',
+    financeTimezone: 'Asia/Shanghai', cleanupEnabled: false
+  };
+  const auth = new AuthService(config);
+  t.after(() => auth.close());
+  const server = http.createServer(createApp(dependencies(config, auth)));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const asset = await fetch(`${base}/app.js?v=test`);
+  assert.equal(asset.status, 200);
+  assert.equal(asset.headers.get('cache-control'), 'no-cache');
+  const explicitIndex = await fetch(`${base}/index.html`);
+  assert.equal(explicitIndex.status, 200);
+  assert.equal(explicitIndex.headers.get('cache-control'), 'no-store');
+  const fallback = await fetch(`${base}/costs`);
+  assert.equal(fallback.status, 200);
+  assert.equal(fallback.headers.get('cache-control'), 'no-store');
+});
+
 test('cost analysis API exposes reports and guards expense mutations', async (t) => {
   const config = {
     env: 'test', trustProxy: false, authMode: 'local', adminUser: 'admin', adminPassword: 'test-password-123',

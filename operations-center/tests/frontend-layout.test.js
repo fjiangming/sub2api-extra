@@ -21,7 +21,7 @@ test('cost analysis exposes period reporting, provider sync and an editable expe
   assert.match(html, /id="cost-expense-form"/);
   assert.match(html, /id="cost-provider-sync"/);
   assert.match(html, /id="cost-periods"/);
-  assert.match(html, /<script src="\/cost-analysis-ui\.js" defer><\/script>[\s\S]*<script src="\/app\.js" defer><\/script>/);
+  assert.match(html, /<script src="\/cost-analysis-ui\.js\?v=[^"]+" defer><\/script>[\s\S]*<script src="\/app\.js\?v=[^"]+" defer><\/script>/);
   assert.match(script, /api\(`\/api\/cost-analysis\?\$\{search\}`\)/);
   assert.match(script, /api\('\/api\/cost-analysis\/providers\?refresh=true'\)/);
   assert.match(script, /method: id \? 'PUT' : 'POST'/);
