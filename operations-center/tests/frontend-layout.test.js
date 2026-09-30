@@ -7,6 +7,7 @@ const path = require('node:path');
 
 const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
 const script = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+const styles = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
 
 test('primary modules use an accessible top tab bar', () => {
   assert.match(html, /<header class="module-header">/);
@@ -23,6 +24,11 @@ test('cost analysis exposes reporting plus editable income and expense ledgers',
   assert.match(html, /id="cost-income-breakdown"/);
   assert.match(html, /id="cost-incomes"/);
   assert.match(html, /id="cost-expense-form"/);
+  assert.match(html, /<details id="cost-analysis-caveats" class="cost-caveats" hidden>/);
+  assert.match(html, /<summary class="cost-caveats-summary">/);
+  assert.match(html, /id="cost-analysis-operational-notices"/);
+  assert.match(script, /caveats\.hidden = state\.costCaveats\.length === 0/);
+  assert.match(styles, /\.cost-caveats:not\(\[open\]\) \.cost-caveats-list \{ display: none; \}/);
   assert.match(html, /id="cost-provider-sync"/);
   assert.match(html, /id="cost-periods"/);
   assert.match(html, /<script src="\/cost-analysis-ui\.js\?v=[^"]+" defer><\/script>[\s\S]*<script src="\/app\.js\?v=[^"]+" defer><\/script>/);

@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Sub2API 运营中心</title>
-  <link rel="stylesheet" href="/styles.css?v=20260930-1">
+  <link rel="stylesheet" href="/styles.css?v=20260930-2">
   <script src="/vendor/echarts.js" defer></script>
   <script src="/vendor/lucide.js" defer></script>
   <script src="/cost-analysis-ui.js?v=20260929-3" defer></script>
-  <script src="/app.js?v=20260930-2" defer></script>
+  <script src="/app.js?v=20260930-3" defer></script>
 </head>
 <body>
   <div id="login-view" class="login-view" hidden>
@@ -172,7 +172,16 @@
             </form>
           </section>
 
-          <div id="cost-analysis-notices" class="alert-stack"></div>
+          <div id="cost-analysis-notices" class="alert-stack">
+            <div id="cost-analysis-operational-notices" class="alert-stack" hidden></div>
+            <details id="cost-analysis-caveats" class="cost-caveats" hidden>
+              <summary class="cost-caveats-summary">
+                <span class="cost-caveats-summary-main"><i data-lucide="info"></i><strong>统计口径说明</strong><span id="cost-analysis-caveat-count" class="cost-caveats-count">0 条</span></span>
+                <i class="cost-caveats-chevron" data-lucide="chevron-down"></i>
+              </summary>
+              <div id="cost-analysis-caveat-list" class="alert-stack cost-caveats-list"></div>
+            </details>
+          </div>
           <div id="cost-analysis-metrics" class="metric-grid compact"></div>
           <section class="panel chart-panel"><div class="panel-heading"><div><h2>收支与利润趋势</h2><p id="cost-analysis-zone"></p></div></div><div id="cost-analysis-chart" class="chart"></div></section>
 

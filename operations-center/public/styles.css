@@ -321,6 +321,29 @@ input:focus, select:focus { border-color: var(--green); box-shadow: 0 0 0 3px rg
 .alert.warning { color: #785019; background: var(--amber-soft); border-color: #e7cf9f; }
 .alert.error { color: #8a2c2c; background: var(--red-soft); border-color: #e3b2b2; }
 .alert.success { color: #15593f; background: var(--green-soft); border-color: #afd3c1; }
+.cost-caveats-summary {
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 13px;
+  color: #294f85;
+  background: var(--blue-soft);
+  border: 1px solid #bfd0e8;
+  border-radius: 5px;
+  cursor: pointer;
+  list-style: none;
+}
+.cost-caveats-summary::-webkit-details-marker { display: none; }
+.cost-caveats-summary:focus-visible { outline: 2px solid #2d5ea8; outline-offset: 2px; }
+.cost-caveats-summary-main { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.cost-caveats-summary-main > svg { flex: 0 0 auto; width: 17px; height: 17px; }
+.cost-caveats-summary-main strong { font-size: 13px; }
+.cost-caveats-count { color: #58749a; font-size: 12px; white-space: nowrap; }
+.cost-caveats-chevron { flex: 0 0 auto; width: 17px; height: 17px; margin-left: auto; transition: transform 160ms ease; }
+.cost-caveats[open] .cost-caveats-chevron { transform: rotate(180deg); }
+.cost-caveats:not([open]) .cost-caveats-list { display: none; }
+.cost-caveats-list { margin-top: 8px; }
 
 .table-wrap { width: 100%; overflow: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 12px; }

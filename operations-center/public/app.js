@@ -526,12 +526,20 @@ function renderCostExpenses(items, currency, customItems = []) {
 }
 
 function renderCostAnalysisNotices(providers) {
-  $('cost-analysis-notices').innerHTML = [
-    ...state.costCaveats.map((message) => alertHtml('info', message)),
-    ...(providers.sync?.status === 'error'
-      ? [alertHtml('warning', `供应商同步失败，当前使用上次快照：${providers.sync.error}`)]
-      : [])
-  ].join('');
+  const operationalNotices = providers.sync?.status === 'error'
+    ? [alertHtml('warning', `供应商同步失败，当前使用上次快照：${providers.sync.error}`)]
+    : [];
+  const operationalContainer = $('cost-analysis-operational-notices');
+  operationalContainer.innerHTML = operationalNotices.join('');
+  operationalContainer.hidden = operationalNotices.length === 0;
+
+  const caveats = $('cost-analysis-caveats');
+  $('cost-analysis-caveat-count').textContent = `${formatInteger(state.costCaveats.length)} 条`;
+  $('cost-analysis-caveat-list').innerHTML = state.costCaveats
+    .map((message) => alertHtml('info', message))
+    .join('');
+  caveats.hidden = state.costCaveats.length === 0;
+  if (caveats.hidden) caveats.open = false;
 }
 
 function costAnalysisQuery() {
