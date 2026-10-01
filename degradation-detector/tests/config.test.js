@@ -91,6 +91,22 @@ test('platform test validation covers regex and protocol-output combinations', (
   assert.equal(parsedGeometry.validation.svg_math.enabled, true);
   assert.equal(parsedGeometry.validation.rules.at(-1).geometry_threshold, 0.08);
 
+  const viewBoxGeometry = structuredClone(geometry);
+  const viewBoxRule = viewBoxGeometry.validation.rules.at(-1);
+  delete viewBoxRule.reference_selector;
+  viewBoxRule.geometry_threshold_basis = 'viewbox_min';
+  viewBoxRule.geometry_threshold = 0.01;
+  const parsedViewBoxGeometry = validateTestConfig('openai', viewBoxGeometry);
+  assert.equal(parsedViewBoxGeometry.validation.rules.at(-1).geometry_threshold_basis, 'viewbox_min');
+
+  const missingReference = structuredClone(viewBoxGeometry);
+  missingReference.validation.rules.at(-1).geometry_threshold_basis = 'reference';
+  assert.throws(() => validateTestConfig('openai', missingReference), /必须填写尺寸参照选择器/);
+
+  const conflictingReference = structuredClone(viewBoxGeometry);
+  conflictingReference.validation.rules.at(-1).reference_selector = '#front-wheel';
+  assert.throws(() => validateTestConfig('openai', conflictingReference), /只有参照元素比例/);
+
   const missingTarget = structuredClone(geometry);
   delete missingTarget.validation.rules.at(-1).target_selector;
   assert.throws(() => validateTestConfig('openai', missingTarget), /目标元素选择器/);

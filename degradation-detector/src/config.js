@@ -42,6 +42,7 @@ const svgGeometryOperations = [
   'rotation_gte',
   'loop_distance_lte'
 ];
+const svgGeometryThresholdBases = ['absolute', 'viewbox_min', 'reference'];
 const dailyTimeSchema = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/);
 
 const legacyValidationSchema = z.object({
@@ -72,6 +73,7 @@ const validationRuleSchema = z.object({
   source_selector: z.string().trim().min(1).max(1000).optional(),
   target_selector: z.string().trim().min(1).max(1000).optional(),
   reference_selector: z.string().trim().min(1).max(1000).optional(),
+  geometry_threshold_basis: z.enum(svgGeometryThresholdBases).optional(),
   geometry_threshold: z.coerce.number().min(0).max(1000000).optional()
 }).strict().superRefine((rule, context) => {
   const requireValue = ['exact_text', 'contains', 'regex', 'not_regex', 'html_selector', 'json_schema', 'mime_type'];
@@ -115,8 +117,18 @@ const validationRuleSchema = z.object({
         context.addIssue({ code: 'custom', path: [field], message: `CSS 选择器无效: ${error.message}` });
       }
     }
-    if (rule.geometry_operation === 'rotation_gte' && rule.reference_selector) {
-      context.addIssue({ code: 'custom', path: ['reference_selector'], message: '旋转角度规则不能使用尺寸参照元素' });
+    const thresholdBasis = rule.geometry_threshold_basis || (rule.reference_selector ? 'reference' : 'absolute');
+    if (rule.geometry_operation === 'rotation_gte') {
+      if (thresholdBasis !== 'absolute') {
+        context.addIssue({ code: 'custom', path: ['geometry_threshold_basis'], message: '旋转角度规则只能使用绝对值阈值' });
+      }
+      if (rule.reference_selector) {
+        context.addIssue({ code: 'custom', path: ['reference_selector'], message: '旋转角度规则不能使用尺寸参照元素' });
+      }
+    } else if (thresholdBasis === 'reference' && !rule.reference_selector) {
+      context.addIssue({ code: 'custom', path: ['reference_selector'], message: '使用参照元素比例时必须填写尺寸参照选择器' });
+    } else if (thresholdBasis !== 'reference' && rule.reference_selector) {
+      context.addIssue({ code: 'custom', path: ['reference_selector'], message: '只有参照元素比例可以填写尺寸参照选择器' });
     }
   }
   if (['regex', 'not_regex'].includes(rule.type) && rule.value) {

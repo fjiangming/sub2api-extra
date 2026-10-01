@@ -384,7 +384,7 @@ button, select, input { color: inherit; }
 .validation-evidence-title, .validation-evidence-summary { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
 .validation-evidence-title svg { width: 15px; height: 15px; color: var(--teal-strong); }
 .validation-evidence-summary { justify-content: flex-end; text-align: right; }
-.validation-evidence-summary strong { color: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; }
+.validation-evidence-summary strong { color: var(--text); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .validation-evidence-summary svg { width: 14px; height: 14px; flex: 0 0 auto; transition: transform .16s ease; }
 .validation-evidence[open] .validation-evidence-summary svg { transform: rotate(180deg); }
 .validation-evidence-content { border-top: 1px solid var(--border-soft); }
@@ -481,8 +481,8 @@ button, select, input { color: inherit; }
   .yzai-pelican-detail { flex: 1; padding: 12px; }
   .yzai-pelican-detail--html .yzai-pelican-meta { padding-right: 0; }
   .yzai-pelican-controls--html { position: static; margin-bottom: 12px; }
-  .validation-evidence summary { align-items: flex-start; }
-  .validation-evidence-summary { flex-direction: row; flex-wrap: nowrap; }
+  .validation-evidence summary { align-items: flex-start; flex-wrap: wrap; }
+  .validation-evidence-summary { width: 100%; justify-content: space-between; text-align: left; }
   .yzai-pelican-frame, .yzai-pelican-artifact { height: clamp(360px, 58dvh, 560px); }
 }
 

@@ -134,6 +134,12 @@ function animationFor(node, tagName, attributeName) {
   return matching[0] || null;
 }
 
+function assertNoSetAnimation(node, attributeName) {
+  const matching = childElements(node, 'set').filter((child) =>
+    String(attribute(child, 'attributeName') || '').toLowerCase() === attributeName.toLowerCase());
+  if (matching.length > 0) throw new SvgMathError(`暂不支持 ${attributeName} 的 set 动画`);
+}
+
 function interpolateValues(animation, progress, baseValues) {
   const mode = String(attribute(animation, 'calcMode') || 'linear').toLowerCase();
   if (!['linear', 'discrete'].includes(mode)) {
@@ -187,6 +193,7 @@ function interpolateValues(animation, progress, baseValues) {
 }
 
 function animatedNumber(node, name, progress, fallback = 0) {
+  assertNoSetAnimation(node, name);
   const base = svgNumber(attribute(node, name), fallback);
   const animation = animationFor(node, 'animate', name);
   if (!animation) return base;
@@ -196,6 +203,13 @@ function animatedNumber(node, name, progress, fallback = 0) {
 }
 
 function localMatrix(node, progress) {
+  assertNoSetAnimation(node, 'transform');
+  if (childElements(node, 'animatemotion').length > 0) {
+    throw new SvgMathError('相关元素使用 animateMotion；暂时无法计算其空间位置');
+  }
+  if (animationFor(node, 'animate', 'transform')) {
+    throw new SvgMathError('相关元素使用 animate 的 transform 动画；请使用 animateTransform');
+  }
   const base = parseTransform(attribute(node, 'transform'));
   const animation = animationFor(node, 'animatetransform', 'transform');
   if (!animation) return base;
@@ -328,6 +342,10 @@ function explicitGeometry(node, progress) {
     };
   }
   if (['polygon', 'polyline'].includes(tag)) {
+    assertNoSetAnimation(node, 'points');
+    if (animationFor(node, 'animate', 'points')) {
+      throw new SvgMathError('相关元素使用暂不支持的 points 属性动画');
+    }
     const values = numberList(attribute(node, 'points'));
     if (values.length < 4 || values.length % 2) throw new SvgMathError(`${tag} points 必须包含坐标对`);
     const xs = values.filter((_item, index) => index % 2 === 0);
@@ -343,7 +361,13 @@ function explicitGeometry(node, progress) {
     const y = animatedNumber(node, 'y', progress);
     return { anchor: explicitAnchor || { x, y }, box: { x, y, width: 0, height: 0 } };
   }
+  if (tag === 'foreignobject') {
+    throw new SvgMathError('相关几何包含 foreignObject，无法进行 SVG 数学计算');
+  }
   if (explicitAnchor) return { anchor: explicitAnchor, box: null };
+  if (tag === 'path' && animationFor(node, 'animate', 'd')) {
+    throw new SvgMathError('相关几何依赖暂不支持的 d 路径动画');
+  }
   return null;
 }
 
@@ -428,6 +452,10 @@ function worldAnchor(node, root, progress, runtime) {
 }
 
 function viewBox(root) {
+  assertNoSetAnimation(root, 'viewBox');
+  if (animationFor(root, 'animate', 'viewBox')) {
+    throw new SvgMathError('相关规则依赖暂不支持的 viewBox 动画');
+  }
   const values = numberList(attribute(root, 'viewBox'));
   if (values.length !== 4 || values[2] <= 0 || values[3] <= 0) {
     throw new SvgMathError('SVG viewBox 必须包含有效的 x y width height');
@@ -441,6 +469,11 @@ function distance(left, right) {
 
 function formatNumber(value) {
   return Math.round(value * 100) / 100;
+}
+
+function geometryThresholdBasis(rule) {
+  if (rule.geometry_threshold_basis) return rule.geometry_threshold_basis;
+  return rule.reference_selector ? 'reference' : 'absolute';
 }
 
 function createSvgMathEvaluator($, source, options = {}) {
@@ -465,14 +498,6 @@ function createSvgMathEvaluator($, source, options = {}) {
     unavailable = `SVG 元素超过 ${MAX_SVG_NODES} 个的数学检测上限`;
   } else if ($('script').length > 0) {
     unavailable = '检测到脚本；SVG 数学检测只支持声明式动画';
-  } else if (svgNodes.some((node) => elementName(node) === 'foreignobject')) {
-    unavailable = '检测到 foreignObject；SVG 数学检测只支持 SVG 几何元素';
-  } else if (svgNodes.some((node) => ['animatemotion', 'set'].includes(elementName(node)))) {
-    unavailable = '检测到 animateMotion 或 set；SVG 数学检测只支持 animate/animateTransform';
-  } else if (svgNodes.some((node) =>
-    elementName(node) === 'animate' &&
-    ['d', 'points', 'transform', 'viewbox'].includes(String(attribute(node, 'attributeName') || '').toLowerCase()))) {
-    unavailable = '检测到暂不支持的几何属性动画；请使用可计算的坐标属性或 animateTransform';
   } else {
     const styles = $('style').text();
     const inlineStyles = $('[style]').toArray().map((node) => attribute(node, 'style')).join('\n');
@@ -498,7 +523,14 @@ function createSvgMathEvaluator($, source, options = {}) {
   function thresholdAt(rule, reference, root, progress) {
     const configured = Number(rule.geometry_threshold);
     if (!Number.isFinite(configured) || configured < 0) throw new SvgMathError('数学判定阈值无效');
-    if (!reference) return configured;
+    const basis = geometryThresholdBasis(rule);
+    if (basis === 'absolute') return configured;
+    if (basis === 'viewbox_min') {
+      const bounds = viewBox(root);
+      return configured * Math.min(bounds.width, bounds.height);
+    }
+    if (basis !== 'reference') throw new SvgMathError(`不支持数学阈值基准 ${basis}`);
+    if (!reference) throw new SvgMathError('参照元素比例缺少尺寸参照选择器');
     if (closestSvg(reference) !== root) throw new SvgMathError('尺寸参照元素必须与源元素位于同一个 SVG');
     const box = worldBox(reference, root, progress, 0, runtime);
     const scale = Math.max(box.width, box.height) / 2;
@@ -518,7 +550,8 @@ function createSvgMathEvaluator($, source, options = {}) {
       const targetNode = needsTarget && rule.target_selector
         ? selectOne(rule.target_selector, '目标元素')
         : null;
-      const referenceNode = operation !== 'rotation_gte' && rule.reference_selector
+      const thresholdBasis = geometryThresholdBasis(rule);
+      const referenceNode = operation !== 'rotation_gte' && thresholdBasis === 'reference' && rule.reference_selector
         ? selectOne(rule.reference_selector, '尺寸参照元素')
         : null;
       if (needsTarget && !targetNode) throw new SvgMathError('该数学关系缺少目标元素选择器');

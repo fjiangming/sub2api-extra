@@ -51,6 +51,65 @@ test('SVG math evaluates sampled distance, alignment, containment, movement, rot
   assert.match(tooFar.message, /最大观测值 3/);
 });
 
+test('SVG math scopes path animation to dependent rules and supports viewBox-relative thresholds', () => {
+  const source = `<!doctype html><html><body>
+    <svg viewBox="0 0 200 100">
+      <path id="decoration" d="M0 0 L10 0">
+        <animate attributeName="d" values="M0 0 L10 0;M0 0 L20 0;M0 0 L10 0" />
+      </path>
+      <g id="left-foot" data-anchor-x="0" data-anchor-y="0">
+        <animateTransform attributeName="transform" type="translate" values="20 60;80 60;20 60" />
+        <path d="M-4 -2 H4 V2 H-4 Z">
+          <animate attributeName="d" values="M-4 -2 H4 V2 H-4 Z;M-5 -2 H5 V2 H-5 Z;M-4 -2 H4 V2 H-4 Z" />
+        </path>
+      </g>
+      <g id="left-pedal" data-anchor-x="0" data-anchor-y="0">
+        <animateTransform attributeName="transform" type="translate" values="20 60;80 60;20 60" />
+        <rect x="-5" y="-1" width="10" height="2" />
+      </g>
+      <g id="front-wheel">
+        <animateTransform attributeName="transform" type="rotate" values="0 150 65;360 150 65" />
+        <circle cx="150" cy="65" r="25" />
+        <path d="M125 65 H175" />
+      </g>
+    </svg>
+  </body></html>`;
+  const math = evaluator(source);
+  const distanceResult = math.evaluate({
+    geometry_operation: 'distance_lte',
+    source_selector: '#left-foot',
+    target_selector: '#left-pedal',
+    geometry_threshold_basis: 'viewbox_min',
+    geometry_threshold: 0.01
+  });
+  const motionResult = math.evaluate({
+    geometry_operation: 'motion_gte',
+    source_selector: '#left-pedal',
+    geometry_threshold_basis: 'viewbox_min',
+    geometry_threshold: 0.05
+  });
+  const rotationResult = math.evaluate({
+    geometry_operation: 'rotation_gte',
+    source_selector: '#front-wheel',
+    geometry_threshold_basis: 'absolute',
+    geometry_threshold: 300
+  });
+  const dependentPath = math.evaluate({
+    geometry_operation: 'inside_viewbox',
+    source_selector: '#decoration',
+    geometry_threshold_basis: 'absolute',
+    geometry_threshold: 0
+  });
+
+  assert.equal(distanceResult.passed, true);
+  assert.match(distanceResult.message, /12\/12/);
+  assert.equal(motionResult.passed, true);
+  assert.match(motionResult.message, /要求不少于 5/);
+  assert.equal(rotationResult.passed, true);
+  assert.equal(dependentPath.indeterminate, true);
+  assert.match(dependentPath.message, /d 路径动画/);
+});
+
 test('SVG math fails closed when deterministic source geometry is unavailable', () => {
   const scripted = evaluator('<svg viewBox="0 0 10 10"><script>setInterval(() => {}, 1)</script><circle id="point" cx="1" cy="1" r="1" /></svg>');
   assert.deepEqual(scripted.evaluate({

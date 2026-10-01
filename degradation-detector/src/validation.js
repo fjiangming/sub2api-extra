@@ -219,6 +219,9 @@ function evaluateOutput(test, output) {
       validationResult: {
         version: 2,
         score: null,
+        score_min: null,
+        score_max: null,
+        coverage: 0,
         passed: 0,
         total: activeRules.length,
         hard_failures: 0,
@@ -237,7 +240,8 @@ function evaluateOutput(test, output) {
         : '响应完整，但没有配置题目判定规则，无法判断模型能力',
       source: 'configured_validation_v2',
       validationResult: {
-        version: 2, score: null, passed: 0, total: 0, hard_failures: 0, integrity_failures: [], results: []
+        version: 2, score: null, score_min: null, score_max: null, coverage: 0,
+        passed: 0, total: 0, hard_failures: 0, integrity_failures: [], results: []
       }
     };
   }
@@ -256,28 +260,47 @@ function evaluateOutput(test, output) {
   }
   const results = activeRules.map((rule) => evaluateRule(rule, context));
   const scorableResults = results.filter((rule) => !rule.indeterminate);
-  const totalWeight = scorableResults.reduce((sum, rule) => sum + rule.weight, 0);
+  const totalWeight = results.reduce((sum, rule) => sum + rule.weight, 0);
+  const computableWeight = scorableResults.reduce((sum, rule) => sum + rule.weight, 0);
   const passedWeight = scorableResults.reduce((sum, rule) => sum + (rule.passed ? rule.weight : 0), 0);
-  const score = totalWeight > 0 ? Math.round((passedWeight / totalWeight) * 100) : null;
   const indeterminateRules = results.filter((rule) => rule.indeterminate);
+  const indeterminateWeight = totalWeight - computableWeight;
+  const scoreMin = totalWeight > 0 ? Math.round((passedWeight / totalWeight) * 100) : null;
+  const scoreMax = totalWeight > 0 ? Math.round(((passedWeight + indeterminateWeight) / totalWeight) * 100) : null;
+  const coverage = totalWeight > 0 ? Math.round((computableWeight / totalWeight) * 100) : 0;
+  const score = indeterminateRules.length === 0 ? scoreMin : null;
   const hardFailures = results.filter((rule) => !rule.indeterminate && !rule.passed && rule.severity === 'hard');
+  const hardIndeterminate = indeterminateRules.filter((rule) => rule.severity === 'hard');
   const failures = results.filter((rule) => !rule.indeterminate && !rule.passed);
   let status;
   if (hardFailures.length > 0) status = 'degraded';
-  else if (indeterminateRules.length > 0) status = 'unknown';
-  else if (score <= policy.degraded_threshold) status = 'degraded';
-  else if (score >= policy.normal_threshold) status = 'normal';
+  else if (scoreMax <= policy.degraded_threshold) status = 'degraded';
+  else if (hardIndeterminate.length > 0) status = 'unknown';
+  else if (scoreMin >= policy.normal_threshold) status = 'normal';
   else status = 'unknown';
 
   const failedLabels = failures.slice(0, 3).map((rule) => rule.label).join('、');
-  const scoreLabel = score == null ? '无法计算' : `${score} 分`;
-  const reason = indeterminateRules.length > 0 && hardFailures.length === 0
-    ? `规则评分 ${scoreLabel}，数学证据无法计算：${indeterminateRules.slice(0, 2).map((rule) => rule.label).join('、')}`
-    : status === 'normal'
-    ? `规则评分 ${score} 分，题目要求已通过`
-    : status === 'degraded'
-      ? `规则评分 ${score} 分，未通过：${failedLabels || '核心规则'}`
-      : `规则评分 ${score} 分，证据不足，未通过：${failedLabels || '辅助规则'}`;
+  const scoreLabel = score == null ? `${scoreMin} 至 ${scoreMax} 分` : `${score} 分`;
+  const indeterminateCauses = [...new Set(indeterminateRules.map((rule) => rule.message))].slice(0, 2).join('；');
+  const indeterminateDetail = indeterminateRules.length > 0
+    ? `${indeterminateRules.length} 条规则无法计算${indeterminateCauses ? `：${indeterminateCauses}` : ''}`
+    : '';
+  let reason;
+  if (hardFailures.length > 0) {
+    reason = `规则评分${score == null ? '区间' : ''} ${scoreLabel}，核心规则未通过：${failedLabels || '核心规则'}${indeterminateDetail ? `；${indeterminateDetail}` : ''}`;
+  } else if (indeterminateRules.length > 0 && status === 'normal') {
+    reason = `规则评分区间 ${scoreLabel}，最低分已达到正常线，可计算覆盖率 ${coverage}%；${indeterminateDetail}`;
+  } else if (indeterminateRules.length > 0 && status === 'degraded') {
+    reason = `规则评分区间 ${scoreLabel}，最高分仍不高于降智线，可计算覆盖率 ${coverage}%；${indeterminateDetail}`;
+  } else if (indeterminateRules.length > 0) {
+    reason = `规则评分区间 ${scoreLabel}，可计算覆盖率 ${coverage}%，证据不足；${indeterminateDetail}`;
+  } else if (status === 'normal') {
+    reason = `规则评分 ${score} 分，题目要求已通过`;
+  } else if (status === 'degraded') {
+    reason = `规则评分 ${score} 分，未通过：${failedLabels || '核心规则'}`;
+  } else {
+    reason = `规则评分 ${score} 分，证据不足，未通过：${failedLabels || '辅助规则'}`;
+  }
   return {
     quality: status,
     status,
@@ -287,6 +310,11 @@ function evaluateOutput(test, output) {
     validationResult: {
       version: 2,
       score,
+      score_min: scoreMin,
+      score_max: scoreMax,
+      coverage,
+      computable_weight: computableWeight,
+      total_weight: totalWeight,
       passed: results.filter((rule) => rule.passed).length,
       total: results.length,
       hard_failures: hardFailures.length,

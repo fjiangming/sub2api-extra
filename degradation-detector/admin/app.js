@@ -63,6 +63,11 @@ const geometryOperationLabels = {
 const geometryTargetOperations = new Set([
   'distance_lte', 'above', 'below', 'left_of', 'right_of', 'aligned_x', 'aligned_y'
 ]);
+const geometryThresholdBasisLabels = {
+  viewbox_min: 'viewBox 短边比例',
+  absolute: 'SVG 坐标绝对值',
+  reference: '参照元素半尺寸比例'
+};
 const severityLabels = { hard: '核心规则', soft: '辅助规则' };
 const MAX_HISTORY_SELECTION = 100;
 const reasoningLabels = {
@@ -330,10 +335,14 @@ function validationRuleParametersHtml(rule) {
       <label class="field"><span>最多数量</span><input data-rule-param="max_count" type="number" min="0" max="10000" value="${escapeHtml(rule.max_count ?? '')}" placeholder="不限"></label>`;
   }
   if (type === 'svg_geometry') {
+    const thresholdBasis = rule.geometry_threshold_basis || (rule.reference_selector
+      ? 'reference'
+      : (rule.id ? 'absolute' : 'viewbox_min'));
     return `
       <label class="field"><span>数学关系</span><select data-rule-param="geometry_operation">${optionsHtml(Object.keys(geometryOperationLabels), rule.geometry_operation || 'distance_lte', geometryOperationLabels)}</select></label>
       <label class="field"><span>源元素</span><input data-rule-param="source_selector" required maxlength="1000" value="${escapeHtml(rule.source_selector || '')}" placeholder="#left-foot"></label>
       <label class="field"><span>目标元素</span><input data-rule-param="target_selector" maxlength="1000" value="${escapeHtml(rule.target_selector || '')}" placeholder="#left-pedal"></label>
+      <label class="field"><span>阈值基准</span><select data-rule-param="geometry_threshold_basis">${optionsHtml(Object.keys(geometryThresholdBasisLabels), thresholdBasis, geometryThresholdBasisLabels)}</select></label>
       <label class="field"><span>尺寸参照</span><input data-rule-param="reference_selector" maxlength="1000" value="${escapeHtml(rule.reference_selector || '')}" placeholder="#front-wheel（可选）"></label>
       <label class="field"><span>判定阈值</span><input data-rule-param="geometry_threshold" type="number" min="0" max="1000000" step="any" required value="${escapeHtml(rule.geometry_threshold ?? 0)}"></label>`;
   }
@@ -541,15 +550,25 @@ function updateGeometryRuleEditor(row) {
   const operation = row.querySelector('[data-rule-param="geometry_operation"]')?.value;
   if (!operation) return;
   const target = row.querySelector('[data-rule-param="target_selector"]');
+  const thresholdBasis = row.querySelector('[data-rule-param="geometry_threshold_basis"]');
   const reference = row.querySelector('[data-rule-param="reference_selector"]');
   const threshold = row.querySelector('[data-rule-param="geometry_threshold"]');
   const needsTarget = geometryTargetOperations.has(operation);
+  const rotation = operation === 'rotation_gte';
+  if (rotation) thresholdBasis.value = 'absolute';
+  thresholdBasis.disabled = rotation;
   target.required = needsTarget;
   target.disabled = !needsTarget;
-  reference.disabled = operation === 'rotation_gte';
-  threshold.closest('.field').querySelector('span').textContent = operation === 'rotation_gte'
+  reference.required = !rotation && thresholdBasis.value === 'reference';
+  reference.disabled = rotation || thresholdBasis.value !== 'reference';
+  const thresholdLabels = {
+    absolute: '判定阈值（SVG 单位）',
+    viewbox_min: '判定阈值（短边比例）',
+    reference: '判定阈值（参照半尺寸比例）'
+  };
+  threshold.closest('.field').querySelector('span').textContent = rotation
     ? '判定阈值（度）'
-    : '判定阈值';
+    : thresholdLabels[thresholdBasis.value];
 }
 
 function updateSvgMathEditor(details) {
@@ -576,6 +595,8 @@ function bindValidationEditor(editor, onChange = markDirty) {
     }
     const operationSelect = event.target.closest('[data-rule-param="geometry_operation"]');
     if (operationSelect) updateGeometryRuleEditor(operationSelect.closest('.validation-rule'));
+    const thresholdBasisSelect = event.target.closest('[data-rule-param="geometry_threshold_basis"]');
+    if (thresholdBasisSelect) updateGeometryRuleEditor(thresholdBasisSelect.closest('.validation-rule'));
     if (event.target.matches('[data-svg-math="enabled"]')) updateSvgMathEditor(details);
     onChange();
   });
@@ -693,9 +714,13 @@ function collectValidationRule(row) {
     rule.geometry_operation = row.querySelector('[data-rule-param="geometry_operation"]').value;
     rule.source_selector = row.querySelector('[data-rule-param="source_selector"]').value.trim();
     const target = row.querySelector('[data-rule-param="target_selector"]').value.trim();
+    const thresholdBasis = rule.geometry_operation === 'rotation_gte'
+      ? 'absolute'
+      : row.querySelector('[data-rule-param="geometry_threshold_basis"]').value;
     const reference = row.querySelector('[data-rule-param="reference_selector"]').value.trim();
     if (geometryTargetOperations.has(rule.geometry_operation) && target) rule.target_selector = target;
-    if (rule.geometry_operation !== 'rotation_gte' && reference) rule.reference_selector = reference;
+    rule.geometry_threshold_basis = thresholdBasis;
+    if (thresholdBasis === 'reference' && reference) rule.reference_selector = reference;
     rule.geometry_threshold = Number(row.querySelector('[data-rule-param="geometry_threshold"]').value);
   }
   if (type === 'image_dimensions') {

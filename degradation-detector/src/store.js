@@ -43,8 +43,9 @@ function parsedObject(value) {
 function publicValidationResult(row, includeRules = false) {
   const parsed = parsedObject(row?.validation_result_json);
   if (!parsed) return null;
+  const exactScore = nullableNumber(row.score ?? parsed.score);
   const result = {
-    score: nullableNumber(row.score ?? parsed.score),
+    score: exactScore,
     passed: Number(parsed.passed || 0),
     total: Number(parsed.total || 0),
     hard_failures: Number(parsed.hard_failures || 0),
@@ -52,6 +53,9 @@ function publicValidationResult(row, includeRules = false) {
       ? parsed.integrity_failures.map(String).slice(0, 10)
       : []
   };
+  if (parsed.score_min != null) result.score_min = nullableNumber(parsed.score_min);
+  if (parsed.score_max != null) result.score_max = nullableNumber(parsed.score_max);
+  if (parsed.coverage != null) result.coverage = nullableNumber(parsed.coverage);
   if (Number(parsed.indeterminate) > 0) result.indeterminate = Number(parsed.indeterminate);
   if (includeRules) {
     result.rules = Array.isArray(parsed.results) ? parsed.results.slice(0, 50).map((rule) => ({

@@ -279,7 +279,8 @@ test('runs snapshot validation configuration and expose sanitized rule evidence'
   store.completeRun(run.id, {
     status: 'normal', quality: 'normal', score: 100, reason: 'ok', source: 'configured_validation_v2',
     validationResult: {
-      version: 2, score: 100, passed: 1, total: 1, hard_failures: 0, integrity_failures: [],
+      version: 2, score: 100, score_min: 100, score_max: 100, coverage: 100,
+      passed: 1, total: 1, hard_failures: 0, integrity_failures: [],
       results: [{ id: 'answer', label: '答案正确', type: 'exact_text', severity: 'hard', weight: 100, passed: true, message: '通过' }]
     },
     outputText: '1161'
@@ -291,6 +292,9 @@ test('runs snapshot validation configuration and expose sanitized rule evidence'
   assert.equal(stored.score, 100);
   assert.deepEqual(store.groupSummary('user-1', 'group-1', 10).history[0].validation, {
     score: 100,
+    score_min: 100,
+    score_max: 100,
+    coverage: 100,
     passed: 1,
     total: 1,
     hard_failures: 0,

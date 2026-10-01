@@ -138,10 +138,13 @@ test('SVG math is opt-in, contributes normal evidence, and fails closed when uns
 
   const unsupported = deterministicVerdict(enabled, { text: html.replace('<body>', '<body><script>void 0</script>') });
   assert.equal(unsupported.status, 'unknown');
-  assert.equal(unsupported.score, 100);
+  assert.equal(unsupported.score, null);
+  assert.equal(unsupported.validationResult.score_min, 40);
+  assert.equal(unsupported.validationResult.score_max, 100);
+  assert.equal(unsupported.validationResult.coverage, 40);
   assert.equal(unsupported.validationResult.indeterminate, 1);
   assert.equal(unsupported.validationResult.results[1].indeterminate, true);
-  assert.match(unsupported.reason, /数学证据无法计算/);
+  assert.match(unsupported.reason, /1 条规则无法计算/);
 
   const mathOnly = structuredClone(enabled);
   mathOnly.validation.rules = [geometryRule];
@@ -149,7 +152,60 @@ test('SVG math is opt-in, contributes normal evidence, and fails closed when uns
     text: html.replace('<body>', '<body><script>void 0</script>')
   });
   assert.equal(mathOnlyUnsupported.score, null);
-  assert.match(mathOnlyUnsupported.reason, /规则评分 无法计算/);
+  assert.equal(mathOnlyUnsupported.validationResult.score_min, 0);
+  assert.equal(mathOnlyUnsupported.validationResult.score_max, 100);
+  assert.match(mathOnlyUnsupported.reason, /规则评分区间 0 至 100 分/);
+});
+
+test('indeterminate soft evidence uses score bounds instead of inflating or discarding known evidence', () => {
+  const html = '<html><body><script>void 0</script><svg viewBox="0 0 100 100"><circle id="point" cx="10" cy="10" r="2"/></svg></body></html>';
+  const rules = [
+    { id: 'svg', label: 'SVG 场景', type: 'html_selector', severity: 'soft', weight: 90, value: 'svg[viewBox]', min_count: 1, case_sensitive: false },
+    {
+      id: 'math', label: '位置可计算', type: 'svg_geometry', severity: 'soft', weight: 10,
+      geometry_operation: 'inside_viewbox', source_selector: '#point',
+      geometry_threshold_basis: 'absolute', geometry_threshold: 0, case_sensitive: false
+    }
+  ];
+  const testCase = {
+    output_type: 'html',
+    validation: {
+      version: 2,
+      normal_threshold: 90,
+      degraded_threshold: 60,
+      svg_math: { enabled: true, samples: 12, pass_ratio: 0.9 },
+      confirmation: { window: 3, required_failures: 2, recovery_passes: 2 },
+      rules
+    }
+  };
+
+  const safelyNormal = deterministicVerdict(testCase, { text: html });
+  assert.equal(safelyNormal.status, 'normal');
+  assert.equal(safelyNormal.score, null);
+  assert.equal(safelyNormal.validationResult.score_min, 90);
+  assert.equal(safelyNormal.validationResult.score_max, 100);
+  assert.equal(safelyNormal.validationResult.coverage, 90);
+  assert.match(safelyNormal.reason, /最低分已达到正常线/);
+
+  const insufficient = structuredClone(testCase);
+  insufficient.validation.rules[0].weight = 80;
+  insufficient.validation.rules[1].weight = 20;
+  const unknown = deterministicVerdict(insufficient, { text: html });
+  assert.equal(unknown.status, 'unknown');
+  assert.equal(unknown.validationResult.score_min, 80);
+  assert.equal(unknown.validationResult.score_max, 100);
+
+  const certainlyDegraded = structuredClone(testCase);
+  certainlyDegraded.validation.rules = [
+    { id: 'svg', label: 'SVG 场景', type: 'html_selector', severity: 'soft', weight: 20, value: 'svg[viewBox]', min_count: 1, case_sensitive: false },
+    { id: 'missing', label: '必要内容', type: 'contains', severity: 'soft', weight: 60, value: 'not-present', case_sensitive: false },
+    { ...rules[1], weight: 20 }
+  ];
+  const degraded = deterministicVerdict(certainlyDegraded, { text: html });
+  assert.equal(degraded.status, 'degraded');
+  assert.equal(degraded.validationResult.score_min, 20);
+  assert.equal(degraded.validationResult.score_max, 40);
+  assert.match(degraded.reason, /最高分仍不高于降智线/);
 });
 
 test('exact text and JSON Schema rules validate prompt-specific answers', () => {

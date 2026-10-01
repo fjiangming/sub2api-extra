@@ -176,7 +176,7 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   validation.rules.push({
     id: 'foot_contact', label: '脚踏接触', type: 'svg_geometry', severity: 'hard', weight: 20,
     geometry_operation: 'distance_lte', source_selector: '#left-foot', target_selector: '#left-pedal',
-    reference_selector: '#front-wheel', geometry_threshold: 0.08, case_sensitive: false
+    geometry_threshold_basis: 'viewbox_min', geometry_threshold: 0.01, case_sensitive: false
   });
   const groupTest = structuredClone(initialConfig.platforms[0].test);
   groupTest.label = 'OpenAI 独立分组';
@@ -205,7 +205,8 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
     enabled: true, samples: 12, pass_ratio: 0.9
   });
   assert.equal(saved.platforms[0].test.validation.rules.at(-1).type, 'svg_geometry');
-  assert.equal(runtime.store.getPlatformTest('openai').validation.rules.at(-1).geometry_threshold, 0.08);
+  assert.equal(runtime.store.getPlatformTest('openai').validation.rules.at(-1).geometry_threshold_basis, 'viewbox_min');
+  assert.equal(runtime.store.getPlatformTest('openai').validation.rules.at(-1).geometry_threshold, 0.01);
   assert.doesNotMatch(JSON.stringify(saved), new RegExp(dedicatedKey));
 
   const storedMonitor = runtime.store.getMonitor(config.serviceOwnerId, '1');
@@ -466,6 +467,7 @@ test('frontends keep authentication and administrator controls separated', () =>
   assert.match(adminSource, /svg_geometry: 'SVG 数学关系'/);
   assert.match(adminSource, /data-svg-math="enabled"/);
   assert.match(adminSource, /geometry_threshold/);
+  assert.match(adminSource, /geometry_threshold_basis/);
   assert.match(adminSource, /geometryTargetOperations/);
   assert.match(adminSource, /target\.required = needsTarget/);
   assert.match(adminHtml, /id="group-config-dialog"/);
@@ -478,6 +480,8 @@ test('frontends keep authentication and administrator controls separated', () =>
   assert.match(mainSource, /<span>PAST \$\{group\.history\.length \|\| 0\} RESULTS<\/span><span>NOW<\/span>/);
   assert.match(mainStyles, /\.history-chart\s*\{[^}]*display: flex;[^}]*gap: 2px;[^}]*height: 33px;/s);
   assert.match(mainStyles, /\.history-point\[data-status="normal"\]\s*\{[^}]*height: 100%;[^}]*background: #10b981;/s);
+  assert.match(mainSource, /validation\?\.score_min/);
+  assert.match(mainSource, /可计算覆盖率/);
   assert.match(mainStyles, /\.dark \.history-point\[data-status="empty"\]\s*\{[^}]*background: #475569;/s);
   assert.doesNotMatch(mainStyles, /\.dark \.history-point\s*\{/);
   assert.match(adminHtml, /id="history-dialog"/);

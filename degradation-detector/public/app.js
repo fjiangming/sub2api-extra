@@ -219,9 +219,19 @@ function degradationSummary(totals) {
   return `${rate}% · ${failed} / ${valid} 次`;
 }
 
+function validationScoreLabel(validation, fallbackScore = null) {
+  const exact = validation?.score ?? fallbackScore;
+  if (exact != null) return `${Number(exact)} 分`;
+  const minimum = validation?.score_min;
+  const maximum = validation?.score_max;
+  if (minimum != null && maximum != null) return `${Number(minimum)} 至 ${Number(maximum)} 分`;
+  return '无法评分';
+}
+
 function validationEvidenceHtml(validation, manuallyReviewed = false) {
   if (!validation) return '';
-  const score = validation.score == null ? '无法评分' : `${validation.score} 分`;
+  const score = validationScoreLabel(validation);
+  const coverage = validation.coverage == null ? '' : ` · 可计算覆盖率 ${Number(validation.coverage)}%`;
   const integrity = (validation.integrity_failures || []).map((message) => `
     <li data-passed="false"><i data-lucide="circle-alert"></i><span><strong>完整性检查</strong><small>${escapeHtml(message)}</small></span></li>`).join('');
   const rules = (validation.rules || []).map((rule) => `
@@ -233,7 +243,7 @@ function validationEvidenceHtml(validation, manuallyReviewed = false) {
     <details class="validation-evidence">
       <summary>
         <span class="validation-evidence-title"><i data-lucide="list-checks"></i>${manuallyReviewed ? '自动判定证据' : '判定证据'}</span>
-        <span class="validation-evidence-summary"><strong>${escapeHtml(score)} · ${Number(validation.passed) || 0}/${Number(validation.total) || 0} 条通过</strong><i data-lucide="chevron-down"></i></span>
+        <span class="validation-evidence-summary"><strong>${escapeHtml(score)}${escapeHtml(coverage)} · ${Number(validation.passed) || 0}/${Number(validation.total) || 0} 条通过</strong><i data-lucide="chevron-down"></i></span>
       </summary>
       <div class="validation-evidence-content">
         ${(integrity || rules) ? `<ul>${integrity}${rules}</ul>` : '<p>该历史记录没有逐条规则数据。</p>'}
@@ -373,7 +383,7 @@ function renderHistory(group) {
     <button type="button" data-run-id="${run.id}" aria-current="${run.id === state.selectedRunId}">
       <strong>${escapeHtml(when(run.started))}</strong>
       ${statusHtml(run.status)}
-      <small>${run.review ? '<span class="manual-review-label"><i data-lucide="badge-check"></i>人工复核</span> · ' : ''}${escapeHtml(run.model || group.model)}${run.score == null ? '' : ` · 自动 ${run.score} 分`}${run.duration_ms ? ` · ${(run.duration_ms / 1000).toFixed(1)} 秒` : ''}</small>
+      <small>${run.review ? '<span class="manual-review-label"><i data-lucide="badge-check"></i>人工复核</span> · ' : ''}${escapeHtml(run.model || group.model)}${validationScoreLabel(run.validation, run.score) === '无法评分' ? '' : ` · 自动 ${escapeHtml(validationScoreLabel(run.validation, run.score))}`}${run.duration_ms ? ` · ${(run.duration_ms / 1000).toFixed(1)} 秒` : ''}</small>
     </button>
   `).join('');
   list.querySelectorAll('button').forEach((button) => {
@@ -390,7 +400,8 @@ async function showRecord(run) {
   const box = $('result-detail');
   box.classList.remove('yzai-pelican-detail--html');
   const duration = run.duration_ms == null ? '' : ` · 耗时：${(run.duration_ms / 1000).toFixed(1)} 秒`;
-  const score = run.score == null ? '' : ` · ${run.review ? '自动规则评分' : '规则评分'}：${run.score} 分`;
+  const scoreLabel = validationScoreLabel(run.validation, run.score);
+  const score = scoreLabel === '无法评分' ? '' : ` · ${run.review ? '自动规则评分' : '规则评分'}：${scoreLabel}`;
   box.innerHTML = `
     <div class="yzai-pelican-meta">
       <div>模型：${escapeHtml(run.model || '--')} · 推理强度：${escapeHtml(resultReasoningLabel(run))} · 输出：${escapeHtml(outputLabels[run.output_type] || run.output_type || '--')}</div>
