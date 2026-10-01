@@ -427,6 +427,7 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
 });
 
 test('frontends keep authentication and administrator controls separated', () => {
+  const mainHtml = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   const mainStyles = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
   const adminSource = fs.readFileSync(path.join(__dirname, '..', 'admin', 'app.js'), 'utf8');
@@ -435,6 +436,9 @@ test('frontends keep authentication and administrator controls separated', () =>
   assert.match(mainSource, /params\.get\('token'\) \|\| params\.get\('access_token'\)/);
   assert.match(mainSource, /\['token', 'access_token'\]/);
   assert.match(mainSource, /state\.sessionToken && !headers\.Authorization/);
+  assert.match(mainHtml, /class="capability-note" role="note"/);
+  assert.match(mainHtml, /疑似降智 ≠ 不可用：多数日常任务仍可胜任，本检测主要为对模型能力上限要求较高的用户提供参考。/);
+  assert.match(mainStyles, /\.capability-note\s*\{/);
   assert.match(mainSource, /URL\.createObjectURL/);
   assert.match(mainSource, /window\.location\.ancestorOrigins/);
   assert.match(mainSource, /X-Preview-Ancestors/);
