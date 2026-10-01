@@ -192,6 +192,9 @@ test('Key status tab exposes centralized probes, filters and per-key controls', 
   assert.match(source, /key-probe-platform-filter[\s\S]*id="key-probe-platform"[\s\S]*key-probe-group-tabs/);
   assert.match(source, /field === 'platform'\) state\.keyProbeFilters\.groupId = ''/);
   assert.match(source, /业务首字（近 10 条）/);
+  assert.match(source, /检测平均 \/ 首字/);
+  assert.match(source, /检测平均 \/ 总耗时/);
+  assert.match(source, /总耗时范围 \/ P95/);
   assert.match(source, /\/api\/key-probes\/automation\/run/);
   assert.match(source, /\/api\/key-ttft-alerts\/config/);
   assert.match(source, /selectedNotificationChannelIds\(form, 'key-ttft-alert'\)/);
@@ -223,7 +226,7 @@ test('Key status tab exposes centralized probes, filters and per-key controls', 
   }])`, context);
   assert.match(rows, /health-warning/);
   assert.match(rows, /黄色/);
-  assert.match(rows, /1\.20 s/);
+  assert.match(rows, /<td class="numeric"><strong>300 ms<\/strong><\/td>\s*<td class="numeric"><strong>1\.20 s<\/strong><\/td>/);
   assert.match(rows, /2 \/ 3 次成功/);
   assert.match(rows, /gpt-monitor/);
   assert.match(rows, /OpenAI 主分组/);
