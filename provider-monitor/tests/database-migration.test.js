@@ -6,7 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
-test('schema v31 migration preserves mappings and makes notification routing explicit', (t) => {
+test('schema migrations through v32 preserve mappings and add explicit alert routing', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
   let db = createDatabase(databasePath);
@@ -153,6 +153,9 @@ test('schema v31 migration preserves mappings and makes notification routing exp
     DROP TRIGGER IF EXISTS sub2api_account_cost_ledger_revision;
     ALTER TABLE sub2api_account_request_samples DROP COLUMN user_id;
     ALTER TABLE sub2api_account_cost_ledger DROP COLUMN user_id;
+    ALTER TABLE sub2api_key_ttft_alert_settings DROP COLUMN active_probe_enabled;
+    ALTER TABLE sub2api_key_ttft_alert_settings DROP COLUMN active_probe_consecutive_count;
+    ALTER TABLE sub2api_key_ttft_alert_settings DROP COLUMN active_probe_threshold_ms;
     INSERT INTO sub2api_mappings(
       id, connection_id, key_id, channel_id, account_id, group_id,
       role, enabled, models_json, config_json, created_at, updated_at
@@ -176,6 +179,7 @@ test('schema v31 migration preserves mappings and makes notification routing exp
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 29').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 30').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 31').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 32').get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());
   assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'recharge_url'));
@@ -189,6 +193,21 @@ test('schema v31 migration preserves mappings and makes notification routing exp
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_key_probe_samples'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_key_probe_actions'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sub2api_key_ttft_alert_settings'").get());
+  const keyTtftAlertSettingColumns = new Set(
+    db.prepare('PRAGMA table_info(sub2api_key_ttft_alert_settings)').all()
+      .map((column) => column.name)
+  );
+  for (const column of [
+    'active_probe_enabled', 'active_probe_consecutive_count', 'active_probe_threshold_ms'
+  ]) assert.equal(keyTtftAlertSettingColumns.has(column), true, `missing Key TTFT alert setting ${column}`);
+  assert.deepEqual(db.prepare(`
+    SELECT active_probe_enabled, active_probe_consecutive_count, active_probe_threshold_ms
+    FROM sub2api_key_ttft_alert_settings WHERE id = 1
+  `).get(), {
+    active_probe_enabled: 0,
+    active_probe_consecutive_count: 3,
+    active_probe_threshold_ms: 8000
+  });
   const keyProbeSettingColumns = new Set(
     db.prepare('PRAGMA table_info(sub2api_key_probe_settings)').all().map((column) => column.name)
   );

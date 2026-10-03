@@ -1807,9 +1807,9 @@ async function renderKeyProbes() {
   const platformOptions = result.platforms.map((platform) => `<option value="${escapeHtml(platform)}" ${filters.platform === platform ? 'selected' : ''}>${escapeHtml(accountMonitorPlatformLabel(platform))}</option>`).join('');
   const groupTabs = [{ id: '', name: '全部分组', accountCount: result.groupScopeCount ?? summary.total }, ...(result.groups || [])]
     .map((group) => `<button class="tab ${filters.groupId === group.id ? 'active' : ''}" role="tab" aria-selected="${filters.groupId === group.id}" data-action="key-probe-group" data-group-id="${escapeHtml(group.id)}"><span>${escapeHtml(group.name)}</span><small>${formatNumber(group.accountCount, 0)}</small></button>`).join('');
-  setTopActions(`<button class="button" data-action="open-key-ttft-alert-settings" title="业务首字提醒设置" aria-label="业务首字提醒设置"><i data-lucide="bell-ring"></i><span>提醒设置</span></button>${ttftAlerts.settings.enabled ? '<button class="button" data-action="evaluate-key-ttft-alerts" title="立即评估业务首字提醒" aria-label="立即评估业务首字提醒"><i data-lucide="scan-line"></i><span>评估提醒</span></button>' : ''}<button class="button" data-action="open-key-probe-settings" title="检测设置" aria-label="检测设置"><i data-lucide="settings-2"></i><span>检测设置</span></button><button class="button" data-action="sync-key-probes" title="同步 Key" aria-label="同步 Key"><i data-lucide="refresh-cw"></i><span>同步 Key</span></button>${result.settings.autoControlEnabled ? '<button class="button" data-action="run-key-probe-automation" title="立即评估自动停启" aria-label="立即评估自动停启"><i data-lucide="shield-check"></i><span>评估管控</span></button>' : ''}<button class="button" data-action="bulk-enable-key-probes" data-key-probe-selection-action data-selection-text="启用" title="启用所选 Key" aria-label="启用所选 Key" disabled><i data-lucide="power"></i><span data-selection-label>启用</span></button><button class="button" data-action="bulk-disable-key-probes" data-key-probe-selection-action data-selection-text="停用" title="停用所选 Key" aria-label="停用所选 Key" disabled><i data-lucide="power-off"></i><span data-selection-label>停用</span></button><button class="button primary" data-action="run-selected-key-probes" data-key-probe-selection-action data-selection-text="检测" title="检测所选 Key" aria-label="检测所选 Key" disabled><i data-lucide="play"></i><span data-selection-label>检测</span></button>`);
+  setTopActions(`<button class="button" data-action="open-key-ttft-alert-settings" title="Key 首字提醒设置" aria-label="Key 首字提醒设置"><i data-lucide="bell-ring"></i><span>提醒设置</span></button>${ttftAlerts.settings.enabled ? '<button class="button" data-action="evaluate-key-ttft-alerts" title="立即评估 Key 首字提醒" aria-label="立即评估 Key 首字提醒"><i data-lucide="scan-line"></i><span>评估提醒</span></button>' : ''}<button class="button" data-action="open-key-probe-settings" title="检测设置" aria-label="检测设置"><i data-lucide="settings-2"></i><span>检测设置</span></button><button class="button" data-action="sync-key-probes" title="同步 Key" aria-label="同步 Key"><i data-lucide="refresh-cw"></i><span>同步 Key</span></button>${result.settings.autoControlEnabled ? '<button class="button" data-action="run-key-probe-automation" title="立即评估自动停启" aria-label="立即评估自动停启"><i data-lucide="shield-check"></i><span>评估管控</span></button>' : ''}<button class="button" data-action="bulk-enable-key-probes" data-key-probe-selection-action data-selection-text="启用" title="启用所选 Key" aria-label="启用所选 Key" disabled><i data-lucide="power"></i><span data-selection-label>启用</span></button><button class="button" data-action="bulk-disable-key-probes" data-key-probe-selection-action data-selection-text="停用" title="停用所选 Key" aria-label="停用所选 Key" disabled><i data-lucide="power-off"></i><span data-selection-label>停用</span></button><button class="button primary" data-action="run-selected-key-probes" data-key-probe-selection-action data-selection-text="检测" title="检测所选 Key" aria-label="检测所选 Key" disabled><i data-lucide="play"></i><span data-selection-label>检测</span></button>`);
   $('#main-content').innerHTML = `
-    <section class="base-instance-bar key-probe-source"><div><span class="status-dot ${result.settings.autoControlEnabled || ttftAlerts.settings.enabled ? 'healthy' : result.settings.enabled ? 'warning' : 'stale'}"></span><strong>Sub2API 上游 Key</strong><small>最近完成 ${escapeHtml(timeAgo(summary.lastCompletedAt))} · 默认 ${result.settings.defaultIntervalMinutes} 分钟 / ${result.settings.sampleCount} 次 / ${escapeHtml(keyProbeComplexityLabel(result.settings.complexity))}</small></div><div class="status-summary">${badge(ttftAlerts.settings.enabled ? 'enabled' : 'info', ttftAlerts.settings.enabled ? '业务首字提醒已启用' : '业务首字提醒未启用')}${badge(result.settings.autoControlEnabled ? 'enabled' : 'info', result.settings.autoControlEnabled ? '自动管控已启用' : '自动管控未启用')}${badge(result.settings.enabled ? 'enabled' : 'info', result.settings.enabled ? '定时检测已启用' : '仅手动检测')}${badge('info', `并发 ${result.settings.concurrency}`)}</div></section>
+    <section class="base-instance-bar key-probe-source"><div><span class="status-dot ${result.settings.autoControlEnabled || ttftAlerts.settings.enabled ? 'healthy' : result.settings.enabled ? 'warning' : 'stale'}"></span><strong>Sub2API 上游 Key</strong><small>最近完成 ${escapeHtml(timeAgo(summary.lastCompletedAt))} · 默认 ${result.settings.defaultIntervalMinutes} 分钟 / ${result.settings.sampleCount} 次 / ${escapeHtml(keyProbeComplexityLabel(result.settings.complexity))}</small></div><div class="status-summary">${badge(ttftAlerts.settings.enabled ? 'enabled' : 'info', ttftAlerts.settings.enabled ? 'Key 首字提醒已启用' : 'Key 首字提醒未启用')}${badge(result.settings.autoControlEnabled ? 'enabled' : 'info', result.settings.autoControlEnabled ? '自动管控已启用' : '自动管控未启用')}${badge(result.settings.enabled ? 'enabled' : 'info', result.settings.enabled ? '定时检测已启用' : '仅手动检测')}${badge('info', `并发 ${result.settings.concurrency}`)}</div></section>
     <div class="stats-grid key-probe-stats">
       <div class="stat"><span class="stat-label"><i data-lucide="key-round"></i>全部 Key</span><strong class="stat-value">${formatNumber(summary.total, 0)}</strong><span class="stat-detail">上游启用 ${formatNumber(summary.upstreamEnabled, 0)} · 未启用 ${formatNumber(summary.upstreamDisabled, 0)}</span></div>
       <div class="stat"><span class="stat-label"><i data-lucide="circle-check"></i>绿色</span><strong class="stat-value healthy-text">${formatNumber(counts.healthy, 0)}</strong><span class="stat-detail">平均耗时低于 ${formatMilliseconds(result.settings.warningThresholdMs)}</span></div>
@@ -1889,7 +1889,11 @@ function openKeyTtftAlertSettings() {
   const { settings } = alertConfig;
   const form = $('#key-ttft-alert-form');
   form.elements.enabled.checked = settings.enabled;
-  for (const field of ['windowMinutes', 'sampleCount', 'thresholdMs', 'cooldownMinutes']) {
+  form.elements.activeProbeEnabled.checked = settings.activeProbeEnabled;
+  for (const field of [
+    'windowMinutes', 'sampleCount', 'thresholdMs', 'activeProbeConsecutiveCount',
+    'activeProbeThresholdMs', 'cooldownMinutes'
+  ]) {
     form.elements[field].value = settings[field];
   }
   $('#key-ttft-alert-channels').innerHTML = notificationChannelOptionsHtml(
@@ -4373,7 +4377,7 @@ async function handleAction(button) {
     if (action === 'open-key-ttft-alert-settings') openKeyTtftAlertSettings();
     if (action === 'evaluate-key-ttft-alerts') {
       const result = await api('/api/key-ttft-alerts/evaluate', { method: 'POST', body: {} });
-      trackKeyProbeJob(result.jobId, '业务首字提醒评估').catch((error) => toast(error.message, 'error'));
+      trackKeyProbeJob(result.jobId, 'Key 首字提醒评估').catch((error) => toast(error.message, 'error'));
     }
     if (action === 'manage-notification-channels') {
       button.closest('dialog')?.close();
@@ -4993,13 +4997,16 @@ $('#key-ttft-alert-form').addEventListener('submit', async (event) => {
         windowMinutes: Number(form.elements.windowMinutes.value),
         sampleCount: Number(form.elements.sampleCount.value),
         thresholdMs: Number(form.elements.thresholdMs.value),
+        activeProbeEnabled: form.elements.activeProbeEnabled.checked,
+        activeProbeConsecutiveCount: Number(form.elements.activeProbeConsecutiveCount.value),
+        activeProbeThresholdMs: Number(form.elements.activeProbeThresholdMs.value),
         cooldownMinutes: Number(form.elements.cooldownMinutes.value),
         channelIds
       }
     });
     state.keyTtftAlerts.settings = result.settings;
     $('#key-ttft-alert-dialog').close();
-    toast('业务首字自动提醒设置已保存');
+    toast('Key 首字自动提醒设置已保存');
     await renderKeyProbes();
   } catch (error) {
     $('#key-ttft-alert-error').textContent = error.message;

@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 31;
+const SCHEMA_VERSION = 32;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -967,6 +967,9 @@ CREATE TABLE IF NOT EXISTS sub2api_key_ttft_alert_settings (
   window_minutes INTEGER NOT NULL DEFAULT 5,
   sample_count INTEGER NOT NULL DEFAULT 10,
   threshold_ms INTEGER NOT NULL DEFAULT 8000,
+  active_probe_enabled INTEGER NOT NULL DEFAULT 0,
+  active_probe_consecutive_count INTEGER NOT NULL DEFAULT 3,
+  active_probe_threshold_ms INTEGER NOT NULL DEFAULT 8000,
   cooldown_minutes INTEGER NOT NULL DEFAULT 60,
   channel_ids_json TEXT NOT NULL DEFAULT '[]',
   updated_at TEXT NOT NULL
@@ -2468,6 +2471,29 @@ function migrateNotificationRoutingV31(db) {
   })();
 }
 
+function migrateActiveProbeTtftAlertsV32(db) {
+  const migrated = db.prepare(
+    'SELECT 1 FROM schema_migrations WHERE version = 32'
+  ).get();
+  if (migrated) return;
+  const columns = new Set(
+    db.prepare('PRAGMA table_info(sub2api_key_ttft_alert_settings)').all()
+      .map((column) => column.name)
+  );
+  for (const [name, definition] of [
+    ['active_probe_enabled', 'INTEGER NOT NULL DEFAULT 0'],
+    ['active_probe_consecutive_count', 'INTEGER NOT NULL DEFAULT 3'],
+    ['active_probe_threshold_ms', 'INTEGER NOT NULL DEFAULT 8000']
+  ]) {
+    if (!columns.has(name)) {
+      db.exec(`ALTER TABLE sub2api_key_ttft_alert_settings ADD COLUMN ${name} ${definition}`);
+    }
+  }
+  db.prepare(
+    'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (32, ?)'
+  ).run(nowIso());
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -2505,6 +2531,7 @@ function createDatabase(databasePath) {
     migrateKeyProbeAutomationV29(db);
     migrateKeyTtftAlertsV30(db);
     migrateNotificationRoutingV31(db);
+    migrateActiveProbeTtftAlertsV32(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

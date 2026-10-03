@@ -3,7 +3,9 @@ const { AppError } = require('../errors');
 const { nowIso, parseJson, stringifyJson } = require('../db');
 
 const EVENT_FINGERPRINT_PREFIX = 'sub2api-business-ttft:';
+const ACTIVE_PROBE_EVENT_FINGERPRINT_PREFIX = 'sub2api-active-probe-ttft:';
 const SAMPLE_SOURCE = 'business_usage';
+const ACTIVE_PROBE_SAMPLE_SOURCE = 'active_probe';
 
 function integerInRange(value, name, minimum, maximum) {
   const number = Number(value);
@@ -62,9 +64,13 @@ class KeyTtftAlertService {
       windowMinutes: row.window_minutes,
       sampleCount: row.sample_count,
       thresholdMs: row.threshold_ms,
+      activeProbeEnabled: Boolean(row.active_probe_enabled),
+      activeProbeConsecutiveCount: row.active_probe_consecutive_count,
+      activeProbeThresholdMs: row.active_probe_threshold_ms,
       cooldownMinutes: row.cooldown_minutes,
       channelIds: normalizeChannelIds(parseJson(row.channel_ids_json, [])),
       sampleSource: SAMPLE_SOURCE,
+      activeProbeSampleSource: ACTIVE_PROBE_SAMPLE_SOURCE,
       updatedAt: row.updated_at
     };
   }
@@ -76,6 +82,9 @@ class KeyTtftAlertService {
       windowMinutes: input.windowMinutes ?? current.windowMinutes,
       sampleCount: input.sampleCount ?? current.sampleCount,
       thresholdMs: input.thresholdMs ?? current.thresholdMs,
+      activeProbeEnabled: input.activeProbeEnabled ?? current.activeProbeEnabled,
+      activeProbeConsecutiveCount: input.activeProbeConsecutiveCount ?? current.activeProbeConsecutiveCount,
+      activeProbeThresholdMs: input.activeProbeThresholdMs ?? current.activeProbeThresholdMs,
       cooldownMinutes: input.cooldownMinutes ?? current.cooldownMinutes,
       channelIds: input.channelIds === undefined
         ? current.channelIds
@@ -84,6 +93,18 @@ class KeyTtftAlertService {
     next.windowMinutes = integerInRange(next.windowMinutes, '监控窗口', 1, 1440);
     next.sampleCount = integerInRange(next.sampleCount, '采样记录条数', 1, 1000);
     next.thresholdMs = integerInRange(next.thresholdMs, '平均首字阈值', 100, 600000);
+    next.activeProbeConsecutiveCount = integerInRange(
+      next.activeProbeConsecutiveCount,
+      '主动检测连续超阈值次数',
+      1,
+      100
+    );
+    next.activeProbeThresholdMs = integerInRange(
+      next.activeProbeThresholdMs,
+      '主动检测首字阈值',
+      100,
+      600000
+    );
     next.cooldownMinutes = integerInRange(next.cooldownMinutes, '提醒冷却时间', 1, 10080);
     if (next.enabled && next.channelIds.length === 0) {
       throw new AppError('VALIDATION_ERROR', '启用自动提醒前请至少选择一个通知渠道', {
@@ -103,22 +124,33 @@ class KeyTtftAlertService {
     this.db.prepare(`
       UPDATE sub2api_key_ttft_alert_settings SET
         enabled = ?, window_minutes = ?, sample_count = ?, threshold_ms = ?,
-        cooldown_minutes = ?, channel_ids_json = ?, updated_at = ?
+        active_probe_enabled = ?, active_probe_consecutive_count = ?,
+        active_probe_threshold_ms = ?, cooldown_minutes = ?, channel_ids_json = ?,
+        updated_at = ?
       WHERE id = 1
     `).run(
       next.enabled ? 1 : 0,
       next.windowMinutes,
       next.sampleCount,
       next.thresholdMs,
+      next.activeProbeEnabled ? 1 : 0,
+      next.activeProbeConsecutiveCount,
+      next.activeProbeThresholdMs,
       next.cooldownMinutes,
       stringifyJson(next.channelIds, []),
       nowIso()
     );
-    if (!next.enabled) this.#resolveAll(nowIso());
+    if (!next.enabled) {
+      const resolvedAt = nowIso();
+      this.#resolveAll(resolvedAt, new Set(), EVENT_FINGERPRINT_PREFIX);
+      this.#resolveAll(resolvedAt, new Set(), ACTIVE_PROBE_EVENT_FINGERPRINT_PREFIX);
+    } else if (!next.activeProbeEnabled) {
+      this.#resolveAll(nowIso(), new Set(), ACTIVE_PROBE_EVENT_FINGERPRINT_PREFIX);
+    }
     return this.settings();
   }
 
-  #metrics(settings, windowStart, evaluatedAt) {
+  #businessMetrics(settings, windowStart, evaluatedAt) {
     return this.db.prepare(`
       WITH ranked AS (
         SELECT sample.account_id, sample.first_token_ms, sample.created_at,
@@ -156,15 +188,58 @@ class KeyTtftAlertService {
     `).all(windowStart, evaluatedAt, settings.sampleCount, settings.sampleCount);
   }
 
-  #eventFingerprint(accountId) {
-    return `${EVENT_FINGERPRINT_PREFIX}${accountId}`;
+  #activeProbeMetrics(settings, evaluatedAt) {
+    return this.db.prepare(`
+      WITH ranked AS (
+        SELECT batch.account_id, sample.id AS source_log_id, sample.status,
+          sample.first_token_ms, sample.completed_at AS created_at,
+          ROW_NUMBER() OVER (
+            PARTITION BY batch.account_id
+            ORDER BY sample.completed_at DESC, batch.completed_at DESC,
+              sample.sample_index DESC, sample.id DESC
+          ) AS row_number
+        FROM sub2api_key_probe_samples sample
+        JOIN sub2api_key_probe_batches batch ON batch.id = sample.batch_id
+        JOIN sub2api_monitored_accounts account ON account.account_id = batch.account_id
+        WHERE sample.completed_at <= ? AND account.missing_since IS NULL
+      ), recent AS (
+        SELECT * FROM ranked WHERE row_number <= ?
+      )
+      SELECT recent.account_id, account.name AS account_name,
+        account.platform, account.status AS account_status,
+        COUNT(*) AS sample_count,
+        SUM(CASE WHEN recent.status = 'succeeded' AND recent.first_token_ms > ?
+          THEN 1 ELSE 0 END) AS slow_sample_count,
+        AVG(recent.first_token_ms) AS avg_first_token_ms,
+        MIN(recent.first_token_ms) AS min_first_token_ms,
+        MAX(recent.first_token_ms) AS max_first_token_ms,
+        MAX(CASE WHEN recent.row_number = 1 THEN recent.first_token_ms END)
+          AS latest_first_token_ms,
+        MAX(CASE WHEN recent.row_number = 1 THEN recent.created_at END) AS last_request_at,
+        MAX(CASE WHEN recent.row_number = 1 THEN recent.source_log_id END)
+          AS last_request_source_log_id
+      FROM recent
+      JOIN sub2api_monitored_accounts account ON account.account_id = recent.account_id
+      GROUP BY recent.account_id, account.name, account.platform, account.status
+      HAVING COUNT(*) >= ?
+      ORDER BY avg_first_token_ms DESC, recent.account_id
+    `).all(
+      evaluatedAt,
+      settings.activeProbeConsecutiveCount,
+      settings.activeProbeThresholdMs,
+      settings.activeProbeConsecutiveCount
+    );
   }
 
-  #resolveAll(resolvedAt, matchedAccountIds = new Set()) {
+  #eventFingerprint(accountId, prefix = EVENT_FINGERPRINT_PREFIX) {
+    return `${prefix}${accountId}`;
+  }
+
+  #resolveAll(resolvedAt, matchedAccountIds = new Set(), prefix = EVENT_FINGERPRINT_PREFIX) {
     const active = this.db.prepare(`
       SELECT id, subject_id FROM alert_events
       WHERE fingerprint LIKE ? AND status != 'resolved'
-    `).all(`${EVENT_FINGERPRINT_PREFIX}%`);
+    `).all(`${prefix}%`);
     const resolve = this.db.prepare(`
       UPDATE alert_events SET status = 'resolved', resolved_at = ? WHERE id = ?
     `);
@@ -178,9 +253,9 @@ class KeyTtftAlertService {
     return count;
   }
 
-  async #applyMetric(metric, settings, evaluatedAt, windowStart) {
+  async #applyMetric(metric, settings, evaluatedAt, alert) {
     const accountId = String(metric.account_id);
-    const fingerprint = this.#eventFingerprint(accountId);
+    const fingerprint = this.#eventFingerprint(accountId, alert.fingerprintPrefix);
     const existing = this.db.prepare(
       'SELECT * FROM alert_events WHERE fingerprint = ?'
     ).get(fingerprint);
@@ -193,7 +268,6 @@ class KeyTtftAlertService {
     const shouldNotify = !existing || existing.status === 'resolved' ||
       (cooldownElapsed && hasNewRequest);
     const eventId = existing?.id || crypto.randomUUID();
-    const averageMs = Math.round(Number(metric.avg_first_token_ms));
     const currentSampleFingerprint = sampleFingerprint(metric);
     const lastNotifiedRequestAt = shouldNotify
       ? metric.last_request_at
@@ -201,26 +275,8 @@ class KeyTtftAlertService {
     const lastNotifiedSampleFingerprint = shouldNotify
       ? currentSampleFingerprint
       : existingDetails.lastNotifiedSampleFingerprint || null;
-    const message = `Key“${metric.account_name}”（#${accountId}）最近 ${settings.windowMinutes} 分钟的 ` +
-      `${metric.sample_count} 条真实业务流式请求平均首字为 ${milliseconds(averageMs)}，` +
-      `超过阈值 ${milliseconds(settings.thresholdMs)}。`;
     const details = {
-      alertType: 'key_ttft_high',
-      sampleSource: SAMPLE_SOURCE,
-      sourceTable: 'sub2api_account_request_samples',
-      accountId,
-      accountName: metric.account_name,
-      platform: metric.platform,
-      accountStatus: metric.account_status,
-      windowMinutes: settings.windowMinutes,
-      windowStart,
-      windowEnd: evaluatedAt,
-      sampleCount: metric.sample_count,
-      configuredSampleCount: settings.sampleCount,
-      averageFirstTokenMs: averageMs,
-      minimumFirstTokenMs: metric.min_first_token_ms,
-      maximumFirstTokenMs: metric.max_first_token_ms,
-      thresholdMs: settings.thresholdMs,
+      ...alert.details,
       lastRequestAt: metric.last_request_at,
       lastNotifiedRequestAt,
       lastNotifiedSampleFingerprint
@@ -234,7 +290,7 @@ class KeyTtftAlertService {
           acknowledged_at = ? WHERE id = ?
       `).run(
         status,
-        message,
+        alert.message,
         stringifyJson(details),
         triggeredAt,
         status === 'acknowledged' ? existing.acknowledged_at : null,
@@ -246,14 +302,21 @@ class KeyTtftAlertService {
           id, rule_id, connection_id, subject_type, subject_id, status, severity,
           message, fingerprint, details_json, triggered_at
         ) VALUES (?, NULL, NULL, 'sub2api_key', ?, 'active', 'warning', ?, ?, ?, ?)
-      `).run(eventId, accountId, message, fingerprint, stringifyJson(details), triggeredAt);
+      `).run(
+        eventId,
+        accountId,
+        alert.message,
+        fingerprint,
+        stringifyJson(details),
+        triggeredAt
+      );
     }
     const event = {
       id: eventId,
       status,
       severity: 'warning',
-      title: 'Key 业务首字延迟提醒',
-      message,
+      title: alert.title,
+      message: alert.message,
       triggered_at: triggeredAt,
       details
     };
@@ -267,12 +330,84 @@ class KeyTtftAlertService {
     };
   }
 
+  async #applyBusinessMetric(metric, settings, evaluatedAt, windowStart) {
+    const accountId = String(metric.account_id);
+    const averageMs = Math.round(Number(metric.avg_first_token_ms));
+    const message = `Key“${metric.account_name}”（#${accountId}）最近 ${settings.windowMinutes} 分钟的 ` +
+      `${metric.sample_count} 条真实业务流式请求平均首字为 ${milliseconds(averageMs)}，` +
+      `超过阈值 ${milliseconds(settings.thresholdMs)}。`;
+    return this.#applyMetric(metric, settings, evaluatedAt, {
+      fingerprintPrefix: EVENT_FINGERPRINT_PREFIX,
+      title: 'Key 业务首字延迟提醒',
+      message,
+      details: {
+        alertType: 'key_ttft_high',
+        sampleSource: SAMPLE_SOURCE,
+        sourceTable: 'sub2api_account_request_samples',
+        accountId,
+        accountName: metric.account_name,
+        platform: metric.platform,
+        accountStatus: metric.account_status,
+        windowMinutes: settings.windowMinutes,
+        windowStart,
+        windowEnd: evaluatedAt,
+        sampleCount: metric.sample_count,
+        configuredSampleCount: settings.sampleCount,
+        averageFirstTokenMs: averageMs,
+        minimumFirstTokenMs: metric.min_first_token_ms,
+        maximumFirstTokenMs: metric.max_first_token_ms,
+        thresholdMs: settings.thresholdMs
+      }
+    });
+  }
+
+  async #applyActiveProbeMetric(metric, settings, evaluatedAt) {
+    const accountId = String(metric.account_id);
+    const averageMs = Math.round(Number(metric.avg_first_token_ms));
+    const message = `Key“${metric.account_name}”（#${accountId}）最近 ` +
+      `${settings.activeProbeConsecutiveCount} 次主动检测请求的首字均超过阈值 ` +
+      `${milliseconds(settings.activeProbeThresholdMs)}，平均首字为 ${milliseconds(averageMs)}。`;
+    return this.#applyMetric(metric, settings, evaluatedAt, {
+      fingerprintPrefix: ACTIVE_PROBE_EVENT_FINGERPRINT_PREFIX,
+      title: 'Key 主动检测首字延迟提醒',
+      message,
+      details: {
+        alertType: 'key_active_probe_ttft_high',
+        sampleSource: ACTIVE_PROBE_SAMPLE_SOURCE,
+        sourceTable: 'sub2api_key_probe_samples',
+        accountId,
+        accountName: metric.account_name,
+        platform: metric.platform,
+        accountStatus: metric.account_status,
+        windowEnd: evaluatedAt,
+        sampleCount: metric.sample_count,
+        consecutiveCount: metric.slow_sample_count,
+        configuredConsecutiveCount: settings.activeProbeConsecutiveCount,
+        averageFirstTokenMs: averageMs,
+        minimumFirstTokenMs: metric.min_first_token_ms,
+        maximumFirstTokenMs: metric.max_first_token_ms,
+        latestFirstTokenMs: metric.latest_first_token_ms,
+        thresholdMs: settings.activeProbeThresholdMs
+      }
+    });
+  }
+
   async evaluate(options = {}) {
     const settings = this.settings();
     const timestamp = Number.isFinite(options.at) ? options.at : Date.now();
     const evaluatedAt = new Date(timestamp).toISOString();
     const windowStart = new Date(timestamp - settings.windowMinutes * 60000).toISOString();
     if (!settings.enabled) {
+      const businessResolved = this.#resolveAll(
+        evaluatedAt,
+        new Set(),
+        EVENT_FINGERPRINT_PREFIX
+      );
+      const activeProbeResolved = this.#resolveAll(
+        evaluatedAt,
+        new Set(),
+        ACTIVE_PROBE_EVENT_FINGERPRINT_PREFIX
+      );
       return {
         enabled: false,
         evaluatedAt,
@@ -281,34 +416,96 @@ class KeyTtftAlertService {
         matchedKeys: 0,
         notified: 0,
         renotified: 0,
-        resolved: this.#resolveAll(evaluatedAt),
-        events: []
+        resolved: businessResolved + activeProbeResolved,
+        events: [],
+        business: {
+          enabled: false, evaluatedKeys: 0, matchedKeys: 0,
+          notified: 0, renotified: 0, resolved: businessResolved, events: []
+        },
+        activeProbe: {
+          enabled: false, evaluatedKeys: 0, matchedKeys: 0,
+          notified: 0, renotified: 0, resolved: activeProbeResolved, events: []
+        }
       };
     }
-    const metrics = this.#metrics(settings, windowStart, evaluatedAt);
-    const matched = metrics.filter(
+
+    const businessMetrics = this.#businessMetrics(settings, windowStart, evaluatedAt);
+    const matchedBusiness = businessMetrics.filter(
       (metric) => Number(metric.avg_first_token_ms) > settings.thresholdMs
     );
-    const matchedAccountIds = new Set(matched.map((metric) => String(metric.account_id)));
-    const results = [];
-    for (const metric of matched) {
-      results.push(await this.#applyMetric(metric, settings, evaluatedAt, windowStart));
+    const matchedBusinessAccountIds = new Set(
+      matchedBusiness.map((metric) => String(metric.account_id))
+    );
+    const businessResults = [];
+    for (const metric of matchedBusiness) {
+      businessResults.push(
+        await this.#applyBusinessMetric(metric, settings, evaluatedAt, windowStart)
+      );
     }
+    const businessResolved = this.#resolveAll(
+      evaluatedAt,
+      matchedBusinessAccountIds,
+      EVENT_FINGERPRINT_PREFIX
+    );
+
+    const activeProbeMetrics = settings.activeProbeEnabled
+      ? this.#activeProbeMetrics(settings, evaluatedAt)
+      : [];
+    const matchedActiveProbe = activeProbeMetrics.filter(
+      (metric) => Number(metric.slow_sample_count) === settings.activeProbeConsecutiveCount
+    );
+    const matchedActiveProbeAccountIds = new Set(
+      matchedActiveProbe.map((metric) => String(metric.account_id))
+    );
+    const activeProbeResults = [];
+    for (const metric of matchedActiveProbe) {
+      activeProbeResults.push(
+        await this.#applyActiveProbeMetric(metric, settings, evaluatedAt)
+      );
+    }
+    const activeProbeResolved = this.#resolveAll(
+      evaluatedAt,
+      matchedActiveProbeAccountIds,
+      ACTIVE_PROBE_EVENT_FINGERPRINT_PREFIX
+    );
+
+    const business = {
+      enabled: true,
+      evaluatedKeys: businessMetrics.length,
+      matchedKeys: matchedBusiness.length,
+      notified: businessResults.filter((result) => result.notified).length,
+      renotified: businessResults.filter((result) => result.renotified).length,
+      resolved: businessResolved,
+      events: businessResults.map((result) => result.event)
+    };
+    const activeProbe = {
+      enabled: settings.activeProbeEnabled,
+      evaluatedKeys: activeProbeMetrics.length,
+      matchedKeys: matchedActiveProbe.length,
+      notified: activeProbeResults.filter((result) => result.notified).length,
+      renotified: activeProbeResults.filter((result) => result.renotified).length,
+      resolved: activeProbeResolved,
+      events: activeProbeResults.map((result) => result.event)
+    };
     return {
       enabled: true,
       evaluatedAt,
       windowStart,
-      evaluatedKeys: metrics.length,
-      matchedKeys: matched.length,
-      notified: results.filter((result) => result.notified).length,
-      renotified: results.filter((result) => result.renotified).length,
-      resolved: this.#resolveAll(evaluatedAt, matchedAccountIds),
-      events: results.map((result) => result.event)
+      evaluatedKeys: business.evaluatedKeys + activeProbe.evaluatedKeys,
+      matchedKeys: business.matchedKeys + activeProbe.matchedKeys,
+      notified: business.notified + activeProbe.notified,
+      renotified: business.renotified + activeProbe.renotified,
+      resolved: business.resolved + activeProbe.resolved,
+      events: [...business.events, ...activeProbe.events],
+      business,
+      activeProbe
     };
   }
 }
 
 module.exports = {
+  ACTIVE_PROBE_EVENT_FINGERPRINT_PREFIX,
+  ACTIVE_PROBE_SAMPLE_SOURCE,
   EVENT_FINGERPRINT_PREFIX,
   KeyTtftAlertService,
   SAMPLE_SOURCE
