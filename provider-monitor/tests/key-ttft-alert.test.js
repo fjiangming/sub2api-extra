@@ -217,11 +217,14 @@ test('active probe TTFT alerts require N consecutive slow successful requests', 
   }
   const notifications = notificationRecorder();
   const service = new KeyTtftAlertService({ db: context.db, notifications });
+  const disabled = await service.evaluate({ at: now });
+  assert.equal(disabled.enabled, false);
+  assert.equal(disabled.activeProbe.enabled, false);
+  assert.equal(notifications.deliveries.length, 0);
   service.saveSettings({
     enabled: true,
-    activeProbeEnabled: true,
     activeProbeConsecutiveCount: 3,
-    activeProbeThresholdMs: 2000,
+    thresholdMs: 2000,
     cooldownMinutes: 60,
     channelIds: [channelId]
   });
@@ -229,6 +232,7 @@ test('active probe TTFT alerts require N consecutive slow successful requests', 
   const result = await service.evaluate({ at: now });
 
   assert.equal(result.business.matchedKeys, 0);
+  assert.equal(result.activeProbe.enabled, true);
   assert.equal(result.activeProbe.evaluatedKeys, 1);
   assert.equal(result.activeProbe.matchedKeys, 1);
   assert.equal(result.activeProbe.notified, 1);
@@ -241,6 +245,7 @@ test('active probe TTFT alerts require N consecutive slow successful requests', 
   );
   assert.equal(notifications.deliveries[0].event.details.averageFirstTokenMs, 2600);
   assert.equal(notifications.deliveries[0].event.details.consecutiveCount, 3);
+  assert.equal(notifications.deliveries[0].event.details.thresholdMs, 2000);
   assert.equal(
     context.db.prepare('SELECT fingerprint FROM alert_events').get().fingerprint,
     `${ACTIVE_PROBE_EVENT_FINGERPRINT_PREFIX}probe-slow`
@@ -283,9 +288,8 @@ test('fast, failed and missing-TTFT probe samples break the consecutive sequence
   const service = new KeyTtftAlertService({ db: context.db, notifications });
   service.saveSettings({
     enabled: true,
-    activeProbeEnabled: true,
     activeProbeConsecutiveCount: 3,
-    activeProbeThresholdMs: 2000,
+    thresholdMs: 2000,
     channelIds: [channelId]
   });
 
@@ -321,9 +325,8 @@ test('active probe alerts honor cooldown, require a new sample and resolve on re
   const service = new KeyTtftAlertService({ db: context.db, notifications });
   service.saveSettings({
     enabled: true,
-    activeProbeEnabled: true,
     activeProbeConsecutiveCount: 2,
-    activeProbeThresholdMs: 2000,
+    thresholdMs: 2000,
     cooldownMinutes: 10,
     channelIds: [channelId]
   });
@@ -423,7 +426,7 @@ test('business request sample provenance rejects active-probe sources', (t) => {
   `).run(now, now), /CHECK constraint failed/);
 });
 
-test('business TTFT alert HTTP API saves channels and supports immediate evaluation', async (t) => {
+test('Key TTFT alert HTTP API saves shared settings and supports immediate evaluation', async (t) => {
   const context = createTestContext();
   const app = createApplication({
     config: context.config,
@@ -468,9 +471,7 @@ test('business TTFT alert HTTP API saves channels and supports immediate evaluat
       windowMinutes: 8,
       sampleCount: 6,
       thresholdMs: 2500,
-      activeProbeEnabled: true,
       activeProbeConsecutiveCount: 4,
-      activeProbeThresholdMs: 3200,
       cooldownMinutes: 45,
       channelIds: [channel.id]
     })
@@ -485,9 +486,10 @@ test('business TTFT alert HTTP API saves channels and supports immediate evaluat
   assert.equal(configBody.settings.sampleSource, 'business_usage');
   assert.equal(configBody.settings.activeProbeSampleSource, 'active_probe');
   assert.equal(configBody.settings.windowMinutes, 8);
-  assert.equal(configBody.settings.activeProbeEnabled, true);
   assert.equal(configBody.settings.activeProbeConsecutiveCount, 4);
-  assert.equal(configBody.settings.activeProbeThresholdMs, 3200);
+  assert.equal(configBody.settings.thresholdMs, 2500);
+  assert.equal('activeProbeEnabled' in configBody.settings, false);
+  assert.equal('activeProbeThresholdMs' in configBody.settings, false);
   assert.equal(configBody.channels[0].name, 'TTFT webhook');
 
   const evaluation = await fetch(`${base}/api/key-ttft-alerts/evaluate?wait=true`, {

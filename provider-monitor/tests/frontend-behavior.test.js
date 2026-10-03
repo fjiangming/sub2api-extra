@@ -172,9 +172,9 @@ test('Key status tab exposes centralized probes, filters and per-key controls', 
   assert.match(index, /name="windowMinutes"[^>]+min="1" max="1440"/);
   assert.match(index, /name="sampleCount"[^>]+max="1000"/);
   assert.match(index, /name="thresholdMs"[^>]+min="100"/);
-  assert.match(index, /name="activeProbeEnabled"[^>]+type="checkbox"/);
   assert.match(index, /name="activeProbeConsecutiveCount"[^>]+min="1" max="100"/);
-  assert.match(index, /name="activeProbeThresholdMs"[^>]+min="100" max="600000"/);
+  assert.doesNotMatch(index, /name="activeProbeEnabled"/);
+  assert.doesNotMatch(index, /name="activeProbeThresholdMs"/);
   assert.match(index, /data-action="manage-notification-channels"/);
   assert.match(index, /name="sampleCount"[^>]+min="1" max="5"/);
   assert.match(index, /name="promptsSimple"/);
@@ -201,9 +201,9 @@ test('Key status tab exposes centralized probes, filters and per-key controls', 
   assert.match(source, /\/api\/key-probes\/automation\/run/);
   assert.match(source, /\/api\/key-ttft-alerts\/config/);
   assert.match(source, /selectedNotificationChannelIds\(form, 'key-ttft-alert'\)/);
-  assert.match(source, /activeProbeEnabled: form\.elements\.activeProbeEnabled\.checked/);
   assert.match(source, /activeProbeConsecutiveCount: Number\(form\.elements\.activeProbeConsecutiveCount\.value\)/);
-  assert.match(source, /activeProbeThresholdMs: Number\(form\.elements\.activeProbeThresholdMs\.value\)/);
+  assert.doesNotMatch(source, /activeProbeEnabled: form\.elements/);
+  assert.doesNotMatch(source, /activeProbeThresholdMs: Number/);
   assert.match(source, /data-action="evaluate-key-ttft-alerts"/);
   assert.match(styles, /\.badge\.critical/);
   assert.match(styles, /\.key-probe-row\.health-critical/);

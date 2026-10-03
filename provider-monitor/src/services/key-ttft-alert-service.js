@@ -64,9 +64,7 @@ class KeyTtftAlertService {
       windowMinutes: row.window_minutes,
       sampleCount: row.sample_count,
       thresholdMs: row.threshold_ms,
-      activeProbeEnabled: Boolean(row.active_probe_enabled),
       activeProbeConsecutiveCount: row.active_probe_consecutive_count,
-      activeProbeThresholdMs: row.active_probe_threshold_ms,
       cooldownMinutes: row.cooldown_minutes,
       channelIds: normalizeChannelIds(parseJson(row.channel_ids_json, [])),
       sampleSource: SAMPLE_SOURCE,
@@ -82,9 +80,7 @@ class KeyTtftAlertService {
       windowMinutes: input.windowMinutes ?? current.windowMinutes,
       sampleCount: input.sampleCount ?? current.sampleCount,
       thresholdMs: input.thresholdMs ?? current.thresholdMs,
-      activeProbeEnabled: input.activeProbeEnabled ?? current.activeProbeEnabled,
       activeProbeConsecutiveCount: input.activeProbeConsecutiveCount ?? current.activeProbeConsecutiveCount,
-      activeProbeThresholdMs: input.activeProbeThresholdMs ?? current.activeProbeThresholdMs,
       cooldownMinutes: input.cooldownMinutes ?? current.cooldownMinutes,
       channelIds: input.channelIds === undefined
         ? current.channelIds
@@ -98,12 +94,6 @@ class KeyTtftAlertService {
       '主动检测连续超阈值次数',
       1,
       100
-    );
-    next.activeProbeThresholdMs = integerInRange(
-      next.activeProbeThresholdMs,
-      '主动检测首字阈值',
-      100,
-      600000
     );
     next.cooldownMinutes = integerInRange(next.cooldownMinutes, '提醒冷却时间', 1, 10080);
     if (next.enabled && next.channelIds.length === 0) {
@@ -124,18 +114,15 @@ class KeyTtftAlertService {
     this.db.prepare(`
       UPDATE sub2api_key_ttft_alert_settings SET
         enabled = ?, window_minutes = ?, sample_count = ?, threshold_ms = ?,
-        active_probe_enabled = ?, active_probe_consecutive_count = ?,
-        active_probe_threshold_ms = ?, cooldown_minutes = ?, channel_ids_json = ?,
-        updated_at = ?
+        active_probe_consecutive_count = ?, cooldown_minutes = ?,
+        channel_ids_json = ?, updated_at = ?
       WHERE id = 1
     `).run(
       next.enabled ? 1 : 0,
       next.windowMinutes,
       next.sampleCount,
       next.thresholdMs,
-      next.activeProbeEnabled ? 1 : 0,
       next.activeProbeConsecutiveCount,
-      next.activeProbeThresholdMs,
       next.cooldownMinutes,
       stringifyJson(next.channelIds, []),
       nowIso()
@@ -144,8 +131,6 @@ class KeyTtftAlertService {
       const resolvedAt = nowIso();
       this.#resolveAll(resolvedAt, new Set(), EVENT_FINGERPRINT_PREFIX);
       this.#resolveAll(resolvedAt, new Set(), ACTIVE_PROBE_EVENT_FINGERPRINT_PREFIX);
-    } else if (!next.activeProbeEnabled) {
-      this.#resolveAll(nowIso(), new Set(), ACTIVE_PROBE_EVENT_FINGERPRINT_PREFIX);
     }
     return this.settings();
   }
@@ -226,7 +211,7 @@ class KeyTtftAlertService {
     `).all(
       evaluatedAt,
       settings.activeProbeConsecutiveCount,
-      settings.activeProbeThresholdMs,
+      settings.thresholdMs,
       settings.activeProbeConsecutiveCount
     );
   }
@@ -366,7 +351,7 @@ class KeyTtftAlertService {
     const averageMs = Math.round(Number(metric.avg_first_token_ms));
     const message = `Key“${metric.account_name}”（#${accountId}）最近 ` +
       `${settings.activeProbeConsecutiveCount} 次主动检测请求的首字均超过阈值 ` +
-      `${milliseconds(settings.activeProbeThresholdMs)}，平均首字为 ${milliseconds(averageMs)}。`;
+      `${milliseconds(settings.thresholdMs)}，平均首字为 ${milliseconds(averageMs)}。`;
     return this.#applyMetric(metric, settings, evaluatedAt, {
       fingerprintPrefix: ACTIVE_PROBE_EVENT_FINGERPRINT_PREFIX,
       title: 'Key 主动检测首字延迟提醒',
@@ -387,7 +372,7 @@ class KeyTtftAlertService {
         minimumFirstTokenMs: metric.min_first_token_ms,
         maximumFirstTokenMs: metric.max_first_token_ms,
         latestFirstTokenMs: metric.latest_first_token_ms,
-        thresholdMs: settings.activeProbeThresholdMs
+        thresholdMs: settings.thresholdMs
       }
     });
   }
@@ -448,9 +433,7 @@ class KeyTtftAlertService {
       EVENT_FINGERPRINT_PREFIX
     );
 
-    const activeProbeMetrics = settings.activeProbeEnabled
-      ? this.#activeProbeMetrics(settings, evaluatedAt)
-      : [];
+    const activeProbeMetrics = this.#activeProbeMetrics(settings, evaluatedAt);
     const matchedActiveProbe = activeProbeMetrics.filter(
       (metric) => Number(metric.slow_sample_count) === settings.activeProbeConsecutiveCount
     );
@@ -479,7 +462,7 @@ class KeyTtftAlertService {
       events: businessResults.map((result) => result.event)
     };
     const activeProbe = {
-      enabled: settings.activeProbeEnabled,
+      enabled: true,
       evaluatedKeys: activeProbeMetrics.length,
       matchedKeys: matchedActiveProbe.length,
       notified: activeProbeResults.filter((result) => result.notified).length,

@@ -153,9 +153,7 @@ test('schema migrations through v32 preserve mappings and add explicit alert rou
     DROP TRIGGER IF EXISTS sub2api_account_cost_ledger_revision;
     ALTER TABLE sub2api_account_request_samples DROP COLUMN user_id;
     ALTER TABLE sub2api_account_cost_ledger DROP COLUMN user_id;
-    ALTER TABLE sub2api_key_ttft_alert_settings DROP COLUMN active_probe_enabled;
     ALTER TABLE sub2api_key_ttft_alert_settings DROP COLUMN active_probe_consecutive_count;
-    ALTER TABLE sub2api_key_ttft_alert_settings DROP COLUMN active_probe_threshold_ms;
     INSERT INTO sub2api_mappings(
       id, connection_id, key_id, channel_id, account_id, group_id,
       role, enabled, models_json, config_json, created_at, updated_at
@@ -197,16 +195,14 @@ test('schema migrations through v32 preserve mappings and add explicit alert rou
     db.prepare('PRAGMA table_info(sub2api_key_ttft_alert_settings)').all()
       .map((column) => column.name)
   );
-  for (const column of [
-    'active_probe_enabled', 'active_probe_consecutive_count', 'active_probe_threshold_ms'
-  ]) assert.equal(keyTtftAlertSettingColumns.has(column), true, `missing Key TTFT alert setting ${column}`);
+  assert.equal(keyTtftAlertSettingColumns.has('active_probe_consecutive_count'), true);
+  assert.equal(keyTtftAlertSettingColumns.has('active_probe_enabled'), false);
+  assert.equal(keyTtftAlertSettingColumns.has('active_probe_threshold_ms'), false);
   assert.deepEqual(db.prepare(`
-    SELECT active_probe_enabled, active_probe_consecutive_count, active_probe_threshold_ms
+    SELECT active_probe_consecutive_count
     FROM sub2api_key_ttft_alert_settings WHERE id = 1
   `).get(), {
-    active_probe_enabled: 0,
-    active_probe_consecutive_count: 3,
-    active_probe_threshold_ms: 8000
+    active_probe_consecutive_count: 3
   });
   const keyProbeSettingColumns = new Set(
     db.prepare('PRAGMA table_info(sub2api_key_probe_settings)').all().map((column) => column.name)

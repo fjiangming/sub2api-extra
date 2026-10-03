@@ -303,9 +303,8 @@
         <label><span>业务采样记录（条）</span><input name="sampleCount" type="number" min="1" max="1000" required></label>
         <label><span>业务平均首字阈值（毫秒）</span><input name="thresholdMs" type="number" min="100" max="600000" required></label>
         <label><span>共用重复提醒冷却（分钟）</span><input name="cooldownMinutes" type="number" min="1" max="10080" required></label>
-        <label class="toggle-field span-2"><input name="activeProbeEnabled" type="checkbox"><span>启用主动检测连续慢首字提醒</span></label>
-        <label><span>主动检测连续超阈值（次）</span><input name="activeProbeConsecutiveCount" type="number" min="1" max="100" required></label>
-        <label><span>主动检测首字阈值（毫秒）</span><input name="activeProbeThresholdMs" type="number" min="100" max="600000" required></label>
+        <div class="span-2"><span class="field-group-label">主动检测请求</span></div>
+        <label class="span-2"><span>连续超过业务首字阈值（次）</span><input name="activeProbeConsecutiveCount" type="number" min="1" max="100" required></label>
         <div class="span-2">
           <span class="field-group-label">通知通道</span>
           <div id="key-ttft-alert-channels" class="notification-channel-options"></div>

@@ -967,9 +967,7 @@ CREATE TABLE IF NOT EXISTS sub2api_key_ttft_alert_settings (
   window_minutes INTEGER NOT NULL DEFAULT 5,
   sample_count INTEGER NOT NULL DEFAULT 10,
   threshold_ms INTEGER NOT NULL DEFAULT 8000,
-  active_probe_enabled INTEGER NOT NULL DEFAULT 0,
   active_probe_consecutive_count INTEGER NOT NULL DEFAULT 3,
-  active_probe_threshold_ms INTEGER NOT NULL DEFAULT 8000,
   cooldown_minutes INTEGER NOT NULL DEFAULT 60,
   channel_ids_json TEXT NOT NULL DEFAULT '[]',
   updated_at TEXT NOT NULL
@@ -2481,9 +2479,7 @@ function migrateActiveProbeTtftAlertsV32(db) {
       .map((column) => column.name)
   );
   for (const [name, definition] of [
-    ['active_probe_enabled', 'INTEGER NOT NULL DEFAULT 0'],
-    ['active_probe_consecutive_count', 'INTEGER NOT NULL DEFAULT 3'],
-    ['active_probe_threshold_ms', 'INTEGER NOT NULL DEFAULT 8000']
+    ['active_probe_consecutive_count', 'INTEGER NOT NULL DEFAULT 3']
   ]) {
     if (!columns.has(name)) {
       db.exec(`ALTER TABLE sub2api_key_ttft_alert_settings ADD COLUMN ${name} ${definition}`);
