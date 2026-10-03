@@ -131,6 +131,14 @@ function setDefaultDates(formId, days = 30) {
   form.elements.start.value = addDays(today, -(days - 1));
 }
 
+function setCurrentMonthDefaults(formId) {
+  const form = $(formId);
+  const today = todayString();
+  form.elements.start.value = `${today.slice(0, 7)}-01`;
+  form.elements.end.value = today;
+  form.elements.granularity.value = 'month';
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
@@ -1553,7 +1561,7 @@ async function initialize() {
   setDefaultDates('usage-filter', 30);
   setDefaultDates('users-filter', 30);
   setDefaultDates('finance-filter', 30);
-  setDefaultDates('cost-analysis-filter', 30);
+  setCurrentMonthDefaults('cost-analysis-filter');
   const hash = new URLSearchParams(location.hash.replace(/^#/, ''));
   const redirectedSession = hash.get('oc_session');
   const initialView = redirectedSession ? 'overview' : location.hash.slice(1);
