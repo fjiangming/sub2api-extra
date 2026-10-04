@@ -19,10 +19,10 @@ test('primary modules use an accessible top tab bar', () => {
 test('cost analysis exposes reporting plus editable income and expense ledgers', () => {
   assert.match(html, /data-view="costs"/);
   assert.match(html, /id="cost-analysis-filter"/);
-  assert.match(html, /<option value="month" selected>按月<\/option>/);
+  assert.match(html, /<option value="day" selected>按日<\/option>/);
   assert.match(script, /setCurrentMonthDefaults\('cost-analysis-filter'\)/);
   assert.match(script, /form\.elements\.start\.value = `\$\{today\.slice\(0, 7\)\}-01`/);
-  assert.match(script, /form\.elements\.granularity\.value = 'month'/);
+  assert.match(script, /form\.elements\.granularity\.value = 'day'/);
   assert.match(html, /id="cost-income-add"/);
   assert.match(html, /id="cost-income-form"/);
   assert.match(html, /id="cost-income-breakdown"/);

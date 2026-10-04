@@ -9,7 +9,7 @@
   <script src="/vendor/echarts.js" defer></script>
   <script src="/vendor/lucide.js" defer></script>
   <script src="/cost-analysis-ui.js?v=20260929-3" defer></script>
-  <script src="/app.js?v=20261003-1" defer></script>
+  <script src="/app.js?v=20261004-1" defer></script>
 </head>
 <body>
   <div id="login-view" class="login-view" hidden>
@@ -125,7 +125,7 @@
           <form id="cost-analysis-filter" class="filter-bar">
             <label>开始日期<input name="start" type="date" required></label>
             <label>结束日期<input name="end" type="date" required></label>
-            <label>统计粒度<select name="granularity"><option value="day">按日</option><option value="week">按周</option><option value="month" selected>按月</option><option value="year">按年</option></select></label>
+            <label>统计粒度<select name="granularity"><option value="day" selected>按日</option><option value="week">按周</option><option value="month">按月</option><option value="year">按年</option></select></label>
             <label>币种<input name="currency" value="CNY" maxlength="12" pattern="[A-Za-z][A-Za-z0-9_-]*" required></label>
             <button class="button primary" type="submit"><i data-lucide="search"></i><span>查询</span></button>
             <button id="cost-income-add" class="button secondary" type="button"><i data-lucide="plus"></i><span>新增收入</span></button>

@@ -136,7 +136,7 @@ function setCurrentMonthDefaults(formId) {
   const today = todayString();
   form.elements.start.value = `${today.slice(0, 7)}-01`;
   form.elements.end.value = today;
-  form.elements.granularity.value = 'month';
+  form.elements.granularity.value = 'day';
 }
 
 async function api(path, options = {}) {
