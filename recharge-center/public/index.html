@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f9fafb">
+  <meta name="robots" content="noindex,nofollow,noarchive">
+  <title>充值中心</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="login-screen">
+  <div class="mesh-background" aria-hidden="true"></div>
+
+  <aside id="standalone-sidebar" class="app-sidebar standalone-only" aria-label="充值中心导航">
+    <div class="sidebar-header">
+      <a class="sidebar-logo" href="/" aria-label="充值中心首页">
+        <i data-lucide="wallet-cards"></i>
+      </a>
+      <div class="sidebar-brand">
+        <strong>Sub2API</strong>
+        <span>EXTRA</span>
+      </div>
+    </div>
+
+    <nav class="sidebar-nav">
+      <div class="sidebar-section">
+        <button class="sidebar-link nav-item active" type="button" data-view="recharge" title="充值中心">
+          <i data-lucide="credit-card"></i>
+          <span class="sidebar-label">充值中心</span>
+        </button>
+        <button id="admin-nav" class="sidebar-link nav-item" type="button" data-view="admin" title="到账审核" hidden>
+          <i data-lucide="clipboard-check"></i>
+          <span class="sidebar-label">到账审核</span>
+          <span id="review-count" class="count-badge" hidden></span>
+        </button>
+      </div>
+    </nav>
+
+    <div class="sidebar-footer">
+      <button id="theme-toggle" class="sidebar-link" type="button" title="切换显示主题">
+        <i class="theme-icon-light" data-lucide="moon"></i>
+        <i class="theme-icon-dark" data-lucide="sun"></i>
+        <span class="sidebar-label theme-label">深色模式</span>
+      </button>
+      <button id="sidebar-collapse" class="sidebar-link" type="button" title="折叠侧边栏">
+        <i class="collapse-icon-open" data-lucide="panel-left-close"></i>
+        <i class="collapse-icon-closed" data-lucide="panel-left-open"></i>
+        <span class="sidebar-label">折叠侧边栏</span>
+      </button>
+    </div>
+  </aside>
+  <button id="mobile-sidebar-backdrop" class="sidebar-backdrop standalone-only" type="button" aria-label="关闭导航" hidden></button>
+
+  <div class="app-frame">
+    <header class="app-header standalone-only">
+      <div class="header-left">
+        <button id="mobile-menu-toggle" class="icon-button mobile-menu-button" type="button" aria-label="打开导航" title="打开导航">
+          <i data-lucide="menu"></i>
+        </button>
+        <div class="header-title">
+          <h1 id="header-page-title">充值中心</h1>
+          <p id="header-page-description">通过支付宝为当前账户充值</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span id="security-mode" class="secure-session" title="支付状态由服务端安全核验">
+          <i data-lucide="shield-check"></i><span id="security-mode-label">安全核验</span>
+        </span>
+        <div id="account-menu" class="account-menu" hidden>
+          <span id="account-avatar" class="account-avatar" aria-hidden="true">U</span>
+          <span class="account-copy"><strong id="account-name"></strong><small id="account-role">用户</small></span>
+          <button id="logout-button" class="icon-button" type="button" title="退出登录" aria-label="退出登录">
+            <i data-lucide="log-out"></i>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="page-main">
+      <section id="login-view" class="login-view">
+        <div class="login-panel card">
+          <div class="login-heading">
+            <span class="login-icon"><i data-lucide="wallet-cards"></i></span>
+            <div>
+              <h1>登录充值中心</h1>
+              <p>使用 Sub2API 账号确认充值归属</p>
+            </div>
+          </div>
+          <form id="login-form" class="form-stack" autocomplete="on">
+            <label class="field-label">Sub2API 邮箱
+              <input class="input" name="email" type="email" autocomplete="username" maxlength="320" required>
+            </label>
+            <label class="field-label">密码
+              <input class="input" name="password" type="password" autocomplete="current-password" maxlength="1024" required>
+            </label>
+            <p id="login-error" class="form-error" role="alert" hidden></p>
+            <button class="button primary full" type="submit">
+              <i data-lucide="log-in"></i><span data-button-label>登录</span>
+            </button>
+          </form>
+          <div id="sso-only-state" class="form-stack" hidden>
+            <div class="notice info"><i data-lucide="shield-check"></i><span>请从 Sub2API 的充值中心菜单安全进入。</span></div>
+            <a id="sub2api-login-link" class="button secondary full" href="#" target="_top">
+              <i data-lucide="arrow-up-right"></i><span>返回 Sub2API</span>
+            </a>
+          </div>
+          <form id="two-factor-form" class="form-stack" hidden>
+            <div class="notice info">
+              <i data-lucide="smartphone"></i>
+              <span>请输入 <strong id="two-factor-account"></strong> 的六位验证码</span>
+            </div>
+            <label class="field-label">双因素验证码
+              <input class="input otp-input" name="totpCode" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+            </label>
+            <p id="two-factor-error" class="form-error" role="alert" hidden></p>
+            <button class="button primary full" type="submit">
+              <i data-lucide="shield-check"></i><span data-button-label>完成登录</span>
+            </button>
+            <button id="two-factor-cancel" class="button secondary full" type="button">返回</button>
+          </form>
+          <p class="login-footnote">从 Sub2API 自定义菜单进入时会自动建立独立的短时会话。</p>
+        </div>
+      </section>
+
+      <section id="app-view" class="app-view" hidden>
+        <div id="workspace-tabs" class="view-tabs" hidden>
+          <button class="view-tab nav-item active" type="button" data-view="recharge">账户充值</button>
+          <button id="admin-tab" class="view-tab nav-item" type="button" data-view="admin">到账审核</button>
+        </div>
+
+        <section id="recharge-view" class="workspace-view recharge-page">
+          <div id="recharge-page-header" class="embedded-page-header">
+            <div>
+              <h1>账户充值</h1>
+              <p>通过支付宝为当前 Sub2API 账户充值</p>
+            </div>
+            <button id="refresh-orders" class="icon-button bordered" type="button" title="刷新订单" aria-label="刷新订单">
+              <i data-lucide="refresh-cw"></i>
+            </button>
+          </div>
+
+          <section class="card account-card">
+            <p>充值账户</p>
+            <strong id="recharge-account"></strong>
+            <span>当前余额: <strong id="recharge-balance">0.00</strong></span>
+          </section>
+
+          <section id="create-order-panel" class="selection-flow">
+            <form id="create-order-form" class="flow-stack">
+              <div class="card amount-card">
+                <label class="section-label">快捷金额</label>
+                <div id="amount-options" class="amount-options" role="radiogroup" aria-label="充值金额"></div>
+                <div class="custom-amount-group">
+                  <label class="section-label" for="custom-amount">自定义金额</label>
+                  <div class="amount-input-wrap">
+                    <span aria-hidden="true">$</span>
+                    <input id="custom-amount" class="input" name="customAmount" type="text" inputmode="decimal"
+                      autocomplete="off" placeholder="输入金额" aria-describedby="amount-error">
+                  </div>
+                  <p id="amount-error" class="form-error" role="alert" hidden></p>
+                </div>
+              </div>
+              <div id="payment-method-card" class="card payment-method-card">
+                <label class="section-label">支付方式</label>
+                <div class="payment-method-grid">
+                  <button class="payment-method selected" type="button" aria-pressed="true" title="支付宝">
+                    <img src="/alipay.svg" alt="">
+                    <strong>支付宝</strong>
+                  </button>
+                </div>
+              </div>
+              <div id="order-summary-card" class="card order-summary-card" hidden>
+                <div class="summary-row">
+                  <span>支付金额</span>
+                  <strong id="credit-preview">¥0.00</strong>
+                </div>
+              </div>
+              <p id="create-order-error" class="form-error" role="alert" hidden></p>
+              <button class="button alipay full submit-order-button" type="submit" disabled>
+                <span data-button-label>确认支付 ¥0.00</span>
+              </button>
+            </form>
+          </section>
+
+          <section id="active-order-panel" class="payment-flow" hidden>
+            <div id="payment-body" class="card payment-card">
+              <div class="payment-heading">
+                <div>
+                  <h2>支付宝扫码支付</h2>
+                  <p>请严格按照订单金额支付，勿修改金额或重复付款</p>
+                </div>
+                <span id="active-status" class="status-badge"></span>
+              </div>
+
+              <div class="payment-facts">
+                <div id="active-requested-row" hidden>
+                  <span>输入金额</span>
+                  <strong>¥<span id="active-requested"></span></strong>
+                </div>
+                <div>
+                  <span>应付金额</span>
+                  <button id="copy-payable" class="fact-value amount-value" type="button" title="复制应付金额">
+                    ¥<strong id="active-payable"></strong><i data-lucide="copy"></i>
+                  </button>
+                </div>
+                <div>
+                  <span>订单号</span>
+                  <button id="copy-order-no" class="fact-value order-value" type="button" title="复制订单号">
+                    <code id="active-order-no"></code><i data-lucide="copy"></i>
+                  </button>
+                </div>
+                <div>
+                  <span>到账额度</span>
+                  <strong id="active-credit"></strong>
+                </div>
+              </div>
+              <div id="amount-adjustment-note" class="notice warning compact-notice" hidden>
+                <i data-lucide="badge-alert"></i><span>同额订单冲突，请严格支付上方应付金额；到账额度与实付金额一致。</span>
+              </div>
+
+              <div id="qr-frame" class="qr-frame">
+                <div id="qr-loading" class="qr-loading"><i data-lucide="loader-circle"></i></div>
+                <img id="payment-qr" alt="支付宝订单二维码" hidden>
+                <span id="alipay-mark" class="alipay-mark" aria-hidden="true" hidden><img src="/alipay.svg" alt=""></span>
+              </div>
+              <p id="scan-hint" class="scan-hint">请使用手机打开支付宝，扫描二维码完成支付</p>
+              <button id="open-pay-url" class="button secondary" type="button" hidden>
+                <span>重新打开支付页面</span>
+              </button>
+              <button id="download-qr" class="button alipay full" type="button">
+                <i data-lucide="download"></i><span>保存支付宝二维码</span>
+              </button>
+            </div>
+
+            <div id="countdown-card" class="card countdown-card">
+              <span>剩余支付时间</span>
+              <strong id="countdown">--:--</strong>
+              <small id="countdown-hint">等待支付...</small>
+            </div>
+
+            <div id="report-payment-block" class="card report-card">
+              <div class="card-title-group">
+                <h2>提交付款信息</h2>
+                <p>从支付宝账单详情中复制完整交易号，提交后等待管理员核验。</p>
+              </div>
+              <form id="report-payment-form" class="report-form">
+                <label class="field-label">支付宝交易号
+                  <input class="input" name="tradeNo" type="text" inputmode="numeric" autocomplete="off" minlength="20" maxlength="64" placeholder="支付宝账单中的完整交易号" required>
+                </label>
+                <button class="button primary" type="submit">
+                  <i data-lucide="send"></i><span data-button-label>提交核验</span>
+                </button>
+              </form>
+              <p id="report-payment-error" class="form-error" role="alert" hidden></p>
+              <div class="notice warning compact-notice">
+                <i data-lucide="shield-alert"></i><span>不上传付款截图；交易号仅以不可逆指纹保存。</span>
+              </div>
+            </div>
+
+            <div id="reported-state" class="card result-card pending-result" hidden>
+              <span class="result-icon"><i data-lucide="clock-3"></i></span>
+              <h2 id="reported-state-title">等待到账核验</h2>
+              <p id="reported-state-text">付款信息已提交。管理员将从支付宝账单独立核对，请勿再次付款。</p>
+            </div>
+            <div id="processing-state" class="card result-card processing-result" hidden>
+              <span class="result-icon"><i data-lucide="loader-circle"></i></span>
+              <h2>额度入账处理中</h2>
+              <p id="processing-state-text"></p>
+            </div>
+            <div id="completed-state" class="card result-card success-result" hidden>
+              <span class="result-icon"><i data-lucide="check"></i></span>
+              <h2>支付成功</h2>
+              <p id="completed-state-text"></p>
+              <div class="result-facts">
+                <div><span>订单 ID</span><strong id="completed-order-id"></strong></div>
+                <div><span>订单编号</span><strong id="completed-order-no"></strong></div>
+                <div><span>金额</span><strong id="completed-credit"></strong></div>
+                <div><span>实付</span><strong id="completed-payable"></strong></div>
+              </div>
+              <button id="completed-done" class="button primary" type="button">确认</button>
+            </div>
+            <div id="cancelled-state" class="card result-card cancelled-result" hidden>
+              <span class="result-icon"><i data-lucide="x"></i></span>
+              <h2>订单已取消</h2>
+              <p>您已取消本次支付</p>
+              <button class="button primary" type="button" data-result-done>确认</button>
+            </div>
+            <div id="expired-state" class="card result-card expired-result" hidden>
+              <span class="result-icon"><i data-lucide="clock-3"></i></span>
+              <h2>订单已过期</h2>
+              <p>订单已超时，请重新创建订单</p>
+              <button class="button primary" type="button" data-result-done>确认</button>
+            </div>
+
+            <div class="payment-actions">
+              <button id="cancel-order" class="button secondary full" type="button">取消订单</button>
+            </div>
+          </section>
+
+          <section id="history-section" class="card history-section">
+            <div class="card-header section-heading">
+              <div><h2>充值记录</h2><p id="history-description">最近的支付宝充值订单</p></div>
+              <span id="history-count" class="muted-count"></span>
+            </div>
+            <div class="table-container history-table">
+              <table class="data-table">
+                <thead><tr><th>订单</th><th>应付金额</th><th>入账额度</th><th>状态</th><th>创建时间</th></tr></thead>
+                <tbody id="order-history"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="admin-view" class="workspace-view admin-page" hidden>
+          <div class="embedded-page-header">
+            <div><h1>到账审核</h1><p>仅依据支付宝账单完成独立核验</p></div>
+            <button id="refresh-admin" class="icon-button bordered" type="button" title="刷新审核队列" aria-label="刷新审核队列">
+              <i data-lucide="refresh-cw"></i>
+            </button>
+          </div>
+          <div class="admin-metrics" id="admin-metrics"></div>
+          <section class="card admin-orders-card">
+            <div class="card-header table-toolbar">
+              <div><h2>充值订单</h2><p>按状态筛选并核对到账信息</p></div>
+              <label class="filter-label"><span>订单状态</span>
+                <select id="admin-status-filter" class="input select-input">
+                  <option value="payment_reported">待核验</option>
+                  <option value="needs_attention">需恢复</option>
+                  <option value="fulfilling">入账中</option>
+                  <option value="completed">已完成</option>
+                  <option value="rejected">已拒绝</option>
+                  <option value="expired">已过期</option>
+                  <option value="all">全部</option>
+                </select>
+              </label>
+            </div>
+            <div class="table-container admin-table">
+              <table class="data-table">
+                <thead><tr><th>订单</th><th>用户</th><th>应付金额</th><th>交易尾号</th><th>状态</th><th>提交时间</th><th class="actions-column">操作</th></tr></thead>
+                <tbody id="admin-orders"></tbody>
+              </table>
+            </div>
+            <div class="pagination">
+              <button id="admin-previous" class="icon-button bordered" type="button" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button>
+              <span id="admin-page"></span>
+              <button id="admin-next" class="icon-button bordered" type="button" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button>
+            </div>
+          </section>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="review-dialog" class="modal-dialog" aria-labelledby="review-title">
+    <div class="modal-content wide-modal">
+      <header class="modal-header">
+        <div><h2 id="review-title">到账核验</h2><p id="review-order-no"></p></div>
+        <button class="icon-button" type="button" data-close-dialog title="关闭" aria-label="关闭"><i data-lucide="x"></i></button>
+      </header>
+      <div class="modal-body">
+        <div class="review-facts" id="review-facts"></div>
+        <div class="notice warning"><i data-lucide="triangle-alert"></i><span>必须在支付宝账单中独立找到这笔交易。不要根据用户口述或截图放款。</span></div>
+        <form id="review-confirm-form" class="form-stack review-form">
+          <input name="orderId" type="hidden">
+          <label class="field-label">支付宝账单实收金额
+            <input class="input" name="paidAmount" type="text" inputmode="decimal" autocomplete="off" required>
+          </label>
+          <label class="field-label">支付宝账单付款时间
+            <input class="input" name="paidAt" type="datetime-local" step="1" autocomplete="off" required>
+          </label>
+          <label class="field-label">支付宝账单完整交易号
+            <input class="input" name="tradeNo" type="text" inputmode="numeric" autocomplete="off" minlength="20" maxlength="64" required>
+          </label>
+          <label class="check-row"><input name="acknowledge" type="checkbox" required><span>我已从支付宝账单逐项录入付款时间、实收金额和完整交易号</span></label>
+          <p id="review-error" class="form-error" role="alert" hidden></p>
+          <div class="dialog-actions">
+            <button class="button secondary" type="button" data-close-dialog>取消</button>
+            <button class="button primary" type="submit"><i data-lucide="badge-check"></i><span data-button-label>确认到账并入账</span></button>
+          </div>
+        </form>
+        <div id="review-events" class="audit-timeline"></div>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="reject-dialog" class="modal-dialog" aria-labelledby="reject-title">
+    <div class="modal-content compact-modal">
+      <header class="modal-header">
+        <div><h2 id="reject-title">拒绝订单</h2><p id="reject-order-no"></p></div>
+        <button class="icon-button" type="button" data-close-dialog title="关闭" aria-label="关闭"><i data-lucide="x"></i></button>
+      </header>
+      <div class="modal-body">
+        <form id="reject-form" class="form-stack">
+          <input name="orderId" type="hidden">
+          <label class="field-label">拒绝原因
+            <select class="input select-input" name="reason" required>
+              <option value="trade_not_found">支付宝账单中未找到交易</option>
+              <option value="amount_mismatch">实收金额不一致</option>
+              <option value="payment_outside_window">付款时间不在订单有效期</option>
+              <option value="duplicate_payment">交易号已用于其他订单</option>
+              <option value="payment_reversed">付款已撤销或退回</option>
+              <option value="other">其他核验失败</option>
+            </select>
+          </label>
+          <p id="reject-error" class="form-error" role="alert" hidden></p>
+          <div class="dialog-actions">
+            <button class="button secondary" type="button" data-close-dialog>取消</button>
+            <button class="button danger" type="submit"><i data-lucide="circle-x"></i><span data-button-label>拒绝订单</span></button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="modal-dialog" aria-labelledby="confirm-title">
+    <div class="modal-content confirm-modal">
+      <header class="modal-header">
+        <h2 id="confirm-title">确认操作</h2>
+        <button class="icon-button" type="button" data-confirm-cancel title="关闭" aria-label="关闭"><i data-lucide="x"></i></button>
+      </header>
+      <div class="modal-body">
+        <p id="confirm-message" class="confirm-message"></p>
+        <div class="dialog-actions">
+          <button class="button secondary" type="button" data-confirm-cancel>取消</button>
+          <button id="confirm-accept" class="button primary" type="button">确认</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
+  <script src="/vendor/lucide/lucide.js" defer></script>
+  <script src="/app.js" defer></script>
+</body>
+</html>

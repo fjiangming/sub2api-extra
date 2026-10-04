@@ -7,3 +7,4 @@ include:
   - ./provider-monitor/compose.yaml
   - ./operations-center/compose.yaml
   - ./degradation-detector/compose.yaml
+  - ./recharge-center/compose.yaml

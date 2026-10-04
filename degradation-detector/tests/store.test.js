@@ -380,6 +380,7 @@ test('manual reviews preserve automatic verdicts and drive effective summaries',
   assert.equal(reviewed.run.manual_updated_by, 'admin-1');
 
   const summary = store.groupSummary('user-1', 'group-1', 10);
+  assert.equal(summary.historyTotal, 2);
   assert.deepEqual(summary.totals, { passed: 1, valid: 2, attempts: 2 });
   assert.equal(summary.assessment.status, 'normal');
   assert.equal(summary.history[0].status, 'normal');
@@ -482,6 +483,7 @@ test('pruning expires old payloads without changing cumulative totals', (t) => {
 
   store.pruneRuns(currentMonitor.id, 1);
   const summary = store.groupSummary('user-1', 'group-1', 10);
+  assert.equal(summary.historyTotal, 3);
   assert.deepEqual(summary.totals, { passed: 1, valid: 2, attempts: 3 });
   assert.equal(summary.history.length, 3);
   assert.equal(store.getRun(runIds[0]).output_text, null);

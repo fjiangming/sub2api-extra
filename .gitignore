@@ -36,6 +36,10 @@ Thumbs.db
 
 # Runtime data directory at the top level of each feature module
 /*/data/
+/*/data-preview/
+
+# Mounted secrets such as personal payment QR images
+/*/secrets/
 
 # Archives
 *.zip

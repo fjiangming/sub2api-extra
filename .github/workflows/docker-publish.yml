@@ -36,6 +36,9 @@ jobs:
           - service: degradation-detector
             context: ./degradation-detector
             tag_prefix: degradation-detector-
+          - service: recharge-center
+            context: ./recharge-center
+            tag_prefix: recharge-center-
     permissions:
       contents: read
       packages: write

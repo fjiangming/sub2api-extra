@@ -1,0 +1,40 @@
+services:
+  recharge-center:
+    profiles: [recharge-center]
+    image: ${RECHARGE_CENTER_IMAGE:-ghcr.io/fjiangming/sub2api-extra:recharge-center-latest}
+    build:
+      context: .
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
+    container_name: ${RECHARGE_CENTER_CONTAINER_NAME:-sub2api-recharge-center}
+    restart: ${RECHARGE_CENTER_RESTART_POLICY:-unless-stopped}
+    ports:
+      - "127.0.0.1:${RECHARGE_CENTER_PORT:-9874}:9874"
+    environment:
+      RECHARGE_CENTER_BIND_HOST: "0.0.0.0"
+      PORT: "9874"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: ./.env
+        required: true
+    volumes:
+      - recharge-center-data:/app/data
+      - ./secrets:/run/secrets:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9874/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  recharge-center-data:
+    name: ${RECHARGE_CENTER_DATA_VOLUME:-sub2api-extra_recharge-center-data}

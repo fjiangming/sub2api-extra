@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const test = require('node:test');
 const { artifactMime, createApp, PREVIEW_CSP } = require('../src/server');
-const { defaultTests, listen, testConfig } = require('./helpers');
+const { defaultTests, listen, seedRuntime, testConfig } = require('./helpers');
 
 class FakeSub2Api {
   constructor() {
@@ -477,7 +477,8 @@ test('frontends keep authentication and administrator controls separated', () =>
   assert.doesNotMatch(mainSource, /reasoningLabel\(run\.reasoning_effort\)/);
   assert.doesNotMatch(mainSource, /未记录/);
   assert.match(mainSource, /const HISTORY_CHART_LENGTH = 60/);
-  assert.match(mainSource, /<span>PAST \$\{group\.history\.length \|\| 0\} RESULTS<\/span><span>NOW<\/span>/);
+  assert.match(mainSource, /LATEST \$\{displayed\} OF \$\{total\} RESULTS/);
+  assert.match(mainSource, /historyCaption\(group\)/);
   assert.match(mainStyles, /\.history-chart\s*\{[^}]*display: flex;[^}]*gap: 2px;[^}]*height: 33px;/s);
   assert.match(mainStyles, /\.history-point\[data-status="normal"\]\s*\{[^}]*height: 100%;[^}]*background: #10b981;/s);
   assert.match(mainSource, /validation\?\.score_min/);
@@ -495,6 +496,46 @@ test('frontends keep authentication and administrator controls separated', () =>
   assert.match(adminStyles, /\.review-status-options\s*\{[^}]*grid-template-columns: repeat\(3,/s);
   assert.match(adminStyles, /@media \(max-width: 430px\)[\s\S]*\.review-status-options \{ grid-template-columns: minmax\(0, 1fr\); \}/);
   assert.doesNotMatch(adminSource, /key_cipher|key_fingerprint/);
+});
+
+test('public result chart receives every record in its 60-result visible window', async (t) => {
+  const config = testConfig(t);
+  const runner = { execute: async () => null };
+  const sub2api = new FakeSub2Api();
+  const { app, runtime } = createApp(config, { sub2api, runner, startScheduler: false });
+  seedRuntime(runtime, [{ id: '1', name: 'OpenAI Group', platform: 'openai' }]);
+  const http = await listen(app);
+  t.after(async () => {
+    await http.close();
+    await runtime.scheduler.close();
+    runtime.auth.close();
+    runtime.store.close();
+  });
+
+  const monitor = runtime.store.getMonitor(config.serviceOwnerId, '1');
+  const testCase = runtime.store.getMonitorTest(monitor);
+  for (let index = 0; index < 17; index += 1) {
+    const status = index === 0 ? 'degraded' : 'normal';
+    const run = runtime.store.createRun(monitor, testCase, 'manual');
+    runtime.store.markRunRunning(run.id);
+    runtime.store.completeRun(run.id, {
+      status,
+      quality: status,
+      reason: status,
+      source: 'test',
+      outputText: `<!doctype html><html><body>${status}</body></html>`
+    }, 60);
+  }
+
+  const auth = await session(http.baseUrl, 'token-b');
+  const response = await fetch(`${http.baseUrl}/api/results`, { headers: headers(auth) });
+  assert.equal(response.status, 200);
+  const group = (await response.json()).groups.find((item) => item.id === '1');
+  assert.equal(group.history_total, 17);
+  assert.equal(group.history.length, 17);
+  assert.equal(group.history.at(-1).status, 'degraded');
+  assert.equal(group.history.filter((run) => run.status === 'normal').length, 16);
+  assert.deepEqual(group.totals, { passed: 16, valid: 17, attempts: 17 });
 });
 
 test('administrators can delete selected or all completed group history without crossing boundaries', async (t) => {
@@ -603,6 +644,7 @@ test('administrators can delete selected or all completed group history without 
 
   const publicResults = await fetch(`${http.baseUrl}/api/results`, { headers: headers(admin) });
   const group = (await publicResults.json()).groups.find((item) => item.id === '1');
+  assert.equal(group.history_total, 1);
   assert.deepEqual(group.totals, { passed: 0, valid: 0, attempts: 0 });
   assert.equal(group.history.length, 1);
   assert.equal(group.history[0].status, 'queued');

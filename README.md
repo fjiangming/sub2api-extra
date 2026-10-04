@@ -10,6 +10,7 @@ Sub2API 的可插拔扩展服务集合。每个功能作为独立模块运行，
 | **供应商监控** | `ghcr.io/fjiangming/sub2api-extra:provider-monitor-latest` | `9871` | [README](provider-monitor/README.md) |
 | **运营数据与存储管理中心** | `ghcr.io/fjiangming/sub2api-extra:operations-center-latest` | `9872` | [README](operations-center/README.md) |
 | **降智检测** | `ghcr.io/fjiangming/sub2api-extra:degradation-detector-latest` | `9873` | [README](degradation-detector/README.md) |
+| **支付宝自动充值中心** | `ghcr.io/fjiangming/sub2api-extra:recharge-center-latest` | `9874` | [README](recharge-center/README.md) |
 
 > 💡 后续新增的功能模块会持续补充到此表中。
 
@@ -38,13 +39,17 @@ sub2api-extra/
 ├── operations-center/
 │   ├── compose.yaml
 │   └── .env
-└── degradation-detector/
+├── degradation-detector/
+│   ├── compose.yaml
+│   └── .env
+└── recharge-center/
     ├── compose.yaml
-    └── .env
+    ├── .env
+    └── secrets/                  # 仅个人码人工模式需要图片
 ```
 
 ```bash
-mkdir -p sub2api-extra/account-manager sub2api-extra/provider-monitor sub2api-extra/operations-center sub2api-extra/degradation-detector
+mkdir -p sub2api-extra/account-manager sub2api-extra/provider-monitor sub2api-extra/operations-center sub2api-extra/degradation-detector sub2api-extra/recharge-center/secrets
 cd sub2api-extra
 ```
 
@@ -60,13 +65,14 @@ include:
   - ./provider-monitor/compose.yaml
   - ./operations-center/compose.yaml
   - ./degradation-detector/compose.yaml
+  - ./recharge-center/compose.yaml
 ```
 
 #### `compose.services.env`（选择要启用的服务）
 
 ```dotenv
 # 逗号分隔的服务名；不需要的模块注释掉或去掉即可
-COMPOSE_PROFILES=account-manager,provider-monitor,operations-center,degradation-detector
+COMPOSE_PROFILES=account-manager,provider-monitor,operations-center,degradation-detector,recharge-center
 ```
 
 > 只部署其中一个模块时，保留对应名称即可，例如 `COMPOSE_PROFILES=provider-monitor`。
@@ -185,6 +191,10 @@ volumes:
   degradation-detector-data:
     name: sub2api-extra_degradation-detector-data
 ```
+
+#### `recharge-center/compose.yaml`
+
+充值中心默认代理 Sub2API 原生支付宝官方支付；也提供实验性的 `personal_transfer_auto`，以个人转账二维码、三分钟订单、自动随机备注和交易详情监听实现严格匹配，任何异常都停止放款并转人工。完整 Compose 定义已包含在仓库中，部署前参照[充值中心 README](recharge-center/README.md)选择模式并配置隔离凭据。
 
 ### 3. 配置模块环境变量
 
@@ -314,6 +324,26 @@ SUB2API_BASE_URL=http://host.docker.internal:8080
 
 被检平台、检测题、分组专用 Key 和每天固定检测时间均由管理员在独立管理页维护；`/results` 是无管理入口和检测按钮的只读结果页，`/admin/config` 由服务端实时限制为管理员访问。两个 Sub2API 自定义菜单的地址、凭据加密及文件预览说明见[降智检测 README](degradation-detector/README.md)。
 
+#### `recharge-center/.env`
+
+```dotenv
+NODE_ENV=production
+RECHARGE_CENTER_SECRET=替换为至少48字符的独立随机密钥
+RECHARGE_CENTER_PUBLIC_URL=https://pay.example.com
+RECHARGE_CENTER_PASSWORD_LOGIN_ENABLED=false
+RECHARGE_CENTER_PAYMENT_MODE=sub2api_official
+RECHARGE_CENTER_OFFICIAL_ALIPAY_INSTANCE_IDS=1
+RECHARGE_CENTER_QUICK_AMOUNTS=10,20,50,100,200,500,1000,2000,5000
+RECHARGE_CENTER_MIN_AMOUNT=1
+RECHARGE_CENTER_MAX_AMOUNT=1000000
+SUB2API_BASE_URL=http://host.docker.internal:8080
+SUB2API_PUBLIC_URL=https://api.example.com
+```
+
+官方自动模式由 Sub2API 创建动态订单并完成验签、主动查询和幂等履约，步骤见[官方自动充值接入手册](recharge-center/docs/alipay-official-auto-recharge-guide.md)。不申请官方产品时可选实验性的个人转账自动模式：无冲突按原金额支付，冲突时分配三分钟唯一分角，并用随机备注和最终交易详情做全字段匹配；它依赖非官方且可能变化的账单采集面，必须完成真实账户验收，不能宣称与官方接口同等级。完整部署与安全边界见[个人支付宝转账自动充值手册](recharge-center/docs/alipay-personal-qr-guide.md)。
+
+个人转账自动模式的 `RECHARGE_CENTER_MAX_ACTIVE_ORDERS` 是单用户并发上限，建议保持 `1`；系统另有不可调高的 100 笔全局金额占位硬上限。两者用途不同，不能通过放宽单用户上限替代全局容量控制。异常邮件与可选 Webhook 由充值中心自身投递，不依赖供应商监控或其他扩展服务。
+
 > 完整参数说明请参阅各模块的 `.env.example` 或模块 README。
 
 ### 4. 拉取镜像并启动
@@ -351,7 +381,7 @@ docker image prune -f  # (可选) 清理旧镜像
 
 ### 固定版本
 
-如需固定版本而不是跟随 `latest`，账号管理、供应商监控和运营中心修改对应模块 `.env` 中的镜像地址；降智检测直接修改 `degradation-detector/compose.yaml` 的 `image`：
+如需固定版本而不是跟随 `latest`，修改对应模块 `.env` 中的镜像地址；降智检测也可直接修改 `degradation-detector/compose.yaml` 的 `image`：
 
 ```dotenv
 # account-manager/.env
@@ -365,6 +395,9 @@ OPERATIONS_CENTER_IMAGE=ghcr.io/fjiangming/sub2api-extra:operations-center-1.2.3
 
 # degradation-detector/compose.yaml
 image: ghcr.io/fjiangming/sub2api-extra:degradation-detector-1.2.3
+
+# recharge-center/.env
+RECHARGE_CENTER_IMAGE=ghcr.io/fjiangming/sub2api-extra:recharge-center-1.2.3
 ```
 
 ---
@@ -377,6 +410,7 @@ image: ghcr.io/fjiangming/sub2api-extra:degradation-detector-1.2.3
 | 供应商监控 | `provider-monitor/.env` | [供应商监控 README](provider-monitor/README.md) |
 | 运营数据与存储管理中心 | `operations-center/.env` | [运营中心 README](operations-center/README.md) |
 | 降智检测 | `degradation-detector/.env` | [降智检测 README](degradation-detector/README.md) |
+| 支付宝自动充值中心 | `recharge-center/.env` | [充值中心 README](recharge-center/README.md) |
 
 修改连接环境变量后需重建容器；降智检测页面内的业务配置保存后立即生效：
 
@@ -388,10 +422,10 @@ docker compose --env-file compose.services.env up -d --no-build --remove-orphans
 
 ## 🐳 Docker 镜像自动构建
 
-仓库中的 [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml) 会构建四个模块并发布到同一个公开 GHCR 包：
+仓库中的 [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml) 会构建五个模块并发布到同一个公开 GHCR 包：
 
-- 推送到 `main` 或 `master`：构建并推送分支标签和提交 SHA 标签；默认分支同时更新 `latest`、`provider-monitor-latest`、`operations-center-latest`、`degradation-detector-latest`。
-- 推送 `v*.*.*` 标签：额外生成四个模块的版本标签，例如 `1.2.3`、`provider-monitor-1.2.3`、`operations-center-1.2.3`、`degradation-detector-1.2.3`。
+- 推送到 `main` 或 `master`：构建并推送分支标签和提交 SHA 标签；默认分支同时更新 `latest`、`provider-monitor-latest`、`operations-center-latest`、`degradation-detector-latest`、`recharge-center-latest`。
+- 推送 `v*.*.*` 标签：额外生成五个模块的版本标签，例如 `1.2.3`、`provider-monitor-1.2.3`、`operations-center-1.2.3`、`degradation-detector-1.2.3`、`recharge-center-1.2.3`。
 - Pull Request：只执行双架构构建校验，不推送镜像。
 - Actions 页面可通过 `workflow_dispatch` 手动触发。
 
@@ -451,6 +485,9 @@ COMPOSE_PROFILES=account-manager,provider-monitor,my-new-feature
 
 - [账号管理模块](account-manager/README.md) — 独立账号管理页面，OAuth 授权代理，用户隔离
 - [供应商监控模块](provider-monitor/README.md) — 供应商资产、基座渠道倍率对照、告警与自动化
+- [运营数据与存储管理中心](operations-center/README.md) — 成本分析、数据留存与安全清理
+- [降智检测模块](degradation-detector/README.md) — 模型能力定时检测与只读结果页
+- [支付宝自动充值中心](recharge-center/README.md) — 官方动态订单，或个人转账备注精确匹配、异常告警、幂等额度入账与运营收入联动
 
 ---
 

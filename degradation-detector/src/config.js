@@ -519,6 +519,7 @@ function defaultPlatformTest(platformName) {
 }
 
 function loadConfig(env = process.env) {
+  const historyLimit = 60;
   const projectRoot = path.resolve(__dirname, '..');
   const environment = String(env.NODE_ENV || 'development');
   const demoMode = parseBoolean(env.DEGRADATION_DETECTOR_DEMO_MODE, false);
@@ -558,8 +559,8 @@ function loadConfig(env = process.env) {
     maxResponseBytes: 20 * 1024 * 1024,
     schedulerPollSeconds: parseInteger(env.DEGRADATION_DETECTOR_SCHEDULER_POLL_SECONDS, 15, 5, 300),
     concurrency: 2,
-    historyLimit: 60,
-    listHistoryLimit: 10,
+    historyLimit,
+    listHistoryLimit: historyLimit,
     scheduleTimezone: 'Asia/Shanghai'
   };
 }

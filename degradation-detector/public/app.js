@@ -308,6 +308,22 @@ function historyChart(history) {
   }).join('');
 }
 
+function historyCaption(group) {
+  const displayed = group.history?.length || 0;
+  const total = Math.max(displayed, Number(group.history_total) || 0);
+  return total > displayed
+    ? `LATEST ${displayed} OF ${total} RESULTS`
+    : `PAST ${displayed} RESULTS`;
+}
+
+function historyAriaLabel(group) {
+  const displayed = group.history?.length || 0;
+  const total = Math.max(displayed, Number(group.history_total) || 0);
+  return total > displayed
+    ? `最近 ${displayed} 条检测记录，共 ${total} 条`
+    : `全部 ${displayed} 条检测记录`;
+}
+
 function renderGroups() {
   const groups = (state.data?.groups || []).filter((group) => !state.platform || group.platform === state.platform);
   $('group-count').textContent = `${groups.length} 个可检测分组`;
@@ -330,8 +346,8 @@ function renderGroups() {
       <div class="assessment-line" title="${escapeHtml(group.assessment?.reason || '暂无综合判定')}">
         <span>综合判定</span>${statusHtml(group.assessment?.status || 'unknown')}
       </div>
-      <div class="history-chart" aria-label="最近检测记录">${historyChart(group.history)}</div>
-      <div class="history-caption"><span>PAST ${group.history.length || 0} RESULTS</span><span>NOW</span></div>
+      <div class="history-chart" aria-label="${escapeHtml(historyAriaLabel(group))}">${historyChart(group.history)}</div>
+      <div class="history-caption"><span>${escapeHtml(historyCaption(group))}</span><span>NOW</span></div>
       <div class="group-actions">
         <span class="degradation-total" title="累计疑似降智次数 / 有效判定次数；异常和无法判定不计入">降智率 <b>${escapeHtml(degradationSummary(group.totals))}</b></span>
         <button class="yzai-pelican-btn detect-button" type="button" data-group-id="${escapeHtml(group.id)}" aria-haspopup="dialog">

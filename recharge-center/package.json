@@ -1,0 +1,35 @@
+{
+  "name": "sub2api-recharge-center",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Security-first Alipay recharge center for Sub2API",
+  "main": "src/server.js",
+  "files": [
+    "src/",
+    "tools/",
+    "public/",
+    "docs/",
+    ".env.example",
+    "compose.yaml",
+    "Dockerfile"
+  ],
+  "scripts": {
+    "start": "node --env-file=.env src/server.js",
+    "dev": "node --env-file=.env --watch src/server.js",
+    "test": "node --test --test-concurrency=1 tests/*.test.js",
+    "check": "node --check src/server.js && node --check src/config.js && node --check src/notification-service.js && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=20.18.1"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
+    "helmet": "^8.3.0",
+    "lucide": "^1.24.0",
+    "nodemailer": "^10.0.13",
+    "qrcode": "^1.5.4",
+    "zod": "^4.4.3"
+  }
+}

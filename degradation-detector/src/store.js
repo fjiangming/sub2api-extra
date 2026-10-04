@@ -899,14 +899,16 @@ class Store {
     const monitor = this.getMonitor(userId, groupId);
     const totals = this.db.prepare(`
       SELECT
-        COUNT(*) AS attempts,
-        SUM(CASE WHEN COALESCE(manual_status, status) IN ('normal', 'degraded') THEN 1 ELSE 0 END) AS valid,
-        SUM(CASE WHEN COALESCE(manual_status, status) = 'normal' THEN 1 ELSE 0 END) AS passed
+        COUNT(*) AS history_total,
+        SUM(CASE WHEN status NOT IN ('queued', 'running') THEN 1 ELSE 0 END) AS attempts,
+        SUM(CASE WHEN status NOT IN ('queued', 'running') AND COALESCE(manual_status, status) IN ('normal', 'degraded') THEN 1 ELSE 0 END) AS valid,
+        SUM(CASE WHEN status NOT IN ('queued', 'running') AND COALESCE(manual_status, status) = 'normal' THEN 1 ELSE 0 END) AS passed
       FROM runs
-      WHERE user_id = ? AND group_id = ? AND status NOT IN ('queued', 'running')
+      WHERE user_id = ? AND group_id = ?
     `).get(String(userId), String(groupId));
     return {
       monitor,
+      historyTotal: Number(totals?.history_total || 0),
       totals: {
         passed: Number(totals?.passed || 0),
         valid: Number(totals?.valid || 0),
