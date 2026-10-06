@@ -89,6 +89,17 @@ const ADAPTERS = [
   ['deepseek', 'DeepSeek'], ['openrouter', 'OpenRouter'], ['litellm', 'LiteLLM'],
   ['voapi-v2', 'VoAPI v2'], ['custom', '自定义 JSONPath']
 ];
+const NOTIFICATION_CHANNEL_LABELS = Object.freeze({
+  webhook: 'Webhook',
+  telegram: 'Telegram',
+  gotify: 'Gotify',
+  bark: 'iOS 提醒（Bark）',
+  email: 'Email',
+  wecom: '企业微信',
+  serverchan: 'Server酱（个人微信）',
+  dingtalk: '钉钉',
+  feishu: '飞书'
+});
 const DYNAMIC_ROUTE_RATE_ADAPTERS = new Set(['new-api']);
 const VIEW_META = {
   overview: ['资产总览', '供应商余额、状态与风险'],
@@ -1869,13 +1880,17 @@ function notificationChannelOptionsHtml(channels, selectedIds, scope) {
     return '<div class="notification-channel-empty"><i data-lucide="bell-off"></i><span>暂无可用通知通道</span></div>';
   }
   return visibleChannels.map((channel) => {
-    const icon = channel.type === 'email' ? 'mail' : 'send';
+    const icon = channel.type === 'email' ? 'mail' : channel.type === 'bark' ? 'smartphone' : 'send';
     const target = channel.type === 'email' && channel.config?.to
       ? ` · ${channel.config.to}`
       : '';
     const status = channel.enabled ? '' : ' · 已停用';
-    return `<label class="notification-channel-option"><input type="checkbox" data-notification-channel="${escapeHtml(scope)}" value="${escapeHtml(channel.id)}" ${selected.has(String(channel.id)) ? 'checked' : ''}><i data-lucide="${icon}"></i><span><strong>${escapeHtml(channel.name)}</strong><small>${escapeHtml(channel.type)}${escapeHtml(target)}${status}</small></span></label>`;
+    return `<label class="notification-channel-option"><input type="checkbox" data-notification-channel="${escapeHtml(scope)}" value="${escapeHtml(channel.id)}" ${selected.has(String(channel.id)) ? 'checked' : ''}><i data-lucide="${icon}"></i><span><strong>${escapeHtml(channel.name)}</strong><small>${escapeHtml(notificationChannelLabel(channel.type))}${escapeHtml(target)}${status}</small></span></label>`;
   }).join('');
+}
+
+function notificationChannelLabel(type) {
+  return NOTIFICATION_CHANNEL_LABELS[type] || type || '未知通道';
 }
 
 function selectedNotificationChannelIds(form, scope) {
@@ -2421,7 +2436,7 @@ async function renderSettings() {
   const lifecycleRows = lifecycle.items.map((item) => `<tr><td class="primary-cell"><strong>${escapeHtml(item.providerName)}</strong><small>${escapeHtml(item.fields.map((field) => field.name).join(', '))}</small></td><td>${badge(item.expiryStatus)}</td><td>${formatDate(item.rotatedAt || item.createdAt)}</td><td>${formatDate(item.expiresAt)}</td><td class="actions-cell"><button class="icon-button small" data-action="rotate-credential" data-id="${item.providerId}" title="轮换凭据" aria-label="轮换凭据"><i data-lucide="rotate-cw"></i></button></td></tr>`).join('');
   const targetRows = targets.items.map((item) => `<tr><td class="primary-cell"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.type)} · ${escapeHtml(item.credentialFields.map((field) => field.name).join(', ') || '无凭据')}</small></td><td>${badge(item.enabled ? 'enabled' : 'disabled')}</td><td>${item.lastStatus ? badge(item.lastStatus) : '-'}</td><td>${formatDate(item.lastBackupAt)}</td><td class="actions-cell"><button class="icon-button small" data-action="test-backup-target" data-id="${item.id}" title="测试并上传备份" aria-label="测试并上传备份"><i data-lucide="cloud-upload"></i></button><button class="icon-button small" data-action="edit-backup-target" data-id="${item.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-backup-target" data-id="${item.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></td></tr>`).join('');
   const remoteRunRows = remoteRuns.items.map((item) => `<tr><td>${escapeHtml(item.target_name || '已删除目标')}</td><td>${badge(item.status)}</td><td class="mono">${escapeHtml(item.filename)}</td><td class="numeric">${formatNumber((item.size || 0) / 1024 / 1024, 2)} MB</td><td>${formatDate(item.completed_at || item.created_at)}</td></tr>`).join('');
-  const channelRows = state.channels.map((channel) => `<tr><td class="primary-cell"><strong>${escapeHtml(channel.name)}</strong><small>${escapeHtml(channel.type)}</small></td><td>${channel.enabled ? badge('enabled') : badge('disabled')}</td><td>${channel.credentialFields.map((field) => escapeHtml(field.name)).join(', ') || '-'}</td><td class="actions-cell"><button class="icon-button small" data-action="test-channel" data-id="${channel.id}" title="测试" aria-label="测试"><i data-lucide="send"></i></button><button class="icon-button small" data-action="edit-channel" data-id="${channel.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-channel" data-id="${channel.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></td></tr>`).join('');
+  const channelRows = state.channels.map((channel) => `<tr><td class="primary-cell"><strong>${escapeHtml(channel.name)}</strong><small>${escapeHtml(notificationChannelLabel(channel.type))}</small></td><td>${channel.enabled ? badge('enabled') : badge('disabled')}</td><td>${channel.credentialFields.map((field) => escapeHtml(field.name)).join(', ') || '-'}</td><td class="actions-cell"><button class="icon-button small" data-action="test-channel" data-id="${channel.id}" title="测试" aria-label="测试"><i data-lucide="send"></i></button><button class="icon-button small" data-action="edit-channel" data-id="${channel.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-channel" data-id="${channel.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></td></tr>`).join('');
   const authStatus = sub2apiStatus.authentication?.available ? badge('healthy', sub2apiStatus.authentication.source) : badge('failed', '缺少凭据');
   const securityPanel = state.authentication?.passwordChangeSupported
     ? `<div class="section-header"><h2>管理员安全</h2></div><div class="panel"><div class="panel-body security-setting-row"><div class="security-setting-copy"><strong>本地管理员密码</strong><small>${escapeHtml(state.user?.name || 'admin')} · ${state.authentication.passwordChangedAt ? `最近修改 ${escapeHtml(formatDate(state.authentication.passwordChangedAt))}` : '尚未在网页中修改'}</small></div><button class="button" type="button" data-action="change-password"><i data-lucide="key-round"></i><span>修改密码</span></button></div></div>`
@@ -2457,7 +2472,7 @@ async function renderSettings() {
     <label><span>通知记录保留（天）</span><input name="notificationRetentionDays" type="number" min="1" max="3650" value="${settings.notificationRetentionDays}"></label>
     <label><span>配置漂移保留（天）</span><input name="assetChangeRetentionDays" type="number" min="1" max="3650" value="${settings.assetChangeRetentionDays}"></label>
   </div></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="button" data-action="save-system-settings"><i data-lucide="save"></i><span>保存系统参数</span></button></footer></form></section>`;
-  const notificationChannelsPanel = `<section class="section"><div class="section-header"><h2>通知通道</h2><div class="section-actions"><button class="button small primary" data-action="add-channel"><i data-lucide="plus"></i><span>添加通道</span></button></div></div>${channelRows ? `<div class="table-wrap"><table><thead><tr><th>通道</th><th>状态</th><th>凭据</th><th></th></tr></thead><tbody>${channelRows}</tbody></table></div>` : emptyState('send', '暂无通知通道', '添加 Webhook、Telegram、Gotify、Bark、个人微信或邮件')}<form class="panel section" id="built-in-balance-alert-routing-form"><div class="panel-header"><h2>内置余额预警</h2></div><div class="panel-body"><div class="notification-channel-options">${notificationChannelOptionsHtml(state.channels, settings.builtInBalanceAlertChannelIds, 'built-in-balance-alert')}</div></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存通道路由</span></button></footer></form></section>`;
+  const notificationChannelsPanel = `<section class="section"><div class="section-header"><h2>通知通道</h2><div class="section-actions"><button class="button small primary" data-action="add-channel"><i data-lucide="plus"></i><span>添加通道</span></button></div></div>${channelRows ? `<div class="table-wrap"><table><thead><tr><th>通道</th><th>状态</th><th>凭据</th><th></th></tr></thead><tbody>${channelRows}</tbody></table></div>` : emptyState('send', '暂无通知通道', '添加 iOS 提醒、Webhook、Telegram、个人微信或邮件')}<form class="panel section" id="built-in-balance-alert-routing-form"><div class="panel-header"><h2>内置余额预警</h2></div><div class="panel-body"><div class="notification-channel-options">${notificationChannelOptionsHtml(state.channels, settings.builtInBalanceAlertChannelIds, 'built-in-balance-alert')}</div></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存通道路由</span></button></footer></form></section>`;
   $('#main-content').innerHTML = `<section class="base-instance-bar"><div><span class="status-dot ${sub2apiStatus.authentication?.available ? 'healthy' : 'warning'}"></span><strong>基座 Sub2API</strong><small>${escapeHtml(sub2apiStatus.publicUrl || sub2apiStatus.baseUrl || '未配置')} · 最近检查 ${escapeHtml(timeAgo(sub2apiStatus.lastCheckedAt))}</small></div><div>${authStatus}</div></section><div class="split-layout"><form class="panel" id="settings-form"><div class="panel-header"><h2>运行设置</h2></div><div class="form-grid"><label><span>显示币种</span><input name="displayCurrency" value="${escapeHtml(settings.displayCurrency)}"></label><label><span>预测最短跨度（小时）</span><input name="forecastMinSpanHours" type="number" min="1" value="${settings.forecastMinSpanHours}"></label><label><span>对账容差</span><input name="reconciliationToleranceRatio" type="number" min="0" step="0.01" value="${settings.reconciliationToleranceRatio}"></label><label><span>综合倍率偏差容差</span><input name="sub2apiRateToleranceRatio" type="number" min="0" step="0.01" value="${settings.sub2apiRateToleranceRatio}"></label><label><span>价格刷新（小时）</span><input name="catalogRefreshHours" type="number" min="1" value="${settings.catalogRefreshHours}"></label><label><span>异常跌幅（%）</span><input name="anomalyDropPercent" type="number" min="1" value="${settings.anomalyDropPercent}"></label><label><span>异常突增倍数</span><input name="anomalySpikeMultiplier" type="number" min="1" step="0.1" value="${settings.anomalySpikeMultiplier}"></label><label class="span-2"><span>汇率（JSON）</span><textarea name="currencyRates" rows="4">${escapeHtml(JSON.stringify(settings.currencyRates, null, 2))}</textarea></label><label class="span-2"><span>官方模型单价（USD / 1M，JSON）</span><textarea name="officialModelPrices" rows="10">${escapeHtml(JSON.stringify(settings.officialModelPrices || {}, null, 2))}</textarea></label></div><footer class="dialog-actions"><span class="action-spacer"></span><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存设置</span></button></footer></form><div>${securityPanel}${adminApiKeyPanel}<div class="section-header section"><h2>数据导出</h2></div><div class="panel"><div class="panel-body action-grid"><button class="button" data-action="download" data-url="/api/exports/balances.csv" data-filename="provider-monitor-balances.csv"><i data-lucide="wallet-cards"></i><span>余额 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/usage.csv" data-filename="provider-monitor-usage.csv"><i data-lucide="activity"></i><span>用量 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/alerts.csv" data-filename="provider-monitor-alerts.csv"><i data-lucide="bell"></i><span>告警 CSV</span></button><button class="button" data-action="download" data-url="/api/exports/env" data-filename="provider-monitor-import.env"><i data-lucide="file-code-2"></i><span>环境变量模板</span></button><button class="button" data-action="export-disaster"><i data-lucide="lock-keyhole"></i><span>加密灾备包</span></button></div></div><div class="section-header section"><h2>SQLite 备份</h2></div><div class="table-wrap">${backupRows ? `<table><thead><tr><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${backupRows}</tbody></table>` : emptyState('database-backup', '暂无备份', '创建在线一致性备份')}</div></div></div><section class="section"><div class="section-header"><h2>远端备份目标</h2><div class="section-actions"><button class="button small" data-action="run-remote-backups"><i data-lucide="cloud-upload"></i><span>立即备份</span></button><button class="button small primary" data-action="add-backup-target"><i data-lucide="plus"></i><span>添加目标</span></button></div></div><div class="table-wrap">${targetRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>最近结果</th><th>最近备份</th><th></th></tr></thead><tbody>${targetRows}</tbody></table>` : emptyState('cloud-upload', '暂无远端目标', '添加本地目录、WebDAV 或 S3 兼容目标')}</div></section><section class="section"><div class="section-header"><h2>远端备份记录</h2></div><div class="table-wrap">${remoteRunRows ? `<table><thead><tr><th>目标</th><th>状态</th><th>文件</th><th class="numeric">大小</th><th>时间</th></tr></thead><tbody>${remoteRunRows}</tbody></table>` : emptyState('history', '暂无远端备份记录', '执行远端备份后显示')}</div></section><section class="section"><div class="section-header"><h2>凭据生命周期</h2></div><div class="table-wrap">${lifecycleRows ? `<table><thead><tr><th>供应商 / 字段</th><th>到期状态</th><th>最近轮换</th><th>凭据到期</th><th></th></tr></thead><tbody>${lifecycleRows}</tbody></table>` : emptyState('key-round', '暂无凭据', '添加供应商后显示')}</div></section>`;
   $('.split-layout', $('#main-content')).insertAdjacentHTML('afterend', `${systemSettingsPanel}${notificationChannelsPanel}`);
   $('#settings-form').addEventListener('submit', saveSettings);
@@ -3369,7 +3384,7 @@ async function renderTests() {
   state.channels = channels.items;
   setTopActions('<button class="button" data-action="refresh-view"><i data-lucide="refresh-cw"></i><span>刷新</span></button>');
   const providerOptions = state.providers.map((provider) => `<option value="${escapeHtml(provider.id)}">${escapeHtml(provider.name)} · ${escapeHtml(adapterLabel(provider.adapter_type))}${provider.rechargeUrl ? '' : ' · 未配置充值链接'}</option>`).join('');
-  const channelOptions = state.channels.map((channel) => `<option value="${escapeHtml(channel.id)}">${escapeHtml(channel.name)} · ${escapeHtml(channel.type)}${channel.enabled ? '' : ' · 停用'}</option>`).join('');
+  const channelOptions = state.channels.map((channel) => `<option value="${escapeHtml(channel.id)}">${escapeHtml(channel.name)} · ${escapeHtml(notificationChannelLabel(channel.type))}${channel.enabled ? '' : ' · 停用'}</option>`).join('');
   $('#main-content').innerHTML = `
     <div class="tabs test-suite-tabs" role="tablist" aria-label="测试项目">
       <button class="tab active" type="button" role="tab" aria-selected="true"><i data-lucide="bell-ring"></i><span>告警充值入口</span></button>
@@ -4119,7 +4134,55 @@ function openChannel(channel = null) {
   form.elements.id.value = channel?.id || ''; form.elements.name.value = channel?.name || '';
   form.elements.type.value = channel?.type || 'webhook'; form.elements.config.value = JSON.stringify(channel?.config || {}, null, 2);
   form.elements.credentials.value = '{}'; form.elements.enabled.checked = channel?.enabled ?? true;
+  form.dataset.hasBarkDeviceKey = String(Boolean(
+    channel?.credentialFields?.some((field) => field.name === 'deviceKey')
+  ));
+  form.elements.barkDeviceKey.value = '';
+  form.elements.barkEndpoint.value = channel?.config?.endpoint || 'https://api.day.app/push';
+  form.elements.barkLevel.value = channel?.config?.level || (channel ? 'active' : 'timeSensitive');
+  form.elements.barkSound.value = channel?.config?.sound ?? (channel ? '' : 'alarm');
+  form.elements.barkGroup.value = channel?.config?.group || 'Provider Monitor';
+  form.elements.barkTitlePrefix.value = channel?.config?.titlePrefix || '';
+  form.elements.barkCall.checked = Boolean(channel?.config?.call);
+  syncNotificationChannelFields(form);
   $('#notification-dialog').showModal(); icons();
+}
+
+function syncNotificationChannelFields(form) {
+  const isBark = form.elements.type.value === 'bark';
+  const barkFields = form.querySelector('[data-channel-fields="bark"]');
+  if (barkFields) barkFields.hidden = !isBark;
+  form.querySelectorAll('[data-channel-json-field]').forEach((field) => {
+    field.hidden = isBark;
+  });
+  form.elements.barkDeviceKey.required = isBark && form.dataset.hasBarkDeviceKey !== 'true';
+}
+
+function notificationChannelPayload(form) {
+  const type = form.elements.type.value;
+  const payload = {
+    name: form.elements.name.value.trim(),
+    type,
+    enabled: form.elements.enabled.checked,
+    config: JSON.parse(form.elements.config.value || '{}'),
+    credentials: JSON.parse(form.elements.credentials.value || '{}')
+  };
+  if (type !== 'bark') return payload;
+
+  const optionalConfig = (key, value) => {
+    const trimmed = value.trim();
+    if (trimmed) payload.config[key] = trimmed;
+    else delete payload.config[key];
+  };
+  payload.config.endpoint = form.elements.barkEndpoint.value.trim() || 'https://api.day.app/push';
+  payload.config.level = form.elements.barkLevel.value;
+  payload.config.call = form.elements.barkCall.checked;
+  optionalConfig('sound', form.elements.barkSound.value);
+  optionalConfig('group', form.elements.barkGroup.value);
+  optionalConfig('titlePrefix', form.elements.barkTitlePrefix.value);
+  const deviceKey = form.elements.barkDeviceKey.value.trim();
+  payload.credentials = deviceKey ? { deviceKey } : {};
+  return payload;
 }
 
 function openAutomation(rule = null) {
@@ -5151,9 +5214,13 @@ $('#alert-rule-form').addEventListener('submit', async (event) => {
 $('#notification-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const id = form.elements.id.value;
   try {
-    const payload = { name: form.elements.name.value, type: form.elements.type.value, enabled: form.elements.enabled.checked, config: JSON.parse(form.elements.config.value || '{}'), credentials: JSON.parse(form.elements.credentials.value || '{}') };
+    const payload = notificationChannelPayload(form);
     await api(id ? `/api/notification-channels/${id}` : '/api/notification-channels', { method: id ? 'PUT' : 'POST', body: payload }); $('#notification-dialog').close(); toast('通知通道已保存'); navigate('settings');
   } catch (error) { toast(error.message, 'error'); }
+});
+
+$('#notification-form').addEventListener('change', (event) => {
+  if (event.target.name === 'type') syncNotificationChannelFields(event.currentTarget);
 });
 
 $('#automation-form').addEventListener('submit', async (event) => {

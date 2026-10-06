@@ -547,6 +547,86 @@ test('notification dispatch sends a TTFT event only to selected channels', async
   );
 });
 
+test('Bark iOS channels send time-sensitive and critical alert options', async (t) => {
+  const requests = [];
+  const receiver = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push({
+      method: request.method,
+      url: request.url,
+      body: JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    });
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ code: 200, message: 'success' }));
+  });
+  await new Promise((resolve) => receiver.listen(0, '127.0.0.1', resolve));
+  const context = createTestContext();
+  t.after(async () => {
+    await new Promise((resolve) => receiver.close(resolve));
+    context.cleanup();
+  });
+
+  const notifications = new NotificationService({ db: context.db, config: context.config });
+  const channel = notifications.save({
+    name: 'iPhone critical alert',
+    type: 'bark',
+    config: {
+      endpoint: `http://127.0.0.1:${receiver.address().port}/push`,
+      group: 'Supplier alerts',
+      level: 'critical',
+      sound: 'alarm',
+      call: true,
+      titlePrefix: '[Production]'
+    },
+    credentials: { deviceKey: 'bark-device-key' }
+  });
+
+  const result = await notifications.test(channel.id);
+
+  assert.deepEqual(result, { channelId: channel.id, status: 'delivered' });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, 'POST');
+  assert.equal(requests[0].url, '/push');
+  assert.deepEqual(requests[0].body, {
+    device_key: 'bark-device-key',
+    title: '[Production] Provider Monitor INFO',
+    body: 'Provider Monitor notification test succeeded.',
+    group: 'Supplier alerts',
+    level: 'critical',
+    sound: 'alarm',
+    call: 1
+  });
+});
+
+test('Bark iOS channels require a Device Key and a supported reminder level', (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const notifications = new NotificationService({ db: context.db, config: context.config });
+
+  assert.throws(
+    () => notifications.save({
+      name: 'Missing key', type: 'bark', config: { level: 'timeSensitive' }
+    }),
+    (error) => error.code === 'NOTIFICATION_CREDENTIAL_INVALID'
+  );
+  assert.throws(
+    () => notifications.save({
+      name: 'Invalid level',
+      type: 'bark',
+      config: { level: 'alwaysVibrate' },
+      credentials: { deviceKey: 'bark-device-key' }
+    }),
+    (error) => error.code === 'NOTIFICATION_CONFIG_INVALID'
+  );
+  assert.doesNotThrow(() => notifications.save({
+    name: 'Legacy numeric call option',
+    type: 'bark',
+    config: { level: 'critical', call: 1 },
+    credentials: { deviceKey: 'legacy-bark-device-key' }
+  }));
+});
+
 test('email channels use authenticated TLS settings and send TTFT details', async (t) => {
   const context = createTestContext();
   t.after(() => context.cleanup());

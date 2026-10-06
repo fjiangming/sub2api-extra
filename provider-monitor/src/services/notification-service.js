@@ -6,6 +6,75 @@ const { maskValue, redactText } = require('../security/redaction');
 const { safeFetch } = require('../http/safe-fetch');
 const { nowIso, parseJson, stringifyJson } = require('../db');
 
+const BARK_LEVELS = new Set(['active', 'timeSensitive', 'critical', 'passive']);
+const BARK_CALL_VALUES = new Set([true, false, 1, 0, '1', '0']);
+
+function barkCallEnabled(value) {
+  return value === true || value === 1 || value === '1';
+}
+
+function validateBarkChannel(config = {}, credentials = {}) {
+  const deviceKey = typeof credentials.deviceKey === 'string'
+    ? credentials.deviceKey.trim()
+    : '';
+  if (!deviceKey) {
+    throw new AppError(
+      'NOTIFICATION_CREDENTIAL_INVALID',
+      'iOS reminder requires a Bark Device Key',
+      { status: 400 }
+    );
+  }
+
+  const level = config.level == null || config.level === '' ? 'active' : config.level;
+  if (!BARK_LEVELS.has(level)) {
+    throw new AppError(
+      'NOTIFICATION_CONFIG_INVALID',
+      'Bark reminder level must be active, timeSensitive, critical or passive',
+      { status: 400 }
+    );
+  }
+  if (config.call != null && !BARK_CALL_VALUES.has(config.call)) {
+    throw new AppError(
+      'NOTIFICATION_CONFIG_INVALID',
+      'Bark continuous alert must be a boolean or 0/1',
+      { status: 400 }
+    );
+  }
+  for (const [field, limit] of [['group', 120], ['sound', 80], ['titlePrefix', 80]]) {
+    if (config[field] != null && typeof config[field] !== 'string') {
+      throw new AppError(
+        'NOTIFICATION_CONFIG_INVALID',
+        `Bark ${field} must be a string`,
+        { status: 400 }
+      );
+    }
+    if (String(config[field] || '').length > limit) {
+      throw new AppError(
+        'NOTIFICATION_CONFIG_INVALID',
+        `Bark ${field} must not exceed ${limit} characters`,
+        { status: 400 }
+      );
+    }
+  }
+
+  const endpoint = String(config.endpoint || 'https://api.day.app/push').trim();
+  let endpointUrl;
+  try {
+    endpointUrl = new URL(endpoint);
+  } catch {
+    throw new AppError('NOTIFICATION_CONFIG_INVALID', 'Bark endpoint must be a valid URL', {
+      status: 400
+    });
+  }
+  if (!['http:', 'https:'].includes(endpointUrl.protocol) || endpointUrl.username || endpointUrl.password) {
+    throw new AppError(
+      'NOTIFICATION_CONFIG_INVALID',
+      'Bark endpoint must be an HTTP(S) URL without embedded credentials',
+      { status: 400 }
+    );
+  }
+}
+
 function normalizedRechargeUrl(event) {
   const value = event?.details?.rechargeUrl;
   if (!value) return null;
@@ -113,6 +182,20 @@ class NotificationService {
       : null;
     if (id && !existing) {
       throw new AppError('CHANNEL_NOT_FOUND', 'Notification channel was not found', { status: 404 });
+    }
+    const nextType = input.type ?? existing?.type;
+    const nextConfig = input.config ?? parseJson(existing?.config_json, {});
+    if (nextType === 'bark') {
+      let savedCredentials = {};
+      if (existing?.credential_id) {
+        const row = this.db.prepare('SELECT payload FROM encrypted_credentials WHERE id = ?')
+          .get(existing.credential_id);
+        if (row?.payload) savedCredentials = decryptJson(row.payload, this.config.secret);
+      }
+      const suppliedCredentials = input.credentials && Object.keys(input.credentials).length > 0
+        ? input.credentials
+        : savedCredentials;
+      validateBarkChannel(nextConfig, suppliedCredentials);
     }
     let credentialId = existing?.credential_id || null;
     this.db.transaction(() => {
@@ -378,12 +461,22 @@ class NotificationService {
       });
     }
     if (type === 'bark') {
-      return this.#postJson(config.endpoint || 'https://api.day.app/push', {
-        device_key: credentials.deviceKey,
+      validateBarkChannel(config, credentials);
+      const payload = {
+        device_key: credentials.deviceKey.trim(),
         title,
         body: message,
-        group: config.group || 'Provider Monitor'
-      });
+        group: config.group || 'Provider Monitor',
+        level: config.level || 'active'
+      };
+      if (config.sound) payload.sound = config.sound;
+      if (barkCallEnabled(config.call)) payload.call = 1;
+      const rechargeUrl = normalizedRechargeUrl(event);
+      if (rechargeUrl) payload.url = rechargeUrl;
+      return this.#postBark(
+        String(config.endpoint || 'https://api.day.app/push').trim(),
+        payload
+      );
     }
     if (type === 'wecom') {
       const markdownMessage = notificationMessage(event, true).replace(/\n/g, '\n>');
@@ -505,6 +598,30 @@ class NotificationService {
     }
   }
 
+  async #postBark(input, body) {
+    const response = await safeFetch(input, this.config, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      readBody: true
+    });
+    if (!response.ok) {
+      throw new AppError('NOTIFICATION_FAILED', `Bark returned HTTP ${response.status}`, {
+        status: 502,
+        retryable: response.status === 429 || response.status >= 500
+      });
+    }
+    const result = parseJson(response.body, null);
+    if (result?.code != null && Number(result.code) !== 200) {
+      const code = Number(result.code);
+      const reason = redactText(result.message || 'unknown response').slice(0, 300);
+      throw new AppError('NOTIFICATION_FAILED', `Bark rejected the notification: ${reason}`, {
+        status: 502,
+        retryable: code === 429 || code >= 500
+      });
+    }
+  }
+
   async #postForm(input, body, serviceName) {
     const response = await safeFetch(input, this.config, {
       method: 'POST',
@@ -530,5 +647,6 @@ class NotificationService {
 
 module.exports = {
   NotificationService,
-  notificationMessage
+  notificationMessage,
+  validateBarkChannel
 };

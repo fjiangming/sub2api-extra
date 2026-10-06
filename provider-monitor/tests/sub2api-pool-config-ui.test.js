@@ -19,7 +19,8 @@ test('Sub2API integration exposes the upstream Key pool batch editor', () => {
 });
 
 test('pool retry status code input accepts both comma styles, sorts and rejects invalid codes', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8')
+    .replace(/\r\n/g, '\n');
   const start = source.indexOf('function parseSub2ApiPoolRetryStatusCodes(value) {');
   const end = source.indexOf('\n\nasync function openSub2ApiPoolConfig()', start);
   assert.ok(start >= 0 && end > start);

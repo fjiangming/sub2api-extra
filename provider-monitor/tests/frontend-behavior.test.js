@@ -120,6 +120,55 @@ test('notification channels are managed globally and selected per feature', () =
   );
 });
 
+test('Bark is presented as a structured iOS reminder channel', () => {
+  const { context } = createBrowserContext();
+  const index = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  context.testBarkForm = {
+    elements: {
+      name: { value: ' On-call iPhone ' },
+      type: { value: 'bark' },
+      enabled: { checked: true },
+      config: { value: '{}' },
+      credentials: { value: '{}' },
+      barkEndpoint: { value: ' https://api.day.app/push ' },
+      barkLevel: { value: 'critical' },
+      barkCall: { checked: true },
+      barkSound: { value: ' alarm ' },
+      barkGroup: { value: ' Supplier alerts ' },
+      barkTitlePrefix: { value: ' [Production] ' },
+      barkDeviceKey: { value: ' bark-device-key ' }
+    }
+  };
+
+  const payload = JSON.parse(vm.runInContext(
+    'JSON.stringify(notificationChannelPayload(testBarkForm))',
+    context
+  ));
+
+  assert.equal(vm.runInContext("notificationChannelLabel('bark')", context), 'iOS 提醒（Bark）');
+  assert.match(index, /<option value="bark">iOS 提醒（Bark）<\/option>/);
+  for (const field of [
+    'barkDeviceKey', 'barkEndpoint', 'barkLevel', 'barkSound',
+    'barkGroup', 'barkTitlePrefix', 'barkCall'
+  ]) {
+    assert.match(index, new RegExp(`name="${field}"`));
+  }
+  assert.deepEqual(payload, {
+    name: 'On-call iPhone',
+    type: 'bark',
+    enabled: true,
+    config: {
+      endpoint: 'https://api.day.app/push',
+      level: 'critical',
+      call: true,
+      sound: 'alarm',
+      group: 'Supplier alerts',
+      titlePrefix: '[Production]'
+    },
+    credentials: { deviceKey: 'bark-device-key' }
+  });
+});
+
 test('account quality exposes metric and dual-source comparison rules from the dashboard', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
