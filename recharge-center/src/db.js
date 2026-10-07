@@ -5,7 +5,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { hmacHex, safeEqual, sealText } = require('./security');
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 const ORDER_STATUSES = [
   'awaiting_payment',
   'payment_reported',
@@ -124,6 +124,32 @@ CREATE INDEX IF NOT EXISTS payment_events_order_time
   ON payment_events(order_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS payment_events_match_time
   ON payment_events(match_status, received_at DESC);
+
+CREATE TABLE IF NOT EXISTS alipay_accountlog_entries (
+  id TEXT PRIMARY KEY,
+  account_log_hash TEXT NOT NULL UNIQUE,
+  account_log_last6 TEXT NOT NULL,
+  payload_hash TEXT NOT NULL,
+  alipay_order_hash TEXT,
+  merchant_order_hash TEXT,
+  amount_minor INTEGER NOT NULL,
+  paid_at TEXT NOT NULL,
+  direction TEXT NOT NULL CHECK (direction IN ('income', 'expense', 'unknown')),
+  memo_hash TEXT,
+  memo_last6 TEXT,
+  other_account_hash TEXT,
+  order_id TEXT REFERENCES recharge_orders(id) ON DELETE RESTRICT,
+  match_status TEXT NOT NULL CHECK (match_status IN ('matched', 'completed', 'duplicate', 'needs_attention', 'ignored')),
+  anomaly_code TEXT,
+  received_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS alipay_accountlog_entries_order_time
+  ON alipay_accountlog_entries(order_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS alipay_accountlog_entries_match_time
+  ON alipay_accountlog_entries(match_status, received_at DESC);
+CREATE INDEX IF NOT EXISTS alipay_accountlog_entries_amount_paid
+  ON alipay_accountlog_entries(amount_minor, paid_at);
 
 CREATE TABLE IF NOT EXISTS listener_nonces (
   nonce_hash TEXT PRIMARY KEY,
@@ -254,6 +280,34 @@ function migrate(db, secret) {
     WHERE payment_mode = 'personal_transfer_auto' AND payment_qr_source IS NULL;
   `);
   db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(7, appliedAt);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS alipay_accountlog_entries (
+      id TEXT PRIMARY KEY,
+      account_log_hash TEXT NOT NULL UNIQUE,
+      account_log_last6 TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      alipay_order_hash TEXT,
+      merchant_order_hash TEXT,
+      amount_minor INTEGER NOT NULL,
+      paid_at TEXT NOT NULL,
+      direction TEXT NOT NULL CHECK (direction IN ('income', 'expense', 'unknown')),
+      memo_hash TEXT,
+      memo_last6 TEXT,
+      other_account_hash TEXT,
+      order_id TEXT REFERENCES recharge_orders(id) ON DELETE RESTRICT,
+      match_status TEXT NOT NULL CHECK (match_status IN ('matched', 'completed', 'duplicate', 'needs_attention', 'ignored')),
+      anomaly_code TEXT,
+      received_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS alipay_accountlog_entries_order_time
+      ON alipay_accountlog_entries(order_id, received_at DESC);
+    CREATE INDEX IF NOT EXISTS alipay_accountlog_entries_match_time
+      ON alipay_accountlog_entries(match_status, received_at DESC);
+    CREATE INDEX IF NOT EXISTS alipay_accountlog_entries_amount_paid
+      ON alipay_accountlog_entries(amount_minor, paid_at);
+  `);
+  db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(8, appliedAt);
 }
 
 function nowIso() {

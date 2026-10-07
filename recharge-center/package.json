@@ -18,7 +18,7 @@
     "start": "node --env-file=.env src/server.js",
     "dev": "node --env-file=.env --watch src/server.js",
     "test": "node --test --test-concurrency=1 tests/*.test.js",
-    "check": "node --check src/server.js && node --check src/config.js && node --check src/notification-service.js && node --check src/qr-provisioning-service.js && node --check tools/listener-client.js && node --check tools/qr-provisioner-agent.js && node --check public/app.js"
+    "check": "node --check src/server.js && node --check src/config.js && node --check src/alipay-accountlog-client.js && node --check src/alipay-accountlog-poller.js && node --check src/notification-service.js && node --check src/qr-provisioning-service.js && node --check tools/listener-client.js && node --check tools/qr-provisioner-agent.js && node --check public/app.js"
   },
   "engines": {
     "node": ">=20.18.1"

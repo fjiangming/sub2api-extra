@@ -65,7 +65,7 @@ test('every example environment setting has purpose and source documentation', (
   }
 });
 
-test('minimal automatic-transfer environment contains only deployment-required settings', () => {
+test('minimal accountlog-static environment contains only deployment-required settings', () => {
   const root = path.resolve(__dirname, '..');
   const source = fs.readFileSync(path.join(root, '.env.minimal.example'), 'utf8');
   const assignments = Object.fromEntries(source
@@ -79,11 +79,10 @@ test('minimal automatic-transfer environment contains only deployment-required s
     'RECHARGE_CENTER_SECRET',
     'RECHARGE_CENTER_PUBLIC_URL',
     'RECHARGE_CENTER_TRUST_PROXY',
-    'RECHARGE_CENTER_TRANSFER_QR_SOURCE',
-    'RECHARGE_CENTER_QR_PROVISIONER_SECRET',
-    'RECHARGE_CENTER_LISTENER_SECRET',
-    'RECHARGE_CENTER_LISTENER_COLLECTOR_ID',
-    'RECHARGE_CENTER_ALIPAY_RECIPIENT_ID',
+    'RECHARGE_CENTER_ALIPAY_STATIC_QR_URL',
+    'RECHARGE_CENTER_ALIPAY_APP_ID',
+    'RECHARGE_CENTER_ALIPAY_APP_PRIVATE_KEY_PATH',
+    'RECHARGE_CENTER_ALIPAY_PUBLIC_KEY_PATH',
     'RECHARGE_CENTER_AUTO_MODE_VERIFIED',
     'SUB2API_BASE_URL',
     'SUB2API_PUBLIC_URL',
@@ -98,7 +97,7 @@ test('minimal automatic-transfer environment contains only deployment-required s
 
   assert.deepEqual(Object.keys(assignments), required);
   assert.equal(assignments.NODE_ENV, 'production');
-  assert.equal(assignments.RECHARGE_CENTER_PAYMENT_MODE, 'personal_transfer_auto');
+  assert.equal(assignments.RECHARGE_CENTER_PAYMENT_MODE, 'personal_accountlog_static');
   assert.equal(assignments.RECHARGE_CENTER_AUTO_MODE_VERIFIED, 'false');
-  assert.equal(assignments.RECHARGE_CENTER_TRANSFER_QR_SOURCE, 'collector');
+  assert.equal(assignments.RECHARGE_CENTER_ALIPAY_APP_PRIVATE_KEY_PATH, '/run/secrets/alipay-app-private-key.pem');
 });

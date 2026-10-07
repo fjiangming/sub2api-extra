@@ -1,20 +1,37 @@
 # Sub2API 独立充值中心
 
-独立运行在 `sub2api-extra` 中，按 Sub2API `0.2.13`（提交 `b8dece9000c68815a5b867ca5a1e6f236e173905`）的原生充值页实现页面结构、金额输入、支付宝方式卡、扫码、倒计时和结果状态。个人码模式固定实收与到账额度 `1:1`，因此对应原生页面的“无优惠、无手续费、倍率 1”状态。支持三种明确隔离的支付模式：
+独立运行在 `sub2api-extra` 中，按 Sub2API `0.2.13`（提交 `b8dece9000c68815a5b867ca5a1e6f236e173905`）的原生充值页实现页面结构、金额输入、支付宝方式卡、扫码、倒计时和结果状态。个人码模式固定实收与到账额度 `1:1`，因此对应原生页面的“无优惠、无手续费、倍率 1”状态。支持四种明确隔离的支付模式。
 
 首次部署请先阅读[部署与配置手册](docs/deployment-configuration.md)。该手册逐步说明个人支付宝二维码的取得、宿主机与容器路径、文件权限、每个 `.env` 参数的来源、HTTPS 反向代理、Sub2API 自定义菜单和健康检查。
 
-按照本文最终的个人转账自动方案部署时，可直接复制 [`.env.minimal.example`](.env.minimal.example) 为 `.env`。它只保留必须显式填写的 20 项；需要调整端口、金额、时效、官方模式或人工静态码模式时再使用完整的 [`.env.example`](.env.example)。
+按照当前 `personal_accountlog_static` 方案部署时，可直接复制 [`.env.minimal.example`](.env.minimal.example) 为 `.env`。它只保留必须显式填写的 19 项；需要调整端口、金额、轮询时效或其他模式时再使用完整的 [`.env.example`](.env.example)。
 
-> **二维码模式不能混用：** `personal_manual` 才读取 `recharge-center/secrets/alipay-personal-qr.png`；最终自动方案使用 `RECHARGE_CENTER_TRANSFER_QR_SOURCE=collector`，由受控支付宝设备为每单设置金额和随机备注并返回新的 `https://qr.alipay.com/fkx...`。该不透明地址不是模板，也不能靠服务器拼接参数得到。
+> **二维码模式不能混用：** `personal_manual` 读取静态图片；`personal_transfer_auto` 由受控设备生成逐单码；`personal_accountlog_static` 配置一个固定通用 `fkx...` 地址，由服务器生成带高熵订单号的中转二维码。静态码模式不能预填金额或备注，用户需在支付宝付款页输入页面显示的应付金额。
 
 | 模式 | 收款依据 | 自动入账 | 适用场景 |
 |---|---|---|---|
 | `sub2api_official` | 支付宝官方订单、验签回调和主动查询 | 是 | 生产首选 |
+| `personal_accountlog_static` | 固定个人收钱码 + 官方账务流水 RSA2 验签 + 唯一金额/时间窗 | 仅唯一匹配时 | 已实际获批账务接口时 |
 | `personal_transfer_auto` | 个人转账二维码 + 交易详情监听 + 随机备注 | 仅完整匹配时 | 无官方产品时的实验性方案 |
 | `personal_manual` | 个人静态收款码 + 管理员独立核账 | 管理员确认后 | 兼容/应急 |
 
-`personal_transfer_auto` 不会把个人收款码变成支付宝官方支付接口，也不具备官方回调同等级别的可信度。它采用严格失败关闭：备注、金额、支付宝交易号、收款账户、收入方向、成功状态和付款时间必须全部一致，否则不放款、进入人工队列并由充值中心自己的邮件/Webhook 通道通知。完整边界见[安全设计](docs/security.md)。
+`personal_accountlog_static` 通过官方接口取得并验签账务流水，但固定个人码仍不会变成“由应用创建的支付宝订单”：充值中心订单号不会进入支付宝账单，同额外部收入仍是无法彻底消除的误归属风险。完整申请、密钥、静态码、Compose、Nginx 和验收步骤见[个人静态码账务流水手册](docs/alipay-accountlog-static-guide.md)，边界见[安全设计](docs/security.md)。
+
+## 个人静态码账务流水模式
+
+### 用户流程
+
+1. 用户选择快捷金额或输入最多两位小数的自定义金额。
+2. 服务生成固定三分钟订单和 128 位随机订单号；原金额冲突时才分配 `+0.01..+0.99`。
+3. 服务端二维码包含充值中心 `/pay/<订单号>` 中转地址，不需要二维码生成设备。
+4. 用户扫码进入固定本人支付宝通用收钱码，并手动输入本单应付金额。
+5. 单实例轮询器调用 `alipay.data.bill.accountlog.query`，只接受 RSA2 验签成功的响应。
+6. 收入方向、精确分值、三分钟时间窗、唯一候选订单和未使用 `account_log_id` 全部通过后，复用固定兑换码与幂等键自动入账。
+7. 完整流水号、支付宝订单号、对方账号和备注不明文落库；Sub2API 兑换备注使用充值中心订单号和流水尾号联动审计。这里的 `RC-...` 不是 Sub2API 官方支付订单号，也不会进入支付宝账单。
+
+订单过期后应付金额继续隔离至少一个账务回看窗口，防止延迟流水匹配下一单。接口首次成功查询前、响应验签失败或最近成功查询过期时，`/readyz` 返回 503 并停止创建新订单。异常流水不放款，转人工并由本服务自己的邮件通道通知。
+
+> 支付宝 SDK 将该接口描述为“支付宝商家账户账务明细查询”。个人账号能否获得权限必须以开放平台控制台实际审核为准；浏览器已登录支付宝不能替代 OpenAPI 授权。
 
 ## 个人转账自动模式
 
@@ -194,7 +211,7 @@ X-Recharge-Signature: HMAC-SHA256(secret, method + "\n" + path + "\n" + timestam
 
 ## 其他模式
 
-官方模式配置和支付宝开放平台操作见[官方自动充值接入手册](docs/alipay-official-auto-recharge-guide.md)。人工个人码模式继续使用 `ALIPAY_QR_IMAGE_PATH`，流程也记录在个人码手册中。
+静态码账务流水模式的接口申请、RSA 密钥、固定码、中转二维码和验收见[个人静态码账务流水手册](docs/alipay-accountlog-static-guide.md)。官方模式配置见[官方自动充值接入手册](docs/alipay-official-auto-recharge-guide.md)；设备监听模式与人工个人码模式见[个人支付宝转账自动充值手册](docs/alipay-personal-qr-guide.md)。
 
 ## 启动与健康检查
 
@@ -204,6 +221,8 @@ curl https://pay.example.com/readyz
 ```
 
 `collector` 自动模式只有数据库、二维码代理心跳、到账监听心跳及监听器最近一次成功轮询都正常时才返回 200。任一设备登录失效、页面变化或字段缺失时必须发送 `ready=false` 或停止心跳；心跳间隔必须明显小于 `RECHARGE_CENTER_LISTENER_MAX_STALE_SECONDS`。
+
+`personal_accountlog_static` 不使用上述设备心跳。它只有在支付宝账务接口至少成功查询并验签一次、且最近成功时间未超过 `RECHARGE_CENTER_ACCOUNTLOG_STALE_SECONDS` 时才返回 200；任何查询、限流、解析或验签错误都会暂停新订单。
 
 ## 本地验证
 

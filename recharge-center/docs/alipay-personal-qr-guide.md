@@ -4,6 +4,8 @@
 
 > `personal_transfer_auto` 不读取 `ALIPAY_QR_IMAGE_PATH`，也不会改写已有静态码。最终方案使用 `collector`：受控支付宝设备按每笔订单的金额和随机备注生成一个新的 `https://qr.alipay.com/fkx...`，服务端校验并渲染成用户扫描的 PNG。
 
+如果你的开放平台应用已实际获批 `alipay.data.bill.accountlog.query`，并接受用户在支付宝付款页手动输入应付金额，可改用不需要常在线设备的 [`personal_accountlog_static`](alipay-accountlog-static-guide.md)。两种模式的到账证据、二维码和配置不能混用。
+
 ## 1. 可行性结论
 
 本项目已经实现 `personal_transfer_auto` 后端链路：三分钟订单、同额优先/冲突分角、随机备注、监听心跳、HMAC 防重放、交易详情匹配、Sub2API 幂等入账、异常人工队列和充值中心独立通知。

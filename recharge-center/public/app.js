@@ -202,6 +202,10 @@ function isPersonalAutoMode() {
   return state.config?.paymentMode === 'personal_transfer_auto';
 }
 
+function isAccountLogStaticMode() {
+  return state.config?.paymentMode === 'personal_accountlog_static';
+}
+
 function isManualAdmin() {
   return !isOfficialMode() && state.session?.user?.role === 'admin';
 }
@@ -235,12 +239,16 @@ function showApp() {
   $('workspace-tabs').hidden = !admin;
   $('security-mode-label').textContent = isOfficialMode()
     ? '自动验签入账'
-    : isPersonalAutoMode() ? '自动备注匹配' : '人工账单核验';
+    : isPersonalAutoMode()
+      ? '自动备注匹配'
+      : isAccountLogStaticMode() ? '账务流水匹配' : '人工账单核验';
   $('security-mode').title = isOfficialMode()
     ? '支付宝官方订单查询与签名回调双路径确认'
     : isPersonalAutoMode()
       ? '仅在交易详情、金额、备注、收款账户、状态和付款时间全部匹配时自动入账'
-      : '付款到账后由管理员独立核验支付宝账单';
+      : isAccountLogStaticMode()
+        ? '仅在支付宝官方账务响应验签、收入方向、唯一金额、三分钟时间窗和流水去重全部通过时自动入账'
+        : '付款到账后由管理员独立核验支付宝账单';
   $('history-description').textContent = isAutomaticMode()
     ? '最近的支付宝自动充值订单'
     : '最近的个人支付宝充值订单';
@@ -448,8 +456,8 @@ async function renderActiveOrder(order, forceQr = false) {
       : '付款已核验，但入账结果需要管理员恢复处理，请勿重复付款。';
   }
   if (reported) {
-    $('reported-state-title').textContent = isPersonalAutoMode() ? '订单转入人工处理' : '等待到账核验';
-    $('reported-state-text').textContent = isPersonalAutoMode()
+    $('reported-state-title').textContent = isAutomaticMode() ? '订单转入人工处理' : '等待到账核验';
+    $('reported-state-text').textContent = isAutomaticMode()
       ? '自动匹配未通过完整校验，系统未放款。管理员将依据支付宝原始账单处理。'
       : '付款信息已提交。管理员将从支付宝账单独立核对，请勿再次付款。';
   }
@@ -476,6 +484,8 @@ async function renderActiveOrder(order, forceQr = false) {
       ? (order.qrAvailable
           ? '打开支付宝扫一扫，确认金额和自动备注均未被修改后完成付款。'
           : '正在通过受控设备生成本单支付宝收钱码。')
+      : isAccountLogStaticMode()
+        ? '打开支付宝扫一扫，在付款页准确输入本单应付金额；请在倒计时结束前完成付款。'
       : '打开支付宝扫一扫，完成后在下方填写账单中的交易号。';
   $('countdown-hint').textContent = isAutomaticMode() ? '等待到账自动确认...' : '订单过期后请勿继续付款';
   startCountdown(order);
@@ -779,7 +789,7 @@ function renderReviewDetails(data) {
     ['用户', `${order.userEmailMasked} · ID ${order.userId}`],
     ['应付金额', `¥${formatMoney(order.payableAmount)}`],
     ['入账额度', `¥${formatMoney(order.creditAmount)}`],
-    ['用户交易尾号', order.tradeLast6 || '-'],
+    ['支付凭证尾号', order.tradeLast6 || '-'],
     ['有效付款时段', `${formatDateTime(order.createdAt)} 至 ${formatDateTime(order.expiresAt)}`],
     ['付款提交', formatDate(order.paymentReportedAt)],
     ['当前状态', statusLabel(order.status)]

@@ -17,6 +17,8 @@ const {
 } = require('./security');
 
 const ACTIVE_STATUSES = ['awaiting_payment', 'payment_reported', 'fulfilling', 'needs_attention'];
+const TRANSFER_AUTO_MODE = 'personal_transfer_auto';
+const ACCOUNTLOG_STATIC_MODE = 'personal_accountlog_static';
 const REJECTION_REASONS = new Set([
   'trade_not_found',
   'amount_mismatch',
@@ -34,9 +36,13 @@ function addHours(date, hours) {
   return new Date(date.getTime() + hours * 3600000);
 }
 
+function addSeconds(date, seconds) {
+  return new Date(date.getTime() + seconds * 1000);
+}
+
 function randomOrderNo(now = new Date()) {
   const date = now.toISOString().slice(2, 10).replace(/-/g, '');
-  return `RC-${date}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+  return `RC-${date}-${crypto.randomBytes(16).toString('hex').toUpperCase()}`;
 }
 
 function randomRedeemCode() {
@@ -45,6 +51,14 @@ function randomRedeemCode() {
 
 function randomPaymentMemo() {
   return `S2-${crypto.randomBytes(12).toString('base64url')}`;
+}
+
+function normalizeAccountLogId(value, status = 400) {
+  const normalized = String(value || '').trim();
+  if (!/^[A-Za-z0-9_-]{6,256}$/.test(normalized)) {
+    throw new AppError('ALIPAY_ACCOUNTLOG_ID_INVALID', '请输入支付宝账务明细中的完整账务流水号', { status });
+  }
+  return normalized;
 }
 
 function publicOrder(row, options = {}) {
@@ -72,9 +86,12 @@ function publicOrder(row, options = {}) {
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
-  if (row.payment_mode === 'personal_transfer_auto') {
+  if ([TRANSFER_AUTO_MODE, ACCOUNTLOG_STATIC_MODE].includes(row.payment_mode)) {
     order.qrStatus = row.payment_qr_status || 'ready';
     order.qrAvailable = order.qrStatus === 'ready';
+  }
+  if (row.payment_mode === ACCOUNTLOG_STATIC_MODE && options.publicUrl) {
+    order.payUrl = `${options.publicUrl}/pay/${encodeURIComponent(row.order_no)}`;
   }
   if (options.admin) {
     order.fulfillmentAttempts = row.fulfillment_attempts;
@@ -101,10 +118,55 @@ class OrderService {
         occurred_at, order_id, actor_type, actor_id, event_type, request_id, ip_hash, metadata_json
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
+    if (config.accountLogStaticMode || config.paymentMode === ACCOUNTLOG_STATIC_MODE) {
+      this.expireAwaiting();
+      this.#bindAccountLogIdentity();
+    }
   }
 
   #now() {
     return this.clock();
+  }
+
+  #bindAccountLogIdentity() {
+    const metadataKey = 'accountlog_static_identity_v1';
+    const fingerprint = hmacHex(
+      this.config.secret,
+      'accountlog-static-identity:v1',
+      `${this.config.alipayAppId || ''}\n${this.config.alipayStaticQrUrl || ''}`
+    );
+    const now = this.#now().toISOString();
+    this.db.transaction(() => {
+      const existing = this.db.prepare('SELECT value FROM service_metadata WHERE key = ?').get(metadataKey);
+      if (!existing) {
+        this.db.prepare(`
+          INSERT INTO service_metadata(key, value, updated_at) VALUES (?, ?, ?)
+        `).run(metadataKey, fingerprint, now);
+        return;
+      }
+      if (safeEqual(existing.value, fingerprint)) return;
+      const activeOrders = this.db.prepare(`
+        SELECT COUNT(*) AS count FROM recharge_orders
+        WHERE payment_mode = ? AND status IN (${ACTIVE_STATUSES.map(() => '?').join(', ')})
+      `).get(ACCOUNTLOG_STATIC_MODE, ...ACTIVE_STATUSES).count;
+      const isolatedAmounts = this.db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM amount_reservations reservations
+        JOIN recharge_orders orders ON orders.id = reservations.order_id
+        WHERE orders.payment_mode = ? AND reservations.expires_at > ?
+      `).get(ACCOUNTLOG_STATIC_MODE, now).count;
+      if (activeOrders > 0 || isolatedAmounts > 0) {
+        throw new Error('固定支付宝收钱码或账务 AppID 已变化；存在活动订单或隔离金额，已拒绝切换收款身份');
+      }
+      const changed = this.db.prepare(`
+        UPDATE service_metadata SET value = ?, updated_at = ? WHERE key = ? AND value = ?
+      `).run(fingerprint, now, metadataKey, existing.value);
+      if (changed.changes !== 1) throw new Error('支付宝收款身份绑定发生并发变化，已拒绝启动');
+    })();
+  }
+
+  #publicOrder(row, options = {}) {
+    return publicOrder(row, { ...options, publicUrl: this.config.publicUrl });
   }
 
   #audit(orderId, actor, eventType, request, metadata = {}) {
@@ -169,12 +231,14 @@ class OrderService {
         throw new AppError('ACTIVE_ORDER_EXISTS', '请先处理当前充值订单', { status: 409 });
       }
       let payableMinor = requestedMinor;
-      const automatic = this.config.paymentMode === 'personal_transfer_auto';
+      const transferAutomatic = this.config.paymentMode === TRANSFER_AUTO_MODE;
+      const accountLogAutomatic = this.config.paymentMode === ACCOUNTLOG_STATIC_MODE;
+      const automatic = transferAutomatic || accountLogAutomatic;
       if (automatic) {
         this.db.prepare('DELETE FROM amount_reservations WHERE expires_at <= ?').run(createdAt);
         const reservationCount = this.db.prepare('SELECT COUNT(*) AS count FROM amount_reservations').get().count;
         if (reservationCount >= this.config.autoReservationLimit) {
-          throw new AppError('AUTO_ORDER_CAPACITY_REACHED', '当前付款订单较多，请三分钟后再试', { status: 503 });
+          throw new AppError('AUTO_ORDER_CAPACITY_REACHED', '当前付款订单较多，请稍后再试', { status: 503 });
         }
         const reserved = new Set(this.db.prepare(`
           SELECT payable_amount_minor FROM amount_reservations WHERE expires_at > ?
@@ -189,7 +253,7 @@ class OrderService {
           }
         }
         if (payableMinor == null) {
-          throw new AppError('AUTO_AMOUNT_UNAVAILABLE', '该金额附近暂无可用付款标识，请三分钟后再试', { status: 503 });
+          throw new AppError('AUTO_AMOUNT_UNAVAILABLE', '该金额附近暂无可用付款标识，请稍后再试', { status: 503 });
         }
       }
       const creditMicros = payableMinor * 1000000;
@@ -203,11 +267,11 @@ class OrderService {
       };
       const redeemCode = randomRedeemCode();
       const sealedRedeemCode = sealText(this.config.secret, 'redeem-code:v1', redeemCode, row.id);
-      const paymentMemo = automatic ? randomPaymentMemo() : null;
-      const paymentQrSource = automatic ? (this.config.transferQrSource || 'template') : null;
-      const paymentQrStatus = automatic
+      const paymentMemo = transferAutomatic ? randomPaymentMemo() : null;
+      const paymentQrSource = transferAutomatic ? (this.config.transferQrSource || 'template') : null;
+      const paymentQrStatus = transferAutomatic
         ? (paymentQrSource === 'collector' ? 'pending' : 'ready')
-        : null;
+        : accountLogAutomatic ? 'ready' : null;
       const paymentMemoHash = paymentMemo
         ? hmacHex(this.config.secret, 'payment-memo:v1', paymentMemo)
         : null;
@@ -230,11 +294,14 @@ class OrderService {
         row.expiresAt, createdAt, createdAt
       );
       if (automatic) {
+        const reservationExpiresAt = accountLogAutomatic
+          ? addSeconds(new Date(row.expiresAt), this.config.accountLogAmountQuarantineSeconds).toISOString()
+          : row.expiresAt;
         this.db.prepare(`
           INSERT INTO amount_reservations(payable_amount_minor, order_id, expires_at, created_at)
           VALUES (?, ?, ?, ?)
-        `).run(payableMinor, row.id, row.expiresAt, createdAt);
-        if (paymentQrSource === 'collector') {
+        `).run(payableMinor, row.id, reservationExpiresAt, createdAt);
+        if (transferAutomatic && paymentQrSource === 'collector') {
           this.db.prepare(`
             INSERT INTO qr_provision_jobs(id, order_id, status, created_at, updated_at)
             VALUES (?, ?, 'queued', ?, ?)
@@ -254,7 +321,7 @@ class OrderService {
       return this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(row.id);
     });
     try {
-      return publicOrder(createTransaction());
+      return this.#publicOrder(createTransaction());
     } catch (error) {
       if (String(error?.code || '').startsWith('SQLITE_CONSTRAINT')) {
         throw new AppError('ORDER_CREATE_CONFLICT', '订单创建冲突，请重试', { status: 409 });
@@ -268,14 +335,14 @@ class OrderService {
     return this.db.prepare(`
       SELECT * FROM recharge_orders WHERE user_id = ?
       ORDER BY created_at DESC LIMIT 50
-    `).all(userId).map((row) => publicOrder(row));
+    `).all(userId).map((row) => this.#publicOrder(row));
   }
 
   getForUser(orderId, userId) {
     this.expireAwaiting();
     const row = this.db.prepare('SELECT * FROM recharge_orders WHERE id = ? AND user_id = ?').get(orderId, userId);
     if (!row) throw new AppError('ORDER_NOT_FOUND', '订单不存在', { status: 404 });
-    return publicOrder(row);
+    return this.#publicOrder(row);
   }
 
   canAccessQr(orderId, user) {
@@ -293,10 +360,16 @@ class OrderService {
   paymentQrData(orderId, user) {
     this.canAccessQr(orderId, user);
     const row = this.db.prepare(`
-      SELECT id, payable_amount_minor, payment_memo_ciphertext, payment_qr_source,
+      SELECT id, order_no, payment_mode, payable_amount_minor, payment_memo_ciphertext, payment_qr_source,
              payment_qr_status, payment_qr_ciphertext
       FROM recharge_orders WHERE id = ?
     `).get(orderId);
+    if (row?.payment_mode === ACCOUNTLOG_STATIC_MODE) {
+      if (!this.config.publicUrl) {
+        throw new AppError('PAYMENT_QR_UNAVAILABLE', '充值中心公网地址未配置', { status: 503 });
+      }
+      return { relayUrl: `${this.config.publicUrl}/pay/${encodeURIComponent(row.order_no)}` };
+    }
     if (!row?.payment_memo_ciphertext) return null;
     if (row.payment_qr_source === 'collector') {
       if (row.payment_qr_status === 'pending') {
@@ -313,6 +386,25 @@ class OrderService {
       amount: minorToDecimal(row.payable_amount_minor),
       memo: openText(this.config.secret, 'payment-memo:v1', row.payment_memo_ciphertext, row.id)
     };
+  }
+
+  openPaymentRelay(orderNo, request = {}) {
+    if (this.config.paymentMode !== ACCOUNTLOG_STATIC_MODE ||
+        !/^RC-\d{6}-[A-F0-9]{32}$/.test(String(orderNo || ''))) {
+      throw new AppError('PAYMENT_RELAY_NOT_FOUND', '付款入口不存在或已失效', { status: 404 });
+    }
+    this.expireAwaiting();
+    const row = this.db.prepare(`
+      SELECT id, status, expires_at, payment_mode FROM recharge_orders WHERE order_no = ?
+    `).get(orderNo);
+    if (!row || row.payment_mode !== ACCOUNTLOG_STATIC_MODE) {
+      throw new AppError('PAYMENT_RELAY_NOT_FOUND', '付款入口不存在或已失效', { status: 404 });
+    }
+    if (row.status !== 'awaiting_payment' || Date.parse(row.expires_at) <= this.#now().getTime()) {
+      throw new AppError('PAYMENT_RELAY_EXPIRED', '付款入口已失效，请返回充值中心重新创建订单', { status: 410 });
+    }
+    this.#audit(row.id, { type: 'system', id: 'payment-relay' }, 'PAYMENT_RELAY_OPENED', request);
+    return this.config.alipayStaticQrUrl;
   }
 
   reportPayment(orderId, user, tradeNo, request = {}) {
@@ -349,7 +441,7 @@ class OrderService {
       this.#audit(row.id, { type: 'user', id: user.id }, 'PAYMENT_REPORTED', request, { tradeLast6: tail });
       return this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(row.id);
     });
-    return publicOrder(transaction());
+    return this.#publicOrder(transaction());
   }
 
   async acceptAutomaticPayment(input, request = {}) {
@@ -586,6 +678,258 @@ class OrderService {
     }
   }
 
+  async acceptAccountLogEntry(input, request = {}) {
+    if (this.config.paymentMode !== ACCOUNTLOG_STATIC_MODE) {
+      throw new AppError('ACCOUNTLOG_PAYMENT_DISABLED', '支付宝账务流水自动匹配未启用', { status: 404 });
+    }
+    const accountLogId = normalizeAccountLogId(input?.accountLogId, 502);
+    const amountMinor = Number(input.amountMinor);
+    if (!Number.isSafeInteger(amountMinor) || Math.abs(amountMinor) > Number.MAX_SAFE_INTEGER / 1000000) {
+      throw new AppError('ALIPAY_ACCOUNTLOG_AMOUNT_INVALID', '支付宝账务流水金额无效', { status: 502 });
+    }
+    const paidAtTimestamp = Date.parse(String(input.paidAt || ''));
+    if (!Number.isFinite(paidAtTimestamp)) {
+      throw new AppError('ALIPAY_ACCOUNTLOG_TIME_INVALID', '支付宝账务流水时间无效', { status: 502 });
+    }
+    const paidAt = new Date(paidAtTimestamp).toISOString();
+    const direction = ['income', 'expense'].includes(input.direction) ? input.direction : 'unknown';
+    const optional = (value, maximum = 4096) => {
+      const text = value == null ? '' : String(value).trim();
+      if (text.length > maximum || text.includes('\0')) {
+        throw new AppError('ALIPAY_ACCOUNTLOG_FIELD_INVALID', '支付宝账务流水字段超出安全限制', { status: 502 });
+      }
+      return text;
+    };
+    const alipayOrderNo = optional(input.alipayOrderNo, 256);
+    const merchantOrderNo = optional(input.merchantOrderNo, 256);
+    const memo = optional(input.memo);
+    const otherAccount = optional(input.otherAccount, 512);
+    const billSource = optional(input.billSource, 256);
+    const type = optional(input.type, 256);
+    const receivedAt = this.#now().toISOString();
+    const accountLogHash = hmacHex(this.config.secret, 'alipay-account-log:v1', accountLogId);
+    const tradeHash = hmacHex(this.config.secret, 'alipay-trade:v1', accountLogId);
+    const accountLogLast6 = accountLogId.slice(-6);
+    const payloadHash = hmacHex(this.config.secret, 'alipay-account-log-payload:v1', JSON.stringify({
+      accountLogId, alipayOrderNo, merchantOrderNo, amountMinor, paidAt, direction,
+      memo, otherAccount, billSource, type
+    }));
+    const hashOptional = (domain, value) => value ? hmacHex(this.config.secret, domain, value) : null;
+    this.expireAwaiting();
+
+    const prepared = this.db.transaction(() => {
+      const existing = this.db.prepare(`
+        SELECT * FROM alipay_accountlog_entries WHERE account_log_hash = ?
+      `).get(accountLogHash);
+      if (existing) {
+        const conflict = !safeEqual(existing.payload_hash, payloadHash);
+        if (conflict) {
+          this.db.prepare(`
+            UPDATE alipay_accountlog_entries
+            SET match_status = 'needs_attention', anomaly_code = 'ACCOUNT_LOG_ID_CONFLICT', updated_at = ?
+            WHERE id = ?
+          `).run(receivedAt, existing.id);
+          this.#audit(existing.order_id || null, { type: 'system', id: 'alipay-accountlog' },
+            'ACCOUNTLOG_PAYMENT_NEEDS_ATTENTION', request, {
+              anomalyCode: 'ACCOUNT_LOG_ID_CONFLICT', accountLogLast6
+            });
+        }
+        return {
+          kind: conflict ? 'anomaly' : 'duplicate',
+          anomalyCode: conflict ? 'ACCOUNT_LOG_ID_CONFLICT' : existing.anomaly_code,
+          entry: this.db.prepare('SELECT * FROM alipay_accountlog_entries WHERE id = ?').get(existing.id),
+          order: existing.order_id
+            ? this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(existing.order_id)
+            : null
+        };
+      }
+
+      let anomalyCode = null;
+      if (direction !== 'income') anomalyCode = 'PAYMENT_DIRECTION_INVALID';
+      else if (amountMinor <= 0) anomalyCode = 'PAYMENT_AMOUNT_INVALID';
+      else if (paidAtTimestamp > Date.parse(receivedAt) + 60000) anomalyCode = 'PAYMENT_TIME_IN_FUTURE';
+      else if (paidAtTimestamp < Date.parse(receivedAt) - this.config.accountLogLookbackSeconds * 1000) {
+        anomalyCode = 'PAYMENT_EVENT_TOO_OLD';
+      }
+
+      const candidates = amountMinor > 0 ? this.db.prepare(`
+        SELECT * FROM recharge_orders
+        WHERE payment_mode = ? AND payable_amount_minor = ?
+          AND created_at <= ? AND expires_at >= ?
+        ORDER BY created_at, id
+      `).all(ACCOUNTLOG_STATIC_MODE, amountMinor, paidAt, paidAt) : [];
+      let order = candidates.length === 1 ? candidates[0] : null;
+      if (!anomalyCode && candidates.length === 0) anomalyCode = 'ACCOUNTLOG_ORDER_NOT_FOUND';
+      else if (!anomalyCode && candidates.length > 1) anomalyCode = 'ACCOUNTLOG_ORDER_AMBIGUOUS';
+      if (!anomalyCode && !['awaiting_payment', 'expired'].includes(order.status)) {
+        anomalyCode = 'ORDER_STATE_INVALID';
+      }
+      if (!anomalyCode) {
+        const anotherPayment = this.db.prepare(`
+          SELECT id FROM alipay_accountlog_entries
+          WHERE order_id = ? AND account_log_hash <> ?
+          LIMIT 1
+        `).get(order.id, accountLogHash);
+        if (anotherPayment) anomalyCode = 'MULTIPLE_PAYMENTS_FOR_ORDER';
+      }
+      const priorTradeOrder = this.db.prepare(`
+        SELECT id FROM recharge_orders WHERE trade_hash = ? AND (? IS NULL OR id <> ?)
+      `).get(tradeHash, order?.id || null, order?.id || null);
+      if (priorTradeOrder) anomalyCode = 'PAYMENT_TRADE_ALREADY_USED';
+
+      const entryId = crypto.randomUUID();
+      this.db.prepare(`
+        INSERT INTO alipay_accountlog_entries(
+          id, account_log_hash, account_log_last6, payload_hash, alipay_order_hash,
+          merchant_order_hash, amount_minor, paid_at, direction, memo_hash, memo_last6,
+          other_account_hash, order_id, match_status, anomaly_code, received_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        entryId, accountLogHash, accountLogLast6, payloadHash,
+        hashOptional('alipay-order:v1', alipayOrderNo),
+        hashOptional('merchant-order:v1', merchantOrderNo),
+        amountMinor, paidAt, direction,
+        hashOptional('alipay-accountlog-memo:v1', memo), null,
+        hashOptional('alipay-other-account:v1', otherAccount), order?.id || null,
+        anomalyCode ? 'needs_attention' : 'matched', anomalyCode, receivedAt, receivedAt
+      );
+
+      if (anomalyCode) {
+        const affected = order ? [order] : candidates;
+        for (const candidate of affected) {
+          if (!['awaiting_payment', 'expired', 'cancelled'].includes(candidate.status)) continue;
+          const reviewExpiresAt = addHours(this.#now(), this.config.reviewTtlHours).toISOString();
+          const attachEvidence = affected.length === 1 && !priorTradeOrder;
+          this.db.prepare(`
+            UPDATE recharge_orders SET
+              status = 'payment_reported',
+              trade_hash = CASE WHEN ? THEN ? ELSE trade_hash END,
+              trade_last6 = CASE WHEN ? THEN ? ELSE trade_last6 END,
+              payment_reported_at = ?, alipay_paid_at = ?, review_expires_at = ?,
+              auto_match_status = 'needs_attention', last_error_code = ?,
+              last_error_message = '支付宝账务流水未通过唯一自动匹配', updated_at = ?, version = version + 1
+            WHERE id = ? AND status IN ('awaiting_payment', 'expired', 'cancelled')
+          `).run(
+            attachEvidence ? 1 : 0, tradeHash, attachEvidence ? 1 : 0, accountLogLast6,
+            receivedAt, paidAt, reviewExpiresAt, anomalyCode, receivedAt, candidate.id
+          );
+          this.#audit(candidate.id, { type: 'system', id: 'alipay-accountlog' },
+            'ACCOUNTLOG_PAYMENT_NEEDS_ATTENTION', request, {
+              anomalyCode, accountLogLast6, amount: minorToDecimal(amountMinor), paidAt
+            });
+        }
+        if (affected.length === 0) {
+          this.#audit(null, { type: 'system', id: 'alipay-accountlog' },
+            'ACCOUNTLOG_PAYMENT_NEEDS_ATTENTION', request, {
+              anomalyCode, accountLogLast6, amount: minorToDecimal(amountMinor), paidAt
+            });
+        }
+        return {
+          kind: 'anomaly', anomalyCode,
+          entry: this.db.prepare('SELECT * FROM alipay_accountlog_entries WHERE id = ?').get(entryId),
+          order: order ? this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(order.id) : null
+        };
+      }
+
+      const changed = this.db.prepare(`
+        UPDATE recharge_orders SET
+          status = 'fulfilling', trade_hash = ?, trade_last6 = ?, payment_reported_at = ?,
+          alipay_paid_at = ?, verified_at = ?, verified_by = 'alipay-accountlog',
+          auto_match_status = 'matched', fulfillment_started_at = ?,
+          fulfillment_attempts = fulfillment_attempts + 1,
+          last_error_code = NULL, last_error_message = NULL, updated_at = ?, version = version + 1
+        WHERE id = ? AND version = ? AND status IN ('awaiting_payment', 'expired')
+      `).run(
+        tradeHash, accountLogLast6, receivedAt, paidAt, receivedAt,
+        receivedAt, receivedAt, order.id, order.version
+      );
+      if (changed.changes !== 1) {
+        throw new AppError('ORDER_STATE_CHANGED', '订单状态已变化，账务流水已停止自动处理', { status: 409 });
+      }
+      this.#audit(order.id, { type: 'system', id: 'alipay-accountlog' },
+        'ACCOUNTLOG_PAYMENT_VERIFIED', request, {
+          accountLogLast6, amount: minorToDecimal(amountMinor), paidAt
+        });
+      return {
+        kind: 'fulfill',
+        entry: this.db.prepare('SELECT * FROM alipay_accountlog_entries WHERE id = ?').get(entryId),
+        order: this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(order.id)
+      };
+    })();
+
+    if (prepared.kind === 'duplicate') return this.#accountLogPaymentResult(prepared, true);
+    if (prepared.kind === 'anomaly') {
+      await this.#notifyAccountLogAnomaly(prepared, prepared.anomalyCode, amountMinor);
+      return this.#accountLogPaymentResult(prepared, false);
+    }
+    try {
+      const completed = await this.#fulfill(prepared.order, {
+        automatic: true,
+        actorId: 'alipay-accountlog'
+      }, request);
+      const updatedAt = this.#now().toISOString();
+      this.db.prepare(`
+        UPDATE alipay_accountlog_entries SET match_status = 'completed', updated_at = ? WHERE id = ?
+      `).run(updatedAt, prepared.entry.id);
+      return {
+        accepted: true,
+        duplicate: false,
+        status: 'completed',
+        orderId: completed.id,
+        orderNo: completed.orderNo
+      };
+    } catch (error) {
+      if (error?.code !== 'FULFILLMENT_NEEDS_ATTENTION') throw error;
+      const updatedAt = this.#now().toISOString();
+      this.db.prepare(`
+        UPDATE alipay_accountlog_entries
+        SET match_status = 'needs_attention', anomaly_code = 'FULFILLMENT_RESULT_UNKNOWN', updated_at = ?
+        WHERE id = ?
+      `).run(updatedAt, prepared.entry.id);
+      const attention = {
+        ...prepared,
+        anomalyCode: 'FULFILLMENT_RESULT_UNKNOWN',
+        entry: this.db.prepare('SELECT * FROM alipay_accountlog_entries WHERE id = ?').get(prepared.entry.id),
+        order: this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(prepared.order.id)
+      };
+      await this.#notifyAccountLogAnomaly(attention, attention.anomalyCode, amountMinor);
+      return this.#accountLogPaymentResult(attention, false, 'needs_attention');
+    }
+  }
+
+  #accountLogPaymentResult(prepared, duplicate, status = null) {
+    const anomalyCode = prepared.anomalyCode || prepared.entry?.anomaly_code || null;
+    const resolvedStatus = status || prepared.entry?.match_status || 'needs_attention';
+    return {
+      accepted: !anomalyCode && ['matched', 'completed'].includes(resolvedStatus),
+      duplicate,
+      status: resolvedStatus,
+      anomalyCode,
+      orderId: prepared.order?.id || null,
+      orderNo: prepared.order?.order_no || null
+    };
+  }
+
+  async #notifyAccountLogAnomaly(prepared, anomalyCode, amountMinor) {
+    if (!this.alerts) return;
+    try {
+      await this.alerts.send({
+        eventId: `recharge-accountlog:${prepared.entry.id}:${anomalyCode}`,
+        anomalyCode,
+        orderNo: prepared.order?.order_no || null,
+        amount: minorToDecimal(Math.abs(prepared.order?.payable_amount_minor || amountMinor)),
+        tradeLast6: prepared.entry.account_log_last6,
+        memoLast6: prepared.entry.memo_last6 || '',
+        occurredAt: prepared.entry.received_at
+      });
+    } catch (error) {
+      this.#audit(prepared.order?.id || null, { type: 'system' }, 'RECHARGE_ALERT_DELIVERY_FAILED', null, {
+        anomalyCode,
+        alertErrorCode: error?.code || 'ALERT_DELIVERY_FAILED'
+      });
+    }
+  }
+
   cancel(orderId, user, request = {}) {
     this.expireAwaiting();
     const transaction = this.db.transaction(() => {
@@ -609,7 +953,7 @@ class OrderService {
       this.#audit(row.id, { type: 'user', id: user.id }, 'ORDER_CANCELLED', request);
       return this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(row.id);
     });
-    return publicOrder(transaction());
+    return this.#publicOrder(transaction());
   }
 
   listForAdmin(input = {}) {
@@ -627,7 +971,7 @@ class OrderService {
                created_at DESC
       LIMIT ? OFFSET ?
     `).all(...params, pageSize, (page - 1) * pageSize);
-    return { items: rows.map((row) => publicOrder(row, { admin: true })), total, page, pageSize };
+    return { items: rows.map((row) => this.#publicOrder(row, { admin: true })), total, page, pageSize };
   }
 
   getForAdmin(orderId) {
@@ -644,7 +988,7 @@ class OrderService {
       requestId: event.request_id,
       metadata: JSON.parse(event.metadata_json)
     }));
-    return { order: publicOrder(row, { admin: true }), events };
+    return { order: this.#publicOrder(row, { admin: true }), events };
   }
 
   async confirm(orderId, adminSession, input, request = {}) {
@@ -657,8 +1001,6 @@ class OrderService {
       throw new AppError('PAYMENT_TIME_INVALID', '请输入支付宝账单中的有效付款时间', { status: 400 });
     }
     const paidAt = new Date(paidAtTimestamp).toISOString();
-    const normalized = normalizeTradeNo(input.tradeNo);
-    const suppliedHash = hmacHex(this.config.secret, 'alipay-trade:v1', normalized);
     const prepared = this.db.transaction(() => {
       const row = this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(orderId);
       if (!row) throw new AppError('ORDER_NOT_FOUND', '订单不存在', { status: 404 });
@@ -695,12 +1037,23 @@ class OrderService {
           error: new AppError('PAYMENT_OUTSIDE_ORDER_WINDOW', '支付宝账单付款时间不在订单有效期内，禁止入账', { status: 409 })
         };
       }
+      const accountLogEvidence = row.payment_mode === ACCOUNTLOG_STATIC_MODE;
+      const normalized = accountLogEvidence
+        ? normalizeAccountLogId(input.tradeNo)
+        : normalizeTradeNo(input.tradeNo);
+      const suppliedHash = hmacHex(this.config.secret, 'alipay-trade:v1', normalized);
       if (!row.trade_hash || !safeEqual(row.trade_hash, suppliedHash)) {
         this.#audit(row.id, { type: 'admin', id: adminSession.user.id }, 'PAYMENT_VERIFICATION_FAILED', request, {
           reason: 'trade_number_mismatch'
         });
         return {
-          error: new AppError('PAYMENT_TRADE_MISMATCH', '管理员账单交易号与用户提交记录不一致', { status: 409 })
+          error: new AppError(
+            'PAYMENT_TRADE_MISMATCH',
+            accountLogEvidence
+              ? '管理员账务流水号与系统记录不一致'
+              : '管理员账单交易号与用户提交记录不一致',
+            { status: 409 }
+          )
         };
       }
       const now = this.#now().toISOString();
@@ -718,7 +1071,7 @@ class OrderService {
       return { row: this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(row.id), completed: false };
     })();
     if (prepared.error) throw prepared.error;
-    if (prepared.completed) return publicOrder(prepared.row, { admin: true });
+    if (prepared.completed) return this.#publicOrder(prepared.row, { admin: true });
     return this.#fulfill(prepared.row, adminSession, request);
   }
 
@@ -750,7 +1103,7 @@ class OrderService {
       });
       return { row: this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(row.id), completed: false };
     })();
-    if (prepared.completed) return publicOrder(prepared.row, { admin: true });
+    if (prepared.completed) return this.#publicOrder(prepared.row, { admin: true });
     return this.#fulfill(prepared.row, adminSession, request);
   }
 
@@ -759,12 +1112,15 @@ class OrderService {
     const attempt = Number(row.fulfillment_attempts);
     try {
       const redeemCode = openText(this.config.secret, 'redeem-code:v1', row.redeem_code, row.id);
+      const evidenceLabel = row.verified_by === 'alipay-accountlog'
+        ? '支付宝账务流水尾号'
+        : '支付宝交易尾号';
       const fulfillmentInput = {
         idempotencyKey: `recharge-center-${row.id}-${attempt}`,
         code: redeemCode,
         value: Number(credit),
         userId: Number(row.user_id),
-        notes: `充值中心订单 ${row.order_no}; 支付宝交易尾号 ${row.trade_last6}`
+        notes: `充值中心订单 ${row.order_no}; ${evidenceLabel} ${row.trade_last6}`
       };
       const result = principal.automatic
         ? await this.sub2api.createAndRedeemWithAdminKey(fulfillmentInput)
@@ -797,7 +1153,7 @@ class OrderService {
         });
         return this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(row.id);
       })();
-      return publicOrder(completed, { admin: true });
+      return this.#publicOrder(completed, { admin: true });
     } catch (error) {
       if (error?.code === 'FULFILLMENT_ATTEMPT_SUPERSEDED') throw error;
       const code = error?.code || 'FULFILLMENT_FAILED';
@@ -842,7 +1198,7 @@ class OrderService {
       this.#audit(row.id, { type: 'admin', id: admin.id }, 'ORDER_REJECTED', request, { reason });
       return this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(row.id);
     });
-    return publicOrder(transaction(), { admin: true });
+    return this.#publicOrder(transaction(), { admin: true });
   }
 
   stats() {

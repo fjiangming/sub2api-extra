@@ -369,10 +369,10 @@
           <label class="field-label">支付宝账单付款时间
             <input class="input" name="paidAt" type="datetime-local" step="1" autocomplete="off" required>
           </label>
-          <label class="field-label">支付宝账单完整交易号
-            <input class="input" name="tradeNo" type="text" inputmode="numeric" autocomplete="off" minlength="20" maxlength="64" required>
+          <label class="field-label">支付宝完整交易号 / 账务流水号
+            <input class="input" name="tradeNo" type="text" inputmode="text" autocomplete="off" minlength="6" maxlength="256" required>
           </label>
-          <label class="check-row"><input name="acknowledge" type="checkbox" required><span>我已从支付宝账单逐项录入付款时间、实收金额和完整交易号</span></label>
+          <label class="check-row"><input name="acknowledge" type="checkbox" required><span>我已从支付宝账单逐项录入付款时间、实收金额和完整交易/流水编号</span></label>
           <p id="review-error" class="form-error" role="alert" hidden></p>
           <div class="dialog-actions">
             <button class="button secondary" type="button" data-close-dialog>取消</button>

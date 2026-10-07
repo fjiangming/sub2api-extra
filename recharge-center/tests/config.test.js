@@ -139,6 +139,67 @@ test('personal transfer auto mode requires isolated credentials and forces a thr
   assert.deepEqual(config.alertEmailTo, ['ops-one@mail.test', 'ops-two@mail.test']);
 });
 
+test('personal accountlog static mode requires official credentials and keeps listener devices disabled', () => {
+  const accountlog = {
+    ...base,
+    RECHARGE_CENTER_PAYMENT_MODE: 'personal_accountlog_static',
+    RECHARGE_CENTER_PUBLIC_URL: 'https://pay.example.com',
+    RECHARGE_CENTER_ALIPAY_STATIC_QR_URL: 'https://qr.alipay.com/fkxStaticCode123456',
+    RECHARGE_CENTER_ALIPAY_APP_ID: '2026100700000001',
+    RECHARGE_CENTER_ALIPAY_APP_PRIVATE_KEY_PATH: '/run/secrets/alipay-app-private-key.pem',
+    RECHARGE_CENTER_ALIPAY_PUBLIC_KEY_PATH: '/run/secrets/alipay-public-key.pem',
+    SUB2API_ADMIN_API_KEY: 'admin-api-key-0123456789',
+    ...emailAlerts
+  };
+  const config = loadConfig(accountlog);
+  assert.equal(config.orderTtlMinutes, 3);
+  assert.equal(config.automaticPersonalMode, true);
+  assert.equal(config.personalTransferAutoMode, false);
+  assert.equal(config.accountLogStaticMode, true);
+  assert.equal(config.collectorQrProvisioning, false);
+  assert.equal(config.listenerSecret, null);
+  assert.equal(config.accountLogPollSeconds, 15);
+  assert.equal(config.accountLogLookbackSeconds, 900);
+  assert.equal(config.accountLogAmountQuarantineSeconds, 900);
+  assert.equal(config.alipayGateway, 'https://openapi.alipay.com/gateway.do');
+
+  const { RECHARGE_CENTER_ALIPAY_APP_ID: _appId, ...missingAppId } = accountlog;
+  assert.throws(() => loadConfig(missingAppId), /ALIPAY_APP_ID/);
+  assert.throws(() => loadConfig({
+    ...accountlog,
+    RECHARGE_CENTER_ALIPAY_STATIC_QR_URL: 'https://example.com/fkxStaticCode123456'
+  }), /ALIPAY_STATIC_QR_URL/);
+  assert.throws(() => loadConfig({
+    ...accountlog,
+    RECHARGE_CENTER_ACCOUNTLOG_LOOKBACK_SECONDS: '900',
+    RECHARGE_CENTER_ACCOUNTLOG_AMOUNT_QUARANTINE_SECONDS: '899'
+  }), /回看窗口/);
+});
+
+test('production accountlog mode rejects sandbox gateways until real end-to-end verification passes', () => {
+  const production = {
+    ...base,
+    NODE_ENV: 'production',
+    RECHARGE_CENTER_PAYMENT_MODE: 'personal_accountlog_static',
+    RECHARGE_CENTER_SECRET: 'production-random-0123456789abcdef0123456789abcdef0123456789',
+    RECHARGE_CENTER_PUBLIC_URL: 'https://pay.example.com',
+    SUB2API_PUBLIC_URL: 'https://api.example.com',
+    RECHARGE_CENTER_ALIPAY_STATIC_QR_URL: 'https://qr.alipay.com/fkxStaticCode123456',
+    RECHARGE_CENTER_ALIPAY_APP_ID: '2026100700000001',
+    RECHARGE_CENTER_ALIPAY_APP_PRIVATE_KEY_PATH: '/run/secrets/alipay-app-private-key.pem',
+    RECHARGE_CENTER_ALIPAY_PUBLIC_KEY_PATH: '/run/secrets/alipay-public-key.pem',
+    SUB2API_ADMIN_API_KEY: `admin-${'a'.repeat(64)}`,
+    ...emailAlerts
+  };
+  assert.throws(() => loadConfig(production), /AUTO_MODE_VERIFIED/);
+  assert.throws(() => loadConfig({
+    ...production,
+    RECHARGE_CENTER_AUTO_MODE_VERIFIED: 'true',
+    RECHARGE_CENTER_ALIPAY_GATEWAY: 'https://openapi.alipaydev.com/gateway.do'
+  }), /生产网关/);
+  assert.doesNotThrow(() => loadConfig({ ...production, RECHARGE_CENTER_AUTO_MODE_VERIFIED: 'true' }));
+});
+
 test('collector QR mode requires a separate provisioning credential', () => {
   const automatic = {
     ...base,
@@ -285,7 +346,7 @@ test('production personal transfer mode rejects documented credential placeholde
   }), /不能使用示例监听密钥/);
 });
 
-test('minimal automatic-transfer template preserves production-safe defaults', () => {
+test('minimal accountlog-static template preserves production-safe defaults', () => {
   const source = fs.readFileSync(path.resolve(__dirname, '..', '.env.minimal.example'), 'utf8');
   const example = Object.fromEntries(source
     .split(/\r?\n/)
@@ -298,9 +359,8 @@ test('minimal automatic-transfer template preserves production-safe defaults', (
   const config = loadConfig({
     ...example,
     RECHARGE_CENTER_SECRET: 'production-random-0123456789abcdef0123456789abcdef0123456789',
-    RECHARGE_CENTER_QR_PROVISIONER_SECRET: 'qr-secret-0123456789abcdef0123456789abcdef',
-    RECHARGE_CENTER_LISTENER_SECRET: 'listener-secret-0123456789abcdef0123456789',
-    RECHARGE_CENTER_ALIPAY_RECIPIENT_ID: '2088123456789012',
+    RECHARGE_CENTER_ALIPAY_STATIC_QR_URL: 'https://qr.alipay.com/fkxStaticCode123456',
+    RECHARGE_CENTER_ALIPAY_APP_ID: '2026100700000001',
     RECHARGE_CENTER_AUTO_MODE_VERIFIED: 'true',
     SUB2API_ADMIN_API_KEY: `admin-${'a'.repeat(64)}`,
     RECHARGE_CENTER_SMTP_HOST: 'smtp.mail.test',
@@ -312,8 +372,9 @@ test('minimal automatic-transfer template preserves production-safe defaults', (
 
   assert.equal(config.orderTtlMinutes, 3);
   assert.equal(config.maxActiveOrders, 1);
-  assert.equal(config.listenerMaxStaleSeconds, 30);
-  assert.equal(config.listenerMaxEventAgeSeconds, 600);
+  assert.equal(config.accountLogPollSeconds, 15);
+  assert.equal(config.accountLogLookbackSeconds, 900);
+  assert.equal(config.accountLogAmountQuarantineSeconds, 900);
   assert.equal(config.cookieSecure, true);
   assert.equal(config.passwordLoginEnabled, false);
   assert.equal(config.smtpPort, 587);

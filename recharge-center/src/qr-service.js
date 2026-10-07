@@ -47,7 +47,14 @@ class QrService {
   }
 
   status() {
-    if (this.config.automaticPersonalMode) {
+    if (this.config.accountLogStaticMode) {
+      return {
+        available: Boolean(this.config.publicUrl && this.config.alipayStaticQrUrl),
+        dynamic: true,
+        source: 'relay'
+      };
+    }
+    if (this.config.personalTransferAutoMode || this.config.paymentMode === 'personal_transfer_auto') {
       return {
         available: this.config.collectorQrProvisioning || Boolean(this.config.transferQrTemplate),
         dynamic: true,
@@ -78,7 +85,14 @@ class QrService {
 
   async #sendDynamic(res, payment) {
     let payload;
-    if (payment?.qrUrl) {
+    if (payment?.relayUrl && this.config.accountLogStaticMode) {
+      const relay = new URL(payment.relayUrl);
+      if (relay.origin !== this.config.publicOrigin || relay.username || relay.password || relay.search || relay.hash ||
+          !/^\/pay\/RC-\d{6}-[A-F0-9]{32}$/.test(relay.pathname)) {
+        throw new AppError('PAYMENT_QR_UNAVAILABLE', '订单付款中转地址无效', { status: 503 });
+      }
+      payload = relay.toString();
+    } else if (payment?.qrUrl) {
       payload = normalizeOpaqueAlipayQrUrl(payment.qrUrl);
     } else if (this.config.transferQrTemplate && payment?.amount && payment?.memo) {
       payload = this.config.transferQrTemplate

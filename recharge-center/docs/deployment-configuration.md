@@ -4,15 +4,16 @@
 
 ## 1. 先选择正确模式
 
-三种模式使用的二维码完全不同，不能混用：
+四种模式使用的二维码和到账证据不同，不能混用：
 
 | 模式 | 页面显示的二维码 | 到账方式 | 是否使用 `secrets` 中的图片 |
 |---|---|---|---|
 | `personal_manual` | 你在支付宝保存的静态个人收款码 | 用户提交支付宝交易号，管理员核账后入账 | 是 |
+| `personal_accountlog_static` | 服务端生成包含 `RC-...` 订单号的中转二维码，最终跳到固定本人通用收钱码 | RSA2 验签后的官方账务流水按唯一金额和三分钟时间窗匹配 | 否，只挂载 RSA 密钥 |
 | `personal_transfer_auto` | 服务按每笔订单动态生成，写入实付金额和随机备注 | 受控监听器读取最终交易详情，完整匹配后自动入账 | 否 |
 | `sub2api_official` | Sub2API 通过支付宝官方接口取得的订单二维码 | 官方回调和主动查询 | 否 |
 
-如果你的目标只是“先把个人收款码放上去”，选择 `personal_manual`。如果目标是“用户只输入金额，扫码后自动入账”，必须选择 `personal_transfer_auto`，但还必须具备可自动带入金额和备注的真实支付宝转账 URI，以及一个能稳定读取最终交易详情的专用监听适配器。仅上传一张普通个人收款码图片无法实现安全自动入账。
+如果你的目标只是“先把个人收款码放上去”，选择 `personal_manual`。如果已实际获批 `alipay.data.bill.accountlog.query`，并接受用户在支付宝付款页手动输入本单应付金额，可选择 `personal_accountlog_static`：它只需服务器，不需要长期在线电脑、手机监听器或二维码生成设备。如果没有该接口权限但具备逐单金额/备注生成能力和最终交易详情监听器，才选择实验性的 `personal_transfer_auto`。仅上传一张二维码图片仍不能实现安全自动入账。
 
 ## 2. 部署前准备
 
@@ -22,8 +23,9 @@
 2. Docker Engine 和 Docker Compose v2。
 3. 充值中心专用 HTTPS 域名，例如 `pay.example.com`，以及指向本机 `127.0.0.1:9874` 的反向代理。
 4. 若使用人工模式：从你自己的支付宝客户端保存的个人收款二维码原图。
-5. 若使用自动个人转账模式：专用 SMTP 账号、Sub2API Admin API Key、能逐单生成 `fkx...` 收钱码的受控支付宝设备适配器，以及独立的支付宝账单监听适配器。
-6. 服务器时间同步服务，例如 `systemd-timesyncd` 或 chrony。自动模式的付款窗口和签名校验依赖准确时间。
+5. 若使用静态码账务流水模式：本人通用 `fkx...` 地址、已获批账务接口的 AppID、应用 RSA 私钥、支付宝公钥、专用 SMTP 账号和 Sub2API Admin API Key。
+6. 若使用设备监听自动模式：专用 SMTP 账号、Sub2API Admin API Key、能逐单生成 `fkx...` 收钱码的受控支付宝设备适配器，以及独立的支付宝账单监听适配器。
+7. 服务器时间同步服务，例如 `systemd-timesyncd` 或 chrony。自动模式的付款窗口和签名校验依赖准确时间。
 
 生产服务器建议使用 Linux。下面的路径均假定仓库位于 `/opt/sub2api-extra`；如果你的目录不同，只替换宿主机路径，不要修改容器内 `/run/secrets/...` 路径的含义。
 
@@ -96,25 +98,23 @@ ALIPAY_QR_IMAGE_PATH=/run/secrets/alipay-personal-qr.png
 
 ## 4. 创建 `.env`
 
-个人转账自动模式可以直接使用 20 项最简模板：
+个人静态码账务流水模式可以直接使用 19 项最简模板：
 
 ```bash
 cd /opt/sub2api-extra
 cp recharge-center/.env.minimal.example recharge-center/.env
 chmod 0600 recharge-center/.env
 openssl rand -hex 48  # 账本主密钥
-openssl rand -hex 48  # 二维码代理密钥
-openssl rand -hex 48  # 到账监听密钥
 ```
 
-若部署 `personal_manual`、`sub2api_official`，或者需要修改端口、金额、时效等高级参数，则改为复制完整模板：
+若部署 `personal_manual`、`personal_transfer_auto`、`sub2api_official`，或者需要修改端口、金额、轮询时效等高级参数，则改为复制完整模板：
 
 ```bash
 cp recharge-center/.env.example recharge-center/.env
 chmod 0600 recharge-center/.env
 ```
 
-将三条命令生成的值依次填入 `RECHARGE_CENTER_SECRET`、`RECHARGE_CENTER_QR_PROVISIONER_SECRET` 和 `RECHARGE_CENTER_LISTENER_SECRET`，三者不得相同。账本主密钥一旦用于现有账本就不能随意更换，否则旧备注、二维码密文和敏感字段 HMAC 将无法读取或匹配。不要把终端输出粘贴到工单、聊天或 Git。
+将命令输出填入 `RECHARGE_CENTER_SECRET`。账本主密钥一旦用于现有账本就不能随意更换，否则旧密文和敏感字段 HMAC 将无法读取或匹配。`personal_transfer_auto` 还需分别生成二维码代理密钥和到账监听密钥，三者不得相同。不要把终端输出粘贴到工单、聊天或 Git。
 
 然后至少替换：
 
@@ -153,10 +153,10 @@ SUB2API_PUBLIC_URL=https://api.example.com
 | `RECHARGE_CENTER_COOKIE_SECURE` | 生产固定 `true`。 |
 | `RECHARGE_CENTER_PASSWORD_LOGIN_ENABLED` | 建议 `false`，避免充值中心接触用户密码；使用 Sub2API 自定义菜单 SSO。 |
 | `RECHARGE_CENTER_SESSION_TTL_MINUTES` | 自行确定登录时长，允许 5 到 240，建议 60。 |
-| `RECHARGE_CENTER_ORDER_TTL_MINUTES` | 官方/人工订单时长，允许 3 到 60；自动个人转账固定 3 分钟。 |
+| `RECHARGE_CENTER_ORDER_TTL_MINUTES` | 官方/人工订单时长，允许 3 到 60；两种个人自动模式固定 3 分钟。 |
 | `RECHARGE_CENTER_REVIEW_TTL_HOURS` | 人工处理时限，允许 1 到 168，建议 72。 |
 | `RECHARGE_CENTER_FULFILLMENT_LEASE_MINUTES` | 幂等履约恢复租约，通常保持 5。 |
-| `RECHARGE_CENTER_PAYMENT_MODE` | 按第 1 节三选一，不能自造名称。 |
+| `RECHARGE_CENTER_PAYMENT_MODE` | 按第 1 节四选一，不能自造名称。 |
 | `RECHARGE_CENTER_QUICK_AMOUNTS` | 页面快捷按钮金额，自行制定，英文逗号分隔，最多 20 项。 |
 | `RECHARGE_CENTER_ALLOWED_AMOUNTS` | 旧兼容项；新部署由 `QUICK_AMOUNTS` 覆盖，保持相同值即可。 |
 | `RECHARGE_CENTER_MIN_AMOUNT` | 业务允许的最低人民币金额，最多两位小数。 |
@@ -214,19 +214,37 @@ RECHARGE_CENTER_CREDIT_MULTIPLIER=1
 
 仓库已提供队列、租约、签名客户端和 `tools/qr-provisioner-agent.js`。账号页面适配模块仍必须依据你当前支付宝页面的可见结构实现和验收，不能复制通用选择器、导出 Cookie 或调用猜测的私有接口。适配前保持 `RECHARGE_CENTER_AUTO_MODE_VERIFIED=false`。接口契约和验收要求见[个人支付宝转账自动充值手册](alipay-personal-qr-guide.md)。
 
-### 4.6 Sub2API 参数
+### 4.6 个人静态码账务流水参数
+
+| 配置项 | 如何确定 |
+|---|---|
+| `RECHARGE_CENTER_ALIPAY_STATIC_QR_URL` | 本地解码本人支付宝通用收钱码得到的完整 `https://qr.alipay.com/fkx...`；不能含预设金额、查询参数或说明文字。 |
+| `RECHARGE_CENTER_ALIPAY_APP_ID` | 支付宝开放平台中已实际获批 `alipay.data.bill.accountlog.query` 的应用数字 AppID。仅创建应用不代表有权限。 |
+| `RECHARGE_CENTER_ALIPAY_APP_PRIVATE_KEY_PATH` | Compose 中保持 `/run/secrets/alipay-app-private-key.pem`；对应文件是你离线生成的至少 2048 位 RSA 应用私钥。 |
+| `RECHARGE_CENTER_ALIPAY_PUBLIC_KEY_PATH` | Compose 中保持 `/run/secrets/alipay-public-key.pem`；对应文件必须是开放平台给出的支付宝公钥，不是应用公钥。 |
+| `RECHARGE_CENTER_ALIPAY_GATEWAY` | 生产固定 `https://openapi.alipay.com/gateway.do`；沙箱地址只允许非生产联调。 |
+| `RECHARGE_CENTER_ACCOUNTLOG_POLL_SECONDS` | 全局轮询间隔，允许 5 到 60，建议 15；不是每个订单各建一个轮询器。 |
+| `RECHARGE_CENTER_ACCOUNTLOG_LOOKBACK_SECONDS` | 每次重复查询的回看秒数，允许 180 到 3600，建议 900，用于容忍流水可见延迟。 |
+| `RECHARGE_CENTER_ACCOUNTLOG_STALE_SECONDS` | 最近一次成功验签查询多久后暂停接单，至少为轮询间隔两倍，建议 60。 |
+| `RECHARGE_CENTER_ACCOUNTLOG_AMOUNT_QUARANTINE_SECONDS` | 订单过期后继续独占实付金额的秒数，不得短于回看窗口，建议 900。 |
+| `RECHARGE_CENTER_ACCOUNTLOG_REQUEST_TIMEOUT_MS` | 单次支付宝请求超时，允许 1000 到 30000，建议 10000。 |
+| `RECHARGE_CENTER_AUTO_MODE_VERIFIED` | 初始保持 `false`；完成真实接口权限、验签、正向、冲突、超时和履约故障测试后才改为 `true`。 |
+
+该模式的二维码只编码 `https://你的充值域名/pay/<RC订单号>`。订单号是充值中心生成的 128 位随机审计令牌，不是 Sub2API 官方 `payment_orders` 的商户订单号，也不会进入支付宝账单；完成入账后它会写入 Sub2API 兑换记录备注，供充值中心账本、兑换记录和运营中心相互追溯。完整申请、密钥文件权限、取码和验收步骤见[个人静态码账务流水手册](alipay-accountlog-static-guide.md)。
+
+### 4.7 Sub2API 参数
 
 | 配置项 | 如何确定 |
 |---|---|
 | `SUB2API_BASE_URL` | 容器访问 Sub2API 的内部地址；同机监听 8080 时通常是 `http://host.docker.internal:8080`。先从容器验证可达性。 |
 | `SUB2API_PUBLIC_URL` | 用户浏览器访问 Sub2API 的 HTTPS 根地址，也是充值中心 CSP 允许嵌入的来源。 |
-| `SUB2API_ADMIN_API_KEY` | 仅自动个人转账模式需要。在 Sub2API 管理后台“系统设置”创建/重新生成管理员 API Key，立即保存唯一一次显示的 `admin-` 加 64 位十六进制值。 |
+| `SUB2API_ADMIN_API_KEY` | 两种个人自动模式需要。在 Sub2API 管理后台“系统设置”创建/重新生成管理员 API Key，立即保存唯一一次显示的 `admin-` 加 64 位十六进制值。 |
 | `SUB2API_REQUEST_TIMEOUT_MS` | 内部请求超时，允许 1000 到 30000，通常 10000。 |
 | `SUB2API_FORWARD_CLIENT_FINGERPRINT` | SSO 时转发浏览器 IP 和 User-Agent，通常保持 `true`；同时只信任你自己的反向代理。 |
 
 `SUB2API_ADMIN_API_KEY` 目前拥有全局管理员权限，不是只允许充值的细粒度 Key。必须为充值中心专用、走受控内网、限制该容器的出站目标，并制定轮换流程。它不是管理员登录密码，也不是用户 Token。
 
-### 4.7 独立通知参数
+### 4.8 独立通知参数
 
 | 配置项 | 如何确定 |
 |---|---|
@@ -265,7 +283,7 @@ docker compose --env-file compose.services.env up -d --no-deps recharge-center
 docker compose --env-file compose.services.env logs --tail=100 recharge-center
 ```
 
-`recharge-center/.env` 由该服务自己的 `compose.yaml` 读取，不能把其中密钥写进根目录 `compose.services.env`。二维码代理运行在已登录支付宝的受控设备上，也不能放进服务器上的充值中心容器。
+`recharge-center/.env` 由该服务自己的 `compose.yaml` 读取，不能把其中密钥写进根目录 `compose.services.env`。只有 `personal_transfer_auto` 需要二维码代理和监听设备；`personal_accountlog_static` 的二维码与轮询都在充值中心服务器完成。
 
 ### 5.2 单独使用充值中心 Compose
 
@@ -329,18 +347,31 @@ server {
 
     access_log /var/log/nginx/recharge-center.access.log recharge_no_query;
 
+    # 订单号是高熵付款令牌；该路径不写访问日志，也不缓存。
+    location ^~ /pay/ {
+        access_log off;
+        proxy_pass http://127.0.0.1:9874;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_buffering off;
+        proxy_request_buffering off;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:9874;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto https;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-For $remote_addr;
     }
 }
 ```
 
-必须使用有效 HTTPS 证书。不要经会修改响应、缓存二维码或记录完整查询串的第三方代理。`RECHARGE_CENTER_TRUST_PROXY=true` 只适用于外部请求确实只能经过受控代理的部署。
+必须使用有效 HTTPS 证书。Cloudflare 代理开启（黄/橙云）时使用 `Full (strict)` 和有效源站证书，不能使用 Flexible；源站只放行 Cloudflare 官方网段，并按其当前官方列表配置 Nginx `set_real_ip_from` 与 `real_ip_header CF-Connecting-IP`。不要无条件信任公网传入的 `CF-Connecting-IP`，也不要经会修改响应、缓存二维码或记录完整查询串的其他代理。`RECHARGE_CENTER_TRUST_PROXY=true` 只适用于外部请求确实只能经过受控代理的部署。
 
 ## 7. 接入 Sub2API 自定义菜单
 
@@ -368,6 +399,7 @@ curl -fsS http://127.0.0.1:9874/readyz
 - `/healthz` 返回 `{"status":"ok"}` 只表示进程活着。
 - `/readyz` 返回 200 才表示当前模式可以接单。
 - `personal_manual` 的 `/readyz` 会确认静态图片已成功加载。
+- `personal_accountlog_static` 只有在完成过一次成功 OpenAPI 查询和 RSA2 响应验签、且最近成功时间未过期时才返回 200；它不需要设备心跳。
 - `personal_transfer_auto` 在监听器尚未成功读取支付宝账单并发送就绪心跳时返回 503，这是安全设计，不应绕过。
 - `collector` 来源还要求二维码代理独立心跳正常；两类设备任一不健康都会返回 503 并停止创建新订单。
 
@@ -376,8 +408,9 @@ curl -fsS http://127.0.0.1:9874/readyz
 1. 页面收款人必须是你本人，二维码清晰且不会跳到第三方域名。
 2. 页面显示的应付金额和到账额度都正确，倍率为 1。
 3. 人工模式下，完整执行“付款 -> 提交交易号 -> 管理员核账 -> 确认”。
-4. 确认 Sub2API 只生成一条 `type=balance`、`status=used` 的兑换记录，用户余额只增加一次。
-5. 确认运营中心按现有兑换记录逻辑展示对应 CNY 自动收入。
+4. 账务流水模式下，扫码后在支付宝手动输入页面应付金额，并确认三分钟内唯一流水只自动入账一次。
+5. 确认 Sub2API 只生成一条 `type=balance`、`status=used` 的兑换记录，备注包含充值中心 `RC-...` 订单号，用户余额只增加一次。
+6. 确认运营中心按现有兑换记录逻辑展示对应 CNY 自动收入。
 
 ## 9. 常见错误
 
@@ -389,18 +422,20 @@ curl -fsS http://127.0.0.1:9874/readyz
 | 图片过大 | 压缩为清晰 PNG/JPEG，或在 5 MiB 硬上限内谨慎调整 `ALIPAY_QR_MAX_BYTES`。 |
 | 生产启动提示主密钥无效 | 仍在使用 `.env.example` 占位值；重新生成独立随机值。 |
 | 生产启动提示必须 HTTPS | `RECHARGE_CENTER_PUBLIC_URL` 或 `SUB2API_PUBLIC_URL` 不是实际 HTTPS 根地址。 |
-| 自动模式 `/readyz` 为 503 | 监听器没有真实成功轮询、心跳过期或报告 `ready=false`；不能用假心跳强行变绿。 |
+| 账务流水模式 `/readyz` 为 503 | 尚未成功调用并验签 `alipay.data.bill.accountlog.query`，或最近成功查询已过期；检查 AppID、接口权限、RSA 密钥、服务器时间和网络。 |
+| 启动提示拒绝切换收款身份 | 固定 `fkx...` 或 AppID 已变化，但仍有活动/人工处理订单或金额隔离；停止接单、处理异常并等待隔离期结束后再切换，不能删除账本元数据绕过。 |
+| 设备监听模式 `/readyz` 为 503 | 监听器没有真实成功轮询、心跳过期或报告 `ready=false`；不能用假心跳强行变绿。 |
 | 自动模式提示二维码代理不可用 | `collector` 模式未启动 `qr-provisioner-agent.js`、代理未登录正确账号、适配器健康检查失败或心跳过期。 |
 | `PAYMENT_QR_PENDING` | 本单 `fkx...` 尚在受控设备生成；页面会自动轮询，超过三分钟仍未完成则订单过期。 |
 | 自动模式拒绝模板 | 仅 `template` 兼容模式会出现；检查 `{amount}`/`{memo}`、支付宝域名和嵌套跳转。 |
 | 自动模式拒绝 Admin API Key | 生产必须使用当前 Sub2API 生成的 `admin-` 加 64 位十六进制值。 |
 | 邮件无法发送 | 核对服务商 SMTP 主机、端口、授权码和 TLS 组合；465 通常 `SECURE=true`，587 通常 `REQUIRE_TLS=true`。 |
-| 上传静态码后仍不能自动充值 | 这是预期行为；静态图片仅属于 `personal_manual`。`collector` 自动模式需要受控设备逐单生成 `fkx...` 和独立的最终交易详情监听器。 |
+| 上传静态码图片后仍不能自动充值 | 图片文件仅属于 `personal_manual`。静态码自动模式要配置解码后的 `fkx...` URL，并且应用必须实际拥有账务接口权限；设备监听模式则需要逐单生成器和详情监听器。 |
 
 ## 10. 更新与备份注意事项
 
 - 更新前备份 `RECHARGE_CENTER_DATA_VOLUME` 中的 SQLite 账本，并做恢复演练。
-- 同时安全备份 `.env` 和二维码，但不要把它们放进源码仓库或普通网盘。
+- 同时安全备份 `.env`、收钱码和 RSA 密钥，但不要把它们放进源码仓库或普通网盘；应用私钥与账本备份分开保管。
 - 不要在服务运行时直接复制 SQLite 主文件作为一致性备份，应使用 SQLite 在线备份方式或先停服务。
 - 不要通过删除订单、修改数据库或更换数据卷“修复”异常订单；应在管理页面保留审计轨迹并按人工流程处理。
 - 轮换 `RECHARGE_CENTER_SECRET` 需要专门迁移设计；二维码代理密钥、监听密钥、SMTP 授权码、Webhook Token 和 Admin API Key 可以分别轮换，且始终不得互相复用。

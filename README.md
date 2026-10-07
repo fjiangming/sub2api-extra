@@ -45,7 +45,7 @@ sub2api-extra/
 └── recharge-center/
     ├── compose.yaml
     ├── .env
-    └── secrets/                  # 仅个人码人工模式需要图片
+    └── secrets/                  # 人工码图片或账务模式 RSA 密钥，只读挂载
 ```
 
 ```bash
@@ -194,7 +194,7 @@ volumes:
 
 #### `recharge-center/compose.yaml`
 
-充值中心默认代理 Sub2API 原生支付宝官方支付；也提供实验性的 `personal_transfer_auto`，以个人转账二维码、三分钟订单、自动随机备注和交易详情监听实现严格匹配，任何异常都停止放款并转人工。完整 Compose 定义已包含在仓库中，部署前参照[充值中心 README](recharge-center/README.md)选择模式并配置隔离凭据。
+充值中心支持四种隔离模式：Sub2API 原生官方支付、固定个人码加官方账务流水查询、设备监听式个人转账以及人工核账。`personal_accountlog_static` 由服务器生成带高熵 `RC-...` 订单号的中转二维码并轮询 RSA2 验签流水，不需要长期在线电脑或手机；接口权限必须由支付宝开放平台实际批准。完整 Compose 定义已包含在仓库中，部署前参照[充值中心 README](recharge-center/README.md)选择模式并配置隔离凭据。
 
 ### 3. 配置模块环境变量
 
@@ -340,9 +340,9 @@ SUB2API_BASE_URL=http://host.docker.internal:8080
 SUB2API_PUBLIC_URL=https://api.example.com
 ```
 
-官方自动模式由 Sub2API 创建动态订单并完成验签、主动查询和幂等履约，步骤见[官方自动充值接入手册](recharge-center/docs/alipay-official-auto-recharge-guide.md)。不申请官方产品时可选实验性的个人转账自动模式：无冲突按原金额支付，冲突时分配三分钟唯一分角，并用随机备注和最终交易详情做全字段匹配；它依赖非官方且可能变化的账单采集面，必须完成真实账户验收，不能宣称与官方接口同等级。完整部署与安全边界见[个人支付宝转账自动充值手册](recharge-center/docs/alipay-personal-qr-guide.md)。
+官方自动模式由 Sub2API 创建动态订单并完成验签、主动查询和幂等履约，步骤见[官方自动充值接入手册](recharge-center/docs/alipay-official-auto-recharge-guide.md)。已获批 `alipay.data.bill.accountlog.query` 时可选 `personal_accountlog_static`：用户手动输入应付金额，服务端查询验签流水并只对唯一金额/时间窗命中自动入账，详见[个人静态码账务流水手册](recharge-center/docs/alipay-accountlog-static-guide.md)。没有该权限时，实验性的 `personal_transfer_auto` 仍依赖逐单二维码设备和最终交易详情监听，完整边界见[个人支付宝转账自动充值手册](recharge-center/docs/alipay-personal-qr-guide.md)。
 
-个人转账自动模式的 `RECHARGE_CENTER_MAX_ACTIVE_ORDERS` 是单用户并发上限，建议保持 `1`；系统另有不可调高的 100 笔全局金额占位硬上限。两者用途不同，不能通过放宽单用户上限替代全局容量控制。异常邮件与可选 Webhook 由充值中心自身投递，不依赖供应商监控或其他扩展服务。
+两种个人自动模式的 `RECHARGE_CENTER_MAX_ACTIVE_ORDERS` 是单用户并发上限，建议保持 `1`；系统另有不可调高的 100 笔全局金额占位硬上限。两者用途不同，不能通过放宽单用户上限替代全局容量控制。异常邮件与可选 Webhook 由充值中心自身投递，不依赖供应商监控或其他扩展服务。
 
 > 完整参数说明请参阅各模块的 `.env.example` 或模块 README。
 

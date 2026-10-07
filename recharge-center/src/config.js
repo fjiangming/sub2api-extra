@@ -20,6 +20,7 @@ const optionalUrl = z.preprocess(
 );
 
 const AUTO_PAYMENT_MODE = 'personal_transfer_auto';
+const ACCOUNTLOG_STATIC_PAYMENT_MODE = 'personal_accountlog_static';
 const AUTO_ORDER_TTL_MINUTES = 3;
 const QR_SOURCE_TEMPLATE = 'template';
 const QR_SOURCE_COLLECTOR = 'collector';
@@ -45,6 +46,18 @@ function isObviousPlaceholder(value) {
 function isAlipayHostname(hostname) {
   const normalized = String(hostname || '').toLowerCase();
   return normalized === 'alipay.com' || normalized.endsWith('.alipay.com');
+}
+
+function validateStaticAlipayQrUrl(value) {
+  if (!value || isObviousPlaceholder(value) || /(?:replace|example|x{4,}|\.{3})/i.test(value)) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.hostname === 'qr.alipay.com' &&
+      !url.username && !url.password && !url.search && !url.hash &&
+      /^\/fkx[A-Za-z0-9_-]{6,256}$/.test(url.pathname);
+  } catch {
+    return false;
+  }
 }
 
 function hasUnsafeNestedTarget(url) {
@@ -119,7 +132,12 @@ const schema = z.object({
   RECHARGE_CENTER_ORDER_TTL_MINUTES: z.coerce.number().int().min(3).max(60).default(20),
   RECHARGE_CENTER_REVIEW_TTL_HOURS: z.coerce.number().int().min(1).max(168).default(72),
   RECHARGE_CENTER_FULFILLMENT_LEASE_MINUTES: z.coerce.number().int().min(1).max(30).default(5),
-  RECHARGE_CENTER_PAYMENT_MODE: z.enum(['personal_manual', AUTO_PAYMENT_MODE, 'sub2api_official']),
+  RECHARGE_CENTER_PAYMENT_MODE: z.enum([
+    'personal_manual',
+    AUTO_PAYMENT_MODE,
+    ACCOUNTLOG_STATIC_PAYMENT_MODE,
+    'sub2api_official'
+  ]),
   RECHARGE_CENTER_QUICK_AMOUNTS: optionalString,
   RECHARGE_CENTER_ALLOWED_AMOUNTS: z.string().default('10,20,50,100,200,500,1000,2000,5000'),
   RECHARGE_CENTER_MIN_AMOUNT: z.union([z.string(), z.number()]).default('1'),
@@ -144,6 +162,16 @@ const schema = z.object({
   RECHARGE_CENTER_LISTENER_SIGNATURE_TOLERANCE_SECONDS: z.coerce.number().int().min(15).max(300).default(60),
   RECHARGE_CENTER_LISTENER_MAX_EVENT_AGE_SECONDS: z.coerce.number().int().min(180).max(3600).default(600),
   RECHARGE_CENTER_ALIPAY_RECIPIENT_ID: optionalString,
+  RECHARGE_CENTER_ALIPAY_STATIC_QR_URL: optionalUrl,
+  RECHARGE_CENTER_ALIPAY_APP_ID: optionalString,
+  RECHARGE_CENTER_ALIPAY_APP_PRIVATE_KEY_PATH: optionalString,
+  RECHARGE_CENTER_ALIPAY_PUBLIC_KEY_PATH: optionalString,
+  RECHARGE_CENTER_ALIPAY_GATEWAY: optionalUrl,
+  RECHARGE_CENTER_ACCOUNTLOG_POLL_SECONDS: z.coerce.number().int().min(5).max(60).default(15),
+  RECHARGE_CENTER_ACCOUNTLOG_LOOKBACK_SECONDS: z.coerce.number().int().min(180).max(3600).default(900),
+  RECHARGE_CENTER_ACCOUNTLOG_STALE_SECONDS: z.coerce.number().int().min(30).max(600).default(60),
+  RECHARGE_CENTER_ACCOUNTLOG_AMOUNT_QUARANTINE_SECONDS: z.coerce.number().int().min(180).max(7200).default(900),
+  RECHARGE_CENTER_ACCOUNTLOG_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).default(10000),
   RECHARGE_CENTER_AUTO_MODE_VERIFIED: boolFromEnv.default(false),
   SUB2API_BASE_URL: z.string().url(),
   SUB2API_PUBLIC_URL: optionalUrl,
@@ -300,6 +328,80 @@ const schema = z.object({
       });
     }
   }
+  if (value.RECHARGE_CENTER_PAYMENT_MODE === ACCOUNTLOG_STATIC_PAYMENT_MODE) {
+    const required = [
+      ['RECHARGE_CENTER_PUBLIC_URL', value.RECHARGE_CENTER_PUBLIC_URL],
+      ['RECHARGE_CENTER_ALIPAY_STATIC_QR_URL', value.RECHARGE_CENTER_ALIPAY_STATIC_QR_URL],
+      ['RECHARGE_CENTER_ALIPAY_APP_ID', value.RECHARGE_CENTER_ALIPAY_APP_ID],
+      ['RECHARGE_CENTER_ALIPAY_APP_PRIVATE_KEY_PATH', value.RECHARGE_CENTER_ALIPAY_APP_PRIVATE_KEY_PATH],
+      ['RECHARGE_CENTER_ALIPAY_PUBLIC_KEY_PATH', value.RECHARGE_CENTER_ALIPAY_PUBLIC_KEY_PATH],
+      ['SUB2API_ADMIN_API_KEY', value.SUB2API_ADMIN_API_KEY],
+      ['RECHARGE_CENTER_ALERT_CHANNELS', value.RECHARGE_CENTER_ALERT_CHANNELS]
+    ];
+    for (const [name, configured] of required) {
+      if (!configured) context.addIssue({ code: 'custom', path: [name], message: '个人账务流水自动模式必须配置此项' });
+    }
+    if (value.RECHARGE_CENTER_PUBLIC_URL) {
+      const publicUrl = new URL(value.RECHARGE_CENTER_PUBLIC_URL);
+      if (publicUrl.pathname !== '/' || publicUrl.search || publicUrl.hash) {
+        context.addIssue({
+          code: 'custom',
+          path: ['RECHARGE_CENTER_PUBLIC_URL'],
+          message: '账务流水模式必须使用不带路径、查询参数或片段的 HTTPS 根地址'
+        });
+      }
+    }
+    if (value.RECHARGE_CENTER_ALIPAY_STATIC_QR_URL &&
+        !validateStaticAlipayQrUrl(value.RECHARGE_CENTER_ALIPAY_STATIC_QR_URL)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['RECHARGE_CENTER_ALIPAY_STATIC_QR_URL'],
+        message: '必须是本人支付宝生成的 https://qr.alipay.com/fkx... 通用收钱码，且不得含查询参数'
+      });
+    }
+    if (value.RECHARGE_CENTER_ALIPAY_APP_ID && !/^\d{10,32}$/.test(value.RECHARGE_CENTER_ALIPAY_APP_ID)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['RECHARGE_CENTER_ALIPAY_APP_ID'],
+        message: '必须是支付宝开放平台应用的数字 AppID'
+      });
+    }
+    const gateway = value.RECHARGE_CENTER_ALIPAY_GATEWAY || 'https://openapi.alipay.com/gateway.do';
+    if (![
+      'https://openapi.alipay.com/gateway.do',
+      'https://openapi.alipaydev.com/gateway.do'
+    ].includes(gateway)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['RECHARGE_CENTER_ALIPAY_GATEWAY'],
+        message: '只允许支付宝生产或沙箱官方网关'
+      });
+    }
+    if (value.RECHARGE_CENTER_ACCOUNTLOG_STALE_SECONDS < value.RECHARGE_CENTER_ACCOUNTLOG_POLL_SECONDS * 2) {
+      context.addIssue({
+        code: 'custom',
+        path: ['RECHARGE_CENTER_ACCOUNTLOG_STALE_SECONDS'],
+        message: '至少应为轮询间隔的两倍'
+      });
+    }
+    if (value.RECHARGE_CENTER_ACCOUNTLOG_AMOUNT_QUARANTINE_SECONDS < value.RECHARGE_CENTER_ACCOUNTLOG_LOOKBACK_SECONDS) {
+      context.addIssue({
+        code: 'custom',
+        path: ['RECHARGE_CENTER_ACCOUNTLOG_AMOUNT_QUARANTINE_SECONDS'],
+        message: '不能短于账务流水回看窗口，避免延迟流水误匹配下一单'
+      });
+    }
+    if (value.SUB2API_ADMIN_API_KEY && value.SUB2API_ADMIN_API_KEY.length < 16) {
+      context.addIssue({ code: 'custom', path: ['SUB2API_ADMIN_API_KEY'], message: '长度至少为 16 个字符' });
+    }
+    if (!alertChannels.includes('email')) {
+      context.addIssue({
+        code: 'custom',
+        path: ['RECHARGE_CENTER_ALERT_CHANNELS'],
+        message: '个人账务流水自动模式必须启用 email 通道，确保异常订单发送邮件'
+      });
+    }
+  }
   const isolatedSecrets = [
     value.RECHARGE_CENTER_SECRET,
     value.RECHARGE_CENTER_QR_PROVISIONER_SECRET,
@@ -332,11 +434,35 @@ const schema = z.object({
     if (value.RECHARGE_CENTER_PAYMENT_MODE === 'personal_manual' && !value.ALIPAY_QR_IMAGE_PATH) {
       context.addIssue({ code: 'custom', path: ['ALIPAY_QR_IMAGE_PATH'], message: '生产环境必须配置收款码文件' });
     }
-    if (value.RECHARGE_CENTER_PAYMENT_MODE === AUTO_PAYMENT_MODE && !value.RECHARGE_CENTER_AUTO_MODE_VERIFIED) {
+    if ([AUTO_PAYMENT_MODE, ACCOUNTLOG_STATIC_PAYMENT_MODE].includes(value.RECHARGE_CENTER_PAYMENT_MODE) &&
+        !value.RECHARGE_CENTER_AUTO_MODE_VERIFIED) {
       context.addIssue({
         code: 'custom',
         path: ['RECHARGE_CENTER_AUTO_MODE_VERIFIED'],
         message: '生产启用前必须完成真实小额端到端验收并显式设置为 true'
+      });
+    }
+    if (value.RECHARGE_CENTER_PAYMENT_MODE === ACCOUNTLOG_STATIC_PAYMENT_MODE &&
+        (value.RECHARGE_CENTER_ALIPAY_GATEWAY || 'https://openapi.alipay.com/gateway.do') !==
+          'https://openapi.alipay.com/gateway.do') {
+      context.addIssue({
+        code: 'custom',
+        path: ['RECHARGE_CENTER_ALIPAY_GATEWAY'],
+        message: '生产环境只能使用支付宝生产网关'
+      });
+    }
+    if (value.RECHARGE_CENTER_PAYMENT_MODE === ACCOUNTLOG_STATIC_PAYMENT_MODE &&
+        [
+          value.RECHARGE_CENTER_ALIPAY_STATIC_QR_URL,
+          value.RECHARGE_CENTER_ALIPAY_APP_ID,
+          value.RECHARGE_CENTER_ALIPAY_APP_PRIVATE_KEY_PATH,
+          value.RECHARGE_CENTER_ALIPAY_PUBLIC_KEY_PATH,
+          value.RECHARGE_CENTER_SMTP_PASSWORD
+        ].filter(Boolean).some(isObviousPlaceholder)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['RECHARGE_CENTER_AUTO_MODE_VERIFIED'],
+        message: '生产账务流水自动模式不能使用示例收钱码、AppID、密钥路径或通知凭据'
       });
     }
     if (value.RECHARGE_CENTER_PAYMENT_MODE === AUTO_PAYMENT_MODE &&
@@ -367,7 +493,7 @@ const schema = z.object({
         message: '生产 Webhook 告警必须使用 HTTPS'
       });
     }
-    if (value.RECHARGE_CENTER_PAYMENT_MODE === AUTO_PAYMENT_MODE &&
+    if ([AUTO_PAYMENT_MODE, ACCOUNTLOG_STATIC_PAYMENT_MODE].includes(value.RECHARGE_CENTER_PAYMENT_MODE) &&
         !/^admin-[a-f0-9]{64}$/.test(value.SUB2API_ADMIN_API_KEY || '')) {
       context.addIssue({
         code: 'custom',
@@ -410,7 +536,9 @@ function loadConfig(env = process.env, options = {}) {
   const sub2apiPublicUrl = value.SUB2API_PUBLIC_URL
     ? normalizeBaseUrl(value.SUB2API_PUBLIC_URL, 'SUB2API_PUBLIC_URL')
     : sub2apiBaseUrl;
-  const automaticPersonalMode = value.RECHARGE_CENTER_PAYMENT_MODE === AUTO_PAYMENT_MODE;
+  const personalTransferAutoMode = value.RECHARGE_CENTER_PAYMENT_MODE === AUTO_PAYMENT_MODE;
+  const accountLogStaticMode = value.RECHARGE_CENTER_PAYMENT_MODE === ACCOUNTLOG_STATIC_PAYMENT_MODE;
+  const automaticPersonalMode = personalTransferAutoMode || accountLogStaticMode;
   const alertChannels = parseList(value.RECHARGE_CENTER_ALERT_CHANNELS);
   return {
     env: value.NODE_ENV,
@@ -431,6 +559,8 @@ function loadConfig(env = process.env, options = {}) {
     fulfillmentLeaseMinutes: value.RECHARGE_CENTER_FULFILLMENT_LEASE_MINUTES,
     paymentMode: value.RECHARGE_CENTER_PAYMENT_MODE,
     automaticPersonalMode,
+    personalTransferAutoMode,
+    accountLogStaticMode,
     quickAmounts: quickAmounts.map((minor) => minor / 100),
     allowedAmounts: quickAmounts.map((minor) => minor / 100),
     minAmount: minAmountMinor / 100,
@@ -445,7 +575,7 @@ function loadConfig(env = process.env, options = {}) {
     qrImagePath: value.ALIPAY_QR_IMAGE_PATH ? path.resolve(value.ALIPAY_QR_IMAGE_PATH) : null,
     qrMaxBytes: value.ALIPAY_QR_MAX_BYTES,
     transferQrSource: value.RECHARGE_CENTER_TRANSFER_QR_SOURCE,
-    collectorQrProvisioning: automaticPersonalMode && value.RECHARGE_CENTER_TRANSFER_QR_SOURCE === QR_SOURCE_COLLECTOR,
+    collectorQrProvisioning: personalTransferAutoMode && value.RECHARGE_CENTER_TRANSFER_QR_SOURCE === QR_SOURCE_COLLECTOR,
     transferQrTemplate: value.RECHARGE_CENTER_TRANSFER_QR_TEMPLATE || null,
     qrJobLeaseSeconds: value.RECHARGE_CENTER_QR_JOB_LEASE_SECONDS,
     qrProvisionerSecret: value.RECHARGE_CENTER_QR_PROVISIONER_SECRET || null,
@@ -455,6 +585,20 @@ function loadConfig(env = process.env, options = {}) {
     listenerSignatureToleranceSeconds: value.RECHARGE_CENTER_LISTENER_SIGNATURE_TOLERANCE_SECONDS,
     listenerMaxEventAgeSeconds: value.RECHARGE_CENTER_LISTENER_MAX_EVENT_AGE_SECONDS,
     alipayRecipientId: value.RECHARGE_CENTER_ALIPAY_RECIPIENT_ID || null,
+    alipayStaticQrUrl: value.RECHARGE_CENTER_ALIPAY_STATIC_QR_URL || null,
+    alipayAppId: value.RECHARGE_CENTER_ALIPAY_APP_ID || null,
+    alipayAppPrivateKeyPath: value.RECHARGE_CENTER_ALIPAY_APP_PRIVATE_KEY_PATH
+      ? path.resolve(value.RECHARGE_CENTER_ALIPAY_APP_PRIVATE_KEY_PATH)
+      : null,
+    alipayPublicKeyPath: value.RECHARGE_CENTER_ALIPAY_PUBLIC_KEY_PATH
+      ? path.resolve(value.RECHARGE_CENTER_ALIPAY_PUBLIC_KEY_PATH)
+      : null,
+    alipayGateway: value.RECHARGE_CENTER_ALIPAY_GATEWAY || 'https://openapi.alipay.com/gateway.do',
+    accountLogPollSeconds: value.RECHARGE_CENTER_ACCOUNTLOG_POLL_SECONDS,
+    accountLogLookbackSeconds: value.RECHARGE_CENTER_ACCOUNTLOG_LOOKBACK_SECONDS,
+    accountLogStaleSeconds: value.RECHARGE_CENTER_ACCOUNTLOG_STALE_SECONDS,
+    accountLogAmountQuarantineSeconds: value.RECHARGE_CENTER_ACCOUNTLOG_AMOUNT_QUARANTINE_SECONDS,
+    accountLogRequestTimeoutMs: value.RECHARGE_CENTER_ACCOUNTLOG_REQUEST_TIMEOUT_MS,
     autoModeVerified: value.RECHARGE_CENTER_AUTO_MODE_VERIFIED,
     autoReservationLimit: 100,
     sub2apiBaseUrl,
@@ -479,6 +623,7 @@ function loadConfig(env = process.env, options = {}) {
 }
 
 module.exports = {
+  ACCOUNTLOG_STATIC_PAYMENT_MODE,
   AUTO_ORDER_TTL_MINUTES,
   AUTO_PAYMENT_MODE,
   QR_SOURCE_COLLECTOR,

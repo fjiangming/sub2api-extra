@@ -21,9 +21,9 @@ function sanitizeEvent(input) {
       !/^[A-Z0-9_]{3,80}$/.test(event.anomalyCode) ||
       (event.orderNo != null && !/^[A-Za-z0-9_-]{3,80}$/.test(event.orderNo)) ||
       !/^(0|[1-9]\d{0,11})\.\d{2}$/.test(event.amount) ||
-      !/^(?:|\d{6})$/.test(event.tradeLast6) ||
+      !/^(?:|[A-Za-z0-9_-]{6})$/.test(event.tradeLast6) ||
       (event.tradeLast6 === '' && !event.anomalyCode.startsWith('QR_')) ||
-      !/^[A-Za-z0-9_-]{1,6}$/.test(event.memoLast6) ||
+      !/^(?:|[A-Za-z0-9_-]{1,6})$/.test(event.memoLast6) ||
       !Number.isFinite(Date.parse(event.occurredAt)) ||
       Object.values(event).some((value) => value != null && String(value).length > MAX_FIELD_LENGTH)) {
     throw new AppError('ALERT_EVENT_INVALID', '异常通知事件不符合安全字段白名单', { status: 500 });
@@ -61,8 +61,8 @@ function emailText(event) {
     `异常代码: ${event.anomalyCode}`,
     `订单号: ${event.orderNo || '未识别'}`,
     `应付金额: CNY ${event.amount}`,
-    `支付宝交易号末六位: ${event.tradeLast6 || '无（付款前异常）'}`,
-    `自动备注末六位: ${event.memoLast6}`,
+    `支付宝交易/账务流水末六位: ${event.tradeLast6 || '无（付款前异常）'}`,
+    `备注末六位: ${event.memoLast6 || '无'}`,
     `发生时间: ${event.occurredAt}`,
     '',
     '请在受信设备上独立核对支付宝最终交易详情和 Sub2API 兑换记录。不要仅凭本邮件执行补款。'

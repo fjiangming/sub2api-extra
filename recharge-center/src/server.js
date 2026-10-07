@@ -10,6 +10,8 @@ const { OfficialPaymentService } = require('./official-payment-service');
 const { NotificationService } = require('./notification-service');
 const { ListenerService } = require('./listener-service');
 const { QrProvisioningService } = require('./qr-provisioning-service');
+const { AlipayAccountLogClient } = require('./alipay-accountlog-client');
+const { AlipayAccountLogPoller } = require('./alipay-accountlog-poller');
 const { createApp } = require('./app');
 
 function createRuntime(env = process.env, options = {}) {
@@ -29,7 +31,24 @@ function createRuntime(env = process.env, options = {}) {
   const officialPayments = config.paymentMode === 'sub2api_official'
     ? new OfficialPaymentService({ config, sub2api, clock: options.clock })
     : null;
-  const app = createApp({ config, db, auth, orders, qr, officialPayments, listener, qrProvisioning });
+  const accountLogClient = config.accountLogStaticMode
+    ? (options.accountLogClient || new AlipayAccountLogClient(config, {
+        fetch: options.alipayFetch || options.fetch,
+        clock: options.clock
+      }))
+    : null;
+  const accountLogPoller = config.accountLogStaticMode
+    ? (options.accountLogPoller || new AlipayAccountLogPoller({
+        client: accountLogClient,
+        orders,
+        config,
+        clock: options.clock
+      }))
+    : null;
+  accountLogPoller?.start?.();
+  const app = createApp({
+    config, db, auth, orders, qr, officialPayments, listener, qrProvisioning, accountLogPoller
+  });
   return {
     app,
     config,
@@ -41,8 +60,11 @@ function createRuntime(env = process.env, options = {}) {
     listener,
     qrProvisioning,
     officialPayments,
+    accountLogClient,
+    accountLogPoller,
     close() {
       officialPayments?.close();
+      accountLogPoller?.close?.();
       notifications.close?.();
       auth.close();
       if (db.open) db.close();

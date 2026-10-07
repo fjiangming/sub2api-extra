@@ -28,7 +28,7 @@ const reportPaymentSchema = z.object({ tradeNo: z.string().min(20).max(100) });
 const confirmSchema = z.object({
   paidAmount: z.union([z.string(), z.number()]),
   paidAt: z.string().datetime({ offset: true }),
-  tradeNo: z.string().min(20).max(100),
+  tradeNo: z.string().trim().min(6).max(256).regex(/^[A-Za-z0-9_-]+$/),
   acknowledge: z.literal(true)
 });
 const rejectSchema = z.object({
@@ -126,10 +126,14 @@ function limiter(limit, code, message) {
   });
 }
 
-function createApp({ config, db, auth, orders, qr, officialPayments, listener, qrProvisioning }) {
+function createApp({
+  config, db, auth, orders, qr, officialPayments, listener, qrProvisioning, accountLogPoller
+}) {
   const app = express();
   const officialMode = config.paymentMode === 'sub2api_official';
-  const automaticPersonalMode = config.paymentMode === 'personal_transfer_auto';
+  const personalTransferAutoMode = config.paymentMode === 'personal_transfer_auto';
+  const accountLogStaticMode = config.paymentMode === 'personal_accountlog_static';
+  const automaticPersonalMode = personalTransferAutoMode || accountLogStaticMode;
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
   app.disable('etag');
@@ -146,7 +150,7 @@ function createApp({ config, db, auth, orders, qr, officialPayments, listener, q
           level: res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info',
           requestId: req.id,
           method: req.method,
-          path: req.path,
+          path: req.path.startsWith('/pay/') ? '/pay/:token' : req.path,
           status: res.statusCode,
           durationMs: Date.now() - started
         }));
@@ -203,23 +207,41 @@ function createApp({ config, db, auth, orders, qr, officialPayments, listener, q
     const qrStatus = qr.status();
     const staticQrRequired = config.paymentMode === 'personal_manual' && config.env === 'production';
     const listenerStatus = listener?.status() || { required: false, healthy: true };
+    const accountLogStatus = accountLogPoller?.status?.() || { required: false, healthy: true };
     const ready = dbStatus?.ok === 1 && (!staticQrRequired || qrStatus.available) &&
-      (!automaticPersonalMode || (qrStatus.available && listenerStatus.healthy));
+      (!personalTransferAutoMode || (qrStatus.available && listenerStatus.healthy)) &&
+      (!accountLogStaticMode || (qrStatus.available && accountLogStatus.healthy));
     res.status(ready ? 200 : 503).json({
       status: ready ? 'ready' : 'not_ready',
       database: 'ok',
       paymentMode: config.paymentMode,
       paymentQr: officialMode || automaticPersonalMode ? 'dynamic' : qrStatus.available,
-      listener: listenerStatus
+      listener: listenerStatus,
+      accountLog: accountLogStatus
     });
   });
 
   const loginLimiter = limiter(10, 'LOGIN_RATE_LIMITED', '登录尝试过多，请稍后再试');
   const orderLimiter = limiter(20, 'ORDER_RATE_LIMITED', '订单操作过于频繁，请稍后再试');
   const qrLimiter = limiter(60, 'QR_RATE_LIMITED', '二维码读取过于频繁，请稍后再试');
+  const relayLimiter = limiter(120, 'PAYMENT_RELAY_RATE_LIMITED', '付款入口访问过于频繁，请稍后再试');
   const reviewLimiter = limiter(30, 'REVIEW_RATE_LIMITED', '审核操作过于频繁，请稍后再试');
   const listenerLimiter = limiter(600, 'LISTENER_RATE_LIMITED', '监听器请求过于频繁');
   const qrProvisionerLimiter = limiter(600, 'QR_PROVISIONER_RATE_LIMITED', '收钱码生成代理请求过于频繁');
+
+  app.get('/pay/:orderNo', relayLimiter, (req, res, next) => {
+    try {
+      const target = orders.openPaymentRelay(req.params.orderNo, requestAuditContext(req));
+      res.set({
+        'Cache-Control': 'no-store, max-age=0, private',
+        Pragma: 'no-cache',
+        'Referrer-Policy': 'no-referrer'
+      });
+      return res.redirect(303, target);
+    } catch (error) {
+      return next(error);
+    }
+  });
 
   const signedDevice = (scope) => (req, _res, next) => {
     try {
@@ -359,7 +381,8 @@ function createApp({ config, db, auth, orders, qr, officialPayments, listener, q
   }));
   api.post('/orders', orderLimiter, csrf, asyncRoute(async (req, res) => {
     const input = parse(createOrderSchema, req.body);
-    if (automaticPersonalMode) listener.assertReady();
+    if (personalTransferAutoMode) listener.assertReady();
+    if (accountLogStaticMode) accountLogPoller.assertReady();
     const order = officialMode
       ? await officialPayments.create(req.auth, req.sessionId, input.amount)
       : orders.create(req.auth.user, input.amount, requestAuditContext(req));
@@ -434,7 +457,7 @@ function createApp({ config, db, auth, orders, qr, officialPayments, listener, q
         requestId: req.id,
         code: error?.code || 'INTERNAL_ERROR',
         message: redactText(error?.message),
-        path: req.path
+        path: req.path.startsWith('/pay/') ? '/pay/:token' : req.path
       }));
     }
     if (!error.status) error.status = status;
