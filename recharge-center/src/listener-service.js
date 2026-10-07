@@ -4,8 +4,12 @@ const crypto = require('crypto');
 const { AppError } = require('./errors');
 const { hmacHex, safeEqual } = require('./security');
 
-function listenerSignature(secret, timestamp, nonce, rawBody) {
+function listenerSignature(secret, timestamp, nonce, rawBody, method, pathname) {
   return crypto.createHmac('sha256', secret)
+    .update(String(method || '').toUpperCase())
+    .update('\n')
+    .update(String(pathname || ''))
+    .update('\n')
     .update(String(timestamp))
     .update('\n')
     .update(String(nonce))
@@ -21,14 +25,18 @@ class ListenerService {
     this.clock = clock;
   }
 
-  authenticate(req) {
-    if (!this.config.automaticPersonalMode || !this.config.listenerSecret) {
+  authenticate(req, scope = 'ledger') {
+    const qrScope = scope === 'qr';
+    const secret = qrScope ? this.config.qrProvisionerSecret : this.config.listenerSecret;
+    if (!this.config.automaticPersonalMode || !secret || (qrScope && !this.config.collectorQrProvisioning)) {
       throw new AppError('LISTENER_DISABLED', '付款监听接口未启用', { status: 404 });
     }
+    const signatureVersion = String(req.get('x-recharge-signature-version') || '');
     const timestamp = String(req.get('x-recharge-timestamp') || '');
     const nonce = String(req.get('x-recharge-nonce') || '');
     const signature = String(req.get('x-recharge-signature') || '').toLowerCase();
-    if (!/^\d{10}$/.test(timestamp) || !/^[A-Za-z0-9_-]{16,128}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(signature)) {
+    if (signatureVersion !== '2' || !/^\d{10}$/.test(timestamp) ||
+        !/^[A-Za-z0-9_-]{16,128}$/.test(nonce) || !/^[a-f0-9]{64}$/.test(signature)) {
       throw new AppError('LISTENER_AUTH_INVALID', '监听器签名头无效', { status: 401 });
     }
     const nowSeconds = Math.floor(this.clock().getTime() / 1000);
@@ -36,11 +44,11 @@ class ListenerService {
       throw new AppError('LISTENER_TIMESTAMP_STALE', '监听器请求时间戳已失效', { status: 401 });
     }
     const rawBody = Buffer.isBuffer(req.rawBody) ? req.rawBody : Buffer.alloc(0);
-    const expected = listenerSignature(this.config.listenerSecret, timestamp, nonce, rawBody);
+    const expected = listenerSignature(secret, timestamp, nonce, rawBody, req.method, req.path);
     if (!safeEqual(expected, signature)) {
       throw new AppError('LISTENER_SIGNATURE_INVALID', '监听器签名校验失败', { status: 401 });
     }
-    const nonceHash = hmacHex(this.config.secret, 'listener-nonce:v1', nonce);
+    const nonceHash = hmacHex(this.config.secret, `listener-nonce:${scope}:v2`, nonce);
     const usedAt = this.clock().toISOString();
     const expiresAt = new Date(this.clock().getTime() + this.config.listenerSignatureToleranceSeconds * 2000).toISOString();
     try {
@@ -87,6 +95,29 @@ class ListenerService {
     };
   }
 
+  qrHeartbeat(input) {
+    this.assertCollector(input.collectorId);
+    const receivedAt = this.clock().toISOString();
+    const set = this.db.prepare(`
+      INSERT INTO service_metadata(key, value, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `);
+    this.db.transaction(() => {
+      set.run('qr_provisioner_last_heartbeat_at', receivedAt, receivedAt);
+      set.run('qr_provisioner_collector_id', input.collectorId, receivedAt);
+      set.run('qr_provisioner_ready', input.ready ? 'true' : 'false', receivedAt);
+      set.run('qr_provisioner_observed_at', input.observedAt, receivedAt);
+      if (input.version) set.run('qr_provisioner_version', input.version, receivedAt);
+    })();
+    return {
+      status: 'accepted',
+      ready: input.ready,
+      receivedAt,
+      observedAt: input.observedAt,
+      maxStaleSeconds: this.config.listenerMaxStaleSeconds
+    };
+  }
+
   status() {
     if (!this.config.automaticPersonalMode) return { required: false, healthy: true };
     const heartbeat = this.db.prepare(`
@@ -101,18 +132,45 @@ class ListenerService {
     const observed = this.db.prepare(`
       SELECT value FROM service_metadata WHERE key = 'listener_observed_at'
     `).get();
+    const qrHeartbeat = this.db.prepare(`
+      SELECT value FROM service_metadata WHERE key = 'qr_provisioner_last_heartbeat_at'
+    `).get();
+    const qrProvisioningReady = this.db.prepare(`
+      SELECT value FROM service_metadata WHERE key = 'qr_provisioner_ready'
+    `).get();
+    const qrObserved = this.db.prepare(`
+      SELECT value FROM service_metadata WHERE key = 'qr_provisioner_observed_at'
+    `).get();
+    const qrCollector = this.db.prepare(`
+      SELECT value FROM service_metadata WHERE key = 'qr_provisioner_collector_id'
+    `).get();
     const now = this.clock().getTime();
     const ageMs = heartbeat ? now - Date.parse(heartbeat.value) : Number.POSITIVE_INFINITY;
     const observedAgeMs = observed ? now - Date.parse(observed.value) : Number.POSITIVE_INFINITY;
-    const healthy = Boolean(
+    const ledgerHealthy = Boolean(
       heartbeat && collector && safeEqual(collector.value, this.config.listenerCollectorId) &&
       ready?.value === 'true' && Number.isFinite(ageMs) && ageMs >= -5000 &&
       ageMs <= this.config.listenerMaxStaleSeconds * 1000 && Number.isFinite(observedAgeMs) &&
       observedAgeMs >= -5000 && observedAgeMs <= this.config.listenerMaxStaleSeconds * 1000
     );
+    const qrProvisioningRequired = this.config.collectorQrProvisioning === true;
+    const qrHeartbeatAgeMs = qrHeartbeat ? now - Date.parse(qrHeartbeat.value) : Number.POSITIVE_INFINITY;
+    const qrObservedAgeMs = qrObserved ? now - Date.parse(qrObserved.value) : Number.POSITIVE_INFINITY;
+    const qrProvisioningHealthy = !qrProvisioningRequired ||
+      (qrCollector && safeEqual(qrCollector.value, this.config.listenerCollectorId) &&
+       qrProvisioningReady?.value === 'true' && Number.isFinite(qrHeartbeatAgeMs) &&
+       qrHeartbeatAgeMs >= -5000 && qrHeartbeatAgeMs <= this.config.listenerMaxStaleSeconds * 1000 &&
+       Number.isFinite(qrObservedAgeMs) && qrObservedAgeMs >= -5000 &&
+       qrObservedAgeMs <= this.config.listenerMaxStaleSeconds * 1000);
+    const healthy = ledgerHealthy && qrProvisioningHealthy;
     return {
       required: true,
       healthy,
+      ledgerHealthy,
+      qrProvisioningRequired,
+      qrProvisioningHealthy,
+      lastQrProvisionerHeartbeatAt: qrHeartbeat?.value || null,
+      lastQrProvisionerCheckAt: qrObserved?.value || null,
       lastHeartbeatAt: heartbeat?.value || null,
       lastSuccessfulPollAt: observed?.value || null,
       staleAfterSeconds: this.config.listenerMaxStaleSeconds
@@ -121,7 +179,7 @@ class ListenerService {
 
   assertReady() {
     if (!this.status().healthy) {
-      throw new AppError('PAYMENT_LISTENER_UNAVAILABLE', '到账监听暂不可用，请稍后再试', { status: 503 });
+      throw new AppError('PAYMENT_LISTENER_UNAVAILABLE', '到账监听或逐单收钱码生成暂不可用，请稍后再试', { status: 503 });
     }
   }
 }

@@ -22,7 +22,7 @@
 2. Docker Engine 和 Docker Compose v2。
 3. 充值中心专用 HTTPS 域名，例如 `pay.example.com`，以及指向本机 `127.0.0.1:9874` 的反向代理。
 4. 若使用人工模式：从你自己的支付宝客户端保存的个人收款二维码原图。
-5. 若使用自动个人转账模式：专用 SMTP 账号、Sub2API Admin API Key、经过真实测试的转账 URI 模板，以及已完成的支付宝账单监听适配器。
+5. 若使用自动个人转账模式：专用 SMTP 账号、Sub2API Admin API Key、能逐单生成 `fkx...` 收钱码的受控支付宝设备适配器，以及独立的支付宝账单监听适配器。
 6. 服务器时间同步服务，例如 `systemd-timesyncd` 或 chrony。自动模式的付款窗口和签名校验依赖准确时间。
 
 生产服务器建议使用 Linux。下面的路径均假定仓库位于 `/opt/sub2api-extra`；如果你的目录不同，只替换宿主机路径，不要修改容器内 `/run/secrets/...` 路径的含义。
@@ -96,16 +96,25 @@ ALIPAY_QR_IMAGE_PATH=/run/secrets/alipay-personal-qr.png
 
 ## 4. 创建 `.env`
 
-在仓库根目录执行：
+个人转账自动模式可以直接使用 20 项最简模板：
 
 ```bash
 cd /opt/sub2api-extra
-cp recharge-center/.env.example recharge-center/.env
+cp recharge-center/.env.minimal.example recharge-center/.env
 chmod 0600 recharge-center/.env
-openssl rand -hex 48
+openssl rand -hex 48  # 账本主密钥
+openssl rand -hex 48  # 二维码代理密钥
+openssl rand -hex 48  # 到账监听密钥
 ```
 
-把最后一条命令生成的 96 位十六进制随机值填入 `RECHARGE_CENTER_SECRET`。该密钥一旦用于现有账本，就不能随意更换；更换后旧备注密文和敏感字段 HMAC 将无法继续匹配。不要把终端输出粘贴到工单、聊天或 Git。
+若部署 `personal_manual`、`sub2api_official`，或者需要修改端口、金额、时效等高级参数，则改为复制完整模板：
+
+```bash
+cp recharge-center/.env.example recharge-center/.env
+chmod 0600 recharge-center/.env
+```
+
+将三条命令生成的值依次填入 `RECHARGE_CENTER_SECRET`、`RECHARGE_CENTER_QR_PROVISIONER_SECRET` 和 `RECHARGE_CENTER_LISTENER_SECRET`，三者不得相同。账本主密钥一旦用于现有账本就不能随意更换，否则旧备注、二维码密文和敏感字段 HMAC 将无法读取或匹配。不要把终端输出粘贴到工单、聊天或 Git。
 
 然后至少替换：
 
@@ -138,7 +147,7 @@ SUB2API_PUBLIC_URL=https://api.example.com
 | `RECHARGE_CENTER_BIND_HOST` | 直接运行 Node 时的监听地址；Compose 已固定容器内为 `0.0.0.0`，宿主机仍只暴露 `127.0.0.1`。 |
 | `RECHARGE_CENTER_DATA_DIR` | Compose 卷挂载目录，保持 `./data`。 |
 | `RECHARGE_CENTER_DATABASE` | SQLite 文件路径，保持 `./data/recharge-center.db`，或留空使用默认值。 |
-| `RECHARGE_CENTER_SECRET` | 用 `openssl rand -hex 48` 自行生成；不可与监听、SMTP、Webhook 或 Admin API Key 复用。 |
+| `RECHARGE_CENTER_SECRET` | 用 `openssl rand -hex 48` 自行生成；不可与二维码代理、监听、SMTP、Webhook 或 Admin API Key 复用。 |
 | `RECHARGE_CENTER_PUBLIC_URL` | 充值中心反向代理后的 HTTPS 根地址，例如 `https://pay.example.com`。 |
 | `RECHARGE_CENTER_TRUST_PROXY` | 使用本文的受控反向代理时设 `true`；不要让用户绕过代理直接访问容器。 |
 | `RECHARGE_CENTER_COOKIE_SECURE` | 生产固定 `true`。 |
@@ -189,7 +198,10 @@ RECHARGE_CENTER_CREDIT_MULTIPLIER=1
 
 | 配置项 | 如何确定 |
 |---|---|
-| `RECHARGE_CENTER_TRANSFER_QR_TEMPLATE` | 从你自己的支付宝合法转账/分享流程取得并真实验证的 URI；必须各含一次 `{amount}` 和 `{memo}`。没有通用值，不能复制文档示例。 |
+| `RECHARGE_CENTER_TRANSFER_QR_SOURCE` | 本方案固定为 `collector`；它表示由受控设备为每单生成新码。`template` 只保留给已有真实可替换 URI 的兼容部署。 |
+| `RECHARGE_CENTER_TRANSFER_QR_TEMPLATE` | `collector` 模式留空。只有选择 `template` 时才填写含 `{amount}`、`{memo}` 的本人实测 URI。普通 `fkx...` 地址不能填在这里。 |
+| `RECHARGE_CENTER_QR_JOB_LEASE_SECONDS` | 二维码代理领取单个任务的最长处理时间，允许 15 到 120 秒，通常保持 45；不得大于实际可控的页面操作时长。 |
+| `RECHARGE_CENTER_QR_PROVISIONER_SECRET` | 用独立的 `openssl rand -hex 48` 生成，只分发给服务端和二维码生成代理；它无权上报到账。 |
 | `RECHARGE_CENTER_LISTENER_SECRET` | 用第二次 `openssl rand -hex 48` 独立生成，只分发给服务端和受控监听器。 |
 | `RECHARGE_CENTER_LISTENER_COLLECTOR_ID` | 自行命名并固定到一台监听设备，例如 `alipay-ledger-phone-1`。 |
 | `RECHARGE_CENTER_LISTENER_MAX_STALE_SECONDS` | 必须明显大于监听器查询间隔；每 10 秒成功查询一次时建议 30。 |
@@ -198,17 +210,9 @@ RECHARGE_CENTER_CREDIT_MULTIPLIER=1
 | `RECHARGE_CENTER_ALIPAY_RECIPIENT_ID` | 由正式适配器从你账户一笔真实“收入成功”的最终交易详情中取得稳定、精确的收款方标识；不能用昵称或猜测的手机号代替。 |
 | `RECHARGE_CENTER_AUTO_MODE_VERIFIED` | 初始保持 `false`；全部真实小额正向/负向验收通过后才由负责人改为 `true`。 |
 
-重要事实：保存下来的普通个人收款码通常是类似 `https://qr.alipay.com/...` 的不透明令牌。它不包含可替换的金额和备注，因此不能直接得到 `RECHARGE_CENTER_TRANSFER_QR_TEMPLATE`。
+你解码得到的 `https://qr.alipay.com/fkx...` 是不透明、不可改写的结果，仍然受支持，但必须由二维码代理针对每笔订单重新生成。代理从服务端领取金额和随机备注，在本人支付宝正常可见页面填写并生成收钱码，再回传页面实际显示的金额、备注、收款账户标识和 `fkx...` URL。服务端会逐项匹配 `RECHARGE_CENTER_ALIPAY_RECIPIENT_ID`、拒绝重复 URL，并用 AES-256-GCM 加密 URL；用户浏览器只会收到服务端渲染的 PNG。
 
-只有你的支付宝流程确实能生成预填金额和备注的转账载荷时，才可以在隔离测试环境中执行以下验证：
-
-1. 分别生成两组不同金额、不同备注的测试二维码或分享链接。
-2. 使用离线二维码工具解码，不上传第三方网站；确认载荷目标是 `alipays://platformapi/startapp` 或支付宝官方 HTTPS 域名。
-3. 比较两组载荷，只把金额值替换为 `{amount}`、备注值替换为 `{memo}`，固定收款人参数保持原样。
-4. 用服务创建测试订单，扫码确认金额和随机备注都自动带入，且不需要付款人再次输入。
-5. 在最终账单详情确认备注完整保留。若载荷只是不可解释的短 Token、客户端忽略备注或详情页拿不到完整备注，立即停止，不能启用自动模式。
-
-仓库提供 HMAC 签名客户端 `tools/listener-client.js`，但不包含适用于你当前支付宝账号和页面版本的 DOM/非公开 API 采集器。在该专用适配器完成并经过真实验收之前，不能仅靠填 `.env` 实现无人值守自动充值，`RECHARGE_CENTER_AUTO_MODE_VERIFIED` 必须保持 `false`。完整验收要求见[个人支付宝转账自动充值手册](alipay-personal-qr-guide.md)。
+仓库已提供队列、租约、签名客户端和 `tools/qr-provisioner-agent.js`。账号页面适配模块仍必须依据你当前支付宝页面的可见结构实现和验收，不能复制通用选择器、导出 Cookie 或调用猜测的私有接口。适配前保持 `RECHARGE_CENTER_AUTO_MODE_VERIFIED=false`。接口契约和验收要求见[个人支付宝转账自动充值手册](alipay-personal-qr-guide.md)。
 
 ### 4.6 Sub2API 参数
 
@@ -242,6 +246,28 @@ RECHARGE_CENTER_CREDIT_MULTIPLIER=1
 SMTP 参数全部来自邮箱服务商，不来自支付宝。通知模块完全位于充值中心，不读取或复用 Provider Monitor 的渠道、数据库或凭据。
 
 ## 5. 校验并启动
+
+### 5.1 已部署 `sub2api-extra` 根目录时增量启动
+
+目录已有 `compose.services.env`、`docker-compose.yml` 和其他服务时，不要替换原有服务列表。先把 `recharge-center` 追加到现有 `COMPOSE_PROFILES`，例如：
+
+```dotenv
+COMPOSE_PROFILES=provider-monitor,operations-center,degradation-detector,recharge-center
+```
+
+然后只拉取并更新充值中心，不重建其他容器：
+
+```bash
+cd /opt/sub2api-extra
+docker compose --env-file compose.services.env config --services
+docker compose --env-file compose.services.env pull recharge-center
+docker compose --env-file compose.services.env up -d --no-deps recharge-center
+docker compose --env-file compose.services.env logs --tail=100 recharge-center
+```
+
+`recharge-center/.env` 由该服务自己的 `compose.yaml` 读取，不能把其中密钥写进根目录 `compose.services.env`。二维码代理运行在已登录支付宝的受控设备上，也不能放进服务器上的充值中心容器。
+
+### 5.2 单独使用充值中心 Compose
 
 先检查 Compose 语法和变量展开：
 
@@ -343,6 +369,7 @@ curl -fsS http://127.0.0.1:9874/readyz
 - `/readyz` 返回 200 才表示当前模式可以接单。
 - `personal_manual` 的 `/readyz` 会确认静态图片已成功加载。
 - `personal_transfer_auto` 在监听器尚未成功读取支付宝账单并发送就绪心跳时返回 503，这是安全设计，不应绕过。
+- `collector` 来源还要求二维码代理独立心跳正常；两类设备任一不健康都会返回 503 并停止创建新订单。
 
 再从 Sub2API 自定义菜单打开充值中心，用另一个支付宝账号做最低金额测试：
 
@@ -363,10 +390,12 @@ curl -fsS http://127.0.0.1:9874/readyz
 | 生产启动提示主密钥无效 | 仍在使用 `.env.example` 占位值；重新生成独立随机值。 |
 | 生产启动提示必须 HTTPS | `RECHARGE_CENTER_PUBLIC_URL` 或 `SUB2API_PUBLIC_URL` 不是实际 HTTPS 根地址。 |
 | 自动模式 `/readyz` 为 503 | 监听器没有真实成功轮询、心跳过期或报告 `ready=false`；不能用假心跳强行变绿。 |
-| 自动模式拒绝模板 | 缺少 `{amount}`/`{memo}`、使用非支付宝域名、含占位示例或不安全的嵌套跳转。 |
+| 自动模式提示二维码代理不可用 | `collector` 模式未启动 `qr-provisioner-agent.js`、代理未登录正确账号、适配器健康检查失败或心跳过期。 |
+| `PAYMENT_QR_PENDING` | 本单 `fkx...` 尚在受控设备生成；页面会自动轮询，超过三分钟仍未完成则订单过期。 |
+| 自动模式拒绝模板 | 仅 `template` 兼容模式会出现；检查 `{amount}`/`{memo}`、支付宝域名和嵌套跳转。 |
 | 自动模式拒绝 Admin API Key | 生产必须使用当前 Sub2API 生成的 `admin-` 加 64 位十六进制值。 |
 | 邮件无法发送 | 核对服务商 SMTP 主机、端口、授权码和 TLS 组合；465 通常 `SECURE=true`，587 通常 `REQUIRE_TLS=true`。 |
-| 上传静态码后仍不能自动充值 | 这是预期行为；静态图片仅属于 `personal_manual`，自动模式需要动态 URI 模板和最终交易详情监听器。 |
+| 上传静态码后仍不能自动充值 | 这是预期行为；静态图片仅属于 `personal_manual`。`collector` 自动模式需要受控设备逐单生成 `fkx...` 和独立的最终交易详情监听器。 |
 
 ## 10. 更新与备份注意事项
 
@@ -374,4 +403,4 @@ curl -fsS http://127.0.0.1:9874/readyz
 - 同时安全备份 `.env` 和二维码，但不要把它们放进源码仓库或普通网盘。
 - 不要在服务运行时直接复制 SQLite 主文件作为一致性备份，应使用 SQLite 在线备份方式或先停服务。
 - 不要通过删除订单、修改数据库或更换数据卷“修复”异常订单；应在管理页面保留审计轨迹并按人工流程处理。
-- 轮换 `RECHARGE_CENTER_SECRET` 需要专门迁移设计；监听密钥、SMTP 授权码、Webhook Token 和 Admin API Key 可以分别轮换，且始终不得互相复用。
+- 轮换 `RECHARGE_CENTER_SECRET` 需要专门迁移设计；二维码代理密钥、监听密钥、SMTP 授权码、Webhook Token 和 Admin API Key 可以分别轮换，且始终不得互相复用。

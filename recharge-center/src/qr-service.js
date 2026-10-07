@@ -4,6 +4,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const QRCode = require('qrcode');
 const { AppError } = require('./errors');
+const { normalizeOpaqueAlipayQrUrl } = require('./qr-provisioning-service');
 
 function detectImageType(buffer) {
   if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
@@ -47,7 +48,11 @@ class QrService {
 
   status() {
     if (this.config.automaticPersonalMode) {
-      return { available: Boolean(this.config.transferQrTemplate), dynamic: true };
+      return {
+        available: this.config.collectorQrProvisioning || Boolean(this.config.transferQrTemplate),
+        dynamic: true,
+        source: this.config.transferQrSource
+      };
     }
     return this.asset
       ? { available: true, bytes: this.asset.bytes, fingerprint: this.asset.sha256.slice(0, 12) }
@@ -72,12 +77,16 @@ class QrService {
   }
 
   async #sendDynamic(res, payment) {
-    if (!this.config.transferQrTemplate || !payment?.amount || !payment?.memo) {
+    let payload;
+    if (payment?.qrUrl) {
+      payload = normalizeOpaqueAlipayQrUrl(payment.qrUrl);
+    } else if (this.config.transferQrTemplate && payment?.amount && payment?.memo) {
+      payload = this.config.transferQrTemplate
+        .replace('{amount}', encodeURIComponent(payment.amount))
+        .replace('{memo}', encodeURIComponent(payment.memo));
+    } else {
       throw new AppError('PAYMENT_QR_UNAVAILABLE', '订单支付二维码暂不可用', { status: 503 });
     }
-    const payload = this.config.transferQrTemplate
-      .replace('{amount}', encodeURIComponent(payment.amount))
-      .replace('{memo}', encodeURIComponent(payment.memo));
     let buffer;
     try {
       buffer = await QRCode.toBuffer(payload, {

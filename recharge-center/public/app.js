@@ -358,8 +358,18 @@ async function loadQr(order) {
     refreshIcons();
     return;
   }
+  if (!order.qrAvailable && isPersonalAutoMode()) {
+    $('qr-loading').innerHTML = `${icon('loader-circle')}<span>正在生成本单收钱码</span>`;
+    refreshIcons();
+    return;
+  }
   try {
     const response = await fetch(`/api/orders/${encodeURIComponent(order.id)}/qr`, { credentials: 'same-origin' });
+    if (response.status === 425) {
+      $('qr-loading').innerHTML = `${icon('loader-circle')}<span>正在生成本单收钱码</span>`;
+      refreshIcons();
+      return;
+    }
     if (!response.ok) throw new Error('收款码读取失败');
     const blob = await response.blob();
     state.qrBlobUrl = URL.createObjectURL(blob);
@@ -453,7 +463,7 @@ async function renderActiveOrder(order, forceQr = false) {
   }
   $('cancel-order').hidden = !awaiting;
   $('cancel-order').parentElement.hidden = !awaiting;
-  $('download-qr').hidden = !awaiting || (isOfficialMode() && !order.qrAvailable);
+  $('download-qr').hidden = !awaiting || (isAutomaticMode() && !order.qrAvailable);
   $('open-pay-url').hidden = !awaiting || !order.payUrl;
   $('qr-frame').hidden = awaiting && isOfficialMode() && !order.qrAvailable && Boolean(order.payUrl);
   $('scan-hint').textContent = isOfficialMode()
@@ -463,7 +473,9 @@ async function renderActiveOrder(order, forceQr = false) {
           ? '支付页面已在新窗口打开，请完成支付后返回此页面'
           : '该订单的支付凭据已失效，请取消后重新创建。')
     : isPersonalAutoMode()
-      ? '打开支付宝扫一扫，确认金额和自动备注均未被修改后完成付款。'
+      ? (order.qrAvailable
+          ? '打开支付宝扫一扫，确认金额和自动备注均未被修改后完成付款。'
+          : '正在通过受控设备生成本单支付宝收钱码。')
       : '打开支付宝扫一扫，完成后在下方填写账单中的交易号。';
   $('countdown-hint').textContent = isAutomaticMode() ? '等待到账自动确认...' : '订单过期后请勿继续付款';
   startCountdown(order);

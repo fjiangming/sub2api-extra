@@ -273,9 +273,17 @@ test('personal transfer auto HTTP mode is heartbeat-gated and never exposes the 
       method: 'POST',
       headers: {
         'content-type': 'application/json',
+        'x-recharge-signature-version': '2',
         'x-recharge-timestamp': timestamp,
         'x-recharge-nonce': requestNonce,
-        'x-recharge-signature': listenerSignature(listenerSecret, timestamp, requestNonce, Buffer.from(body))
+        'x-recharge-signature': listenerSignature(
+          listenerSecret,
+          timestamp,
+          requestNonce,
+          Buffer.from(body),
+          'POST',
+          pathname
+        )
       },
       body
     });
@@ -349,4 +357,180 @@ test('personal transfer auto HTTP mode is heartbeat-gated and never exposes the 
     headers: { cookie, 'user-agent': 'test-browser' }
   });
   assert.equal((await finalOrder.json()).status, 'completed');
+});
+
+test('collector QR HTTP flow provisions an opaque code before exact automatic credit', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'recharge-collector-http-test-'));
+  const listenerSecret = 'listener-secret-0123456789abcdef0123456789';
+  const qrSecret = 'qr-secret-0123456789abcdef0123456789abcdef';
+  const env = {
+    NODE_ENV: 'test',
+    RECHARGE_CENTER_PAYMENT_MODE: 'personal_transfer_auto',
+    RECHARGE_CENTER_SECRET: 'test-secret-0123456789abcdef0123456789abcdef',
+    RECHARGE_CENTER_DATA_DIR: directory,
+    RECHARGE_CENTER_DATABASE: path.join(directory, 'http.db'),
+    RECHARGE_CENTER_PASSWORD_LOGIN_ENABLED: 'false',
+    RECHARGE_CENTER_TRANSFER_QR_SOURCE: 'collector',
+    RECHARGE_CENTER_QR_PROVISIONER_SECRET: qrSecret,
+    RECHARGE_CENTER_LISTENER_SECRET: listenerSecret,
+    RECHARGE_CENTER_LISTENER_COLLECTOR_ID: 'collector-one',
+    RECHARGE_CENTER_LISTENER_MAX_STALE_SECONDS: '30',
+    RECHARGE_CENTER_ALIPAY_RECIPIENT_ID: '2088123456789012',
+    SUB2API_BASE_URL: 'http://127.0.0.1:8080',
+    SUB2API_ADMIN_API_KEY: 'admin-api-key-0123456789',
+    RECHARGE_CENTER_ALERT_CHANNELS: 'email',
+    RECHARGE_CENTER_SMTP_HOST: 'smtp.mail.test',
+    RECHARGE_CENTER_SMTP_USER: 'recharge-alerts',
+    RECHARGE_CENTER_SMTP_PASSWORD: 'smtp-password-0123456789abcdef',
+    RECHARGE_CENTER_SMTP_FROM: 'recharge-alerts@mail.test',
+    RECHARGE_CENTER_ALERT_EMAIL_TO: 'ops@mail.test'
+  };
+  const redemptions = [];
+  const runtime = createRuntime(env, {
+    sub2api: {
+      async getCurrentUser() {
+        return { id: 42, email: 'alice@example.com', username: 'alice', role: 'user', status: 'active' };
+      },
+      async createAndRedeemWithAdminKey(input) {
+        redemptions.push(input);
+        return {
+          redeem_code: {
+            code: input.code, type: 'balance', value: input.value, status: 'used', used_by: input.userId
+          }
+        };
+      }
+    },
+    alerts: { async send() {} },
+    projectRoot: path.resolve(__dirname, '..')
+  });
+  const server = runtime.app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    runtime.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  let nonceCounter = 0;
+  const signedPost = (pathname, payload, secret) => {
+    const body = JSON.stringify(payload);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const nonce = `collector-nonce-${String(++nonceCounter).padStart(12, '0')}`;
+    return fetch(`${baseUrl}${pathname}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-recharge-signature-version': '2',
+        'x-recharge-timestamp': timestamp,
+        'x-recharge-nonce': nonce,
+        'x-recharge-signature': listenerSignature(secret, timestamp, nonce, Buffer.from(body), 'POST', pathname)
+      },
+      body
+    });
+  };
+  const heartbeatPayload = () => ({
+    collectorId: 'collector-one', version: 'test-collector-1', ready: true, observedAt: new Date().toISOString()
+  });
+
+  assert.equal((await signedPost('/api/listener/alipay/heartbeat', heartbeatPayload(), listenerSecret)).status, 200);
+  assert.equal((await fetch(`${baseUrl}/readyz`)).status, 503);
+  assert.equal((await signedPost('/api/listener/alipay/qr-heartbeat', heartbeatPayload(), listenerSecret)).status, 401);
+  assert.equal((await signedPost('/api/listener/alipay/events', {
+    collectorId: 'collector-one',
+    eventId: 'scope-check-0001',
+    source: 'browser',
+    evidenceType: 'ledger_detail',
+    tradeNo: '2026100700000000000000000099',
+    amount: '1.00',
+    paidAt: new Date().toISOString(),
+    memo: 'S2-0123456789abcdef',
+    recipientId: '2088123456789012',
+    direction: 'income',
+    status: 'success'
+  }, qrSecret)).status, 401);
+  assert.equal((await signedPost('/api/listener/alipay/qr-heartbeat', heartbeatPayload(), qrSecret)).status, 200);
+  assert.equal((await fetch(`${baseUrl}/readyz`)).status, 200);
+
+  const login = await fetch(`${baseUrl}/api/auth/sso`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'user-agent': 'test-browser' },
+    body: JSON.stringify({ token: 'valid-user-token-1234567890' })
+  });
+  const session = await login.json();
+  const cookie = login.headers.get('set-cookie').match(/rc_session=[^;]+/)[0];
+  const created = await fetch(`${baseUrl}/api/orders`, {
+    method: 'POST',
+    headers: {
+      cookie,
+      'content-type': 'application/json',
+      'user-agent': 'test-browser',
+      'x-csrf-token': session.csrfToken
+    },
+    body: JSON.stringify({ amount: '12.34' })
+  });
+  assert.equal(created.status, 201);
+  const order = await created.json();
+  assert.equal(order.qrStatus, 'pending');
+  assert.equal(order.qrAvailable, false);
+  assert.equal(JSON.stringify(order).includes('S2-'), false);
+
+  const pendingQr = await fetch(`${baseUrl}/api/orders/${order.id}/qr`, {
+    headers: { cookie, 'user-agent': 'test-browser' }
+  });
+  assert.equal(pendingQr.status, 425);
+  assert.equal((await pendingQr.json()).error.code, 'PAYMENT_QR_PENDING');
+
+  const claimedResponse = await signedPost('/api/listener/alipay/qr-jobs/claim', {
+    collectorId: 'collector-one'
+  }, qrSecret);
+  assert.equal(claimedResponse.status, 200);
+  const claimed = await claimedResponse.json();
+  assert.equal(claimed.amount, '12.34');
+  assert.match(claimed.memo, /^S2-[A-Za-z0-9_-]{16}$/);
+  const generatedAt = new Date().toISOString();
+  const opaqueUrl = 'https://qr.alipay.com/fkxHttpCollectorFlow123';
+  const completedQr = await signedPost('/api/listener/alipay/qr-jobs/complete', {
+    collectorId: 'collector-one',
+    jobId: claimed.jobId,
+    leaseToken: claimed.leaseToken,
+    qrUrl: opaqueUrl,
+    observedAmount: claimed.amount,
+    observedMemo: claimed.memo,
+    observedRecipientId: '2088123456789012',
+    generatedAt
+  }, qrSecret);
+  assert.equal(completedQr.status, 200);
+
+  const readyOrderResponse = await fetch(`${baseUrl}/api/orders/${order.id}`, {
+    headers: { cookie, 'user-agent': 'test-browser' }
+  });
+  const readyOrder = await readyOrderResponse.json();
+  assert.equal(readyOrder.qrAvailable, true);
+  assert.equal(JSON.stringify(readyOrder).includes(opaqueUrl), false);
+  assert.equal(JSON.stringify(readyOrder).includes(claimed.memo), false);
+  const qr = await fetch(`${baseUrl}/api/orders/${order.id}/qr`, {
+    headers: { cookie, 'user-agent': 'test-browser' }
+  });
+  assert.equal(qr.status, 200);
+  assert.equal(qr.headers.get('content-type'), 'image/png');
+  assert.ok((await qr.arrayBuffer()).byteLength > 500);
+
+  const paidAt = new Date().toISOString();
+  const paid = await signedPost('/api/listener/alipay/events', {
+    collectorId: 'collector-one',
+    eventId: 'evt-collector-http-0001',
+    source: 'browser',
+    evidenceType: 'ledger_detail',
+    tradeNo: '2026100700000000000000000001',
+    amount: order.payableAmount,
+    paidAt,
+    memo: claimed.memo,
+    recipientId: '2088123456789012',
+    direction: 'income',
+    status: 'success'
+  }, listenerSecret);
+  assert.equal(paid.status, 200);
+  assert.equal((await paid.json()).status, 'completed');
+  assert.equal(redemptions.length, 1);
+  assert.equal(redemptions[0].value, 12.34);
 });

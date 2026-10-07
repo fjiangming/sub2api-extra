@@ -21,6 +21,8 @@ const optionalUrl = z.preprocess(
 
 const AUTO_PAYMENT_MODE = 'personal_transfer_auto';
 const AUTO_ORDER_TTL_MINUTES = 3;
+const QR_SOURCE_TEMPLATE = 'template';
+const QR_SOURCE_COLLECTOR = 'collector';
 const ALERT_CHANNEL_NAMES = new Set(['email', 'webhook']);
 
 function parseList(value) {
@@ -132,7 +134,10 @@ const schema = z.object({
   RECHARGE_CENTER_MAX_ACTIVE_ORDERS: z.coerce.number().int().min(1).max(5).default(1),
   ALIPAY_QR_IMAGE_PATH: optionalString,
   ALIPAY_QR_MAX_BYTES: z.coerce.number().int().min(1024).max(5 * 1024 * 1024).default(2 * 1024 * 1024),
+  RECHARGE_CENTER_TRANSFER_QR_SOURCE: z.enum([QR_SOURCE_TEMPLATE, QR_SOURCE_COLLECTOR]).default(QR_SOURCE_TEMPLATE),
   RECHARGE_CENTER_TRANSFER_QR_TEMPLATE: optionalString,
+  RECHARGE_CENTER_QR_JOB_LEASE_SECONDS: z.coerce.number().int().min(15).max(120).default(45),
+  RECHARGE_CENTER_QR_PROVISIONER_SECRET: optionalString,
   RECHARGE_CENTER_LISTENER_SECRET: optionalString,
   RECHARGE_CENTER_LISTENER_COLLECTOR_ID: optionalString,
   RECHARGE_CENTER_LISTENER_MAX_STALE_SECONDS: z.coerce.number().int().min(5).max(300).default(30),
@@ -242,7 +247,6 @@ const schema = z.object({
   }
   if (value.RECHARGE_CENTER_PAYMENT_MODE === AUTO_PAYMENT_MODE) {
     const required = [
-      ['RECHARGE_CENTER_TRANSFER_QR_TEMPLATE', value.RECHARGE_CENTER_TRANSFER_QR_TEMPLATE],
       ['RECHARGE_CENTER_LISTENER_SECRET', value.RECHARGE_CENTER_LISTENER_SECRET],
       ['RECHARGE_CENTER_LISTENER_COLLECTOR_ID', value.RECHARGE_CENTER_LISTENER_COLLECTOR_ID],
       ['RECHARGE_CENTER_ALIPAY_RECIPIENT_ID', value.RECHARGE_CENTER_ALIPAY_RECIPIENT_ID],
@@ -251,6 +255,20 @@ const schema = z.object({
     ];
     for (const [name, configured] of required) {
       if (!configured) context.addIssue({ code: 'custom', path: [name], message: '个人转账自动模式必须配置此项' });
+    }
+    if (value.RECHARGE_CENTER_TRANSFER_QR_SOURCE === QR_SOURCE_TEMPLATE && !value.RECHARGE_CENTER_TRANSFER_QR_TEMPLATE) {
+      context.addIssue({
+        code: 'custom',
+        path: ['RECHARGE_CENTER_TRANSFER_QR_TEMPLATE'],
+        message: 'template 二维码来源必须配置此项'
+      });
+    }
+    if (value.RECHARGE_CENTER_TRANSFER_QR_SOURCE === QR_SOURCE_COLLECTOR && !value.RECHARGE_CENTER_QR_PROVISIONER_SECRET) {
+      context.addIssue({
+        code: 'custom',
+        path: ['RECHARGE_CENTER_QR_PROVISIONER_SECRET'],
+        message: 'collector 二维码来源必须配置独立的二维码代理密钥'
+      });
     }
     if (value.RECHARGE_CENTER_TRANSFER_QR_TEMPLATE && !validateTransferTemplate(value.RECHARGE_CENTER_TRANSFER_QR_TEMPLATE)) {
       context.addIssue({
@@ -261,6 +279,9 @@ const schema = z.object({
     }
     if (value.RECHARGE_CENTER_LISTENER_SECRET && value.RECHARGE_CENTER_LISTENER_SECRET.length < 32) {
       context.addIssue({ code: 'custom', path: ['RECHARGE_CENTER_LISTENER_SECRET'], message: '至少需要 32 个字符' });
+    }
+    if (value.RECHARGE_CENTER_QR_PROVISIONER_SECRET && value.RECHARGE_CENTER_QR_PROVISIONER_SECRET.length < 32) {
+      context.addIssue({ code: 'custom', path: ['RECHARGE_CENTER_QR_PROVISIONER_SECRET'], message: '至少需要 32 个字符' });
     }
     if (value.RECHARGE_CENTER_LISTENER_COLLECTOR_ID && !/^[A-Za-z0-9_-]{3,64}$/.test(value.RECHARGE_CENTER_LISTENER_COLLECTOR_ID)) {
       context.addIssue({ code: 'custom', path: ['RECHARGE_CENTER_LISTENER_COLLECTOR_ID'], message: '只能包含字母、数字、下划线和连字符' });
@@ -281,6 +302,7 @@ const schema = z.object({
   }
   const isolatedSecrets = [
     value.RECHARGE_CENTER_SECRET,
+    value.RECHARGE_CENTER_QR_PROVISIONER_SECRET,
     value.RECHARGE_CENTER_LISTENER_SECRET,
     value.SUB2API_ADMIN_API_KEY,
     value.RECHARGE_CENTER_SMTP_PASSWORD,
@@ -290,7 +312,7 @@ const schema = z.object({
     context.addIssue({
       code: 'custom',
       path: ['RECHARGE_CENTER_ALERT_CHANNELS'],
-      message: '账本、监听、Sub2API 管理、SMTP 和 Webhook 凭据必须相互独立，不能复用'
+      message: '账本、二维码代理、到账监听、Sub2API 管理、SMTP 和 Webhook 凭据必须相互独立，不能复用'
     });
   }
   if (value.NODE_ENV === 'production') {
@@ -320,6 +342,7 @@ const schema = z.object({
     if (value.RECHARGE_CENTER_PAYMENT_MODE === AUTO_PAYMENT_MODE &&
         [
           value.RECHARGE_CENTER_LISTENER_SECRET,
+          value.RECHARGE_CENTER_QR_PROVISIONER_SECRET,
           value.RECHARGE_CENTER_SMTP_PASSWORD,
           value.RECHARGE_CENTER_ALERT_WEBHOOK_BEARER_TOKEN,
           value.RECHARGE_CENTER_ALIPAY_RECIPIENT_ID
@@ -421,7 +444,11 @@ function loadConfig(env = process.env, options = {}) {
     maxActiveOrders: value.RECHARGE_CENTER_MAX_ACTIVE_ORDERS,
     qrImagePath: value.ALIPAY_QR_IMAGE_PATH ? path.resolve(value.ALIPAY_QR_IMAGE_PATH) : null,
     qrMaxBytes: value.ALIPAY_QR_MAX_BYTES,
+    transferQrSource: value.RECHARGE_CENTER_TRANSFER_QR_SOURCE,
+    collectorQrProvisioning: automaticPersonalMode && value.RECHARGE_CENTER_TRANSFER_QR_SOURCE === QR_SOURCE_COLLECTOR,
     transferQrTemplate: value.RECHARGE_CENTER_TRANSFER_QR_TEMPLATE || null,
+    qrJobLeaseSeconds: value.RECHARGE_CENTER_QR_JOB_LEASE_SECONDS,
+    qrProvisionerSecret: value.RECHARGE_CENTER_QR_PROVISIONER_SECRET || null,
     listenerSecret: value.RECHARGE_CENTER_LISTENER_SECRET || null,
     listenerCollectorId: value.RECHARGE_CENTER_LISTENER_COLLECTOR_ID || null,
     listenerMaxStaleSeconds: value.RECHARGE_CENTER_LISTENER_MAX_STALE_SECONDS,
@@ -451,4 +478,11 @@ function loadConfig(env = process.env, options = {}) {
   };
 }
 
-module.exports = { AUTO_ORDER_TTL_MINUTES, AUTO_PAYMENT_MODE, loadConfig, validateTransferTemplate };
+module.exports = {
+  AUTO_ORDER_TTL_MINUTES,
+  AUTO_PAYMENT_MODE,
+  QR_SOURCE_COLLECTOR,
+  QR_SOURCE_TEMPLATE,
+  loadConfig,
+  validateTransferTemplate
+};

@@ -2,13 +2,13 @@
 
 需要先完成目录、二维码文件、`.env`、反向代理和 Sub2API 自定义菜单配置时，请从[充值中心部署与配置手册](deployment-configuration.md)开始。本文专门说明个人转账自动模式的安全边界和验收流程。
 
-> `personal_transfer_auto` 不读取 `ALIPAY_QR_IMAGE_PATH`，也不会把上传的静态个人收款码自动改造成带金额和备注的订单码。静态图片只用于 `personal_manual`；自动模式必须使用真实验证的转账 URI 模板并接入最终交易详情监听器。
+> `personal_transfer_auto` 不读取 `ALIPAY_QR_IMAGE_PATH`，也不会改写已有静态码。最终方案使用 `collector`：受控支付宝设备按每笔订单的金额和随机备注生成一个新的 `https://qr.alipay.com/fkx...`，服务端校验并渲染成用户扫描的 PNG。
 
 ## 1. 可行性结论
 
 本项目已经实现 `personal_transfer_auto` 后端链路：三分钟订单、同额优先/冲突分角、随机备注、监听心跳、HMAC 防重放、交易详情匹配、Sub2API 幂等入账、异常人工队列和充值中心独立通知。
 
-该模式不要求开通当面付，但有一个不能绕开的前提：你的个人支付宝转账入口必须在当前客户端版本中实际支持由二维码自动带入“金额”和“备注”，收款侧监听器也必须能从最终交易详情稳定取得完整备注。普通静态收钱码图片本身通常只标识收款人；如果扫码后无法自动带入备注，这个方案不能满足“用户只填金额”，必须保持 `RECHARGE_CENTER_AUTO_MODE_VERIFIED=false`。
+该模式不要求开通当面付，但有两个不能绕开的前提：本人支付宝当前页面必须能逐单设置“金额”和“备注”并生成收钱码，到账监听器还必须能从最终交易详情稳定取得完整备注。普通静态码和已经生成的某个 `fkx...` 都不能复用于任意订单；如果任一页面流程不成立，必须保持 `RECHARGE_CENTER_AUTO_MODE_VERIFIED=false`。
 
 这不是支付宝开放平台官方支付能力。支付宝没有向普通个人账户承诺一个可供任意服务器使用、带签名回调和商户订单号的通用到账查询接口。浏览器页面或手机端可见的账单信息属于非稳定采集面，页面字段、登录策略和风控都可能变化。因此本模式只能做到严格失败关闭，不能宣称与官方接口同等级或“完美零风险”。
 
@@ -19,9 +19,10 @@
   -> 创建 180 秒订单
   -> 原金额优先；冲突时 +0.01..+0.99 全局占位
   -> 生成 S2-<96 bit 随机值> 备注
-  -> 服务端生成含金额与备注的支付宝二维码 PNG
-  -> 浏览器/手机适配器读取最终交易详情
-  -> HMAC 签名事件
+  -> 二维码代理在本人支付宝页面生成本单 fkx URL
+  -> 服务端校验、加密 URL 并生成二维码 PNG
+  -> 独立浏览器/手机适配器读取最终交易详情
+  -> 使用另一把 HMAC 密钥签名到账事件
   -> 精确匹配全部字段
   -> 固定兑换码 + Idempotency-Key 调用 Sub2API
   -> 余额与 balance/used 兑换记录
@@ -33,7 +34,7 @@
 1. `evidenceType` 为 `ledger_detail`。
 2. 随机备注 HMAC 唯一命中一个自动模式订单。
 3. 实收金额精确到分且等于订单实际应付金额。
-4. 支付宝付款时间位于订单创建到过期之间。
+4. 本单二维码状态为 `ready`，支付宝付款时间不早于二维码生成时间且不晚于订单过期时间。
 5. `recipientId` 与部署时锁定的收款标识完全一致。
 6. 方向为 `income`，状态为 `success`。
 7. 完整支付宝交易号此前未处理过。
@@ -45,10 +46,11 @@
 
 ## 3. 准备独立凭据
 
-生成账本和监听两枚互不复用的随机值；启用可选 Webhook 时再生成第三枚 Token：
+生成账本、二维码代理和到账监听三枚互不复用的随机值；启用可选 Webhook 时再生成第四枚 Token：
 
 ```bash
 openssl rand -base64 48  # RECHARGE_CENTER_SECRET
+openssl rand -base64 48  # RECHARGE_CENTER_QR_PROVISIONER_SECRET
 openssl rand -base64 48  # RECHARGE_CENTER_LISTENER_SECRET
 openssl rand -base64 48  # RECHARGE_CENTER_ALERT_WEBHOOK_BEARER_TOKEN（可选）
 ```
@@ -57,39 +59,30 @@ openssl rand -base64 48  # RECHARGE_CENTER_ALERT_WEBHOOK_BEARER_TOKEN（可选�
 
 权限要求：
 
-- `.env`、监听器环境文件：Linux `0600`。
+- `.env`、二维码代理和监听器环境文件：Linux `0600`。
 - SQLite 数据目录：`0700`；账本文件：`0600`。
-- 监听密钥只存在充值中心和受控监听进程，不放入网页脚本、扩展页面 DOM 或同步网盘。
+- 二维码代理密钥与监听密钥分别只存在充值中心和对应进程，不互相分发，不放入网页脚本、页面 DOM 或同步网盘。
 - SMTP 密码和可选 Webhook Token 只存在充值中心服务端，不发给监听器，也不与其他服务复用。
 
-## 4. 验证个人转账二维码模板
+## 4. 验证逐单 `fkx` 收钱码
 
-`RECHARGE_CENTER_TRANSFER_QR_TEMPLATE` 不是静态二维码图片路径，而是你自己的支付宝转账 URI 模板。它必须各包含一次：
+你解码得到的这类地址可以使用：
 
 ```text
-{amount}
-{memo}
+https://qr.alipay.com/fkx165...
 ```
 
-允许的目标仅为：
+但它是不透明的单次生成结果，不含可由服务器替换的金额或备注。正确流程不是保存一张静态图片，也不是把 `fkx...` 当成 `RECHARGE_CENTER_TRANSFER_QR_TEMPLATE`，而是让受控设备为每笔订单重新执行支付宝正常页面流程：
 
-- `alipays://platformapi/startapp`，并使用你从支付宝合法分享流程取得的查询参数
-- `https://alipay.com/` 或支付宝子域名下的 HTTPS 地址
+1. 二维码代理通过签名接口领取 `amount`、`memo` 和 45 秒左右的租约。
+2. 代理在已登录本人账号的支付宝正常可见页面填写两项数据并触发生成收钱码。
+3. 代理从结果页回读实际显示的金额、完整备注、生成时间及 `fkx...` URL。
+4. 服务端要求金额和备注逐字一致，URL 必须是无查询串、无片段、无凭据的直接 `https://qr.alipay.com/fkx...`，且此前从未用于其他订单。
+5. URL 以 AES-256-GCM 密文保存，数据库只索引带密钥 HMAC；用户浏览器只能通过鉴权二维码端点得到 PNG。
 
-禁止把第三方跳转域名、短链接或带账号密码的 URL 放入模板。`alipays://` 只接受 `platformapi/startapp`，查询参数内嵌的 HTTP(S) 地址也必须是支付宝 HTTPS 域名。模板中的固定收款人参数必须指向你的账户。
+代理不能导出支付宝 Cookie、调用猜测的私有查询接口、把完整备注或 URL 写入日志，也不能在页面结构变化时继续报告健康。扫码支付页必须自动显示本单金额和备注，用户不得补填。最终账单详情还必须原样保留同一备注。
 
-验收步骤：
-
-1. 从你自己的支付宝“转账/收钱”合法分享流程取得 URI，不使用他人的链接，不抓取或复制登录 Cookie。
-2. 在隔离的 staging 环境把实际 URI 中的金额值替换为 `{amount}`，把备注值替换为 `{memo}`。验收时使用 `NODE_ENV=development`、HTTPS、Secure Cookie、`RECHARGE_CENTER_PASSWORD_LOGIN_ENABLED=false` 和反向代理 IP 白名单；不得接入真实用户流量。
-3. 创建 0.01 元测试订单并扫码。
-4. 支付确认页必须自动显示服务端分配的金额和随机备注。
-5. 不做任何手工填写，完成付款。
-6. 收款账单最终详情必须完整显示同一备注，不能截断、转义、改写大小写或丢失前缀。
-7. 重复测试整数金额、小数金额、同额冲突金额和跨 1 元边界的分角金额。
-
-只要其中一步不成立，就不能打开自动模式生产闸门。不要通过要求用户手填备注来掩盖模板失败，因为这违反本方案的交互要求，也显著增加错单概率。
-配置校验会拒绝 `REPLACE_FROM_OWN_LINK`、`replace-with-*` 以及尖括号形式的明显占位值；它们只能出现在文档中，不能进入生产环境。
+分别验收整数金额、小数金额、同额冲突分角、租约超时、重复 URL、金额回读不一致、备注回读不一致和登录失效。任何一项失败都不能打开生产闸门。
 
 ## 5. 配置充值中心独立告警
 
@@ -131,7 +124,9 @@ RECHARGE_CENTER_MAX_AMOUNT=5000
 # 单用户同时活动订单上限；系统另有不可调高的 100 笔全局占位硬上限
 RECHARGE_CENTER_MAX_ACTIVE_ORDERS=1
 
-RECHARGE_CENTER_TRANSFER_QR_TEMPLATE=<已验证模板>
+RECHARGE_CENTER_TRANSFER_QR_SOURCE=collector
+RECHARGE_CENTER_QR_JOB_LEASE_SECONDS=45
+RECHARGE_CENTER_QR_PROVISIONER_SECRET=<二维码代理独立密钥>
 RECHARGE_CENTER_LISTENER_SECRET=<监听密钥>
 RECHARGE_CENTER_LISTENER_COLLECTOR_ID=alipay-ledger-device-1
 RECHARGE_CENTER_LISTENER_MAX_STALE_SECONDS=30
@@ -158,7 +153,38 @@ RECHARGE_CENTER_ALERT_EMAIL_TO=<收件邮箱，多个用逗号分隔>
 
 自动模式会忽略 `RECHARGE_CENTER_ORDER_TTL_MINUTES` 并固定使用三分钟。生产环境在 `RECHARGE_CENTER_AUTO_MODE_VERIFIED` 不是 `true` 时拒绝启动，这是故意设计的上线闸门。完成本手册全部验收前只能运行受控 staging；验收通过后同时切换为 `NODE_ENV=production` 和 `RECHARGE_CENTER_AUTO_MODE_VERIFIED=true`。
 
-## 7. 接入浏览器或手机监听器
+## 7. 接入二维码代理与到账监听器
+
+### 二维码代理
+
+二维码代理应运行在已登录本人支付宝的专用设备上。服务端容器不接触支付宝登录态，只通过独立签名接口下发短时任务：
+
+```bash
+export RECHARGE_CENTER_LISTENER_BASE_URL=https://pay.example.com
+export RECHARGE_CENTER_QR_PROVISIONER_SECRET='<二维码代理独立密钥>'
+export RECHARGE_CENTER_LISTENER_COLLECTOR_ID=alipay-ledger-device-1
+export RECHARGE_CENTER_ALIPAY_RECIPIENT_ID='<与服务端相同的精确收款标识>'
+export RECHARGE_CENTER_QR_ADAPTER_MODULE=/secure/alipay-qr-adapter.js
+export RECHARGE_CENTER_QR_POLL_MS=3000
+node tools/qr-provisioner-agent.js
+```
+
+`RECHARGE_CENTER_QR_ADAPTER_MODULE` 指向本机普通 JS 文件，Linux 上不得允许组用户或其他用户写入。模块契约：
+
+```js
+module.exports = {
+  async healthCheck() {
+    // 只有已登录正确收款账号且页面字段自检通过才返回 ready。
+    return { ready: true, recipientId };
+  },
+  async generate({ amount, memo, expiresAt, signal }) {
+    // 使用正常可见页面设置 amount/memo，并从结果页回读四个字段。
+    return { qrUrl, observedAmount, observedMemo, observedRecipientId, generatedAt };
+  }
+};
+```
+
+适配器不得使用订单传入值冒充 `observedAmount`、`observedMemo` 或 `observedRecipientId`；这些值必须从支付宝结果页独立回读。代理框架不会在普通日志中记录完整备注或二维码 URL。网络中断导致完成回执不确定时会以同一租约重试，不会发送破坏性的失败请求。任一生成失败或回执不确定都会锁止代理为不健康；查明原因后由运维人员重启代理，不能自动忽略故障继续接单。
 
 ### 监听器必须提供的事实
 
@@ -202,25 +228,26 @@ await client.heartbeat({
 await client.sendPayment(paymentDetail);
 ```
 
-客户端自动生成时间戳和 144 位随机 nonce，并对原始 JSON 请求体计算 HMAC-SHA-256。服务端验证时间漂移后把 nonce 写入 SQLite，任何重放都会返回 `LISTENER_REPLAY_REJECTED`。
+客户端自动生成时间戳和 144 位随机 nonce，并对 HTTP 方法、接口路径、时间戳、nonce 与原始 JSON 请求体计算版本 2 HMAC-SHA-256。服务端验证时间漂移后把按权限域隔离的 nonce HMAC 写入 SQLite；路径替换、跨权限域使用或重放都会被拒绝。
 
 `ready=true` 只能在本轮已成功访问支付宝账单、完成登录状态检查，并确认最终详情所需字段仍可读取后发送。登录过期、页面结构变化、解析异常或最近一次成功轮询超过阈值时，发送 `ready=false` 或停止心跳；不能用一个与采集逻辑无关的定时器持续报告就绪。
 
-### 当前适配器边界
+### 当前账号适配边界
 
-仓库没有硬编码支付宝网页 DOM 选择器或非公开接口。原因不是遗漏：在未观察你当前账号、当前页面版本和最终详情字段前，写死选择器会产生“看起来自动、实际漏单或读错字段”的危险实现。浏览器适配器只有在以下条件全部实测后才可投入生产：
+仓库已实现二维码任务代理、租约和回传校验，但没有硬编码你当前支付宝网页的 DOM 选择器或非公开接口。原因不是遗漏：在未观察当前账号、页面版本、生成页和最终详情字段前，写死选择器会产生“看起来自动、实际漏单或读错字段”的危险实现。账号适配模块只有在以下条件全部实测后才可投入生产：
 
 - 页面登录会话由支付宝正常维护，程序不导出 Cookie。
 - 能稳定区分收入与支出、成功与处理中/退款。
 - 能进入详情并读取完整交易号、完整备注和精确付款时间。
 - 页面变化或字段缺失时停止发送事件，而不是猜测默认值。
 - 进程崩溃恢复后 `eventId` 不复用，重复扫描同一交易仍保持同一交易号。
+- 生成页能独立回读金额和备注，并只返回直接 `qr.alipay.com/fkx...`。
 
-在真实页面适配完成前，后端和签名客户端可以联调，但 `RECHARGE_CENTER_AUTO_MODE_VERIFIED` 必须保持 `false`。
+当前 Chrome 必须先安装并启用 Codex/ChatGPT Browser 扩展，才能由开发工具观察已登录页面并完成账号适配。未完成真实页面适配前，后端、代理框架和签名客户端可以联调，但 `RECHARGE_CENTER_AUTO_MODE_VERIFIED` 必须保持 `false`。
 
 ## 8. 心跳与健康检查
 
-监听器应每 10 秒发送一次：
+到账监听器应每 10 秒发送一次；二维码代理会独立执行 `qr-heartbeat`：
 
 ```bash
 export RECHARGE_CENTER_LISTENER_BASE_URL=https://pay.example.com
@@ -241,6 +268,11 @@ node tools/listener-client.js heartbeat
   "listener": {
     "required": true,
     "healthy": true,
+    "ledgerHealthy": true,
+    "qrProvisioningRequired": true,
+    "qrProvisioningHealthy": true,
+    "lastQrProvisionerHeartbeatAt": "2026-10-03T00:00:00.000Z",
+    "lastQrProvisionerCheckAt": "2026-10-03T00:00:00.000Z",
     "lastHeartbeatAt": "2026-10-03T00:00:00.000Z",
     "lastSuccessfulPollAt": "2026-10-03T00:00:00.000Z",
     "staleAfterSeconds": 30
@@ -248,7 +280,7 @@ node tools/listener-client.js heartbeat
 }
 ```
 
-心跳或最近成功轮询过期后服务仍接收付款事件，但拒绝创建新订单。事件只有在 `RECHARGE_CENTER_LISTENER_MAX_EVENT_AGE_SECONDS`（默认 600 秒，允许 180 到 3600 秒）内且付款时间位于原订单三分钟窗口时才可能自动入账；更晚的事件保留证据、告警并转人工。
+二维码代理或到账监听器任一心跳过期后，服务仍接收已有订单的付款事件，但拒绝创建新订单。事件只有在 `RECHARGE_CENTER_LISTENER_MAX_EVENT_AGE_SECONDS`（默认 600 秒，允许 180 到 3600 秒）内，且付款时间位于本单二维码生成后至订单过期之间，才可能自动入账；更晚的事件保留证据、告警并转人工。
 
 ## 9. 联调事件
 
@@ -263,15 +295,15 @@ node tools/listener-client.js event /secure/payment-event.json
 
 必须执行的负向测试：
 
-1. 错金额。
-2. 未知、缺失和截断备注。
-3. 错收款标识。
-4. `direction=outgoing`。
-5. `status=pending` 或退款状态。
-6. 付款时间早于创建或晚于过期。
+1. 二维码生成回读错金额、错备注、非 `fkx` 域名和重复 URL。
+2. 二维码租约过期、旧租约重放和完成回执网络中断。
+3. 二维码代理密钥调用到账接口，到账监听密钥调用二维码接口。
+4. 到账错金额、未知/缺失/截断备注和错收款标识。
+5. `direction=outgoing`、`status=pending` 或退款状态。
+6. 付款时间早于二维码生成或晚于订单过期。
 7. 同一交易号配不同备注重放。
-8. 同一 nonce 重放。
-9. 停止心跳超过阈值。
+8. 同一 nonce 重放或把签名请求改投其他路径。
+9. 分别停止两类心跳超过阈值。
 10. 心跳继续但报告 `ready=false`，或最近成功轮询时间过期。
 11. 事件迟到超过最大允许时间，但其 `paidAt` 仍伪装在订单窗口内。
 12. Sub2API 请求超时或返回无法核验的兑换记录。
@@ -297,9 +329,9 @@ node tools/listener-client.js event /secure/payment-event.json
 
 发生错充、重复入账、监听器被控制、密钥泄露或页面字段变化时：
 
-1. 停止监听器并关闭充值中心入口。
+1. 停止二维码代理和到账监听器，并关闭充值中心入口。
 2. 保全 SQLite、支付宝原始账单、Sub2API 兑换记录和充值中心通知记录。
-3. 轮换对应的监听密钥、SMTP 密码、Webhook Token 或 Admin API Key；不同用途不要复用轮换值。
+3. 轮换对应的二维码代理密钥、监听密钥、SMTP 密码、Webhook Token 或 Admin API Key；不同用途不要复用轮换值。
 4. 通过 Sub2API 正式余额调整流程纠正，不直接编辑数据库，不删除原兑换记录。
 5. 重新完成全部正向和负向验收后再设置生产闸门。
 

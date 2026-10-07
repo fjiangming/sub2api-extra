@@ -40,6 +40,39 @@ const listenerHeartbeatSchema = z.object({
   ready: z.boolean(),
   observedAt: z.string().datetime({ offset: true })
 }).strict();
+const qrJobClaimSchema = z.object({
+  collectorId: z.string().min(3).max(64)
+}).strict();
+const qrProvisionerHeartbeatSchema = z.object({
+  collectorId: z.string().min(3).max(64),
+  version: z.string().trim().min(1).max(80).optional(),
+  ready: z.boolean(),
+  observedAt: z.string().datetime({ offset: true })
+}).strict();
+const qrJobCompleteSchema = z.object({
+  collectorId: z.string().min(3).max(64),
+  jobId: z.string().uuid(),
+  leaseToken: z.string().min(32).max(128).regex(/^[A-Za-z0-9_-]+$/),
+  qrUrl: z.string().url().max(512),
+  observedAmount: z.union([z.string(), z.number()]),
+  observedMemo: z.string().trim().min(1).max(200),
+  observedRecipientId: z.string().trim().min(1).max(200),
+  generatedAt: z.string().datetime({ offset: true })
+}).strict();
+const qrJobFailSchema = z.object({
+  collectorId: z.string().min(3).max(64),
+  jobId: z.string().uuid(),
+  leaseToken: z.string().min(32).max(128).regex(/^[A-Za-z0-9_-]+$/),
+  failureCode: z.enum([
+    'login_required',
+    'navigation_failed',
+    'unexpected_page',
+    'field_mismatch',
+    'qr_not_generated',
+    'adapter_unavailable',
+    'other'
+  ])
+}).strict();
 const listenerEventSchema = z.object({
   collectorId: z.string().min(3).max(64),
   eventId: z.string().trim().min(8).max(128).regex(/^[A-Za-z0-9._:-]+$/),
@@ -93,7 +126,7 @@ function limiter(limit, code, message) {
   });
 }
 
-function createApp({ config, db, auth, orders, qr, officialPayments, listener }) {
+function createApp({ config, db, auth, orders, qr, officialPayments, listener, qrProvisioning }) {
   const app = express();
   const officialMode = config.paymentMode === 'sub2api_official';
   const automaticPersonalMode = config.paymentMode === 'personal_transfer_auto';
@@ -186,15 +219,18 @@ function createApp({ config, db, auth, orders, qr, officialPayments, listener })
   const qrLimiter = limiter(60, 'QR_RATE_LIMITED', '二维码读取过于频繁，请稍后再试');
   const reviewLimiter = limiter(30, 'REVIEW_RATE_LIMITED', '审核操作过于频繁，请稍后再试');
   const listenerLimiter = limiter(600, 'LISTENER_RATE_LIMITED', '监听器请求过于频繁');
+  const qrProvisionerLimiter = limiter(600, 'QR_PROVISIONER_RATE_LIMITED', '收钱码生成代理请求过于频繁');
 
-  const listenerAuthenticated = (req, _res, next) => {
+  const signedDevice = (scope) => (req, _res, next) => {
     try {
-      listener?.authenticate(req);
+      listener?.authenticate(req, scope);
       next();
     } catch (error) {
       next(error);
     }
   };
+  const listenerAuthenticated = signedDevice('ledger');
+  const qrProvisionerAuthenticated = signedDevice('qr');
 
   app.post('/api/listener/alipay/heartbeat', listenerLimiter, listenerAuthenticated, (req, res) => {
     const input = parse(listenerHeartbeatSchema, req.body);
@@ -205,6 +241,28 @@ function createApp({ config, db, auth, orders, qr, officialPayments, listener })
     listener.assertCollector(input.collectorId);
     const result = await orders.acceptAutomaticPayment(input, requestAuditContext(req));
     res.set('Cache-Control', 'no-store').status(result.status === 'completed' || result.duplicate ? 200 : 202).json(result);
+  }));
+  app.post('/api/listener/alipay/qr-heartbeat', qrProvisionerLimiter, qrProvisionerAuthenticated, (req, res) => {
+    const input = parse(qrProvisionerHeartbeatSchema, req.body);
+    res.set('Cache-Control', 'no-store').json(listener.qrHeartbeat(input));
+  });
+  app.post('/api/listener/alipay/qr-jobs/claim', qrProvisionerLimiter, qrProvisionerAuthenticated, (req, res) => {
+    const input = parse(qrJobClaimSchema, req.body);
+    listener.assertCollector(input.collectorId);
+    orders.expireAwaiting();
+    const job = qrProvisioning.claim(input.collectorId, requestAuditContext(req));
+    res.set('Cache-Control', 'no-store');
+    return job ? res.json(job) : res.status(204).end();
+  });
+  app.post('/api/listener/alipay/qr-jobs/complete', qrProvisionerLimiter, qrProvisionerAuthenticated, asyncRoute(async (req, res) => {
+    const input = parse(qrJobCompleteSchema, req.body);
+    listener.assertCollector(input.collectorId);
+    res.set('Cache-Control', 'no-store').json(await qrProvisioning.complete(input, requestAuditContext(req)));
+  }));
+  app.post('/api/listener/alipay/qr-jobs/fail', qrProvisionerLimiter, qrProvisionerAuthenticated, asyncRoute(async (req, res) => {
+    const input = parse(qrJobFailSchema, req.body);
+    listener.assertCollector(input.collectorId);
+    res.set('Cache-Control', 'no-store').json(await qrProvisioning.fail(input, requestAuditContext(req)));
   }));
 
   app.get('/api/config', (_req, res) => {

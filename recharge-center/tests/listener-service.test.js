@@ -24,11 +24,14 @@ test('listener requests require a fresh HMAC signature and a one-time nonce', (t
   }));
   const timestamp = String(Math.floor(now.getTime() / 1000));
   const nonce = 'nonce-0123456789abcdef';
-  const signature = listenerSignature(secret, timestamp, nonce, rawBody);
+  const signature = listenerSignature(secret, timestamp, nonce, rawBody, 'POST', '/api/listener/alipay/heartbeat');
   const request = {
     rawBody,
+    method: 'POST',
+    path: '/api/listener/alipay/heartbeat',
     get(name) {
       return ({
+        'x-recharge-signature-version': '2',
         'x-recharge-timestamp': timestamp,
         'x-recharge-nonce': nonce,
         'x-recharge-signature': signature
@@ -98,6 +101,14 @@ test('listener client signs the exact body and pins its configured collector ide
   const nonce = captured.options.headers['X-Recharge-Nonce'];
   assert.equal(
     captured.options.headers['X-Recharge-Signature'],
-    listenerSignature(secret, timestamp, nonce, Buffer.from(captured.options.body))
+    listenerSignature(
+      secret,
+      timestamp,
+      nonce,
+      Buffer.from(captured.options.body),
+      'POST',
+      '/api/listener/alipay/events'
+    )
   );
+  assert.equal(captured.options.headers['X-Recharge-Signature-Version'], '2');
 });

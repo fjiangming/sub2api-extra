@@ -9,6 +9,7 @@ const { OrderService } = require('./order-service');
 const { OfficialPaymentService } = require('./official-payment-service');
 const { NotificationService } = require('./notification-service');
 const { ListenerService } = require('./listener-service');
+const { QrProvisioningService } = require('./qr-provisioning-service');
 const { createApp } = require('./app');
 
 function createRuntime(env = process.env, options = {}) {
@@ -24,10 +25,11 @@ function createRuntime(env = process.env, options = {}) {
   const auth = new AuthService(config, sub2api);
   const orders = new OrderService({ db, config, sub2api, alerts: notifications, clock: options.clock });
   const listener = new ListenerService({ db, config, clock: options.clock });
+  const qrProvisioning = new QrProvisioningService({ db, config, alerts: notifications, clock: options.clock });
   const officialPayments = config.paymentMode === 'sub2api_official'
     ? new OfficialPaymentService({ config, sub2api, clock: options.clock })
     : null;
-  const app = createApp({ config, db, auth, orders, qr, officialPayments, listener });
+  const app = createApp({ config, db, auth, orders, qr, officialPayments, listener, qrProvisioning });
   return {
     app,
     config,
@@ -37,6 +39,7 @@ function createRuntime(env = process.env, options = {}) {
     qr,
     notifications,
     listener,
+    qrProvisioning,
     officialPayments,
     close() {
       officialPayments?.close();

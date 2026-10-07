@@ -58,3 +58,10 @@ test('recharge interactions use native-style feedback instead of browser dialogs
   assert.match(script, /classList\.toggle\('payment-phase-active', Boolean\(order\)\)/);
   assert.match(css, /body\.payment-phase-active \.account-card\s*\{[^}]*display:\s*none/s);
 });
+
+test('collector QR generation uses a non-error waiting state and hides premature download', () => {
+  assert.match(script, /response\.status === 425/);
+  assert.match(script, /正在生成本单收钱码/);
+  assert.match(script, /\$\('download-qr'\)\.hidden = !awaiting \|\| \(isAutomaticMode\(\) && !order\.qrAvailable\)/);
+  assert.match(script, /正在通过受控设备生成本单支付宝收钱码/);
+});

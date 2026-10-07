@@ -24,6 +24,7 @@ test('npm package uses an explicit allowlist without runtime payment data', () =
     'public/',
     'docs/',
     '.env.example',
+    '.env.minimal.example',
     'compose.yaml',
     'Dockerfile'
   ]);
@@ -62,4 +63,42 @@ test('every example environment setting has purpose and source documentation', (
   for (const name of [...runtimeNames, ...composeNames]) {
     assert.ok(assignments.has(name), `.env.example 缺少 ${name}`);
   }
+});
+
+test('minimal automatic-transfer environment contains only deployment-required settings', () => {
+  const root = path.resolve(__dirname, '..');
+  const source = fs.readFileSync(path.join(root, '.env.minimal.example'), 'utf8');
+  const assignments = Object.fromEntries(source
+    .split(/\r?\n/)
+    .map((line) => /^([A-Z][A-Z0-9_]*)=(.*)$/.exec(line))
+    .filter(Boolean)
+    .map((match) => [match[1], match[2]]));
+  const required = [
+    'NODE_ENV',
+    'RECHARGE_CENTER_PAYMENT_MODE',
+    'RECHARGE_CENTER_SECRET',
+    'RECHARGE_CENTER_PUBLIC_URL',
+    'RECHARGE_CENTER_TRUST_PROXY',
+    'RECHARGE_CENTER_TRANSFER_QR_SOURCE',
+    'RECHARGE_CENTER_QR_PROVISIONER_SECRET',
+    'RECHARGE_CENTER_LISTENER_SECRET',
+    'RECHARGE_CENTER_LISTENER_COLLECTOR_ID',
+    'RECHARGE_CENTER_ALIPAY_RECIPIENT_ID',
+    'RECHARGE_CENTER_AUTO_MODE_VERIFIED',
+    'SUB2API_BASE_URL',
+    'SUB2API_PUBLIC_URL',
+    'SUB2API_ADMIN_API_KEY',
+    'RECHARGE_CENTER_ALERT_CHANNELS',
+    'RECHARGE_CENTER_SMTP_HOST',
+    'RECHARGE_CENTER_SMTP_USER',
+    'RECHARGE_CENTER_SMTP_PASSWORD',
+    'RECHARGE_CENTER_SMTP_FROM',
+    'RECHARGE_CENTER_ALERT_EMAIL_TO'
+  ];
+
+  assert.deepEqual(Object.keys(assignments), required);
+  assert.equal(assignments.NODE_ENV, 'production');
+  assert.equal(assignments.RECHARGE_CENTER_PAYMENT_MODE, 'personal_transfer_auto');
+  assert.equal(assignments.RECHARGE_CENTER_AUTO_MODE_VERIFIED, 'false');
+  assert.equal(assignments.RECHARGE_CENTER_TRANSFER_QR_SOURCE, 'collector');
 });

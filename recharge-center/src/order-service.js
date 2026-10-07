@@ -72,6 +72,10 @@ function publicOrder(row, options = {}) {
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+  if (row.payment_mode === 'personal_transfer_auto') {
+    order.qrStatus = row.payment_qr_status || 'ready';
+    order.qrAvailable = order.qrStatus === 'ready';
+  }
   if (options.admin) {
     order.fulfillmentAttempts = row.fulfillment_attempts;
     order.fulfillmentStartedAt = row.fulfillment_started_at || null;
@@ -133,7 +137,17 @@ class OrderService {
     `);
     const transaction = this.db.transaction(() => {
       for (const row of rows) {
-        if (update.run(now, row.id).changes === 1) this.#audit(row.id, { type: 'system' }, 'ORDER_EXPIRED', null);
+        if (update.run(now, row.id).changes === 1) {
+          this.db.prepare(`
+            UPDATE recharge_orders SET payment_qr_status = 'expired'
+            WHERE id = ? AND payment_qr_status = 'pending'
+          `).run(row.id);
+          this.db.prepare(`
+            UPDATE qr_provision_jobs SET status = 'expired', updated_at = ?
+            WHERE order_id = ? AND status IN ('queued', 'leased')
+          `).run(now, row.id);
+          this.#audit(row.id, { type: 'system' }, 'ORDER_EXPIRED', null);
+        }
       }
       this.db.prepare('DELETE FROM amount_reservations WHERE expires_at <= ?').run(now);
     });
@@ -190,6 +204,10 @@ class OrderService {
       const redeemCode = randomRedeemCode();
       const sealedRedeemCode = sealText(this.config.secret, 'redeem-code:v1', redeemCode, row.id);
       const paymentMemo = automatic ? randomPaymentMemo() : null;
+      const paymentQrSource = automatic ? (this.config.transferQrSource || 'template') : null;
+      const paymentQrStatus = automatic
+        ? (paymentQrSource === 'collector' ? 'pending' : 'ready')
+        : null;
       const paymentMemoHash = paymentMemo
         ? hmacHex(this.config.secret, 'payment-memo:v1', paymentMemo)
         : null;
@@ -201,19 +219,27 @@ class OrderService {
           id, order_no, user_id, user_email_masked, payment_mode,
           requested_amount_minor, payable_amount_minor, credit_amount_micros,
           status, redeem_code, payment_memo_hash, payment_memo_ciphertext,
-          payment_memo_last6, auto_match_status, expires_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_payment', ?, ?, ?, ?, ?, ?, ?, ?)
+          payment_memo_last6, payment_qr_source, payment_qr_status,
+          auto_match_status, expires_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_payment', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         row.id, row.orderNo, user.id, user.emailMasked, this.config.paymentMode || 'personal_manual',
         requestedMinor, payableMinor, creditMicros, sealedRedeemCode,
         paymentMemoHash, sealedPaymentMemo, paymentMemo?.slice(-6) || null,
-        automatic ? 'awaiting_match' : null, row.expiresAt, createdAt, createdAt
+        paymentQrSource, paymentQrStatus, automatic ? 'awaiting_match' : null,
+        row.expiresAt, createdAt, createdAt
       );
       if (automatic) {
         this.db.prepare(`
           INSERT INTO amount_reservations(payable_amount_minor, order_id, expires_at, created_at)
           VALUES (?, ?, ?, ?)
         `).run(payableMinor, row.id, row.expiresAt, createdAt);
+        if (paymentQrSource === 'collector') {
+          this.db.prepare(`
+            INSERT INTO qr_provision_jobs(id, order_id, status, created_at, updated_at)
+            VALUES (?, ?, 'queued', ?, ?)
+          `).run(crypto.randomUUID(), row.id, createdAt, createdAt);
+        }
       }
       this.#audit(row.id, { type: 'user', id: user.id }, 'ORDER_CREATED', request, {
         requestedAmount: minorToDecimal(requestedMinor),
@@ -221,6 +247,7 @@ class OrderService {
         creditAmount: microsToDecimal(creditMicros),
         amountAdjusted: requestedMinor !== payableMinor,
         paymentMode: this.config.paymentMode,
+        paymentQrSource,
         memoSuffix: paymentMemo?.slice(-6) || null,
         currency: 'CNY'
       });
@@ -266,10 +293,22 @@ class OrderService {
   paymentQrData(orderId, user) {
     this.canAccessQr(orderId, user);
     const row = this.db.prepare(`
-      SELECT id, payable_amount_minor, payment_memo_ciphertext
+      SELECT id, payable_amount_minor, payment_memo_ciphertext, payment_qr_source,
+             payment_qr_status, payment_qr_ciphertext
       FROM recharge_orders WHERE id = ?
     `).get(orderId);
     if (!row?.payment_memo_ciphertext) return null;
+    if (row.payment_qr_source === 'collector') {
+      if (row.payment_qr_status === 'pending') {
+        throw new AppError('PAYMENT_QR_PENDING', '正在生成本单支付宝收钱码', { status: 425 });
+      }
+      if (row.payment_qr_status !== 'ready' || !row.payment_qr_ciphertext) {
+        throw new AppError('PAYMENT_QR_UNAVAILABLE', '本单支付宝收钱码生成失败', { status: 409 });
+      }
+      return {
+        qrUrl: openText(this.config.secret, 'alipay-qr-url:v1', row.payment_qr_ciphertext, row.id)
+      };
+    }
     return {
       amount: minorToDecimal(row.payable_amount_minor),
       memo: openText(this.config.secret, 'payment-memo:v1', row.payment_memo_ciphertext, row.id)
@@ -380,9 +419,15 @@ class OrderService {
       else if (!order) anomalyCode = 'MEMO_UNKNOWN';
       else if (order.payment_mode !== 'personal_transfer_auto') anomalyCode = 'ORDER_MODE_MISMATCH';
       else if (amountMinor !== Number(order.payable_amount_minor)) anomalyCode = 'PAYMENT_AMOUNT_MISMATCH';
+      else if (order.payment_qr_source === 'collector' &&
+               (order.payment_qr_status !== 'ready' || !order.payment_qr_generated_at ||
+                !order.payment_qr_hash || !order.payment_qr_ciphertext)) anomalyCode = 'PAYMENT_QR_NOT_READY';
       else {
         const paidSecond = Math.floor(paidAtTimestamp / 1000);
-        const createdSecond = Math.floor(Date.parse(order.created_at) / 1000);
+        const payableFrom = order.payment_qr_source === 'collector'
+          ? order.payment_qr_generated_at
+          : order.created_at;
+        const createdSecond = Math.floor(Date.parse(payableFrom) / 1000);
         const expiresSecond = Math.floor(Date.parse(order.expires_at) / 1000);
         if (paidSecond < createdSecond || paidSecond > expiresSecond) anomalyCode = 'PAYMENT_OUTSIDE_ORDER_WINDOW';
         else if (!['awaiting_payment', 'expired'].includes(order.status)) anomalyCode = 'ORDER_STATE_INVALID';
@@ -557,6 +602,10 @@ class OrderService {
         UPDATE recharge_orders SET status = 'cancelled', cancelled_at = ?, updated_at = ?, version = version + 1
         WHERE id = ? AND status = 'awaiting_payment'
       `).run(now, now, row.id);
+      this.db.prepare(`
+        UPDATE qr_provision_jobs SET status = 'cancelled', updated_at = ?
+        WHERE order_id = ? AND status IN ('queued', 'leased')
+      `).run(now, row.id);
       this.#audit(row.id, { type: 'user', id: user.id }, 'ORDER_CANCELLED', request);
       return this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(row.id);
     });

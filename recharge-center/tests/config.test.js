@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
 const path = require('path');
 const { loadConfig } = require('../src/config');
 
@@ -138,6 +139,30 @@ test('personal transfer auto mode requires isolated credentials and forces a thr
   assert.deepEqual(config.alertEmailTo, ['ops-one@mail.test', 'ops-two@mail.test']);
 });
 
+test('collector QR mode requires a separate provisioning credential', () => {
+  const automatic = {
+    ...base,
+    RECHARGE_CENTER_PAYMENT_MODE: 'personal_transfer_auto',
+    RECHARGE_CENTER_TRANSFER_QR_SOURCE: 'collector',
+    RECHARGE_CENTER_LISTENER_SECRET: 'listener-secret-0123456789abcdef0123456789',
+    RECHARGE_CENTER_LISTENER_COLLECTOR_ID: 'collector-one',
+    RECHARGE_CENTER_ALIPAY_RECIPIENT_ID: '2088123456789012',
+    SUB2API_ADMIN_API_KEY: 'admin-api-key-0123456789',
+    ...emailAlerts
+  };
+  assert.throws(() => loadConfig(automatic), /QR_PROVISIONER_SECRET/);
+  assert.throws(() => loadConfig({
+    ...automatic,
+    RECHARGE_CENTER_QR_PROVISIONER_SECRET: automatic.RECHARGE_CENTER_LISTENER_SECRET
+  }), /不能复用/);
+  const config = loadConfig({
+    ...automatic,
+    RECHARGE_CENTER_QR_PROVISIONER_SECRET: 'qr-secret-0123456789abcdef0123456789abcdef'
+  });
+  assert.equal(config.collectorQrProvisioning, true);
+  assert.equal(config.transferQrTemplate, null);
+});
+
 test('personal transfer auto mode requires standalone email alerts', () => {
   assert.throws(() => loadConfig({
     ...base,
@@ -258,4 +283,40 @@ test('production personal transfer mode rejects documented credential placeholde
     RECHARGE_CENTER_LISTENER_SECRET: 'listener-secret-0123456789abcdef0123456789',
     RECHARGE_CENTER_ALIPAY_RECIPIENT_ID: '<详情页稳定收款标识>'
   }), /不能使用示例监听密钥/);
+});
+
+test('minimal automatic-transfer template preserves production-safe defaults', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '..', '.env.minimal.example'), 'utf8');
+  const example = Object.fromEntries(source
+    .split(/\r?\n/)
+    .map((line) => /^([A-Z][A-Z0-9_]*)=(.*)$/.exec(line))
+    .filter(Boolean)
+    .map((match) => [match[1], match[2]]));
+
+  assert.throws(() => loadConfig(example), /配置无效/);
+
+  const config = loadConfig({
+    ...example,
+    RECHARGE_CENTER_SECRET: 'production-random-0123456789abcdef0123456789abcdef0123456789',
+    RECHARGE_CENTER_QR_PROVISIONER_SECRET: 'qr-secret-0123456789abcdef0123456789abcdef',
+    RECHARGE_CENTER_LISTENER_SECRET: 'listener-secret-0123456789abcdef0123456789',
+    RECHARGE_CENTER_ALIPAY_RECIPIENT_ID: '2088123456789012',
+    RECHARGE_CENTER_AUTO_MODE_VERIFIED: 'true',
+    SUB2API_ADMIN_API_KEY: `admin-${'a'.repeat(64)}`,
+    RECHARGE_CENTER_SMTP_HOST: 'smtp.mail.test',
+    RECHARGE_CENTER_SMTP_USER: 'recharge-alerts@mail.test',
+    RECHARGE_CENTER_SMTP_PASSWORD: 'smtp-password-0123456789abcdef',
+    RECHARGE_CENTER_SMTP_FROM: 'recharge-alerts@mail.test',
+    RECHARGE_CENTER_ALERT_EMAIL_TO: 'operations@mail.test'
+  });
+
+  assert.equal(config.orderTtlMinutes, 3);
+  assert.equal(config.maxActiveOrders, 1);
+  assert.equal(config.listenerMaxStaleSeconds, 30);
+  assert.equal(config.listenerMaxEventAgeSeconds, 600);
+  assert.equal(config.cookieSecure, true);
+  assert.equal(config.passwordLoginEnabled, false);
+  assert.equal(config.smtpPort, 587);
+  assert.equal(config.smtpSecure, false);
+  assert.equal(config.smtpRequireTls, true);
 });

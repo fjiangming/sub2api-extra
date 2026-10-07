@@ -39,6 +39,33 @@ class RechargeListenerClient {
     });
   }
 
+  qrHeartbeat(input = {}) {
+    return this.#post('/api/listener/alipay/qr-heartbeat', {
+      collectorId: this.collectorId,
+      ready: input.ready === true,
+      observedAt: input.observedAt || new Date().toISOString(),
+      ...(input.version ? { version: String(input.version).slice(0, 80) } : {})
+    });
+  }
+
+  claimQrJob() {
+    return this.#post('/api/listener/alipay/qr-jobs/claim', { collectorId: this.collectorId });
+  }
+
+  completeQrJob(input) {
+    return this.#post('/api/listener/alipay/qr-jobs/complete', {
+      ...input,
+      collectorId: this.collectorId
+    });
+  }
+
+  failQrJob(input) {
+    return this.#post('/api/listener/alipay/qr-jobs/fail', {
+      ...input,
+      collectorId: this.collectorId
+    });
+  }
+
   sendPayment(event) {
     return this.#post('/api/listener/alipay/events', { ...event, collectorId: this.collectorId });
   }
@@ -57,7 +84,15 @@ class RechargeListenerClient {
           'Content-Type': 'application/json',
           'X-Recharge-Timestamp': timestamp,
           'X-Recharge-Nonce': nonce,
-          'X-Recharge-Signature': listenerSignature(this.secret, timestamp, nonce, Buffer.from(body))
+          'X-Recharge-Signature-Version': '2',
+          'X-Recharge-Signature': listenerSignature(
+            this.secret,
+            timestamp,
+            nonce,
+            Buffer.from(body),
+            'POST',
+            pathname
+          )
         },
         body,
         redirect: 'error',
@@ -71,9 +106,12 @@ class RechargeListenerClient {
       }
       if (!response.ok) {
         const code = result?.error?.code || `HTTP_${response.status}`;
-        throw new Error(`监听服务拒绝请求: ${code}`);
+        const error = new Error(`监听服务拒绝请求: ${code}`);
+        error.code = code;
+        error.status = response.status;
+        throw error;
       }
-      return result;
+      return response.status === 204 ? null : result;
     } finally {
       clearTimeout(timeout);
     }

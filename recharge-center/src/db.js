@@ -5,7 +5,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { hmacHex, safeEqual, sealText } = require('./security');
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 const ORDER_STATUSES = [
   'awaiting_payment',
   'payment_reported',
@@ -46,6 +46,11 @@ CREATE TABLE IF NOT EXISTS recharge_orders (
   payment_memo_hash TEXT,
   payment_memo_ciphertext TEXT,
   payment_memo_last6 TEXT,
+  payment_qr_source TEXT CHECK (payment_qr_source IS NULL OR payment_qr_source IN ('template', 'collector')),
+  payment_qr_status TEXT CHECK (payment_qr_status IS NULL OR payment_qr_status IN ('pending', 'ready', 'failed', 'expired')),
+  payment_qr_hash TEXT,
+  payment_qr_ciphertext TEXT,
+  payment_qr_generated_at TEXT,
   auto_match_status TEXT,
   payment_reported_at TEXT,
   alipay_paid_at TEXT,
@@ -78,6 +83,24 @@ CREATE TABLE IF NOT EXISTS amount_reservations (
 );
 CREATE INDEX IF NOT EXISTS amount_reservations_expiry
   ON amount_reservations(expires_at);
+
+CREATE TABLE IF NOT EXISTS qr_provision_jobs (
+  id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL UNIQUE REFERENCES recharge_orders(id) ON DELETE RESTRICT,
+  collector_id TEXT,
+  status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'completed', 'failed', 'expired', 'cancelled')),
+  lease_hash TEXT,
+  lease_expires_at TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  failure_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS qr_provision_jobs_status_created
+  ON qr_provision_jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS qr_provision_jobs_lease_expiry
+  ON qr_provision_jobs(lease_expires_at);
 
 CREATE TABLE IF NOT EXISTS payment_events (
   id TEXT PRIMARY KEY,
@@ -195,6 +218,42 @@ function migrate(db, secret) {
       ON recharge_orders(payment_memo_hash) WHERE payment_memo_hash IS NOT NULL;
   `);
   db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(6, appliedAt);
+  for (const [column, definition] of [
+    ['payment_qr_source', 'TEXT'],
+    ['payment_qr_status', 'TEXT'],
+    ['payment_qr_hash', 'TEXT'],
+    ['payment_qr_ciphertext', 'TEXT'],
+    ['payment_qr_generated_at', 'TEXT']
+  ]) {
+    if (!hasColumn(db, 'recharge_orders', column)) {
+      db.exec(`ALTER TABLE recharge_orders ADD COLUMN ${column} ${definition}`);
+    }
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS qr_provision_jobs (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL UNIQUE REFERENCES recharge_orders(id) ON DELETE RESTRICT,
+      collector_id TEXT,
+      status TEXT NOT NULL CHECK (status IN ('queued', 'leased', 'completed', 'failed', 'expired', 'cancelled')),
+      lease_hash TEXT,
+      lease_expires_at TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+      failure_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS qr_provision_jobs_status_created
+      ON qr_provision_jobs(status, created_at);
+    CREATE INDEX IF NOT EXISTS qr_provision_jobs_lease_expiry
+      ON qr_provision_jobs(lease_expires_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS recharge_orders_payment_qr_hash
+      ON recharge_orders(payment_qr_hash) WHERE payment_qr_hash IS NOT NULL;
+    UPDATE recharge_orders
+    SET payment_qr_source = 'template', payment_qr_status = 'ready'
+    WHERE payment_mode = 'personal_transfer_auto' AND payment_qr_source IS NULL;
+  `);
+  db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(7, appliedAt);
 }
 
 function nowIso() {
