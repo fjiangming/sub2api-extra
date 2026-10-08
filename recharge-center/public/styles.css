@@ -460,6 +460,37 @@ html.dark .card {
   background: var(--surface-soft);
 }
 
+.loading-view {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+}
+
+.loading-view p {
+  max-width: min(420px, 100%);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+#loading-message {
+  color: var(--muted);
+}
+
+.loading-spinner {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  border: 2px solid var(--primary-500);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 750ms linear infinite;
+}
+
 .login-view {
   min-height: calc(100vh - 128px);
   display: grid;

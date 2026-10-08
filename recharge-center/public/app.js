@@ -19,6 +19,7 @@ document.documentElement.classList.toggle('embedded', embeddedMode);
 
 const $ = (id) => document.getElementById(id);
 const state = {
+  bootstrapping: true,
   config: null,
   checkout: null,
   session: null,
@@ -160,9 +161,10 @@ async function api(path, options = {}) {
   if (!response.ok) {
     if (response.status === 401 && !path.startsWith('/api/auth/login')) {
       clearSession();
-      showLogin();
+      if (!state.bootstrapping) showLogin();
     }
     const error = new Error(payload?.error?.message || `请求失败 (${response.status})`);
+    error.status = response.status;
     error.code = payload?.error?.code;
     error.details = payload?.error?.details;
     throw error;
@@ -183,7 +185,39 @@ function clearSession() {
   state.qrBlobUrl = null;
 }
 
+function showLoading() {
+  state.bootstrapping = true;
+  document.body.classList.add('login-screen');
+  $('loading-view').hidden = false;
+  $('loading-view').setAttribute('aria-busy', 'true');
+  $('loading-spinner').hidden = false;
+  $('loading-message').textContent = '加载中...';
+  $('loading-retry').hidden = true;
+  setError('loading-error');
+  $('login-view').hidden = true;
+  $('app-view').hidden = true;
+  $('account-menu').hidden = true;
+}
+
+function finishLoading() {
+  state.bootstrapping = false;
+  $('loading-view').setAttribute('aria-busy', 'false');
+  $('loading-view').hidden = true;
+}
+
+function showLoadingError(error) {
+  state.bootstrapping = false;
+  $('loading-view').setAttribute('aria-busy', 'false');
+  $('loading-spinner').hidden = true;
+  $('loading-message').textContent = '暂时无法打开充值中心';
+  setError('loading-error', ['TimeoutError', 'AbortError'].includes(error.name)
+    ? '加载超时，请稍后重试'
+    : error.code ? error.message : '暂时无法加载，请稍后重试');
+  $('loading-retry').hidden = false;
+}
+
 function showLogin() {
+  finishLoading();
   document.body.classList.add('login-screen');
   $('login-view').hidden = false;
   $('app-view').hidden = true;
@@ -221,6 +255,7 @@ function renderLoginMode() {
 }
 
 function showApp() {
+  finishLoading();
   document.body.classList.remove('login-screen');
   $('login-view').hidden = true;
   $('app-view').hidden = false;
@@ -909,6 +944,7 @@ function startPolling() {
 }
 
 function bindEvents() {
+  $('loading-retry').addEventListener('click', bootstrap);
   $('login-form').addEventListener('submit', handleLogin);
   $('two-factor-form').addEventListener('submit', handleTwoFactor);
   $('two-factor-cancel').addEventListener('click', () => {
@@ -1017,25 +1053,27 @@ function bindEvents() {
 }
 
 async function bootstrap() {
+  showLoading();
   applyTheme(state.theme);
   if (!state.embedded) {
     try {
       document.body.classList.toggle('sidebar-collapsed', window.localStorage.getItem('recharge-center-sidebar-collapsed') === '1');
     } catch {}
   }
-  bindEvents();
   refreshIcons();
   try {
-    state.config = await api('/api/config');
+    state.config = await api('/api/config', { signal: AbortSignal.timeout(15000) });
     renderAmountOptions();
     renderLoginMode();
   } catch (error) {
-    toast(error.message, 'error');
+    showLoadingError(error);
+    return;
   }
   try {
-    state.session = await api('/api/auth/me');
-  } catch {
-    showLogin();
+    state.session = await api('/api/auth/me', { signal: AbortSignal.timeout(15000) });
+  } catch (error) {
+    if (error.status === 401 || error.status === 403) showLogin();
+    else showLoadingError(error);
     refreshIcons();
     return;
   }
@@ -1044,4 +1082,5 @@ async function bootstrap() {
   refreshIcons();
 }
 
+bindEvents();
 bootstrap();

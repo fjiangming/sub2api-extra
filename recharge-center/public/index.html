@@ -78,7 +78,16 @@
     </header>
 
     <main class="page-main">
-      <section id="login-view" class="login-view">
+      <section id="loading-view" class="loading-view" role="status" aria-live="polite" aria-busy="true">
+        <span id="loading-spinner" class="loading-spinner" aria-hidden="true"></span>
+        <p id="loading-message">加载中...</p>
+        <p id="loading-error" class="form-error" role="alert" hidden></p>
+        <button id="loading-retry" class="button secondary" type="button" hidden>
+          <i data-lucide="refresh-cw"></i><span>重试</span>
+        </button>
+      </section>
+
+      <section id="login-view" class="login-view" hidden>
         <div class="login-panel card">
           <div class="login-heading">
             <span class="login-icon"><i data-lucide="wallet-cards"></i></span>

@@ -385,6 +385,10 @@ URL：https://pay.example.com/?token={token}&theme={theme}
 
 充值中心会校验 Token、换成自己的短时会话，然后立即从地址栏删除 Token。由于首次请求仍带 Token，必须按上一节让反向代理访问日志忽略查询参数。
 
+自定义菜单的“SVG 图标”可填写 [充值中心图标](../public/recharge-center-icon.svg) 的完整内容，与 Sub2API 原生充值菜单图标一致，颜色自动跟随主题。
+
+模块首次打开时显示居中的 loading，配置和登录校验完成后直接进入充值页面。启动请求超时或服务异常会显示“重试”；只有确认登录会话不可用时才显示登录或返回 Sub2API 的提示。
+
 如果提示 `SESSION_BINDING_MISMATCH`，先确认反向代理正确传递真实 IP 和 User-Agent、`SUB2API_FORWARD_CLIENT_FINGERPRINT=true`，并确认 Sub2API 只信任你的代理头。调整会话绑定策略后需要退出 Sub2API 并重新登录，旧 Token 不会自动改变绑定信息。
 
 ## 8. 健康检查与二维码验收
