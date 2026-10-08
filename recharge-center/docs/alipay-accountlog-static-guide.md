@@ -52,9 +52,105 @@ RECHARGE_CENTER_PAYMENT_MODE=personal_accountlog_static
 
 ## 配置 RSA2 密钥
 
-在离线或受控主机生成 2048 位以上 RSA 私钥：
+本服务使用普通公钥 / RSA2 模式，不使用证书模式。先区分已有的三份密钥：
+
+| 名称 | 保存到 Linux 服务器的文件 | 用途 |
+| --- | --- | --- |
+| 应用私钥 | `recharge-center/secrets/alipay-app-private-key.pem` | 服务端签署 API 请求，必须与当前 AppID 已上传的应用公钥配对 |
+| 应用公钥 | `recharge-center/secrets/alipay-app-public-key.pem` | 上传到支付宝开放平台；服务器只用它检查密钥是否配对，运行时不读取 |
+| 支付宝公钥 | `recharge-center/secrets/alipay-public-key.pem` | 服务端验证支付宝响应，必须从同一 AppID 的普通公钥配置中取得 |
+
+### 已有密钥：直接复制粘贴到 Linux
+
+已有正确的应用私钥、应用公钥和支付宝公钥时，跳过下一小节的生成步骤。不要重新生成或覆盖正在使用的密钥，否则它可能与开放平台当前配置不匹配。
+
+以下操作在通过 SSH 登录的 Linux 服务器上完成，使用 Bash。`/你的路径/sub2api-extra` 替换成现有部署根目录；使用你有权限管理该目录的账号。先执行不含密钥的准备命令：
 
 ```bash
+cd /你的路径/sub2api-extra
+umask 077
+mkdir -p recharge-center/secrets
+chmod 700 recharge-center/secrets
+```
+
+使用编辑器粘贴密钥正文，避免把密钥写进 Shell 命令历史。以下以 `nano` 为例；也可以使用 `vi`。如果出现 `nano: command not found`，Ubuntu / Debian 可以执行 `sudo apt-get install nano` 后继续。
+
+1. 打开应用私钥文件：
+
+   ```bash
+   nano recharge-center/secrets/alipay-app-private-key.pem
+   ```
+
+   在编辑器内粘贴完整的应用私钥。PKCS#8 私钥的文件结构如下，中文占位文字必须替换成你的实际 Base64 密钥正文：
+
+   ```text
+   -----BEGIN PRIVATE KEY-----
+   此处粘贴应用私钥的完整Base64正文
+   -----END PRIVATE KEY-----
+   ```
+
+   如果已有私钥带有 `-----BEGIN RSA PRIVATE KEY-----` / `-----END RSA PRIVATE KEY-----`，它是 PKCS#1 格式，保留原来的完整首尾标记即可，不要仅替换标记来假装转换格式。
+
+2. 按 `Ctrl+O`，再按回车保存；按 `Ctrl+X` 退出。然后打开应用公钥文件：
+
+   ```bash
+   nano recharge-center/secrets/alipay-app-public-key.pem
+   ```
+
+   粘贴完整的应用公钥并以同样方式保存、退出：
+
+   ```text
+   -----BEGIN PUBLIC KEY-----
+   此处粘贴应用公钥的完整Base64正文
+   -----END PUBLIC KEY-----
+   ```
+
+3. 打开支付宝公钥文件：
+
+   ```bash
+   nano recharge-center/secrets/alipay-public-key.pem
+   ```
+
+   粘贴开放平台给出的完整支付宝公钥，再保存、退出：
+
+   ```text
+   -----BEGIN PUBLIC KEY-----
+   此处粘贴支付宝公钥的完整Base64正文
+   -----END PUBLIC KEY-----
+   ```
+
+   该文件的首尾标记与应用公钥一样，但正文不同；不能用应用公钥代替。
+
+如果复制到的只有一长串 Base64、没有首尾标记，在编辑器中按上述格式补齐。应用私钥需先确认导出格式：PKCS#8 使用 `PRIVATE KEY`，PKCS#1 使用 `RSA PRIVATE KEY`；开放平台常见的两份公钥使用 `PUBLIC KEY`。不要把 JSON 字段名、引号、逗号、Markdown 代码围栏或字面量 `\n` 一起粘贴。正文可以保持一行，也可以按原有换行粘贴。`BEGIN CERTIFICATE` 是证书，不能直接当作本模式的公钥文件；`BEGIN ENCRYPTED PRIVATE KEY` 也不能直接供当前无人值守服务读取。
+
+所有文件写好后设置权限，并只检查有效性与公开指纹，不打印私钥正文：
+
+```bash
+chmod 600 recharge-center/secrets/alipay-app-private-key.pem \
+  recharge-center/secrets/alipay-app-public-key.pem \
+  recharge-center/secrets/alipay-public-key.pem
+
+openssl pkey -in recharge-center/secrets/alipay-app-private-key.pem -check -noout
+openssl pkey -pubin -in recharge-center/secrets/alipay-app-public-key.pem -pubcheck -noout
+openssl pkey -pubin -in recharge-center/secrets/alipay-public-key.pem -pubcheck -noout
+
+set -o pipefail
+openssl pkey -in recharge-center/secrets/alipay-app-private-key.pem -pubout -outform DER \
+  | openssl dgst -sha256
+openssl pkey -pubin -in recharge-center/secrets/alipay-app-public-key.pem -outform DER \
+  | openssl dgst -sha256
+```
+
+前三条 OpenSSL 校验应成功；最后两条命令的 SHA-256 指纹必须完全一致，才说明应用私钥与应用公钥配对。支付宝公钥无需与它们相同。检查失败时先核对复制是否完整、私钥导出格式是否正确，不要继续启动服务。
+
+如果开放平台已经配置了这一份应用公钥，无需重复上传；如果尚未配置，在当前 AppID 的“接口加签方式”中选择普通公钥 / RSA2，上传应用公钥，并使用该页面最新返回的支付宝公钥。能解析公钥文件只证明文件格式有效，实际响应验签成功还要按后面的上线验收确认。
+
+### 没有密钥：生成新的密钥对
+
+仅首次配置且没有可复用密钥时，在离线或受控主机生成 2048 位以上 RSA 私钥。不要对已有生产文件直接执行以下命令：
+
+```bash
+umask 077
 mkdir -p recharge-center/secrets
 openssl genpkey -algorithm RSA \
   -pkeyopt rsa_keygen_bits:2048 \
@@ -78,6 +174,40 @@ chmod 600 recharge-center/secrets/alipay-app-public-key.pem
    ```
 
 4. 对该文件执行 `chmod 600`。
+
+### Docker Compose 文件权限与配置
+
+已有密钥和新生成密钥都要完成这一小节。仓库 Compose 将服务器的 `recharge-center/secrets` 只读挂载为容器中的 `/run/secrets`；默认镜像以 `node` 用户运行，UID / GID 均为 `1000`。因此，Linux 上由 root 写入的 `600` 密钥还需要调整归属，否则服务会报 `EACCES` / `permission denied`。
+
+下面在服务器部署根目录执行；没有 `sudo` 但已是 root 时，去掉 `sudo`。如果使用了自定义镜像或配置了其他容器用户，把 `1000:1000` 换成其实际 UID / GID。运行时只需应用私钥和支付宝公钥，应用公钥文件可留作核验：
+
+```bash
+sudo chown 1000:1000 recharge-center/secrets \
+  recharge-center/secrets/alipay-app-private-key.pem \
+  recharge-center/secrets/alipay-public-key.pem
+sudo chmod 700 recharge-center/secrets
+sudo chmod 600 recharge-center/secrets/alipay-app-private-key.pem \
+  recharge-center/secrets/alipay-public-key.pem
+```
+
+不要通过 `chmod 644` 或 `chmod 777` 解决读取失败；生产环境会拒绝组用户或其他用户可读的密钥文件。调整目录归属后，原 SSH 用户可能无法直接访问该目录，需要维护时使用受控的 `sudo` 编辑。
+
+在 `recharge-center/.env` 中填写的是容器内路径，不是密钥正文，也不是服务器文件路径：
+
+```dotenv
+RECHARGE_CENTER_ALIPAY_APP_PRIVATE_KEY_PATH=/run/secrets/alipay-app-private-key.pem
+RECHARGE_CENTER_ALIPAY_PUBLIC_KEY_PATH=/run/secrets/alipay-public-key.pem
+```
+
+没有“应用公钥路径”配置项，因为应用公钥不参与本服务的运行。填写其余必配项并取得镜像后，可以先用一次性容器确认容器用户和文件读取权限；这个命令不启动充值服务，也不输出密钥正文：
+
+```bash
+docker compose --env-file compose.services.env run --rm --no-deps \
+  --entrypoint sh recharge-center -c \
+  'id; test -r /run/secrets/alipay-app-private-key.pem && test -r /run/secrets/alipay-public-key.pem && echo "key files readable"'
+```
+
+应看到默认 `uid=1000(node)` / `gid=1000(node)`，以及 `key files readable`。没有出现后者或命令返回非零时，检查服务器文件是否存在、属主是否匹配容器用户、目录是否允许该用户进入，再继续上线验收。已有容器更换密钥文件后需要重新创建 `recharge-center` 容器，使运行中的服务重新读取文件；不要同时改动其他服务。
 
 `alipay-app-private-key.pem` 是应用私钥，永远不能上传到支付宝、提交 Git、放进 `.env` 或发送给他人。`alipay-public-key.pem` 必须是控制台给出的支付宝公钥，不能误用你刚生成的应用公钥。服务启动时会拒绝小于 2048 位、类型错误、过大的文件；Linux 生产环境还会拒绝组用户或其他用户可读的密钥文件。
 
@@ -156,8 +286,8 @@ RECHARGE_CENTER_ACCOUNTLOG_REQUEST_TIMEOUT_MS=10000
 
 ```bash
 cd /你的路径/sub2api-extra
-mkdir -p recharge-center/secrets
-chmod 700 recharge-center/secrets
+
+# 先按“配置 RSA2 密钥”小节写好文件，并设置容器用户的归属与严格权限。
 
 # 确认根 docker-compose.yml 已 include ./recharge-center/compose.yaml
 # 在现有列表末尾增加 recharge-center，不要删掉原服务
