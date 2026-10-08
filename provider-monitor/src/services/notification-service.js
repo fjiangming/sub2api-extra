@@ -605,17 +605,25 @@ class NotificationService {
       body: JSON.stringify(body),
       readBody: true
     });
+    const result = parseJson(response.body, null);
+    let reason = typeof result?.message === 'string' ? result.message : '';
+    // Bark can echo the Device Key when a database lookup fails.
+    if (body.device_key) {
+      for (const key of new Set([body.device_key, encodeURIComponent(body.device_key)])) {
+        reason = reason.replaceAll(key, '[REDACTED]');
+      }
+    }
+    reason = redactText(reason).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 300);
     if (!response.ok) {
-      throw new AppError('NOTIFICATION_FAILED', `Bark returned HTTP ${response.status}`, {
+      const message = `Bark returned HTTP ${response.status}${reason ? `: ${reason}` : ''}`;
+      throw new AppError('NOTIFICATION_FAILED', message, {
         status: 502,
         retryable: response.status === 429 || response.status >= 500
       });
     }
-    const result = parseJson(response.body, null);
     if (result?.code != null && Number(result.code) !== 200) {
       const code = Number(result.code);
-      const reason = redactText(result.message || 'unknown response').slice(0, 300);
-      throw new AppError('NOTIFICATION_FAILED', `Bark rejected the notification: ${reason}`, {
+      throw new AppError('NOTIFICATION_FAILED', `Bark rejected the notification: ${reason || 'unknown response'}`, {
         status: 502,
         retryable: code === 429 || code >= 500
       });

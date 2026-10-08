@@ -245,6 +245,12 @@ Provider Monitor 通过 Bark 把告警交给 Apple APNs，无需维护原生 iOS
 
 iOS 不提供由服务端单独强制震动的 APNs 字段。是否产生触觉反馈取决于 iPhone 的“通知”和“声音与触感”设置；使用重要警告前，还需要在 Bark 和 iOS 设置中允许重要警告。公共 Bark 服务会处理通知标题和正文，敏感部署应使用自建 Bark Server。
 
+测试出现 `Bark returned HTTP 400` 时，表示 Bark 拒绝了请求；监控系统会以 HTTP 502 返回，并在测试提示和日志中附带 Bark 的具体错误原因（Device Key 会脱敏）。优先核对以下配置：
+
+- Device Key 只填写 Bark 推送 URL 中的 Key，不要填写完整 URL 或 APNs Device Token。例如推送 URL 为 `https://api.day.app/你的Key/测试` 时，Device Key 填 `你的Key`，服务地址填 `https://api.day.app/push`。
+- Device Key 必须与 Bark App 中注册的服务器对应；自建服务器的 Key 不能用于官方服务器。出现 `failed to get device token` 时，检查 Key 是否复制完整、服务器是否一致；出现 `device token invalid` 时，在 Bark App 中重新注册该服务器后更新 Key 并重试。
+- 出现 `request bind failed` 时，检查自建 Bark Server 及反向代理是否支持 `/push` 的 JSON POST 请求。旧版监控系统只显示 HTTP 状态，需要更新后才能看到具体原因。
+
 ## Key 状态业务首字自动提醒
 
 “Key 状态 -> 提醒设置”可以配置监控窗口、每个 Key 采用的最新记录条数、平均首字阈值、重复提醒冷却时间和通知渠道。通道本身在“设置与备份”统一维护。评估任务每分钟运行一次，真实请求日志同步完成后也会立即排队运行；页面提供手动“评估提醒”。
