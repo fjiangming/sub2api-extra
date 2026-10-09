@@ -228,18 +228,32 @@
                 <i data-lucide="badge-alert"></i><span>同额订单冲突，请严格支付上方应付金额；到账额度与实付金额一致。</span>
               </div>
 
-              <div id="qr-frame" class="qr-frame">
-                <div id="qr-loading" class="qr-loading"><i data-lucide="loader-circle"></i></div>
-                <img id="payment-qr" alt="支付宝订单二维码" hidden>
-                <span id="alipay-mark" class="alipay-mark" aria-hidden="true" hidden><img src="/alipay.svg" alt=""></span>
+              <div class="payment-scan-layout">
+                <section class="payment-notice" aria-labelledby="payment-notice-title">
+                  <h3 id="payment-notice-title">付款须知</h3>
+                  <ul class="payment-notice-list">
+                    <li>使用支付宝扫描收款二维码。</li>
+                    <li><span id="payment-notice-amount-intro">手动填写 </span><strong class="payment-notice-amount">¥<span id="payment-notice-amount">0.00</span></strong><span id="payment-notice-amount-suffix">（应付金额），保留全部小数。</span></li>
+                    <li id="payment-notice-expiry">请在页面倒计时结束前完成付款，确认或刷新不会延长。</li>
+                    <li id="payment-notice-confirmation">付款后等待自动确认，请勿重复付款。</li>
+                  </ul>
+                  <p id="payment-notice-adjustment" class="payment-notice-warning" hidden><strong>注意：</strong>为保证到账识别准确，实际金额可能出现0.01～0.99元的差额。必须按页面展示金额完成支付，否则可能无法正常到账。</p>
+                </section>
+                <div id="qr-frame" class="qr-frame">
+                  <div id="qr-loading" class="qr-loading"><i data-lucide="loader-circle"></i></div>
+                  <img id="payment-qr" alt="支付宝订单二维码" hidden>
+                  <span id="alipay-mark" class="alipay-mark" aria-hidden="true" hidden><img src="/alipay.svg" alt=""></span>
+                </div>
+                <div class="payment-qr-actions">
+                  <p id="scan-hint" class="scan-hint">请使用手机打开支付宝，扫描二维码完成支付</p>
+                  <button id="open-pay-url" class="button secondary" type="button" hidden>
+                    <span>重新打开支付页面</span>
+                  </button>
+                  <button id="download-qr" class="button alipay full" type="button">
+                    <i data-lucide="download"></i><span>保存支付宝二维码</span>
+                  </button>
+                </div>
               </div>
-              <p id="scan-hint" class="scan-hint">请使用手机打开支付宝，扫描二维码完成支付</p>
-              <button id="open-pay-url" class="button secondary" type="button" hidden>
-                <span>重新打开支付页面</span>
-              </button>
-              <button id="download-qr" class="button alipay full" type="button">
-                <i data-lucide="download"></i><span>保存支付宝二维码</span>
-              </button>
             </div>
 
             <div id="countdown-card" class="card countdown-card">

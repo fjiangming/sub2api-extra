@@ -1150,6 +1150,80 @@ html.dark .payment-method.selected {
   align-items: center;
 }
 
+.payment-scan-layout {
+  width: min(720px, 100%);
+  margin: 4px auto 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 256px;
+  align-items: center;
+  column-gap: 40px;
+  row-gap: 14px;
+}
+
+.payment-notice {
+  min-width: 0;
+  grid-column: 1;
+  grid-row: 1;
+  text-align: left;
+}
+
+.payment-notice h3 {
+  margin: 0 0 16px;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.payment-notice-list {
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+  list-style: none;
+  color: var(--text-soft);
+  font-size: 14px;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+
+.payment-notice-amount {
+  color: var(--alipay);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.payment-notice-warning {
+  margin: 18px 0 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--warning);
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+
+.payment-scan-layout > .qr-frame {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: center;
+}
+
+.payment-qr-actions {
+  width: min(360px, 100%);
+  min-width: 0;
+  grid-column: 1 / -1;
+  grid-row: 2;
+  justify-self: center;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+}
+
+.payment-qr-actions .button {
+  width: 100%;
+}
+
 .qr-frame {
   position: relative;
   width: 256px;
@@ -1224,19 +1298,11 @@ html.dark .qr-frame {
 }
 
 .scan-hint {
-  margin: 14px 0;
+  margin: 0;
   color: var(--muted);
   font-size: 14px;
   line-height: 1.6;
   text-align: center;
-}
-
-.payment-card > .button {
-  max-width: 360px;
-}
-
-.payment-card > .button + .button {
-  margin-top: 8px;
 }
 
 .countdown-card {
@@ -2090,6 +2156,28 @@ body.login-screen .login-view {
 
   .report-form .button {
     width: 100%;
+  }
+
+  .payment-scan-layout {
+    width: min(440px, 100%);
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 22px;
+  }
+
+  .payment-scan-layout > .qr-frame {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .payment-qr-actions {
+    width: min(256px, 100%);
+    grid-column: 1;
+    grid-row: 3;
+    justify-self: center;
+  }
+
+  .payment-scan-layout:has(> .qr-frame[hidden]) .payment-qr-actions {
+    grid-row: 2;
   }
 
   .admin-metrics {

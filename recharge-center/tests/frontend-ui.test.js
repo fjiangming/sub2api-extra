@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(projectRoot, 'public', 'index.html'), 'utf8');
@@ -64,4 +65,48 @@ test('collector QR generation uses a non-error waiting state and hides premature
   assert.match(script, /正在生成本单收钱码/);
   assert.match(script, /\$\('download-qr'\)\.hidden = !awaiting \|\| \(isAutomaticMode\(\) && !order\.qrAvailable\)/);
   assert.match(script, /正在通过受控设备生成本单支付宝收钱码/);
+});
+
+test('payment notices use the exact payable amount and match each payment mode', () => {
+  const elements = new Map();
+  const context = vm.createContext({
+    URLSearchParams,
+    window: {
+      location: { search: '?theme=light' },
+      localStorage: { getItem: () => null },
+      matchMedia: () => ({ matches: false })
+    },
+    document: {
+      documentElement: { classList: { toggle() {} } },
+      getElementById(id) {
+        if (!elements.has(id)) elements.set(id, { textContent: '', hidden: false });
+        return elements.get(id);
+      }
+    }
+  });
+  // Disable startup while exercising the real browser notice renderer.
+  vm.runInContext(`${script}\nfunction bindEvents() {}\nfunction bootstrap() {}`, context);
+  const fixtures = [
+    { mode: 'personal_accountlog_static', minutes: 3, automatic: true, prefilled: false, adjustment: true },
+    { mode: 'personal_transfer_auto', minutes: 3, automatic: true, prefilled: true, adjustment: true },
+    { mode: 'sub2api_official', minutes: 20, automatic: true, prefilled: true, adjustment: false },
+    { mode: 'personal_manual', minutes: 20, automatic: false, prefilled: false, adjustment: false }
+  ];
+  for (const fixture of fixtures) {
+    context.fixtureConfig = { paymentMode: fixture.mode, automaticConfirmation: fixture.automatic };
+    context.fixtureOrder = {
+      requestedAmount: '50.00', payableAmount: '50.01',
+      createdAt: '2026-10-09T00:00:00.000Z',
+      expiresAt: new Date(Date.parse('2026-10-09T00:00:00.000Z') + fixture.minutes * 60000).toISOString()
+    };
+    vm.runInContext('state.config = fixtureConfig; renderPaymentNotice(fixtureOrder)', context);
+    assert.equal(elements.get('payment-notice-amount').textContent, '50.01', fixture.mode);
+    assert.equal(elements.get('payment-notice-amount-intro').textContent, fixture.prefilled ? '确认金额 ' : '手动填写 ', fixture.mode);
+    assert.equal(elements.get('payment-notice-expiry').textContent, `订单${fixture.minutes}分钟内有效，确认或刷新不会延长。`, fixture.mode);
+    assert.equal(elements.get('payment-notice-adjustment').hidden, !fixture.adjustment, fixture.mode);
+    assert.match(elements.get('payment-notice-confirmation').textContent, fixture.automatic ? /等待自动确认/ : /等待管理员核验/, fixture.mode);
+    if (fixture.mode === 'personal_transfer_auto') {
+      assert.match(elements.get('payment-notice-amount-suffix').textContent, /保留自动备注/);
+    }
+  }
 });

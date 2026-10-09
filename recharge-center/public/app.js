@@ -450,6 +450,23 @@ function startCountdown(order) {
   state.countdownTimer = setInterval(render, 1000);
 }
 
+function renderPaymentNotice(order) {
+  const prefilled = isOfficialMode() || isPersonalAutoMode();
+  $('payment-notice-amount-intro').textContent = prefilled ? '确认金额 ' : '手动填写 ';
+  $('payment-notice-amount').textContent = formatMoney(order.payableAmount);
+  $('payment-notice-amount-suffix').textContent = isPersonalAutoMode()
+    ? '（应付金额），保留自动备注。'
+    : isOfficialMode() ? '（应付金额），以支付宝订单为准。' : '（应付金额），保留全部小数。';
+  const minutes = (Date.parse(order.expiresAt) - Date.parse(order.createdAt)) / 60000;
+  $('payment-notice-expiry').textContent = Number.isInteger(minutes) && minutes > 0
+    ? `订单${minutes}分钟内有效，确认或刷新不会延长。`
+    : '请在页面倒计时结束前完成付款，确认或刷新不会延长。';
+  $('payment-notice-confirmation').textContent = isAutomaticMode()
+    ? '付款后等待自动确认，请勿重复付款。'
+    : '付款后在下方提交交易号，等待管理员核验，请勿重复付款。';
+  $('payment-notice-adjustment').hidden = !isPersonalAutoMode() && !isAccountLogStaticMode();
+}
+
 async function renderActiveOrder(order, forceQr = false) {
   const previousId = state.activeOrder?.id;
   const previousStatus = state.activeOrder?.status;
@@ -468,6 +485,7 @@ async function renderActiveOrder(order, forceQr = false) {
   $('active-requested-row').hidden = !order.amountAdjusted;
   $('amount-adjustment-note').hidden = !order.amountAdjusted;
   $('active-payable').textContent = formatMoney(order.payableAmount);
+  renderPaymentNotice(order);
   $('active-credit').textContent = `¥${formatMoney(order.creditAmount)}`;
   $('active-status').textContent = statusLabel(order.status);
   $('active-status').className = `status-badge ${order.status}`;
