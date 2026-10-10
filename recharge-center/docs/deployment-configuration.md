@@ -226,11 +226,13 @@ RECHARGE_CENTER_CREDIT_MULTIPLIER=1
 | `RECHARGE_CENTER_ACCOUNTLOG_POLL_SECONDS` | 全局轮询间隔，允许 5 到 60，建议 15；不是每个订单各建一个轮询器。 |
 | `RECHARGE_CENTER_ACCOUNTLOG_LOOKBACK_SECONDS` | 每次重复查询的回看秒数，允许 180 到 3600，建议 900，用于容忍流水可见延迟。 |
 | `RECHARGE_CENTER_ACCOUNTLOG_STALE_SECONDS` | 最近一次成功验签查询多久后暂停接单，至少为轮询间隔两倍，建议 60。 |
-| `RECHARGE_CENTER_ACCOUNTLOG_AMOUNT_QUARANTINE_SECONDS` | 订单过期后继续独占实付金额的秒数，不得短于回看窗口，建议 900。 |
+| `RECHARGE_CENTER_ACCOUNTLOG_AMOUNT_QUARANTINE_SECONDS` | 原三分钟窗口结束后继续隔离实付金额的秒数，不得短于回看窗口，建议 900；取消不向其他用户释放金额，同用户无证据、无异常的取消订单可复用占位。 |
 | `RECHARGE_CENTER_ACCOUNTLOG_REQUEST_TIMEOUT_MS` | 单次支付宝请求超时，允许 1000 到 30000，建议 10000。 |
 | `RECHARGE_CENTER_AUTO_MODE_VERIFIED` | 初始保持 `false`；完成真实接口权限、验签、正向、冲突、超时和履约故障测试后才改为 `true`。 |
 
 该模式的二维码只编码 `https://你的充值域名/pay/<RC订单号>`。订单号是充值中心生成的 128 位随机审计令牌，不是 Sub2API 官方 `payment_orders` 的商户订单号，也不会进入支付宝账单；完成入账后它会写入 Sub2API 兑换记录备注，供充值中心账本、兑换记录和运营中心相互追溯。完整申请、密钥文件权限、取码和验收步骤见[个人静态码账务流水手册](alipay-accountlog-static-guide.md)。
+
+取消后连续重建同金额订单，同一用户会复用自己的合格占位，不必通过修改配置消除分角累加；原金额被其他用户占用或属于自己不可复用的过期、已完成等订单时，才寻找下一个可用分值。这里的“占用”包括尚未结束的隔离，不能只看活动订单。账本会自动增量升级到版本 9，已有取消订单也可按规则复用，不需要清空订单或金额占位。升级前备份账本，详情见静态码手册的取消重建规则。
 
 ### 4.7 Sub2API 参数
 

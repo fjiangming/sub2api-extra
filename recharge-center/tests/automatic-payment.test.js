@@ -93,6 +93,40 @@ test('automatic order capacity is capped at 100 live reservations', (t) => {
   }
   assert.throws(() => service.create(user(101), '10.00'), { code: 'AUTO_ORDER_CAPACITY_REACHED' });
   assert.equal(context.db.prepare('SELECT COUNT(*) AS count FROM amount_reservations').get().count, 100);
+  service.cancel(service.listForUser(50)[0].id, user(50));
+  const replacement = service.create(user(50), '10.00');
+  assert.equal(replacement.payableAmount, '10.49');
+  assert.equal(context.db.prepare('SELECT COUNT(*) AS count FROM amount_reservations').get().count, 100);
+  assert.throws(() => service.create(user(101), '10.00'), { code: 'AUTO_ORDER_CAPACITY_REACHED' });
+});
+
+test('replacing a cancelled transfer order keeps its amount and rejects the old memo', async (t) => {
+  const context = autoContext();
+  t.after(() => context.cleanup());
+  let now = baseTime;
+  const calls = [];
+  const service = new OrderService({
+    db: context.db, config: context.config, clock: () => now,
+    sub2api: { async createAndRedeemWithAdminKey(input) { calls.push(input); return successRedeem(input); } }
+  });
+  const first = service.create(user(1), '1.00');
+  const firstMemo = service.paymentQrData(first.id, user(1)).memo;
+  now = new Date(baseTime.getTime() + 10000);
+  service.cancel(first.id, user(1));
+  const replacement = service.create(user(1), '1.00');
+  assert.equal(replacement.payableAmount, '1.00');
+  const newMemo = service.paymentQrData(replacement.id, user(1)).memo;
+  assert.notEqual(firstMemo, newMemo);
+  assert.throws(() => service.paymentQrData(first.id, user(1)), { code: 'PAYMENT_QR_UNAVAILABLE' });
+  const oldPayment = await service.acceptAutomaticPayment(paymentEvent(first, firstMemo));
+  assert.equal(oldPayment.accepted, false);
+  assert.equal(oldPayment.anomalyCode, 'ORDER_STATE_INVALID');
+  assert.equal(calls.length, 0);
+  const newPayment = await service.acceptAutomaticPayment(paymentEvent(replacement, newMemo, { sequence: 2 }));
+  assert.equal(newPayment.status, 'completed');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].userId, 1);
+  assert.equal(calls[0].value, 1);
 });
 
 test('full transaction-detail evidence fulfills exactly once without storing the trade number or memo', async (t) => {

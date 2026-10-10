@@ -102,6 +102,7 @@ function publicOrder(row, options = {}) {
     order.verifiedBy = row.verified_by || null;
     order.autoMatchStatus = row.auto_match_status || null;
     order.paymentMemoLast6 = row.payment_memo_last6 || null;
+    order.paymentMatchUntil = row.payment_match_until || null;
   }
   return order;
 }
@@ -231,28 +232,49 @@ class OrderService {
         throw new AppError('ACTIVE_ORDER_EXISTS', '请先处理当前充值订单', { status: 409 });
       }
       let payableMinor = requestedMinor;
+      let reusedReservation = null;
       const transferAutomatic = this.config.paymentMode === TRANSFER_AUTO_MODE;
       const accountLogAutomatic = this.config.paymentMode === ACCOUNTLOG_STATIC_MODE;
       const automatic = transferAutomatic || accountLogAutomatic;
       if (automatic) {
         this.db.prepare('DELETE FROM amount_reservations WHERE expires_at <= ?').run(createdAt);
-        const reservationCount = this.db.prepare('SELECT COUNT(*) AS count FROM amount_reservations').get().count;
-        if (reservationCount >= this.config.autoReservationLimit) {
-          throw new AppError('AUTO_ORDER_CAPACITY_REACHED', '当前付款订单较多，请稍后再试', { status: 503 });
-        }
-        const reserved = new Set(this.db.prepare(`
-          SELECT payable_amount_minor FROM amount_reservations WHERE expires_at > ?
-        `).all(createdAt).map((entry) => Number(entry.payable_amount_minor)));
+        const reservations = this.db.prepare(`
+          SELECT reservations.*, orders.order_no, orders.user_id, orders.payment_mode,
+                 orders.requested_amount_minor, orders.status, orders.cancelled_at,
+                 orders.trade_hash, orders.payment_reported_at, orders.last_error_code,
+                 orders.auto_match_status, orders.fulfillment_attempts,
+                 EXISTS (SELECT 1 FROM payment_events WHERE order_id = orders.id) OR
+                 EXISTS (SELECT 1 FROM alipay_accountlog_entries WHERE order_id = orders.id) AS has_payment_evidence
+          FROM amount_reservations reservations
+          JOIN recharge_orders orders ON orders.id = reservations.order_id
+          WHERE reservations.expires_at > ?
+        `).all(createdAt);
+        const atCapacity = reservations.length >= this.config.autoReservationLimit;
+        const reserved = new Map(reservations.map((entry) => [Number(entry.payable_amount_minor), entry]));
         const maximumMinor = parseMoneyToMinor(this.config.maxAmount);
         payableMinor = null;
         for (let offset = 0; offset <= 99; offset += 1) {
           const candidate = requestedMinor + offset;
-          if (candidate <= maximumMinor && !reserved.has(candidate)) {
+          if (candidate > maximumMinor) break;
+          const reservation = reserved.get(candidate);
+          // A cancelled user's slot can move to their replacement order, never to another user.
+          const reusable = reservation && String(reservation.user_id) === String(user.id) &&
+            reservation.payment_mode === this.config.paymentMode &&
+            Number(reservation.requested_amount_minor) === requestedMinor &&
+            reservation.status === 'cancelled' && reservation.cancelled_at &&
+            !reservation.trade_hash && !reservation.payment_reported_at && !reservation.last_error_code &&
+            reservation.auto_match_status === 'awaiting_match' &&
+            Number(reservation.fulfillment_attempts) === 0 && !reservation.has_payment_evidence;
+          if ((!reservation && !atCapacity) || reusable) {
             payableMinor = candidate;
+            reusedReservation = reusable ? reservation : null;
             break;
           }
         }
         if (payableMinor == null) {
+          if (atCapacity) {
+            throw new AppError('AUTO_ORDER_CAPACITY_REACHED', '当前付款订单较多，请稍后再试', { status: 503 });
+          }
           throw new AppError('AUTO_AMOUNT_UNAVAILABLE', '该金额附近暂无可用付款标识，请稍后再试', { status: 503 });
         }
       }
@@ -294,13 +316,35 @@ class OrderService {
         row.expiresAt, createdAt, createdAt
       );
       if (automatic) {
-        const reservationExpiresAt = accountLogAutomatic
+        let reservationExpiresAt = accountLogAutomatic
           ? addSeconds(new Date(row.expiresAt), this.config.accountLogAmountQuarantineSeconds).toISOString()
           : row.expiresAt;
-        this.db.prepare(`
-          INSERT INTO amount_reservations(payable_amount_minor, order_id, expires_at, created_at)
-          VALUES (?, ?, ?, ?)
-        `).run(payableMinor, row.id, reservationExpiresAt, createdAt);
+        if (reusedReservation) {
+          reservationExpiresAt = [reservationExpiresAt, reusedReservation.expires_at].sort().at(-1);
+          const changed = this.db.prepare(`
+            UPDATE amount_reservations SET order_id = ?, expires_at = ?, created_at = ?
+            WHERE payable_amount_minor = ? AND order_id = ?
+          `).run(row.id, reservationExpiresAt, createdAt, payableMinor, reusedReservation.order_id);
+          if (changed.changes !== 1) {
+            throw new AppError('ORDER_CREATE_CONFLICT', '订单创建冲突，请重试', { status: 409 });
+          }
+          if (accountLogAutomatic) {
+            this.db.prepare(`
+              UPDATE recharge_orders SET payment_match_until = ?, updated_at = ?, version = version + 1
+              WHERE id = ? AND status = 'cancelled'
+            `).run(reusedReservation.cancelled_at, createdAt, reusedReservation.order_id);
+          }
+          this.#audit(reusedReservation.order_id, { type: 'user', id: user.id }, 'AMOUNT_RESERVATION_REUSED', request, {
+            replacementOrderNo: row.orderNo,
+            payableAmount: minorToDecimal(payableMinor),
+            paymentMatchUntil: accountLogAutomatic ? reusedReservation.cancelled_at : null
+          });
+        } else {
+          this.db.prepare(`
+            INSERT INTO amount_reservations(payable_amount_minor, order_id, expires_at, created_at)
+            VALUES (?, ?, ?, ?)
+          `).run(payableMinor, row.id, reservationExpiresAt, createdAt);
+        }
         if (transferAutomatic && paymentQrSource === 'collector') {
           this.db.prepare(`
             INSERT INTO qr_provision_jobs(id, order_id, status, created_at, updated_at)
@@ -313,6 +357,7 @@ class OrderService {
         payableAmount: minorToDecimal(payableMinor),
         creditAmount: microsToDecimal(creditMicros),
         amountAdjusted: requestedMinor !== payableMinor,
+        ...(reusedReservation ? { reusedAmountFromOrderNo: reusedReservation.order_no } : {}),
         paymentMode: this.config.paymentMode,
         paymentQrSource,
         memoSuffix: paymentMemo?.slice(-6) || null,
@@ -752,12 +797,14 @@ class OrderService {
         anomalyCode = 'PAYMENT_EVENT_TOO_OLD';
       }
 
+      // Include the whole cancellation second so boundary collisions cannot be resolved by guessing.
       const candidates = amountMinor > 0 ? this.db.prepare(`
         SELECT * FROM recharge_orders
         WHERE payment_mode = ? AND payable_amount_minor = ?
           AND created_at <= ? AND expires_at >= ?
+          AND (payment_match_until IS NULL OR substr(payment_match_until, 1, 19) >= substr(?, 1, 19))
         ORDER BY created_at, id
-      `).all(ACCOUNTLOG_STATIC_MODE, amountMinor, paidAt, paidAt) : [];
+      `).all(ACCOUNTLOG_STATIC_MODE, amountMinor, paidAt, paidAt, paidAt) : [];
       let order = candidates.length === 1 ? candidates[0] : null;
       if (!anomalyCode && candidates.length === 0) anomalyCode = 'ACCOUNTLOG_ORDER_NOT_FOUND';
       else if (!anomalyCode && candidates.length > 1) anomalyCode = 'ACCOUNTLOG_ORDER_AMBIGUOUS';
@@ -1025,7 +1072,7 @@ class OrderService {
         };
       }
       const createdAt = Date.parse(row.created_at);
-      const expiresAt = Date.parse(row.expires_at);
+      const expiresAt = Math.min(Date.parse(row.expires_at), Date.parse(row.payment_match_until || row.expires_at));
       const paidSecond = Math.floor(paidAtTimestamp / 1000);
       const createdSecond = Math.floor(createdAt / 1000);
       const expiresSecond = Math.floor(expiresAt / 1000);

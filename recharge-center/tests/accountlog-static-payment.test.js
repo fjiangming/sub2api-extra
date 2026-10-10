@@ -100,6 +100,190 @@ test('static QR and accountlog AppID cannot change until orders and amount quara
   }));
 });
 
+test('repeated cancellation reuses the same user amount without consuming more slots', (t) => {
+  const context = accountLogContext();
+  t.after(() => context.cleanup());
+  let now = baseTime;
+  let service = new OrderService({ db: context.db, config: context.config, sub2api: {}, clock: () => now });
+  let previous = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const order = service.create(user(1), '1.00');
+    assert.equal(order.payableAmount, '1.00');
+    assert.equal(order.creditAmount, '1.00');
+    assert.equal(order.amountAdjusted, false);
+    const reservation = context.db.prepare('SELECT * FROM amount_reservations').get();
+    assert.equal(reservation.order_id, order.id);
+    assert.equal(context.db.prepare('SELECT COUNT(*) AS count FROM amount_reservations').get().count, 1);
+    assert.equal(Date.parse(reservation.expires_at) - Date.parse(order.expiresAt), 900000);
+    if (previous) {
+      assert.notEqual(order.id, previous.id);
+      assert.equal(service.getForUser(previous.id, '1').status, 'cancelled');
+      assert.throws(() => service.openPaymentRelay(previous.orderNo), { code: 'PAYMENT_RELAY_EXPIRED' });
+      const audit = context.db.prepare(`
+        SELECT metadata_json FROM audit_events
+        WHERE order_id = ? AND event_type = 'AMOUNT_RESERVATION_REUSED'
+      `).get(previous.id);
+      assert.equal(JSON.parse(audit.metadata_json).replacementOrderNo, order.orderNo);
+    }
+    now = new Date(now.getTime() + 10000);
+    service.cancel(order.id, user(1));
+    previous = order;
+    now = new Date(now.getTime() + 1000);
+    // The reuse decision must survive service restart and a string-valued authenticated user ID.
+    service = new OrderService({ db: context.db, config: context.config, sub2api: {}, clock: () => now });
+  }
+  const replacement = service.create(user('1'), '1.00');
+  assert.equal(replacement.payableAmount, '1.00');
+});
+
+test('cancellation preserves other users isolation while reusing an already adjusted amount for its owner', (t) => {
+  const context = accountLogContext();
+  t.after(() => context.cleanup());
+  let now = baseTime;
+  const service = new OrderService({ db: context.db, config: context.config, sub2api: {}, clock: () => now });
+  const first = service.create(user(1), '1.00');
+  const second = service.create(user(2), '1.00');
+  assert.equal(second.payableAmount, '1.01');
+  now = new Date(baseTime.getTime() + 10000);
+  service.cancel(second.id, user(2));
+  const replacement = service.create(user(2), '1.00');
+  assert.equal(replacement.payableAmount, '1.01');
+  assert.equal(replacement.creditAmount, '1.01');
+  service.cancel(first.id, user(1));
+  const third = service.create(user(3), '1.00');
+  assert.equal(third.payableAmount, '1.02');
+  assert.equal(context.db.prepare('SELECT COUNT(*) AS count FROM amount_reservations').get().count, 3);
+
+  now = new Date(baseTime.getTime() + 20 * 60000);
+  assert.equal(service.create(user(4), '1.00').payableAmount, '1.00');
+});
+
+test('a replacement order accepts its later payment once and excludes all earlier cancelled windows', async (t) => {
+  const context = accountLogContext();
+  t.after(() => context.cleanup());
+  let now = baseTime;
+  const calls = [];
+  const alerts = [];
+  const service = new OrderService({
+    db: context.db, config: context.config, clock: () => now,
+    alerts: { async send(event) { alerts.push(event); } },
+    sub2api: { async createAndRedeemWithAdminKey(input) { calls.push(input); return successRedeem(input); } }
+  });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const cancelled = service.create(user(1), '1.00');
+    now = new Date(now.getTime() + 10000);
+    service.cancel(cancelled.id, user(1));
+    now = new Date(now.getTime() + 1000);
+  }
+  const replacement = service.create(user(1), '1.00');
+  now = new Date(now.getTime() + 90000);
+  const payment = entry(replacement);
+  const result = await service.acceptAccountLogEntry(payment);
+  assert.equal(result.status, 'completed');
+  assert.equal(result.orderId, replacement.id);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].userId, 1);
+  assert.equal(calls[0].value, 1);
+  assert.match(calls[0].notes, new RegExp(replacement.orderNo));
+  assert.equal(alerts.length, 0);
+  const replay = await service.acceptAccountLogEntry(payment);
+  assert.equal(replay.duplicate, true);
+  assert.equal(calls.length, 1);
+});
+
+test('a delayed pre-cancellation payment enters review on the old order without crediting its replacement', async (t) => {
+  const context = accountLogContext();
+  t.after(() => context.cleanup());
+  let now = baseTime;
+  let calls = 0;
+  const alerts = [];
+  const service = new OrderService({
+    db: context.db, config: context.config, clock: () => now,
+    alerts: { async send(event) { alerts.push(event); } },
+    sub2api: {
+      async createAndRedeemWithAdminKey() { calls += 1; },
+      async createAndRedeem(_token, input) { calls += 1; return successRedeem(input); }
+    }
+  });
+  const first = service.create(user(1), '1.00');
+  now = new Date(baseTime.getTime() + 20000);
+  const cancelled = service.cancel(first.id, user(1));
+  now = new Date(baseTime.getTime() + 30000);
+  const replacement = service.create(user(1), '1.00');
+  assert.equal(service.getForAdmin(first.id).order.paymentMatchUntil, cancelled.cancelledAt);
+  now = new Date(baseTime.getTime() + 90000);
+  const result = await service.acceptAccountLogEntry(entry(first, {
+    paidAt: new Date(baseTime.getTime() + 10000).toISOString()
+  }));
+  assert.equal(result.accepted, false);
+  assert.equal(result.anomalyCode, 'ORDER_STATE_INVALID');
+  assert.equal(result.orderId, first.id);
+  assert.equal(calls, 0);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].orderNo, first.orderNo);
+  assert.equal(service.getForUser(first.id, 1).status, 'payment_reported');
+  assert.equal(service.getForUser(replacement.id, 1).status, 'awaiting_payment');
+  const adminSession = { user: { id: 9, role: 'admin' }, upstreamToken: 'admin-session-token', client: {} };
+  await assert.rejects(service.confirm(first.id, adminSession, {
+    paidAmount: '1.00', paidAt: replacement.createdAt,
+    tradeNo: '117007123456789151', acknowledge: true
+  }), { code: 'PAYMENT_OUTSIDE_ORDER_WINDOW' });
+  assert.equal(calls, 0);
+  const reviewed = await service.confirm(first.id, adminSession, {
+    paidAmount: '1.00', paidAt: new Date(baseTime.getTime() + 10000).toISOString(),
+    tradeNo: '117007123456789151', acknowledge: true
+  });
+  assert.equal(reviewed.status, 'completed');
+  assert.equal(calls, 1);
+  assert.equal(service.getForUser(replacement.id, 1).status, 'awaiting_payment');
+});
+
+test('cancellation within a ledger second cannot choose either order at the ambiguous boundary', async (t) => {
+  const context = accountLogContext();
+  t.after(() => context.cleanup());
+  let now = baseTime;
+  let calls = 0;
+  const alerts = [];
+  const service = new OrderService({
+    db: context.db, config: context.config, clock: () => now,
+    alerts: { async send(event) { alerts.push(event); } },
+    sub2api: { async createAndRedeemWithAdminKey() { calls += 1; } }
+  });
+  const first = service.create(user(1), '1.00');
+  now = new Date(baseTime.getTime() + 20500);
+  service.cancel(first.id, user(1));
+  const replacement = service.create(user(1), '1.00');
+  now = new Date(baseTime.getTime() + 30000);
+  const result = await service.acceptAccountLogEntry(entry(replacement, {
+    paidAt: new Date(baseTime.getTime() + 20700).toISOString()
+  }));
+  assert.equal(result.accepted, false);
+  assert.equal(result.anomalyCode, 'ACCOUNTLOG_ORDER_AMBIGUOUS');
+  assert.equal(calls, 0);
+  assert.equal(alerts.length, 1);
+  assert.equal(service.getForUser(first.id, 1).status, 'payment_reported');
+  assert.equal(service.getForUser(replacement.id, 1).status, 'payment_reported');
+});
+
+test('expired and completed static orders keep their amounts isolated even from the same user', async (t) => {
+  const context = accountLogContext();
+  t.after(() => context.cleanup());
+  let now = baseTime;
+  const service = new OrderService({
+    db: context.db, config: context.config, clock: () => now,
+    sub2api: { async createAndRedeemWithAdminKey(input) { return successRedeem(input); } }
+  });
+  const expired = service.create(user(1), '1.00');
+  now = new Date(baseTime.getTime() + 4 * 60000);
+  assert.equal(service.create(user(1), '1.00').payableAmount, '1.01');
+  assert.equal(service.getForUser(expired.id, 1).status, 'expired');
+
+  const completed = service.create(user(2), '2.00');
+  now = new Date(now.getTime() + 90000);
+  assert.equal((await service.acceptAccountLogEntry(entry(completed))).status, 'completed');
+  assert.equal(service.create(user(2), '2.00').payableAmount, '2.01');
+});
+
 test('a unique verified income entry credits exactly once without storing raw financial identifiers', async (t) => {
   const context = accountLogContext();
   t.after(() => context.cleanup());

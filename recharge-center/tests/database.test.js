@@ -58,7 +58,15 @@ test('legacy ledgers preserve historical amounts while migrating to exact-amount
     1001000000, 1, 'RCPLAINTEXTCODE0123456789012345',
     '2026-10-02T01:00:00.000Z', '2026-10-02T00:00:00.000Z', '2026-10-02T00:00:00.000Z'
   );
-  initial.exec('ALTER TABLE recharge_orders DROP COLUMN alipay_paid_at; DELETE FROM schema_migrations WHERE version >= 2;');
+  initial.prepare(`
+    INSERT INTO amount_reservations(payable_amount_minor, order_id, expires_at, created_at)
+    VALUES (?, ?, ?, ?)
+  `).run(1001, 'migration-order', '2026-10-02T01:15:00.000Z', '2026-10-02T00:00:00.000Z');
+  initial.exec(`
+    ALTER TABLE recharge_orders DROP COLUMN alipay_paid_at;
+    ALTER TABLE recharge_orders DROP COLUMN payment_match_until;
+    DELETE FROM schema_migrations WHERE version >= 2;
+  `);
   initial.close();
   const reopened = createDatabase(file, secret);
   t.after(() => {
@@ -69,7 +77,8 @@ test('legacy ledgers preserve historical amounts while migrating to exact-amount
   assert.ok(columns.includes('alipay_paid_at'));
   assert.equal(columns.includes('cent_fingerprint'), false);
   assert.equal(columns.includes('base_amount_minor'), false);
-  assert.equal(reopened.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version, 8);
+  assert.equal(reopened.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version, 9);
+  assert.ok(columns.includes('payment_match_until'));
   assert.ok(columns.includes('payment_qr_ciphertext'));
   assert.ok(reopened.prepare(`
     SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'qr_provision_jobs'
@@ -82,11 +91,18 @@ test('legacy ledgers preserve historical amounts while migrating to exact-amount
   `).get();
   assert.equal(legacyIndex, undefined);
   const migrated = reopened.prepare(`
-    SELECT payable_amount_minor, credit_amount_micros, redeem_code
+    SELECT payable_amount_minor, credit_amount_micros, redeem_code, payment_match_until
     FROM recharge_orders WHERE id = ?
   `).get('migration-order');
   assert.equal(migrated.payable_amount_minor, 1001);
   assert.equal(migrated.credit_amount_micros, 1001000000);
+  assert.equal(migrated.payment_match_until, null);
   assert.match(migrated.redeem_code, /^sealed:v1:/);
   assert.equal(migrated.redeem_code.includes('RCPLAINTEXTCODE'), false);
+  assert.deepEqual(reopened.prepare('SELECT * FROM amount_reservations').get(), {
+    payable_amount_minor: 1001,
+    order_id: 'migration-order',
+    expires_at: '2026-10-02T01:15:00.000Z',
+    created_at: '2026-10-02T00:00:00.000Z'
+  });
 });

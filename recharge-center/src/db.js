@@ -5,7 +5,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { hmacHex, safeEqual, sealText } = require('./security');
 
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 const ORDER_STATUSES = [
   'awaiting_payment',
   'payment_reported',
@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS recharge_orders (
   rejected_at TEXT,
   rejected_reason TEXT,
   cancelled_at TEXT,
+  payment_match_until TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   version INTEGER NOT NULL DEFAULT 1
@@ -308,6 +309,10 @@ function migrate(db, secret) {
       ON alipay_accountlog_entries(amount_minor, paid_at);
   `);
   db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(8, appliedAt);
+  if (!hasColumn(db, 'recharge_orders', 'payment_match_until')) {
+    db.exec('ALTER TABLE recharge_orders ADD COLUMN payment_match_until TEXT');
+  }
+  db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(9, appliedAt);
 }
 
 function nowIso() {
