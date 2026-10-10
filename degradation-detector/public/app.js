@@ -239,14 +239,20 @@ function validationEvidenceHtml(validation, manuallyReviewed = false) {
       <i data-lucide="${rule.indeterminate ? 'circle-help' : rule.passed ? 'circle-check' : 'circle-x'}"></i>
       <span><strong>${escapeHtml(rule.label)}</strong><small>${escapeHtml(rule.message)} · ${rule.severity === 'hard' ? '核心规则' : '辅助规则'} · 权重 ${Number(rule.weight) || 0}</small></span>
     </li>`).join('');
+  const visual = validation.visual;
+  const reviewEvidence = visual ? `
+    <li data-passed="${visual.status === 'normal' ? 'true' : visual.status === 'degraded' ? 'false' : 'unknown'}">
+      <i data-lucide="eye"></i><span><strong>视觉审核 · ${escapeHtml(labels[visual.status] || '无法判定')}</strong>
+      <small>${escapeHtml(visual.reason)} · ${visual.protocol === 'manxue' ? '满血 AI 兼容协议' : 'HTML 审核协议'} · ${(Number(visual.duration_ms || 0) / 1000).toFixed(1)} 秒</small></span>
+    </li>` : '';
   return `
     <details class="validation-evidence">
       <summary>
         <span class="validation-evidence-title"><i data-lucide="list-checks"></i>${manuallyReviewed ? '自动判定证据' : '判定证据'}</span>
-        <span class="validation-evidence-summary"><strong>${escapeHtml(score)}${escapeHtml(coverage)} · ${Number(validation.passed) || 0}/${Number(validation.total) || 0} 条通过</strong><i data-lucide="chevron-down"></i></span>
+        <span class="validation-evidence-summary"><strong>${visual ? `视觉 ${escapeHtml(labels[visual.status] || '无法判定')} · 本地 ` : ''}${escapeHtml(score)}${escapeHtml(coverage)} · ${Number(validation.passed) || 0}/${Number(validation.total) || 0} 条通过</strong><i data-lucide="chevron-down"></i></span>
       </summary>
       <div class="validation-evidence-content">
-        ${(integrity || rules) ? `<ul>${integrity}${rules}</ul>` : '<p>该历史记录没有逐条规则数据。</p>'}
+        ${(integrity || rules || reviewEvidence) ? `<ul>${reviewEvidence}${integrity}${rules}</ul>` : '<p>该历史记录没有逐条规则数据。</p>'}
       </div>
     </details>`;
 }
@@ -254,7 +260,8 @@ function validationEvidenceHtml(validation, manuallyReviewed = false) {
 function resultReason(run) {
   const reason = run.reason || '正在生成与评估，请稍后查看。';
   if (run.status !== 'normal') return reason;
-  const caveat = '规则判定为正常；单次结果不能证明模型身份或整体能力';
+  const ruleCaveat = '规则判定为正常；单次结果不能证明模型身份或整体能力';
+  const caveat = run.validation?.visual ? ruleCaveat.replace('规则判定', '综合判定') : ruleCaveat;
   return reason.includes(caveat) ? reason : `${reason.replace(/[；;。\s]+$/u, '')}；${caveat}`;
 }
 

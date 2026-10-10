@@ -203,6 +203,22 @@ test('default platform templates cover known and generic platforms', () => {
   assert.equal(defaultPlatformTest('custom').api, 'chat_completions');
 });
 
+test('storage policies enforce bounded retention and preserve older configuration payloads', () => {
+  const input = { schedule_mode: 'daily', schedule_times: ['09:00'], schedule_interval_minutes: 60, platforms: [] };
+  assert.equal(validateAdminConfiguration(input).storage_policy, undefined);
+  const policy = { enabled: true, history_days: 90, history_per_group: 2000, artifact_per_group: 60 };
+  assert.deepEqual(validateAdminConfiguration({ ...input, storage_policy: policy }).storage_policy, policy);
+  assert.throws(() => validateAdminConfiguration({
+    ...input, storage_policy: { ...policy, history_per_group: 59 }
+  }), /history_per_group/);
+  assert.throws(() => validateAdminConfiguration({
+    ...input, storage_policy: { ...policy, history_per_group: 60, artifact_per_group: 61 }
+  }), /作品保留数量不能超过/);
+  assert.throws(() => validateAdminConfiguration({
+    ...input, storage_policy: { ...policy, history_days: 0 }
+  }), /history_days/);
+});
+
 test('.env.example contains only the Sub2API connection variable', () => {
   const content = fs.readFileSync(path.join(__dirname, '..', '.env.example'), 'utf8');
   const variables = content.split(/\r?\n/)

@@ -65,6 +65,20 @@
 .interval-field input { border-radius: 7px 0 0 7px; }
 .interval-field select { border-left: 0; border-radius: 0 7px 7px 0; }
 
+.storage-band { padding: 14px 0; border-bottom: 1px solid var(--border-soft); }
+.storage-band summary { display: flex; align-items: center; gap: 11px; cursor: pointer; list-style: none; }
+.storage-band summary::-webkit-details-marker { display: none; }
+.storage-heading { display: grid; gap: 3px; min-width: 0; }
+.storage-heading strong { font-size: 15px; }
+.storage-heading small { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.storage-chevron { width: 16px; height: 16px; flex: 0 0 16px; margin-left: auto; color: var(--muted); }
+.storage-band[open] .storage-chevron { transform: rotate(180deg); }
+.storage-editor { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
+.storage-toggle { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; }
+.storage-toggle input { width: 17px; height: 17px; accent-color: var(--teal); }
+.storage-note { margin: 12px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .storage-editor { grid-template-columns: minmax(0, 1fr); } }
+
 input, textarea, select {
   width: 100%;
   border: 1px solid var(--border);
@@ -210,6 +224,17 @@ input:disabled, textarea:disabled, select:disabled { opacity: .58; cursor: not-a
 .history-group-button svg { width: 14px; height: 14px; }
 .history-group-button b { min-width: 15px; color: var(--teal-strong); font-size: 10px; font-variant-numeric: tabular-nums; }
 .empty-groups { padding: 48px 20px; color: var(--muted); text-align: center; }
+
+.visual-review-details { grid-column: 1 / -1; min-width: 0; border-top: 1px solid var(--border-soft); padding-top: 14px; }
+.visual-review-details summary { display: flex; align-items: center; gap: 8px; cursor: pointer; color: var(--text); font-size: 12px; font-weight: 600; }
+.visual-review-details summary > svg { width: 15px; height: 15px; color: var(--teal-strong); }
+.visual-review-details summary span { margin-left: auto; color: var(--muted); font-size: 11px; font-weight: 400; }
+.visual-review-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding-top: 15px; }
+.visual-review-fields > .validation-math-toggle, .visual-key-clear { grid-column: 1 / -1; }
+.visual-key-clear { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
+.visual-key-clear input { width: 16px; height: 16px; accent-color: var(--teal); }
+.visual-review-fields [hidden] { display: none; }
+@media (max-width: 520px) { .visual-review-fields { grid-template-columns: minmax(0, 1fr); } }
 
 .group-config-modal, .history-modal, .review-modal, .confirm-modal {
   padding: 0;

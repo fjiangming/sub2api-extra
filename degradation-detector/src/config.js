@@ -181,11 +181,40 @@ const svgMathSchema = z.object({
   pass_ratio: z.coerce.number().min(0.5).max(1).default(0.9)
 }).strict();
 
+const visualReviewSchema = z.object({
+  enabled: z.boolean().default(false),
+  protocol: z.enum(['manxue', 'html_review']).default('manxue'),
+  api_url: z.string().trim().max(2000).default('https://manxue.ai/api/v1/tests'),
+  benchmark: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/).default('pelican'),
+  decision_mode: z.enum(['visual', 'both']).default('visual'),
+  timeout_seconds: z.coerce.number().int().min(5).max(600).default(120),
+  poll_interval_seconds: z.coerce.number().int().min(1).max(30).default(2),
+  model: z.string().trim().max(200).default(''),
+  instructions: z.string().trim().max(10000).default(''),
+  api_key: z.string().max(8192).optional(),
+  clear_api_key: z.boolean().optional(),
+  api_key_configured: z.boolean().optional(),
+  key_cipher: z.string().max(12000).optional(),
+  key_context: z.string().regex(/^visual-[a-f0-9]{64}$/).optional(),
+  key_fingerprint: z.string().max(100).optional()
+}).strict().superRefine((value, context) => {
+  try {
+    const url = new URL(value.api_url);
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) throw new Error();
+  } catch {
+    context.addIssue({ code: 'custom', path: ['api_url'], message: '审核 API 必须是 HTTPS 地址，不能包含凭据、查询参数或片段' });
+  }
+  if (value.api_key?.trim() && value.clear_api_key) {
+    context.addIssue({ code: 'custom', path: ['api_key'], message: '不能同时填写和清除审核 Key' });
+  }
+});
+
 const validationPolicySchema = z.object({
   version: z.literal(2).default(2),
   normal_threshold: z.coerce.number().int().min(1).max(100).default(80),
   degraded_threshold: z.coerce.number().int().min(0).max(99).default(50),
   svg_math: svgMathSchema.optional(),
+  visual: visualReviewSchema.optional(),
   rules: z.array(validationRuleSchema).max(50).default([]),
   confirmation: confirmationSchema.default({ window: 3, required_failures: 2, recovery_passes: 2 })
 }).strict().superRefine((value, context) => {
@@ -241,7 +270,7 @@ function migrateLegacyValidation(value) {
 
 const validationSchema = z.preprocess((value) => {
   if (value && typeof value === 'object' && !Array.isArray(value) &&
-      ('version' in value || 'rules' in value)) {
+      ('version' in value || 'rules' in value || 'visual' in value)) {
     return value;
   }
   const legacy = legacyValidationSchema.safeParse(value || {});
@@ -300,6 +329,9 @@ const testSchema = z.object({
       message: 'SVG 数学检测只能用于 HTML 输出'
     });
   }
+  if (value.validation.visual?.enabled && value.output_type !== 'html') {
+    context.addIssue({ code: 'custom', path: ['validation', 'visual', 'enabled'], message: 'HTML 视觉审核只能用于 HTML 输出' });
+  }
 });
 
 const groupSelectionSchema = z.object({
@@ -316,10 +348,29 @@ const platformSelectionSchema = z.object({
   groups: z.array(groupSelectionSchema).max(2000)
 }).strict();
 
+const defaultStoragePolicy = {
+  enabled: true,
+  history_days: 90,
+  history_per_group: 2000,
+  artifact_per_group: 60
+};
+
+const storagePolicySchema = z.object({
+  enabled: z.boolean(),
+  history_days: z.coerce.number().int().min(1).max(3650),
+  history_per_group: z.coerce.number().int().min(60).max(10000),
+  artifact_per_group: z.coerce.number().int().min(60).max(2000)
+}).strict().superRefine((value, context) => {
+  if (value.artifact_per_group > value.history_per_group) {
+    context.addIssue({ code: 'custom', path: ['artifact_per_group'], message: '作品保留数量不能超过详细历史保留数量' });
+  }
+});
+
 const adminConfigurationSchema = z.object({
   schedule_mode: z.enum(['daily', 'interval']),
   schedule_times: z.array(dailyTimeSchema).min(1).max(24),
   schedule_interval_minutes: z.coerce.number().int().min(1).max(43200),
+  storage_policy: storagePolicySchema.optional(),
   platforms: z.array(platformSelectionSchema).max(64)
 }).strict().superRefine((value, context) => {
   const platforms = new Set();
@@ -336,6 +387,15 @@ const adminConfigurationSchema = z.object({
     times.add(time);
   });
   value.platforms.forEach((platform, platformIndex) => {
+    const tests = [[platform.test, ['platforms', platformIndex, 'test']],
+      ...platform.groups.map((group, index) => [group.test, ['platforms', platformIndex, 'groups', index, 'test']])];
+    for (const [test, location] of tests) {
+      for (const field of ['key_cipher', 'key_context', 'key_fingerprint']) {
+        if (test?.validation?.visual?.[field] != null) {
+          context.addIssue({ code: 'custom', path: [...location, 'validation', 'visual', field], message: '不能提交服务端审核凭据字段' });
+        }
+      }
+    }
     if (platforms.has(platform.id)) {
       context.addIssue({
         code: 'custom',
@@ -569,12 +629,14 @@ module.exports = {
   adminConfigurationSchema,
   apiTypes,
   defaultPlatformTest,
+  defaultStoragePolicy,
   loadConfig,
   normalizeUrl,
   outputTypes,
   parseBoolean,
   parseInteger,
   reasoningEfforts,
+  storagePolicySchema,
   testSchema,
   validationRuleSchema,
   validationRuleTypes,

@@ -538,6 +538,64 @@ test('public result chart receives every record in its 60-result visible window'
   assert.deepEqual(group.totals, { passed: 16, valid: 17, attempts: 17 });
 });
 
+test('only administrators can change retention and maintenance preserves shared cumulative results', async (t) => {
+  const config = testConfig(t);
+  const { app, runtime } = createApp(config, { sub2api: new FakeSub2Api(), runner: { execute: async () => null }, startScheduler: false });
+  const http = await listen(app);
+  t.after(async () => {
+    await http.close();
+    await runtime.scheduler.close();
+    runtime.auth.close();
+    runtime.store.close();
+  });
+  const admin = await session(http.baseUrl, 'token-a');
+  const ordinary = await session(http.baseUrl, 'token-b');
+  const payload = {
+    ...configuration([{ id: '1', enabled: true, key: 'sk-retention-dedicated-key-1234567890' }]),
+    storage_policy: { enabled: true, history_days: 30, history_per_group: 60, artifact_per_group: 60 }
+  };
+  const save = (auth, csrf, body = payload) => fetch(`${http.baseUrl}/api/admin/config`, {
+    method: 'PUT', headers: headers(auth, csrf), body: JSON.stringify(body)
+  });
+  assert.equal((await save(ordinary, ordinary.csrfToken)).status, 403);
+  assert.equal((await save(admin, '')).status, 403);
+  assert.equal((await save(admin, admin.csrfToken, {
+    ...payload, storage_policy: { ...payload.storage_policy, history_per_group: 59 }
+  })).status, 400);
+  const saved = await save(admin, admin.csrfToken);
+  assert.equal(saved.status, 200);
+  assert.deepEqual((await saved.json()).storage_policy, payload.storage_policy);
+  const { storage_policy: omitted, ...legacyPayload } = payload;
+  assert.deepEqual((await (await save(admin, admin.csrfToken, legacyPayload)).json()).storage_policy, payload.storage_policy);
+  const monitor = runtime.store.getMonitor(config.serviceOwnerId, '1');
+  for (let index = 0; index < 63; index += 1) {
+    const run = runtime.store.createRun(monitor, runtime.store.getMonitorTest(monitor), 'test');
+    runtime.store.markRunRunning(run.id);
+    runtime.store.completeRun(run.id, {
+      status: index === 0 ? 'degraded' : 'normal', quality: index === 0 ? 'degraded' : 'normal',
+      reason: 'fixture', outputText: '<!doctype html><html><body>fixture</body></html>'
+    });
+  }
+  await runtime.maintenance.run();
+  const readOnly = await fetch(`${http.baseUrl}/api/results`, { headers: headers(ordinary) });
+  const group = (await readOnly.json()).groups.find((item) => item.id === '1');
+  assert.equal(group.history.length, 60);
+  assert.equal(group.history_total, 63);
+  assert.equal(group.history_archived, 3);
+  assert.deepEqual(group.totals, { passed: 62, valid: 63, attempts: 63 });
+  assert.doesNotMatch(JSON.stringify(group), /key_cipher|key_fingerprint|test_snapshot|storage_policy/);
+  const history = await fetch(`${http.baseUrl}/api/admin/groups/1/runs`, { headers: headers(admin) });
+  const historyPage = await history.json();
+  assert.equal(historyPage.total, 60);
+  assert.equal(historyPage.archived_count, 3);
+  const cleared = await fetch(`${http.baseUrl}/api/admin/groups/1/runs`, {
+    method: 'DELETE', headers: headers(admin, admin.csrfToken), body: JSON.stringify({ all: true })
+  });
+  assert.equal(cleared.status, 200);
+  const after = await fetch(`${http.baseUrl}/api/results`, { headers: headers(ordinary) });
+  assert.deepEqual((await after.json()).groups[0].totals, { passed: 0, valid: 0, attempts: 0 });
+});
+
 test('administrators can delete selected or all completed group history without crossing boundaries', async (t) => {
   const config = testConfig(t);
   const runner = { execute: async () => null };
@@ -760,4 +818,57 @@ test('only administrators can review completed verdicts within their group bound
 test('artifact MIME values are normalized before being used as response headers', () => {
   assert.equal(artifactMime('Image/PNG; charset=binary'), 'image/png');
   assert.equal(artifactMime('text/html\r\nx-unsafe: yes'), 'application/octet-stream');
+});
+
+test('visual settings enforce administrator access and keep credentials out of configs, history and result APIs', async (t) => {
+  const config = testConfig(t);
+  const { app, runtime } = createApp(config, { sub2api: new FakeSub2Api(), runner: { execute: async () => null }, startScheduler: false });
+  const http = await listen(app);
+  t.after(async () => {
+    await http.close(); await runtime.scheduler.close(); runtime.auth.close(); runtime.store.close();
+  });
+  const admin = await session(http.baseUrl, 'token-a');
+  const ordinary = await session(http.baseUrl, 'token-b');
+  const auditKey = 'sk-audit-private-1234567890123456';
+  const testCase = { ...defaultTests.openai, validation: { version: 2, rules: [], visual: { enabled: true, api_key: auditKey } } };
+  const body = configuration([{ id: '1', enabled: true, key: 'sk-group-generation-1234567890' },
+    { id: '3', enabled: true, key: 'sk-group-second-1234567890', test: { ...testCase, validation: { version: 2, rules: [], visual: { enabled: true } } } }], '09:00', testCase);
+  const endpoint = `${http.baseUrl}/api/admin/config`;
+  assert.equal((await fetch(endpoint, { headers: headers(ordinary) })).status, 403);
+  assert.equal((await fetch(endpoint, { method: 'PUT', headers: headers(ordinary, ordinary.csrfToken), body: JSON.stringify(body) })).status, 403);
+  assert.equal((await fetch(endpoint, { method: 'PUT', headers: headers(admin), body: JSON.stringify(body) })).status, 403);
+  const response = await fetch(endpoint, { method: 'PUT', headers: headers(admin, admin.csrfToken), body: JSON.stringify(body) });
+  assert.equal(response.status, 200);
+  const saved = await response.json();
+  assert.equal(saved.platforms[0].test.validation.visual.api_key_configured, true);
+  assert.equal(saved.platforms[0].groups.find((group) => group.id === '3').test.validation.visual.api_key_configured, true);
+  assert.equal(JSON.stringify(saved).includes(auditKey), false);
+  assert.doesNotMatch(JSON.stringify(saved), /key_cipher|key_context|key_fingerprint/);
+  const stored = runtime.store.getPlatformTest('openai');
+  assert.equal(runtime.vault.decrypt(stored.validation.visual.key_context, stored.validation.visual.key_cipher), auditKey);
+  const monitor = runtime.store.getMonitor(config.serviceOwnerId, '1');
+  const run = runtime.store.createRun(monitor, stored, 'manual');
+  assert.doesNotMatch(run.test_snapshot, /key_cipher|key_context|api_key/);
+  assert.doesNotMatch(run.validation_snapshot, /key_cipher|key_context|api_key/);
+  runtime.store.markRunRunning(run.id);
+  runtime.store.completeRun(run.id, {
+    status: 'normal', quality: 'normal', reason: '视觉审核判定为正常', source: 'visual_review',
+    outputText: '<html><body><svg></svg></body></html>', previewToken: 'audit-result-test',
+    validationResult: { passed: 0, total: 0, results: [], local_status: 'unknown', visual: {
+      protocol: 'manxue', decision_mode: 'visual', status: 'normal', state: 'completed', duration_ms: 1000,
+      reason: '视觉审核判定为正常', api_key: auditKey, api_url: 'https://private-review.example.com/api', raw_response: 'private response'
+    } }
+  });
+  const detailResponse = await fetch(`${http.baseUrl}/api/results/${run.id}`, { headers: headers(ordinary) });
+  assert.equal(detailResponse.status, 200);
+  const detail = await detailResponse.json();
+  assert.equal(detail.validation.visual.status, 'normal');
+  assert.equal(detail.validation.local_status, 'unknown');
+  assert.doesNotMatch(JSON.stringify(detail), /sk-audit|api_key|api_url|raw_response|private response|key_cipher|key_context/);
+  // A disabled platform retains its independent audit credential on later saves.
+  const disabledBody = { ...body, platforms: [{ ...body.platforms[0], enabled: false,
+    test: saved.platforms[0].test, groups: [{ id: '1', enabled: false }] }] };
+  assert.equal((await fetch(endpoint, { method: 'PUT', headers: headers(admin, admin.csrfToken), body: JSON.stringify(disabledBody) })).status, 200);
+  assert.equal((await fetch(endpoint, { method: 'PUT', headers: headers(admin, admin.csrfToken), body: JSON.stringify(disabledBody) })).status, 200);
+  assert.ok(runtime.store.getPlatformTest('openai', false).validation.visual.key_cipher);
 });

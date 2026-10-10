@@ -8,6 +8,11 @@ services:
         NPM_REGISTRY: ${NPM_REGISTRY:-}
     container_name: sub2api-degradation-detector
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "127.0.0.1:9873:9873"
     environment:

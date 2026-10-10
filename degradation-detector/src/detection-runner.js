@@ -9,6 +9,7 @@ const path = require('path');
 const { validationSchema } = require('./config');
 const { AppError } = require('./errors');
 const { evaluateOutput, imageDimensions } = require('./validation');
+const { VisualReviewer, combineReview, reviewFailure } = require('./visual-review');
 
 const MODEL_REQUEST_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
 
@@ -254,11 +255,12 @@ function deterministicVerdict(test, output) {
 }
 
 class DetectionRunner {
-  constructor({ config, store, sub2api, vault, sleepFn = wait, nowFn = Date.now }) {
+  constructor({ config, store, sub2api, vault, visualReviewer = new VisualReviewer(), sleepFn = wait, nowFn = Date.now }) {
     this.config = config;
     this.store = store;
     this.sub2api = sub2api;
     this.vault = vault;
+    this.visualReviewer = visualReviewer;
     this.sleep = sleepFn;
     this.now = nowFn;
   }
@@ -506,8 +508,27 @@ class DetectionRunner {
     return { text: stripFence(text), mime: 'text/plain' };
   }
 
-  async classify(test, output, deterministic) {
-    return deterministic;
+  async classify(test, output, deterministic, runId) {
+    const visual = test.validation?.visual;
+    if (!visual?.enabled) return deterministic;
+    let review;
+    if (this.config.demoMode) {
+      review = { ...reviewFailure(visual, 'REVIEW_NO_VERDICT'), reason: '演示模式不调用外部审核服务，无法判定' };
+    } else if (deterministic.validationResult?.integrity_failures?.length) {
+      review = reviewFailure(visual, 'REVIEW_INPUT_INVALID');
+    } else {
+      let apiKey;
+      try {
+        apiKey = visual.key_cipher ? this.vault.decrypt(visual.key_context, visual.key_cipher) : '';
+      } catch {
+        review = reviewFailure(visual, 'REVIEW_KEY_UNREADABLE');
+      }
+      if (!review) {
+        try { review = await this.visualReviewer.review({ visual, html: output.text, apiKey, runId }); }
+        catch { review = reviewFailure(visual, 'REVIEW_NETWORK_ERROR'); }
+      }
+    }
+    return combineReview(deterministic, visual, review);
   }
 
   async persistArtifact(runId, output) {
@@ -563,28 +584,39 @@ class DetectionRunner {
         monitorId: currentMonitor.id
       });
       const output = await this.normalizeOutput(test, payload);
-      const deterministic = deterministicVerdict(test, output);
-      const verdict = await this.classify(test, output, deterministic);
       const artifact = await this.persistArtifact(runId, output);
       const previewToken = ['html', 'image', 'file'].includes(test.output_type)
         ? crypto.randomBytes(32).toString('base64url')
         : null;
-      const completed = this.store.completeRun(runId, {
-        ...verdict,
-        validationResult: verdict.validationResult,
+      const savedOutput = {
         outputText: output.text || null,
         artifactPath: artifact?.path || null,
         artifactName: artifact?.name || null,
         artifactMime: artifact?.mime || output.mime || null,
         previewToken
+      };
+      this.store.saveRunOutput?.(runId, savedOutput);
+      const deterministic = deterministicVerdict(test, output);
+      const verdict = await this.classify(test, output, deterministic, runId);
+      const completed = this.store.completeRun(runId, {
+        ...verdict,
+        validationResult: verdict.validationResult,
+        ...savedOutput
       });
-      const stalePaths = this.store.pruneRuns(currentMonitor.id, this.config.historyLimit);
-      const artifactRoot = path.resolve(this.config.artifactDir);
-      await Promise.all(stalePaths.map((filename) => {
-        const resolved = path.resolve(filename);
-        if (!resolved.startsWith(`${artifactRoot}${path.sep}`)) return null;
-        return fs.promises.rm(resolved, { force: true }).catch(() => {});
-      }));
+      try {
+        const keep = this.store.getServiceSettings?.().storage_policy?.artifact_per_group || this.config.historyLimit;
+        const stalePaths = this.store.pruneRuns(currentMonitor.id, keep);
+        const artifactRoot = path.resolve(this.config.artifactDir);
+        await Promise.all(stalePaths.map((filename) => {
+          const resolved = path.resolve(filename);
+          if (path.dirname(resolved) !== artifactRoot || this.store.isArtifactReferenced?.(resolved)) return null;
+          return fs.promises.rm(resolved, { force: true }).catch((error) => {
+            console.error(JSON.stringify({ event: 'artifact_cleanup_failed', code: error.code || 'UNKNOWN' }));
+          });
+        }));
+      } catch (error) {
+        console.error(JSON.stringify({ event: 'artifact_cleanup_failed', code: error.code || 'UNKNOWN' }));
+      }
       return completed;
     } catch (error) {
       const appError = error instanceof AppError

@@ -13,6 +13,7 @@ const state = {
   historyRuns: [],
   historyTotal: 0,
   historyDeletableCount: 0,
+  historyArchivedCount: 0,
   historyNextCursor: null,
   historySelected: new Set(),
   historyLoading: false,
@@ -291,6 +292,7 @@ function testEditorHtml(test) {
       <label class="field"><span>最大输出 Token</span><input data-test="max_output_tokens" type="number" min="64" max="131072" required value="${escapeHtml(test.max_output_tokens || 16384)}"></label>
       <label class="field field-wide"><span>检测提示词</span><textarea class="prompt-input" data-test="prompt" required maxlength="100000">${escapeHtml(test.prompt || '')}</textarea></label>
       <label class="field field-wide"><span>文件 MIME 类型</span><input data-test="mime_type" maxlength="200" value="${escapeHtml(test.mime_type || '')}" placeholder="可选"></label>
+      ${visualReviewEditorHtml(validation.visual)}
       <details class="validation-details" open>
         <summary>判定规则 <span>${(validation.rules || []).length} 条</span></summary>
         <div class="validation-policy">
@@ -313,6 +315,69 @@ function testEditorHtml(test) {
         <button class="button rule-add" type="button" data-add-rule><i data-lucide="plus"></i><span>添加规则</span></button>
       </details>
     </div>`;
+}
+
+function visualReviewEditorHtml(visual = {}) {
+  return `
+    <details class="visual-review-details" data-key-configured="${visual.api_key_configured === true}" ${visual.enabled ? 'open' : ''}>
+      <summary><i data-lucide="eye"></i>视觉审核 <span>${visual.enabled ? '已开启' : '未开启'}</span></summary>
+      <div class="visual-review-fields">
+        <label class="validation-math-toggle" title="将完整 HTML 或 SVG 源码发送给审核服务；作品不在本机截图">
+          <input data-visual="enabled" type="checkbox" ${visual.enabled ? 'checked' : ''}>
+          <span class="switch-track" aria-hidden="true"><span></span></span><span>启用视觉审核</span>
+        </label>
+        <label class="field"><span>审核协议</span><select data-visual="protocol">${optionsHtml(['manxue', 'html_review'], visual.protocol || 'manxue', { manxue: '满血 AI / 异步任务', html_review: '兼容 HTML 审核 / 同步返回' })}</select></label>
+        <label class="field"><span>判定方式</span><select data-visual="decision_mode">${optionsHtml(['visual', 'both'], visual.decision_mode || 'visual', { visual: '以视觉审核为准', both: '现有规则与视觉审核共同判定' })}</select></label>
+        <label class="field field-wide"><span>审核 API 地址</span><input data-visual="api_url" type="url" maxlength="2000" value="${escapeHtml(visual.api_url || 'https://manxue.ai/api/v1/tests')}"></label>
+        <label class="field field-wide"><span>审核专用 Key（可选）</span><input data-visual="api_key" type="password" autocomplete="new-password" maxlength="8192" value="${escapeHtml(visual.api_key || '')}" placeholder="${visual.api_key_configured ? '已配置，留空保留' : '无鉴权的审核服务可留空'}"></label>
+        <label class="visual-key-clear"><input data-visual="clear_api_key" type="checkbox" ${visual.clear_api_key ? 'checked' : ''}>清除已保存的审核 Key</label>
+        <label class="field"><span>检测基准</span><input data-visual="benchmark" maxlength="64" value="${escapeHtml(visual.benchmark || 'pelican')}"></label>
+        <label class="field"><span>审核总超时（秒）</span><input data-visual="timeout_seconds" type="number" min="5" max="600" value="${escapeHtml(visual.timeout_seconds || 120)}"></label>
+        <label class="field" data-visual-async><span>轮询间隔（秒）</span><input data-visual="poll_interval_seconds" type="number" min="1" max="30" value="${escapeHtml(visual.poll_interval_seconds || 2)}"></label>
+        <label class="field" data-visual-sync><span>审核模型（可选）</span><input data-visual="model" maxlength="200" value="${escapeHtml(visual.model || '')}"></label>
+        <label class="field field-wide" data-visual-sync><span>审核要求（可选）</span><textarea data-visual="instructions" maxlength="10000">${escapeHtml(visual.instructions || '')}</textarea></label>
+      </div>
+    </details>`;
+}
+
+function updateVisualEditor(editor) {
+  const details = editor.querySelector('.visual-review-details');
+  const toggle = details.querySelector('[data-visual="enabled"]');
+  const supportsReview = editor.querySelector('[data-test="output_type"]').value === 'html';
+  if (!supportsReview) toggle.checked = false;
+  toggle.disabled = !supportsReview;
+  const enabled = supportsReview && toggle.checked;
+  const asynchronous = details.querySelector('[data-visual="protocol"]').value === 'manxue';
+  details.querySelector('summary span').textContent = enabled ? '已开启' : '未开启';
+  for (const control of details.querySelectorAll('[data-visual]')) {
+    if (control === toggle) continue;
+    const visible = !control.closest('[data-visual-sync]') || !asynchronous;
+    control.disabled = !enabled || !visible || Boolean(control.closest('[data-visual-async]') && !asynchronous);
+    control.required = enabled && ['api_url', 'benchmark', 'timeout_seconds'].includes(control.dataset.visual);
+  }
+  details.querySelectorAll('[data-visual-sync]').forEach((field) => { field.hidden = asynchronous; });
+  details.querySelectorAll('[data-visual-async]').forEach((field) => { field.hidden = !asynchronous; });
+}
+
+function collectVisual(editor) {
+  const read = (name) => editor.querySelector(`[data-visual="${name}"]`);
+  const enabled = read('enabled').checked;
+  const numberValue = (name, fallback) => read(name).value === '' && !enabled
+    ? fallback : Number(read(name).value);
+  return {
+    enabled,
+    api_key_configured: editor.querySelector('.visual-review-details').dataset.keyConfigured === 'true',
+    protocol: read('protocol').value,
+    decision_mode: read('decision_mode').value,
+    api_url: read('api_url').value.trim() || (!enabled ? 'https://manxue.ai/api/v1/tests' : ''),
+    benchmark: read('benchmark').value.trim() || (!enabled ? 'pelican' : ''),
+    timeout_seconds: numberValue('timeout_seconds', 120),
+    poll_interval_seconds: numberValue('poll_interval_seconds', 2),
+    model: read('model').value.trim(),
+    instructions: read('instructions').value.trim(),
+    ...(read('api_key').value.trim() ? { api_key: read('api_key').value.trim() } : {}),
+    ...(read('clear_api_key').checked ? { clear_api_key: true } : {})
+  };
 }
 
 function validationRuleParametersHtml(rule) {
@@ -584,6 +649,11 @@ function updateSvgMathEditor(details) {
 }
 
 function bindValidationEditor(editor, onChange = markDirty) {
+  const visual = editor.querySelector('.visual-review-details');
+  visual.addEventListener('input', onChange);
+  visual.addEventListener('change', () => { updateVisualEditor(editor); onChange(); });
+  editor.querySelector('[data-test="output_type"]').addEventListener('change', () => updateVisualEditor(editor));
+  updateVisualEditor(editor);
   const details = editor.querySelector('.validation-details');
   details.addEventListener('input', onChange);
   details.addEventListener('change', (event) => {
@@ -668,6 +738,17 @@ function render() {
     state.activePlatform = platforms[0]?.id || '';
   }
   renderSchedule();
+  const storage = state.data.storage_policy || { enabled: true, history_days: 90, history_per_group: 2000, artifact_per_group: 60 };
+  $('storage-enabled').checked = storage.enabled;
+  $('storage-history-days').value = String(storage.history_days);
+  $('storage-history-count').value = String(storage.history_per_group);
+  $('storage-artifact-count').value = String(storage.artifact_per_group);
+  updateStorageSummary();
+  const maintainedAt = state.data.maintenance_last_run_at;
+  const maintenance = state.data.maintenance_last_result;
+  $('storage-maintenance').textContent = maintainedAt
+    ? `最近维护：${when(maintainedAt)}${maintenance ? ` · 清理 ${maintenance.archived || 0} 条详细历史 · 移除 ${maintenance.files_removed || 0} 个文件` : ''}`
+    : '最近维护：尚未执行';
   $('schedule-next').textContent = state.data.schedule_timezone || 'Asia/Shanghai';
   $('platform-summary').textContent = `${platforms.length} 个平台 · ${platforms.reduce((sum, platform) => sum + platform.groups.length, 0)} 个分组`;
   $('platform-tabs').innerHTML = platforms.map((platform, index) => `
@@ -747,6 +828,7 @@ function collectTest(editor) {
     ...(mime ? { mime_type: mime } : {}),
     validation: {
       version: 2,
+      visual: collectVisual(editor),
       normal_threshold: Number(editor.querySelector('[data-validation="normal_threshold"]').value),
       degraded_threshold: Number(editor.querySelector('[data-validation="degraded_threshold"]').value),
       ...(svgMathEnabled ? { svg_math: {
@@ -792,6 +874,12 @@ function collect() {
     schedule_mode: scheduleMode,
     schedule_times: scheduleTimes,
     schedule_interval_minutes: intervalMinutes,
+    storage_policy: {
+      enabled: $('storage-enabled').checked,
+      history_days: Number($('storage-history-days').value),
+      history_per_group: Number($('storage-history-count').value),
+      artifact_per_group: Number($('storage-artifact-count').value)
+    },
     platforms: [...document.querySelectorAll('.platform-panel')].map(collectPlatform)
   };
 }
@@ -856,9 +944,12 @@ function configuredGroup(groupId) {
   return null;
 }
 
-function updateHistoryCount(groupId, count) {
+function updateHistoryCount(groupId, count, archivedCount) {
   const group = configuredGroup(groupId);
-  if (group) group.history_count = Number(count) || 0;
+  if (group) {
+    group.history_count = Number(count) || 0;
+    if (archivedCount != null) group.history_archived = Number(archivedCount) || 0;
+  }
   document.querySelectorAll('[data-history-button]').forEach((button) => {
     if (String(button.dataset.groupId) !== String(groupId)) return;
     button.querySelector('[data-history-count]').textContent = String(Number(count) || 0);
@@ -935,7 +1026,7 @@ function updateHistorySelection() {
   selectAll.indeterminate = selectedCount > 0 && selectedCount < deletableIds.length;
   $('history-selection').textContent = `已选择 ${selectedCount}/${MAX_HISTORY_SELECTION} 条`;
   $('history-delete-selected').disabled = selectedCount === 0 || state.historyLoading || state.historyDeleting;
-  $('history-clear-all').disabled = state.historyDeletableCount === 0 || state.historyLoading || state.historyDeleting;
+  $('history-clear-all').disabled = (state.historyDeletableCount === 0 && state.historyArchivedCount === 0) || state.historyLoading || state.historyDeleting;
 }
 
 async function loadHistory(append = false) {
@@ -959,10 +1050,11 @@ async function loadHistory(append = false) {
     state.historyRuns = append ? [...state.historyRuns, ...payload.runs] : payload.runs;
     state.historyTotal = Number(payload.total) || 0;
     state.historyDeletableCount = Number(payload.deletable_count) || 0;
+    state.historyArchivedCount = Number(payload.archived_count) || 0;
     state.historyNextCursor = payload.next_cursor;
     $('history-title').textContent = `历史检测记录 · ${payload.group.name}`;
-    $('history-meta').textContent = `共 ${state.historyTotal} 条记录 · ${state.historyDeletableCount} 条可清理`;
-    updateHistoryCount(groupId, state.historyTotal);
+    $('history-meta').textContent = `共 ${state.historyTotal} 条详细记录 · ${state.historyDeletableCount} 条可清理${state.historyArchivedCount ? ` · ${state.historyArchivedCount} 条仅保留累计统计` : ''}`;
+    updateHistoryCount(groupId, state.historyTotal, state.historyArchivedCount);
   } catch (error) {
     if (requestId === state.historyRequest) {
       if (append) toast(error.message, 'error');
@@ -983,6 +1075,7 @@ function openHistory(groupId) {
   state.historyRuns = [];
   state.historyTotal = Number(group?.history_count) || 0;
   state.historyDeletableCount = 0;
+  state.historyArchivedCount = Number(group?.history_archived) || 0;
   state.historyNextCursor = null;
   state.historySelected.clear();
   state.historyLoading = false;
@@ -1085,7 +1178,7 @@ async function deleteHistory(clearAll) {
   const group = configuredGroup(state.historyGroupId);
   const accepted = await confirmDeletion(
     clearAll
-      ? `将永久删除“${group?.name || state.historyGroupId}”的 ${state.historyDeletableCount} 条已结束记录，正在执行的任务会保留。`
+      ? `将永久删除“${group?.name || state.historyGroupId}”的 ${state.historyDeletableCount} 条已结束记录，并清空累计统计，正在执行的任务会保留。`
       : `将永久删除选中的 ${ids.length} 条历史检测记录。`,
     clearAll ? '确认清空' : '确认删除'
   );
@@ -1098,8 +1191,8 @@ async function deleteHistory(clearAll) {
       mutation: true,
       body: clearAll ? { all: true } : { run_ids: ids }
     });
-    updateHistoryCount(state.historyGroupId, result.total);
-    toast(result.deleted ? `已删除 ${result.deleted} 条历史记录` : '没有可删除的历史记录');
+    updateHistoryCount(state.historyGroupId, result.total, result.archived_count);
+    toast(clearAll ? '已清空历史和累计统计' : result.deleted ? `已删除 ${result.deleted} 条历史记录` : '没有可删除的历史记录');
     state.historyDeleting = false;
     await loadHistory(false);
   } catch (error) {
@@ -1159,6 +1252,14 @@ $('schedule-interval-value').addEventListener('input', markDirty);
 $('schedule-interval-unit').addEventListener('change', () => {
   updateIntervalLimit();
   markDirty();
+});
+function updateStorageSummary() {
+  $('storage-summary').textContent = $('storage-enabled').checked
+    ? `详细历史 ${$('storage-history-days').value} 天 / 每组 ${$('storage-history-count').value} 条 · 作品每组 ${$('storage-artifact-count').value} 份`
+    : `详细历史自动清理已关闭 · 作品每组 ${$('storage-artifact-count').value} 份`;
+}
+['storage-enabled', 'storage-history-days', 'storage-history-count', 'storage-artifact-count'].forEach((id) => {
+  $(id).addEventListener('input', () => { updateStorageSummary(); markDirty(); });
 });
 $('history-close').addEventListener('click', () => {
   if (!state.historyDeleting) $('history-dialog').close();

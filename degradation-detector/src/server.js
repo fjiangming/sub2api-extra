@@ -12,8 +12,10 @@ const { CredentialVault } = require('./credential-vault');
 const { DetectionRunner, deterministicVerdict } = require('./detection-runner');
 const { AppError, publicError } = require('./errors');
 const { Scheduler } = require('./scheduler');
+const { MaintenanceService } = require('./maintenance');
 const { Store, publicRun, publicValidationResult } = require('./store');
 const { Sub2ApiClient } = require('./sub2api-client');
+const { publicVisualSettings, storeVisualTest } = require('./visual-config');
 
 const PREVIEW_CSP = [
   'sandbox allow-scripts',
@@ -73,6 +75,7 @@ function groupPayload(group, summary, runtime) {
     output_type: test?.output_type || null,
     next_run_at: monitor?.next_run_at == null ? null : monitor.next_run_at / 1000,
     history_total: summary.historyTotal,
+    history_archived: summary.historyArchived,
     totals: summary.totals,
     assessment: summary.assessment,
     history: summary.history
@@ -271,7 +274,10 @@ function adminHistoryRun(row) {
 function publicTest(test) {
   if (!test) return null;
   const { platform: _platform, ...payload } = test;
-  return payload;
+  return { ...payload, validation: {
+    ...payload.validation,
+    ...(payload.validation?.visual ? { visual: publicVisualSettings(payload.validation.visual) } : {})
+  } };
 }
 
 function credentialUsable(runtime, monitor) {
@@ -294,6 +300,8 @@ async function adminConfigurationPayload(req, runtime) {
   const monitors = new Map(runtime.store.listMonitors(runtime.config.serviceOwnerId)
     .map((monitor) => [String(monitor.group_id), monitor]));
   const historyCounts = new Map(runtime.store.historyCounts(runtime.config.serviceOwnerId)
+    .map((item) => [item.group_id, item.count]));
+  const archiveCounts = new Map(runtime.store.archiveCounts(runtime.config.serviceOwnerId)
     .map((item) => [item.group_id, item.count]));
   const grouped = new Map();
   for (const group of discovered) {
@@ -324,7 +332,8 @@ async function adminConfigurationPayload(req, runtime) {
               enabled: Boolean(stored?.enabled && monitor?.enabled && keyConfigured),
               key_configured: keyConfigured,
               test: publicTest(groupTest),
-              history_count: historyCounts.get(String(group.id)) || 0
+              history_count: historyCounts.get(String(group.id)) || 0,
+              history_archived: archiveCounts.get(String(group.id)) || 0
             };
           })
       };
@@ -336,6 +345,9 @@ async function adminConfigurationPayload(req, runtime) {
     schedule_times: settings.schedule_times,
     schedule_interval_minutes: settings.schedule_interval_minutes,
     schedule_timezone: settings.schedule_timezone,
+    storage_policy: settings.storage_policy,
+    maintenance_last_run_at: settings.maintenance_last_run_at == null ? null : settings.maintenance_last_run_at / 1000,
+    maintenance_last_result: settings.maintenance_last_result,
     updated_at: settings.updated_at / 1000,
     platforms
   };
@@ -363,11 +375,16 @@ async function saveAdminConfiguration(req, runtime) {
     if (!availablePlatforms.has(platform.id)) {
       throw new AppError('PLATFORM_NOT_AVAILABLE', `平台 ${platform.id} 不存在或当前管理员无权配置`, { status: 400 });
     }
+    platform.test = storeVisualTest(platform.test, runtime.vault, `platform:${platform.id}`,
+      runtime.store.getPlatformTest(platform.id, false));
     for (const selection of platform.groups) {
       const group = availableGroups.get(String(selection.id));
       if (!group || group.platform !== platform.id) {
         throw new AppError('GROUP_NOT_AVAILABLE', '分组不存在、无权配置或平台不匹配', { status: 400 });
       }
+      const existing = runtime.store.getMonitor(runtime.config.serviceOwnerId, group.id);
+      const groupTest = selection.test ? storeVisualTest(selection.test, runtime.vault,
+        `group:${platform.id}:${group.id}`, runtime.store.getMonitorTestOverride(existing), platform.test) : null;
       const submittedKey = String(selection.key || '').trim();
       if (!selection.enabled) {
         if (submittedKey) {
@@ -379,12 +396,11 @@ async function saveAdminConfiguration(req, runtime) {
           platform: group.platform,
           keyCipher: null,
           keyFingerprint: null,
-          test: selection.test ? publicTest(selection.test) : null,
+          test: groupTest,
           enabled: false
         });
         continue;
       }
-      const existing = runtime.store.getMonitor(runtime.config.serviceOwnerId, group.id);
       let keyCipher;
       let keyFingerprint;
       if (submittedKey) {
@@ -410,7 +426,7 @@ async function saveAdminConfiguration(req, runtime) {
         platform: group.platform,
         keyCipher,
         keyFingerprint,
-        test: selection.test ? publicTest(selection.test) : null,
+        test: groupTest,
         enabled: true
       });
     }
@@ -421,6 +437,7 @@ async function saveAdminConfiguration(req, runtime) {
     scheduleTimes: submitted.schedule_times,
     scheduleIntervalMinutes: submitted.schedule_interval_minutes,
     scheduleTimezone: runtime.config.scheduleTimezone,
+    storagePolicy: submitted.storage_policy,
     updatedBy: String(req.auth.user.id),
     serviceOwnerId: runtime.config.serviceOwnerId,
     platforms: submitted.platforms,
@@ -501,8 +518,11 @@ function createRuntime(config, overrides = {}) {
     sub2api,
     vault
   });
-  const scheduler = overrides.scheduler || new Scheduler({ config, store, runner });
-  return { config, store, vault, sub2api, auth, runner, scheduler };
+  const maintenance = overrides.maintenance || new MaintenanceService({
+    config, store, isIdle: () => scheduler.active?.size === 0 && scheduler.queue?.length === 0
+  });
+  const scheduler = overrides.scheduler || new Scheduler({ config, store, runner, maintenance });
+  return { config, store, vault, sub2api, auth, runner, scheduler, maintenance };
 }
 
 function createApp(config, overrides = {}) {
@@ -821,6 +841,7 @@ function createApp(config, overrides = {}) {
         runs: page.map(adminHistoryRun),
         total: stats.total,
         deletable_count: stats.deletable,
+        archived_count: runtime.store.archivedCount(config.serviceOwnerId, group.id),
         next_cursor: rows.length > limit ? page.at(-1)?.id || null : null
       });
     } catch (error) {
@@ -920,7 +941,8 @@ function createApp(config, overrides = {}) {
         res.json({
           deleted: result.deleted,
           total: stats.total,
-          deletable_count: stats.deletable
+          deletable_count: stats.deletable,
+          archived_count: runtime.store.archivedCount(config.serviceOwnerId, group.id)
         });
       } catch (error) {
         next(error);

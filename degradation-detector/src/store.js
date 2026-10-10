@@ -3,8 +3,17 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
-const { validateTestConfig } = require('./config');
+const { defaultStoragePolicy, storagePolicySchema, validateTestConfig } = require('./config');
 const { nextScheduledRunAt, parseDailyTime } = require('./schedule');
+const { snapshotValidation } = require('./visual-config');
+
+const runSummaryColumns = `
+  id, started_at, finished_at, status, quality, reason, source, duration_ms,
+  output_type, model, reasoning_effort, score, validation_result_json, trigger_type,
+  manual_status, manual_reason, manual_updated_at, manual_updated_by,
+  (artifact_path IS NOT NULL OR (output_type = 'html' AND output_text IS NOT NULL)) AS has_artifact,
+  (output_type = 'html' AND output_text IS NOT NULL) AS has_html
+`;
 
 function nowMs() {
   return Date.now();
@@ -57,6 +66,19 @@ function publicValidationResult(row, includeRules = false) {
   if (parsed.score_max != null) result.score_max = nullableNumber(parsed.score_max);
   if (parsed.coverage != null) result.coverage = nullableNumber(parsed.coverage);
   if (Number(parsed.indeterminate) > 0) result.indeterminate = Number(parsed.indeterminate);
+  if (parsed.visual) {
+    const visual = parsed.visual;
+    result.local_status = ['normal', 'degraded', 'unknown'].includes(parsed.local_status) ? parsed.local_status : 'unknown';
+    result.visual = {
+      protocol: visual.protocol === 'manxue' ? 'manxue' : 'html_review',
+      decision_mode: visual.decision_mode === 'both' ? 'both' : 'visual',
+      status: ['normal', 'degraded'].includes(visual.status) ? visual.status : 'unknown',
+      state: visual.state === 'completed' ? 'completed' : 'failed',
+      reason: String(visual.reason || '').slice(0, 300),
+      duration_ms: Math.max(0, Number(visual.duration_ms) || 0),
+      ...(visual.error_code ? { error_code: String(visual.error_code).slice(0, 60) } : {})
+    };
+  }
   if (includeRules) {
     result.rules = Array.isArray(parsed.results) ? parsed.results.slice(0, 50).map((rule) => ({
       id: String(rule.id || '').slice(0, 64),
@@ -82,7 +104,7 @@ function testSnapshot(test) {
     reasoning_effort: test.reasoning_effort || 'none',
     max_output_tokens: test.max_output_tokens,
     mime_type: test.mime_type || null,
-    validation: test.validation || null
+    validation: snapshotValidation(test.validation) || null
   });
 }
 
@@ -132,8 +154,10 @@ function publicRun(row) {
     score: nullableNumber(row.score),
     validation: publicValidationResult(row),
     review,
-    has_artifact: Boolean(row.artifact_path || (row.output_type === 'html' && row.output_text)),
-    has_html: row.output_type === 'html' && Boolean(row.output_text)
+    has_artifact: row.has_artifact == null
+      ? Boolean(row.artifact_path || (row.output_type === 'html' && row.output_text)) : Boolean(row.has_artifact),
+    has_html: row.has_html == null
+      ? row.output_type === 'html' && Boolean(row.output_text) : Boolean(row.has_html)
   };
 }
 
@@ -171,15 +195,46 @@ function storedTestConfig(test) {
   return JSON.stringify(config);
 }
 
+function emptyAssessmentState() {
+  return { status: 'unknown', evidence: [], recoveryStreak: 0, recent: [] };
+}
+
+function advanceAssessment(state, current, confirmation) {
+  state.recent.push(current);
+  state.recent = state.recent.slice(-confirmation.window);
+  if (state.status === 'degraded') {
+    state.recoveryStreak = current === 'normal' ? state.recoveryStreak + 1 : 0;
+    if (state.recoveryStreak >= confirmation.recovery_passes) {
+      state.status = 'normal';
+      state.evidence = [];
+      state.recoveryStreak = 0;
+    }
+    return;
+  }
+  state.evidence.push(current);
+  state.evidence = state.evidence.slice(-confirmation.window);
+  if (state.evidence.filter((status) => status === 'degraded').length >= confirmation.required_failures) {
+    state.status = 'degraded';
+    state.evidence = [];
+    state.recoveryStreak = 0;
+  } else if (state.status === 'unknown' && current === 'normal') {
+    state.status = 'normal';
+  }
+}
+
 class Store {
   constructor(config) {
     this.config = config;
     fs.mkdirSync(path.dirname(config.databasePath), { recursive: true });
     fs.mkdirSync(config.artifactDir, { recursive: true });
     this.db = new Database(config.databasePath);
+    if (this.db.pragma('page_count', { simple: true }) === 0) {
+      this.db.pragma('auto_vacuum = INCREMENTAL');
+    }
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
+    this.summaryCache = new Map();
     this.#migrate();
     this.recoverInterruptedRuns();
   }
@@ -272,6 +327,16 @@ class Store {
         updated_at INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS run_archives (
+        monitor_id INTEGER PRIMARY KEY REFERENCES monitors(id) ON DELETE CASCADE,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        valid INTEGER NOT NULL DEFAULT 0,
+        passed INTEGER NOT NULL DEFAULT 0,
+        assessment_snapshot TEXT,
+        assessment_state TEXT,
+        updated_at INTEGER NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS monitors_due_idx
         ON monitors(enabled, next_run_at);
       CREATE INDEX IF NOT EXISTS runs_monitor_created_idx
@@ -280,6 +345,8 @@ class Store {
         ON runs(user_id, group_id, id DESC);
       CREATE INDEX IF NOT EXISTS runs_preview_idx
         ON runs(preview_token);
+      CREATE INDEX IF NOT EXISTS runs_artifact_idx
+        ON runs(artifact_path) WHERE artifact_path IS NOT NULL;
     `);
     this.#ensureColumn('monitors', 'key_fingerprint', 'TEXT');
     this.#ensureColumn('monitors', 'test_config_json', 'TEXT');
@@ -295,6 +362,10 @@ class Store {
     this.#ensureColumn('service_settings', 'schedule_mode', "TEXT NOT NULL DEFAULT 'daily'");
     this.#ensureColumn('service_settings', 'schedule_times_json', 'TEXT');
     this.#ensureColumn('service_settings', 'schedule_interval_minutes', 'INTEGER NOT NULL DEFAULT 60');
+    this.#ensureColumn('service_settings', 'storage_policy_json', 'TEXT');
+    this.#ensureColumn('service_settings', 'maintenance_last_run_at', 'INTEGER');
+    this.#ensureColumn('service_settings', 'maintenance_last_result_json', 'TEXT');
+    this.#ensureColumn('service_settings', 'maintenance_last_compact_at', 'INTEGER');
     this.db.prepare(`
       INSERT OR IGNORE INTO service_settings (
         id, schedule_time, schedule_mode, schedule_times_json,
@@ -317,18 +388,28 @@ class Store {
   }
 
   close() {
+    this.summaryCache.clear();
     this.db.close();
+  }
+
+  invalidateSummary(userId, groupId) {
+    if (userId == null) this.summaryCache.clear();
+    else this.summaryCache.delete(JSON.stringify([String(userId), String(groupId)]));
   }
 
   getServiceSettings() {
     const row = this.db.prepare('SELECT * FROM service_settings WHERE id = 1').get();
     const schedule = storedSchedule(row);
-    const { schedule_times_json: omitted, ...settings } = row;
+    const { schedule_times_json: omitted, storage_policy_json: omittedPolicy,
+      maintenance_last_result_json: omittedResult, ...settings } = row;
+    const policy = storagePolicySchema.safeParse(parsedObject(row.storage_policy_json));
     return {
       ...settings,
       schedule_mode: schedule.mode,
       schedule_times: schedule.times,
-      schedule_interval_minutes: schedule.intervalMinutes
+      schedule_interval_minutes: schedule.intervalMinutes,
+      storage_policy: policy.success ? policy.data : { ...defaultStoragePolicy },
+      maintenance_last_result: parsedObject(row.maintenance_last_result_json)
     };
   }
 
@@ -376,11 +457,12 @@ class Store {
 
   saveAdminConfiguration(input) {
     const timestamp = nowMs();
+    const storagePolicy = storagePolicySchema.parse(input.storagePolicy || this.getServiceSettings().storage_policy);
     const transaction = this.db.transaction(() => {
       this.db.prepare(`
         UPDATE service_settings SET
           schedule_time = ?, schedule_mode = ?, schedule_times_json = ?,
-          schedule_interval_minutes = ?, schedule_timezone = ?, updated_by = ?, updated_at = ?
+          schedule_interval_minutes = ?, schedule_timezone = ?, updated_by = ?, updated_at = ?, storage_policy_json = ?
         WHERE id = 1
       `).run(
         input.scheduleTimes[0],
@@ -389,7 +471,8 @@ class Store {
         input.scheduleIntervalMinutes,
         input.scheduleTimezone,
         input.updatedBy,
-        timestamp
+        timestamp,
+        JSON.stringify(storagePolicy)
       );
 
       this.db.prepare('UPDATE platform_configs SET enabled = 0').run();
@@ -463,10 +546,13 @@ class Store {
       }
       return { nextRunAt, groupsEnabled: input.groups.filter((group) => group.enabled !== false).length };
     });
-    return transaction();
+    const result = transaction();
+    this.invalidateSummary();
+    return result;
   }
 
   recoverInterruptedRuns() {
+    this.invalidateSummary();
     const timestamp = nowMs();
     const transaction = this.db.transaction(() => {
       const monitorIds = this.db.prepare(`
@@ -496,6 +582,7 @@ class Store {
   }
 
   prepareServiceOwnership(serviceOwnerId) {
+    this.invalidateSummary();
     const owner = String(serviceOwnerId);
     const timestamp = nowMs();
     const transaction = this.db.transaction(() => {
@@ -521,6 +608,7 @@ class Store {
   }
 
   upsertMonitor(input) {
+    this.invalidateSummary(input.userId, input.groupId);
     const timestamp = nowMs();
     const existing = this.getMonitor(input.userId, input.groupId);
     const keyCipher = input.keyCipher === undefined ? existing?.key_cipher || null : input.keyCipher;
@@ -594,6 +682,7 @@ class Store {
   }
 
   setMonitorEnabled(userId, groupId, enabled, nextRunAt = this.nextScheduledAt()) {
+    this.invalidateSummary(userId, groupId);
     this.db.prepare(`
       UPDATE monitors SET enabled = ?, next_run_at = ?, updated_at = ?
       WHERE user_id = ? AND group_id = ?
@@ -602,6 +691,7 @@ class Store {
   }
 
   disableUnavailableMonitors(userId, groupIds) {
+    this.invalidateSummary();
     const available = [...new Set(groupIds.map((groupId) => String(groupId)))];
     const timestamp = nowMs();
     if (available.length === 0) {
@@ -631,6 +721,7 @@ class Store {
   }
 
   createRun(monitor, test, triggerType) {
+    this.invalidateSummary(monitor.user_id, monitor.group_id);
     const result = this.db.prepare(`
       INSERT INTO runs (
         monitor_id, user_id, group_id, platform, model, prompt, trigger_type,
@@ -647,13 +738,15 @@ class Store {
       test.output_type,
       test.reasoning_effort || 'none',
       testSnapshot(test),
-      test.validation ? JSON.stringify(test.validation) : null,
+      test.validation ? JSON.stringify(snapshotValidation(test.validation)) : null,
       nowMs()
     );
     return this.getRun(result.lastInsertRowid);
   }
 
   markRunRunning(id) {
+    const run = this.getRun(id);
+    if (run) this.invalidateSummary(run.user_id, run.group_id);
     const startedAt = nowMs();
     this.db.prepare(`
       UPDATE runs SET status = 'running', started_at = ?
@@ -662,10 +755,18 @@ class Store {
     return this.getRun(id);
   }
 
+  saveRunOutput(id, output) {
+    this.db.prepare(`
+      UPDATE runs SET output_text = ?, artifact_path = ?, artifact_name = ?, artifact_mime = ?, preview_token = ?
+      WHERE id = ? AND status = 'running'
+    `).run(output.outputText, output.artifactPath, output.artifactName, output.artifactMime, output.previewToken, Number(id));
+  }
+
   completeRun(id, result, nextRunAt) {
     const finishedAt = nowMs();
     const run = this.getRun(id);
     if (!run) throw new Error(`Run ${id} does not exist`);
+    this.invalidateSummary(run.user_id, run.group_id);
     const startedAt = run.started_at || finishedAt;
     const currentMonitor = this.getMonitorById(run.monitor_id);
     const resolvedNextRunAt = nextRunAt !== undefined
@@ -778,19 +879,20 @@ class Store {
     const pageSize = Math.floor(Math.max(1, Math.min(101, Number(limit) || 50)));
     if (beforeId == null) {
       return this.db.prepare(`
-        SELECT * FROM runs
+        SELECT ${runSummaryColumns} FROM runs
         WHERE user_id = ? AND group_id = ?
         ORDER BY id DESC LIMIT ?
       `).all(String(userId), String(groupId), pageSize);
     }
     return this.db.prepare(`
-      SELECT * FROM runs
+      SELECT ${runSummaryColumns} FROM runs
       WHERE user_id = ? AND group_id = ? AND id < ?
       ORDER BY id DESC LIMIT ?
     `).all(String(userId), String(groupId), Number(beforeId), pageSize);
   }
 
   reviewRun(userId, groupId, runId, review, reviewedBy) {
+    this.invalidateSummary(userId, groupId);
     const owner = String(userId);
     const group = String(groupId);
     const id = Number(runId);
@@ -828,6 +930,7 @@ class Store {
   }
 
   deleteHistory(userId, groupId, runIds = null) {
+    this.invalidateSummary(userId, groupId);
     const owner = String(userId);
     const group = String(groupId);
     const all = runIds == null;
@@ -858,6 +961,11 @@ class Store {
     const activeIds = rows
       .filter((row) => ['queued', 'running'].includes(row.status))
       .map((row) => Number(row.id));
+    if (all && rows.length === 0) {
+      this.db.prepare(`DELETE FROM run_archives WHERE monitor_id IN (
+        SELECT id FROM monitors WHERE user_id = ? AND group_id = ?
+      )`).run(owner, group);
+    }
     if (missingIds.length || activeIds.length || rows.length === 0) {
       return { deleted: 0, artifactPaths: [], missingIds, activeIds };
     }
@@ -884,6 +992,9 @@ class Store {
     `);
     const transaction = this.db.transaction(() => {
       const result = all ? remove.run(owner, group) : remove.run(owner, group, ...ids);
+      if (all) this.db.prepare(`DELETE FROM run_archives WHERE monitor_id IN (
+        SELECT id FROM monitors WHERE user_id = ? AND group_id = ?
+      )`).run(owner, group);
       updateMonitor.run(nowMs(), owner, group);
       return result.changes;
     });
@@ -897,6 +1008,14 @@ class Store {
 
   groupSummary(userId, groupId, historyLimit) {
     const monitor = this.getMonitor(userId, groupId);
+    const key = JSON.stringify([String(userId), String(groupId)]);
+    const limit = Math.max(0, Math.min(2000, Math.floor(Number(historyLimit) || 0)));
+    const cached = this.summaryCache.get(key);
+    if (cached?.limit === limit) {
+      this.summaryCache.delete(key);
+      this.summaryCache.set(key, cached);
+      return { monitor, ...cached.value };
+    }
     const totals = this.db.prepare(`
       SELECT
         COUNT(*) AS history_total,
@@ -906,17 +1025,23 @@ class Store {
       FROM runs
       WHERE user_id = ? AND group_id = ?
     `).get(String(userId), String(groupId));
-    return {
-      monitor,
-      historyTotal: Number(totals?.history_total || 0),
+    const archived = monitor ? this.db.prepare('SELECT * FROM run_archives WHERE monitor_id = ?').get(monitor.id) : null;
+    const value = {
+      historyTotal: Number(totals?.history_total || 0) + Number(archived?.attempts || 0),
+      historyArchived: Number(archived?.attempts || 0),
       totals: {
-        passed: Number(totals?.passed || 0),
-        valid: Number(totals?.valid || 0),
-        attempts: Number(totals?.attempts || 0)
+        passed: Number(totals?.passed || 0) + Number(archived?.passed || 0),
+        valid: Number(totals?.valid || 0) + Number(archived?.valid || 0),
+        attempts: Number(totals?.attempts || 0) + Number(archived?.attempts || 0)
       },
       assessment: this.groupAssessment(userId, groupId, monitor),
-      history: this.listHistory(userId, groupId, historyLimit).map(publicRun)
+      history: this.db.prepare(`
+        SELECT ${runSummaryColumns} FROM runs WHERE user_id = ? AND group_id = ? ORDER BY id DESC LIMIT ?
+      `).all(String(userId), String(groupId), limit).map(publicRun)
     };
+    this.summaryCache.set(key, { limit, value });
+    if (this.summaryCache.size > 128) this.summaryCache.delete(this.summaryCache.keys().next().value);
+    return { monitor, ...value };
   }
 
   groupAssessment(userId, groupId, monitor = this.getMonitor(userId, groupId)) {
@@ -927,45 +1052,21 @@ class Store {
       recovery_passes: 2
     };
     const snapshot = testSnapshot(test);
+    const state = this.archivedAssessmentState(monitor?.id, snapshot);
     const rows = this.db.prepare(`
       SELECT COALESCE(manual_status, status) AS effective_status FROM runs
       WHERE user_id = ? AND group_id = ?
         AND COALESCE(manual_status, status) IN ('normal', 'degraded')
         ${snapshot ? 'AND test_snapshot = ?' : ''}
       ORDER BY id ASC
-    `).all(
+    `).iterate(
       String(userId),
       String(groupId),
       ...(snapshot ? [snapshot] : [])
     );
-    const allStatuses = rows.map((row) => row.effective_status);
-    const statuses = allStatuses.slice(-Number(confirmation.window));
-    let status = 'unknown';
-    let evidence = [];
-    let recoveryStreak = 0;
-
-    for (const current of allStatuses) {
-      if (status === 'degraded') {
-        recoveryStreak = current === 'normal' ? recoveryStreak + 1 : 0;
-        if (recoveryStreak >= confirmation.recovery_passes) {
-          status = 'normal';
-          evidence = [];
-          recoveryStreak = 0;
-        }
-        continue;
-      }
-
-      evidence.push(current);
-      evidence = evidence.slice(-Number(confirmation.window));
-      const failures = evidence.filter((item) => item === 'degraded').length;
-      if (failures >= confirmation.required_failures) {
-        status = 'degraded';
-        evidence = [];
-        recoveryStreak = 0;
-      } else if (status === 'unknown' && current === 'normal') {
-        status = 'normal';
-      }
-    }
+    for (const row of rows) advanceAssessment(state, row.effective_status, confirmation);
+    const statuses = state.recent;
+    const status = state.status;
 
     let consecutiveNormal = 0;
     for (let index = statuses.length - 1; index >= 0; index -= 1) {
@@ -999,17 +1100,141 @@ class Store {
     };
   }
 
-  pruneRuns(monitorId, keep) {
+  archivedAssessmentState(monitorId, snapshot) {
+    const archive = monitorId == null ? null : this.db.prepare(
+      'SELECT assessment_snapshot, assessment_state FROM run_archives WHERE monitor_id = ?'
+    ).get(Number(monitorId));
+    const state = archive?.assessment_snapshot === snapshot ? parsedObject(archive.assessment_state) : null;
+    return state && ['normal', 'degraded', 'unknown'].includes(state.status)
+      && Array.isArray(state.evidence) && Array.isArray(state.recent) ? state : emptyAssessmentState();
+  }
+
+  archiveCounts(userId) {
+    return this.db.prepare(`
+      SELECT m.group_id, a.attempts AS count FROM run_archives a
+      JOIN monitors m ON m.id = a.monitor_id WHERE m.user_id = ?
+    `).all(String(userId));
+  }
+
+  archivedCount(userId, groupId) {
+    return Number(this.db.prepare(`
+      SELECT a.attempts FROM run_archives a JOIN monitors m ON m.id = a.monitor_id
+      WHERE m.user_id = ? AND m.group_id = ?
+    `).get(String(userId), String(groupId))?.attempts || 0);
+  }
+
+  listMaintenanceMonitors(afterId = 0, limit = 20) {
+    return this.db.prepare('SELECT * FROM monitors WHERE id > ? ORDER BY id LIMIT ?')
+      .all(Number(afterId), Number(limit));
+  }
+
+  archiveHistory(monitor, policy, timestamp = nowMs(), batchSize = 200) {
+    const empty = { archived: 0, artifactPaths: [], pending: false };
+    if (!policy.enabled) return empty;
+    const protectedId = this.db.prepare(`
+      SELECT id FROM runs WHERE monitor_id = ? ORDER BY id DESC LIMIT 1 OFFSET 59
+    `).get(monitor.id)?.id;
+    if (!protectedId) return empty;
+    const countBoundary = this.db.prepare(`
+      SELECT id FROM runs WHERE monitor_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?
+    `).get(monitor.id, policy.history_per_group - 1)?.id || 0;
+    const activeId = this.db.prepare(`
+      SELECT MIN(id) AS id FROM runs WHERE monitor_id = ? AND status IN ('queued', 'running')
+    `).get(monitor.id)?.id;
+    const rows = this.db.prepare(`
+      SELECT id, status, COALESCE(manual_status, status) AS effective_status,
+        test_snapshot, created_at, artifact_path FROM runs
+      WHERE monitor_id = ? AND id < ? ORDER BY id LIMIT ?
+    `).all(monitor.id, Math.min(protectedId, activeId ?? protectedId), batchSize + 1);
+    const cutoff = timestamp - policy.history_days * 86400000;
+    const eligible = [];
+    for (const row of rows) {
+      if (row.id >= countBoundary && row.created_at >= cutoff) break;
+      eligible.push(row);
+    }
+    const selected = eligible.slice(0, batchSize);
+    if (!selected.length) return empty;
+    const test = this.getMonitorTest(monitor);
+    const snapshot = testSnapshot(test);
+    const confirmation = test?.validation?.confirmation || { window: 3, required_failures: 2, recovery_passes: 2 };
+    const state = this.archivedAssessmentState(monitor.id, snapshot);
+    let valid = 0;
+    let passed = 0;
+    for (const row of selected) {
+      if (!['normal', 'degraded'].includes(row.effective_status)) continue;
+      valid += 1;
+      if (row.effective_status === 'normal') passed += 1;
+      if (!snapshot || row.test_snapshot === snapshot) advanceAssessment(state, row.effective_status, confirmation);
+    }
+    // Archive only the chronological prefix so the saved state precedes every retained verdict.
+    this.db.transaction(() => {
+      this.db.prepare(`
+        INSERT INTO run_archives (monitor_id, attempts, valid, passed, assessment_snapshot, assessment_state, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(monitor_id) DO UPDATE SET
+          attempts = attempts + excluded.attempts, valid = valid + excluded.valid, passed = passed + excluded.passed,
+          assessment_snapshot = excluded.assessment_snapshot, assessment_state = excluded.assessment_state,
+          updated_at = excluded.updated_at
+      `).run(monitor.id, selected.length, valid, passed, snapshot, JSON.stringify(state), timestamp);
+      this.db.prepare(`DELETE FROM runs WHERE monitor_id = ? AND id IN (${selected.map(() => '?').join(',')})`)
+        .run(monitor.id, ...selected.map((row) => row.id));
+    })();
+    this.invalidateSummary(monitor.user_id, monitor.group_id);
+    return {
+      archived: selected.length,
+      artifactPaths: selected.map((row) => row.artifact_path).filter(Boolean),
+      pending: eligible.length > batchSize
+    };
+  }
+
+  isArtifactReferenced(filename) {
+    return Boolean(this.db.prepare('SELECT 1 FROM runs WHERE artifact_path = ? LIMIT 1').get(String(filename)));
+  }
+
+  recordMaintenance(result, timestamp = nowMs()) {
+    this.db.prepare(`UPDATE service_settings SET maintenance_last_run_at = ?, maintenance_last_result_json = ? WHERE id = 1`)
+      .run(timestamp, JSON.stringify(result));
+  }
+
+  compactDatabase(timestamp = nowMs()) {
+    if (this.db.prepare("SELECT 1 FROM runs WHERE status IN ('queued', 'running') LIMIT 1").get()) return false;
+    const settings = this.getServiceSettings();
+    this.db.pragma('wal_checkpoint(PASSIVE)');
+    if (timestamp - Number(settings.maintenance_last_compact_at || 0) < 86400000) return false;
+    const freePages = this.db.pragma('freelist_count', { simple: true });
+    const pageSize = this.db.pragma('page_size', { simple: true });
+    if (freePages * pageSize < 8 * 1024 * 1024) return false;
+    if (this.db.pragma('auto_vacuum', { simple: true }) === 0) {
+      this.db.pragma('auto_vacuum = INCREMENTAL');
+      this.db.exec('VACUUM');
+    } else {
+      this.db.exec('PRAGMA incremental_vacuum(2048)');
+    }
+    this.db.prepare('UPDATE service_settings SET maintenance_last_compact_at = ? WHERE id = 1').run(timestamp);
+    this.db.pragma('wal_checkpoint(TRUNCATE)');
+    return true;
+  }
+
+  hasExpiredPayloads(monitorId, keep) {
+    return Boolean(this.db.prepare(`
+      SELECT 1 FROM runs WHERE monitor_id = ? AND status NOT IN ('queued', 'running')
+        AND (output_text IS NOT NULL OR artifact_path IS NOT NULL OR preview_token IS NOT NULL)
+        AND id < (SELECT id FROM runs WHERE monitor_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?)
+      LIMIT 1
+    `).get(Number(monitorId), Number(monitorId), Number(keep) - 1));
+  }
+
+  pruneRuns(monitorId, keep, limit = 200) {
     const stale = this.db.prepare(`
       SELECT id, artifact_path FROM runs
-      WHERE monitor_id = ?
+      WHERE monitor_id = ? AND status NOT IN ('queued', 'running')
         AND (output_text IS NOT NULL OR artifact_path IS NOT NULL OR preview_token IS NOT NULL)
-        AND id IN (
-          SELECT id FROM runs WHERE monitor_id = ?
-          ORDER BY id DESC LIMIT -1 OFFSET ?
-        )
-    `).all(Number(monitorId), Number(monitorId), Number(keep));
+        AND id < (SELECT id FROM runs WHERE monitor_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?)
+      ORDER BY id LIMIT ?
+    `).all(Number(monitorId), Number(monitorId), Number(keep) - 1, Number(limit));
     if (stale.length === 0) return [];
+    const monitor = this.getMonitorById(monitorId);
+    if (monitor) this.invalidateSummary(monitor.user_id, monitor.group_id);
     const ids = stale.map((row) => row.id);
     const placeholders = ids.map(() => '?').join(',');
     this.db.prepare(`

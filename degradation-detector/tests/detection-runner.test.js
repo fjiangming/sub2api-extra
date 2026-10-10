@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { AppError } = require('../src/errors');
+const { validateTestConfig } = require('../src/config');
 const {
   DetectionRunner,
   MODEL_REQUEST_RETRY_DELAYS_MS,
@@ -565,7 +566,7 @@ test('a started streaming response is never resubmitted even when marked retryab
   assert.equal(attempts, 1);
 });
 
-test('execution decrypts the configured service key from the credential vault', async () => {
+test('execution uses the dedicated key and preserves completed results if cleanup fails', async (t) => {
   let usedKey;
   let completed;
   const currentMonitor = {
@@ -621,4 +622,54 @@ test('execution decrypts the configured service key from the credential vault', 
 
   assert.equal(usedKey, 'sk-service-only-1234567890');
   assert.equal(completed.status, 'normal');
+  const events = [];
+  t.mock.method(console, 'error', (message) => events.push(JSON.parse(message)));
+  store.getServiceSettings = () => ({ storage_policy: { artifact_per_group: 120 } });
+  store.pruneRuns = (_monitorId, keep) => {
+    assert.equal(keep, 120);
+    throw Object.assign(new Error('fixture cleanup failure'), { code: 'SQLITE_BUSY' });
+  };
+  const result = await runner.execute(8, currentMonitor);
+  assert.equal(result.status, 'normal');
+  assert.equal(usedKey, 'sk-service-only-1234567890');
+  assert.equal(events[0].event, 'artifact_cleanup_failed');
+});
+
+test('visual review uses a separate key, persists output before audit and preserves it when audit fails', async () => {
+  const html = '<!doctype html><html><body><svg viewBox="0 0 100 100"></svg></body></html>';
+  const configured = validateTestConfig('openai', {
+    model: 'test-model', prompt: 'draw', output_type: 'html',
+    validation: { version: 2, rules: [], visual: { enabled: true, key_context: `visual-${'a'.repeat(64)}`, key_cipher: 'v1.audit-key' } }
+  });
+  const monitor = { id: 1, enabled: 1, group_id: '1', platform: 'openai', key_cipher: 'v1.generation-key', key_fingerprint: 'generation-fingerprint' };
+  let saved;
+  let auditCalls = 0;
+  const store = {
+    markRunRunning: () => ({ id: 1 }), getMonitorById: () => monitor, getMonitorTest: () => configured,
+    saveRunOutput: (_id, output) => { saved = output; }, completeRun: (_id, result) => result,
+    failRun: assert.fail, pruneRuns: () => []
+  };
+  const runner = new DetectionRunner({ config: { historyLimit: 60, requestTimeoutMs: 10000, artifactDir: 'unused' }, store, sub2api: {},
+    vault: { decrypt: (context) => context === '1' ? 'generation-key-only' : 'audit-key-only' },
+    visualReviewer: { review: async (input) => {
+      auditCalls++;
+      assert.equal(saved.outputText, html);
+      assert.equal(input.apiKey, 'audit-key-only');
+      assert.equal(input.html, html);
+      return { protocol: 'manxue', decision_mode: 'visual', status: 'unknown', state: 'failed', reason: '视觉审核超时，无法判定', error_code: 'REVIEW_TIMEOUT', duration_ms: 120000 };
+    } }
+  });
+  runner.callModel = async (_test, key) => {
+    assert.equal(key, 'generation-key-only');
+    return { output_text: html };
+  };
+  const result = await runner.execute(1, monitor);
+  assert.equal(auditCalls, 1);
+  assert.equal(result.status, 'unknown');
+  assert.equal(result.outputText, html);
+  assert.ok(result.previewToken);
+  assert.equal(result.validationResult.visual.error_code, 'REVIEW_TIMEOUT');
+  configured.validation.visual.enabled = false;
+  await runner.execute(2, monitor);
+  assert.equal(auditCalls, 1);
 });

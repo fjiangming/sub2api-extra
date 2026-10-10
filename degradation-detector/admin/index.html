@@ -80,6 +80,22 @@
         </div>
       </section>
 
+      <details class="storage-band">
+        <summary>
+          <span class="section-icon"><i data-lucide="database"></i></span>
+          <span class="storage-heading"><strong>历史保留与维护</strong><small id="storage-summary"></small></span>
+          <i data-lucide="chevron-down" class="storage-chevron"></i>
+        </summary>
+        <div class="storage-editor">
+          <label class="storage-toggle"><input id="storage-enabled" type="checkbox"><span>自动清理详细历史</span></label>
+          <label class="field"><span>详细历史保留天数</span><input id="storage-history-days" type="number" min="1" max="3650" required></label>
+          <label class="field"><span>每组详细历史上限（条）</span><input id="storage-history-count" type="number" min="60" max="10000" required></label>
+          <label class="field"><span>每组作品保留数量（份）</span><input id="storage-artifact-count" type="number" min="60" max="2000" required></label>
+        </div>
+        <p class="storage-note">自动清理保留累计统计，并保护最近 60 条历史；清理后的详细内容不可查看或复核。管理员清空历史会同时清空累计统计。</p>
+        <p id="storage-maintenance" class="storage-note"></p>
+      </details>
+
       <section class="platform-workspace" aria-labelledby="platform-title">
         <div class="workspace-head">
           <div>

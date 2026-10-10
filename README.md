@@ -167,6 +167,11 @@ services:
     image: ghcr.io/fjiangming/sub2api-extra:degradation-detector-latest
     container_name: sub2api-degradation-detector
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ports:
       - "127.0.0.1:9873:9873"
     environment:
@@ -323,6 +328,8 @@ SUB2API_BASE_URL=http://host.docker.internal:8080
 ```
 
 被检平台、检测题、分组专用 Key 和每天固定检测时间均由管理员在独立管理页维护；`/results` 是无管理入口和检测按钮的只读结果页，`/admin/config` 由服务端实时限制为管理员访问。两个 Sub2API 自定义菜单的地址、凭据加密及文件预览说明见[降智检测 README](degradation-detector/README.md)。
+
+长期运行的保留策略也在管理员配置页的“历史保留与维护”中设置，默认保留 90 天、每组最多 2000 条详细历史和最近 60 份作品，并保护最近 60 条记录、保留累计统计。日志轮转须同步上面的 Compose 设置并重建容器；仅拉取镜像不会更新服务器上的 Compose 文件。
 
 #### `recharge-center/.env`
 
