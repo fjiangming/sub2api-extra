@@ -100,6 +100,143 @@ test('static QR and accountlog AppID cannot change until orders and amount quara
   }));
 });
 
+for (const [scenario, offsets] of [
+  ['identical creation times', [0, 0, 0, 0]],
+  ['overlapping three-minute windows', [0, 60000, 130000, 170000]]
+]) {
+  test(`same and adjacent requested amounts with ${scenario} credit their owners despite reversed arrivals`, async (t) => {
+    const context = accountLogContext();
+    t.after(() => context.cleanup());
+    let now = baseTime;
+    const calls = [];
+    const balances = new Map();
+    const alerts = [];
+    const service = new OrderService({
+      db: context.db, config: context.config, clock: () => now,
+      alerts: { async send(event) { alerts.push(event); } },
+      sub2api: {
+        async createAndRedeemWithAdminKey(input) {
+          calls.push(input);
+          await new Promise((resolve) => setImmediate(resolve));
+          balances.set(input.userId, (balances.get(input.userId) || 0) + input.value);
+          return successRedeem(input);
+        }
+      }
+    });
+    const requested = ['1.00', '1.00', '1.01', '1.00'];
+    const orders = offsets.map((offset, index) => {
+      now = new Date(baseTime.getTime() + offset);
+      return service.create(user(index + 1), requested[index]);
+    });
+    assert.deepEqual(orders.map((order) => order.payableAmount), ['1.00', '1.01', '1.02', '1.03']);
+    const payments = orders.map((order, index) => entry(order, {
+      accountLogId: `11700712345678916${index}`,
+      alipayOrderNo: `202610072200000000001${index}`,
+      paidAt: new Date(Date.parse(order.createdAt) + 120000).toISOString()
+    }));
+    now = new Date(baseTime.getTime() + offsets.at(-1) + 185000);
+    const arrivalOrder = [3, 0, 2, 1];
+    const results = await Promise.all(arrivalOrder.map((index) => service.acceptAccountLogEntry(payments[index])));
+    for (const [position, index] of arrivalOrder.entries()) {
+      assert.equal(results[position].status, 'completed');
+      assert.equal(results[position].orderId, orders[index].id);
+      const input = calls.find((call) => call.userId === index + 1);
+      assert.equal(input.value, Number(orders[index].payableAmount));
+      assert.match(input.notes, new RegExp(orders[index].orderNo));
+      const ledger = context.db.prepare('SELECT order_id FROM alipay_accountlog_entries WHERE account_log_last6 = ?')
+        .get(payments[index].accountLogId.slice(-6));
+      assert.equal(ledger.order_id, orders[index].id);
+    }
+    assert.deepEqual([...balances.entries()].sort((a, b) => a[0] - b[0]), [[1, 1], [2, 1.01], [3, 1.02], [4, 1.03]]);
+    assert.equal(new Set(calls.map((input) => input.code)).size, 4);
+    assert.equal(alerts.length, 0);
+    const replays = await Promise.all(payments.map((payment) => service.acceptAccountLogEntry(payment)));
+    assert.ok(replays.every((result) => result.duplicate && result.status === 'completed'));
+    assert.equal(calls.length, 4);
+  });
+}
+
+test('one user cancelling and rebuilding among competing orders cannot take another user amount or credit', async (t) => {
+  const context = accountLogContext();
+  t.after(() => context.cleanup());
+  let now = baseTime;
+  const calls = [];
+  const alerts = [];
+  const service = new OrderService({
+    db: context.db, config: context.config, clock: () => now,
+    alerts: { async send(event) { alerts.push(event); } },
+    sub2api: { async createAndRedeemWithAdminKey(input) { calls.push(input); return successRedeem(input); } }
+  });
+  const first = service.create(user(1), '1.00');
+  const cancelled = service.create(user(2), '1.00');
+  const third = service.create(user(3), '1.00');
+  now = new Date(baseTime.getTime() + 60000);
+  service.cancel(cancelled.id, user(2));
+  now = new Date(baseTime.getTime() + 61000);
+  const replacement = service.create(user(2), '1.00');
+  now = new Date(baseTime.getTime() + 62000);
+  const fourth = service.create(user(4), '1.00');
+  const orders = [first, replacement, third, fourth];
+  assert.deepEqual(orders.map((order) => order.payableAmount), ['1.00', '1.01', '1.02', '1.03']);
+  now = new Date(baseTime.getTime() + 160000);
+  const oldPayment = await service.acceptAccountLogEntry(entry(cancelled, {
+    accountLogId: '117007123456789169',
+    paidAt: new Date(baseTime.getTime() + 40000).toISOString()
+  }));
+  assert.equal(oldPayment.accepted, false);
+  assert.equal(oldPayment.orderId, cancelled.id);
+  assert.equal(calls.length, 0);
+  const arrivals = [3, 2, 0, 1];
+  const results = await Promise.all(arrivals.map((index) => service.acceptAccountLogEntry(entry(orders[index], {
+    accountLogId: `11700712345678917${index}`,
+    paidAt: new Date(baseTime.getTime() + 120000).toISOString()
+  }))));
+  for (const [position, index] of arrivals.entries()) {
+    assert.equal(results[position].orderId, orders[index].id);
+    assert.equal(results[position].status, 'completed');
+    const input = calls.find((call) => call.userId === index + 1);
+    assert.equal(input.value, Number(orders[index].payableAmount));
+    assert.match(input.notes, new RegExp(orders[index].orderNo));
+  }
+  assert.equal(calls.length, 4);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].orderNo, cancelled.orderNo);
+});
+
+test('concurrent duplicate receipts for competing orders call fulfillment once per owner', async (t) => {
+  const context = accountLogContext();
+  t.after(() => context.cleanup());
+  let now = baseTime;
+  const calls = [];
+  const service = new OrderService({
+    db: context.db, config: context.config, clock: () => now,
+    sub2api: {
+      async createAndRedeemWithAdminKey(input) {
+        calls.push(input);
+        await new Promise((resolve) => setImmediate(resolve));
+        return successRedeem(input);
+      }
+    }
+  });
+  const first = service.create(user(1), '1.00');
+  const second = service.create(user(2), '1.00');
+  assert.equal(second.payableAmount, '1.01');
+  now = new Date(baseTime.getTime() + 90000);
+  const payments = [entry(first), entry(second, { accountLogId: '117007123456789152' })];
+  const indexes = [1, 0, 1, 0, 0, 1];
+  const results = await Promise.all(indexes.map((index) => service.acceptAccountLogEntry(payments[index])));
+  assert.equal(results.filter((result) => !result.duplicate).length, 2);
+  assert.equal(results.filter((result) => result.duplicate).length, 4);
+  for (const [position, index] of indexes.entries()) {
+    assert.equal(results[position].accepted, true);
+    assert.equal(results[position].orderId, [first, second][index].id);
+  }
+  assert.deepEqual(calls.map((call) => [call.userId, call.value]).sort((a, b) => a[0] - b[0]), [[1, 1], [2, 1.01]]);
+  assert.equal(context.db.prepare('SELECT COUNT(*) AS count FROM alipay_accountlog_entries').get().count, 2);
+  assert.equal(service.getForUser(first.id, 1).status, 'completed');
+  assert.equal(service.getForUser(second.id, 2).status, 'completed');
+});
+
 test('repeated cancellation reuses the same user amount without consuming more slots', (t) => {
   const context = accountLogContext();
   t.after(() => context.cleanup());

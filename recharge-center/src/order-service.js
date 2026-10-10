@@ -366,7 +366,7 @@ class OrderService {
       return this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(row.id);
     });
     try {
-      return this.#publicOrder(createTransaction());
+      return this.#publicOrder(createTransaction.immediate());
     } catch (error) {
       if (String(error?.code || '').startsWith('SQLITE_CONSTRAINT')) {
         throw new AppError('ORDER_CREATE_CONFLICT', '订单创建冲突，请重试', { status: 409 });
