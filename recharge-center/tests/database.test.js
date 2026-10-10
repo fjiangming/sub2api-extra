@@ -77,7 +77,7 @@ test('legacy ledgers preserve historical amounts while migrating to exact-amount
   assert.ok(columns.includes('alipay_paid_at'));
   assert.equal(columns.includes('cent_fingerprint'), false);
   assert.equal(columns.includes('base_amount_minor'), false);
-  assert.equal(reopened.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version, 9);
+  assert.equal(reopened.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version, 10);
   assert.ok(columns.includes('payment_match_until'));
   assert.ok(columns.includes('payment_qr_ciphertext'));
   assert.ok(reopened.prepare(`
@@ -85,6 +85,9 @@ test('legacy ledgers preserve historical amounts while migrating to exact-amount
   `).get());
   assert.ok(reopened.prepare(`
     SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'alipay_accountlog_entries'
+  `).get());
+  assert.ok(reopened.prepare(`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'official_order_creations'
   `).get());
   const legacyIndex = reopened.prepare(`
     SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'recharge_orders_active_payable_amount'

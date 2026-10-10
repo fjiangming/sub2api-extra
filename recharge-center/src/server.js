@@ -29,7 +29,7 @@ function createRuntime(env = process.env, options = {}) {
   const listener = new ListenerService({ db, config, clock: options.clock });
   const qrProvisioning = new QrProvisioningService({ db, config, alerts: notifications, clock: options.clock });
   const officialPayments = config.paymentMode === 'sub2api_official'
-    ? new OfficialPaymentService({ config, sub2api, clock: options.clock })
+    ? new OfficialPaymentService({ db, config, sub2api, dailyOrderLimit: orders.dailyOrderLimit, clock: options.clock })
     : null;
   const accountLogClient = config.accountLogStaticMode
     ? (options.accountLogClient || new AlipayAccountLogClient(config, {

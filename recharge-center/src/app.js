@@ -361,7 +361,10 @@ function createApp({
     : next();
 
   api.get('/checkout', asyncRoute(async (req, res) => {
-    if (officialMode) return res.json(await officialPayments.checkout(req.auth));
+    if (officialMode) return res.json({
+      ...await officialPayments.checkout(req.auth),
+      dailyOrderLimit: orders.dailyOrderLimit.status(req.auth.user.id)
+    });
     return res.json({
       paymentMode: config.paymentMode,
       automaticConfirmation: automaticPersonalMode,
@@ -370,14 +373,15 @@ function createApp({
       maxAmount: config.maxAmount,
       quickAmounts: config.quickAmounts,
       balanceRechargeMultiplier: 1,
-      rechargeFeeRate: 0
+      rechargeFeeRate: 0,
+      dailyOrderLimit: orders.dailyOrderLimit.status(req.auth.user.id)
     });
   }));
   api.get('/orders', asyncRoute(async (req, res) => {
     const items = officialMode
       ? await officialPayments.listForUser(req.auth, req.sessionId)
       : orders.listForUser(req.auth.user.id);
-    res.json({ items });
+    res.json({ items, dailyOrderLimit: orders.dailyOrderLimit.status(req.auth.user.id) });
   }));
   api.post('/orders', orderLimiter, csrf, asyncRoute(async (req, res) => {
     const input = parse(createOrderSchema, req.body);
@@ -386,7 +390,7 @@ function createApp({
     const order = officialMode
       ? await officialPayments.create(req.auth, req.sessionId, input.amount)
       : orders.create(req.auth.user, input.amount, requestAuditContext(req));
-    res.status(201).json(order);
+    res.status(201).json({ ...order, dailyOrderLimit: orders.dailyOrderLimit.status(req.auth.user.id) });
   }));
   api.get('/orders/:id', asyncRoute(async (req, res) => {
     const order = officialMode

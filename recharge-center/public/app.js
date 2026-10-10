@@ -22,6 +22,8 @@ const state = {
   bootstrapping: true,
   config: null,
   checkout: null,
+  dailyOrderLimit: null,
+  creatingOrder: false,
   session: null,
   loginChallenge: null,
   orders: [],
@@ -175,6 +177,8 @@ async function api(path, options = {}) {
 function clearSession() {
   state.session = null;
   state.checkout = null;
+  state.dailyOrderLimit = null;
+  state.creatingOrder = false;
   state.activeOrder = null;
   state.settledOrder = null;
   state.selectedAmount = null;
@@ -353,13 +357,33 @@ function updateCreditPreview() {
   $('custom-amount').placeholder = min > 0 && max > 0 ? `${min} - ${max}` : '请输入充值金额';
   setError('amount-error', error);
   const button = $('create-order-form').querySelector('button[type="submit"]');
-  button.disabled = value <= 0 || Boolean(error) || !state.checkout;
+  button.disabled = value <= 0 || Boolean(error) || !state.checkout || state.creatingOrder ||
+    !state.dailyOrderLimit || state.dailyOrderLimit.remaining === 0;
   const label = $('create-order-form').querySelector('[data-button-label]');
-  if (label) label.textContent = `确认支付 ¥${formatMoney(value)}`;
+  if (label && !state.creatingOrder) label.textContent = state.dailyOrderLimit?.remaining === 0
+    ? '今日创建次数已用完' : `确认支付 ¥${formatMoney(value)}`;
+}
+
+function renderDailyOrderLimit(status) {
+  const previousRemaining = state.dailyOrderLimit?.remaining;
+  if (status?.limit === 10 && Number.isInteger(status.remaining) && status.remaining >= 0 && status.remaining <= 10) {
+    state.dailyOrderLimit = status;
+  }
+  if (previousRemaining === 0 && state.dailyOrderLimit?.remaining > 0) setError('create-order-error');
+  for (const id of ['payment-notice-daily-limit', 'create-order-daily-limit']) {
+    const node = $(id);
+    node.hidden = !state.dailyOrderLimit;
+    if (state.dailyOrderLimit) {
+      const text = `今日还可创建 ${state.dailyOrderLimit.remaining} 次订单（最多10次）`;
+      if (node.textContent !== text) node.textContent = text;
+    }
+  }
+  updateCreditPreview();
 }
 
 async function loadCheckout() {
   state.checkout = await api('/api/checkout');
+  renderDailyOrderLimit(state.checkout.dailyOrderLimit);
   const { min, max } = amountLimits();
   if (state.selectedAmount != null && ((min > 0 && state.selectedAmount < min) || (max > 0 && state.selectedAmount > max))) {
     state.selectedAmount = null;
@@ -564,6 +588,7 @@ async function renderActiveOrder(order, forceQr = false) {
 async function loadOrders(options = {}) {
   const previousOrder = state.activeOrder;
   const data = await api('/api/orders');
+  renderDailyOrderLimit(data.dailyOrderLimit);
   state.orders = data.items || [];
   const activeOrder = activeOrderFromList();
   if (activeOrder) {
@@ -679,22 +704,33 @@ async function handleLogout() {
 
 async function createOrder(event) {
   event.preventDefault();
+  if (state.creatingOrder) return;
   setError('create-order-error');
+  if (!state.dailyOrderLimit || state.dailyOrderLimit.remaining === 0) {
+    setError('create-order-error', state.dailyOrderLimit
+      ? '今日创建订单次数已达上限（最多10次），请明日再试' : '正在查询今日剩余次数，请稍后重试');
+    return;
+  }
   const validationError = amountValidationMessage(Number(state.selectedAmount || 0));
   if (!state.checkout || !state.selectedAmount || validationError) {
     setError('create-order-error', validationError || '请输入有效的充值金额');
     return;
   }
   const button = event.currentTarget.querySelector('button[type="submit"]');
+  state.creatingOrder = true;
   setButtonLoading(button, true, '创建中');
   try {
-    await api('/api/orders', {
+    const order = await api('/api/orders', {
       method: 'POST', mutation: true, body: JSON.stringify({ amount: state.selectedAmount })
     });
+    renderDailyOrderLimit(order.dailyOrderLimit);
     await loadOrders({ forceQr: true });
   } catch (error) {
+    if (error.details?.dailyOrderLimit) renderDailyOrderLimit(error.details.dailyOrderLimit);
+    else await loadOrders().catch(() => {});
     setError('create-order-error', error.message);
   } finally {
+    state.creatingOrder = false;
     setButtonLoading(button, false);
     updateCreditPreview();
   }

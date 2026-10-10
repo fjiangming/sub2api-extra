@@ -185,6 +185,7 @@
                   <strong id="credit-preview">¥0.00</strong>
                 </div>
               </div>
+              <p id="create-order-daily-limit" class="order-limit-summary" role="status" aria-live="polite" hidden></p>
               <p id="create-order-error" class="form-error" role="alert" hidden></p>
               <button class="button alipay full submit-order-button" type="submit" disabled>
                 <span data-button-label>确认支付 ¥0.00</span>
@@ -237,6 +238,10 @@
                     <li id="payment-notice-expiry">请在页面倒计时结束前完成付款，确认或刷新不会延长。</li>
                     <li id="payment-notice-confirmation">付款后等待自动确认，请勿重复付款。</li>
                   </ul>
+                  <div class="payment-notice-details">
+                    <p id="payment-notice-daily-limit" class="payment-notice-daily-limit" role="status" aria-live="polite" hidden></p>
+                    <p class="payment-notice-support">如果对订单有疑问，请联系客服。</p>
+                  </div>
                   <p id="payment-notice-adjustment" class="payment-notice-warning" hidden><strong>注意：</strong>为保证到账识别准确，实际金额可能出现0.01～0.99元的差额。必须按页面展示金额完成支付，否则可能无法正常到账。</p>
                 </section>
                 <div id="qr-frame" class="qr-frame">

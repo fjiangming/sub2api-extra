@@ -5,7 +5,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { hmacHex, safeEqual, sealText } = require('./security');
 
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 const ORDER_STATUSES = [
   'awaiting_payment',
   'payment_reported',
@@ -76,6 +76,17 @@ CREATE INDEX IF NOT EXISTS recharge_orders_user_created
   ON recharge_orders(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS recharge_orders_status_created
   ON recharge_orders(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS official_order_creations (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL CHECK (user_id > 0),
+  remote_order_id TEXT,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'created')),
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS official_order_creations_user_created
+  ON official_order_creations(user_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS amount_reservations (
   payable_amount_minor INTEGER PRIMARY KEY CHECK (payable_amount_minor > 0),
   order_id TEXT NOT NULL UNIQUE REFERENCES recharge_orders(id) ON DELETE RESTRICT,
@@ -313,6 +324,7 @@ function migrate(db, secret) {
     db.exec('ALTER TABLE recharge_orders ADD COLUMN payment_match_until TEXT');
   }
   db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(9, appliedAt);
+  db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(10, appliedAt);
 }
 
 function nowIso() {

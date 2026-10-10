@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { AppError } = require('./errors');
+const { DailyOrderLimit } = require('./daily-order-limit');
 const {
   hmacHex,
   microsToDecimal,
@@ -108,12 +109,13 @@ function publicOrder(row, options = {}) {
 }
 
 class OrderService {
-  constructor({ db, config, sub2api, alerts = null, clock = () => new Date() }) {
+  constructor({ db, config, sub2api, alerts = null, dailyOrderLimit = null, clock = () => new Date() }) {
     this.db = db;
     this.config = config;
     this.sub2api = sub2api;
     this.alerts = alerts;
     this.clock = clock;
+    this.dailyOrderLimit = dailyOrderLimit || new DailyOrderLimit({ db, clock });
     this.insertAudit = db.prepare(`
       INSERT INTO audit_events(
         occurred_at, order_id, actor_type, actor_id, event_type, request_id, ip_hash, metadata_json
@@ -220,10 +222,11 @@ class OrderService {
 
   create(user, amount, request = {}) {
     const requestedMinor = parseRechargeAmount(amount, this.config.minAmount, this.config.maxAmount);
-    const now = this.#now();
-    const createdAt = now.toISOString();
     this.expireAwaiting();
     const createTransaction = this.db.transaction(() => {
+      const now = this.#now();
+      const createdAt = now.toISOString();
+      this.dailyOrderLimit.assertAvailable(user.id, now);
       const active = this.db.prepare(`
         SELECT COUNT(*) AS count FROM recharge_orders
         WHERE user_id = ? AND status IN (${ACTIVE_STATUSES.map(() => '?').join(', ')})

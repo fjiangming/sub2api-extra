@@ -110,3 +110,62 @@ test('payment notices use the exact payable amount and match each payment mode',
     }
   }
 });
+
+test('payment notices and creation controls show server quota, prevent exhausted submissions and recover next day', async () => {
+  const elements = new Map();
+  const button = { disabled: false };
+  const label = { textContent: '' };
+  const context = vm.createContext({
+    URLSearchParams,
+    window: {
+      location: { search: '?theme=light' }, localStorage: { getItem: () => null },
+      matchMedia: () => ({ matches: false })
+    },
+    document: {
+      documentElement: { classList: { toggle() {} } },
+      getElementById(id) {
+        if (!elements.has(id)) elements.set(id, { textContent: '', hidden: false,
+          querySelector: (selector) => selector === '[data-button-label]' ? label : button });
+        return elements.get(id);
+      }
+    },
+    quotaResponse: null,
+    apiCalls: 0
+  });
+  vm.runInContext(`${script}
+    function bindEvents() {}
+    function bootstrap() {}
+    async function api() { apiCalls += 1; return { items: [], dailyOrderLimit: quotaResponse }; }
+    function renderHistory() {}
+    async function renderActiveOrder() {}
+    function refreshIcons() {}
+    state.checkout = { minAmount: 1, maxAmount: 1000 };
+    state.selectedAmount = 50;
+  `, context);
+  context.quotaResponse = { limit: 10, remaining: 9 };
+  await vm.runInContext('loadOrders()', context);
+  for (const id of ['payment-notice-daily-limit', 'create-order-daily-limit']) {
+    assert.equal(elements.get(id).textContent, '今日还可创建 9 次订单（最多10次）');
+    assert.equal(elements.get(id).hidden, false);
+  }
+  assert.equal(button.disabled, false);
+  vm.runInContext('state.creatingOrder = true; updateCreditPreview()', context);
+  assert.equal(button.disabled, true);
+  vm.runInContext('state.creatingOrder = false', context);
+  context.quotaResponse = { limit: 10, remaining: 0 };
+  await vm.runInContext('loadOrders()', context);
+  assert.equal(elements.get('payment-notice-daily-limit').textContent, '今日还可创建 0 次订单（最多10次）');
+  assert.equal(button.disabled, true);
+  assert.equal(label.textContent, '今日创建次数已用完');
+  const callsBefore = context.apiCalls;
+  await vm.runInContext('createOrder({ preventDefault() {} })', context);
+  assert.equal(context.apiCalls, callsBefore);
+  assert.match(elements.get('create-order-error').textContent, /已达上限/);
+  context.quotaResponse = { limit: 10, remaining: 10 };
+  await vm.runInContext('loadOrders()', context);
+  assert.equal(elements.get('payment-notice-daily-limit').textContent, '今日还可创建 10 次订单（最多10次）');
+  assert.equal(button.disabled, false);
+  assert.equal(label.textContent, '确认支付 ¥50.00');
+  assert.equal(elements.get('create-order-error').hidden, true);
+  assert.match(html, /id="payment-notice-daily-limit"[\s\S]*?如果对订单有疑问，请联系客服。[\s\S]*?id="payment-notice-adjustment"/);
+});

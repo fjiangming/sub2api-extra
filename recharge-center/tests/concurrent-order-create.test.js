@@ -9,9 +9,10 @@ const { createTestContext } = require('./helpers');
 
 const now = new Date('2026-10-10T04:00:00.000Z');
 
-async function concurrentlyCreate(t, { workerCount, ordersPerWorker, paymentMode, sharedUserId = null }) {
+async function concurrentlyCreate(t, { workerCount, ordersPerWorker, paymentMode, sharedUserId = null, maxActiveOrders = 1 }) {
   const context = createTestContext({
     paymentMode,
+    maxActiveOrders,
     automaticPersonalMode: true,
     accountLogStaticMode: paymentMode === 'personal_accountlog_static',
     orderTtlMinutes: 3,
@@ -109,4 +110,18 @@ test('simultaneous requests for one user cannot bypass the active-order limit', 
   assert.ok(failures.every((result) => result.errorCode === 'ACTIVE_ORDER_EXISTS'));
   assert.equal(context.db.prepare('SELECT COUNT(*) AS count FROM amount_reservations').get().count, 1);
   assert.equal(context.db.prepare('SELECT COUNT(*) AS count FROM recharge_orders').get().count, 1);
+});
+
+test('simultaneous requests across eight connections cannot create more than ten daily orders for one user', { timeout: 15000 }, async (t) => {
+  const { context, results } = await concurrentlyCreate(t, {
+    workerCount: 8, ordersPerWorker: 3, paymentMode: 'personal_accountlog_static',
+    sharedUserId: 42, maxActiveOrders: 20
+  });
+  assert.equal(results.filter((result) => result.order).length, 10);
+  const failures = results.filter((result) => result.errorCode);
+  assert.equal(failures.length, 14);
+  assert.ok(failures.every((result) => result.errorCode === 'DAILY_ORDER_LIMIT_REACHED'));
+  assert.equal(context.db.prepare('SELECT COUNT(*) AS count FROM recharge_orders').get().count, 10);
+  assert.equal(context.db.prepare('SELECT COUNT(*) AS count FROM amount_reservations').get().count, 10);
+  assert.equal(context.db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type = 'ORDER_CREATED'").get().count, 10);
 });

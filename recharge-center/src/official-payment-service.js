@@ -2,6 +2,7 @@
 
 const QRCode = require('qrcode');
 const { AppError } = require('./errors');
+const { DailyOrderLimit } = require('./daily-order-limit');
 const { minorToDecimal, parseMoneyToMinor, parseRechargeAmount } = require('./security');
 
 const ACTIVE_REMOTE_STATUSES = new Set(['PENDING', 'PAID', 'RECHARGING']);
@@ -185,10 +186,11 @@ function publicOrder(order, paymentDetails) {
 }
 
 class OfficialPaymentService {
-  constructor({ config, sub2api, clock = () => new Date() }) {
+  constructor({ db, config, sub2api, dailyOrderLimit = null, clock = () => new Date() }) {
     this.config = config;
     this.sub2api = sub2api;
     this.clock = clock;
+    this.dailyOrderLimit = dailyOrderLimit || new DailyOrderLimit({ db, clock });
     this.tracked = new Map();
     this.paymentDetails = new Map();
     this.creatingUsers = new Set();
@@ -275,6 +277,7 @@ class OfficialPaymentService {
     }
     this.creatingUsers.add(userId);
     try {
+      this.dailyOrderLimit.assertAvailable(userId);
       const checkout = await this.checkout(auth);
       const amountMinor = parseRechargeAmount(amount, checkout.minAmount, checkout.maxAmount);
       const current = await this.#listRemote(auth);
@@ -282,16 +285,29 @@ class OfficialPaymentService {
       if (activeCount >= this.config.maxActiveOrders) {
         throw new AppError('ACTIVE_ORDER_EXISTS', '请先处理当前充值订单', { status: 409 });
       }
-      const result = await this.sub2api.createPaymentOrder(auth.upstreamToken, {
-        amount: Number(minorToDecimal(amountMinor)),
-        // Sub2API only accepts its own /payment/result URL here. This QR flow
-        // settles through webhook/query, so no cross-origin browser return is needed.
-        returnUrl: '',
-        isMobile: false
-      }, auth.client);
+      const quotaReservation = this.dailyOrderLimit.reserveOfficial(userId);
+      let result;
+      try {
+        result = await this.sub2api.createPaymentOrder(auth.upstreamToken, {
+          amount: Number(minorToDecimal(amountMinor)),
+          // Sub2API only accepts its own /payment/result URL here. This QR flow
+          // settles through webhook/query, so no cross-origin browser return is needed.
+          returnUrl: '',
+          isMobile: false
+        }, auth.client);
+      } catch (error) {
+        // Only explicit client rejection proves that no remote order was created.
+        const remoteStatus = Number(error?.details?.remoteStatus);
+        if (['SUB2API_AUTH_FAILED', 'SUB2API_SESSION_BINDING_MISMATCH'].includes(error?.code) ||
+            (error?.code === 'SUB2API_REQUEST_FAILED' && remoteStatus >= 400 && remoteStatus < 500)) {
+          this.dailyOrderLimit.releaseOfficial(quotaReservation);
+        }
+        throw error;
+      }
       let created;
       try {
         created = this.#normalizeCreatedOrder(result, auth.user.id);
+        this.dailyOrderLimit.confirmOfficial(quotaReservation, created.id);
       } catch (error) {
         try {
           await this.#cancelUnsafeOrder(auth, parseOrderId(result?.order_id));

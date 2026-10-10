@@ -3,8 +3,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { OfficialPaymentService, normalizeRemoteOrder } = require('../src/official-payment-service');
+const { AppError } = require('../src/errors');
+const { createTestContext } = require('./helpers');
 
 const now = new Date('2026-10-02T04:00:00.000Z');
+
+function createService(t, options) {
+  const context = createTestContext();
+  const service = new OfficialPaymentService({ ...options, db: context.db });
+  t.after(() => { service.close(); context.cleanup(); });
+  return service;
+}
 
 function config(overrides = {}) {
   return {
@@ -96,8 +105,7 @@ test('official Alipay creates an exact-value dynamic order and polling completes
       return remoteOrder({ status: 'COMPLETED', paid_at: now.toISOString(), completed_at: now.toISOString() });
     }
   };
-  const service = new OfficialPaymentService({ config: config(), sub2api, clock: () => now });
-  t.after(() => service.close());
+  const service = createService(t, { config: config(), sub2api, clock: () => now });
 
   const order = await service.create(auth(), 'session-1', '37.25');
   assert.equal(order.payableAmount, '37.25');
@@ -123,7 +131,7 @@ test('official Alipay creates an exact-value dynamic order and polling completes
 
 test('official mode refuses multiplier or fee settings that would change the target amount', async (t) => {
   let createCalls = 0;
-  const service = new OfficialPaymentService({
+  const service = createService(t, {
     config: config(),
     sub2api: {
       getPaymentCheckoutInfo: async () => checkout({ balance_recharge_multiplier: 0.8, recharge_fee_rate: 1 }),
@@ -131,7 +139,6 @@ test('official mode refuses multiplier or fee settings that would change the tar
     },
     clock: () => now
   });
-  t.after(() => service.close());
 
   await assert.rejects(service.create(auth(), 'session-1', 50), { code: 'EXACT_AMOUNT_POLICY_REQUIRED' });
   assert.equal(createCalls, 0);
@@ -139,7 +146,7 @@ test('official mode refuses multiplier or fee settings that would change the tar
 
 test('a raced amount mismatch is hidden and cancelled before payment details are exposed', async (t) => {
   const cancelled = [];
-  const service = new OfficialPaymentService({
+  const service = createService(t, {
     config: config(),
     sub2api: {
       getPaymentCheckoutInfo: async () => checkout(),
@@ -150,7 +157,6 @@ test('a raced amount mismatch is hidden and cancelled before payment details are
     },
     clock: () => now
   });
-  t.after(() => service.close());
 
   await assert.rejects(service.create(auth(), 'session-1', '37.25'), { code: 'PAYMENT_AMOUNT_POLICY_CHANGED' });
   assert.deepEqual(cancelled, [101]);
@@ -166,7 +172,7 @@ test('remote order ownership is verified before exposing financial data', () => 
 
 test('non-Alipay QR payloads are cancelled before reaching the browser', async (t) => {
   const cancelled = [];
-  const service = new OfficialPaymentService({
+  const service = createService(t, {
     config: config(),
     sub2api: {
       getPaymentCheckoutInfo: async () => checkout(),
@@ -177,8 +183,49 @@ test('non-Alipay QR payloads are cancelled before reaching the browser', async (
     },
     clock: () => now
   });
-  t.after(() => service.close());
 
   await assert.rejects(service.create(auth(), 'session-1', '37.25'), { code: 'SUB2API_PAYMENT_RESPONSE_INVALID' });
   assert.deepEqual(cancelled, [101]);
+});
+
+test('official orders stop at ten creations including cancelled orders', async (t) => {
+  let sequence = 100;
+  const service = createService(t, {
+    config: config(), clock: () => now,
+    sub2api: {
+      getPaymentCheckoutInfo: async () => checkout(),
+      getPaymentOrders: async () => ({ items: [] }),
+      createPaymentOrder: async () => createdOrder({ order_id: ++sequence }),
+      getPaymentOrder: async (_token, id) => remoteOrder({ id, status: 'CANCELLED' }),
+      cancelPaymentOrder: async () => {}
+    }
+  });
+  for (let index = 0; index < 10; index += 1) {
+    await service.create(auth(), 'session-1', '37.25');
+    assert.equal(service.dailyOrderLimit.status(42).remaining, 9 - index);
+  }
+  await assert.rejects(service.create(auth(), 'session-2', '37.25'), { code: 'DAILY_ORDER_LIMIT_REACHED' });
+  assert.equal(sequence, 110);
+});
+
+test('official validation and explicit rejections release quota while unknown remote results retain it', async (t) => {
+  let failure = new AppError('SUB2API_REQUEST_FAILED', 'rejected', { status: 502, details: { remoteStatus: 400 } });
+  const service = createService(t, {
+    config: config(), clock: () => now,
+    sub2api: {
+      getPaymentCheckoutInfo: async () => checkout(),
+      getPaymentOrders: async () => ({ items: [] }),
+      createPaymentOrder: async () => { throw failure; }
+    }
+  });
+  await assert.rejects(service.create(auth(), 'session-1', '0.01'));
+  assert.equal(service.dailyOrderLimit.status(42).used, 0);
+  await assert.rejects(service.create(auth(), 'session-1', '37.25'), { code: 'SUB2API_REQUEST_FAILED' });
+  assert.equal(service.dailyOrderLimit.status(42).used, 0);
+  failure = new AppError('SUB2API_TIMEOUT', 'unknown', { status: 504 });
+  await assert.rejects(service.create(auth(), 'session-1', '37.25'), { code: 'SUB2API_TIMEOUT' });
+  assert.equal(service.dailyOrderLimit.status(42).used, 1);
+  failure = new AppError('SUB2API_REQUEST_FAILED', 'unknown', { status: 502, details: { remoteStatus: 500 } });
+  await assert.rejects(service.create(auth(), 'session-1', '37.25'), { code: 'SUB2API_REQUEST_FAILED' });
+  assert.equal(service.dailyOrderLimit.status(42).used, 2);
 });

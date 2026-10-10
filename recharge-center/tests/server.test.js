@@ -177,6 +177,7 @@ test('official HTTP mode serves dynamic QR orders and disables manual review', a
   const checkoutBody = await checkoutResponse.json();
   assert.equal(checkoutBody.automaticConfirmation, true);
   assert.equal(checkoutBody.balanceRechargeMultiplier, 1);
+  assert.equal(checkoutBody.dailyOrderLimit.remaining, 10);
 
   const created = await fetch(`${baseUrl}/api/orders`, {
     method: 'POST',
@@ -193,6 +194,7 @@ test('official HTTP mode serves dynamic QR orders and disables manual review', a
   assert.equal(order.payableAmount, '12.34');
   assert.equal(order.creditAmount, '12.34');
   assert.equal(order.qrAvailable, true);
+  assert.equal(order.dailyOrderLimit.remaining, 9);
   assert.equal(JSON.stringify(order).includes('precreate-token'), false);
 
   const qr = await fetch(`${baseUrl}/api/orders/${order.id}/qr`, {
@@ -213,6 +215,75 @@ test('official HTTP mode serves dynamic QR orders and disables manual review', a
   });
   assert.equal(manualReview.status, 404);
   assert.equal((await manualReview.json()).error.code, 'MANUAL_PAYMENT_DISABLED');
+});
+
+test('HTTP daily quota is authoritative for the authenticated user and refreshes after Shanghai midnight', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'recharge-daily-http-test-'));
+  let now = new Date('2026-10-11T04:00:00.000Z');
+  const runtime = createRuntime({
+    NODE_ENV: 'test',
+    RECHARGE_CENTER_PAYMENT_MODE: 'personal_manual',
+    RECHARGE_CENTER_SECRET: 'test-secret-0123456789abcdef0123456789abcdef',
+    RECHARGE_CENTER_DATA_DIR: directory,
+    RECHARGE_CENTER_DATABASE: path.join(directory, 'http.db'),
+    SUB2API_BASE_URL: 'http://127.0.0.1:8080'
+  }, {
+    clock: () => now,
+    sub2api: { getCurrentUser: async (token) => ({
+      id: token.startsWith('second') ? 43 : 42,
+      email: 'alice@example.test', username: 'alice', role: 'user', status: 'active'
+    }) }
+  });
+  const server = runtime.app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    runtime.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  async function sessionFor(token) {
+    const login = await fetch(`${baseUrl}/api/auth/sso`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': 'quota-browser' },
+      body: JSON.stringify({ token })
+    });
+    assert.equal(login.status, 200);
+    return {
+      'user-agent': 'quota-browser', 'content-type': 'application/json',
+      cookie: login.headers.get('set-cookie').match(/rc_session=[^;]+/)[0],
+      'x-csrf-token': (await login.json()).csrfToken
+    };
+  }
+  const headers = await sessionFor('first-user-token-1234567890');
+  const user = { id: 42, emailMasked: 'al***@example.test', role: 'user' };
+  for (let index = 0; index < 9; index += 1) {
+    const order = runtime.orders.create(user, '1.00');
+    runtime.orders.cancel(order.id, user);
+  }
+  for (const endpoint of ['/api/checkout', '/api/orders']) {
+    const response = await fetch(`${baseUrl}${endpoint}`, { headers });
+    assert.match(response.headers.get('cache-control'), /no-store/);
+    assert.equal((await response.json()).dailyOrderLimit.remaining, 1);
+  }
+  const response = await fetch(`${baseUrl}/api/orders`, {
+    method: 'POST', headers, body: JSON.stringify({ amount: '1.00', userId: 43, dailyOrderLimit: { remaining: 10 } })
+  });
+  assert.equal(response.status, 201);
+  const tenth = await response.json();
+  assert.equal(tenth.userId, '42');
+  assert.equal(tenth.dailyOrderLimit.remaining, 0);
+  const blocked = await fetch(`${baseUrl}/api/orders`, {
+    method: 'POST', headers, body: JSON.stringify({ amount: '1.00' })
+  });
+  assert.equal(blocked.status, 429);
+  const error = (await blocked.json()).error;
+  assert.equal(error.code, 'DAILY_ORDER_LIMIT_REACHED');
+  assert.equal(error.details.dailyOrderLimit.remaining, 0);
+  assert.equal(runtime.db.prepare('SELECT COUNT(*) AS count FROM recharge_orders').get().count, 10);
+  const secondHeaders = await sessionFor('second-user-token-1234567890');
+  assert.equal((await (await fetch(`${baseUrl}/api/orders`, { headers: secondHeaders })).json()).dailyOrderLimit.remaining, 10);
+  now = new Date('2026-10-11T16:00:00.000Z');
+  assert.equal((await (await fetch(`${baseUrl}/api/orders`, { headers })).json()).dailyOrderLimit.remaining, 10);
 });
 
 test('personal transfer auto HTTP mode is heartbeat-gated and never exposes the automatic memo', async (t) => {

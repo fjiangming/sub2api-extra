@@ -1168,7 +1168,7 @@ html.dark .payment-method.selected {
 }
 
 .payment-notice h3 {
-  margin: 0 0 16px;
+  margin: 0 0 12px;
   color: var(--text);
   font-size: 16px;
   font-weight: 600;
@@ -1178,12 +1178,44 @@ html.dark .payment-method.selected {
   margin: 0;
   padding: 0;
   display: grid;
-  gap: 10px;
+  gap: 6px;
   list-style: none;
   color: var(--text-soft);
   font-size: 14px;
-  line-height: 1.75;
+  line-height: 1.55;
   overflow-wrap: anywhere;
+}
+
+.payment-notice-details {
+  margin-top: 12px;
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.payment-notice-details p {
+  margin: 0;
+}
+
+.payment-notice-daily-limit {
+  color: var(--text);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.payment-notice-support {
+  color: var(--text-soft);
+}
+
+.order-limit-summary {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.55;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 .payment-notice-amount {
@@ -1194,12 +1226,12 @@ html.dark .payment-method.selected {
 }
 
 .payment-notice-warning {
-  margin: 18px 0 0;
+  margin: 12px 0 0;
   padding-left: 12px;
   border-left: 3px solid var(--warning);
   color: var(--text-soft);
   font-size: 13px;
-  line-height: 1.75;
+  line-height: 1.55;
   overflow-wrap: anywhere;
 }
 
