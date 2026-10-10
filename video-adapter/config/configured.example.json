@@ -1,0 +1,26 @@
+{
+  "version": "custom-provider-example-disabled",
+  "providers": [{
+    "id": "custom", "type": "configured", "enabled": false,
+    "baseUrl": "https://video-provider.example", "apiKeyEnv": "CUSTOM_VIDEO_API_KEY",
+    "idempotentCreate": false, "financialMode": "manual", "dailyCostBudgetUsd": "25", "downloadHosts": ["media.video-provider.example"],
+    "createPath": "/api/tasks", "statusPath": "/api/tasks/{id}", "contentPath": "/api/tasks/{id}/file",
+    "response": {
+      "idPaths": ["task.id"], "statusPaths": ["task.state"], "success": ["ready"], "failure": ["failed"],
+      "fundsPaths": ["payment.state"], "amountPaths": ["payment.total"], "urlPaths": ["task.video.url"]
+    },
+    "quote": { "path": "/api/quote", "method": "POST", "amountPath": "quote.total", "currency": "USD", "mode": "per_request" }
+  }],
+  "models": [{
+    "id": "custom-video", "provider": "custom", "upstreamModel": "provider-video-v1", "enabled": false,
+    "minDuration": 5, "maxDuration": 20, "defaultDuration": 5,
+    "resolutions": ["720p"], "aspectRatios": ["16:9"],
+    "maxReferences": { "image": 0, "video": 0, "audio": 0, "total": 0 },
+    "fields": { "duration": "options.seconds", "aspect_ratio": "options.ratio" },
+    "cost": {
+      "mode": "per_request", "currency": "USD", "prices": { "default": "1.0" },
+      "verifiedAt": "2026-10-10T00:00:00Z", "expiresAt": "2026-10-11T00:00:00Z",
+      "evidence": "Example only; replace with an enforceable supplier price and acceptance evidence"
+    }
+  }]
+}

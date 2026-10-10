@@ -11,6 +11,7 @@ Sub2API 的可插拔扩展服务集合。每个功能作为独立模块运行，
 | **运营数据与存储管理中心** | `ghcr.io/fjiangming/sub2api-extra:operations-center-latest` | `9872` | [README](operations-center/README.md) |
 | **降智检测** | `ghcr.io/fjiangming/sub2api-extra:degradation-detector-latest` | `9873` | [README](degradation-detector/README.md) |
 | **支付宝自动充值中心** | `ghcr.io/fjiangming/sub2api-extra:recharge-center-latest` | `9874` | [README](recharge-center/README.md) |
+| **视频适配与资金结算** | 本地构建；CI 发布标签 `video-adapter-latest` | `9875` | [README](video-adapter/README.md) |
 
 > 💡 后续新增的功能模块会持续补充到此表中。
 

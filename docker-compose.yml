@@ -8,3 +8,4 @@ include:
   - ./operations-center/compose.yaml
   - ./degradation-detector/compose.yaml
   - ./recharge-center/compose.yaml
+  - ./video-adapter/compose.yaml

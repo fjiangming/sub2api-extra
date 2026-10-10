@@ -1,0 +1,76 @@
+{
+  "version": "2026-10-10-example-disabled",
+  "providers": [
+    {
+      "id": "xcm", "type": "xcm", "enabled": false,
+      "baseUrl": "https://xcmapi.org", "apiKeyEnv": "XCM_API_KEY",
+      "idempotentCreate": false, "financialMode": "manual",
+      "dailyCostBudgetUsd": "50", "downloadHosts": [],
+      "createPath": "/v1/videos", "statusPath": "/v1/videos/{id}", "contentPath": "/v1/videos/{id}/content"
+    },
+    {
+      "id": "lingsu", "type": "lingsu", "enabled": false,
+      "baseUrl": "https://lingsu.xyz", "apiKeyEnv": "LINGSU_API_KEY",
+      "idempotentCreate": true, "financialMode": "funds_status",
+      "dailyCostBudgetUsd": "50", "downloadHosts": [],
+      "createPath": "/v1/videos", "statusPath": "/v1/videos/{id}", "contentPath": "/v1/videos/{id}/download"
+    }
+  ],
+  "models": [
+    {
+      "id": "xcm-h3", "provider": "xcm", "upstreamModel": "h3", "enabled": false,
+      "minDuration": 1, "maxDuration": 15, "defaultDuration": 8,
+      "resolutions": ["480p", "720p", "1080p"], "aspectRatios": ["16:9", "9:16", "1:1"],
+      "maxReferences": { "image": 0, "video": 0, "audio": 0, "total": 0 }, "requestStyle": "xcm-h3",
+      "cost": {
+        "mode": "per_second", "currency": "CNY", "prices": { "480p": "0.02", "720p": "0.08", "1080p": "0.40" },
+        "usdPerUnit": "0.15", "verifiedAt": "2026-10-10T00:00:00Z", "expiresAt": "2026-10-11T00:00:00Z",
+        "evidence": "Documentation reference only; reverify current key pricing, specification and refund contract before enabling"
+      }
+    },
+    {
+      "id": "xcm-seedance-2.0-special", "provider": "xcm", "upstreamModel": "seedance-2.0-900-特惠", "enabled": false,
+      "minDuration": 5, "maxDuration": 5, "defaultDuration": 5,
+      "resolutions": ["720p"], "aspectRatios": ["16:9"],
+      "maxReferences": { "image": 0, "video": 0, "audio": 0, "total": 0 }, "requestStyle": "xcm-mixed",
+      "cost": {
+        "mode": "per_request", "currency": "CNY", "prices": { "default": "0.8" },
+        "usdPerUnit": "0.15", "verifiedAt": "2026-10-10T00:00:00Z", "expiresAt": "2026-10-11T00:00:00Z",
+        "evidence": "Documented 5s 720p case only; other specifications require separate acceptance"
+      }
+    },
+    {
+      "id": "lingsu-h3-ks", "provider": "lingsu", "upstreamModel": "H3-KS", "enabled": false,
+      "minDuration": 5, "maxDuration": 15, "defaultDuration": 5,
+      "resolutions": ["1080p"], "aspectRatios": ["16:9", "9:16", "1:1"],
+      "maxReferences": { "image": 0, "video": 0, "audio": 0, "total": 0 }, "requestStyle": "lingsu-references",
+      "cost": {
+        "mode": "per_request", "currency": "CNY", "prices": { "default": "3.7" },
+        "usdPerUnit": "0.15", "verifiedAt": "2026-10-10T00:00:00Z", "expiresAt": "2026-10-11T00:00:00Z",
+        "evidence": "Reference price from video-api v1.1.0; verify current authenticated video-models quote before enabling"
+      }
+    },
+    {
+      "id": "lingsu-special-2.5", "provider": "lingsu", "upstreamModel": "特价2.5需要过人脸技术-可参考过人脸素材库", "enabled": false,
+      "minDuration": 30, "maxDuration": 30, "durations": [30], "defaultDuration": 30,
+      "resolutions": ["720p"], "aspectRatios": ["16:9", "9:16", "1:1"],
+      "maxReferences": { "image": 30, "video": 0, "audio": 0, "total": 30 }, "requestStyle": "lingsu-special",
+      "cost": {
+        "mode": "per_request", "currency": "CNY", "prices": { "default": "2.1" },
+        "usdPerUnit": "0.15", "verifiedAt": "2026-10-10T00:00:00Z", "expiresAt": "2026-10-11T00:00:00Z",
+        "evidence": "Reference price from video-api v1.1.0; verify quote and result delivery before enabling"
+      }
+    },
+    {
+      "id": "lingsu-full-2.5", "provider": "lingsu", "upstreamModel": "原生不卡人脸-全参2.5", "enabled": false,
+      "minDuration": 4, "maxDuration": 30, "defaultDuration": 5,
+      "resolutions": ["480p", "720p"], "aspectRatios": ["16:9", "9:16", "1:1"],
+      "maxReferences": { "image": 30, "video": 10, "audio": 10, "total": 50 }, "requestStyle": "lingsu-references",
+      "cost": {
+        "mode": "per_second", "currency": "CNY", "prices": { "480p": "0.52", "720p": "0.87" },
+        "usdPerUnit": "0.15", "verifiedAt": "2026-10-10T00:00:00Z", "expiresAt": "2026-10-11T00:00:00Z",
+        "evidence": "Documentation contains an example-price inconsistency; authenticated quote and receipt are authoritative"
+      }
+    }
+  ]
+}

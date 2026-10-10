@@ -1,0 +1,27 @@
+{
+  "name": "sub2api-video-adapter",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Prepaid, cost-guarded video gateway for Sub2API and asynchronous video providers",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "dev": "node --env-file-if-exists=.env --watch src/server.js",
+    "demo": "node src/server.js --demo",
+    "test": "node --test --test-concurrency=1 tests/*.test.js",
+    "check": "node scripts/check.js"
+  },
+  "engines": { "node": ">=22.18.0" },
+  "dependencies": {
+    "decimal.js": "^10.6.0",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.2.1",
+    "helmet": "^8.1.0",
+    "ipaddr.js": "^2.2.0",
+    "pg": "^8.16.3",
+    "redis": "^5.8.3",
+    "undici": "^7.16.0",
+    "zod": "^4.1.11"
+  },
+  "devDependencies": { "@electric-sql/pglite": "^0.3.14" }
+}

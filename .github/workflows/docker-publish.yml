@@ -17,9 +17,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test-video-adapter:
+    name: Video adapter financial and protocol tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: video-adapter/package-lock.json
+      - run: npm ci
+        working-directory: video-adapter
+      - run: npm run check
+        working-directory: video-adapter
+      - run: npm test
+        working-directory: video-adapter
   build:
     name: Build ${{ matrix.service }}
     runs-on: ubuntu-latest
+    needs: test-video-adapter
     strategy:
       fail-fast: false
       matrix:
@@ -39,6 +58,9 @@ jobs:
           - service: recharge-center
             context: ./recharge-center
             tag_prefix: recharge-center-
+          - service: video-adapter
+            context: ./video-adapter
+            tag_prefix: video-adapter-
     permissions:
       contents: read
       packages: write

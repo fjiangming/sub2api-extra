@@ -1,0 +1,17 @@
+-- Run as your database administrator, after backing up the database.
+-- Replace passwords and database name; do not run fixture SQL on production.
+CREATE ROLE video_adapter LOGIN PASSWORD 'REPLACE_WITH_A_RANDOM_PASSWORD';
+GRANT CONNECT ON DATABASE sub2api TO video_adapter;
+GRANT USAGE ON SCHEMA public TO video_adapter;
+CREATE SCHEMA video_adapter AUTHORIZATION video_adapter;
+GRANT SELECT (id,balance,frozen_balance,status,deleted_at,concurrency,rpm_limit,restrict_public_groups) ON users TO video_adapter;
+GRANT SELECT (id,deleted_at) ON accounts TO video_adapter;
+GRANT SELECT ON api_keys,groups,user_allowed_groups,user_group_rate_multipliers,user_platform_quotas,
+  channels,channel_groups,channel_model_pricing,channel_pricing_intervals TO video_adapter;
+GRANT UPDATE (balance,frozen_balance,updated_at) ON users TO video_adapter;
+GRANT UPDATE (quota_used,usage_5h,usage_1d,usage_7d,window_5h_start,window_1d_start,window_7d_start,last_used_at,updated_at) ON api_keys TO video_adapter;
+GRANT INSERT ON usage_logs,auth_cache_invalidation_outbox TO video_adapter;
+-- Native BIGSERIAL inserts need sequence privileges. Review this grant for your installation.
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO video_adapter;
+-- The service owns all of its schema tables/sequences, including migrations.
+-- Native Sub2API triggers may enqueue auth-invalidation rows during UPDATE.

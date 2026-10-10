@@ -1,0 +1,35 @@
+services:
+  video-adapter:
+    profiles: [video-adapter]
+    image: ${VIDEO_ADAPTER_IMAGE:-sub2api-video-adapter:local}
+    build:
+      context: .
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
+    container_name: ${VIDEO_ADAPTER_CONTAINER_NAME:-sub2api-video-adapter}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:${VIDEO_ADAPTER_PORT:-9875}:9875"
+    environment:
+      VIDEO_ADAPTER_BIND_HOST: "0.0.0.0"
+      VIDEO_ADAPTER_PORT: "9875"
+      VIDEO_ADAPTER_CATALOG_PATH: /app/config/catalog.json
+    env_file:
+      - path: ./.env
+        required: false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config:/app/config:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9875/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
