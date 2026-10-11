@@ -377,6 +377,13 @@ button, select, input { color: inherit; }
 .manual-review-notice > svg { width: 16px; height: 16px; margin-top: 1px; color: var(--teal-strong); }
 .manual-review-notice strong { display: block; color: var(--teal-strong); font-size: 12px; }
 .manual-review-notice p { margin: 3px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.validation-basis { display: flex; flex: 0 0 auto; align-items: flex-start; gap: 6px; margin: 0 0 12px; color: var(--muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.validation-basis > svg { flex: 0 0 14px; width: 14px; height: 14px; margin-top: 2px; }
+.validation-basis > span { min-width: 0; }
+.validation-basis strong { color: var(--text); font-weight: 600; }
+.validation-basis a { color: var(--teal-strong); text-decoration: underline; text-underline-offset: 2px; }
+.validation-basis a:hover { color: var(--text); }
+.validation-basis a:focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; border-radius: 2px; }
 .validation-evidence { flex: 0 0 auto; margin: 0 0 14px; border-top: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); }
 .validation-evidence summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 42px; padding: 10px 0; color: var(--muted); font-size: 11px; cursor: pointer; list-style: none; }
 .validation-evidence summary::-webkit-details-marker { display: none; }

@@ -97,6 +97,76 @@ test('manxue submits exactly the tutorial payload, polls the same task and maps 
   }
 });
 
+test('manxue accepts HTTP 202 tasks and polls until a valid completed assessment', async () => {
+  for (const quality of ['normal', 'degraded', 'future']) {
+    const calls = [];
+    const responses = [
+      { httpStatus: 202, body: { id: 'task-202', status: 'queued', benchmark: 'pelican' } },
+      { httpStatus: 202, body: { id: 'task-202', status: 'running', benchmark: 'pelican' } },
+      { httpStatus: 200, body: { id: 'task-202', status: 'succeeded', benchmark: 'pelican', assessment: { quality } } }
+    ];
+    const transport = (url, options, receive) => {
+      const connection = new EventEmitter();
+      connection.end = () => {
+        calls.push({ url: url.href, method: options.method });
+        const next = responses.shift();
+        const response = Readable.from([Buffer.from(JSON.stringify(next.body))]);
+        response.statusCode = next.httpStatus;
+        response.headers = {};
+        receive(response);
+      };
+      return connection;
+    };
+    const reviewer = new VisualReviewer({ sleep: async () => {}, logger: { warn: () => {} },
+      request: (url, options) => requestReviewJson(url, options, {
+        lookup: async () => [{ address: '8.8.8.8', family: 4 }], request: transport
+      }) });
+    const result = await reviewer.review({ visual: reviewTest().validation.visual, html, runId: 202 });
+    assert.equal(result.status, quality === 'future' ? 'unknown' : quality);
+    assert.equal(result.state, quality === 'future' ? 'failed' : 'completed');
+    assert.deepEqual(calls.map((call) => call.method), ['POST', 'GET', 'GET']);
+    assert.equal(calls[1].url, 'https://manxue.ai/api/v1/tests/task-202');
+    assert.equal(responses.length, 0);
+  }
+});
+
+test('audit HTTP failures keep their status and log safe submit or poll diagnostics without resubmitting', async () => {
+  for (const stage of ['submit', 'poll']) {
+    for (const httpStatus of [302, 401, 403, 404, 429, 503]) {
+      const calls = [];
+      const logs = [];
+      const transport = (_url, options, receive) => {
+        const connection = new EventEmitter();
+        connection.end = () => {
+          calls.push(options.method);
+          const queued = stage === 'poll' && options.method === 'POST';
+          const response = Readable.from([Buffer.from(queued
+            ? JSON.stringify({ id: 'task-1', status: 'queued', benchmark: 'pelican' })
+            : 'private upstream response with sk-private-audit-key')]);
+          response.statusCode = queued ? 201 : httpStatus;
+          response.headers = { location: 'https://private.example.com/private/path?token=secret' };
+          receive(response);
+        };
+        return connection;
+      };
+      const reviewer = new VisualReviewer({ sleep: async () => {},
+        logger: { warn: (message) => logs.push(JSON.parse(message)) },
+        request: (url, options) => requestReviewJson(url, options, {
+          lookup: async () => [{ address: '8.8.8.8', family: 4 }], request: transport
+        }) });
+      const result = await reviewer.review({ visual: reviewTest().validation.visual, html,
+        apiKey: 'sk-private-audit-key', runId: 42 });
+      assert.equal(result.status, 'unknown');
+      assert.equal(result.error_code, 'REVIEW_HTTP_ERROR');
+      assert.equal(result.http_status, httpStatus);
+      assert.deepEqual(calls, stage === 'submit' ? ['POST'] : ['POST', 'GET']);
+      assert.deepEqual(logs, [{ event: 'visual_review_failed', runId: 42, protocol: 'manxue',
+        stage, code: 'REVIEW_HTTP_ERROR', httpStatus }]);
+      assert.doesNotMatch(JSON.stringify({ result, logs }), /sk-private|private upstream|private\.example|private\/path|token=secret/);
+    }
+  }
+});
+
 test('manxue rejects mismatched tasks, unknown conclusions, invalid statuses and never resubmits', async () => {
   for (const task of [
     { id: 'wrong', benchmark: 'pelican', status: 'succeeded', assessment: { quality: 'normal' } },

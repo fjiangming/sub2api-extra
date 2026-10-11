@@ -187,7 +187,7 @@ const visualReviewSchema = z.object({
   api_url: z.string().trim().max(2000).default('https://manxue.ai/api/v1/tests'),
   benchmark: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/).default('pelican'),
   decision_mode: z.enum(['visual', 'both']).default('visual'),
-  timeout_seconds: z.coerce.number().int().min(5).max(600).default(120),
+  timeout_seconds: z.coerce.number().int().min(5).max(1800).default(120),
   poll_interval_seconds: z.coerce.number().int().min(1).max(30).default(2),
   model: z.string().trim().max(200).default(''),
   instructions: z.string().trim().max(10000).default(''),

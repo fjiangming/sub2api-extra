@@ -379,6 +379,33 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   );
   const crossSessionPreview = await fetch(`${http.baseUrl}${sharedPayload.preview_url}`, { headers: headers(authA) });
   assert.equal(crossSessionPreview.status, 404);
+  const sameUserNewSession = await session(http.baseUrl, 'token-b');
+  const cookieSwitchedDetail = await fetch(`${http.baseUrl}/api/results/${sharedRun.id}`, {
+    headers: { ...headers(authB), cookie: `dd_session=${sameUserNewSession.sessionToken}`,
+      'x-preview-ancestors': '["https://aihub.example.test"]' }
+  });
+  assert.equal(cookieSwitchedDetail.status, 200);
+  const cookieSwitchedPayload = await cookieSwitchedDetail.json();
+  const sameUserCookiePreview = await fetch(`${http.baseUrl}${cookieSwitchedPayload.preview_url}`, {
+    headers: { cookie: `dd_session=${sameUserNewSession.sessionToken}` }
+  });
+  assert.equal(sameUserCookiePreview.status, 200);
+  assert.match(await sameUserCookiePreview.text(), /<body>shared<\/body>/);
+  assert.match(sameUserCookiePreview.headers.get('content-security-policy'), /https:\/\/aihub\.example\.test/);
+  const forbiddenSignedPreview = await fetch(`${http.baseUrl}${cookieSwitchedPayload.preview_url}`, {
+    headers: headers(authC)
+  });
+  assert.equal(forbiddenSignedPreview.status, 404);
+  const signedAnonymousPreview = await fetch(`${http.baseUrl}${cookieSwitchedPayload.preview_url}`);
+  assert.equal(signedAnonymousPreview.status, 401);
+  const logout = await fetch(`${http.baseUrl}/api/auth/session`, {
+    method: 'DELETE', headers: headers(sameUserNewSession, sameUserNewSession.csrfToken)
+  });
+  assert.equal(logout.status, 204);
+  const revokedSessionPreview = await fetch(`${http.baseUrl}${cookieSwitchedPayload.preview_url}`, {
+    headers: { cookie: `dd_session=${sameUserNewSession.sessionToken}` }
+  });
+  assert.equal(revokedSessionPreview.status, 401);
   const tamperedPreviewUrl = sharedPayload.preview_url.replace('ancestors=', 'ancestors=e30');
   const tamperedPreview = await fetch(`${http.baseUrl}${tamperedPreviewUrl}`, { headers: headers(authB) });
   assert.equal(tamperedPreview.status, 404);
@@ -856,14 +883,17 @@ test('visual settings enforce administrator access and keep credentials out of c
     outputText: '<html><body><svg></svg></body></html>', previewToken: 'audit-result-test',
     validationResult: { passed: 0, total: 0, results: [], local_status: 'unknown', visual: {
       protocol: 'manxue', decision_mode: 'visual', status: 'normal', state: 'completed', duration_ms: 1000,
-      reason: '视觉审核判定为正常', api_key: auditKey, api_url: 'https://private-review.example.com/api', raw_response: 'private response'
+      reason: '视觉审核判定为正常', api_key: auditKey, api_url: 'https://private-review.example.com/api', raw_response: 'private response',
+      http_status: 401
     } }
   });
   const detailResponse = await fetch(`${http.baseUrl}/api/results/${run.id}`, { headers: headers(ordinary) });
   assert.equal(detailResponse.status, 200);
   const detail = await detailResponse.json();
   assert.equal(detail.validation.visual.status, 'normal');
+  assert.equal(detail.validation.visual.site_url, 'https://manxue.ai');
   assert.equal(detail.validation.local_status, 'unknown');
+  assert.equal('http_status' in detail.validation.visual, false);
   assert.doesNotMatch(JSON.stringify(detail), /sk-audit|api_key|api_url|raw_response|private response|key_cipher|key_context/);
   // A disabled platform retains its independent audit credential on later saves.
   const disabledBody = { ...body, platforms: [{ ...body.platforms[0], enabled: false,

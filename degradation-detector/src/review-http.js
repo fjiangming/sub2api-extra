@@ -19,9 +19,12 @@ for (const [address, prefix] of [['2001::', 32], ['2001:db8::', 32], ['2002::', 
 }
 
 class ReviewError extends Error {
-  constructor(code) {
+  constructor(code, { httpStatus } = {}) {
     super(code);
     this.code = code;
+    if (Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599) {
+      this.httpStatus = httpStatus;
+    }
   }
 }
 
@@ -81,7 +84,9 @@ async function requestReviewJson(value, { method, body, apiKey, signal, taskKey 
     }, async (response) => {
       try {
         // Redirects never receive credentials or trigger an additional POST.
-        if (![200, 201].includes(response.statusCode)) throw new ReviewError('REVIEW_HTTP_ERROR');
+        if (![200, 201, 202].includes(response.statusCode)) {
+          throw new ReviewError('REVIEW_HTTP_ERROR', { httpStatus: response.statusCode });
+        }
         if (Number(response.headers['content-length'] || 0) > 256 * 1024) throw new ReviewError('REVIEW_RESPONSE_TOO_LARGE');
         const chunks = [];
         let length = 0;

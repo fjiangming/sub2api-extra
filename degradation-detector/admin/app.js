@@ -332,7 +332,7 @@ function visualReviewEditorHtml(visual = {}) {
         <label class="field field-wide"><span>审核专用 Key（可选）</span><input data-visual="api_key" type="password" autocomplete="new-password" maxlength="8192" value="${escapeHtml(visual.api_key || '')}" placeholder="${visual.api_key_configured ? '已配置，留空保留' : '无鉴权的审核服务可留空'}"></label>
         <label class="visual-key-clear"><input data-visual="clear_api_key" type="checkbox" ${visual.clear_api_key ? 'checked' : ''}>清除已保存的审核 Key</label>
         <label class="field"><span>检测基准</span><input data-visual="benchmark" maxlength="64" value="${escapeHtml(visual.benchmark || 'pelican')}"></label>
-        <label class="field"><span>审核总超时（秒）</span><input data-visual="timeout_seconds" type="number" min="5" max="600" value="${escapeHtml(visual.timeout_seconds || 120)}"></label>
+        <label class="field"><span>审核总超时（秒）</span><input data-visual="timeout_seconds" type="number" min="5" max="1800" value="${escapeHtml(visual.timeout_seconds || 120)}"></label>
         <label class="field" data-visual-async><span>轮询间隔（秒）</span><input data-visual="poll_interval_seconds" type="number" min="1" max="30" value="${escapeHtml(visual.poll_interval_seconds || 2)}"></label>
         <label class="field" data-visual-sync><span>审核模型（可选）</span><input data-visual="model" maxlength="200" value="${escapeHtml(visual.model || '')}"></label>
         <label class="field field-wide" data-visual-sync><span>审核要求（可选）</span><textarea data-visual="instructions" maxlength="10000">${escapeHtml(visual.instructions || '')}</textarea></label>

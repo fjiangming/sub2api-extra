@@ -168,13 +168,13 @@ function normalizePreviewAncestors(values) {
   return origins;
 }
 
-function previewSignature(secret, token, encodedAncestors) {
-  return crypto.createHmac('sha256', String(secret))
-    .update(`${token}.${encodedAncestors}`)
+function previewSignature(signingKey, userId, token, encodedAncestors) {
+  return crypto.createHmac('sha256', signingKey)
+    .update(JSON.stringify([String(userId), token, encodedAncestors]))
     .digest('base64url');
 }
 
-function signedPreviewUrl(req, token) {
+function signedPreviewUrl(req, token, signingKey) {
   let submitted = [];
   const header = String(req.get('x-preview-ancestors') || '');
   if (header && header.length <= 2048) {
@@ -188,11 +188,11 @@ function signedPreviewUrl(req, token) {
   const path = `/api/previews/${token}`;
   if (!ancestors.length) return path;
   const encoded = Buffer.from(JSON.stringify(ancestors)).toString('base64url');
-  const signature = previewSignature(req.auth.csrfToken, token, encoded);
+  const signature = previewSignature(signingKey, req.auth.user.id, token, encoded);
   return `${path}?ancestors=${encoded}&signature=${signature}`;
 }
 
-function authorizedPreviewAncestors(req, token) {
+function authorizedPreviewAncestors(req, token, signingKey) {
   const encoded = String(req.query.ancestors || '');
   const signature = String(req.query.signature || '');
   if (!encoded && !signature) return [];
@@ -200,7 +200,7 @@ function authorizedPreviewAncestors(req, token) {
     throw new AppError('PREVIEW_NOT_FOUND', '预览不存在或已过期', { status: 404 });
   };
   if (!/^[a-zA-Z0-9_-]{4,2048}$/.test(encoded) || !/^[a-zA-Z0-9_-]{43}$/.test(signature)) invalid();
-  const expected = previewSignature(req.auth.csrfToken, token, encoded);
+  const expected = previewSignature(signingKey, req.auth.user.id, token, encoded);
   const actualBuffer = Buffer.from(signature);
   const expectedBuffer = Buffer.from(expected);
   if (actualBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(actualBuffer, expectedBuffer)) invalid();
@@ -527,6 +527,8 @@ function createRuntime(config, overrides = {}) {
 
 function createApp(config, overrides = {}) {
   const runtime = overrides.runtime || createRuntime(config, overrides);
+  // Sessions vary between tabs; preview signatures stay scoped to the authenticated user.
+  const previewSigningKey = crypto.randomBytes(32);
   seedDemo(config, runtime.store, runtime.vault);
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
@@ -640,7 +642,7 @@ function createApp(config, overrides = {}) {
       if (!await canAccessRun(req, runtime, run)) {
         throw new AppError('PREVIEW_NOT_FOUND', '预览不存在或已过期', { status: 404 });
       }
-      previewHeaders(res, authorizedPreviewAncestors(req, token));
+      previewHeaders(res, authorizedPreviewAncestors(req, token, previewSigningKey));
       if (run.output_type === 'html' && run.output_text) {
         res.type('html').send(run.output_text);
         return;
@@ -811,7 +813,7 @@ function createApp(config, overrides = {}) {
           content_url: `/api/artifacts/${run.preview_token}`,
           download_url: `/api/artifacts/${run.preview_token}?download=1`
         } : null,
-        preview_url: run.preview_token ? signedPreviewUrl(req, run.preview_token) : null
+        preview_url: run.preview_token ? signedPreviewUrl(req, run.preview_token, previewSigningKey) : null
       });
     } catch (error) {
       next(error);

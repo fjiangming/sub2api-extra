@@ -78,7 +78,7 @@ function prepareReviewHtml(source) {
   return html;
 }
 
-function reviewFailure(visual, code, durationMs = 0) {
+function reviewFailure(visual, code, durationMs = 0, httpStatus = null) {
   const knownCode = Object.hasOwn(errorReasons, code) ? code : 'REVIEW_NETWORK_ERROR';
   return {
     protocol: visual.protocol,
@@ -87,15 +87,18 @@ function reviewFailure(visual, code, durationMs = 0) {
     state: 'failed',
     error_code: knownCode,
     reason: errorReasons[knownCode],
-    duration_ms: Math.max(0, durationMs)
+    duration_ms: Math.max(0, durationMs),
+    ...(knownCode === 'REVIEW_HTTP_ERROR' && Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599
+      ? { http_status: httpStatus } : {})
   };
 }
 
 class VisualReviewer {
-  constructor({ request = requestReviewJson, sleep = (ms, signal) => delay(ms, undefined, { signal }), now = Date.now } = {}) {
+  constructor({ request = requestReviewJson, sleep = (ms, signal) => delay(ms, undefined, { signal }), now = Date.now, logger = console } = {}) {
     this.request = request;
     this.sleep = sleep;
     this.now = now;
+    this.logger = logger;
   }
 
   async review({ visual, html, apiKey, runId }) {
@@ -104,6 +107,7 @@ class VisualReviewer {
     const deadline = started + visual.timeout_seconds * 1000;
     const taskKey = `degradation-review-${runId}-${crypto.randomUUID()}`;
     const timer = setTimeout(() => controller.abort(), visual.timeout_seconds * 1000);
+    let stage = 'prepare';
     const remaining = () => {
       const milliseconds = deadline - this.now();
       if (milliseconds <= 0 || controller.signal.aborted) throw new ReviewError('REVIEW_TIMEOUT');
@@ -111,6 +115,7 @@ class VisualReviewer {
     };
     const request = async (method, url, body) => {
       remaining();
+      stage = method === 'POST' ? 'submit' : 'poll';
       // The absolute deadline also applies to DNS, polling and response reads.
       let abort;
       try {
@@ -163,7 +168,13 @@ class VisualReviewer {
         duration_ms: Math.max(0, this.now() - started)
       };
     } catch (error) {
-      return reviewFailure(visual, controller.signal.aborted ? 'REVIEW_TIMEOUT' : error.code, this.now() - started);
+      const failure = reviewFailure(visual, controller.signal.aborted ? 'REVIEW_TIMEOUT' : error.code,
+        this.now() - started, error.httpStatus);
+      this.logger.warn(JSON.stringify({
+        event: 'visual_review_failed', runId, protocol: visual.protocol, stage, code: failure.error_code,
+        ...(failure.http_status ? { httpStatus: failure.http_status } : {})
+      }));
+      return failure;
     } finally {
       clearTimeout(timer);
       controller.abort();

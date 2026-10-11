@@ -228,6 +228,29 @@ function validationScoreLabel(validation, fallbackScore = null) {
   return '无法评分';
 }
 
+function validationBasisHtml(detail) {
+  if (detail.output_type !== 'html') return '';
+  const title = detail.review ? '自动检测依据' : '检测依据';
+  const visual = detail.validation?.visual;
+  let basis = detail.validation
+    ? '本地规则与输出完整性检查，结论仅供模型能力评估参考。'
+    : '该历史记录未保存详细判定依据，结论仅供模型能力评估参考。';
+  if (visual) {
+    let site = '外部审核服务';
+    try {
+      const url = new URL(visual.site_url);
+      if (url.protocol === 'https:' && !url.username && !url.password && !url.search && !url.hash) {
+        site = `<a href="${escapeHtml(url.origin)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url.host)}</a>`;
+      }
+    } catch {}
+    const completed = visual.state === 'completed' && ['normal', 'degraded'].includes(visual.status);
+    basis = completed
+      ? `${visual.decision_mode === 'both' ? '结合本地规则与' : '参考'} ${site} 的作品审核结果，结论仅供模型能力评估参考。`
+      : `本次配置的作品审核服务为 ${site}，未取得有效审核结论。`;
+  }
+  return `<p class="validation-basis"><i data-lucide="info"></i><span><strong>${title}：</strong>${basis}</span></p>`;
+}
+
 function validationEvidenceHtml(validation, manuallyReviewed = false) {
   if (!validation) return '';
   const score = validationScoreLabel(validation);
@@ -240,6 +263,9 @@ function validationEvidenceHtml(validation, manuallyReviewed = false) {
       <span><strong>${escapeHtml(rule.label)}</strong><small>${escapeHtml(rule.message)} · ${rule.severity === 'hard' ? '核心规则' : '辅助规则'} · 权重 ${Number(rule.weight) || 0}</small></span>
     </li>`).join('');
   const visual = validation.visual;
+  const summary = visual
+    ? `视觉 ${labels[visual.status] || '无法判定'}`
+    : `${score}${coverage} · ${Number(validation.passed) || 0}/${Number(validation.total) || 0} 条通过`;
   const reviewEvidence = visual ? `
     <li data-passed="${visual.status === 'normal' ? 'true' : visual.status === 'degraded' ? 'false' : 'unknown'}">
       <i data-lucide="eye"></i><span><strong>视觉审核 · ${escapeHtml(labels[visual.status] || '无法判定')}</strong>
@@ -249,7 +275,7 @@ function validationEvidenceHtml(validation, manuallyReviewed = false) {
     <details class="validation-evidence">
       <summary>
         <span class="validation-evidence-title"><i data-lucide="list-checks"></i>${manuallyReviewed ? '自动判定证据' : '判定证据'}</span>
-        <span class="validation-evidence-summary"><strong>${visual ? `视觉 ${escapeHtml(labels[visual.status] || '无法判定')} · 本地 ` : ''}${escapeHtml(score)}${escapeHtml(coverage)} · ${Number(validation.passed) || 0}/${Number(validation.total) || 0} 条通过</strong><i data-lucide="chevron-down"></i></span>
+        <span class="validation-evidence-summary"><strong>${escapeHtml(summary)}</strong><i data-lucide="chevron-down"></i></span>
       </summary>
       <div class="validation-evidence-content">
         ${(integrity || rules || reviewEvidence) ? `<ul>${reviewEvidence}${integrity}${rules}</ul>` : '<p>该历史记录没有逐条规则数据。</p>'}
@@ -454,7 +480,8 @@ async function showRecord(run) {
     });
     if (requestId !== state.detailRequest || !$('result-dialog').open) return;
     loading.remove();
-    box.insertAdjacentHTML('beforeend', validationEvidenceHtml(detail.validation, Boolean(detail.review)));
+    box.insertAdjacentHTML('beforeend', validationBasisHtml(detail)
+      + validationEvidenceHtml(detail.validation, Boolean(detail.review)));
     refreshIcons();
     if (detail.output_type === 'text') {
       if (detail.text == null) {

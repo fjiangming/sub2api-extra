@@ -49,6 +49,19 @@ function parsedObject(value) {
   }
 }
 
+function visualReviewSite(row) {
+  const visual = parsedObject(row?.validation_snapshot)?.visual
+    ?? parsedObject(row?.test_snapshot)?.validation?.visual;
+  if (visual?.enabled !== true || typeof visual.api_url !== 'string') return null;
+  try {
+    const url = new URL(visual.api_url);
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
 function publicValidationResult(row, includeRules = false) {
   const parsed = parsedObject(row?.validation_result_json);
   if (!parsed) return null;
@@ -78,6 +91,10 @@ function publicValidationResult(row, includeRules = false) {
       duration_ms: Math.max(0, Number(visual.duration_ms) || 0),
       ...(visual.error_code ? { error_code: String(visual.error_code).slice(0, 60) } : {})
     };
+    if (includeRules) {
+      const site = visualReviewSite(row);
+      if (site) result.visual.site_url = site;
+    }
   }
   if (includeRules) {
     result.rules = Array.isArray(parsed.results) ? parsed.results.slice(0, 50).map((rule) => ({

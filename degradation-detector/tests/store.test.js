@@ -6,7 +6,7 @@ const path = require('path');
 const test = require('node:test');
 const Database = require('better-sqlite3');
 const { validateTestConfig } = require('../src/config');
-const { Store } = require('../src/store');
+const { Store, publicValidationResult } = require('../src/store');
 const { testConfig } = require('./helpers');
 
 function monitor(store, enabled = true) {
@@ -38,6 +38,37 @@ function saveSchedule(store, config, overrides = {}) {
     groups: []
   });
 }
+
+test('public audit sites use historical configuration and expose only safe website origins in details', () => {
+  const row = {
+    validation_result_json: JSON.stringify({ visual: {
+      protocol: 'manxue', status: 'normal', state: 'completed',
+      api_url: 'https://spoofed.example.com/private', site_url: 'https://spoofed.example.com'
+    } }),
+    validation_snapshot: JSON.stringify({ visual: {
+      enabled: true, api_url: 'https://historical.example.com:8443/private/api/v1/tests',
+      api_key: 'private-key', instructions: 'private instructions'
+    } }),
+    test_snapshot: JSON.stringify({ validation: { visual: {
+      enabled: true, api_url: 'https://fallback.example.com/api/review'
+    } } })
+  };
+  const detail = publicValidationResult(row, true);
+  assert.equal(detail.visual.site_url, 'https://historical.example.com:8443');
+  assert.doesNotMatch(JSON.stringify(detail), /private|spoofed|fallback|instructions|api_key|api_url/);
+  assert.equal('site_url' in publicValidationResult(row).visual, false);
+  assert.equal(publicValidationResult({ ...row, validation_snapshot: null }, true).visual.site_url, 'https://fallback.example.com');
+  assert.equal(publicValidationResult({ ...row, validation_snapshot: '{invalid' }, true).visual.site_url, 'https://fallback.example.com');
+  assert.equal('site_url' in publicValidationResult({ ...row, validation_snapshot: null, test_snapshot: null }, true).visual, false);
+  assert.equal('site_url' in publicValidationResult({ ...row,
+    validation_snapshot: JSON.stringify({ visual: { enabled: false, api_url: 'https://disabled.example.com' } })
+  }, true).visual, false);
+  for (const apiUrl of ['not a URL', 'http://example.com/api', 'javascript:alert(1)',
+    'https://secret:password@example.com/api', 'https://example.com/api?token=secret', 'https://example.com/api#secret']) {
+    const unsafe = { ...row, validation_snapshot: JSON.stringify({ visual: { enabled: true, api_url: apiUrl } }) };
+    assert.equal('site_url' in publicValidationResult(unsafe, true).visual, false);
+  }
+});
 
 test('legacy single-time settings migrate to the multi-mode schedule', (t) => {
   const config = testConfig(t);
