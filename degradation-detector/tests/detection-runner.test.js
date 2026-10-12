@@ -673,3 +673,30 @@ test('visual review uses a separate key, persists output before audit and preser
   await runner.execute(2, monitor);
   assert.equal(auditCalls, 1);
 });
+
+test('enabled visual review submits the output even when local integrity checks cannot classify it', async () => {
+  const configured = validateTestConfig('openai', {
+    model: 'test-model', prompt: 'draw', output_type: 'html',
+    validation: { version: 2, rules: [], visual: { enabled: true } }
+  });
+  const output = { text: 'The response has no HTML elements.', mime: 'text/html' };
+  const local = deterministicVerdict(configured, output);
+  assert.equal(local.status, 'unknown');
+  assert.ok(local.validationResult.integrity_failures.length);
+  let auditCalls = 0;
+  const runner = new DetectionRunner({ config: {}, store: {}, sub2api: {}, vault: {},
+    visualReviewer: { review: async (input) => {
+      auditCalls++;
+      assert.equal(input.html, output.text);
+      assert.equal(input.apiKey, '');
+      return { status: 'degraded', reason: 'visual assessment' };
+    } }
+  });
+  const result = await runner.classify(configured, output, local, 1);
+  assert.equal(auditCalls, 1);
+  assert.equal(result.status, 'degraded');
+  assert.deepEqual(result.validationResult.integrity_failures, local.validationResult.integrity_failures);
+  configured.validation.visual.enabled = false;
+  assert.equal(await runner.classify(configured, output, local, 2), local);
+  assert.equal(auditCalls, 1);
+});

@@ -12,6 +12,13 @@ const { publicVisualSettings, snapshotValidation, storeVisualTest } = require('.
 const { defaultTests, testConfig } = require('./helpers');
 
 const html = '<!doctype html><html><head><style>@keyframes a{to{opacity:1}}</style></head><body><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="20"><animateTransform attributeName="transform" type="rotate" values="0 50 50;360 50 50" dur="2s" repeatCount="indefinite"/></circle></svg></body></html>';
+const scriptHtml = [
+  '  <!doctype html><html><head><link rel="stylesheet" href="https://example.com/scene.css"></head><body>',
+  '<svg viewBox="0 0 100 100"><path id="leg"/><foreignObject><div>scene</div></foreignObject></svg>',
+  '<script>globalThis.__reviewSourceExecuted = true; requestAnimationFrame(function frame(t) {',
+  'document.getElementById("leg").setAttribute("d", "M0 0 L" + Math.cos(t) + " 50"); requestAnimationFrame(frame); });</script>',
+  '</body></html>\n'
+].join('\n');
 function reviewTest(overrides = {}) {
   return validateTestConfig('openai', { ...defaultTests.openai,
     validation: { version: 2, rules: [], visual: { enabled: true, ...overrides } } });
@@ -50,7 +57,7 @@ test('review credentials are encrypted, preserved, inherited, cleared and never 
   assert.deepEqual(snapshotValidation({ version: 2, rules: [], visual: { enabled: false } }), { version: 2, rules: [] });
 });
 
-test('safe HTML and standalone SVG retain their original animation content', () => {
+test('HTML and standalone SVG retain their original animation content', () => {
   assert.equal(prepareReviewHtml(html), html);
   const svg = '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0 L1 1"/></svg>';
   const wrapped = prepareReviewHtml(svg);
@@ -60,11 +67,20 @@ test('safe HTML and standalone SVG retain their original animation content', () 
   assert.doesNotThrow(() => prepareReviewHtml('<html><style>svg{clip-path:url(#clip);--color:red}@media (max-width:500px){svg{width:100%}}</style><svg><defs><clipPath id="clip"><rect width="10" height="10"/></clipPath></defs></svg></html>'));
 });
 
-test('review preparation rejects incomplete, excessive and unsafe content without executing it', () => {
-  assert.throws(() => prepareReviewHtml('<html><body><svg/>'), /REVIEW_INPUT_INVALID/);
+test('review preparation rejects empty and excessive payloads, including SVG wrapping overhead', () => {
+  for (const source of [undefined, null, '', ' \r\n\t ']) {
+    assert.throws(() => prepareReviewHtml(source), /REVIEW_INPUT_INVALID/);
+  }
   assert.throws(() => prepareReviewHtml('x'.repeat(1024 * 1024 + 1)), /REVIEW_INPUT_TOO_LARGE/);
+  assert.throws(() => prepareReviewHtml('\u6c49'.repeat(400000)), /REVIEW_INPUT_TOO_LARGE/);
+  assert.throws(() => prepareReviewHtml(`<svg>${' '.repeat(1024 * 1024 - 11)}</svg>`), /REVIEW_INPUT_TOO_LARGE/);
+});
+
+test('review preparation preserves scripts, external content and incomplete markup as data', () => {
   for (const source of [
-    '<script>alert(1)</script>', '<svg onload="alert(1)"></svg>', '<iframe srcdoc="x"></iframe>',
+    '<html><body><svg/>', '<p>HTML fragment</p>', scriptHtml,
+    '<script>globalThis.__reviewSourceExecuted = true</script>', '<script src="https://example.com/animation.js"></script>',
+    '<svg onload="alert(1)"></svg>', '<iframe srcdoc="x"></iframe>',
     '<svg><foreignObject><div>unsafe</div></foreignObject></svg>', '<img src="https://example.com/x">',
     '<style>@import "https://example.com/x";</style>', '<style>x{background:u\\72l(https://example.com)}</style>',
     '<style>x{background:u\\72l("https://example.com")}</style>',
@@ -74,7 +90,11 @@ test('review preparation rejects incomplete, excessive and unsafe content withou
     '<template><img src="https://example.com/x"></template>',
     '<style>x{--image:url(https://example.com)}</style>', '<svg><animate attributeName="href" values="#x;https://example.com"/></svg>',
     '<svg><animate attributeName="fill" values="red;url(https://example.com)"/></svg>', '<meta http-equiv="refresh" content="0;url=https://example.com">'
-  ]) assert.throws(() => prepareReviewHtml(`<html><body>${source}</body></html>`), /REVIEW_INPUT_UNSAFE/, source);
+  ]) {
+    const original = ` \n<html><body>${source}</body></html>\r\n`;
+    assert.equal(prepareReviewHtml(original), original);
+  }
+  assert.equal(globalThis.__reviewSourceExecuted, undefined);
 });
 
 test('manxue submits exactly the tutorial payload, polls the same task and maps quality', async () => {
@@ -85,15 +105,16 @@ test('manxue submits exactly the tutorial payload, polls the same task and maps 
       return options.method === 'POST' ? { id: 'task-1', status: 'queued', benchmark: 'pelican' }
         : { id: 'task-1', status: 'succeeded', benchmark: 'pelican', assessment: { quality } };
     } });
-    const result = await reviewer.review({ visual: reviewTest().validation.visual, html, apiKey: '', runId: 17 });
+    const result = await reviewer.review({ visual: reviewTest().validation.visual, html: scriptHtml, apiKey: '', runId: 17 });
     assert.equal(result.status, quality);
     assert.equal(result.state, 'completed');
     assert.equal(calls.length, 2);
-    assert.deepEqual(calls[0].options.body, { benchmark: 'pelican', html });
+    assert.deepEqual(calls[0].options.body, { benchmark: 'pelican', html: scriptHtml });
     assert.match(calls[0].options.taskKey, /^degradation-review-17-[a-f0-9-]{36}$/);
     assert.equal(calls[1].options.taskKey, calls[0].options.taskKey);
     assert.equal(calls[1].url, 'https://manxue.ai/api/v1/tests/task-1');
     assert.equal(calls[1].options.body, undefined);
+    assert.equal(globalThis.__reviewSourceExecuted, undefined);
   }
 });
 
@@ -107,8 +128,11 @@ test('manxue accepts HTTP 202 tasks and polls until a valid completed assessment
     ];
     const transport = (url, options, receive) => {
       const connection = new EventEmitter();
-      connection.end = () => {
+      connection.end = (raw) => {
         calls.push({ url: url.href, method: options.method });
+        if (options.method === 'POST') {
+          assert.deepEqual(JSON.parse(raw.toString('utf8')), { benchmark: 'pelican', html: scriptHtml });
+        }
         const next = responses.shift();
         const response = Readable.from([Buffer.from(JSON.stringify(next.body))]);
         response.statusCode = next.httpStatus;
@@ -121,7 +145,7 @@ test('manxue accepts HTTP 202 tasks and polls until a valid completed assessment
       request: (url, options) => requestReviewJson(url, options, {
         lookup: async () => [{ address: '8.8.8.8', family: 4 }], request: transport
       }) });
-    const result = await reviewer.review({ visual: reviewTest().validation.visual, html, runId: 202 });
+    const result = await reviewer.review({ visual: reviewTest().validation.visual, html: scriptHtml, runId: 202 });
     assert.equal(result.status, quality === 'future' ? 'unknown' : quality);
     assert.equal(result.state, quality === 'future' ? 'failed' : 'completed');
     assert.deepEqual(calls.map((call) => call.method), ['POST', 'GET', 'GET']);
@@ -196,14 +220,15 @@ test('sync HTML review supports a configured endpoint, model and rubric', async 
     posted = { url, options };
     return { quality: 'normal' };
   } });
-  const result = await reviewer.review({ visual, html, apiKey: 'review-only-key', runId: 3 });
+  const result = await reviewer.review({ visual, html: scriptHtml, apiKey: 'review-only-key', runId: 3 });
   assert.equal(result.status, 'normal');
   assert.equal(posted.url, visual.api_url);
   assert.equal(posted.options.apiKey, 'review-only-key');
-  assert.deepEqual(posted.options.body, { benchmark: 'pelican', html, model: 'vision-test', instructions: 'Inspect visible contact.' });
+  assert.deepEqual(posted.options.body, { benchmark: 'pelican', html: scriptHtml, model: 'vision-test', instructions: 'Inspect visible contact.' });
+  assert.equal(globalThis.__reviewSourceExecuted, undefined);
 });
 
-test('review total timeout covers polling, while unsafe output never reaches the API', async () => {
+test('review total timeout covers polling, while empty and oversized output never reaches the API', async () => {
   let time = 0;
   let calls = 0;
   const reviewer = new VisualReviewer({ now: () => time, sleep: async (ms) => { time += ms; }, request: async () => {
@@ -215,10 +240,13 @@ test('review total timeout covers polling, while unsafe output never reaches the
   assert.equal(result.status, 'unknown');
   assert.equal(result.error_code, 'REVIEW_TIMEOUT');
   assert.equal(calls, 3);
-  calls = 0;
-  const unsafe = await reviewer.review({ visual, html: '<html><script>alert(1)</script></html>', runId: 2 });
-  assert.equal(unsafe.error_code, 'REVIEW_INPUT_UNSAFE');
-  assert.equal(calls, 0);
+  for (const [source, code] of [['  ', 'REVIEW_INPUT_INVALID'], ['x'.repeat(1024 * 1024 + 1), 'REVIEW_INPUT_TOO_LARGE']]) {
+    calls = 0;
+    const invalid = await reviewer.review({ visual, html: source, runId: 2 });
+    assert.equal(invalid.status, 'unknown');
+    assert.equal(invalid.error_code, code);
+    assert.equal(calls, 0);
+  }
 });
 
 test('visual and combined decisions preserve local evidence and never turn an audit failure into a pass', () => {

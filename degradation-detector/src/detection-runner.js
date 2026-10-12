@@ -514,8 +514,6 @@ class DetectionRunner {
     let review;
     if (this.config.demoMode) {
       review = { ...reviewFailure(visual, 'REVIEW_NO_VERDICT'), reason: '演示模式不调用外部审核服务，无法判定' };
-    } else if (deterministic.validationResult?.integrity_failures?.length) {
-      review = reviewFailure(visual, 'REVIEW_INPUT_INVALID');
     } else {
       let apiKey;
       try {

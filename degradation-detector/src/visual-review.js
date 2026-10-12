@@ -1,7 +1,5 @@
 'use strict';
 
-const { load } = require('cheerio');
-const css = require('css-tree');
 const { setTimeout: delay } = require('timers/promises');
 const crypto = require('crypto');
 const { ReviewError, requestReviewJson, reviewUrl } = require('./review-http');
@@ -14,67 +12,23 @@ const errorReasons = {
   REVIEW_RESPONSE_INVALID: '视觉审核响应格式无效，无法判定',
   REVIEW_TASK_MISMATCH: '视觉审核任务或基准不匹配，无法判定',
   REVIEW_NO_VERDICT: '视觉审核没有返回可信结论，无法判定',
-  REVIEW_INPUT_INVALID: '作品不是完整 HTML 或 SVG，无法送审',
-  REVIEW_INPUT_UNSAFE: '作品包含审核接口不支持的脚本或外部内容，无法送审',
+  REVIEW_INPUT_INVALID: '作品内容为空，无法送审',
   REVIEW_INPUT_TOO_LARGE: '作品超过 1 MB 的送审上限，无法判定',
   REVIEW_KEY_UNREADABLE: '审核专用 Key 无法读取，请由管理员重新配置',
   REVIEW_NETWORK_ERROR: '无法连接视觉审核服务，无法判定'
 };
 
-function checkCss(source, context = 'stylesheet') {
-  let tree;
-  try { tree = css.parse(source, { context, parseCustomProperty: true }); }
-  catch { throw new ReviewError('REVIEW_INPUT_UNSAFE'); }
-  let nodes = 0;
-  css.walk(tree, (node) => {
-    if (++nodes > 20000 || node.type === 'Raw') throw new ReviewError('REVIEW_INPUT_UNSAFE');
-    if (node.type === 'Url' && !/^#[a-zA-Z0-9_.:-]+$/.test(node.value)) throw new ReviewError('REVIEW_INPUT_UNSAFE');
-    if (node.type === 'Atrule' && !['keyframes', '-webkit-keyframes', 'media', 'supports', 'layer', 'container', 'property']
-      .includes(css.ident.decode(node.name).toLowerCase())) throw new ReviewError('REVIEW_INPUT_UNSAFE');
-    if (node.type === 'Function' && ['expression', 'url', 'image-set', '-webkit-image-set', 'image', 'src']
-      .includes(css.ident.decode(node.name).toLowerCase())) {
-      throw new ReviewError('REVIEW_INPUT_UNSAFE');
-    }
-  });
-}
-
 function prepareReviewHtml(source) {
-  let html = String(source || '').trim();
-  if (!html || Buffer.byteLength(html) > 1024 * 1024) throw new ReviewError('REVIEW_INPUT_TOO_LARGE');
-  html = html.replace(/^<\?xml\s+[^?]*\?>\s*/i, '');
-  if (/<!ENTITY|<\?/i.test(html) || /<!DOCTYPE(?!\s+html\s*>)/i.test(html)) throw new ReviewError('REVIEW_INPUT_UNSAFE');
-  if (/^<svg(?:\s|>)/i.test(html) && /<\/svg>\s*$/i.test(html)) {
-    html = `<!doctype html><html><head><meta charset="utf-8"></head><body>${html}</body></html>`;
-  } else if (!/^(?:<!doctype\s+html\s*>\s*)?<html(?:\s|>)/i.test(html) || !/<\/html>\s*$/i.test(html)) {
-    throw new ReviewError('REVIEW_INPUT_INVALID');
+  const html = String(source ?? '');
+  if (Buffer.byteLength(html) > 1024 * 1024) throw new ReviewError('REVIEW_INPUT_TOO_LARGE');
+  if (!html.trim()) throw new ReviewError('REVIEW_INPUT_INVALID');
+  const svg = html.trim().replace(/^<\?xml\s+[^?]*\?>\s*/i, '');
+  if (/^<svg(?:\s|>)/i.test(svg) && /<\/svg>\s*$/i.test(svg)) {
+    const wrapped = `<!doctype html><html><head><meta charset="utf-8"></head><body>${svg}</body></html>`;
+    if (Buffer.byteLength(wrapped) > 1024 * 1024) throw new ReviewError('REVIEW_INPUT_TOO_LARGE');
+    return wrapped;
   }
-  const $ = load(html);
-  if ($('script, noscript, iframe, object, embed, foreignObject, form, base, link, meta[http-equiv]').length) {
-    throw new ReviewError('REVIEW_INPUT_UNSAFE');
-  }
-  const elements = $('*').toArray();
-  if (elements.length > 10000) throw new ReviewError('REVIEW_INPUT_TOO_LARGE');
-  for (const element of elements) {
-    if (['script', 'noscript', 'iframe', 'object', 'embed', 'foreignobject', 'form', 'base', 'link']
-      .includes(String(element.name || '').toLowerCase().split(':').at(-1))) throw new ReviewError('REVIEW_INPUT_UNSAFE');
-    for (const [name, value] of Object.entries(element.attribs || {})) {
-      const key = name.toLowerCase();
-      if (/^on/.test(key) || ['srcdoc', 'srcset', 'ping', 'xml:base'].includes(key)) throw new ReviewError('REVIEW_INPUT_UNSAFE');
-      if (['href', 'xlink:href', 'src', 'action', 'formaction', 'poster', 'data', 'background', 'manifest'].includes(key)
-        && value && !/^#[a-zA-Z0-9_.:-]+$/.test(value)) throw new ReviewError('REVIEW_INPUT_UNSAFE');
-      if (key === 'style') checkCss(value, 'declarationList');
-      if (['fill', 'stroke', 'filter', 'mask', 'clip-path', 'cursor'].includes(key)) checkCss(value, 'value');
-      if (key === 'attributename' && !/^(?:x|y|cx|cy|r|rx|ry|x1|x2|y1|y2|width|height|d|points|transform|viewBox|opacity|fill|stroke|stroke-width|fill-opacity|stroke-opacity)$/i.test(value)) {
-        throw new ReviewError('REVIEW_INPUT_UNSAFE');
-      }
-    }
-    if (['animate', 'set'].includes(element.name?.toLowerCase()) && /^(?:fill|stroke)$/i.test($(element).attr('attributeName') || '')) {
-      for (const name of ['values', 'from', 'to', 'by']) {
-        for (const value of String($(element).attr(name) || '').split(';').filter(Boolean)) checkCss(value, 'value');
-      }
-    }
-  }
-  $('style').each((_index, node) => checkCss($(node).text()));
+  // Forward source as data; the external reviewer owns rendering and content policy.
   return html;
 }
 
@@ -130,11 +84,11 @@ class VisualReviewer {
       } finally { controller.signal.removeEventListener('abort', abort); }
     };
     try {
-      const safeHtml = prepareReviewHtml(html);
+      const reviewHtml = prepareReviewHtml(html);
       const base = reviewUrl(visual.api_url).href.replace(/\/$/, '');
       let task = await request('POST', base, {
         benchmark: visual.benchmark,
-        html: safeHtml,
+        html: reviewHtml,
         ...(visual.protocol === 'html_review' && visual.model ? { model: visual.model } : {}),
         ...(visual.protocol === 'html_review' && visual.instructions ? { instructions: visual.instructions } : {})
       });
