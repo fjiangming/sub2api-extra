@@ -1,0 +1,118 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { AuthService } = require('../src/auth');
+const { Sub2ApiClient } = require('../src/sub2api-client');
+const { loadConfig } = require('../src/config');
+const { AppError } = require('../src/errors');
+
+function request(headers = {}) {
+  return { ip: '::ffff:127.0.0.1', headers, get: (name) => headers[name.toLowerCase()] };
+}
+function response() { return { headers: {}, setHeader(name, value) { this.headers[name] = value; } }; }
+function middleware(auth, req) {
+  return new Promise((resolve, reject) => auth.middleware()(req, {}, (error) => error ? reject(error) : resolve(req.auth)));
+}
+function token(claims) { return `header.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.unsigned`; }
+
+test('identity comes only from upstream; forged JWT claims and query user IDs are ignored', async (t) => {
+  const config = loadConfig({ NODE_ENV: 'test' });
+  let called;
+  const client = new Sub2ApiClient(config, { fetchImpl: async (url, options) => {
+    called = { url, options };
+    return Response.json({ code: 0, data: { id: 7, username: '真实昵称', role: 'user', status: 'active', email: 'private@example.com' } });
+  } });
+  const auth = new AuthService(config, client);
+  t.after(() => auth.close());
+  const res = response();
+  const jwt = token({ user_id: 1, role: 'admin', exp: Math.floor(Date.now() / 1000) + 3600 });
+  const data = await auth.sso(request({ 'user-agent': 'test-browser' }), res, jwt);
+  assert.equal(called.url, 'http://127.0.0.1:8080/api/v1/auth/me');
+  assert.equal(called.options.headers.authorization, `Bearer ${jwt}`);
+  assert.equal(called.options.redirect, 'error');
+  const session = await middleware(auth, request({ 'user-agent': 'test-browser', authorization: `Session ${data.sessionToken}` }));
+  assert.equal(session.user.id, '7');
+  assert.equal(data.user.name, 'pr***@example.com');
+  assert.equal(auth.publicSession(session).user.name, 'pr***@example.com');
+  assert.ok(!JSON.stringify(data).includes('真实昵称'));
+  assert.ok(!JSON.stringify(data).includes('private@example.com'));
+  assert.ok(!JSON.stringify(data).includes(jwt));
+  assert.match(res.headers['Set-Cookie'], /HttpOnly; SameSite=Lax/);
+  await assert.rejects(middleware(auth, request({ 'user-agent': 'different', authorization: `Session ${data.sessionToken}` })), { code: 'AUTH_REQUIRED' });
+});
+
+test('upstream expiry caps sessions, cleanup releases memory, and revoked users fail revalidation', async (t) => {
+  let clock = 100000;
+  let valid = true;
+  let calls = 0;
+  const auth = new AuthService(loadConfig({ NODE_ENV: 'test' }), { async me() {
+    calls++;
+    if (!valid) throw new AppError('AUTH_FAILED', 'expired', 401);
+    return { id: '2', email: 'user@example.com' };
+  } }, { now: () => clock });
+  t.after(() => auth.close());
+  const data = await auth.sso(request(), response(), token({ exp: 300 }));
+  assert.equal(new Date(data.expiresAt).getTime(), 300000);
+  const req = request({ authorization: `Session ${data.sessionToken}` });
+  await middleware(auth, req);
+  assert.equal(calls, 1);
+  clock += 61000;
+  await Promise.all([middleware(auth, req), middleware(auth, req)]);
+  assert.equal(calls, 2);
+  clock += 61000;
+  valid = false;
+  await assert.rejects(middleware(auth, req), { code: 'AUTH_FAILED' });
+  assert.equal(auth.sessions.size, 0);
+  valid = true;
+  await assert.rejects(auth.sso(request(), response(), token({ exp: 1 })), { code: 'AUTH_FAILED' });
+  const next = await auth.sso(request(), response(), 'opaque-token');
+  clock = new Date(next.expiresAt).getTime();
+  auth.cleanup();
+  assert.equal(auth.sessions.size, 0);
+});
+
+test('concurrent logins obey the memory cap and secure iframe cookies have a Session-header fallback', async (t) => {
+  const auth = new AuthService({ ...loadConfig({ NODE_ENV: 'test' }), maxSessions: 1, cookieSecure: true },
+    { async me() { await new Promise((resolve) => setImmediate(resolve)); return { id: '2', email: 'user@example.com' }; } });
+  t.after(() => auth.close());
+  const res = response();
+  const outcomes = await Promise.allSettled([
+    auth.sso(request(), res, 'first'), auth.sso(request(), response(), 'second')
+  ]);
+  assert.equal(outcomes.filter((result) => result.status === 'fulfilled').length, 1);
+  assert.equal(auth.sessions.size, 1);
+  assert.equal(outcomes.find((result) => result.status === 'rejected').reason.code, 'SESSION_CAPACITY');
+  assert.match(res.headers['Set-Cookie'][0], /^__Host-ul_session=.*Secure/);
+  assert.match(res.headers['Set-Cookie'][1], /SameSite=None; Secure; Partitioned/);
+  const id = outcomes.find((result) => result.status === 'fulfilled').value.sessionToken;
+  const session = await middleware(auth, request({ authorization: `Session ${id}` }));
+  assert.equal(session.user.id, '2');
+  auth.logout(request({ authorization: `Session ${id}` }), response());
+  await assert.rejects(middleware(auth, request({ authorization: `Session ${id}` })), { code: 'AUTH_REQUIRED' });
+});
+
+test('upstream errors, disabled users and oversized responses never create a session', async () => {
+  const config = loadConfig({ NODE_ENV: 'test' });
+  for (const [responseValue, code] of [
+    [Response.json({ reason: 'SESSION_BINDING_MISMATCH' }, { status: 401 }), 'SESSION_BINDING_MISMATCH'],
+    [Response.json({ data: { id: 1, status: 'disabled' } }), 'ACCOUNT_UNAVAILABLE'],
+    [Response.json({ code: 123, data: { id: 1 } }), 'AUTH_FAILED'],
+    [Response.json({ data: { user_id: Number.MAX_SAFE_INTEGER + 2 } }), 'AUTH_UPSTREAM_INVALID'],
+    [new Response('bad json'), 'AUTH_UPSTREAM_INVALID'],
+    [Response.json({ large: 'x'.repeat(300000) }), 'AUTH_UPSTREAM_INVALID']
+  ]) {
+    const client = new Sub2ApiClient(config, { fetchImpl: async () => responseValue });
+    await assert.rejects(client.me('token', { ip: '127.0.0.1', userAgent: '' }), { code });
+  }
+});
+
+test('client fingerprint forwarding requires explicit configuration and valid IP', async () => {
+  for (const [enabled, ip, expected] of [[false, '127.0.0.1', undefined], [true, '127.0.0.1', '127.0.0.1'], [true, 'bad\r\nheader', undefined]]) {
+    let headers;
+    const client = new Sub2ApiClient({ ...loadConfig({ NODE_ENV: 'test' }), forwardClientFingerprint: enabled },
+      { fetchImpl: async (_url, options) => { headers = options.headers; return Response.json({ id: 1 }); } });
+    await client.me('token', { ip, userAgent: 'browser' });
+    assert.equal(headers['x-forwarded-for'], expected);
+  }
+});

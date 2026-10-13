@@ -6,10 +6,12 @@
   <meta name="color-scheme" content="light">
   <title>Sub2API 运营中心</title>
   <link rel="stylesheet" href="/styles.css?v=20260930-2">
+  <link rel="stylesheet" href="/user-profiles.css?v=20261013-1">
   <script src="/vendor/echarts.js" defer></script>
   <script src="/vendor/lucide.js" defer></script>
   <script src="/cost-analysis-ui.js?v=20260929-3" defer></script>
-  <script src="/app.js?v=20261004-1" defer></script>
+  <script src="/user-profiles-ui.js?v=20261013-1" defer></script>
+  <script src="/app.js?v=20261013-1" defer></script>
 </head>
 <body>
   <div id="login-view" class="login-view" hidden>
@@ -38,6 +40,7 @@
         <button class="module-tab active" data-view="overview" role="tab" aria-selected="true" aria-controls="content" tabindex="0"><i data-lucide="layout-dashboard"></i><span>运营概览</span></button>
         <button class="module-tab" data-view="usage" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="activity"></i><span>用量分析</span></button>
         <button class="module-tab" data-view="users" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="users"></i><span>用户分析</span></button>
+        <button class="module-tab" data-view="profiles" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="contact-round"></i><span>用户画像</span></button>
         <button class="module-tab" data-view="finance" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="landmark"></i><span>收款与入账</span></button>
         <button class="module-tab" data-view="costs" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="chart-spline"></i><span>成本分析</span></button>
         <button class="module-tab" data-view="storage" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="database"></i><span>存储容量</span></button>
@@ -104,6 +107,122 @@
           <div id="users-metrics" class="metric-grid compact"></div>
           <section class="panel chart-panel"><div class="panel-heading"><div><h2>活跃与新增</h2><p id="users-zone"></p></div></div><div id="users-chart" class="chart"></div></section>
           <section class="panel"><div class="panel-heading"><div><h2>注册留存</h2><p>最近 90 天 cohort</p></div></div><div class="table-wrap"><table><thead><tr><th>注册日</th><th>注册人数</th><th>次日</th><th>7 日</th><th>30 日</th></tr></thead><tbody id="users-cohorts"></tbody></table></div></section>
+        </section>
+
+        <section id="view-profiles" class="view" aria-labelledby="page-title">
+          <form id="up-filter" class="up-filter">
+            <div class="up-dates">
+              <label>开始日期<input name="start" type="date" required></label>
+              <span class="up-date-separator" aria-hidden="true">至</span>
+              <label>结束日期<input name="end" type="date" required></label>
+            </div>
+            <div id="up-presets" class="up-segmented" role="group" aria-label="画像日期范围">
+              <button type="button" data-days="7" aria-pressed="false">近 7 天</button>
+              <button type="button" data-days="30" aria-pressed="true">近 30 天</button>
+            </div>
+            <label>计费类型<select name="billing"><option value="all">全部计费类型</option><option value="balance">余额计费</option><option value="subscription">订阅计费</option></select></label>
+            <label>平台<select name="platform"><option value="all">全部平台</option></select></label>
+            <button class="button primary" type="submit"><i data-lucide="search"></i><span>查询</span></button>
+            <button id="up-definitions-open" class="icon-button" type="button" title="统计口径" aria-label="查看画像统计口径"><i data-lucide="circle-help"></i></button>
+          </form>
+          <div id="up-notices" class="alert-stack" aria-live="polite"></div>
+          <div id="up-status" class="up-status" role="status" hidden></div>
+          <div id="up-data" hidden>
+            <div id="up-metrics" class="up-metrics" aria-label="用户画像概要"></div>
+            <section class="up-analysis" aria-labelledby="up-preference-title">
+              <header class="up-section-heading">
+                <div><h2 id="up-preference-title">平台与模型偏好</h2><p id="up-coverage-label"></p></div>
+                <div id="up-modes" class="up-segmented" role="group" aria-label="占比统计口径">
+                  <button type="button" data-metric="requests" aria-pressed="true">请求数</button>
+                  <button type="button" data-metric="tokens" aria-pressed="false">Token</button>
+                  <button type="button" data-metric="cost" aria-pressed="false">消费额度</button>
+                </div>
+              </header>
+              <div class="up-preference-grid">
+                <div class="up-platform-analysis">
+                  <div class="up-subheading"><h3>平台分布</h3><span id="up-platform-count"></span></div>
+                  <div class="up-platform-layout">
+                    <div class="up-donut-wrap"><div id="up-platform-chart" class="up-platform-chart" role="img" aria-label="平台使用占比分布"></div><div class="up-donut-center" aria-hidden="true"><span id="up-donut-label"></span><strong id="up-donut-value"></strong></div></div>
+                    <div id="up-platform-legend" class="up-platform-legend"></div>
+                  </div>
+                </div>
+                <div class="up-model-analysis">
+                  <div class="up-subheading"><h3>模型偏好</h3><span>Top 5 + 其他</span></div>
+                  <div id="up-model-bars" class="up-model-bars"></div>
+                </div>
+              </div>
+            </section>
+            <section class="up-insights" aria-label="消费集中度与运营关注">
+              <div class="up-concentration">
+                <div class="up-subheading"><h2>消费集中度</h2><span>按用户消费排序</span></div>
+                <div class="up-concentration-intro"><strong id="up-concentration-value"></strong><span id="up-concentration-description"></span></div>
+                <div id="up-concentration-bar" class="up-concentration-bar" role="img"></div>
+                <div id="up-concentration-legend" class="up-concentration-legend"></div>
+              </div>
+              <div class="up-attention">
+                <div class="up-subheading"><h2>运营关注</h2><span id="up-recent-period"></span></div>
+                <button id="up-attention-decline" class="up-attention-item" type="button"><span class="up-attention-icon up-amber"><i data-lucide="trending-down"></i></span><span class="up-attention-text"><strong>活跃下降</strong><small>请求较前 7 天下降至少 50%</small></span><strong id="up-decline-count" class="up-attention-count"></strong><i data-lucide="chevron-right"></i></button>
+                <button id="up-attention-balance" class="up-attention-item" type="button"><span class="up-attention-icon up-rose"><i data-lucide="wallet"></i></span><span class="up-attention-text"><strong>低余额用户</strong><small>最近 7 天余额消费估算不足 3 天</small></span><strong id="up-balance-count" class="up-attention-count"></strong><i data-lucide="chevron-right"></i></button>
+              </div>
+            </section>
+            <section class="up-users" aria-labelledby="up-list-title">
+              <header class="up-section-heading up-list-heading">
+                <div class="up-list-title"><h2 id="up-list-title">用户画像明细</h2><span id="up-user-count"></span></div>
+                <form id="up-search-form" class="up-table-actions">
+                  <label class="up-search-field"><i data-lucide="search" aria-hidden="true"></i><input name="search" type="search" placeholder="搜索用户、邮箱或 ID" aria-label="搜索画像用户、邮箱或 ID" maxlength="120"></label>
+                  <select id="up-sort" aria-label="画像用户排序"><option value="cost">消费额度从高到低</option><option value="requests">请求数从高到低</option><option value="tokens">Token 从高到低</option><option value="days">活跃天数从高到低</option></select>
+                  <button id="up-export" class="icon-button" type="button" title="导出筛选后的全部用户" aria-label="导出筛选后的全部用户"><i data-lucide="download"></i></button>
+                </form>
+              </header>
+              <div class="up-user-segments">
+                <div id="up-segments" class="up-segment-tabs" role="group" aria-label="用户画像分层">
+                  <button type="button" data-segment="all" aria-pressed="true">全部用户</button>
+                  <button type="button" data-segment="high" aria-pressed="false"><i data-lucide="gem"></i>高消费</button>
+                  <button type="button" data-segment="multi" aria-pressed="false"><i data-lucide="network"></i>多平台</button>
+                  <button type="button" data-segment="decline" aria-pressed="false">活跃下降</button>
+                  <button type="button" data-segment="balance" aria-pressed="false">低余额</button>
+                </div>
+                <span id="up-denominator"></span>
+              </div>
+              <div class="up-table-wrap" tabindex="0" role="region" aria-label="用户画像表格">
+                <table class="up-user-table"><thead><tr><th>#</th><th>用户</th><th id="up-platform-table-heading">平台偏好 · 请求数</th><th class="numeric">消费额度</th><th class="numeric">消费占比</th><th class="numeric">请求数</th><th class="numeric">活跃天数</th><th>画像标签</th><th><span class="up-sr-only">详情</span></th></tr></thead><tbody id="up-user-rows"></tbody></table>
+              </div>
+              <footer class="up-pagination"><span id="up-pagination-label" aria-live="polite"></span><div><label>每页<select id="up-page-size" aria-label="画像每页用户数"><option value="20">20</option><option value="50">50</option><option value="100">100</option></select></label><button id="up-prev" class="icon-button" type="button" title="上一页" aria-label="画像上一页"><i data-lucide="chevron-left"></i></button><span id="up-page-label"></span><button id="up-next" class="icon-button" type="button" title="下一页" aria-label="画像下一页"><i data-lucide="chevron-right"></i></button></div></footer>
+            </section>
+          </div>
+          <dialog id="up-drawer" class="up-drawer" aria-labelledby="up-detail-name">
+            <header class="up-drawer-heading"><div><span class="up-caption">用户画像</span><h2 id="up-detail-name">正在读取</h2><p id="up-detail-email"></p></div><button id="up-detail-close" class="icon-button" type="button" title="关闭用户画像" aria-label="关闭用户画像"><i data-lucide="x"></i></button></header>
+            <div id="up-detail-status" class="up-status" role="status"></div>
+            <div id="up-detail-content" hidden>
+              <div id="up-detail-meta" class="up-detail-meta"></div>
+              <div id="up-detail-metrics" class="up-detail-metrics"></div>
+              <div id="up-detail-tabs" class="up-detail-tabs" role="tablist" aria-label="用户画像详情视图"><button id="up-preference-tab" type="button" role="tab" data-tab="preference" aria-selected="true" aria-controls="up-preference-panel">使用偏好</button><button id="up-activity-tab" type="button" role="tab" data-tab="activity" aria-selected="false" aria-controls="up-activity-panel" tabindex="-1">活跃与额度</button></div>
+              <div id="up-preference-panel" role="tabpanel" aria-labelledby="up-preference-tab">
+                <div id="up-detail-modes" class="up-segmented up-detail-modes" role="group" aria-label="单用户占比口径"><button type="button" data-metric="requests" aria-pressed="true">请求数</button><button type="button" data-metric="tokens" aria-pressed="false">Token</button><button type="button" data-metric="cost" aria-pressed="false">消费额度</button></div>
+                <section class="up-drawer-section"><div class="up-subheading"><h3>平台使用构成</h3><span id="up-detail-mode-label"></span></div><div id="up-detail-platform-bar" class="up-detail-platform-bar" role="img"></div><div id="up-detail-platform-legend" class="up-detail-platform-legend"></div></section>
+                <section class="up-drawer-section"><div class="up-subheading"><h3>模型明细</h3><span>Top 50 + 其他 · 用户内占比</span></div><div class="up-table-wrap" tabindex="0" role="region" aria-label="用户模型明细"><table class="up-model-table"><thead><tr><th>模型</th><th class="numeric">请求数</th><th class="numeric">消费额度</th><th id="up-detail-share-heading" class="numeric">请求占比</th></tr></thead><tbody id="up-detail-model-rows"></tbody></table></div></section>
+                <section class="up-drawer-section"><div class="up-subheading"><h3>Token 构成</h3><span id="up-detail-token-total"></span></div><div id="up-detail-tokens" class="up-token-breakdown"></div></section>
+              </div>
+              <div id="up-activity-panel" role="tabpanel" aria-labelledby="up-activity-tab" hidden>
+                <section class="up-drawer-section"><div class="up-subheading"><h3>每日消费与请求</h3><span>所选日期范围</span></div><div id="up-detail-trend" class="up-detail-trend" role="img" aria-label="每日消费额度与请求数趋势"></div></section>
+                <section class="up-drawer-section"><div class="up-subheading"><h3>活跃日历</h3><span id="up-calendar-summary"></span></div><div id="up-calendar" class="up-calendar"></div><div class="up-calendar-legend"><span>无请求</span><span class="up-level-0"></span><span class="up-level-1"></span><span class="up-level-2"></span><span class="up-level-3"></span><span class="up-level-4"></span><span>更多请求</span></div></section>
+                <section class="up-drawer-section"><div class="up-subheading"><h3>额度与使用状态</h3><span>当前快照</span></div><dl id="up-detail-state" class="up-detail-state"></dl></section>
+              </div>
+            </div>
+          </dialog>
+          <dialog id="up-definitions" class="up-definitions" aria-labelledby="up-definitions-title">
+            <header class="up-drawer-heading"><h2 id="up-definitions-title">用户画像统计口径</h2><button id="up-definitions-close" class="icon-button" type="button" title="关闭统计口径" aria-label="关闭画像统计口径"><i data-lucide="x"></i></button></header>
+            <dl class="up-definitions-list">
+              <div><dt>范围与覆盖</dt><dd>按站点配置时区统计，起止自然日均包含，排除 ID 1。明细查询受保留周期约束；与站点日汇总核对覆盖，缺失或尚未核验时明确提示。当天数据持续更新。</dd></div>
+              <div><dt>平台与模型</dt><dd>平台取 Sub2API 分组平台，分组缺失时回退账号平台；复合分组取实际账号平台。未知平台独立保留，不根据模型名称推测。平台关联来自当前配置；模型优先使用用户请求模型，旧记录回退日志模型。</dd></div>
+              <div><dt>消费额度</dt><dd>使用实际计费额度 actual_cost，包含所选余额与订阅消费；不等于充值现金、标准价或供应商成本。用户消费占比的分母是所选范围总消费，搜索与分层不改变分母；详情内占比使用该用户的用量。</dd></div>
+              <div><dt>Token 与请求</dt><dd>Token 为输入、输出、缓存读取和缓存创建之和。图片、视频等非 Token 请求仍参与请求数与消费统计。请求数为保留的用量记录数，不表示成功率。</dd></div>
+              <div><dt>高消费与多平台</dt><dd>高消费为当前范围按消费排序前 20% 的活跃用户，人数向上取整且排除零消费。多平台指在至少两个已识别平台产生请求；平台筛选后重新计算。消费集中度按前 20%、累计至 50%、剩余用户分组。</dd></div>
+              <div><dt>活跃下降</dt><dd>固定观察最近 14 天：最近 7 天比前 7 天请求下降至少 50%，且前 7 天不少于 100 次；包含今天，遵循平台和计费筛选。所选历史范围不改变状态。关注列表可包含所选范围内已无请求的用户。</dd></div>
+              <div><dt>余额预计可用天数</dt><dd>当前可用余额 / 最近 7 天日均余额计费消费，消费涵盖该用户所有平台，不随平台或订阅筛选缩小。支持混合计费；订阅消费不扣入估算。近 14 天覆盖未核验或近 7 天无余额消费时不估算，少于 3 天列为低余额。</dd></div>
+              <div><dt>搜索、导出与快照</dt><dd>默认列出所选范围内产生请求的用户；搜索匹配名称、邮箱或精确 ID。CSV 导出当前筛选的全部用户，最多 50,000 人，超限须缩小范围。身份、余额与状态为查询时的当前快照，已删除或缺失用户保留独立 ID。</dd></div>
+            </dl>
+          </dialog>
         </section>
 
         <section id="view-finance" class="view" aria-labelledby="page-title">

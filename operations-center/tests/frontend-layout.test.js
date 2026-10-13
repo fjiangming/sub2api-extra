@@ -12,7 +12,7 @@ const styles = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'
 test('primary modules use an accessible top tab bar', () => {
   assert.match(html, /<header class="module-header">/);
   assert.match(html, /<nav id="main-nav" class="module-tabs"[^>]*role="tablist">/);
-  assert.equal((html.match(/class="module-tab(?: active)?"/g) || []).length, 9);
+  assert.equal((html.match(/class="module-tab(?: active)?"/g) || []).length, 10);
   assert.doesNotMatch(html, /class="sidebar"|id="mobile-menu"/);
 });
 

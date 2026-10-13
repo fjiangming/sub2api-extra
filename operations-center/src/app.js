@@ -136,7 +136,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, costAnalysis, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, costAnalysis, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -267,6 +267,16 @@ function createApp({ config, database, auth, inspector, metrics, costAnalysis, s
   api.get('/metrics/usage', asyncRoute(async (req, res) => res.json(await metrics.getUsage(req.query))));
   api.get('/metrics/usage/dimensions', asyncRoute(async (req, res) => res.json(await metrics.getUsageDimensions(req.query))));
   api.get('/metrics/users', asyncRoute(async (req, res) => res.json(await metrics.getUsers(req.query))));
+  api.get('/user-profiles/options', asyncRoute(async (_req, res) => res.json(await profiles.getOptions())));
+  api.get('/user-profiles', asyncRoute(async (req, res) => res.json(await profiles.getReport(req.query))));
+  api.get('/user-profiles/users', asyncRoute(async (req, res) => res.json(await profiles.getUsers(req.query))));
+  api.get('/user-profiles/export', asyncRoute(async (req, res) => {
+    const result = await profiles.exportUsers(req.query);
+    res.attachment(result.filename).type('text/csv; charset=utf-8').send(result.csv);
+  }));
+  api.get('/user-profiles/users/:userId', asyncRoute(async (req, res) => {
+    res.json(await profiles.getUser(req.params.userId, req.query));
+  }));
   api.get('/metrics/finance', asyncRoute(async (req, res) => res.json(await metrics.getFinance(req.query))));
   api.get('/cost-analysis', asyncRoute(async (req, res) => res.json(await costAnalysis.getReport(req.query))));
   api.get('/cost-analysis/automatic-income/users', asyncRoute(async (req, res) => {

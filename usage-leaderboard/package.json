@@ -1,0 +1,24 @@
+{
+  "name": "sub2api-usage-leaderboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Read-only, memory-cached user usage leaderboard for Sub2API",
+  "main": "src/server.js",
+  "engines": { "node": ">=22.18.0" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "dev": "node --env-file-if-exists=.env --watch src/server.js",
+    "preview": "node scripts/preview.js",
+    "test": "node --test --test-concurrency=1 tests/*.test.js",
+    "check": "node scripts/check.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "helmet": "^8.1.0",
+    "pg": "^8.16.3",
+    "zod": "^4.1.11"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.3.14"
+  }
+}

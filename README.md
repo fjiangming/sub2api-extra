@@ -12,6 +12,7 @@ Sub2API 的可插拔扩展服务集合。每个功能作为独立模块运行，
 | **降智检测** | `ghcr.io/fjiangming/sub2api-extra:degradation-detector-latest` | `9873` | [README](degradation-detector/README.md) |
 | **支付宝自动充值中心** | `ghcr.io/fjiangming/sub2api-extra:recharge-center-latest` | `9874` | [README](recharge-center/README.md) |
 | **视频适配与资金结算** | 本地构建；CI 发布标签 `video-adapter-latest` | `9875` | [README](video-adapter/README.md) |
+| **用户用量排行** | 本地构建；CI 发布标签 `usage-leaderboard-latest` | `9876` | [README](usage-leaderboard/README.md) |
 
 > 💡 后续新增的功能模块会持续补充到此表中。
 
@@ -21,7 +22,7 @@ Sub2API 的可插拔扩展服务集合。每个功能作为独立模块运行，
 
 ## 🚀 快速开始
 
-> **前置要求**：Docker Compose **≥ 2.20.0**（模块化编排使用了 `include` 指令）。
+> **前置要求**：Docker Compose **≥ 2.24.0**（模块化编排使用 `include`，子服务的环境文件使用 `required` 配置）。
 
 ### 1. 创建部署目录
 
@@ -43,14 +44,20 @@ sub2api-extra/
 ├── degradation-detector/
 │   ├── compose.yaml
 │   └── .env
-└── recharge-center/
+├── recharge-center/
+│   ├── compose.yaml
+│   ├── .env
+│   └── secrets/                  # 人工码图片或账务模式 RSA 密钥，只读挂载
+├── video-adapter/
+│   ├── compose.yaml
+│   └── .env
+└── usage-leaderboard/
     ├── compose.yaml
-    ├── .env
-    └── secrets/                  # 人工码图片或账务模式 RSA 密钥，只读挂载
+    └── .env                      # 只读数据库与主站地址，不需要数据目录
 ```
 
 ```bash
-mkdir -p sub2api-extra/account-manager sub2api-extra/provider-monitor sub2api-extra/operations-center sub2api-extra/degradation-detector sub2api-extra/recharge-center/secrets
+mkdir -p sub2api-extra/account-manager sub2api-extra/provider-monitor sub2api-extra/operations-center sub2api-extra/degradation-detector sub2api-extra/recharge-center/secrets sub2api-extra/video-adapter sub2api-extra/usage-leaderboard
 cd sub2api-extra
 ```
 
@@ -67,6 +74,8 @@ include:
   - ./operations-center/compose.yaml
   - ./degradation-detector/compose.yaml
   - ./recharge-center/compose.yaml
+  - ./video-adapter/compose.yaml
+  - ./usage-leaderboard/compose.yaml
 ```
 
 #### `compose.services.env`（选择要启用的服务）
@@ -77,6 +86,20 @@ COMPOSE_PROFILES=account-manager,provider-monitor,operations-center,degradation-
 ```
 
 > 只部署其中一个模块时，保留对应名称即可，例如 `COMPOSE_PROFILES=provider-monitor`。
+
+### 用户用量排行
+
+`usage-leaderboard` 已按确认的页面 Demo 实现为独立子服务，展示 Top 10、个人排名、近 7 天趋势和常用模型。只读查询 Sub2API 现有 PostgreSQL，排行缓存和登录会话只放在有上限的内存中，不建立新数据库、不挂载数据卷。页面跟随系统主题。
+
+首次部署按[排行服务文档](usage-leaderboard/README.md)配置只读数据库连接、主站地址和用户自定义菜单，然后从源码构建：
+
+```bash
+cp usage-leaderboard/.env.example usage-leaderboard/.env
+# 编辑 usage-leaderboard/.env 后执行；不会改动 compose.services.env 的已有启用项。
+docker compose --env-file compose.services.env --profile usage-leaderboard up -d --build usage-leaderboard
+```
+
+该模块已加入根 Compose 和镜像 CI。镜像须待流水线发布后才能直接拉取；累计榜仅累计主站现存用量记录，已清理的历史明细不计入。
 
 #### `account-manager/compose.yaml`
 

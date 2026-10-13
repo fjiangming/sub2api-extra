@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f9f8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#171c19" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
+  <title>用量排行榜</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./styles.css?v=2">
+  <script src="./assets/lucide.min.js" defer></script>
+  <script src="./app.js?v=2" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳至榜单</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <nav class="navigation" aria-label="页面导航">
+        <a class="nav-link active" href="#leaderboard" aria-current="page"><i data-lucide="chart-no-axes-column-increasing"></i>用量排行</a>
+        <a class="nav-link" href="#my-usage"><i data-lucide="activity"></i>我的用量</a>
+      </nav>
+      <div class="header-end">
+        <span class="preview-label" id="preview-label" hidden>示例数据</span>
+        <a class="signed-in" id="signed-in" href="#my-usage" aria-label="查看个人用量" hidden><img id="header-avatar" src="./assets/sea.jpg" alt="" width="30" height="30"><span id="header-name"></span></a>
+      </div>
+    </div>
+  </header>
+
+  <main class="page" id="main">
+    <section class="page-heading" aria-labelledby="page-title">
+      <div>
+        <div class="eyebrow"><span></span>COMMUNITY LEADERBOARD</div>
+        <h1 id="page-title">用量排行榜<span class="heading-dot">.</span></h1>
+        <p>每一份热爱，都有回响。<span class="copy-divider">/</span>与每一位创造者，一起向前。</p>
+      </div>
+      <button class="text-button rules-button" type="button" id="rules-button"><i data-lucide="info"></i>榜单规则<i class="small-icon" data-lucide="arrow-up-right"></i></button>
+    </section>
+
+    <section class="toolbar" aria-label="榜单筛选">
+      <div class="period-control" role="group" aria-label="统计周期">
+        <button type="button" data-period="today" aria-pressed="false">今日</button>
+        <button type="button" data-period="week" aria-pressed="false">本周</button>
+        <button type="button" data-period="month" aria-pressed="true">本月</button>
+        <button type="button" data-period="all" aria-pressed="false">累计</button>
+      </div>
+      <div class="toolbar-end">
+        <span class="date-range"><i data-lucide="calendar-days"></i><span id="date-range">—</span></span>
+        <label class="metric-select"><i data-lucide="sliders-horizontal"></i><select id="metric-select" aria-label="排名依据"><option value="tokens">Token 用量</option><option value="requests">调用次数</option></select><i data-lucide="chevron-down"></i></label>
+      </div>
+    </section>
+
+    <div class="page-status" id="page-status" role="status" aria-live="polite"><i data-lucide="loader-circle"></i><span id="status-message">正在获取用量排行</span><button type="button" class="text-button" id="retry-button" hidden><i data-lucide="refresh-cw"></i>重新加载</button><a class="text-button" id="login-link" target="_blank" rel="noopener noreferrer" hidden><i data-lucide="log-in"></i>前往登录</a></div>
+
+    <div id="usage-content" hidden>
+    <section class="station-stats" aria-label="全站用量概览">
+      <div class="station-stat">
+        <div><span class="stat-label">全站 Token 用量</span><div class="stat-number"><strong id="total-tokens">—</strong><span id="total-tokens-unit"></span><span class="stat-delta" id="total-tokens-delta" hidden></span></div></div>
+        <span class="stat-icon green"><i data-lucide="zap"></i></span>
+      </div>
+      <div class="station-stat">
+        <div><span class="stat-label">活跃创造者</span><div class="stat-number"><strong id="active-users">—</strong><span class="stat-unit">位</span><span class="stat-delta" id="active-users-delta" hidden></span></div></div>
+        <span class="stat-icon blue"><i data-lucide="users-round"></i></span>
+      </div>
+      <div class="station-stat">
+        <div><span class="stat-label">API 调用次数</span><div class="stat-number"><strong id="total-requests">—</strong><span class="stat-unit">次</span><span class="stat-delta" id="total-requests-delta" hidden></span></div></div>
+        <span class="stat-icon peach"><i data-lucide="radio"></i></span>
+      </div>
+    </section>
+
+    <div class="workspace">
+      <section class="leaderboard" id="leaderboard" aria-labelledby="leaderboard-title">
+        <div class="section-heading">
+          <div class="section-title"><h2 id="leaderboard-title">用量之星</h2><span class="top-label">TOP 10</span></div>
+          <span class="section-note">每一次探索，都值得被看见</span>
+        </div>
+        <div class="podium" id="podium" aria-label="用量前三名"></div>
+
+        <div class="ranking-heading">
+          <div><h3>完整榜单</h3><span id="ranking-period">本月排名</span></div>
+          <div class="update-status"><span class="live-dot"></span><span id="updated-at"></span><button class="icon-button small" id="refresh-button" type="button" aria-label="刷新榜单" data-tooltip="刷新榜单"><i data-lucide="refresh-cw"></i></button></div>
+        </div>
+        <div class="ranking-table-wrap">
+          <table class="ranking-table">
+            <caption class="sr-only" id="table-caption">本月按 Token 用量排序的前十位用户</caption>
+            <thead><tr><th scope="col" class="rank-column">排名</th><th scope="col">创造者</th><th scope="col" class="number-column" id="tokens-heading">Token 用量 <i data-lucide="arrow-down"></i></th><th scope="col" class="number-column secondary-column" id="requests-heading">调用次数</th><th scope="col" class="change-column">变动</th><th scope="col" class="action-column"><span class="sr-only">查看详情</span></th></tr></thead>
+            <tbody id="ranking-body"></tbody>
+          </table>
+        </div>
+        <div class="empty-ranking" id="empty-ranking" hidden><i data-lucide="sprout"></i><h3>期待第一份创造</h3><p>这个周期还没有用量记录</p></div>
+        <div class="table-footnote"><span><i data-lucide="shield-check"></i><span id="privacy-note">仅展示脱敏邮箱和汇总用量</span></span></div>
+        <p class="coverage-note" id="coverage-note"></p>
+      </section>
+
+      <aside class="personal-sidebar" id="my-usage" aria-labelledby="personal-title">
+        <section class="personal-section">
+          <div class="sidebar-heading"><h2 id="personal-title">我的排名</h2><span class="period-badge" id="personal-period">本月</span></div>
+          <div class="personal-identity"><img id="personal-avatar" src="./assets/sea.jpg" alt="" width="42" height="42"><div><strong id="personal-name"></strong><span>保持热爱，持续创造</span></div><span class="you-label">你</span></div>
+          <div class="personal-rank"><strong id="my-rank">—</strong><div><span id="my-percentile"></span><span class="rank-change" id="my-change"></span></div></div>
+          <div class="personal-metrics"><div><span id="my-primary-label">Token 用量</span><strong id="my-primary-value">—</strong></div><div><span id="my-secondary-label">调用次数</span><strong id="my-secondary-value">—</strong></div></div>
+          <div class="next-rank"><div><span id="next-rank-label"></span><strong id="next-rank-gap"></strong></div><div class="next-rank-track"><span id="next-rank-progress"></span></div><p id="next-rank-copy"></p></div>
+          <button class="locate-button" type="button" id="locate-me"><i data-lucide="locate-fixed"></i>找到我的位置<i data-lucide="arrow-right"></i></button>
+        </section>
+
+        <section class="trend-section" aria-labelledby="trend-title">
+          <div class="sidebar-heading"><h2 id="trend-title">我的用量趋势</h2><span class="subtle-label">近 7 天</span></div>
+          <div class="trend-total"><strong id="weekly-total">—</strong><span class="stat-delta" id="trend-delta" hidden></span></div>
+          <div class="usage-chart" id="usage-chart" role="img" aria-label="近七天每日 Token 用量"></div>
+          <div class="chart-labels" id="chart-labels" aria-hidden="true"></div>
+        </section>
+
+        <section class="models-section" aria-labelledby="models-title">
+          <div class="sidebar-heading"><h2 id="models-title">我的常用模型</h2><span class="subtle-label" id="model-basis"></span></div>
+          <div class="model-distribution" id="model-distribution" role="img"></div>
+          <ul class="model-legend" id="model-legend"></ul>
+          <p class="model-empty subtle-label" id="model-empty" hidden>本期还没有模型用量</p>
+        </section>
+      </aside>
+    </div>
+    </div>
+
+  </main>
+
+  <dialog class="dialog" id="rules-dialog" aria-labelledby="rules-title">
+    <div class="dialog-header"><span class="dialog-symbol"><i data-lucide="trophy"></i></span><button class="icon-button" type="button" data-close-dialog aria-label="关闭榜单规则" data-tooltip="关闭"><i data-lucide="x"></i></button></div>
+    <h2 id="rules-title">每一份创造，都公平计量</h2>
+    <p class="dialog-intro">用量排行榜 · 榜单规则</p>
+    <dl class="rules-list"><div><dt><i data-lucide="calendar-days"></i>统计周期</dt><dd id="rules-timezone">今日从 00:00、本周从周一、本月从 1 日开始。</dd></div><div><dt><i data-lucide="chart-no-axes-column-increasing"></i>排名依据</dt><dd>Token 包含输入、输出、缓存创建和缓存读取，与主站统计一致。调用次数按已记录的用量请求计数。同值并列排名，最多展示 10 位用户。</dd></div><div><dt><i data-lucide="arrow-up-down"></i>排名变动</dt><dd>比较上日、上周或上月截至相同进度的排名；上月天数不足时截至月末。“新”表示上期未进入前十。累计榜和缺少上期记录时不显示变动。</dd></div><div><dt><i data-lucide="shield-check"></i>公开信息</dt><dd id="rules-privacy">仅展示脱敏的注册邮箱和汇总用量，不展示完整邮箱、余额、密钥或逐笔请求。邮箱不可用时使用匿名名称。</dd></div><div><dt><i data-lucide="users-round"></i>参与范围</dt><dd id="rules-participants"></dd></div></dl>
+    <p class="dialog-note" id="rules-retention">所有周期均基于主站现存用量记录。累计不代表已经清理的历史数据；主站清理记录后，相关统计会相应变化。</p>
+    <button class="primary-button" type="button" data-close-dialog>了解了</button>
+  </dialog>
+
+  <dialog class="dialog user-dialog" id="user-dialog" aria-labelledby="user-dialog-title">
+    <div class="dialog-header"><span class="subtle-label" id="detail-period">本月用量</span><button class="icon-button" type="button" data-close-dialog aria-label="关闭用量详情" data-tooltip="关闭"><i data-lucide="x"></i></button></div>
+    <div class="detail-identity"><img id="detail-avatar" src="./assets/mountain.jpg" alt="" width="64" height="64"><div><h2 id="user-dialog-title"></h2><p id="detail-rank"></p></div></div>
+    <dl class="detail-stats" id="detail-stats"></dl>
+    <div class="detail-model"><span>统计范围</span><strong id="detail-range"></strong></div>
+    <button class="primary-button" type="button" data-close-dialog>返回榜单</button>
+  </dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden><i data-lucide="circle-check"></i><span></span></div>
+</body>
+</html>

@@ -10,6 +10,7 @@ const { SchemaInspector } = require('./schema-inspector');
 const { Sub2ApiClient } = require('./sub2api-client');
 const { ProviderMonitorClient } = require('./provider-monitor-client');
 const { MetricsService } = require('./services/metrics-service');
+const { UserProfilesService } = require('./services/user-profiles-service');
 const { CostAnalysisService } = require('./services/cost-analysis-service');
 const { StorageService } = require('./services/storage-service');
 const { RetentionService } = require('./services/retention-service');
@@ -32,6 +33,7 @@ async function main() {
   });
   const inspector = new SchemaInspector(database.read);
   const metrics = new MetricsService(database.read, inspector, config);
+  const profiles = new UserProfilesService(database.read, inspector, config);
   const costAnalysis = new CostAnalysisService({
     pool: database.read,
     inspector,
@@ -60,7 +62,7 @@ async function main() {
     sub2api
   });
   const app = createApp({
-    config, database, auth, inspector, metrics, costAnalysis, storage, retention, scheduler, sub2api, settings
+    config, database, auth, inspector, metrics, profiles, costAnalysis, storage, retention, scheduler, sub2api, settings
   });
   const server = http.createServer(app);
   server.requestTimeout = 120000;

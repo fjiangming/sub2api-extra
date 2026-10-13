@@ -9,3 +9,4 @@ include:
   - ./degradation-detector/compose.yaml
   - ./recharge-center/compose.yaml
   - ./video-adapter/compose.yaml
+  - ./usage-leaderboard/compose.yaml

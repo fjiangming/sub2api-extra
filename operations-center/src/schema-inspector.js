@@ -14,6 +14,8 @@ const REQUIRED_TABLES = [
 ];
 
 const OPTIONAL_TABLES = [
+  'groups',
+  'accounts',
   'user_subscriptions',
   'usage_group_daily_rollups',
   'usage_group_rollup_state',

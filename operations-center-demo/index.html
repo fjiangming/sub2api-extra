@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>用户画像 · Sub2API 运营中心</title>
+  <link rel="icon" href="assets/sub2api.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+  <script src="assets/echarts.min.js" defer></script>
+  <script src="assets/lucide.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="module-header">
+    <a class="brand" href="index.html" aria-label="Sub2API 运营中心用户画像">
+      <span class="brand-mark"><i data-lucide="chart-no-axes-combined" aria-hidden="true"></i></span>
+      <span><strong>Sub2API</strong><small>运营中心</small></span>
+    </a>
+    <nav class="module-tabs" aria-label="运营中心导航">
+      <span class="module-tab"><i data-lucide="layout-dashboard" aria-hidden="true"></i>运营概览</span>
+      <span class="module-tab"><i data-lucide="activity" aria-hidden="true"></i>用量分析</span>
+      <span class="module-tab"><i data-lucide="users" aria-hidden="true"></i>用户分析</span>
+      <a class="module-tab active" href="#profiles" aria-current="page"><i data-lucide="contact-round" aria-hidden="true"></i>用户画像<span class="new-dot" aria-hidden="true"></span></a>
+      <span class="module-tab">收款与入账</span>
+      <span class="module-tab">成本分析</span>
+      <span class="module-tab">存储容量</span>
+      <span class="module-tab nav-secondary">数据清理</span>
+      <span class="module-tab nav-secondary">维护状态</span>
+      <span class="module-tab nav-secondary">系统设置</span>
+    </nav>
+    <div class="header-account"><i data-lucide="circle-user-round" aria-hidden="true"></i><span>管理员</span></div>
+  </header>
+
+  <main id="profiles" class="workspace">
+    <header class="page-heading">
+      <div>
+        <div class="eyebrow">运营中心 <i data-lucide="chevron-right" aria-hidden="true"></i> 用户洞察</div>
+        <div class="title-row"><h1>用户画像</h1><span class="demo-badge"><span></span>设计预览 · 模拟数据</span></div>
+        <p id="range-summary">2026.09.14 — 2026.10.13 · 近 30 天 · Asia/Shanghai</p>
+      </div>
+      <div class="heading-actions">
+        <button id="definitions-open" class="button quiet" type="button"><i data-lucide="info" aria-hidden="true"></i>统计口径</button>
+        <button id="export-button" class="button" type="button"><i data-lucide="download" aria-hidden="true"></i>导出画像</button>
+      </div>
+    </header>
+
+    <form id="range-form" class="filter-toolbar">
+      <div class="date-controls">
+        <i data-lucide="calendar-days" aria-hidden="true"></i>
+        <input id="start-date" aria-label="开始日期" type="date" value="2026-09-14" min="2026-09-14" max="2026-10-13" required>
+        <span class="date-separator">至</span>
+        <input id="end-date" aria-label="结束日期" type="date" value="2026-10-13" min="2026-09-14" max="2026-10-13" required>
+      </div>
+      <div class="segmented date-presets" role="group" aria-label="日期范围">
+        <button type="button" data-days="7" aria-pressed="false">近 7 天</button>
+        <button type="button" data-days="30" aria-pressed="true">近 30 天</button>
+      </div>
+      <span class="toolbar-divider" aria-hidden="true"></span>
+      <label class="select-label"><span>计费</span><select id="plan-filter" aria-label="计费类型"><option value="all">全部计费类型</option><option value="balance">按量付费</option><option value="subscription">订阅用户</option></select></label>
+      <label class="select-label"><span>平台</span><select id="platform-filter" aria-label="平台筛选"><option value="all">全部平台</option><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option><option value="google">Google</option><option value="other">其他平台</option></select></label>
+      <button class="button apply-button" type="submit"><i data-lucide="search" aria-hidden="true"></i>查询</button>
+      <span class="coverage"><span class="status-dot"></span>近 30 天明细完整</span>
+      <p id="range-error" class="form-error" role="alert" hidden></p>
+    </form>
+
+    <section id="summary-metrics" class="metric-grid" aria-label="用户画像概览"></section>
+
+    <section class="analysis-section preference-section" aria-labelledby="preference-title">
+      <header class="section-heading">
+        <div><h2 id="preference-title">平台与模型偏好</h2><p>当前统计范围内的使用构成</p></div>
+        <div class="segmented metric-modes" role="group" aria-label="占比统计口径">
+          <button type="button" data-metric="requests" aria-pressed="true">请求数</button>
+          <button type="button" data-metric="tokens" aria-pressed="false">Token</button>
+          <button type="button" data-metric="cost" aria-pressed="false">消费额度</button>
+        </div>
+      </header>
+      <div class="preference-grid">
+        <div class="platform-analysis">
+          <div class="subheading"><h3>平台分布</h3><span id="platform-count" class="muted"></span></div>
+          <div class="platform-layout">
+            <div class="donut-wrap"><div id="platform-chart" class="platform-chart" role="img" aria-label="各平台请求占比分布"></div><div class="donut-center" aria-hidden="true"><span id="donut-label">总请求</span><strong id="donut-value"></strong><span id="donut-unit"></span></div></div>
+            <div id="platform-legend" class="platform-legend"></div>
+          </div>
+        </div>
+        <div class="model-analysis">
+          <div class="subheading"><h3>模型偏好</h3><span class="muted">Top 5 + 其他</span></div>
+          <div id="model-bars" class="model-bars"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="insight-section" aria-label="消费集中度与运营关注">
+      <div class="concentration-block">
+        <div class="subheading"><h2>消费集中度</h2><span class="tiny-caption">按用户消费额度排序</span></div>
+        <div class="concentration-intro"><strong id="concentration-value"></strong><span id="concentration-description"></span></div>
+        <div id="concentration-bar" class="concentration-bar" role="img"></div>
+        <div id="concentration-legend" class="concentration-legend"></div>
+      </div>
+      <div class="attention-block">
+        <div class="subheading"><h2>运营关注</h2><span class="tiny-caption">截至 10.13 · 最近 7 天</span></div>
+        <div class="attention-items">
+          <button class="attention-item" id="attention-decline" type="button"><span class="attention-icon amber"><i data-lucide="trending-down" aria-hidden="true"></i></span><span class="attention-text"><strong>活跃下降</strong><small>请求数较前 7 天下降 ≥ 50%</small></span><strong id="decline-count" class="attention-count"></strong><i data-lucide="chevron-right" aria-hidden="true"></i></button>
+          <button class="attention-item" id="attention-balance" type="button"><span class="attention-icon rose"><i data-lucide="wallet" aria-hidden="true"></i></span><span class="attention-text"><strong>低余额用户</strong><small>按最近 7 天余额消费估算 &lt; 3 天</small></span><strong id="balance-count" class="attention-count"></strong><i data-lucide="chevron-right" aria-hidden="true"></i></button>
+        </div>
+      </div>
+    </section>
+
+    <section class="users-section" aria-labelledby="user-list-title">
+      <header class="section-heading user-list-heading">
+        <div class="list-title"><h2 id="user-list-title">用户画像明细</h2><span id="user-count" class="count-badge"></span></div>
+        <div class="table-actions">
+          <label class="search-field"><i data-lucide="search" aria-hidden="true"></i><input id="user-search" type="search" placeholder="搜索用户、邮箱或 ID" aria-label="搜索用户、邮箱或 ID"></label>
+          <select id="sort-select" aria-label="用户排序"><option value="cost">消费额度从高到低</option><option value="requests">请求数从高到低</option><option value="tokens">Token 从高到低</option><option value="days">活跃天数从高到低</option></select>
+        </div>
+      </header>
+      <div class="user-segment-row">
+        <div class="segment-tabs" role="group" aria-label="用户画像筛选">
+          <button type="button" data-segment="all" aria-pressed="true">全部用户</button>
+          <button type="button" data-segment="high" aria-pressed="false"><i data-lucide="gem" aria-hidden="true"></i>高消费</button>
+          <button type="button" data-segment="multi" aria-pressed="false"><i data-lucide="network" aria-hidden="true"></i>多平台</button>
+          <button type="button" data-segment="decline" aria-pressed="false">活跃下降</button>
+          <button type="button" data-segment="balance" aria-pressed="false">低余额</button>
+        </div>
+        <span id="table-denominator" class="tiny-caption">消费占比以当前统计范围总消费为分母</span>
+      </div>
+      <div class="table-wrap">
+        <table class="user-table">
+          <thead><tr><th class="rank-cell">#</th><th>用户</th><th id="platform-table-heading">平台偏好 · 请求占比</th><th class="numeric">消费额度</th><th class="share-col">消费占比</th><th class="numeric">请求数</th><th class="numeric">活跃天数</th><th>画像标签</th><th class="action-cell"><span class="sr-only">用户详情</span></th></tr></thead>
+          <tbody id="user-rows"></tbody>
+        </table>
+      </div>
+      <div id="empty-state" class="empty-state" hidden><i data-lucide="search-x" aria-hidden="true"></i><h3>没有符合条件的用户</h3><p>当前范围内无匹配的使用记录</p><button id="clear-table-filters" class="button" type="button"><i data-lucide="rotate-ccw" aria-hidden="true"></i>清除画像筛选</button></div>
+      <footer class="table-footer"><span id="pagination-summary" aria-live="polite"></span><div class="pagination"><label><span class="sr-only">每页条数</span><select id="page-size" aria-label="每页条数"><option value="8">8 条 / 页</option><option value="16">16 条 / 页</option><option value="24">24 条 / 页</option></select></label><button id="previous-page" class="icon-button" aria-label="上一页" type="button"><i data-lucide="chevron-left" aria-hidden="true"></i></button><span id="page-number"></span><button id="next-page" class="icon-button" aria-label="下一页" type="button"><i data-lucide="chevron-right" aria-hidden="true"></i></button></div></footer>
+    </section>
+    <footer class="page-footer"><span><span class="status-dot"></span>模拟数据快照 · 2026.10.13</span><span>Asia/Shanghai <span class="footer-separator">/</span> 排除 ID 1 管理员 <span class="footer-separator">/</span> 消费单位：额度</span></footer>
+  </main>
+
+  <dialog id="profile-dialog" class="profile-dialog" aria-labelledby="profile-name">
+    <header class="drawer-heading"><span>用户画像</span><button id="profile-close" class="icon-button" type="button" aria-label="关闭用户画像" title="关闭"><i data-lucide="x" aria-hidden="true"></i></button></header>
+    <div class="drawer-content">
+      <div id="profile-identity" class="profile-identity"></div>
+      <p id="profile-range" class="profile-range"></p>
+      <div id="profile-metrics" class="profile-metrics"></div>
+      <div class="detail-tabs" role="tablist" aria-label="用户详情维度"><button id="preference-tab" class="active" type="button" role="tab" aria-selected="true" aria-controls="preference-panel">使用偏好</button><button id="activity-tab" type="button" role="tab" aria-selected="false" aria-controls="activity-panel">活跃与额度</button></div>
+      <div id="preference-panel" role="tabpanel" aria-labelledby="preference-tab">
+        <div class="detail-metric-toolbar"><span class="tiny-caption">占比口径</span><div class="segmented" role="group" aria-label="单用户占比口径"><button type="button" data-detail-metric="requests" aria-pressed="true">请求数</button><button type="button" data-detail-metric="tokens" aria-pressed="false">Token</button><button type="button" data-detail-metric="cost" aria-pressed="false">消费额度</button></div></div>
+        <section class="drawer-section"><div class="subheading"><h3>平台使用构成</h3><span id="detail-metric-name" class="tiny-caption"></span></div><div id="detail-platform-bar" class="detail-platform-bar"></div><div id="detail-platform-legend" class="detail-platform-legend"></div></section>
+        <section class="drawer-section"><div class="subheading"><h3>模型明细</h3><span class="tiny-caption">占比以该用户用量为分母</span></div><div class="table-wrap"><table class="model-table"><thead><tr><th>模型</th><th class="numeric">请求数</th><th class="numeric">消费额度</th><th class="numeric" id="detail-model-share-label">请求占比</th></tr></thead><tbody id="detail-model-rows"></tbody></table></div></section>
+        <section class="drawer-section"><div class="subheading"><h3>Token 构成</h3><span id="detail-token-total" class="tiny-caption"></span></div><div id="detail-tokens" class="token-breakdown"></div></section>
+      </div>
+      <div id="activity-panel" role="tabpanel" aria-labelledby="activity-tab" hidden>
+        <section class="drawer-section"><div class="subheading"><h3>每日消费与请求</h3><span class="tiny-caption">所选日期范围</span></div><div id="detail-trend" class="detail-trend" role="img" aria-label="用户每日消费额度与请求数趋势"></div></section>
+        <section class="drawer-section"><div class="subheading"><h3>活跃日历</h3><span id="calendar-summary" class="tiny-caption"></span></div><div id="detail-calendar" class="activity-calendar"></div><div class="calendar-legend"><span>无请求</span><span class="calendar-swatch level-0"></span><span class="calendar-swatch level-1"></span><span class="calendar-swatch level-2"></span><span class="calendar-swatch level-3"></span><span class="calendar-swatch level-4"></span><span>更多请求</span></div></section>
+        <section class="drawer-section"><div class="subheading"><h3>额度与使用状态</h3><span class="tiny-caption">当前快照 · 截至 10.13</span></div><dl id="detail-state" class="detail-state"></dl></section>
+      </div>
+      <footer class="drawer-footer"><i data-lucide="info" aria-hidden="true"></i>消费额度包含所选范围内的实际计费，不等于充值金额。</footer>
+    </div>
+  </dialog>
+
+  <dialog id="definitions-dialog" class="definitions-dialog" aria-labelledby="definitions-title">
+    <header class="drawer-heading"><h2 id="definitions-title">统计口径</h2><button id="definitions-close" class="icon-button" type="button" aria-label="关闭统计口径" title="关闭"><i data-lucide="x" aria-hidden="true"></i></button></header>
+    <div class="definitions-content">
+      <dl>
+        <div><dt>统计范围</dt><dd>所选自然日，起止日期均包含，时区 Asia/Shanghai。排除 ID 1 管理员。日期、计费类型和平台影响全页；搜索与画像标签只筛选用户明细。</dd></div>
+        <div><dt>平台与模型占比</dt><dd>请求、Token、消费额度分别计算。平台按实际使用分组的平台归类；模型按用户请求的模型归类。未识别平台归入“其他”，不会仅凭模型名称猜测平台。</dd></div>
+        <div><dt>消费额度与消费占比</dt><dd>消费额度为实际计费后的额度，包含按量与订阅；不是充值现金、标准价格或供应商成本。用户消费占比 = 用户消费额度 / 当前统计范围总消费。筛选用户明细不会改变这个分母。</dd></div>
+        <div><dt>Token</dt><dd>输入、输出、缓存读取和缓存创建 Token 之和。非 Token 计量的图片或视频请求仍参与请求与消费统计；Token 占比不能替代它们的使用占比。</dd></div>
+        <div><dt>高消费 / 多平台</dt><dd>高消费指当前范围内按消费排序的前 20% 用户（人数向上取整，不纳入零消费用户）。多平台指当前范围内在两个及以上平台产生请求的用户；平台筛选后按筛选结果重新计算。</dd></div>
+        <div><dt>活跃下降</dt><dd>截至快照日期，最近 7 天请求数比前 7 天下降至少 50%，且前 7 天至少有 100 次请求。使用固定 14 天窗口，画像日期筛选不改变此状态。</dd></div>
+        <div><dt>余额预计可用天数</dt><dd>当前余额 / 最近 7 天日均余额消费。仅对按量付费用户估算，少于 3 天列为低余额；近期无消费与订阅用户不估算。不表示历史余额或订阅剩余额度。</dd></div>
+        <div><dt>历史覆盖</dt><dd>平台、模型与单用户细分依赖请求明细，本方案默认近 30 天。超出明细保留期的画像不能由站点总量反推，缺失数据应显示不可用。</dd></div>
+      </dl>
+    </div>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

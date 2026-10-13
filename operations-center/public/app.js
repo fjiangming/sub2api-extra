@@ -42,6 +42,7 @@ const titles = {
   overview: '运营概览',
   usage: '用量分析',
   users: '用户分析',
+  profiles: '用户画像',
   finance: '收款与入账',
   costs: '成本分析',
   storage: '存储容量',
@@ -231,6 +232,7 @@ function badge(status) {
 }
 
 function showLogin(message = '') {
+  profilesUi.reset();
   if (state.runPoller) clearInterval(state.runPoller);
   state.runPoller = null;
   state.csrfToken = '';
@@ -1514,10 +1516,12 @@ async function navigateAfterAuthentication(initialView) {
 }
 
 async function loadCurrentView(options = {}) {
+  const requestedView = state.currentView;
   const loaders = {
     overview: loadOverview,
     usage: loadUsage,
     users: loadUsers,
+    profiles: () => profilesUi.load(options),
     finance: loadFinance,
     costs: state.costAutomaticIncome.active
       ? (state.costAutomaticIncome.selectedUserKey ? loadAutomaticIncomeRecords : loadAutomaticIncomeUsers)
@@ -1528,9 +1532,11 @@ async function loadCurrentView(options = {}) {
     settings: loadSettings
   };
   try {
-    await loaders[state.currentView]();
+    await loaders[requestedView]();
+    if (requestedView !== state.currentView || !state.user) return;
     if (!['maintenance', 'settings'].includes(state.currentView)) setConnection(true, '数据源正常');
   } catch (error) {
+    if (requestedView !== state.currentView || !state.user) return;
     setConnection(false, '数据源异常');
     setPageMeta(error.message);
     toast(error.message, 'error');
@@ -1541,6 +1547,7 @@ async function loadCurrentView(options = {}) {
 
 function navigate(view) {
   if (!titles[view]) return;
+  if (state.currentView === 'profiles') profilesUi.leave();
   if (state.costAutomaticIncome.active) closeAutomaticIncomeDrilldown({ restoreHeader: false });
   state.currentView = view;
   window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
@@ -1627,7 +1634,7 @@ $('login-form').addEventListener('submit', async (event) => {
       body: JSON.stringify({ username: $('login-username').value, password: $('login-password').value })
     });
     showApp(session);
-    await navigateAfterAuthentication('overview');
+    await navigateAfterAuthentication(location.hash.slice(1));
   } catch (error) {
     $('login-error').textContent = error.message;
     $('login-error').hidden = false;
@@ -1750,6 +1757,11 @@ document.addEventListener('keydown', (event) => {
   nextIndex = (nextIndex + tabs.length) % tabs.length;
   tabs[nextIndex].focus();
   tabs[nextIndex].click();
+});
+
+const profilesUi = window.UserProfilesUi.create({
+  api, escapeHtml, icon, refreshIcons, toast, setPageMeta, setConnection,
+  isActive: () => state.currentView === 'profiles' && Boolean(state.user)
 });
 
 initialize();

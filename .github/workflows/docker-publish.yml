@@ -35,10 +35,28 @@ jobs:
         working-directory: video-adapter
       - run: npm test
         working-directory: video-adapter
+  test-usage-leaderboard:
+    name: Usage leaderboard statistics and authentication tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: usage-leaderboard/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: usage-leaderboard
+      - run: npm run check
+        working-directory: usage-leaderboard
+      - run: npm test
+        working-directory: usage-leaderboard
   build:
     name: Build ${{ matrix.service }}
     runs-on: ubuntu-latest
-    needs: test-video-adapter
+    needs: [test-video-adapter, test-usage-leaderboard]
     strategy:
       fail-fast: false
       matrix:
@@ -61,6 +79,9 @@ jobs:
           - service: video-adapter
             context: ./video-adapter
             tag_prefix: video-adapter-
+          - service: usage-leaderboard
+            context: ./usage-leaderboard
+            tag_prefix: usage-leaderboard-
     permissions:
       contents: read
       packages: write
