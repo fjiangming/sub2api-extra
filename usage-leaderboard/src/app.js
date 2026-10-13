@@ -71,8 +71,7 @@ function createApp({ config, database, inspector, auth, leaderboard }) {
   });
   app.get('/api/auth/config', (_req, res) => res.json({
     sub2apiUrl: config.sub2apiPublicUrl, timezone: config.timezone,
-    includeAdmins: config.includeAdmins,
-    preview: config.preview === true
+    includeAdmins: config.includeAdmins
   }));
   app.post('/api/auth/sso', originCheck, async (req, res) => {
     const header = String(req.get('authorization') || '');

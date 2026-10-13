@@ -49,3 +49,13 @@ Thumbs.db
 
 # Browser captures may contain cookies and authorization tokens
 *.har
+
+# Local design demos, screenshots and manual preview entry points
+/operations-center-demo/
+/usage-leaderboard-demo/
+/merged-images.png
+/operations-center/tests/profile-preview.js
+/usage-leaderboard/scripts/preview.js
+
+# Local exploratory protocol assessment
+/video-adapter/docs/lingsu-protocol-assessment.md

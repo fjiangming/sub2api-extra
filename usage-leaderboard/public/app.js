@@ -307,17 +307,15 @@ async function initialize() {
   try {
     state.config = await api('auth/config');
     $('login-link').href = state.config.sub2apiUrl;
-    $('preview-label').hidden = !state.config.preview;
     $('rules-timezone').textContent = `今日从 00:00、本周从周一、本月从 1 日开始。统计时区：${state.config.timezone}。`;
     $('rules-participants').textContent = `仅统计当前可用的账号，已停用或删除的账号不参与。${state.config.includeAdmins ? '管理员也参与排名。' : '管理员不参与排名。'}`;
-    if (state.config.preview) $('rules-retention').textContent = '本地预览使用独立的内存示例数据，未连接你的站点。';
     if (!state.session) {
       try { state.session = sessionStorage.getItem('usage-leaderboard.session') || ''; } catch {}
     }
     let session;
-    if (upstreamToken || state.config.preview) {
+    if (upstreamToken) {
       saveSession('');
-      session = await api('auth/sso', { method: 'POST', headers: { authorization: `Bearer ${upstreamToken || 'preview'}` }, body: '{}' });
+      session = await api('auth/sso', { method: 'POST', headers: { authorization: `Bearer ${upstreamToken}` }, body: '{}' });
       upstreamToken = '';
     } else session = await api('auth/me');
     saveSession(session.sessionToken);

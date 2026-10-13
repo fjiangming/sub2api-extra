@@ -1,6 +1,6 @@
 # 用户用量排行
 
-面向 Sub2API 用户的独立排行子服务，默认端口 `9876`。页面沿用确认的 Demo：前三名领奖台、Top 10 表格、个人排名、与上一名差距、近 7 天 Token 趋势和常用模型。支持今日、本周、本月、累计，以及 Token / 调用次数排序。用户名称统一使用脱敏的注册邮箱。自动跟随系统主题，无 Logo、主题切换和底部系统名。
+面向 Sub2API 用户的独立排行子服务，默认端口 `9876`。页面包含前三名领奖台、Top 10 表格、个人排名、与上一名差距、近 7 天 Token 趋势和常用模型。支持今日、本周、本月、累计，以及 Token / 调用次数排序。用户名称统一使用脱敏的注册邮箱，页面自动跟随系统主题。
 
 ## 数据与资源
 
@@ -125,22 +125,9 @@ cd usage-leaderboard
 npm ci --ignore-scripts
 npm run check
 npm test
-npm run preview
 ```
 
-预览地址 `http://127.0.0.1:9877/`，仅监听本机。预览使用测试专用的 PGlite 内存 PostgreSQL 和模拟主站身份，页面标注“示例数据”，不会读取 `.env` 或连接真实数据库。PGlite 只属于开发依赖，Docker 生产镜像不安装它，也不包含预览入口或测试数据。
-
-可验证空榜、未入前十、服务故障、未登录和长邮箱（含无效邮箱兜底）：
-
-```bash
-node scripts/preview.js empty
-node scripts/preview.js outside
-node scripts/preview.js unavailable
-node scripts/preview.js signed-out
-node scripts/preview.js long-names
-```
-
-每次启动一个场景；可通过 `USAGE_LEADERBOARD_PREVIEW_PORT` 更换预览端口。真实本地运行使用 `npm start` 并读取 `.env`；HTTP 开发时设置 `NODE_ENV=development` 和 `USAGE_LEADERBOARD_COOKIE_SECURE=false`。
+PGlite 只属于开发依赖，用于测试专用的内存 PostgreSQL；Docker 生产镜像不安装它，也不包含测试数据。本地运行使用 `npm start` 并读取 `.env`；HTTP 开发时设置 `NODE_ENV=development` 和 `USAGE_LEADERBOARD_COOKIE_SECURE=false`。
 
 测试包含临时内存 PostgreSQL 上的实际查询，覆盖四类 Token、Token/次数并列、邮箱脱敏与费用排除、时区/夏令时/周月边界、历史清理、空榜、榜外个人排名、只读事务、缓存上限和身份隔离。没有测试生成的持久数据库文件。
 

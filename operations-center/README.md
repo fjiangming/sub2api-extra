@@ -31,7 +31,7 @@
 
 只读管理员接口：`GET /api/user-profiles/options`、`GET /api/user-profiles`、`GET /api/user-profiles/users`、`GET /api/user-profiles/users/:userId`、`GET /api/user-profiles/export`。复用现有认证、参数校验、TTL 缓存与只读 PostgreSQL 快照；不创建或修改业务表。读取角色需要 `users`、`usage_logs`、`groups`、`accounts`、`usage_dashboard_daily` 和 `usage_dashboard_aggregation_watermark` 的 SELECT 权限，系统设置生成的读取角色已覆盖这些表。
 
-画像 SQL 测试使用开发依赖 PGlite 验证 PostgreSQL 聚合与时区边界，不读取真实数据库。本地界面验证可运行 `node tests/profile-preview.js`，访问 `http://127.0.0.1:9877/#profiles`，使用 `admin / profiles-local-demo`；此入口为独立内存测试夹具，不属于生产启动流程。
+画像 SQL 测试使用开发依赖 PGlite 验证 PostgreSQL 聚合与时区边界，不读取真实数据库。
 
 ## 数据保留结果
 

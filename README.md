@@ -89,7 +89,7 @@ COMPOSE_PROFILES=account-manager,provider-monitor,operations-center,degradation-
 
 ### 用户用量排行
 
-`usage-leaderboard` 已按确认的页面 Demo 实现为独立子服务，展示 Top 10、个人排名、近 7 天趋势和常用模型。只读查询 Sub2API 现有 PostgreSQL，排行缓存和登录会话只放在有上限的内存中，不建立新数据库、不挂载数据卷。页面跟随系统主题。
+`usage-leaderboard` 是独立子服务，展示 Top 10、个人排名、近 7 天趋势和常用模型。只读查询 Sub2API 现有 PostgreSQL，排行缓存和登录会话只放在有上限的内存中，不建立新数据库、不挂载数据卷。页面跟随系统主题。
 
 首次部署按[排行服务文档](usage-leaderboard/README.md)配置只读数据库连接、主站地址和用户自定义菜单，然后从源码构建：
 
