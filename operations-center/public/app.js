@@ -77,6 +77,14 @@ function formatDecimal(value, digits = 4) {
   return new Intl.NumberFormat('zh-CN', { minimumFractionDigits: 0, maximumFractionDigits: digits }).format(number);
 }
 
+function formatTokens(value) {
+  const tokens = Number(value ?? 0);
+  if (!Number.isFinite(tokens)) return 'N/A';
+  if (Math.abs(tokens) >= 1e9) return `${formatDecimal(tokens / 1e9, 2)} B`;
+  if (Math.abs(tokens) >= 1e6) return `${formatDecimal(tokens / 1e6, 2)} M`;
+  return formatInteger(tokens);
+}
+
 function formatMoney(value, currency = '', digits = 2) {
   const amount = formatDecimal(value, digits);
   return currency ? `${amount} ${currency}` : amount;
@@ -316,11 +324,11 @@ async function loadOverview() {
   $('overview-metrics').innerHTML = [
     metricCard('今日用量活跃', formatInteger(overview.activity.dau), `${overview.timezones.usage} 自然日`, 'green'),
     metricCard('本月用量活跃', formatInteger(overview.activity.mau), '自然月去重', 'blue'),
-    metricCard('今日请求', formatInteger(overview.usage.requests_today), `日汇总至 ${formatDateTime(overview.usage.computed_at)}`, 'amber'),
+    metricCard('今日请求', formatInteger(overview.usage.requests_today), overview.usage.metrics_today_complete === false ? '已保留明细 · 不完整' : '不含 ID 1', 'amber'),
     metricCard('本月用户消费', formatDecimal(overview.usage.spend_month, 4), spendMonthMeta, 'red'),
     metricCard('当前可用用户', formatInteger(overview.users.available_users), `本月新增 ${formatInteger(overview.users.new_month)}`, 'green')
   ].join('');
-  $('overview-usage-meta').textContent = `${usage.timezone} · ${usage.range.start} 至 ${usage.range.end}`;
+  $('overview-usage-meta').textContent = `${usage.timezone} · ${usage.range.start} 至 ${usage.range.end} · 不含 ID 1`;
   chart('overview-chart', {
     legend: { top: 2, right: 10, data: ['请求数', '用户消费'] },
     xAxis: { type: 'category', data: usage.trend.map((row) => row.date.slice(5)), axisLabel: { color: '#69716b' } },
@@ -329,18 +337,19 @@ async function loadOverview() {
       { type: 'value', name: '消费', splitLine: { show: false } }
     ],
     series: [
-      lineSeries('请求数', usage.trend.map((row) => row.available === false ? null : row.total_requests), '#176b4d'),
-      lineSeries('用户消费', usage.trend.map((row) => row.available === false ? null : row.actual_cost), '#b05a3c', 1)
+      lineSeries('请求数', usage.trend.map((row) => row.available === false || row.metrics_complete === false ? null : row.total_requests), '#176b4d'),
+      lineSeries('用户消费', usage.trend.map((row) => row.available === false || row.actual_cost_complete === false ? null : row.actual_cost), '#b05a3c', 1)
     ]
   });
-  $('overview-finance-zone').textContent = overview.timezones.finance;
+  $('overview-finance-zone').textContent = `${overview.timezones.finance} · 不含 ID 1`;
   $('overview-payments').innerHTML = overview.payments.length ? overview.payments.map((item) => `
     <div class="compact-row"><div class="grow"><strong>${escapeHtml(item.currency)}</strong><span>${formatInteger(item.orders_month)} 笔成功支付</span></div><strong class="amount">${escapeHtml(formatMoney(item.paid_month, item.currency))}</strong></div>
   `).join('') : '<div class="compact-row"><div class="grow"><strong>本月暂无支付</strong><span>paid_at 口径</span></div></div>';
   const alerts = [];
   if (!overview.coverage.daily_from) alerts.push(alertHtml('warning', '日汇总当前没有可用数据。'));
-  if (overview.usage.spend_month_complete === false) alerts.push(alertHtml('warning', '本月逐请求明细少于日汇总请求数；消费已排除 ID 1，但可能少计已清理的其他用户明细。'));
+  if (overview.usage.spend_month_complete === false) alerts.push(alertHtml('warning', '本月请求与消费不含 ID 1；明细不完整，仅统计已保留的用户用量，可能少计。'));
   if (usage.trend.some((row) => row.available === false)) alerts.push(alertHtml('warning', '所选范围存在无汇总桶日期；它们显示为空缺，不会自动当作 0。'));
+  if (usage.summary.metrics_complete === false) alerts.push(alertHtml('warning', '近 30 天用量不含 ID 1；部分日期的明细不完整，对应请求与消费趋势显示为空缺。'));
   $('overview-alerts').innerHTML = alerts.join('');
   setPageMeta(`更新于 ${formatDateTime(overview.generatedAt)} · 用量 ${overview.timezones.usage} · 资金 ${overview.timezones.finance}`);
   refreshIcons();
@@ -352,22 +361,26 @@ function formRange(formId) {
 }
 
 async function loadUsage() {
-  setPageMeta('日汇总最长 730 天，维度明细最近 30 天');
+  setPageMeta('全部用户指标不含 ID 1 管理员');
   const range = formRange('usage-filter');
   const dimension = $('usage-filter').elements.dimension.value;
   const usage = await api(`/api/metrics/usage?${new URLSearchParams(range)}`);
+  const spendMeta = usage.summary.metrics_complete === false
+    ? '不含 ID 1 · 明细不完整'
+    : '不含 ID 1';
   $('usage-metrics').innerHTML = [
-    metricCard('请求记录数', formatInteger(usage.summary.total_requests), `${usage.range.days} 天`, 'green'),
+    metricCard('请求记录数', formatInteger(usage.summary.total_requests), usage.summary.metrics_complete === false ? '已保留明细 · 不完整' : `${usage.range.days} 天 · 不含 ID 1`, 'green'),
     metricCard('区间活跃用户', formatInteger(usage.summary.active_users), '所选自然日去重', 'green'),
-    metricCard('输入 Token', formatInteger(usage.summary.input_tokens), '不含缓存读取', 'blue'),
-    metricCard('输出 Token', formatInteger(usage.summary.output_tokens), '', 'amber'),
-    metricCard('用户消费', formatDecimal(usage.summary.actual_cost, 4), 'actual_cost', 'red'),
+    metricCard('输入 Token', formatTokens(usage.summary.input_tokens), '不含缓存读取', 'blue'),
+    metricCard('输出 Token', formatTokens(usage.summary.output_tokens), '', 'amber'),
+    metricCard('总 Token', formatTokens(usage.summary.total_tokens), '输入 + 输出', 'blue'),
+    metricCard('用户消费', formatDecimal(usage.summary.actual_cost, 4), spendMeta, 'red'),
     metricCard('标准计价', formatDecimal(usage.summary.total_cost, 4), 'total_cost', 'blue'),
     metricCard('账号成本', formatDecimal(usage.summary.account_cost, 4), 'account_cost', 'amber'),
     metricCard('平均耗时', formatDuration(usage.summary.average_duration_ms), '总耗时 / 请求数', 'green'),
     metricCard('汇总桶', formatInteger(usage.coverage.stored_buckets), `${usage.coverage.available_from || 'N/A'} 起`, 'blue')
   ].join('');
-  $('usage-zone').textContent = `${usage.timezone} 日桶 · ${range.start} 至 ${range.end}`;
+  $('usage-zone').textContent = `${usage.timezone} 日桶 · ${range.start} 至 ${range.end} · 不含 ID 1`;
   $('usage-notices').innerHTML = [
     ...usage.limitations.map((message) => alertHtml('warning', message)),
     ...(usage.trend.some((row) => row.available === false) ? [alertHtml('warning', '空缺日期没有被填成业务零值。')] : [])
@@ -376,28 +389,31 @@ async function loadUsage() {
     legend: { top: 2, right: 10, data: ['请求数', '总 Token', '用户消费'] },
     xAxis: { type: 'category', data: usage.trend.map((row) => row.date), axisLabel: { hideOverlap: true } },
     yAxis: [
-      { type: 'value', name: '请求 / Token', splitLine: { lineStyle: { color: '#edf0eb' } } },
+      { type: 'value', name: '请求 / Token', axisLabel: { formatter: formatTokens }, splitLine: { lineStyle: { color: '#edf0eb' } } },
       { type: 'value', name: '消费', splitLine: { show: false } }
     ],
     series: [
-      lineSeries('请求数', usage.trend.map((row) => row.available === false ? null : row.total_requests), '#176b4d'),
-      lineSeries('总 Token', usage.trend.map((row) => row.available === false ? null : row.input_tokens + row.output_tokens), '#2d5ea8'),
-      lineSeries('用户消费', usage.trend.map((row) => row.available === false ? null : row.actual_cost), '#ae3636', 1)
+      lineSeries('请求数', usage.trend.map((row) => row.available === false || row.metrics_complete === false ? null : row.total_requests), '#176b4d'),
+      {
+        ...lineSeries('总 Token', usage.trend.map((row) => row.available === false || row.metrics_complete === false ? null : row.total_tokens), '#2d5ea8'),
+        tooltip: { valueFormatter: formatTokens }
+      },
+      lineSeries('用户消费', usage.trend.map((row) => row.available === false || row.actual_cost_complete === false ? null : row.actual_cost), '#ae3636', 1)
     ]
   });
   const detailRetentionDays = Number(usage.detailRetentionDays || 30);
   const detailCutoff = addDays(todayString(), -(detailRetentionDays - 1));
   if (usage.range.days > detailRetentionDays || range.start < detailCutoff) {
-    $('usage-dimensions').innerHTML = emptyRow(6, '该范围超出请求明细保证期，维度分布不可恢复');
+    $('usage-dimensions').innerHTML = emptyRow(7, '该范围超出请求明细保证期，维度分布不可恢复');
   } else {
     try {
       const params = new URLSearchParams({ ...range, dimension });
       const details = await api(`/api/metrics/usage/dimensions?${params}`);
       $('usage-dimensions').innerHTML = details.rows.length ? details.rows.map((row) => `
-        <tr><td>${escapeHtml(row.label)}</td><td class="numeric">${formatInteger(row.requests)}</td><td class="numeric">${formatInteger(row.input_tokens)}</td><td class="numeric">${formatInteger(row.output_tokens)}</td><td class="numeric">${formatDecimal(row.actual_cost, 4)}</td><td class="numeric">${formatDuration(row.average_duration_ms)}</td></tr>
-      `).join('') : emptyRow(6);
+        <tr><td>${escapeHtml(row.label)}</td><td class="numeric">${formatInteger(row.requests)}</td><td class="numeric">${formatTokens(row.input_tokens)}</td><td class="numeric">${formatTokens(row.output_tokens)}</td><td class="numeric">${formatTokens(row.total_tokens)}</td><td class="numeric">${formatDecimal(row.actual_cost, 4)}</td><td class="numeric">${formatDuration(row.average_duration_ms)}</td></tr>
+      `).join('') : emptyRow(7);
     } catch (error) {
-      $('usage-dimensions').innerHTML = emptyRow(6, error.message);
+      $('usage-dimensions').innerHTML = emptyRow(7, error.message);
     }
   }
   refreshIcons();
@@ -415,7 +431,7 @@ async function loadUsers() {
     metricCard('当前保留用户', formatInteger(data.summary.retained_users), '未物理删除', 'blue'),
     metricCard('当前可用用户', formatInteger(data.summary.available_users), 'status=active', 'green')
   ].join('');
-  $('users-zone').textContent = `${data.timezone} 自然日 · 缺失活跃桶显示为空`;
+  $('users-zone').textContent = `${data.timezone} 自然日 · 不含 ID 1 · 缺失活跃桶显示为空`;
   chart('users-chart', {
     legend: { top: 2, right: 10, data: ['活跃用户', '新增注册'] },
     xAxis: { type: 'category', data: data.trend.map((row) => row.date), axisLabel: { hideOverlap: true } },
@@ -443,7 +459,7 @@ async function loadFinance() {
   cards.push(metricCard('数据异常项', formatInteger(Object.values(data.anomalies).reduce((sum, value) => sum + Number(value || 0), 0)), '需要人工核对', 'amber'));
   $('finance-metrics').innerHTML = cards.join('') || metricCard('区间实收', '0', '', 'green');
   $('finance-notices').innerHTML = data.caveats.map((message) => alertHtml('info', message)).join('');
-  $('finance-zone').textContent = `${data.timezone} · 退款为系统字段比例估算`;
+  $('finance-zone').textContent = `${data.timezone} · 不含 ID 1 · 退款为系统字段比例估算`;
   const dates = [...new Set([...data.payments.map((row) => row.date), ...data.refunds.map((row) => row.date)])].sort();
   const currencies = [...new Set([...data.payments.map((row) => row.currency), ...data.refunds.map((row) => row.currency)])];
   const series = [];

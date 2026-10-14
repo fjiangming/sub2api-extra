@@ -97,7 +97,8 @@ class MetricsService {
   async getOverview() {
     return this.cached('overview', async () => {
       await this.require(['users', 'usage_logs', 'usage_dashboard_daily', 'usage_dashboard_daily_users', 'payment_orders']);
-      const [users, activity, usage, payments, coverage] = await Promise.all([
+      const today = dateInTimezone(this.config.sub2apiTimezone);
+      const [users, activity, usage, payments] = await Promise.all([
         this.pool.query(`
           SELECT COUNT(*) AS total_users,
                  COUNT(*) FILTER (WHERE deleted_at IS NULL) AS retained_users,
@@ -105,6 +106,7 @@ class MetricsService {
                  COUNT(*) FILTER (WHERE created_at >= date_trunc('day', NOW() AT TIME ZONE $1) AT TIME ZONE $1) AS new_today,
                  COUNT(*) FILTER (WHERE created_at >= date_trunc('month', NOW() AT TIME ZONE $1) AT TIME ZONE $1) AS new_month
           FROM users
+          WHERE id <> 1
         `, [this.config.sub2apiTimezone]),
         this.pool.query(`
           SELECT COUNT(DISTINCT user_id) FILTER (
@@ -124,30 +126,9 @@ class MetricsService {
             date_trunc('month', NOW() AT TIME ZONE $1)::date,
             (NOW() AT TIME ZONE $1)::date - 29
           )
+            AND user_id <> 1
         `, [this.config.sub2apiTimezone]),
-        this.pool.query(`
-          WITH month_detail AS (
-            SELECT COUNT(*) AS detail_requests_month,
-                   COALESCE(SUM(actual_cost) FILTER (WHERE user_id <> 1), 0) AS spend_month
-            FROM usage_logs
-            WHERE created_at >= date_trunc('month', NOW() AT TIME ZONE $1) AT TIME ZONE $1
-              AND created_at < (date_trunc('month', NOW() AT TIME ZONE $1) + INTERVAL '1 month') AT TIME ZONE $1
-          )
-          SELECT COALESCE(SUM(total_requests) FILTER (
-                   WHERE bucket_date = (NOW() AT TIME ZONE $1)::date
-                 ), 0) AS requests_today,
-                 COALESCE(SUM(actual_cost) FILTER (
-                   WHERE bucket_date = (NOW() AT TIME ZONE $1)::date
-                 ), 0) AS spend_today,
-                 COALESCE(SUM(total_requests) FILTER (
-                   WHERE bucket_date >= date_trunc('month', NOW() AT TIME ZONE $1)::date
-                 ), 0) AS requests_month,
-                 (SELECT spend_month FROM month_detail) AS spend_month,
-                 (SELECT detail_requests_month FROM month_detail) AS detail_requests_month,
-                 MAX(computed_at) AS computed_at
-          FROM usage_dashboard_daily
-          WHERE bucket_date >= date_trunc('month', NOW() AT TIME ZONE $1)::date
-        `, [this.config.sub2apiTimezone]),
+        this.getUsage({ start: `${today.slice(0, 7)}-01`, end: today }),
         this.pool.query(`
           SELECT ${CURRENCY_SQL} AS currency,
                  COALESCE(SUM(pay_amount) FILTER (
@@ -162,22 +143,24 @@ class MetricsService {
           FROM payment_orders
           WHERE paid_at IS NOT NULL
             AND paid_at >= date_trunc('month', NOW() AT TIME ZONE $1) AT TIME ZONE $1
+            AND user_id IS DISTINCT FROM 1
           GROUP BY 1
           ORDER BY 1
-        `, [this.config.financeTimezone]),
-        this.pool.query(`
-          SELECT MIN(bucket_date)::text AS daily_from,
-                 MAX(bucket_date)::text AS daily_through,
-                 MAX(computed_at) AS last_computed_at
-          FROM usage_dashboard_daily
-        `)
+        `, [this.config.financeTimezone])
       ]);
-      const usageSummary = numericRow(usage.rows[0], [
-        'requests_today', 'spend_today', 'requests_month', 'spend_month', 'detail_requests_month'
-      ]);
-      usageSummary.spend_month_complete = usageSummary.detail_requests_month >= usageSummary.requests_month;
-      usageSummary.spend_month_excluded_user_id = 1;
-      delete usageSummary.detail_requests_month;
+      const todayUsage = usage.trend.find((row) => row.date === today);
+      const usageSummary = {
+        requests_today: todayUsage?.total_requests ?? 0,
+        spend_today: todayUsage?.actual_cost ?? 0,
+        requests_month: usage.summary.total_requests,
+        spend_month: usage.summary.actual_cost,
+        metrics_today_complete: todayUsage?.metrics_complete === true,
+        metrics_month_complete: usage.summary.metrics_complete,
+        spend_month_complete: usage.summary.actual_cost_complete,
+        excluded_user_id: 1,
+        spend_month_excluded_user_id: 1,
+        computed_at: usage.summary.computed_at
+      };
       return {
         generatedAt: new Date().toISOString(),
         timezones: { usage: this.config.sub2apiTimezone, finance: this.config.financeTimezone },
@@ -185,7 +168,11 @@ class MetricsService {
         activity: numericRow(activity.rows[0], ['dau', 'mau', 'active_7d', 'active_30d']),
         usage: usageSummary,
         payments: payments.rows.map((row) => numericRow(row, ['paid_today', 'paid_month', 'orders_month'])),
-        coverage: coverage.rows[0]
+        coverage: {
+          daily_from: usage.coverage.available_from,
+          daily_through: usage.coverage.available_through,
+          last_computed_at: usage.coverage.last_computed_at
+        }
       };
     });
   }
@@ -196,63 +183,96 @@ class MetricsService {
       today: dateInTimezone(this.config.sub2apiTimezone)
     });
     return this.cached(`usage:${range.start}:${range.end}`, async () => {
-      await this.require(['usage_dashboard_daily', 'usage_dashboard_daily_users']);
-      const [daily, summary, coverage] = await Promise.all([
+      await this.require(['usage_dashboard_daily', 'usage_dashboard_daily_users', 'usage_logs']);
+      const [daily, activity, coverage, details] = await Promise.all([
         this.pool.query(`
           SELECT bucket_date::text AS date,
-                 total_requests,
-                 input_tokens,
-                 output_tokens,
-                 cache_creation_tokens,
-                 cache_read_tokens,
-                 total_cost,
-                 actual_cost,
-                 account_cost,
-                 total_duration_ms,
-                 active_users,
+                 total_requests AS source_requests,
+                 (SELECT COUNT(DISTINCT user_id) FROM usage_dashboard_daily_users u
+                  WHERE u.bucket_date = d.bucket_date AND u.user_id <> 1) AS active_users,
                  computed_at
-          FROM usage_dashboard_daily
+          FROM usage_dashboard_daily d
           WHERE bucket_date >= $1::date AND bucket_date < $2::date
           ORDER BY bucket_date
         `, [range.start, range.endExclusive]),
         this.pool.query(`
-          SELECT COALESCE(SUM(total_requests), 0) AS total_requests,
-                 COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                 COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                 COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
-                 COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
-                 COALESCE(SUM(total_cost), 0) AS total_cost,
-                 COALESCE(SUM(actual_cost), 0) AS actual_cost,
-                 COALESCE(SUM(account_cost), 0) AS account_cost,
-                 COALESCE(SUM(total_duration_ms), 0) AS total_duration_ms,
-                 (SELECT COUNT(DISTINCT user_id)
-                  FROM usage_dashboard_daily_users
-                  WHERE bucket_date >= $1::date AND bucket_date < $2::date) AS active_users,
-                 CASE WHEN SUM(total_requests) > 0
-                      THEN SUM(total_duration_ms)::numeric / SUM(total_requests)
-                      ELSE NULL END AS average_duration_ms,
-                 MIN(bucket_date)::text AS data_from,
-                 MAX(bucket_date)::text AS data_through,
-                 MAX(computed_at) AS computed_at
-          FROM usage_dashboard_daily
+          SELECT COUNT(DISTINCT user_id) AS active_users
+          FROM usage_dashboard_daily_users
           WHERE bucket_date >= $1::date AND bucket_date < $2::date
+            AND user_id <> 1
         `, [range.start, range.endExclusive]),
         this.pool.query(`
           SELECT MIN(bucket_date)::text AS available_from,
                  MAX(bucket_date)::text AS available_through,
-                 COUNT(*) AS stored_buckets
+                 COUNT(*) AS stored_buckets,
+                 MAX(computed_at) AS last_computed_at
           FROM usage_dashboard_daily
-        `)
+        `),
+        this.pool.query(`
+          SELECT (created_at AT TIME ZONE $3)::date::text AS date,
+                 COUNT(*) AS detail_requests,
+                 COUNT(*) FILTER (WHERE user_id <> 1) AS total_requests,
+                 COALESCE(SUM(input_tokens) FILTER (WHERE user_id <> 1), 0) AS input_tokens,
+                 COALESCE(SUM(output_tokens) FILTER (WHERE user_id <> 1), 0) AS output_tokens,
+                 COALESCE(SUM(cache_creation_tokens) FILTER (WHERE user_id <> 1), 0) AS cache_creation_tokens,
+                 COALESCE(SUM(cache_read_tokens) FILTER (WHERE user_id <> 1), 0) AS cache_read_tokens,
+                 COALESCE(SUM(total_cost) FILTER (WHERE user_id <> 1), 0) AS total_cost,
+                 COALESCE(SUM(actual_cost) FILTER (WHERE user_id <> 1), 0) AS actual_cost,
+                 COALESCE(SUM(COALESCE(account_stats_cost, total_cost) * COALESCE(account_rate_multiplier, 1))
+                   FILTER (WHERE user_id <> 1), 0) AS account_cost,
+                 COALESCE(SUM(COALESCE(duration_ms, 0)) FILTER (WHERE user_id <> 1), 0) AS total_duration_ms,
+                 COUNT(DISTINCT user_id) FILTER (WHERE user_id <> 1) AS active_users
+          FROM usage_logs
+          WHERE created_at >= $1::date::timestamp AT TIME ZONE $3
+            AND created_at < $2::date::timestamp AT TIME ZONE $3
+          GROUP BY 1
+          ORDER BY 1
+        `, [range.start, range.endExclusive, this.config.sub2apiTimezone])
       ]);
       const numericFields = [
         'total_requests', 'input_tokens', 'output_tokens', 'cache_creation_tokens',
         'cache_read_tokens', 'total_cost', 'actual_cost', 'account_cost',
-        'total_duration_ms', 'active_users', 'average_duration_ms'
+        'total_duration_ms'
       ];
-      const byDate = new Map(daily.rows.map((row) => [row.date, numericRow(row, numericFields)]));
+      // Station totals include ID 1 and only serve as a completeness check.
+      const dailyByDate = new Map(daily.rows.map((row) => [row.date, row]));
+      const detailByDate = new Map(details.rows.map((row) => [row.date, row]));
+      const dates = [...new Set([...dailyByDate.keys(), ...detailByDate.keys()])].sort();
+      const byDate = new Map(dates.map((date) => {
+        const dailyRow = dailyByDate.get(date);
+        const detail = detailByDate.get(date);
+        const usage = numericRow(detail || { date }, numericFields);
+        usage.total_tokens = usage.input_tokens + usage.output_tokens;
+        usage.active_users = number(dailyRow?.active_users ?? detail?.active_users);
+        usage.average_duration_ms = usage.total_requests ? usage.total_duration_ms / usage.total_requests : null;
+        usage.computed_at = dailyRow?.computed_at ?? null;
+        usage.metrics_complete = Boolean(dailyRow) && number(detail?.detail_requests) >= number(dailyRow.source_requests);
+        usage.actual_cost_complete = usage.metrics_complete;
+        delete usage.detail_requests;
+        return [date, usage];
+      }));
+      const usageSummary = Object.fromEntries(numericFields.map((field) => [field,
+        [...byDate.values()].reduce((sum, row) => sum + row[field], 0)
+      ]));
+      usageSummary.active_users = number(activity.rows[0]?.active_users);
+      usageSummary.average_duration_ms = usageSummary.total_requests
+        ? usageSummary.total_duration_ms / usageSummary.total_requests : null;
+      usageSummary.total_tokens = usageSummary.input_tokens + usageSummary.output_tokens;
+      usageSummary.data_from = dates[0] ?? null;
+      usageSummary.data_through = dates.at(-1) ?? null;
+      usageSummary.computed_at = daily.rows.reduce((latest, row) =>
+        !latest || new Date(row.computed_at) > new Date(latest) ? row.computed_at : latest, null);
+      usageSummary.excluded_user_id = 1;
+      usageSummary.actual_cost_excluded_user_id = 1;
       const trend = [];
       for (let date = range.start; date < range.endExclusive; date = addUtcDays(date, 1)) {
-        trend.push(byDate.get(date) || { date, available: false });
+        trend.push(byDate.get(date) || { date, available: false, metrics_complete: false, actual_cost_complete: false });
+      }
+      usageSummary.metrics_complete = trend.every((row) => row.metrics_complete);
+      usageSummary.actual_cost_complete = usageSummary.metrics_complete;
+      const limitations = [];
+      if (!usageSummary.metrics_complete) {
+        limitations.push('全部用户指标已排除 ID 1 管理员；部分日期的请求明细不完整或缺少汇总桶，请求、Token、费用和耗时仅统计保留明细，可能少计；对应趋势显示为空缺。原生站点日汇总没有用户维度，无法恢复已清理明细的非管理员用量。');
       }
       return {
         range,
@@ -260,12 +280,10 @@ class MetricsService {
         granularity: 'day',
         detailRetentionDays: this.config.retention.usageLogsDays,
         generatedAt: new Date().toISOString(),
-        summary: numericRow(summary.rows[0], numericFields),
+        summary: usageSummary,
         trend,
         coverage: numericRow(coverage.rows[0], ['stored_buckets']),
-        limitations: range.days > this.config.retention.usageLogsDays
-          ? [`超过近 ${this.config.retention.usageLogsDays} 天的范围仅有站点级日汇总，不能恢复用户、API Key、模型、分组或端点维度。`]
-          : []
+        limitations
       };
     });
   }
@@ -294,7 +312,8 @@ class MetricsService {
     const values = [range.start, range.endExclusive, this.config.sub2apiTimezone];
     const conditions = [
       'created_at >= $1::date::timestamp AT TIME ZONE $3',
-      'created_at < $2::date::timestamp AT TIME ZONE $3'
+      'created_at < $2::date::timestamp AT TIME ZONE $3',
+      'user_id <> 1'
     ];
     const filterMap = [
       ['userId', 'user_id'], ['apiKeyId', 'api_key_id'], ['accountId', 'account_id'], ['groupId', 'group_id']
@@ -329,7 +348,14 @@ class MetricsService {
       LIMIT 100
     `, values);
     const fields = ['requests', 'input_tokens', 'output_tokens', 'cache_creation_tokens', 'cache_read_tokens', 'actual_cost', 'total_cost', 'image_count', 'video_count', 'average_duration_ms'];
-    return { range, timezone: this.config.sub2apiTimezone, dimension, rows: rows.map((row) => numericRow(row, fields)) };
+    return {
+      range, timezone: this.config.sub2apiTimezone, dimension,
+      rows: rows.map((row) => {
+        const usage = numericRow(row, fields);
+        usage.total_tokens = usage.input_tokens + usage.output_tokens;
+        return usage;
+      })
+    };
   }
 
   async getUsers(input) {
@@ -341,7 +367,7 @@ class MetricsService {
       await this.require(['users', 'usage_dashboard_daily_users']);
       const [activity, registrations, summary, firstObserved, activation, cohorts] = await Promise.all([
         this.pool.query(`
-          SELECT bucket_date::text AS date, COUNT(*) AS active_users
+          SELECT bucket_date::text AS date, COUNT(DISTINCT user_id) FILTER (WHERE user_id <> 1) AS active_users
           FROM usage_dashboard_daily_users
           WHERE bucket_date >= $1::date AND bucket_date < $2::date
           GROUP BY bucket_date ORDER BY bucket_date
@@ -351,21 +377,23 @@ class MetricsService {
           FROM users
           WHERE created_at >= $1::date::timestamp AT TIME ZONE $3
             AND created_at < $2::date::timestamp AT TIME ZONE $3
+            AND id <> 1
           GROUP BY 1 ORDER BY 1
         `, [range.start, range.endExclusive, this.config.sub2apiTimezone]),
         this.pool.query(`
           SELECT (SELECT COUNT(DISTINCT user_id) FROM usage_dashboard_daily_users
-                  WHERE bucket_date >= $1::date AND bucket_date < $2::date) AS active_users,
+                  WHERE bucket_date >= $1::date AND bucket_date < $2::date AND user_id <> 1) AS active_users,
                  (SELECT COUNT(*) FROM users
                   WHERE created_at >= $1::date::timestamp AT TIME ZONE $3
-                    AND created_at < $2::date::timestamp AT TIME ZONE $3) AS new_users,
-                 (SELECT COUNT(*) FROM users WHERE deleted_at IS NULL) AS retained_users,
-                 (SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND status = 'active') AS available_users
+                    AND created_at < $2::date::timestamp AT TIME ZONE $3 AND id <> 1) AS new_users,
+                 (SELECT COUNT(*) FROM users WHERE id <> 1 AND deleted_at IS NULL) AS retained_users,
+                 (SELECT COUNT(*) FROM users WHERE id <> 1 AND deleted_at IS NULL AND status = 'active') AS available_users
         `, [range.start, range.endExclusive, this.config.sub2apiTimezone]),
         this.pool.query(`
           WITH first_seen AS (
             SELECT user_id, MIN(bucket_date) AS first_date
             FROM usage_dashboard_daily_users
+            WHERE user_id <> 1
             GROUP BY user_id
           )
           SELECT COUNT(*) AS first_observed_users
@@ -378,6 +406,7 @@ class MetricsService {
             FROM users
             WHERE created_at >= $1::date::timestamp AT TIME ZONE $3
               AND created_at < LEAST($2::date, (NOW() AT TIME ZONE $3)::date - 6)::timestamp AT TIME ZONE $3
+              AND id <> 1
           )
           SELECT COUNT(*) AS mature_registrations,
                  COUNT(*) FILTER (WHERE EXISTS (
@@ -394,6 +423,7 @@ class MetricsService {
             FROM users
             WHERE created_at >= GREATEST($1::date, (NOW() AT TIME ZONE $3)::date - 90)::timestamp AT TIME ZONE $3
               AND created_at < $2::date::timestamp AT TIME ZONE $3
+              AND id <> 1
           )
           SELECT cohort_date::text,
                  COUNT(*) AS registered,
@@ -458,6 +488,7 @@ class MetricsService {
           FROM payment_orders
           WHERE paid_at >= $1::date::timestamp AT TIME ZONE $3
             AND paid_at < $2::date::timestamp AT TIME ZONE $3
+            AND user_id IS DISTINCT FROM 1
           GROUP BY 1, 2, 3 ORDER BY 1, 2, 3
         `, [range.start, range.endExclusive, this.config.financeTimezone]),
         this.pool.query(`
@@ -473,6 +504,7 @@ class MetricsService {
           FROM payment_orders
           WHERE refund_at >= $1::date::timestamp AT TIME ZONE $3
             AND refund_at < $2::date::timestamp AT TIME ZONE $3
+            AND user_id IS DISTINCT FROM 1
           GROUP BY 1, 2, 3 ORDER BY 1, 2, 3
         `, [range.start, range.endExclusive, this.config.financeTimezone]),
         this.pool.query(`
@@ -491,6 +523,7 @@ class MetricsService {
             AND r.used_at < $2::date::timestamp AT TIME ZONE $3
             AND r.used_at IS NOT NULL
             AND r.type IN ('balance', 'admin_balance')
+            AND r.used_by IS DISTINCT FROM 1
           GROUP BY 1, 2 ORDER BY 1, 2
         `, [range.start, range.endExclusive, this.config.financeTimezone]),
         this.pool.query(`
@@ -499,6 +532,7 @@ class MetricsService {
             FROM payment_orders
             WHERE paid_at >= $1::date::timestamp AT TIME ZONE $3
               AND paid_at < $2::date::timestamp AT TIME ZONE $3
+              AND user_id IS DISTINCT FROM 1
           ), refunded AS (
             SELECT order_type, ${CURRENCY_SQL} AS currency,
                    CASE WHEN amount > 0 AND pay_amount > 0 AND refund_amount > 0
@@ -507,6 +541,7 @@ class MetricsService {
             FROM payment_orders
             WHERE refund_at >= $1::date::timestamp AT TIME ZONE $3
               AND refund_at < $2::date::timestamp AT TIME ZONE $3
+              AND user_id IS DISTINCT FROM 1
           ), keys AS (
             SELECT currency, order_type FROM paid UNION SELECT currency, order_type FROM refunded
           )
@@ -525,6 +560,7 @@ class MetricsService {
                    SELECT 1 FROM redeem_codes r WHERE r.code = payment_orders.recharge_code AND r.used_at IS NOT NULL
                  )) AS paid_without_credit
           FROM payment_orders
+          WHERE user_id IS DISTINCT FROM 1
         `)
       ]);
       const paymentFields = ['orders', 'paying_users', 'gross_received'];

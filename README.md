@@ -91,7 +91,7 @@ COMPOSE_PROFILES=account-manager,provider-monitor,operations-center,degradation-
 
 `usage-leaderboard` 是独立子服务，展示 Top 10、个人排名、近 7 天趋势和常用模型。只读查询 Sub2API 现有 PostgreSQL，排行缓存和登录会话只放在有上限的内存中，不建立新数据库、不挂载数据卷。页面跟随系统主题。
 
-首次部署按[排行服务文档](usage-leaderboard/README.md)配置只读数据库连接、主站地址和用户自定义菜单，然后从源码构建：
+已有其他模块、希望仅创建配置文件并拉取镜像时，按[镜像增量部署手册](usage-leaderboard/docs/image-deployment.md)操作。手册已结合历史连接问题补齐数据库外部网络、主站认证连接和原 Compose 项目身份的检查；纯镜像模板默认采用历史验证过的 `sub2api-deploy_sub2api-network`，部署前确认服务器当前网络名。源码构建则按[排行服务文档](usage-leaderboard/README.md)配置只读数据库连接、主站地址和用户自定义菜单，然后执行：
 
 ```bash
 cp usage-leaderboard/.env.example usage-leaderboard/.env
@@ -99,7 +99,7 @@ cp usage-leaderboard/.env.example usage-leaderboard/.env
 docker compose --env-file compose.services.env --profile usage-leaderboard up -d --build usage-leaderboard
 ```
 
-该模块已加入根 Compose 和镜像 CI。镜像须待流水线发布后才能直接拉取；累计榜仅累计主站现存用量记录，已清理的历史明细不计入。
+该模块已加入根 Compose 和镜像 CI，`usage-leaderboard-latest` 镜像已发布。累计榜仅累计主站现存用量记录，已清理的历史明细不计入。
 
 #### `account-manager/compose.yaml`
 

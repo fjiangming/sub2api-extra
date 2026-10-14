@@ -17,6 +17,8 @@
 
 ## 部署
 
+已有其他子服务、希望只创建 Compose 和环境文件再拉取镜像时，参照[镜像增量部署手册](docs/image-deployment.md)。手册已结合本工程历史会话，包含数据库共享网络、主站认证连接和 Compose 项目名的检查步骤。[纯镜像 Compose 模板](deploy/compose.yaml)不含构建配置，放到服务器的 `usage-leaderboard/compose.yaml` 使用；外部网络默认采用历史验证过的 `sub2api-deploy_sub2api-network`，使用前按实际 PostgreSQL 网络确认。`usage-leaderboard-latest` 已发布；2026-10-13 已核验匿名拉取权限及 amd64/arm64 支持。
+
 要求 Node.js 22.18+，或 Docker Compose 2.24+。数据库结构已与本地 Sub2API `d2e319b2a` 源码核对；运行时检查所需字段。更早版本没有 `requested_model` 时，常用模型使用 `model`。本服务仅使用主站的 `/api/v1/auth/me` 验证普通用户，无需管理员 API Key 或密码。
 
 ```bash
@@ -27,13 +29,13 @@ cp usage-leaderboard/.env.example usage-leaderboard/.env
 
 | 配置 | 用途 |
 | --- | --- |
-| `SUB2API_BASE_URL` | 服务端可达的主站 HTTP(S) 根地址，如 `http://host.docker.internal:8080` |
+| `SUB2API_BASE_URL` | 容器实际可达的主站 HTTP(S) 根地址，如主站公开 HTTPS 地址；同网可使用实际容器名 |
 | `SUB2API_PUBLIC_URL` | 用户浏览器可达的主站 HTTPS 根地址，同时是允许嵌入页面的父站来源 |
 | `SUB2API_DATABASE_URL` | 主站数据库的只读连接串；密码中的特殊字符需 URL 编码 |
 | `SUB2API_DATABASE_SSL` | `disable` / `require` / `verify-full`；远程数据库优先使用 `verify-full` |
 | `SUB2API_TIMEZONE` | IANA 时区，默认 `Asia/Shanghai` |
 
-数据库连接串不接受查询参数，SSL 和超时由单独配置设置。可以复用运营中心的只读连接。不要将数据库开放到公网；使用内网或已有受限网络通道。主站 PostgreSQL 若仅绑定宿主机 `127.0.0.1`，容器的 `host.docker.internal` 不一定能访问，需要为容器提供实际可达的受限地址。
+数据库连接串不接受查询参数，SSL 和超时由单独配置设置。可以复用已知凭据的运营中心只读连接。不要将数据库开放到公网；使用内网或已有受限网络通道。容器化主站 PostgreSQL 未发布宿主端口时，应永久加入其网络并使用数据库容器名，不能假设 `host.docker.internal:5432` 可达。用量排行不会在 `SUB2API_BASE_URL` 连接失败时自动回退到 `SUB2API_PUBLIC_URL`，部署时需要分别验证主站认证和数据库。
 
 从源码构建并启动此模块：
 
@@ -41,7 +43,7 @@ cp usage-leaderboard/.env.example usage-leaderboard/.env
 docker compose --env-file compose.services.env --profile usage-leaderboard up -d --build usage-leaderboard
 ```
 
-无需启用其他模块，也不会改写 `compose.services.env`。长期启用时，把 `usage-leaderboard` 追加到现有 `COMPOSE_PROFILES` 列表；保留原先需要的模块。镜像 CI 已登记 `usage-leaderboard-latest` 标签，待流水线发布后可以用 `--no-build` 部署已发布镜像。
+无需启用其他模块，也不会改写 `compose.services.env`。长期启用时，把 `usage-leaderboard` 追加到现有 `COMPOSE_PROFILES` 列表；保留原先需要的模块。使用已发布镜像时，仅拉取该服务，然后以 `--no-build --no-deps --pull never` 启动，具体命令见镜像增量部署手册。
 
 服务仅在宿主机 `127.0.0.1:9876` 发布端口。用独立 HTTPS 域名反代，示例 Nginx `server` 中的配置：
 

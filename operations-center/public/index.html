@@ -11,7 +11,7 @@
   <script src="/vendor/lucide.js" defer></script>
   <script src="/cost-analysis-ui.js?v=20260929-3" defer></script>
   <script src="/user-profiles-ui.js?v=20261013-1" defer></script>
-  <script src="/app.js?v=20261013-1" defer></script>
+  <script src="/app.js?v=20261014-2" defer></script>
 </head>
 <body>
   <div id="login-view" class="login-view" hidden>
@@ -93,9 +93,9 @@
             <button class="button primary" type="submit"><i data-lucide="search"></i><span>查询</span></button>
           </form>
           <div id="usage-notices" class="alert-stack"></div>
-          <div id="usage-metrics" class="metric-grid compact"></div>
+          <div id="usage-metrics" class="metric-grid"></div>
           <section class="panel chart-panel"><div class="panel-heading"><div><h2>用量趋势</h2><p id="usage-zone"></p></div></div><div id="usage-chart" class="chart"></div></section>
-          <section class="panel"><div class="panel-heading"><div><h2>维度分布</h2><p>仅显示仍在线的请求明细</p></div></div><div class="table-wrap"><table><thead><tr><th>维度</th><th>请求</th><th>输入 Token</th><th>输出 Token</th><th>用户消费</th><th>平均耗时</th></tr></thead><tbody id="usage-dimensions"></tbody></table></div></section>
+          <section class="panel"><div class="panel-heading"><div><h2>维度分布</h2><p>仅显示仍在线的请求明细 · 全部指标不含 ID 1</p></div></div><div class="table-wrap"><table><thead><tr><th>维度</th><th>请求</th><th>输入 Token</th><th>输出 Token</th><th>总 Token</th><th>用户消费</th><th>平均耗时</th></tr></thead><tbody id="usage-dimensions"></tbody></table></div></section>
         </section>
 
         <section id="view-users" class="view" aria-labelledby="page-title">
