@@ -261,6 +261,14 @@ button, select, input { color: inherit; }
 
 .group-model span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-model span:last-child { flex: 0 0 auto; color: var(--faint); }
+
+.group-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; margin: 0 0 8px; }
+.group-metrics > div { display: flex; align-items: baseline; gap: 7px; min-width: 0; flex-wrap: wrap; }
+.group-metrics > div:last-child { justify-content: flex-end; }
+.group-metrics dt { color: var(--muted); font-size: 11px; }
+.group-metrics dd { margin: 0; color: var(--text); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.group-metrics dd[data-available="false"] { color: var(--faint); font-size: 11px; font-weight: 400; }
+
 .assessment-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 27px; padding: 5px 0 8px; border-bottom: 1px solid var(--border-soft); color: var(--muted); font-size: 11px; }
 
 .history-chart {

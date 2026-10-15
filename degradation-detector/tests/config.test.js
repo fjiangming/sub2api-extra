@@ -50,6 +50,16 @@ test('production requires a valid Sub2API URL and rejects demo mode', (t) => {
   })), /不支持的 URL 协议/);
 });
 
+test('Sub2API database statistics are optional and connection errors omit credentials', (t) => {
+  assert.equal(loadConfig(env(t)).sub2apiDatabaseUrl, '');
+  const connection = 'postgresql://stats_reader:secret@postgres:5432/sub2api?sslmode=disable';
+  assert.equal(loadConfig(env(t, { SUB2API_DATABASE_URL: connection })).sub2apiDatabaseUrl, connection);
+  for (const invalid of ['https://stats_reader:secret@example.test/sub2api', 'postgresql://reader:secret@postgres', 'not-a-url']) {
+    assert.throws(() => loadConfig(env(t, { SUB2API_DATABASE_URL: invalid })),
+      (error) => /SUB2API_DATABASE_URL/.test(error.message) && !/secret|stats_reader/.test(error.message));
+  }
+});
+
 test('platform test validation covers regex and protocol-output combinations', () => {
   const parsed = validateTestConfig('openai', defaultTests.openai);
   assert.equal(parsed.output_type, 'html');
@@ -219,12 +229,12 @@ test('storage policies enforce bounded retention and preserve older configuratio
   }), /history_days/);
 });
 
-test('.env.example contains only the Sub2API connection variable', () => {
+test('.env.example contains only Sub2API connection variables', () => {
   const content = fs.readFileSync(path.join(__dirname, '..', '.env.example'), 'utf8');
   const variables = content.split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith('#'))
     .map((line) => line.slice(0, line.indexOf('=')));
-  assert.deepEqual(variables, ['SUB2API_BASE_URL']);
+  assert.deepEqual(variables, ['SUB2API_BASE_URL', 'SUB2API_DATABASE_URL']);
   assert.doesNotMatch(content, /GROUP_KEYS|SUPPORTED_PLATFORMS|TESTS_JSON|INTERVAL_SECONDS/);
 });

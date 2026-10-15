@@ -11,6 +11,7 @@ const { defaultPlatformTest, loadConfig, validateAdminConfiguration } = require(
 const { CredentialVault } = require('./credential-vault');
 const { DetectionRunner, deterministicVerdict } = require('./detection-runner');
 const { AppError, publicError } = require('./errors');
+const { GroupMetrics, publicGroupCacheStats } = require('./group-metrics');
 const { Scheduler } = require('./scheduler');
 const { MaintenanceService } = require('./maintenance');
 const { Store, publicRun, publicValidationResult } = require('./store');
@@ -62,7 +63,7 @@ function platformGroups(groups, runtime) {
   });
 }
 
-function groupPayload(group, summary, runtime) {
+function groupPayload(group, summary, runtime, cacheSnapshot) {
   const monitor = summary.monitor;
   const test = runtime.store.getMonitorTest(monitor);
   return {
@@ -70,6 +71,8 @@ function groupPayload(group, summary, runtime) {
     name: group.name,
     platform: group.platform,
     platform_label: test?.label || group.platform,
+    rate_multiplier: group.rate_multiplier ?? null,
+    cache_stats: publicGroupCacheStats(cacheSnapshot, group.id),
     model: test?.model || null,
     reasoning_effort: test?.reasoning_effort || 'none',
     output_type: test?.output_type || null,
@@ -512,6 +515,7 @@ function createRuntime(config, overrides = {}) {
   const vault = overrides.vault || new CredentialVault(config);
   const sub2api = overrides.sub2api || new Sub2ApiClient(config, overrides.fetchImpl);
   const auth = overrides.auth || new AuthService(config, sub2api);
+  const groupMetrics = overrides.groupMetrics || new GroupMetrics(config);
   const runner = overrides.runner || new DetectionRunner({
     config,
     store,
@@ -522,7 +526,7 @@ function createRuntime(config, overrides = {}) {
     config, store, isIdle: () => scheduler.active?.size === 0 && scheduler.queue?.length === 0
   });
   const scheduler = overrides.scheduler || new Scheduler({ config, store, runner, maintenance });
-  return { config, store, vault, sub2api, auth, runner, scheduler, maintenance };
+  return { config, store, vault, sub2api, auth, groupMetrics, runner, scheduler, maintenance };
 }
 
 function createApp(config, overrides = {}) {
@@ -767,10 +771,14 @@ function createApp(config, overrides = {}) {
       setNoStore(res);
       await runtime.auth.refreshUser(req.auth);
       const groups = await availableGroups(req, runtime);
+      const cacheSnapshot = groups.length ? await runtime.groupMetrics.getRates(
+        runtime.store.listEnabledMonitors(config.serviceOwnerId).map((monitor) => monitor.group_id)
+      ) : null;
       const payload = groups.map((group) => groupPayload(
         group,
         runtime.store.groupSummary(config.serviceOwnerId, group.id, config.listHistoryLimit),
-        runtime
+        runtime,
+        cacheSnapshot
       ));
       const nextRunTimes = payload.map((group) => group.next_run_at).filter(Number.isFinite);
       const nextRunAt = nextRunTimes.length > 0 ? Math.min(...nextRunTimes) : null;
@@ -1010,6 +1018,7 @@ async function main() {
     server.close();
     await runtime.scheduler.close();
     await runtime.sub2api.close?.();
+    await runtime.groupMetrics.close();
     runtime.auth.close();
     runtime.store.close();
   };

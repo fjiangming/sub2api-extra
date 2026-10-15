@@ -599,6 +599,17 @@ function loadConfig(env = process.env) {
     demoMode || environment === 'test' ? 'http://127.0.0.1:8080' : ''
   );
   if (!sub2apiBaseUrl) throw new Error('必须配置 SUB2API_BASE_URL');
+  const sub2apiDatabaseUrl = String(env.SUB2API_DATABASE_URL || '').trim();
+  if (sub2apiDatabaseUrl) {
+    try {
+      const url = new URL(sub2apiDatabaseUrl);
+      if (!['postgres:', 'postgresql:'].includes(url.protocol) || !url.hostname || url.pathname.length < 2) {
+        throw new Error();
+      }
+    } catch {
+      throw new Error('SUB2API_DATABASE_URL 必须是包含数据库名的 PostgreSQL 连接地址');
+    }
+  }
 
   return {
     env: environment,
@@ -615,6 +626,7 @@ function loadConfig(env = process.env) {
     cookieSecure: parseBoolean(env.DEGRADATION_DETECTOR_COOKIE_SECURE, environment === 'production'),
     sessionTtlMinutes: 480,
     sub2apiBaseUrl,
+    sub2apiDatabaseUrl,
     requestTimeoutMs: 30 * 60 * 1000,
     maxResponseBytes: 20 * 1024 * 1024,
     schedulerPollSeconds: parseInteger(env.DEGRADATION_DETECTOR_SCHEDULER_POLL_SECONDS, 15, 5, 300),

@@ -34,6 +34,32 @@ Sub2API 菜单的角色可见性只负责入口展示，不能单独作为安全
 - Sub2API 自定义菜单会在首次跳转 URL 中携带短期 Token。服务会立即换取本地会话、清理地址栏并设置 `Referrer-Policy: no-referrer`，但反向代理仍可能记录首个请求的完整查询串。生产环境必须使用 HTTPS，并在代理访问日志中隐藏或删除 `token`、`access_token` 参数。
 - 只读不等于匿名：结果、详情、预览和下载仍要求有效登录态，并在每次访问时重新计算用户可见分组。用户被移出分组或管理员停用分组后，旧预览地址也不再可访问。
 
+## 分组倍率与缓存率
+
+结果页的分组卡片展示 Sub2API 当前分组的基础计费倍率，以及最近 5 小时的缓存率。倍率直接取自用户有权访问的分组列表；这是分组基础倍率，个人专属倍率仍以 Sub2API 实际计费为准。
+
+缓存率统计该分组全部用户的实际调用，使用与 Sub2API Token 图表一致的口径：
+
+```text
+缓存率 = 缓存读取 Token / (输入 Token + 缓存创建 Token + 缓存读取 Token) × 100%
+```
+
+按 Token 总量加权汇总，不对单次请求的百分比求平均，不计输出 Token。统计窗口为查询时刻向前滚动 5 小时，采用 `[开始时间, 结束时间)` 边界，跨天仍按完整 5 小时计算。零缓存但有输入时展示 `0.0%`；没有输入用量时展示“暂无数据”，连接未配置时展示“未接入”，数据库故障时展示“暂不可用”。
+
+Sub2API 现有用量 API 不提供精确的滚动 5 小时分组聚合。启用此项统计需要在 `degradation-detector/.env` 中增加一个可选的数据库读取连接，可复用运营中心已配置的 Sub2API 只读连接：
+
+```dotenv
+SUB2API_BASE_URL=http://sub2api:8080
+# 使用降智检测容器可访问的数据库主机名；用户和密码中的特殊字符需要 URL 编码。
+SUB2API_DATABASE_URL=postgresql://stats_reader:your_password@sub2api-postgres:5432/sub2api?sslmode=disable
+```
+
+数据库连接属于服务端配置，不会返回页面，也不会借用登录用户或管理员的模型 Key。容器需要能访问该数据库；同一 Docker 网络内应填写数据库容器名及其内部端口。留空不影响检测、预览、历史记录和倍率展示。
+
+建议使用只有 `usage_logs` 所需列读取权限的账号：`group_id`、`created_at`、`input_tokens`、`cache_creation_tokens`、`cache_read_tokens`。统计连接默认启用只读事务，不创建表或索引，不修改 Sub2API 数据。生产镜像只安装 PostgreSQL 客户端，无浏览器或本地数据库副本。
+
+服务将所有已启用分组一次聚合，共享一个最长 60 秒的内存缓存，并合并并发查询；连接池最多 1 条连接，单条统计查询超时为 5 秒。每次返回结果仍重新校验分组权限，只提供可见分组的比例、统计时间和可用状态，不返回用户、Key、请求明细、Token 数量或费用。故障也会短暂缓存，避免页面轮询不断重试数据库；不会用过期比例冒充最新数据。查询负载随最近 5 小时实际用量变化，不随检测历史不断增长。
+
 ## 可视化配置
 
 管理员从 Sub2API 的“降智检测管理”菜单直接进入管理页。管理页支持：
@@ -263,7 +289,7 @@ services:
 cp degradation-detector/.env.example degradation-detector/.env
 ```
 
-环境文件只需配置服务可访问的 Sub2API 地址：
+基础检测只需配置服务可访问的 Sub2API 地址；分组缓存率统计另需可选的 `SUB2API_DATABASE_URL` 只读连接，具体见“分组倍率与缓存率”：
 
 ```dotenv
 SUB2API_BASE_URL=http://host.docker.internal:8080

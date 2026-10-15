@@ -322,6 +322,35 @@ function resultReasoningLabel(run, group = activeGroup()) {
   return reasoningLabel(effective, '默认');
 }
 
+function multiplierLabel(value) {
+  if (value == null || value === '' || typeof value === 'boolean') return '未知';
+  const multiplier = Number(value);
+  return Number.isFinite(multiplier) && multiplier >= 0
+    ? `${new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 12 }).format(multiplier)}×`
+    : '未知';
+}
+
+function cacheRateLabel(stats) {
+  if (stats?.status === 'ok' && stats.rate != null) {
+    const rate = Number(stats.rate);
+    if (Number.isFinite(rate) && rate >= 0 && rate <= 1) return `${(rate * 100).toFixed(1)}%`;
+  }
+  return ({ no_data: '暂无数据', not_configured: '未接入' })[stats?.status] || '暂不可用';
+}
+
+function cacheRateTitle(stats) {
+  const states = {
+    no_data: '最近 5 小时没有可统计的输入 Token。',
+    not_configured: '暂未接入分组用量统计。',
+    unavailable: '分组用量统计暂不可用。'
+  };
+  const formula = '缓存读取 Token / (输入 Token + 缓存创建 Token + 缓存读取 Token)，按该分组全部请求汇总，不含输出 Token。';
+  const window = stats?.window_start && stats?.window_end && stats?.updated_at
+    ? `统计区间：${when(stats.window_start)} 至 ${when(stats.window_end)}，每分钟更新。`
+    : '';
+  return `${states[stats?.status] || ''}${formula}${window}`;
+}
+
 function renderPlatformFilter() {
   const select = $('platform-filter');
   const current = state.platform;
@@ -376,6 +405,14 @@ function renderGroups() {
         <span title="${escapeHtml(group.model)}">${escapeHtml(group.model)}</span>
         <span title="推理强度：${escapeHtml(reasoningLabel(group.reasoning_effort, '默认'))} · 输出：${escapeHtml(outputLabels[group.output_type] || group.output_type)}">${escapeHtml(reasoningLabel(group.reasoning_effort, '默认'))} · ${escapeHtml(outputLabels[group.output_type] || group.output_type)}</span>
       </div>
+      <dl class="group-metrics">
+        <div title="Sub2API 当前分组的基础计费倍率">
+          <dt>分组倍率</dt><dd>${escapeHtml(multiplierLabel(group.rate_multiplier))}</dd>
+        </div>
+        <div title="${escapeHtml(cacheRateTitle(group.cache_stats))}">
+          <dt>最近 5h 缓存率</dt><dd data-available="${group.cache_stats?.status === 'ok'}">${escapeHtml(cacheRateLabel(group.cache_stats))}</dd>
+        </div>
+      </dl>
       <div class="assessment-line" title="${escapeHtml(group.assessment?.reason || '暂无综合判定')}">
         <span>综合判定</span>${statusHtml(group.assessment?.status || 'unknown')}
       </div>
