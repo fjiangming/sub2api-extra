@@ -2,6 +2,7 @@
 
 const net = require('node:net');
 const { AppError } = require('./errors');
+const { avatarUrl } = require('./identity');
 const MAX_RESPONSE_BYTES = 256 * 1024;
 
 async function readJson(response) {
@@ -61,7 +62,8 @@ class Sub2ApiClient {
         throw new AppError('AUTH_UPSTREAM_INVALID', '身份服务返回的账号信息无效', 502);
       }
       if (user.status && user.status !== 'active') throw new AppError('ACCOUNT_UNAVAILABLE', '当前账号不可用', 403);
-      return { id, email: typeof user.email === 'string' ? user.email : '' };
+      return { id, email: typeof user.email === 'string' ? user.email : '', role: user.role === 'admin' ? 'admin' : 'user',
+        avatar: avatarUrl(user.avatar_url, this.config.sub2apiPublicUrl) };
     } catch (error) {
       if (error instanceof AppError) throw error;
       if (error.name === 'AbortError') throw new AppError('AUTH_UPSTREAM_TIMEOUT', '身份验证超时，请稍后重试', 504);

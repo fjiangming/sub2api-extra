@@ -45,7 +45,7 @@ class SchemaInspector {
     this.pending = this.database.query(`
       SELECT table_name, column_name, data_type
       FROM information_schema.columns
-      WHERE table_schema = 'public' AND table_name IN ('users', 'usage_logs')
+      WHERE table_schema = 'public' AND table_name IN ('users', 'usage_logs', 'user_avatars')
     `).then(({ rows }) => {
       for (const [table, columns] of Object.entries(REQUIRED_COLUMNS)) {
         if (columns.some((column) => !rows.some((row) => row.table_name === table && row.column_name === column))) {
@@ -55,7 +55,10 @@ class SchemaInspector {
       if (!rows.some((row) => row.table_name === 'usage_logs' && row.column_name === 'created_at' && row.data_type === 'timestamp with time zone')) {
         throw new AppError('SCHEMA_INCOMPATIBLE', '当前用量数据的时间字段不兼容', 503);
       }
-      const value = { requestedModel: rows.some((row) => row.table_name === 'usage_logs' && row.column_name === 'requested_model') };
+      const value = {
+        requestedModel: rows.some((row) => row.table_name === 'usage_logs' && row.column_name === 'requested_model'),
+        userAvatars: ['user_id', 'url'].every((column) => rows.some((row) => row.table_name === 'user_avatars' && row.column_name === column))
+      };
       this.checked = { value, expiresAt: Date.now() + 300000 };
       return value;
     }).finally(() => { this.pending = null; });

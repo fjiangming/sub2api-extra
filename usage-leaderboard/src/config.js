@@ -16,6 +16,7 @@ const schema = z.object({
   USAGE_LEADERBOARD_MAX_SESSIONS: z.coerce.number().int().min(1).max(10000).default(1000),
   USAGE_LEADERBOARD_SESSION_MINUTES: z.coerce.number().int().min(5).max(120).default(30),
   USAGE_LEADERBOARD_INCLUDE_ADMINS: boolean.default(false),
+  USAGE_LEADERBOARD_SETTINGS_DIR: optionalString,
   SUB2API_BASE_URL: z.string().trim().default('http://127.0.0.1:8080'),
   SUB2API_PUBLIC_URL: optionalString,
   SUB2API_TIMEZONE: z.string().trim().default('Asia/Shanghai'),
@@ -54,9 +55,17 @@ function loadConfig(env = process.env) {
   if (value.NODE_ENV === 'production' && (!sub2apiPublicUrl.startsWith('https://') || value.USAGE_LEADERBOARD_COOKIE_SECURE === false)) {
     throw new Error('生产环境需要 SUB2API_PUBLIC_URL 的 HTTPS 地址和 Secure Cookie');
   }
+  const projectRoot = path.join(__dirname, '..');
+  const settingsDir = value.USAGE_LEADERBOARD_SETTINGS_DIR ? path.resolve(value.USAGE_LEADERBOARD_SETTINGS_DIR) : null;
+  if (settingsDir) {
+    const relative = path.relative(path.join(projectRoot, 'public'), settingsDir);
+    if (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
+      throw new Error('USAGE_LEADERBOARD_SETTINGS_DIR: 设置目录不能位于公开静态目录中');
+    }
+  }
   return {
     env: value.NODE_ENV,
-    projectRoot: path.join(__dirname, '..'),
+    projectRoot,
     port: value.USAGE_LEADERBOARD_PORT,
     bindHost: value.USAGE_LEADERBOARD_BIND_HOST,
     trustProxy: value.USAGE_LEADERBOARD_TRUST_PROXY,
@@ -66,6 +75,7 @@ function loadConfig(env = process.env) {
     maxSessions: value.USAGE_LEADERBOARD_MAX_SESSIONS,
     sessionTtlMs: value.USAGE_LEADERBOARD_SESSION_MINUTES * 60000,
     includeAdmins: value.USAGE_LEADERBOARD_INCLUDE_ADMINS,
+    settingsDir,
     sub2apiBaseUrl,
     sub2apiPublicUrl,
     timezone: value.SUB2API_TIMEZONE,

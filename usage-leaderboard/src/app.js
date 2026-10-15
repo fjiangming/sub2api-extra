@@ -1,16 +1,29 @@
 'use strict';
 
 const path = require('node:path');
+const fs = require('node:fs');
 const express = require('express');
 const helmet = require('helmet');
 const { z } = require('zod');
 const { AppError, errorMiddleware } = require('./errors');
 const { PERIODS, METRICS } = require('./repository');
+const { publicIdentity } = require('./identity');
+const { SettingsStore } = require('./settings');
+const { rulesSchema } = require('./simulation');
 
 const selection = z.object({
-  period: z.enum(PERIODS).default('month'),
+  period: z.enum(PERIODS).default('today'),
   metric: z.enum(METRICS).default('tokens')
 }).strict();
+const revisionSchema = z.object({ revision: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER) }).strict();
+const sourceSchema = revisionSchema.extend({ source: z.enum(['real', 'simulation']) }).strict();
+const generateSchema = revisionSchema.extend({ rules: rulesSchema, keepIdentities: z.boolean().default(true) }).strict();
+
+function parse(schema, value) {
+  const result = schema.safeParse(value);
+  if (!result.success) throw new AppError('INVALID_REQUEST', '请求参数无效，请检查设置后重试', 400);
+  return result.data;
+}
 
 function originCheck(req, _res, next) {
   const origin = req.get('origin');
@@ -22,7 +35,7 @@ function originCheck(req, _res, next) {
   next();
 }
 
-function createApp({ config, database, inspector, auth, leaderboard }) {
+function createApp({ config, database, inspector, auth, leaderboard, settings = new SettingsStore(config) }) {
   const app = express();
   app.disable('x-powered-by');
   if (config.trustProxy) app.set('trust proxy', 1);
@@ -33,7 +46,7 @@ function createApp({ config, database, inspector, auth, leaderboard }) {
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'"], styleSrcAttr: ["'unsafe-inline'"],
-        imgSrc: ["'self'", 'data:'], connectSrc: ["'self'"], objectSrc: ["'none'"], baseUri: ["'none'"],
+        imgSrc: ["'self'", 'data:', 'https:', 'http:'], connectSrc: ["'self'"], objectSrc: ["'none'"], baseUri: ["'none'"],
         frameAncestors: ["'self'", new URL(config.sub2apiPublicUrl).origin],
         upgradeInsecureRequests: config.env === 'production' ? [] : null
       }
@@ -85,6 +98,21 @@ function createApp({ config, database, inspector, auth, leaderboard }) {
     if (!parsed.success) throw new AppError('INVALID_REQUEST', '统计周期或排名依据无效', 400);
     res.json(await leaderboard.get(parsed.data.period, parsed.data.metric, req.auth.user.id));
   });
+  const admin = express.Router();
+  admin.use(auth.adminMiddleware());
+  admin.get('/view', (_req, res) => res.json({ html: fs.readFileSync(path.join(config.projectRoot, 'views', 'admin.html'), 'utf8') }));
+  admin.get('/settings', (_req, res) => res.json(settings.snapshot()));
+  admin.post('/simulation/preview', async (req, res) => res.json(await settings.generate(parse(generateSchema, req.body))));
+  admin.get('/leaderboard/preview', async (req, res) => {
+    const { period, metric, source } = parse(selection.extend({ source: z.enum(['real', 'simulation']) }).strict(), req.query);
+    res.json(await leaderboard.preview(source === 'simulation' ? settings.draftCandidate() : null, period, metric));
+  });
+  admin.put('/settings/draft', async (req, res) => res.json(await settings.saveDraft(parse(sourceSchema, req.body))));
+  const actor = (req) => publicIdentity(req.auth.user.id, req.auth.user.email).name;
+  admin.post('/leaderboard/publish', async (req, res) => res.json(await settings.publish(parse(sourceSchema, req.body), actor(req))));
+  admin.post('/leaderboard/restore-real', async (req, res) => res.json(await settings.publish({ ...parse(revisionSchema, req.body), source: 'real' }, actor(req))));
+  admin.post('/leaderboard/rollback', async (req, res) => res.json(await settings.rollback(parse(revisionSchema, req.body), actor(req))));
+  app.use('/api/admin', admin);
   app.use('/api', (_req, _res, next) => next(new AppError('NOT_FOUND', '接口不存在', 404)));
   app.get('/', (_req, res) => {
     res.set('Cache-Control', 'no-store');

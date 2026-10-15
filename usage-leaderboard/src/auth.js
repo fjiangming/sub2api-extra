@@ -68,6 +68,7 @@ class AuthService {
     if (oldId) this.sessions.delete(oldId);
     const session = {
       id: crypto.randomBytes(32).toString('base64url'), user, token, context, expiresAt,
+      csrfToken: crypto.randomBytes(32).toString('base64url'),
       verifiedAt: this.now(), verification: null
     };
     this.sessions.set(session.id, session);
@@ -79,8 +80,44 @@ class AuthService {
   }
 
   publicSession(session) {
-    return { user: publicIdentity(session.user.id, session.user.email),
+    return { user: publicIdentity(session.user.id, session.user.email, session.user.avatar),
+      capabilities: { manageLeaderboard: session.user.role === 'admin' },
+      ...(session.user.role === 'admin' ? { csrfToken: session.csrfToken } : {}),
       sessionToken: session.id, expiresAt: new Date(session.expiresAt).toISOString() };
+  }
+
+  async refresh(session, context) {
+    if (!session.verification) {
+      session.verification = this.verify(session.token, context).then((user) => {
+        if (user.id !== session.user.id) throw new AppError('AUTH_REQUIRED', '登录身份已变化', 401);
+        session.user = user;
+        session.verifiedAt = this.now();
+      }).catch((error) => {
+        if ([401, 403].includes(error.status)) this.sessions.delete(session.id);
+        throw error;
+      }).finally(() => { session.verification = null; });
+    }
+    await session.verification;
+    if (session.expiresAt <= this.now() || !this.sessions.has(session.id)) throw new AppError('AUTH_REQUIRED', '登录状态已过期', 401);
+  }
+
+  adminMiddleware() {
+    return async (req, _res, next) => {
+      try {
+        await this.refresh(req.auth, requestContext(req));
+        if (req.auth.user.role !== 'admin') throw new AppError('ADMIN_REQUIRED', '只有主站管理员可以访问排行设置', 403);
+        if (!['GET', 'HEAD'].includes(req.method)) {
+          const origin = req.get('origin');
+          let sameOrigin = false;
+          try { sameOrigin = Boolean(origin) && new URL(origin).origin === `${req.protocol}://${req.get('host')}`; } catch {}
+          if (!sameOrigin) throw new AppError('ORIGIN_INVALID', '设置请求来源无效，请刷新后重试', 403);
+          const supplied = Buffer.from(String(req.get('x-csrf-token') || ''));
+          const expected = Buffer.from(req.auth.csrfToken);
+          if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) throw new AppError('CSRF_INVALID', '页面状态已失效，请重新加载设置', 403);
+        }
+        next();
+      } catch (error) { next(error); }
+    };
   }
 
   middleware() {
@@ -94,17 +131,7 @@ class AuthService {
         }
         if (session.context.userAgent !== requestContext(req).userAgent) throw new AppError('AUTH_REQUIRED', '登录环境已变化，请重新从主站打开排行', 401);
         if (this.now() - session.verifiedAt >= 60000) {
-          if (!session.verification) {
-            session.verification = this.verify(session.token, requestContext(req)).then((user) => {
-              if (user.id !== session.user.id) throw new AppError('AUTH_REQUIRED', '登录身份已变化', 401);
-              session.user = user;
-              session.verifiedAt = this.now();
-            }).catch((error) => {
-              if ([401, 403].includes(error.status)) this.sessions.delete(id);
-              throw error;
-            }).finally(() => { session.verification = null; });
-          }
-          await session.verification;
+          await this.refresh(session, requestContext(req));
         }
         if (session.expiresAt <= this.now() || !this.sessions.has(id)) throw new AppError('AUTH_REQUIRED', '登录状态已过期', 401);
         req.auth = session;

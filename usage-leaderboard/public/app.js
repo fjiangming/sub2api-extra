@@ -2,9 +2,8 @@
 
 const PERIODS = { today: '今日', week: '本周', month: '本月', all: '累计' };
 const METRICS = { tokens: { label: 'Token 用量', unit: 'Tokens' }, requests: { label: '调用次数', unit: '次调用' } };
-const AVATARS = new Set(['mountain', 'lake', 'night', 'forest', 'hills', 'sea', 'peak', 'valley', 'coast', 'green']);
 const $ = (id) => document.getElementById(id);
-const state = { period: 'month', metric: 'tokens', data: null, session: '', config: null, controller: null, sequence: 0 };
+const state = { period: 'today', metric: 'tokens', data: null, session: '', csrf: '', authenticated: false, canManage: false, config: null, controller: null, sequence: 0 };
 const query = new URLSearchParams(location.search);
 let upstreamToken = query.get('token') || query.get('access_token') || '';
 for (const key of ['token', 'access_token', 'user_id', 'src_host', 'src_url']) query.delete(key);
@@ -18,7 +17,7 @@ function escapeHtml(value) { return String(value).replace(/[&<>"']/g, (character
 function number(value) { return new Intl.NumberFormat('en-US').format(value); }
 function compact(value) {
   if (value >= 1e9) return { value: (value / 1e9).toFixed(2), unit: 'B' };
-  if (value >= 1e6) return { value: (value / 1e6).toFixed(1), unit: 'M' };
+  if (value >= 1e6) return { value: (value / 1e6).toFixed(2), unit: 'M' };
   if (value >= 1e3) return { value: (value / 1e3).toFixed(1), unit: 'K' };
   return { value: number(value), unit: '' };
 }
@@ -30,7 +29,6 @@ function displayHtml(value, metric = state.metric) {
   const formatted = display(value, metric);
   return `${formatted.value}${formatted.unit ? ` <small>${formatted.unit}</small>` : ''}`;
 }
-function avatar(user) { return `./assets/${AVATARS.has(user.avatar) ? user.avatar : 'sea'}.jpg`; }
 function saveSession(token) {
   state.session = token;
   try {
@@ -41,7 +39,10 @@ function saveSession(token) {
 
 async function api(path, options = {}) {
   const headers = { accept: 'application/json', ...(state.session ? { authorization: `Session ${state.session}` } : {}), ...options.headers };
-  if (options.method === 'POST') headers['content-type'] = 'application/json';
+  if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(options.method)) {
+    headers['content-type'] = 'application/json';
+    if (state.csrf) headers['x-csrf-token'] = state.csrf;
+  }
   let response;
   try {
     response = await fetch(`./api/${path}`, { ...options, headers, credentials: 'same-origin',
@@ -70,6 +71,11 @@ function showStatus(message, { error = false, login = false } = {}) {
   $('usage-content').hidden = true;
   $('page-status').setAttribute('aria-busy', String(!error && !login));
   if (login) {
+    state.authenticated = false;
+    state.canManage = false;
+    state.csrf = '';
+    $('settings-link').hidden = true;
+    window.UsageAdmin.clear();
     saveSession('');
     $('signed-in').hidden = true;
     enableFilters(false);
@@ -84,11 +90,11 @@ function renderIdentity(user) {
   $('signed-in').hidden = false;
   $('header-name').textContent = user.name;
   $('header-name').title = user.name;
-  $('header-avatar').src = avatar(user);
+  window.UsageAvatars.set($('header-avatar'), user);
   $('signed-in').setAttribute('aria-label', `查看${user.name}的个人用量`);
   $('personal-name').textContent = user.name;
   $('personal-name').title = user.name;
-  $('personal-avatar').src = avatar(user);
+  window.UsageAvatars.set($('personal-avatar'), user);
 }
 
 function localDate(value) {
@@ -116,12 +122,20 @@ function changeHtml(user) {
 }
 
 function renderStats(data) {
+  const simulated = data.display.simulatedCount > 0;
+  const scoped = data.display.mode !== 'real';
+  $('tokens-summary-label').textContent = scoped ? '榜单 Token 用量' : '全站 Token 用量';
+  $('requests-summary-label').textContent = scoped ? '榜单调用次数' : 'API 调用次数';
+  document.querySelector('.station-stats').setAttribute('aria-label', scoped ? '当前榜单用量汇总' : '全站用量概览');
+  $('board-source-note').textContent = simulated ? '含示例数据 · 真实用户优先' : scoped ? '真实用户优先 · 按用量下限筛选' : '每一次探索，都值得被看见';
+  $('rules-source').hidden = !scoped;
+  $('rules-source').textContent = simulated ? `当前榜单含 ${data.display.simulatedCount} 位模拟用户，以“示例”标识；真实用户按设置的用量下限优先展示。汇总仅计当前榜单，个人用量始终来自主站真实记录。模拟快照日期：${data.display.date}。` : scoped ? '当前按 Token 下限筛选真实用户，再按所选指标展示前十位。汇总仅计当前榜单，不与全站名次比较；个人用量始终来自真实记录。' : '';
+  $('rules-retention').textContent = simulated ? '真实用量基于主站现存记录，模拟数据为管理员发布的当日快照。' : '所有周期均基于主站现存用量记录。累计不代表已经清理的历史数据；主站清理记录后，相关统计会相应变化。';
   const total = compact(data.summary.tokens);
   $('total-tokens').textContent = total.value;
   $('total-tokens-unit').textContent = total.unit;
-  $('active-users').textContent = number(data.summary.active);
   $('total-requests').textContent = number(data.summary.requests);
-  for (const [id, key] of [['total-tokens-delta', 'tokens'], ['active-users-delta', 'active'], ['total-requests-delta', 'requests']]) delta(id, data.summary.deltas?.[key]);
+  for (const [id, key] of [['total-tokens-delta', 'tokens'], ['total-requests-delta', 'requests']]) delta(id, data.summary.deltas?.[key]);
   $('date-range').textContent = rangeText(data);
   $('ranking-period').textContent = data.period === 'all' ? '现存记录累计' : `${PERIODS[data.period]}排名`;
   $('personal-period').textContent = PERIODS[data.period];
@@ -131,6 +145,8 @@ function renderStats(data) {
   $('coverage-note').textContent = data.period === 'all'
     ? '仅累计主站现存记录，已清理的历史用量不计入。'
     : limited ? `当前记录最早始于 ${localDate(data.window.retainedFrom)}，仅统计仍保留的用量。` : '统计基于主站现存用量记录。';
+  if (simulated) $('coverage-note').textContent = `真实 ${data.display.realCount} 位 · 示例 ${data.display.simulatedCount} 位。示例为 ${data.display.date} 的固定快照，汇总仅含当前榜单，个人用量为实际记录。`;
+  else if (scoped) $('coverage-note').textContent = '按所设 Token 下限优先展示真实用户，再按当前指标排序；汇总仅含当前榜单，个人用量为实际记录。';
 }
 
 function renderPodium(data) {
@@ -141,8 +157,8 @@ function renderPodium(data) {
     const bottom = user.growth != null ? icon(user.growth < 0 ? 'trending-down' : 'trending-up') + `较上期 ${user.growth > 0 ? '+' : ''}${user.growth}%` : icon('sparkles') + '持续创造，保持热爱';
     return `<button class="podium-card ${labels[index]}" type="button" data-user-key="${user.key}" aria-label="查看第 ${user.rank} 名 ${escapeHtml(user.name)} 的用量详情">
       ${index === 0 ? `<span class="podium-kicker">${icon('crown')}${user.rank === 1 ? '用量之星' : PERIODS[data.period] + '榜首'}</span>` : ''}
-      <span class="podium-avatar"><img src="${avatar(user)}" alt="" width="64" height="64"><span class="medal">${user.rank}</span></span>
-      <span class="podium-name" title="${escapeHtml(user.name)}"><span>${escapeHtml(user.name)}</span>${user.key === data.me.key ? '<span class="you-label">你</span>' : ''}</span>
+      <span class="podium-avatar">${window.UsageAvatars.html(user, 50)}<span class="medal">${user.rank}</span></span>
+      <span class="podium-name" title="${escapeHtml(user.name)}"><span>${escapeHtml(user.name)}</span>${user.key === data.me.key ? '<span class="you-label">你</span>' : ''}${user.source === 'simulation' ? '<span class="example-tag">示例</span>' : ''}</span>
       <span class="podium-model">${number(user.requests)} 次探索</span>
       <span class="podium-amount"><strong class="${value.value.length > 9 ? 'long-amount' : ''}">${value.value}</strong><span>${value.unit}</span></span><span class="podium-unit">${METRICS[data.metric].unit}</span>
       <span class="podium-bottom">${bottom}</span></button>`;
@@ -161,16 +177,21 @@ function renderTable(data) {
     const rank = index < 3 ? `<span class="table-medal ${index === 1 ? 'silver' : index === 2 ? 'bronze' : ''}" aria-label="第 ${user.rank} 名">${icon('medal')}<span class="sr-only">${user.rank}</span></span>` : String(user.rank).padStart(2, '0');
     const cells = metrics.map((metric, column) => {
       const value = display(user[metric], metric);
-      return `<td class="numeric-cell ${column === 0 ? 'primary-cell' : 'secondary-cell'}" title="${escapeHtml(display(user[metric], metric).value)}">${column === 0 ? `<span class="usage-cell"><span>${value.value}<span class="value-unit">${value.unit}</span></span><span class="usage-track"><span style="width:${Math.max(0, Math.min(100, user[metric] / maximum * 100))}%"></span></span></span>` : value.value + (value.unit ? ' ' + value.unit : '')}</td>`;
+      return `<td class="numeric-cell ${column === 0 ? 'primary-cell' : 'secondary-cell'}" title="${number(user[metric])}">${column === 0 ? `<span class="usage-cell"><span>${value.value}<span class="value-unit">${value.unit}</span></span><span class="usage-track"><span style="width:${Math.max(0, Math.min(100, user[metric] / maximum * 100))}%"></span></span></span>` : value.value + (value.unit ? ' ' + value.unit : '')}</td>`;
     }).join('');
     return `<tr data-ranking-user="${user.key}" ${user.key === data.me.key ? 'class="is-me"' : ''}><td class="rank-cell">${rank}</td>
-      <td><div class="rank-user"><img src="${avatar(user)}" alt="" width="31" height="31"><div class="user-copy"><span class="user-name"><span title="${escapeHtml(user.name)}">${escapeHtml(user.name)}</span>${user.key === data.me.key ? '<span class="you-label">你</span>' : ''}</span><span class="user-model">${number(user.requests)} 次调用</span></div></div></td>
+      <td><div class="rank-user">${window.UsageAvatars.html(user, 31)}<div class="user-copy"><span class="user-name"><span title="${escapeHtml(user.name)}">${escapeHtml(user.name)}</span>${user.key === data.me.key ? '<span class="you-label">你</span>' : ''}${user.source === 'simulation' ? '<span class="example-tag">示例</span>' : ''}</span><span class="user-model">${number(user.requests)} 次调用</span></div></div></td>
       ${cells}<td class="change-cell">${changeHtml(user)}</td><td class="action-column"><button class="row-detail" type="button" data-user-key="${user.key}" aria-label="查看${escapeHtml(user.name)}的用量详情" title="查看用量详情">${icon('chevron-right')}</button></td></tr>`;
   }).join('');
 }
 
 function renderPersonal(data) {
   const me = data.me;
+  const rankingAvailable = me.rankingAvailable !== false;
+  $('personal-title').textContent = rankingAvailable ? '我的排名' : '我的实际用量';
+  $('personal-ranking').hidden = !rankingAvailable;
+  $('personal-next').hidden = !rankingAvailable;
+  $('locate-me').hidden = !rankingAvailable;
   renderIdentity(me);
   $('my-rank').textContent = me.rank ? String(me.rank).padStart(2, '0') : '—';
   $('my-rank').classList.toggle('long-rank', me.rank >= 1000);
@@ -255,10 +276,11 @@ function showUser(key) {
   const user = data.entries.find((entry) => entry.key === key) || (key === data.me.key ? data.me : null);
   if (!user) return;
   $('detail-period').textContent = PERIODS[data.period] + '用量';
-  $('detail-avatar').src = avatar(user);
+  window.UsageAvatars.set($('detail-avatar'), user);
+  hydrateIcons();
   $('user-dialog-title').textContent = user.name;
-  $('detail-rank').textContent = user.rank ? `${PERIODS[data.period]}排名 #${user.rank} · ${METRICS[data.metric].label}` : '本期未参与排名';
-  $('detail-range').textContent = rangeText(data);
+  $('detail-rank').textContent = (user.source === 'simulation' ? '示例数据 · ' : '') + (user.rank ? `${PERIODS[data.period]}排名 #${user.rank} · ${METRICS[data.metric].label}` : '个人实际用量');
+  $('detail-range').textContent = user.source === 'simulation' ? `模拟快照 ${data.display.date}` : rangeText(data);
   $('detail-stats').innerHTML = Object.keys(METRICS).map((metric) => `<div><dt>${METRICS[metric].label}</dt><dd>${displayHtml(user[metric], metric)}</dd></div>`).join('');
   $('user-dialog').showModal();
 }
@@ -292,12 +314,21 @@ $('locate-me').addEventListener('click', () => {
 });
 $('refresh-button').addEventListener('click', () => loadBoard({ announce: true }));
 $('retry-button').addEventListener('click', () => initialize());
-function updateNavigation() {
-  const hash = location.hash === '#my-usage' ? '#my-usage' : '#leaderboard';
-  for (const link of document.querySelectorAll('.nav-link')) {
-    const selected = link.getAttribute('href') === hash;
-    link.classList.toggle('active', selected);
-    if (selected) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
+async function updateNavigation() {
+  const settings = location.hash === '#settings';
+  $('main').hidden = settings;
+  $('admin-page').hidden = !settings;
+  document.querySelector('.skip-link').href = settings ? '#admin-page' : '#main';
+  if (settings) {
+    state.controller?.abort(); state.sequence++;
+    if (state.authenticated && state.canManage) await window.UsageAdmin.show();
+    else {
+      $('admin-loading').hidden = false;
+      $('admin-loading').textContent = state.authenticated ? '该页面仅主站管理员可见' : '请先登录主站管理员账号后打开排行设置';
+    }
+  } else {
+    window.UsageAdmin.hide();
+    if (state.authenticated && !state.data) await loadBoard();
   }
 }
 window.addEventListener('hashchange', updateNavigation);
@@ -319,9 +350,14 @@ async function initialize() {
       upstreamToken = '';
     } else session = await api('auth/me');
     saveSession(session.sessionToken);
+    state.authenticated = true;
+    state.canManage = session.capabilities?.manageLeaderboard === true;
+    state.csrf = session.csrfToken || '';
+    $('settings-link').hidden = !state.canManage;
+    if (!state.canManage) window.UsageAdmin.clear();
     renderIdentity(session.user);
     enableFilters(true);
-    await loadBoard();
+    await updateNavigation();
   } catch (error) {
     const login = [401, 403].includes(error.status);
     showStatus(login ? '请登录主站后打开用量排行' : error.message || '暂时无法连接用量服务', { error: true, login });
@@ -329,4 +365,9 @@ async function initialize() {
   hydrateIcons();
 }
 
+window.UsageAdmin.configure({ api, notify: toast, onChanged() { state.data = null; }, onDenied(error) {
+  state.canManage = false; $('settings-link').hidden = true;
+  $('admin-loading').hidden = false; $('admin-loading').textContent = error.message;
+  if (error.status === 401) { showStatus('请重新登录主站后打开用量排行', { login: true, error: true }); location.hash = '#leaderboard'; }
+} });
 enableFilters(false); hydrateIcons(); updateNavigation(); initialize();

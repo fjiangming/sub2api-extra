@@ -7,13 +7,16 @@ const { AuthService } = require('./auth');
 const { UsageRepository } = require('./repository');
 const { LeaderboardService } = require('./leaderboard');
 const { createApp } = require('./app');
+const { SettingsStore } = require('./settings');
 
 function createRuntime(config, { database = createDatabase(config), client = new Sub2ApiClient(config) } = {}) {
   const inspector = new SchemaInspector(database);
   const auth = new AuthService(config, client);
-  const leaderboard = new LeaderboardService(new UsageRepository(database, config), inspector, config);
-  const app = createApp({ config, database, inspector, auth, leaderboard });
-  return { app, database, inspector, auth, leaderboard,
+  const settings = new SettingsStore(config);
+  const leaderboard = new LeaderboardService(new UsageRepository(database, config), inspector, config, { settings });
+  settings.onPublish = () => leaderboard.invalidate();
+  const app = createApp({ config, database, inspector, auth, leaderboard, settings });
+  return { app, database, inspector, auth, leaderboard, settings,
     async close() { auth.close(); leaderboard.close(); await database.close(); } };
 }
 

@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const path = require('node:path');
 const { BoundedCache } = require('../src/cache');
 const { loadConfig } = require('../src/config');
 const { publicIdentity, maskEmail } = require('../src/identity');
@@ -41,6 +42,11 @@ test('config validates timezone, transport settings and database URL without lea
   assert.equal(config.databaseUrl, null);
   assert.equal(config.trustProxy, false);
   assert.equal(config.forwardClientFingerprint, false);
+  assert.equal(config.settingsDir, null);
+  assert.equal(loadConfig({ USAGE_LEADERBOARD_SETTINGS_DIR: './settings' }).settingsDir, path.resolve('settings'));
+  for (const directory of ['public', path.join('public', 'nested')]) {
+    assert.throws(() => loadConfig({ USAGE_LEADERBOARD_SETTINGS_DIR: path.join(config.projectRoot, directory) }), /SETTINGS_DIR/);
+  }
   assert.throws(() => loadConfig({ SUB2API_TIMEZONE: 'invalid-zone' }), /SUB2API_TIMEZONE/);
   assert.throws(() => loadConfig({ NODE_ENV: 'production' }), /HTTPS/);
   assert.throws(() => loadConfig({ SUB2API_DATABASE_URL: 'postgres://u:sensitive-password@localhost/db?options=unsafe' }), (error) => !error.message.includes('sensitive-password'));

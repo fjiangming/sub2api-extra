@@ -24,6 +24,9 @@ services:
       retries: 3
       start_period: 15s
     read_only: true
+    # Optional bounded admin settings; also set USAGE_LEADERBOARD_SETTINGS_DIR.
+    # volumes:
+    #   - ./settings:/app/settings
     tmpfs:
       - /tmp:size=16m,mode=1777
     security_opt:

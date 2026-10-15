@@ -48,8 +48,9 @@ test('HTTP authenticates ordinary users, isolates personal data, rejects forged 
   }
   const user2 = await login('user-two');
   const user3 = await login('user-three');
-  const data2 = await (await fetch(`${base}/api/leaderboard?period=today&metric=tokens`, { headers: user2 })).json();
+  const data2 = await (await fetch(`${base}/api/leaderboard`, { headers: user2 })).json();
   const data3 = await (await fetch(`${base}/api/leaderboard?period=today&metric=tokens`, { headers: user3 })).json();
+  assert.equal(data2.period, 'today');
   assert.equal(data2.me.tokens, 10);
   assert.equal(data3.me.tokens, 100);
   assert.equal(data2.me.name, 're***@example.com');

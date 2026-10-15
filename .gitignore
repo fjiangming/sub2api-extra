@@ -37,6 +37,7 @@ Thumbs.db
 # Runtime data directory at the top level of each feature module
 /*/data/
 /*/data-preview/
+/usage-leaderboard/settings/
 
 # Mounted secrets such as personal payment QR images
 /*/secrets/
@@ -56,6 +57,14 @@ Thumbs.db
 /merged-images.png
 /operations-center/tests/profile-preview.js
 /usage-leaderboard/scripts/preview.js
+/usage-leaderboard/scripts/preview-admin.js
+/usage-leaderboard/docs/admin-settings-demo*
+/usage-leaderboard/docs/admin-settings-live-*.png
+/usage-leaderboard/docs/admin-settings-verified-*.png
+/usage-leaderboard/docs/aihubrank.nginx.conf
+
+# Deployment reference exports contain database credentials
+/usage-leaderboard/.env.database-reference
 
 # Local exploratory protocol assessment
 /video-adapter/docs/lingsu-protocol-assessment.md

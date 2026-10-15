@@ -7,3 +7,5 @@ README.md
 *.log
 .git
 coverage
+settings
+docs

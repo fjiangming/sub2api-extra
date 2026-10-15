@@ -2,6 +2,8 @@
 
 const { BoundedCache } = require('./cache');
 const { publicIdentity } = require('./identity');
+const { calendarDate, projectSimulation } = require('./simulation');
+const { AppError } = require('./errors');
 
 const amount = (value) => Number(value || 0);
 const numeric = (row) => ({ tokens: amount(row.tokens), requests: amount(row.requests) });
@@ -13,11 +15,13 @@ function comparison(window, period) {
 }
 
 class LeaderboardService {
-  constructor(repository, inspector, config, { now = () => new Date() } = {}) {
+  constructor(repository, inspector, config, { now = () => new Date(), settings = null } = {}) {
     this.repository = repository;
     this.inspector = inspector;
     this.config = config;
     this.now = now;
+    this.settings = settings;
+    this.generation = 0;
     this.boardCache = new BoundedCache({ ttlMs: config.cacheTtlMs, maxEntries: 8 });
     this.personalCache = new BoundedCache({ ttlMs: config.cacheTtlMs, maxEntries: config.personalCacheEntries });
   }
@@ -26,7 +30,7 @@ class LeaderboardService {
     const previousRank = row.previous_rank == null ? null : amount(row.previous_rank);
     const rank = row.rank == null ? null : amount(row.rank);
     return {
-      ...publicIdentity(row.id, row.email), ...numeric(row), rank,
+      ...publicIdentity(row.id, row.email, row.avatar_url, this.config.sub2apiPublicUrl), ...numeric(row), rank, source: 'real',
       comparisonAvailable: compare,
       change: compare && previousRank !== null && rank !== null ? previousRank - rank : null,
       newEntry: compare && rank !== null && rank <= 10 && (previousRank === null || previousRank > 10),
@@ -34,13 +38,14 @@ class LeaderboardService {
     };
   }
 
-  async get(period, metric, userId) {
+  async board(period, metric, publication = null) {
     const schema = await this.inspector.inspect();
     const now = this.now();
-    const calendarDay = new Intl.DateTimeFormat('sv-SE', { timeZone: this.config.timezone }).format(now);
-    const board = await this.boardCache.getOrLoad(`${period}:${metric}:${calendarDay}`, async () => {
+    const calendarDay = calendarDate(now, this.config.timezone);
+    const minimum = publication?.candidate.rules.minimumTokens ?? null;
+    return this.boardCache.getOrLoad(`${this.generation}:${period}:${metric}:${calendarDay}:${minimum}`, async () => {
       const anchor = now.toISOString();
-      const raw = await this.repository.board(period, metric, anchor);
+      const raw = await this.repository.board(period, metric, anchor, minimum, schema);
       const compare = comparison(raw.window, period);
       const summary = { ...numeric(raw.summary), active: amount(raw.summary.active) };
       const previous = { ...numeric(raw.previous_summary), active: amount(raw.previous_summary.active) };
@@ -52,11 +57,34 @@ class LeaderboardService {
           requests: percentChange(summary.requests, previous.requests),
           active: percentChange(summary.active, previous.active)
         } : null },
-        entries: raw.entries.map((row) => this.entry(row, metric, compare))
+        entries: raw.entries.map((row) => this.entry(row, metric, compare)),
+        qualifiedEntries: (raw.qualified_entries || []).map((row) => this.entry(row, metric, false))
       };
     });
-    const personal = await this.personalCache.getOrLoad(`${userId}:${period}:${metric}:${board.generatedAt}`, async () => {
-      const raw = await this.repository.personal(period, metric, board.generatedAt, userId);
+  }
+
+  view(board, publication) {
+    const projected = publication && calendarDate(new Date(board.generatedAt), this.config.timezone) === publication.candidate.date
+      ? projectSimulation(board, publication.candidate, publication.version) : { ...board, display: { mode: 'real', realCount: board.entries.length, simulatedCount: 0 } };
+    const { qualifiedEntries: _private, ...result } = projected;
+    return result;
+  }
+
+  async preview(candidate, period, metric) {
+    const publication = candidate ? { candidate, version: 'draft' } : null;
+    const board = await this.board(period, metric, publication);
+    if (candidate && candidate.date !== calendarDate(this.now(), this.config.timezone)) throw new AppError('SIMULATION_EXPIRED', '模拟候选已跨天，请重新生成', 400);
+    return this.view(board, publication);
+  }
+
+  async get(period, metric, userId, attempt = 0) {
+    const generation = this.generation;
+    const date = calendarDate(this.now(), this.config.timezone);
+    const schema = await this.inspector.inspect();
+    const publication = this.settings?.active();
+    const board = await this.board(period, metric, publication);
+    const personal = await this.personalCache.getOrLoad(`${generation}:${userId}:${period}:${metric}:${board.generatedAt}`, async () => {
+      const raw = await this.repository.personal(period, metric, board.generatedAt, userId, schema);
       const detail = await this.repository.details(period, board.generatedAt, userId, schema);
       const me = this.entry({ ...raw.me, rank: raw.rank, previous_rank: raw.previous_rank }, metric, board.comparisonAvailable);
       const trend = detail.trend.map((day) => ({ date: day.date, tokens: amount(day.tokens) }));
@@ -79,10 +107,18 @@ class LeaderboardService {
         models: modelRows.map((model) => ({ ...model, percent: denominator > 0 ? model[modelMetric] / denominator * 100 : 0 }))
       };
     });
-    return { ...board, me: personal };
+    if (generation !== this.generation || date !== calendarDate(this.now(), this.config.timezone)) {
+      if (attempt >= 2) throw new AppError('SERVICE_BUSY', '榜单正在更新，请稍后重试', 503);
+      return this.get(period, metric, userId, attempt + 1);
+    }
+    const view = this.view(board, publication);
+    const rankingAvailable = view.display.mode === 'real';
+    return { ...view, me: rankingAvailable ? { ...personal, rankingAvailable } : { ...personal, rankingAvailable,
+      rank: null, percentile: null, next: null, change: null, growth: null, newEntry: false, comparisonAvailable: false } };
   }
 
-  close() { this.boardCache.clear(); this.personalCache.clear(); }
+  invalidate() { this.generation++; this.boardCache.clear(); this.personalCache.clear(); }
+  close() { this.invalidate(); }
 }
 
 module.exports = { LeaderboardService, comparison, percentChange };

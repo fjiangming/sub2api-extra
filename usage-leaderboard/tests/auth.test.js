@@ -16,6 +16,15 @@ function middleware(auth, req) {
 }
 function token(claims) { return `header.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.unsigned`; }
 
+test('only the upstream exact admin role enables leaderboard management', async () => {
+  for (const role of ['admin', 'user', 'root', 'Admin', undefined, 1]) {
+    const client = new Sub2ApiClient(loadConfig({ NODE_ENV: 'test' }), { fetchImpl: async () =>
+      Response.json({ code: 0, data: { id: 7, role, status: 'active', email: 'admin@example.com' } }) });
+    const user = await client.me(token({ role: 'admin' }), {});
+    assert.equal(user.role, role === 'admin' ? 'admin' : 'user');
+  }
+});
+
 test('identity comes only from upstream; forged JWT claims and query user IDs are ignored', async (t) => {
   const config = loadConfig({ NODE_ENV: 'test' });
   let called;

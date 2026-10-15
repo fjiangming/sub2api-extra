@@ -1,0 +1,68 @@
+<div class="admin-heading">
+  <div><div class="eyebrow"><span></span>LEADERBOARD SETTINGS</div><h1>排行设置<span class="heading-dot">.</span></h1></div>
+  <div class="admin-heading-actions"><button class="secondary-action" id="a-rollback" type="button" disabled><i data-lucide="history"></i>回退上一版</button><button class="secondary-action" id="a-restore" type="button" disabled><i data-lucide="rotate-ccw"></i>恢复真实榜单</button></div>
+</div>
+<div class="admin-notice" id="a-notice" role="alert" hidden></div>
+<section class="publication-strip" aria-label="发布状态">
+  <div><span class="strip-label">当前用户端</span><strong id="a-published-mode"></strong></div>
+  <div><span class="strip-label">发布版本</span><strong id="a-published-version"></strong></div>
+  <div><span class="strip-label">最近发布</span><strong id="a-published-at"></strong></div>
+  <span class="admin-storage" id="a-storage"></span>
+</section>
+<div class="settings-workspace">
+  <form class="settings-form" id="a-form" novalidate>
+    <section class="settings-section">
+      <div class="settings-section-heading"><span class="step-number">01</span><h2>数据来源</h2></div>
+      <div class="source-control" role="group" aria-label="草稿数据来源">
+        <button type="button" data-source="real" aria-pressed="false"><i data-lucide="database"></i>真实用量</button>
+        <button type="button" data-source="simulation" aria-pressed="true"><i data-lucide="sparkles"></i>模拟榜单</button>
+      </div>
+      <div class="source-meta"><i data-lucide="users-round"></i><span id="a-source-meta">真实用户优先，模拟补位</span><span class="small-badge">TOP 10</span></div>
+    </section>
+    <section class="settings-section" id="a-generation-section">
+      <div class="settings-section-heading"><span class="step-number">02</span><h2>生成规则</h2></div>
+      <fieldset id="a-fields">
+        <div class="field-heading"><span>单人 Token 范围</span><span class="field-constraint">1M ≤ 用量 ≤ 1B</span></div>
+        <div class="range-fields">
+          <label for="a-minimum"><span>下限</span><div class="number-input"><input id="a-minimum" type="number" min="1" max="1000" step="0.01" inputmode="decimal" aria-describedby="a-range-error"><span>M</span></div></label>
+          <span class="range-divider">—</span>
+          <label for="a-maximum"><span>上限</span><div class="number-input"><input id="a-maximum" type="number" min="1" max="1000" step="0.01" inputmode="decimal" aria-describedby="a-range-error"><span>M</span></div></label>
+        </div>
+        <p class="field-error" id="a-range-error" role="alert" hidden></p>
+        <div class="field-heading distribution-heading"><label for="a-distribution">数值分布</label></div>
+        <div class="select-input"><i data-lucide="chart-no-axes-combined"></i><select id="a-distribution"><option value="natural">自然梯度</option><option value="close">差距接近</option><option value="concentrated">头部集中</option></select><i data-lucide="chevron-down"></i></div>
+        <div class="distribution-chart" id="a-distribution-chart" role="img" aria-label="预览用户的 Token 用量分布"></div>
+        <div class="distribution-caption"><span>高用量</span><span>低用量</span></div>
+        <label class="checkbox-label"><input id="a-keep-identities" type="checkbox" checked><span>重新生成时保留当前模拟名单</span></label>
+        <button class="generate-button" id="a-generate" type="submit"><i data-lucide="shuffle"></i>随机生成<i data-lucide="arrow-right"></i></button>
+      </fieldset>
+    </section>
+    <section class="settings-section scope-section">
+      <div class="settings-section-heading"><span class="step-number">03</span><h2>展示范围</h2></div>
+      <dl class="scope-list">
+        <div><dt>用户身份</dt><dd>注册邮箱脱敏</dd></div>
+        <div><dt>真实用户</dt><dd>达到下限即优先</dd></div>
+        <div><dt>模拟身份</dt><dd>随机脱敏邮箱</dd></div>
+        <div><dt>个人用量</dt><dd>实际用量</dd></div>
+        <div><dt>有效日期</dt><dd id="a-valid-date">尚未生成</dd></div>
+        <div><dt>数据标识</dt><dd><span class="example-tag">示例数据</span></dd></div>
+      </dl>
+    </section>
+  </form>
+  <section class="preview-tool" aria-labelledby="a-preview-title">
+    <div class="preview-heading"><div><h2 id="a-preview-title">榜单预览</h2><span id="a-preview-subtitle">生成后预览</span></div><span class="draft-label"><i data-lucide="file-pen-line"></i>候选草稿</span></div>
+    <div class="preview-toolbar">
+      <div class="period-control" role="group" aria-label="预览统计周期"><button type="button" data-preview-period="today" aria-pressed="false">今日</button><button type="button" data-preview-period="week" aria-pressed="false">本周</button><button type="button" data-preview-period="month" aria-pressed="true">本月</button><button type="button" data-preview-period="all" aria-pressed="false">累计</button></div>
+      <label class="metric-select"><i data-lucide="sliders-horizontal"></i><select id="a-metric" aria-label="预览排名依据"><option value="tokens">Token 用量</option><option value="requests">调用次数</option></select><i data-lucide="chevron-down"></i></label>
+    </div>
+    <div class="admin-preview-status" id="a-preview-status" role="status" aria-live="polite">尚未生成候选数据</div>
+    <div id="a-preview-content" hidden>
+      <div class="preview-stats"><div><span id="a-total-label">榜单 Token 用量</span><strong id="a-total"></strong></div><div><span id="a-count-label">上榜用户</span><strong id="a-count"></strong></div><div><span id="a-requests-label">榜单调用次数</span><strong id="a-requests"></strong></div></div>
+      <div class="preview-table-heading"><div><h3>用量之星</h3><span class="small-badge">TOP 10</span></div><span class="preview-counts" id="a-source-counts"></span></div>
+      <div class="preview-table-wrap"><table class="preview-table"><caption class="sr-only" id="a-caption">候选排行榜</caption><thead><tr><th scope="col">排名</th><th scope="col">创造者</th><th scope="col" class="right" id="a-primary-heading">Token 用量</th><th scope="col" class="right secondary-metric" id="a-secondary-heading">调用次数</th></tr></thead><tbody id="a-preview-body"></tbody></table></div>
+      <div class="preview-footnote"><span><i data-lucide="shield-check"></i>真实用户优先 · 最多 10 位</span><span id="a-snapshot-date"></span></div>
+    </div>
+  </section>
+</div>
+<footer class="action-bar"><div class="action-bar-inner"><div class="draft-state"><span class="draft-dot"></span><strong id="a-draft-state">尚未生成</strong><span id="a-candidate-version"></span></div><div class="footer-actions"><button class="reset-button" id="a-reset" type="button" aria-label="重置生成参数" data-tooltip="重置参数"><i data-lucide="rotate-ccw"></i></button><button class="secondary-action" id="a-save" type="button"><i data-lucide="save"></i>保存草稿</button><button class="publish-button" id="a-publish" type="button"><i data-lucide="send"></i>发布榜单</button></div></div></footer>
+<dialog class="publish-dialog" id="a-dialog" aria-labelledby="a-dialog-title"><div class="publish-dialog-heading"><span class="publish-symbol"><i data-lucide="send"></i></span><button class="icon-button" type="button" data-admin-close aria-label="关闭发布确认" data-tooltip="关闭"><i data-lucide="x"></i></button></div><h2 id="a-dialog-title">发布榜单</h2><dl class="publish-summary" id="a-publish-summary"></dl><div class="dialog-actions"><button class="secondary-action" type="button" data-admin-close>取消</button><button class="publish-button" type="button" id="a-confirm"><i data-lucide="check"></i>确认发布</button></div></dialog>

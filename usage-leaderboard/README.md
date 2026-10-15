@@ -2,14 +2,16 @@
 
 面向 Sub2API 用户的独立排行子服务，默认端口 `9876`。页面包含前三名领奖台、Top 10 表格、个人排名、与上一名差距、近 7 天 Token 趋势和常用模型。支持今日、本周、本月、累计，以及 Token / 调用次数排序。用户名称统一使用脱敏的注册邮箱，页面自动跟随系统主题。
 
+已实现管理员专用「排行设置」页面：主站管理员登录后进入 `/#settings`，可生成 1M～1B 的模拟用量、预览四个周期、保存草稿、发布、恢复真实榜单或回退上一版。真实用户优先占位，模拟用户补位并带「示例」标识。详见[实现规则与设置说明](docs/admin-settings-design.md)。
+
 ## 数据与资源
 
-- **没有自己的数据库**：直接只读查询 Sub2API 现有 PostgreSQL 的 `public.users`、`public.usage_logs`，不创建表、索引、迁移、归档或逐日快照。
-- **没有数据卷**：排行缓存、个人统计缓存和短期会话都只在内存中；重启会清空，用户重新从主站菜单进入即可。
+- **没有自己的数据库**：直接只读查询 Sub2API 现有 PostgreSQL 的 `public.users`、`public.usage_logs`，以及可用时的 `public.user_avatars`，不创建表、索引、迁移、归档或逐日快照。
+- **默认没有数据卷**：排行缓存、个人统计缓存、短期会话和后台设置只在内存中；重启会清空并恢复真实榜单。可选只持久化一个不超过 64 KiB 的设置文件，不保存逐日历史。
 - 全局榜缓存最多 8 项，个人缓存默认 256 项，默认 TTL 60 秒；各缓存最多 8 个并发加载，会合并相同请求。会话默认最多 1,000 个，过期自动清理。限流桶最多 4,096 个。
 - PostgreSQL 默认最多 3 个连接，查询超时 15 秒；超过并发上限立即返回繁忙，不积累连接等待队列。连接固定启用 `default_transaction_read_only=on`，推荐再使用受限只读数据库账号。
-- 容器只读文件系统，默认内存上限 192 MB、CPU 0.5，无持久挂载；Docker 日志最多 `5 MB × 3`。服务不写访问日志、Token、SQL、数据库连接串或业务数据文件。
-- 页面、Lucide 图标与风景头像均为本地静态资源，不依赖 CDN；风景是固定分配的装饰图片，不是用户上传的头像。
+- 容器只读文件系统，默认内存上限 192 MB、CPU 0.5，无持久挂载；Docker 日志最多 `5 MB × 3`。服务不写访问日志、认证 Token、SQL 或数据库连接串。开启可选设置目录时，只覆盖写入有大小上限的设置文件。
+- 用户头像只读取主站 `public.user_avatars.url` 和登录接口的 `avatar_url`，支持主站保存的上传图片或头像链接；未设置、加载失败、旧版无头像表或模拟账号均显示统一的默认用户图标，不分配装饰头像。页面与 Lucide 图标为本地资源，远程头像按主站保存的链接加载。
 
 服务不另外保留历史。**累计榜表示主站现存用量记录的累计**，不承诺主站已清理明细后的完整终身排名。站点原生的日/小时活跃用户表没有用户级 Token 和费用，不能用它们补出被删除的排行。所有周期都在页面注明“现存记录”；数据缺少上期起点时隐藏排名变动和增长率。最早记录检查无法证明中间从未清理过数据。
 
@@ -19,7 +21,7 @@
 
 已有其他子服务、希望只创建 Compose 和环境文件再拉取镜像时，参照[镜像增量部署手册](docs/image-deployment.md)。手册已结合本工程历史会话，包含数据库共享网络、主站认证连接和 Compose 项目名的检查步骤。[纯镜像 Compose 模板](deploy/compose.yaml)不含构建配置，放到服务器的 `usage-leaderboard/compose.yaml` 使用；外部网络默认采用历史验证过的 `sub2api-deploy_sub2api-network`，使用前按实际 PostgreSQL 网络确认。`usage-leaderboard-latest` 已发布；2026-10-13 已核验匿名拉取权限及 amd64/arm64 支持。
 
-要求 Node.js 22.18+，或 Docker Compose 2.24+。数据库结构已与本地 Sub2API `d2e319b2a` 源码核对；运行时检查所需字段。更早版本没有 `requested_model` 时，常用模型使用 `model`。本服务仅使用主站的 `/api/v1/auth/me` 验证普通用户，无需管理员 API Key 或密码。
+要求 Node.js 22.18+，或 Docker Compose 2.24+。数据库结构已与本地 Sub2API `d2e319b2a` 源码核对；运行时检查所需字段。更早版本没有 `requested_model` 时，常用模型使用 `model`。身份和管理员角色均通过主站 `/api/v1/auth/me` 验证，无需额外管理员 API Key 或密码。推送到 `main` 后由 GitHub Actions 构建并发布镜像，待对应提交的排行构建成功后再拉取更新；历史镜像可拉取不代表已包含新功能。
 
 ```bash
 cp usage-leaderboard/.env.example usage-leaderboard/.env
@@ -45,22 +47,61 @@ docker compose --env-file compose.services.env --profile usage-leaderboard up -d
 
 无需启用其他模块，也不会改写 `compose.services.env`。长期启用时，把 `usage-leaderboard` 追加到现有 `COMPOSE_PROFILES` 列表；保留原先需要的模块。使用已发布镜像时，仅拉取该服务，然后以 `--no-build --no-deps --pull never` 启动，具体命令见镜像增量部署手册。
 
-服务仅在宿主机 `127.0.0.1:9876` 发布端口。用独立 HTTPS 域名反代，示例 Nginx `server` 中的配置：
+服务仅在宿主机 `127.0.0.1:9876` 发布端口。使用独立 HTTPS 域名，下面是可直接保存为排行站点文件的完整 [Nginx 配置](docs/nginx.conf.example)，包含 HTTP 跳转、HTTP-01 续期入口、HTTPS 证书和反代。将所有 `rank.example.com` 替换为实际排行域名，两个证书路径替换为服务器现有的实际证书路径。配置作为独立站点由 Nginx 的 `http {}` 加载，不粘到已有 `server {}` 内。
 
 ```nginx
-location / {
-    proxy_pass http://127.0.0.1:9876;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_set_header X-Real-IP $remote_addr;
-    # 主站自定义菜单会把短期 Token 放到首次页面 URL，避免代理记录它。
+# Replace rank.example.com and the certificate paths before use.
+# The HTTP-01 webroot must match your ACME client's renewal configuration.
+server {
+    listen 80;
+    server_name rank.example.com;
     access_log off;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 301 https://rank.example.com$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name rank.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/rank.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/rank.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    client_max_body_size 32k;
+    access_log off;
+
+    # The app's CSP uses SUB2API_PUBLIC_URL to allow the main site's iframe.
+    location / {
+        proxy_pass http://127.0.0.1:9876;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 65s;
+        proxy_read_timeout 65s;
+        proxy_cache off;
+        proxy_intercept_errors off;
+        access_log off;
+    }
 }
 ```
 
-上例省略域名和证书配置。代理需允许最长 60 秒响应时间，且不要缓存 `/api/`。如果用其他访问日志方案，应只记录不含查询参数的 `$uri`；同样检查 CDN/网关日志。生产环境的排行页面与主站均使用 HTTPS，保留 Secure Cookie。推荐独立域名并在根路径 `/` 提供服务。
+证书路径是 Certbot 示例；使用宝塔时改为该排行站点的实际证书路径，并整份替换该站点的配置文件。HTTP-01 客户端使用的 webroot 要与 `/var/www/letsencrypt` 一致，宝塔用户可改为排行站点原有的网站目录。创建目录、签发证书和检查重载的完整步骤见[镜像增量部署手册](docs/image-deployment.md#8-配置排行-https-域名和用户菜单)。
+
+配置关闭访问日志，避免首次页面 URL 的 Token 写入日志；若使用其他日志方案，只记录不含查询参数的 `$uri`，同样检查 CDN/网关日志。模板保留服务自己的 iframe CSP，`SUB2API_PUBLIC_URL` 填主站的实际 HTTPS 来源。生产环境的排行页面与主站均使用 HTTPS，保留 Secure Cookie，页面提供在排行域名根路径 `/`。
 
 使用上述单层可信代理时，保持示例中的 `USAGE_LEADERBOARD_TRUST_PROXY=true`，让限流按真实客户端 IP 计数；否则所有用户可能一起受到代理 IP 的限流。直接访问 Node 服务时设置为 `false`。该选项只信任最近的一层代理，不适用于未经确认的多层代理链。
 
@@ -78,6 +119,57 @@ location / {
 
 未满足以上条件时，不要开启转发指纹。`SESSION_BINDING_MISMATCH` 会作为登录失败展示，不会通过伪造身份或跳过校验绕过绑定。
 
+## 管理员设置与真实用户优先
+
+主站另加一个自定义菜单，名称「排行设置」，地址 `https://实际排行域名/#settings`，可见范围仅管理员，iframe 打开。使用现有 Nginx，无需新增端口或反代路由。主站会在 URL 查询参数中附加登录信息，并保留 `#settings`。普通用户既没有排行页内的设置入口，也无法获取后台表单；所有 `/api/admin/*` 都在服务端重新验证 `role === 'admin'`，降权或认证失败立即拒绝后台访问。写接口还校验同源 Origin 和会话 CSRF Token。
+
+1. 选择模拟榜单、设置上下限与分布，点击「随机生成」。只有服务端生成的候选可以发布，不接收浏览器自编用量。
+2. 切换今日、本周、本月、累计及 Token / 调用次数，查看合并后的真实效果。修改参数后必须重新生成，才能发布。
+3. 「保存草稿」不影响用户端；「发布榜单」确认后原子切换所有周期。可恢复真实榜单，或回退至唯一的上一发布版本；重复提交旧修订号返回 409，不会重复覆盖。
+
+| 边界 | 实际行为 |
+| --- | --- |
+| 真实用户进入所设区间 | 按当前周期的真实 Token 总量判断，达到下限即优先保留；低于下限的用户不预留名额 |
+| 真实用户超过上限或 1B | 仍优先保留，模拟范围不限制真实用量 |
+| 达到下限的真实用户不足 10 位 | 全部保留，用模拟身份补足 10 位，再按所选指标排序；不承诺普通混排 Top 10 的数学含义 |
+| 达到下限的真实用户至少 10 位 | 不补模拟用户，从达标真实用户中按当前指标与并列规则取 10 位；与全站真实 Top 10 一致时恢复正常全站展示，否则保留真实优先筛选和仅榜单汇总 |
+| 请求次数排序 | 仍按真实 Token 下限保留用户，随后按请求次数排序；不把 Token 阈值误用为请求阈值 |
+| 比较、合计与个人信息 | 混合榜或真实优先筛选榜只合计当前 10 行，不显示全站增长率；个人用量、趋势和模型统计保持真实，隐藏个人名次、百分位及追赶差距 |
+| 四个周期 | 基于同一组固定的日级模拟桶聚合，今日属于周、月，周、月分别属于累计；跨月周不强行要求小于本月 |
+| 快照跨天 | 按 `SUB2API_TIMEZONE` 判断，过期即恢复真实榜单；管理员重新生成发布，不自动制造历史 |
+| 失败与更新 | 数据库失败显示错误；文件写入失败保留已发布版本；发布清理缓存，并防止旧的在途查询重新覆盖新版本 |
+
+原始 Token 是整数计数；模拟展示为带两位小数的 M，避开 `.00M` 和四舍五入成 `1000.00M`。1M～1B 约束针对每个模拟身份的每个周期，不约束十人合计。模拟邮箱使用 `example.com`，与脱敏真实身份冲突时自动换名，不借用真实账号承载虚构用量。真实用量按正常缓存周期刷新，默认最多延迟 60 秒。
+
+## 可选：重启后保留后台设置
+
+默认内存模式无需增加文件。需要重启保留草稿与发布设置时，在服务器现有 `sub2api-extra` 根目录执行：
+
+```bash
+sudo install -d -m 700 -o 1000 -g 1000 usage-leaderboard/settings
+```
+
+在 `usage-leaderboard/.env` 增加：
+
+```dotenv
+USAGE_LEADERBOARD_SETTINGS_DIR=/app/settings
+```
+
+在 `usage-leaderboard/compose.yaml` 的 `usage-leaderboard` 服务内取消模板中的挂载注释：
+
+```yaml
+    volumes:
+      - ./settings:/app/settings
+```
+
+然后从原项目根目录按原项目参数重建仅排行服务：
+
+```bash
+docker compose --env-file compose.services.env --profile usage-leaderboard up -d --no-build --no-deps --pull never usage-leaderboard
+```
+
+配置目录按官方镜像的 UID/GID `1000:1000` 设置权限；自定义镜像用户不同则相应调整。只新增 `leaderboard-settings.json`，上限 64 KiB，包含一份草稿、当前发布和唯一上一版；原子写入时使用同名 `.tmp`，也最多 64 KiB。不保存请求、历史序列或长期审计日志。其余文件系统仍只读，文件损坏会恢复真实模式并仅在管理员页提示。重启会话仍会失效，模拟快照的当日有效期也不会因持久化而延长。只支持单个排行进程管理该文件，不让多个副本并发挂载同一目录。
+
 ## 统计口径
 
 | 项目 | 口径 |
@@ -94,7 +186,7 @@ location / {
 
 用户名称统一取注册邮箱 `users.email`，由服务端脱敏：邮箱本地部分最多保留前 2 个字符，其余以固定 `***` 隐藏，域名保留。例如 `apricity@example.com` 显示为 `ap***@example.com`；`ab@example.com` 显示为 `a***@example.com`；`a@example.com` 显示为 `***@example.com`。`+` 别名整体隐藏，短地址仍至少隐藏一个字符；邮箱缺失或无效时使用稳定匿名名称。会话展示信息从主站 `/api/v1/auth/me` 的 `email` 字段获取，使用相同脱敏规则。顶部、领奖台、榜单、个人栏、详情和悬浮提示均使用脱敏结果，完整邮箱不会传到浏览器。
 
-API 只向已登录用户返回 Top 10 的脱敏邮箱及汇总用量，不提供完整邮箱、消费金额、余额、Key、逐笔请求或其他用户的模型分布。个人统计仅由当前服务会话中的身份选择，客户端不能请求其他账号。不查询费用字段，也不接受 `metric=cost`。旧 `USAGE_LEADERBOARD_NAME_MODE` 配置已移除，历史配置不会改变邮箱脱敏规则。
+API 只向已登录用户返回 Top 10 的用户头像、脱敏邮箱及汇总用量，不提供完整邮箱、消费金额、余额、Key、逐笔请求或其他用户的模型分布。个人统计仅由当前服务会话中的身份选择，客户端不能请求其他账号。不查询费用字段，也不接受 `metric=cost`。旧 `USAGE_LEADERBOARD_NAME_MODE` 配置已移除，历史配置不会改变邮箱脱敏规则。
 
 ## 最小只读权限
 
@@ -118,7 +210,13 @@ ALTER ROLE sub2api_leaderboard SET default_transaction_read_only = on;
 GRANT SELECT (requested_model) ON public.usage_logs TO sub2api_leaderboard;
 ```
 
-服务通过 `information_schema.columns` 检查该账号可读的字段，兼容普通表与通过父表读取的分区表。只读角色需要 `users.email` 的 SELECT 权限；原先仅授权 `username` 的账号需补充此权限。完整邮箱仅在服务端用于脱敏，不读取密码或费用字段。
+如果主站有 `user_avatars` 表，为真实头像额外授权：
+
+```sql
+GRANT SELECT (user_id, url) ON public.user_avatars TO sub2api_leaderboard;
+```
+
+服务通过 `information_schema.columns` 检查该账号可读的字段，兼容普通表与通过父表读取的分区表。只读角色需要 `users.email` 的 SELECT 权限；原先仅授权 `username` 的账号需补充此权限。头像表不存在或没有上述读取权限时，榜单仍可用并显示默认用户图标。完整邮箱仅在服务端用于脱敏，不读取密码或费用字段。
 
 ## 本地开发与验证
 
@@ -131,7 +229,7 @@ npm test
 
 PGlite 只属于开发依赖，用于测试专用的内存 PostgreSQL；Docker 生产镜像不安装它，也不包含测试数据。本地运行使用 `npm start` 并读取 `.env`；HTTP 开发时设置 `NODE_ENV=development` 和 `USAGE_LEADERBOARD_COOKIE_SECURE=false`。
 
-测试包含临时内存 PostgreSQL 上的实际查询，覆盖四类 Token、Token/次数并列、邮箱脱敏与费用排除、时区/夏令时/周月边界、历史清理、空榜、榜外个人排名、只读事务、缓存上限和身份隔离。没有测试生成的持久数据库文件。
+测试包含临时内存 PostgreSQL 上的实际查询，覆盖四类 Token、并列、邮箱脱敏与费用排除、时区和历史清理、空榜、真实用户优先、超上限真实用量、个人统计隔离、管理员降权、CSRF、生成重放与周期包含关系、并发版本、跨天失效、固定大小文件重启及写入失败。没有测试生成的持久数据库文件。
 
 ## 接口与排查
 
@@ -144,5 +242,11 @@ PGlite 只属于开发依赖，用于测试专用的内存 PostgreSQL；Docker �
 | `GET /api/auth/me` | 当前会话的展示信息 |
 | `POST /api/auth/logout` | 撤销当前会话 |
 | `GET /api/leaderboard?period=month&metric=tokens` | Top 10 和当前用户统计；必须已登录 |
+| `GET /api/admin/view` / `GET /api/admin/settings` | 管理员表单、草稿、发布状态及修订号 |
+| `POST /api/admin/simulation/preview` | 服务端生成候选；不发布 |
+| `GET /api/admin/leaderboard/preview?source=simulation&period=month&metric=tokens` | 草稿与真实用户合并预览；`source=real` 预览真实榜 |
+| `PUT /api/admin/settings/draft` | 保存当前草稿 |
+| `POST /api/admin/leaderboard/publish` | 发布选定来源 |
+| `POST /api/admin/leaderboard/restore-real` / `POST /api/admin/leaderboard/rollback` | 恢复真实 / 回退上一发布 |
 
 `DATABASE_NOT_CONFIGURED` / `DATABASE_UNAVAILABLE` 表示连接未配置或不可达；`SCHEMA_INCOMPATIBLE` 表示字段或权限不足；`QUERY_TIMEOUT` 表示源库聚合超时；`AUTH_REQUIRED` 表示需从主站重新打开页面；`SERVICE_BUSY` / `SESSION_CAPACITY` 表示资源上限已达到。错误不会回退为示例数据，也不会把 SQL 或凭据返回页面。

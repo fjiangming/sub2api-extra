@@ -5,6 +5,9 @@ const { AppError } = require('./errors');
 const PERIODS = ['today', 'week', 'month', 'all'];
 const METRICS = ['tokens', 'requests'];
 const tokenExpression = (alias) => `COALESCE(${alias}.input_tokens, 0)::bigint + COALESCE(${alias}.output_tokens, 0)::bigint + COALESCE(${alias}.cache_creation_tokens, 0)::bigint + COALESCE(${alias}.cache_read_tokens, 0)::bigint`;
+const avatarExpression = (schema, alias) => schema.userAvatars
+  ? `(SELECT a.url FROM public.user_avatars a WHERE a.user_id = ${alias}.id) AS avatar_url`
+  : 'NULL::text AS avatar_url';
 
 function validateSelection(period, metric) {
   if (!PERIODS.includes(period) || !METRICS.includes(metric)) throw new AppError('INVALID_REQUEST', '统计周期或排名依据无效', 400);
@@ -68,15 +71,22 @@ class UsageRepository {
     return [period, anchor, this.config.timezone, this.config.includeAdmins, ...(userId ? [userId] : [])];
   }
 
-  async board(period, metric, anchor) {
+  async board(period, metric, anchor, minimumTokens = null, schema = {}) {
     const { rows } = await this.database.query(`${rankingCte(metric)}
       SELECT
         COALESCE((SELECT jsonb_agg(to_jsonb(t) ORDER BY t.${metric} DESC, t.id::bigint) FROM (
-          SELECT r.id::text, r.email, r.tokens, r.requests, r.rank,
+          SELECT r.id::text, r.email, ${avatarExpression(schema, 'r')}, r.tokens, r.requests, r.rank,
                  p.rank AS previous_rank, r.previous_${metric} AS previous_value
           FROM ranked r LEFT JOIN previous_ranked p ON p.id = r.id
           ORDER BY r.${metric} DESC, r.id LIMIT 10
         ) t), '[]'::jsonb) AS entries,
+        COALESCE((SELECT jsonb_agg(to_jsonb(t) ORDER BY t.${metric} DESC, t.id::bigint) FROM (
+          SELECT r.id::text, r.email, ${avatarExpression(schema, 'r')}, r.tokens, r.requests, r.rank,
+                 p.rank AS previous_rank, r.previous_${metric} AS previous_value
+          FROM ranked r LEFT JOIN previous_ranked p ON p.id = r.id
+          WHERE $5::bigint IS NOT NULL AND r.tokens >= $5::bigint
+          ORDER BY r.${metric} DESC, r.id LIMIT 10
+        ) t), '[]'::jsonb) AS qualified_entries,
         (SELECT jsonb_build_object('tokens', COALESCE(SUM(tokens), 0),
           'requests', COALESCE(SUM(requests), 0), 'active', COUNT(*)) FROM ranked) AS summary,
         (SELECT jsonb_build_object('tokens', COALESCE(SUM(previous_tokens), 0),
@@ -86,14 +96,14 @@ class UsageRepository {
           'previousStart', w.previous_start, 'previousEnd', w.previous_finish,
           'retainedFrom', (SELECT MIN(created_at) FROM public.usage_logs WHERE created_at < w.finish)) AS window
       FROM win w
-    `, this.params(period, metric, anchor));
+    `, [...this.params(period, metric, anchor), minimumTokens]);
     return rows[0];
   }
 
-  async personal(period, metric, anchor, userId) {
+  async personal(period, metric, anchor, userId, schema = {}) {
     const { rows } = await this.database.query(`${rankingCte(metric)},
       mine AS (
-        SELECT u.id::text, u.email, u.eligible, COALESCE(t.tokens, 0) AS tokens,
+        SELECT u.id::text, u.email, ${avatarExpression(schema, 'u')}, u.eligible, COALESCE(t.tokens, 0) AS tokens,
           COALESCE(t.requests, 0) AS requests,
           COALESCE(t.previous_${metric}, 0) AS previous_value
         FROM scope_users u LEFT JOIN totals t ON t.id = u.id WHERE u.id = $5::bigint

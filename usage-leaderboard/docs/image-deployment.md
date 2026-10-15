@@ -4,6 +4,8 @@
 
 镜像为 `ghcr.io/fjiangming/sub2api-extra:usage-leaderboard-latest`。2026-10-13 已核验该标签可匿名读取，支持 `linux/amd64` 和 `linux/arm64`；镜像标注的源码版本 `d31322c7c60d1699c99126362ba3f61d9e5c1168` 已包含注册邮箱脱敏和移除金额展示、排序。
 
+后台设置、真实用户优先和真实头像功能须使用包含相应源码的镜像。推送到 `main` 后由 GitHub Actions 自动构建，确认对应提交的 `Build usage-leaderboard` 成功后再按本文拉取更新；历史镜像可拉取不代表已包含新功能。源码部署可在原根目录对本服务执行 `up -d --build --no-deps usage-leaderboard`。
+
 ## 历史网络问题与本次配置
 
 当前工程的历史会话《规划独立统计清理服务》记录了以下情况：
@@ -57,7 +59,7 @@ sub2api-extra/
 
 ## 2. 准备数据库只读账号
 
-如果手中已有运营中心的有效只读连接凭据，可直接复用，无需创建账号。账号需具备 `public.users` 和 `public.usage_logs` 的必要字段读取权限。运营中心在网页初始化后加密保存的密码不一定在 `.env` 中；不要为找回密码重新初始化运营中心或重置它正在使用的账号。
+如果手中已有运营中心的有效只读连接凭据，可直接复用，无需创建账号。账号需具备 `public.users` 和 `public.usage_logs` 的必要字段读取权限；展示真实头像还需读取 `public.user_avatars` 的 `user_id`、`url`。运营中心在网页初始化后加密保存的密码不一定在 `.env` 中；不要为找回密码重新初始化运营中心或重置它正在使用的账号。
 
 运营中心可以使用 `.env` 中的高级连接配置，也可以使用页面初始化后保存的加密连接配置。默认只读角色名是 `sub2api_ops_read`，但密码由系统随机生成；页面里填写的 PostgreSQL 管理员密码不属于这个只读角色。不要把主站管理员账号、`SUB2API_MAINTENANCE_DATABASE_URL` 或清理角色用于排行。
 
@@ -138,7 +140,7 @@ GRANT SELECT (user_id, created_at, model, input_tokens, output_tokens,
 ALTER ROLE sub2api_leaderboard SET default_transaction_read_only = on;
 ```
 
-仍在 `psql` 中执行下面的条件授权；有 `requested_model` 字段时读取它，没有时服务使用 `model`：
+仍在 `psql` 中执行下面的条件授权；有 `requested_model` 字段时读取它，没有时服务使用 `model`；头像表可用时读取主站保存的真实头像：
 
 ```sql
 SELECT 'GRANT SELECT (requested_model) ON public.usage_logs TO sub2api_leaderboard;'
@@ -147,6 +149,8 @@ WHERE EXISTS (
   WHERE table_schema = 'public' AND table_name = 'usage_logs'
     AND column_name = 'requested_model'
 ) \gexec
+SELECT 'GRANT SELECT (user_id, url) ON public.user_avatars TO sub2api_leaderboard;'
+WHERE to_regclass('public.user_avatars') IS NOT NULL \gexec
 \q
 ```
 
@@ -181,6 +185,9 @@ services:
       retries: 3
       start_period: 15s
     read_only: true
+    # Optional bounded admin settings; also set USAGE_LEADERBOARD_SETTINGS_DIR.
+    # volumes:
+    #   - ./settings:/app/settings
     tmpfs: ["/tmp:size=16m,mode=1777"]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
@@ -232,6 +239,9 @@ USAGE_LEADERBOARD_PERSONAL_CACHE_ENTRIES=256
 USAGE_LEADERBOARD_MAX_SESSIONS=1000
 USAGE_LEADERBOARD_SESSION_MINUTES=30
 USAGE_LEADERBOARD_INCLUDE_ADMINS=false
+
+# Optional: uncomment only after adding the settings mount in step 10.
+# USAGE_LEADERBOARD_SETTINGS_DIR=/app/settings
 ```
 
 完成编辑后执行：
@@ -376,43 +386,97 @@ SUB2API_BASE_URL=http://sub2api:8080
 
 ## 8. 配置排行 HTTPS 域名和用户菜单
 
-例如主站是 `https://api.example.com`，排行使用 `https://rank.example.com`。将排行域名解析到服务器，在现有宿主机 Nginx、宝塔或其他反代中设置 HTTPS。在已有域名和证书的 Nginx `server` 块中添加：
+例如主站是 `https://api.example.com`，排行使用 `https://rank.example.com`。下面是完整的 Nginx 站点配置，包含 HTTP 跳转、HTTP-01 证书续期入口、HTTPS 证书和排行反代，可整份保存为该域名的站点文件。配置文件见 [nginx.conf.example](nginx.conf.example)。
+
+先将排行域名解析到服务器，并准备该域名的有效证书。复制前修改以下值：
+
+| 示例值 | 替换为 |
+| --- | --- |
+| 所有 `rank.example.com` | 实际排行域名，不是主站域名 |
+| `/etc/letsencrypt/live/rank.example.com/fullchain.pem` | 该域名完整证书链的绝对路径 |
+| `/etc/letsencrypt/live/rank.example.com/privkey.pem` | 对应私钥的绝对路径 |
+| `/var/www/letsencrypt` | HTTP-01 续期客户端使用的 webroot；默认按下文创建 |
+
+证书路径采用常见的 Certbot 示例。若使用宝塔，证书路径通常是 `/www/server/panel/vhost/cert/实际排行域名/fullchain.pem` 和 `/www/server/panel/vhost/cert/实际排行域名/privkey.pem`，以该站点 SSL 页面或原配置中的实际路径为准。证书文件必须已经存在，完整 HTTPS 配置才能通过 `nginx -t`。
+
+宝塔用户在排行域名的“配置文件”中用下面整份内容替换该站点配置，不粘进旧的 `server {}` 内；若证书由宝塔管理，将 HTTP-01 的 `root` 改为该排行站点原有的实际网站目录，并让续期设置使用相同目录。其他子服务的站点文件继续独立管理。
 
 ```nginx
-location / {
-    proxy_pass http://127.0.0.1:9876;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header Authorization $http_authorization;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_set_header X-Real-IP $remote_addr;
-    proxy_read_timeout 65s;
-    proxy_cache off;
+# Replace rank.example.com and the certificate paths before use.
+# The HTTP-01 webroot must match your ACME client's renewal configuration.
+server {
+    listen 80;
+    server_name rank.example.com;
     access_log off;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        default_type text/plain;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 301 https://rank.example.com$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name rank.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/rank.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/rank.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    client_max_body_size 32k;
+    access_log off;
+
+    # The app's CSP uses SUB2API_PUBLIC_URL to allow the main site's iframe.
+    location / {
+        proxy_pass http://127.0.0.1:9876;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_connect_timeout 5s;
+        proxy_send_timeout 65s;
+        proxy_read_timeout 65s;
+        proxy_cache off;
+        proxy_intercept_errors off;
+        access_log off;
+    }
 }
 ```
 
-修改宿主机 Nginx 后先检查，再重新加载：
+使用系统安装的 Nginx 时，创建 HTTP-01 webroot，并将完整配置保存到实际被 Nginx 加载的站点目录；下面以已由主配置包含的 `/etc/nginx/conf.d/` 为例：
 
 ```bash
-sudo nginx -t && sudo systemctl reload nginx
+sudo mkdir -p /var/www/letsencrypt/.well-known/acme-challenge
+sudo nano /etc/nginx/conf.d/usage-leaderboard.conf
+sudo nginx -t && sudo nginx -s reload
 ```
 
-反代目标是本机 9876，页面提供在独立域名的根路径 `/`，不挂 `/rank/` 子路径。保留 Authorization 请求头，不缓存 `/api/`。主站菜单会向首次页面 URL 添加短期 Token，以上配置关闭访问日志；其他 CDN/网关日志也应排除查询参数。
+该文件由 Nginx 的 `http {}` 加载，只保存两个 `server {}` 块，不覆盖全局 `nginx.conf`。同一排行域名已有站点文件时，在原文件中替换，不再创建重复站点。宝塔用户使用其界面保存并重载即可。配置检查失败时先修复错误，不执行重载；本地验证使用临时证书，服务器仍需用实际证书路径完成检查。
+
+模板允许 `/.well-known/acme-challenge/` 通过 HTTP 读取，其余 HTTP 请求跳转到排行 HTTPS 域名；使用 HTTP-01 续期时，ACME 客户端 webroot 必须与 `root` 一致。使用 DNS-01 等方式签发的现有证书时，这个目录可以保留为空。尚未取得证书时，先通过现有证书管理工具签发，或先启用模板的第一个 HTTP `server` 并使用相同 webroot 签发，再启用完整配置。
+
+HTTPS 下的页面、JS、CSS、图片和 API 都交给本机 9876 的排行容器，服务提供在独立域名根路径 `/`。保留 Authorization 请求头，不缓存代理响应，主站允许的 iframe 来源由排行服务的 `SUB2API_PUBLIC_URL` 决定；完整模板不额外设置 `X-Frame-Options` 或隐藏服务的 CSP。若全局配置另有阻止主站嵌入的响应头，需在实际部署中修正。主站菜单会向首次页面 URL 添加短期 Token，以上配置关闭访问日志；其他 CDN/网关日志也应排除查询参数。
 
 如果反代自身也在 Docker 内，`127.0.0.1` 指向反代容器，不能照用宿主机地址。让反代和排行共享实际已有网络，目标改为 `http://usage-leaderboard:9876`；反代网络也要写入它自己的 Compose，单次 `network connect` 不是永久配置。若反代位于宿主机，当前主流程已经满足要求。
 
-在 Sub2API 管理后台的自定义菜单中新增：
+在 Sub2API 管理后台「系统设置 → 通用设置 → 自定义菜单页面」中新增展示菜单：
 
 | 项目 | 值 |
 | --- | --- |
-| 名称 | 用量排行 |
-| 地址 | `https://rank.example.com/`，替换为实际排行域名 |
-| 可见范围 | 普通用户 |
-| 打开方式 | iframe |
+| 菜单名称 | 用量排行 |
+| 页面 URL | `https://rank.example.com/`，替换为实际排行域名 |
+| 可见角色 | 普通用户 |
+| 隐藏「新窗口打开」按钮 | 建议勾选 |
 
-菜单 URL 不手填 Token、管理员 API Key 或用户 ID；主站会自动传入当前用户登录信息。确认 `SUB2API_PUBLIC_URL` 与用户实际打开的主站来源一致，并让排行反代允许该主站嵌入；不要在排行响应上添加与 iframe 冲突的 `X-Frame-Options: DENY/SAMEORIGIN` 或更严格的 `frame-ancestors`。
+填写完整 HTTPS 页面 URL 后，主站自动以 iframe 打开并传入当前用户登录信息，无需另外选择 iframe，也不手填 Token、管理员 API Key 或用户 ID。点击页面底部「保存设置」后刷新主站。确认 `SUB2API_PUBLIC_URL` 与用户实际打开的主站来源一致，并让排行反代允许该主站嵌入；不要在排行响应上添加与 iframe 冲突的 `X-Frame-Options: DENY/SAMEORIGIN` 或更严格的 `frame-ancestors`。
 
 最后从普通用户账号打开菜单，确认 Top 10、个人用量和趋势正常，名称显示脱敏注册邮箱，排序仅有 Token 和调用次数，没有消费金额。直接访问排行域名而没有会话时提示登录是正常行为。
 
@@ -425,7 +489,7 @@ docker compose --env-file compose.services.env --profile usage-leaderboard pull 
 docker compose --env-file compose.services.env --profile usage-leaderboard up -d --no-build --no-deps --pull never usage-leaderboard
 ```
 
-只修改排行 `.env` 或 Compose 时，执行第二条即可，Compose 会应用配置并重建该服务。`restart` 不加载新环境变量。外部网络已声明在 Compose 中，更新后无需手动重新连接。重启会清空内存缓存和会话，用户重新从主站菜单进入即可；不会另外积累业务数据文件。
+只修改排行 `.env` 或 Compose 时，执行第二条即可，Compose 会应用配置并重建该服务。`restart` 不加载新环境变量。外部网络已声明在 Compose 中，更新后无需手动重新连接。重启会清空内存缓存和会话，用户重新从主站菜单进入即可。后台设置默认也只在内存，重启后恢复真实榜单；需要保留设置时按下一节配置固定大小文件。
 
 | 错误或现象 | 检查与处理 |
 | --- | --- |
@@ -442,3 +506,54 @@ docker compose --env-file compose.services.env --profile usage-leaderboard up -d
 | `healthy` 但榜单不能使用 | 继续验证 `readyz`、认证接口和普通用户菜单；进程健康不等于全链路可用 |
 
 本手册和镜像 Compose 已在本地做静态检查。历史网络名来自当时的服务器输出；当前服务器的实际网络、数据库授权和登录联通仍以第 1、7、8 步现场验证为准。
+
+## 10. 管理员设置页与可选配置保存
+
+升级到包含后台功能的新镜像后，用主站管理员账号从「用量排行」打开页面，顶部会显示「排行设置」。也可在主站另建管理员专用自定义菜单：
+
+| 项目 | 值 |
+| --- | --- |
+| 菜单名称 | 排行设置 |
+| 页面 URL | `https://rank.example.com/#settings`，与展示菜单使用同一个实际域名 |
+| 可见角色 | 仅管理员 |
+| 隐藏「新窗口打开」按钮 | 建议勾选 |
+
+管理菜单也在「系统设置 → 通用设置 → 自定义菜单页面」添加，保存设置并刷新主站。无需为 `#settings` 新增 Nginx 路由、域名或端口；主站会在保留 `#settings` 的同时附带登录参数。服务端对所有后台请求实时验证主站管理员角色，普通用户直达也看不到表单；不以菜单可见性替代接口授权。
+
+设置上下限（单位 M，硬范围 1～1000）与分布，点击「随机生成」，切换四个周期和两种排序预览，再保存草稿或确认发布。生成和草稿不改变用户端。真实用户达到所设 Token 下限时优先保留，超过 1B 也照实展示；模拟用户仅补足剩余位置。达标真实用户至少 10 位时不再补模拟用户，按所选指标在达标用户中取前 10 位。与全站真实 Top 10 一致时恢复正常全站展示，否则仍只汇总优先筛选出的榜单，避免低 Token、高频用户挤掉达标用户。模拟行带「示例」标识，个人用量仍为真实记录；快照跨天自动恢复真实榜单，需重新生成发布。
+
+默认完全不新增目录，后台设置只在内存。如果需要容器重启后保留规则、草稿及发布，在现有 `sub2api-extra` 根目录执行：
+
+```bash
+sudo install -d -m 700 -o 1000 -g 1000 usage-leaderboard/settings
+nano usage-leaderboard/.env
+```
+
+在 `.env` 取消这一行注释或添加：
+
+```dotenv
+USAGE_LEADERBOARD_SETTINGS_DIR=/app/settings
+```
+
+编辑原 `usage-leaderboard/compose.yaml`，将 `read_only: true` 后面的三行可选挂载注释改为以下内容（`volumes` 与 `read_only` 同级，位于 `usage-leaderboard` 服务内）：
+
+```yaml
+    volumes:
+      - ./settings:/app/settings
+```
+
+仍在原项目根目录执行，保留原来实际使用的项目名和覆盖参数：
+
+```bash
+docker compose --env-file compose.services.env --profile usage-leaderboard up -d --no-build --no-deps --pull never usage-leaderboard
+```
+
+官方镜像以 `1000:1000` 运行；不要通过放宽为 `777` 解决权限。启用后设置页不再提示内存模式。保存一次后只出现 `settings/leaderboard-settings.json`，最多 64 KiB；包含草稿、当前发布和唯一上一版，不随天数或访问量增加。原子写入的固定 `.tmp` 文件也不超过 64 KiB，不追加历史、请求日志或另一套数据库。只允许运行一个排行进程操作该文件。
+
+写入失败时已发布版本保持不变，管理员收到保存失败提示；文件损坏或不兼容时恢复真实模式并提示。跨天失效仍然适用，持久化不会把昨日模拟快照继续标成今日。查看文件大小可使用：
+
+```bash
+sudo du -h usage-leaderboard/settings/leaderboard-settings.json
+```
+
+后台提示 `ADMIN_REQUIRED` 时检查当前主站账号角色；`ORIGIN_INVALID` 时确认 Nginx 原样传递 Host，并用 `X-Forwarded-Proto` 和单层可信代理配置让服务识别 HTTPS；`SETTINGS_WRITE_FAILED` 时检查挂载路径和 `1000:1000` 权限；`SETTINGS_CONFLICT` 刷新设置后再操作；`SIMULATION_EXPIRED` 重新生成。

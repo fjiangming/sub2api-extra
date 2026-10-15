@@ -1,0 +1,126 @@
+'use strict';
+
+const crypto = require('node:crypto');
+const { isDeepStrictEqual } = require('node:util');
+const { z } = require('zod');
+const { AppError } = require('./errors');
+
+const AVATARS = ['mountain', 'lake', 'night', 'forest', 'hills', 'sea', 'peak', 'valley', 'coast', 'green'];
+const PERIODS = ['today', 'week', 'month', 'all'];
+const rulesSchema = z.object({
+  minimumTokens: z.number().int().min(1e6).max(1e9),
+  maximumTokens: z.number().int().min(1e6).max(1e9),
+  distribution: z.enum(['natural', 'close', 'concentrated'])
+}).strict().refine((value) => value.maximumTokens > value.minimumTokens, '上限必须大于下限');
+const DEFAULT_RULES = { minimumTokens: 1370000, maximumTokens: 980830000, distribution: 'natural' };
+const identitySchema = z.object({
+  key: z.string().regex(/^sim_[a-f0-9]{16}$/), name: z.string().regex(/^[a-z]{2}\*\*\*@example\.com$/), avatar: z.enum(AVATARS).nullable()
+}).strict();
+const valueSchema = z.object({ tokens: z.number().int().min(1e6).max(1e9), requests: z.number().int().positive().max(1e9) }).strict();
+const candidateSchema = z.object({
+  version: z.literal(1), seed: z.string().regex(/^[a-f0-9]{32}$/), generatedAt: z.iso.datetime(),
+  timezone: z.string().max(80), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), rules: rulesSchema,
+  rows: z.array(identitySchema.extend({ values: z.object(Object.fromEntries(PERIODS.map((period) => [period, valueSchema]))).strict() }).strict()).length(10)
+}).strict();
+
+function calendarDate(now, timezone) { return new Intl.DateTimeFormat('sv-SE', { timeZone: timezone }).format(now); }
+function shiftDay(date, days) { return new Date(Date.parse(`${date}T00:00:00Z`) + days * 86400000).toISOString().slice(0, 10); }
+function randomSource(seed) {
+  let state = crypto.createHash('sha256').update(seed).digest().readUInt32BE(0) || 1;
+  return () => { state ^= state << 13; state ^= state >>> 17; state ^= state << 5; return (state >>> 0) / 4294967296; };
+}
+function fractional(value) { return Number.isSafeInteger(value) && value % 1000 !== 0 && !(value / 1e6).toFixed(2).endsWith('.00'); }
+function invalidRange() { return new AppError('SIMULATION_RANGE_INVALID', '当前范围无法生成十组随机小数，请扩大上下限间距', 400); }
+
+function generateSimulation(input, { now = new Date(), timezone = 'Asia/Shanghai', seed = crypto.randomBytes(16).toString('hex'), roster } = {}) {
+  const result = rulesSchema.safeParse(input);
+  if (!result.success) throw new AppError('INVALID_REQUEST', '模拟 Token 范围须为 1M～1B，且上限大于下限', 400);
+  const rules = result.data;
+  const random = randomSource(seed);
+  const choose = (low, high, preferred) => {
+    for (let attempt = 0; attempt < 64; attempt++) {
+      const value = attempt === 0 ? Math.round(preferred) : Math.floor(low + random() * (high - low + 1));
+      if (value >= low && value <= high && fractional(value)) return value;
+    }
+    throw invalidRange();
+  };
+  const date = calendarDate(now, timezone);
+  const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+  const weekStart = shiftDay(date, -((weekday + 6) % 7));
+  const monthStart = `${date.slice(0, 7)}-01`;
+  const floor = choose(rules.minimumTokens, rules.maximumTokens, rules.minimumTokens + 12347);
+  const identityRandom = randomSource(`${seed}:names`);
+  const prefixes = Array.from({ length: 676 }, (_, i) => `${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + i % 26)}`);
+  const identities = roster ? z.array(identitySchema).length(10).parse(roster) : Array.from({ length: 10 }, (_, i) => ({
+    key: `sim_${crypto.createHash('sha256').update(`${seed}:identity:${i}`).digest('hex').slice(0, 16)}`,
+    name: `${prefixes.splice(Math.floor(identityRandom() * prefixes.length), 1)[0]}***@example.com`, avatar: null
+  }));
+  // Metrics use a separate stream so retaining identities does not change seeded replay.
+  const metricRandom = randomSource(`${seed}:metrics`);
+  const used = Object.fromEntries(PERIODS.map((period) => [period, new Set()]));
+  const rows = identities.map((identity, index) => {
+    for (let attempt = 0; attempt < 64; attempt++) {
+      const quantile = (10 - index - (.08 + metricRandom() * .77)) / 10;
+      const weight = rules.distribution === 'close' ? .66 + quantile * .32 : Math.pow(quantile, rules.distribution === 'concentrated' ? 2.5 : 1.35);
+      const budget = choose(floor, rules.maximumTokens, floor + (rules.maximumTokens - floor) * weight);
+      const today = choose(floor, budget, floor + (budget - floor) * (.012 + metricRandom() * .05));
+      const weights = Array.from({ length: 93 }, () => .02 + metricRandom());
+      const denominator = weights.reduce((sum, value) => sum + value, 0);
+      let remaining = budget - today;
+      const values = Object.fromEntries(PERIODS.map((period) => [period, { tokens: 0, requests: 0 }]));
+      for (let day = 0; day <= 93; day++) {
+        const localDay = shiftDay(date, -day);
+        const tokens = day === 0 ? today : day === 93 ? remaining : Math.min(remaining, Math.floor((budget - today) * weights[day - 1] / denominator));
+        if (day > 0) remaining -= tokens;
+        const requests = tokens > 0 ? Math.max(1, Math.round(tokens / (1800 + metricRandom() * 22200))) : 0;
+        for (const period of PERIODS) {
+          if (period === 'today' && day !== 0 || period === 'week' && localDay < weekStart || period === 'month' && localDay < monthStart) continue;
+          values[period].tokens += tokens;
+          values[period].requests += requests;
+        }
+      }
+      if (PERIODS.some((period) => !fractional(values[period].tokens) || values[period].tokens < rules.minimumTokens || values[period].tokens > rules.maximumTokens || used[period].has((values[period].tokens / 1e6).toFixed(2)))) continue;
+      PERIODS.forEach((period) => used[period].add((values[period].tokens / 1e6).toFixed(2)));
+      return { ...identity, values };
+    }
+    throw invalidRange();
+  });
+  return { version: 1, seed, generatedAt: now.toISOString(), timezone, date, rules, rows };
+}
+
+function validateCandidate(value, timezone) {
+  const parsed = candidateSchema.safeParse(value);
+  if (!parsed.success || parsed.data.timezone !== timezone) throw new AppError('SIMULATION_INVALID', '模拟数据无效，请重新生成', 400);
+  const candidate = parsed.data;
+  const replay = generateSimulation(candidate.rules, { now: new Date(candidate.generatedAt), timezone, seed: candidate.seed,
+    roster: candidate.rows.map(({ key, name, avatar }) => ({ key, name, avatar })) });
+  if (!isDeepStrictEqual(candidate, replay) || new Set(candidate.rows.map((row) => row.key)).size !== 10 || new Set(candidate.rows.map((row) => row.name)).size !== 10) {
+    throw new AppError('SIMULATION_INVALID', '模拟数据校验失败，请重新生成', 400);
+  }
+  return candidate;
+}
+
+function projectSimulation(board, candidate, version) {
+  const realEntries = board.qualifiedEntries || [];
+  const realKeys = new Set(realEntries.map((entry) => entry.key));
+  if (realEntries.length >= 10 && board.entries.every((entry) => realKeys.has(entry.key))) {
+    return { ...board, display: { mode: 'real', realCount: board.entries.length, simulatedCount: 0, version } };
+  }
+  const names = new Set(realEntries.map((entry) => entry.name));
+  const simulated = candidate.rows.map((row) => {
+    let name = row.name;
+    for (let i = 0; names.has(name) && i < 676; i++) name = `${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + i % 26)}***@example.com`;
+    names.add(name);
+    return { key: row.key, name, avatar: null, ...row.values[board.period], source: 'simulation' };
+  }).sort((a, b) => b[board.metric] - a[board.metric] || a.key.localeCompare(b.key)).slice(0, 10 - realEntries.length);
+  const entries = [...realEntries.map((entry) => ({ ...entry, source: 'real' })), ...simulated]
+    .sort((a, b) => b[board.metric] - a[board.metric] || Number(a.source === 'simulation') - Number(b.source === 'simulation') || a.key.localeCompare(b.key));
+  let rank = 0;
+  entries.forEach((entry, index) => { if (index === 0 || entry[board.metric] !== entries[index - 1][board.metric]) rank = index + 1;
+    entry.rank = rank; entry.comparisonAvailable = false; entry.change = null; entry.newEntry = false; entry.growth = null; });
+  return { ...board, entries, comparisonAvailable: false,
+    summary: { tokens: entries.reduce((sum, entry) => sum + entry.tokens, 0), requests: entries.reduce((sum, entry) => sum + entry.requests, 0), active: entries.length, deltas: null },
+    display: { mode: !simulated.length ? 'priority' : realEntries.length ? 'mixed' : 'simulation', realCount: realEntries.length, simulatedCount: simulated.length, version, snapshotAt: candidate.generatedAt, date: candidate.date } };
+}
+
+module.exports = { DEFAULT_RULES, rulesSchema, calendarDate, generateSimulation, validateCandidate, projectSimulation };
