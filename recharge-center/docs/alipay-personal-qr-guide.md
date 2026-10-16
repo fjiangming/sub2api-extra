@@ -105,7 +105,7 @@ RECHARGE_CENTER_SMTP_FROM=recharge-alerts@example.com
 RECHARGE_CENTER_ALERT_EMAIL_TO=operations@example.com
 ```
 
-使用 SMTP 465 端口时通常设置 `RECHARGE_CENTER_SMTP_SECURE=true`；使用 587 端口时保持 `false` 并强制 STARTTLS。先在隔离环境制造一笔错金额事件，确认邮件到达并显示该订单的下单用户 ID、脱敏邮箱、订单号、应付金额、交易号末六位、备注末六位、异常代码和时间；没有唯一关联订单时会提示“归属未确认”。完整用户邮箱和支付宝账号不会出现在通知中。
+使用 SMTP 465 端口时通常设置 `RECHARGE_CENTER_SMTP_SECURE=true`；使用 587 端口时保持 `false` 并强制 STARTTLS。先在隔离环境创建新订单并制造一笔错金额事件，确认邮件到达并显示该订单的下单用户 ID、完整下单邮箱、订单号、应付金额、交易号末六位、备注末六位、异常代码和时间；没有唯一关联订单时会提示“归属未确认”。历史订单没有完整邮箱快照时提示按用户 ID 查找；支付宝账号不进入通知。
 
 可选第二通道：把 `RECHARGE_CENTER_ALERT_CHANNELS` 改为 `email,webhook`，并配置 `RECHARGE_CENTER_ALERT_WEBHOOK_URL` 与至少 32 字符的 `RECHARGE_CENTER_ALERT_WEBHOOK_BEARER_TOKEN`。生产 Webhook 必须使用 HTTPS，拒绝跳转；SMTP、Webhook 各自有限重试。投递失败只会记录本地审计，异常订单仍保持人工处理且绝不自动放款。
 

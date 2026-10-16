@@ -14,14 +14,14 @@ const event = {
   anomalyCode: 'PAYMENT_AMOUNT_MISMATCH',
   orderNo: 'RC202610030001',
   userId: 42,
-  userEmailMasked: 'al***@example.test',
+  userEmail: 'alice@example.test',
   amount: '50.01',
   tradeLast6: '345678',
   memoLast6: 'abcdef',
   occurredAt: '2026-10-03T08:01:02+08:00',
   tradeNo: '20261003000000000000345678',
   memo: 'S2-full-sensitive-memo',
-  userEmail: 'alice@example.test'
+  userEmailMasked: 'al***@example.test'
 };
 
 function config(overrides = {}) {
@@ -45,38 +45,39 @@ function config(overrides = {}) {
 test('notification events are rebuilt from a strict redacted field allowlist', () => {
   const safe = sanitizeEvent(event);
   assert.deepEqual(Object.keys(safe), [
-    'eventId', 'anomalyCode', 'orderNo', 'userId', 'userEmailMasked',
+    'eventId', 'anomalyCode', 'orderNo', 'userId', 'userEmail',
     'amount', 'tradeLast6', 'memoLast6', 'occurredAt'
   ]);
   assert.equal(safe.userId, '42');
-  assert.equal(safe.userEmailMasked, event.userEmailMasked);
+  assert.equal(safe.userEmail, event.userEmail);
+  assert.equal(Object.hasOwn(safe, 'userEmailMasked'), false);
   assert.equal(JSON.stringify(safe).includes(event.tradeNo), false);
   assert.equal(JSON.stringify(safe).includes(event.memo), false);
   assert.throws(() => sanitizeEvent({ ...event, tradeLast6: 'not-six' }), /安全字段白名单/);
 });
 
-test('account identity rejects invalid IDs, unmasked emails, and control character injection', () => {
+test('account identity accepts full email and rejects invalid IDs, invalid emails, and control character injection', () => {
   for (const userId of [0, -1, 1.5, '42\n100', '42\n', Number.MAX_SAFE_INTEGER + 1]) {
     assert.throws(() => sanitizeEvent({ ...event, userId }), /安全字段白名单/);
   }
-  for (const userEmailMasked of [event.userEmail, 'al***@example.test\n伪造内容', 'al***@example.test\n',
-    'al***@example.test\u0000', 'al***@example.test\u0085', 'al***@example.test\u202e', `al***@${'x'.repeat(320)}`]) {
-    assert.throws(() => sanitizeEvent({ ...event, userEmailMasked }), /安全字段白名单/);
+  for (const userEmail of ['not-an-email', 'alice@example.test\n伪造内容', 'alice@example.test\n',
+    'alice@example.test\u0000', 'alice@example.test\u0085', 'alice@example.test\u202e', `alice@${'x'.repeat(320)}`]) {
+    assert.throws(() => sanitizeEvent({ ...event, userEmail }), /安全字段白名单/);
   }
   assert.throws(() => sanitizeEvent({ ...event, userId: null }), /安全字段白名单/);
-  const longMaskedEmail = `al***@${'x'.repeat(63)}.${'x'.repeat(63)}.${'x'.repeat(63)}.test`;
-  assert.equal(sanitizeEvent({ ...event, userEmailMasked: longMaskedEmail }).userEmailMasked, longMaskedEmail);
+  const longEmail = `alice@${'x'.repeat(63)}.${'x'.repeat(63)}.${'x'.repeat(63)}.test`;
+  assert.equal(sanitizeEvent({ ...event, userEmail: longEmail }).userEmail, longEmail);
 });
 
 test('unattributed anomalies explicitly request review instead of guessing an account', () => {
-  const safe = sanitizeEvent({ ...event, orderNo: null, userId: null, userEmailMasked: null });
+  const safe = sanitizeEvent({ ...event, orderNo: null, userId: null, userEmail: null });
   assert.equal(safe.userId, null);
-  assert.equal(safe.userEmailMasked, null);
+  assert.equal(safe.userEmail, null);
   assert.match(emailText(safe), /下单用户 ID: 未识别/);
-  assert.match(emailText(safe), /下单账号（脱敏邮箱）: 归属未确认/);
-  const { userId, userEmailMasked, ...legacyEvent } = event;
+  assert.match(emailText(safe), /下单账号（完整邮箱）: 归属未确认/);
+  const { userId, userEmail, ...legacyEvent } = event;
   assert.equal(sanitizeEvent(legacyEvent).userId, null);
-  assert.match(emailText(sanitizeEvent({ ...event, userEmailMasked: null })), /未记录，请按用户 ID 查找/);
+  assert.match(emailText(sanitizeEvent({ ...event, userEmail: null })), /未记录完整邮箱，请按用户 ID 查找/);
 });
 
 test('standalone SMTP delivery identifies the ordering account using only safe reconciliation fields', async () => {
@@ -93,11 +94,12 @@ test('standalone SMTP delivery identifies the ordering account using only safe r
   const serialized = JSON.stringify(messages[0]);
   assert.match(messages[0].text, /PAYMENT_AMOUNT_MISMATCH/);
   assert.match(messages[0].text, /下单用户 ID: 42/);
-  assert.match(messages[0].text, /下单账号（脱敏邮箱）: al\*{3}@example\.test/);
+  assert.match(messages[0].text, /下单账号（完整邮箱）: alice@example\.test/);
   assert.match(messages[0].text, /345678/);
   assert.equal(serialized.includes(event.tradeNo), false);
   assert.equal(serialized.includes(event.memo), false);
-  assert.equal(serialized.includes(event.userEmail), false);
+  assert.equal(serialized.includes(event.userEmail), true);
+  assert.equal(serialized.includes(event.userEmailMasked), false);
   service.close();
   assert.equal(closed, true);
 });
@@ -121,9 +123,9 @@ test('standalone webhook uses bearer auth, rejects redirects, and does not resen
   const payload = JSON.parse(calls[0].options.body);
   assert.equal(payload.source, 'recharge-center');
   assert.equal(payload.userId, '42');
-  assert.equal(payload.userEmailMasked, event.userEmailMasked);
+  assert.equal(payload.userEmail, event.userEmail);
+  assert.equal(Object.hasOwn(payload, 'userEmailMasked'), false);
   assert.equal(JSON.stringify(payload).includes(event.tradeNo), false);
-  assert.equal(JSON.stringify(payload).includes(event.userEmail), false);
 });
 
 test('webhook responses are bounded even when the server omits content-length', async () => {

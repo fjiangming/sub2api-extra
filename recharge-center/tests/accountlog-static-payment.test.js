@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { createDatabase } = require('../src/db');
+const { NotificationService } = require('../src/notification-service');
 const { OrderService } = require('../src/order-service');
 const { createTestContext } = require('./helpers');
 
@@ -25,7 +27,7 @@ function accountLogContext(overrides = {}) {
 }
 
 function user(id) {
-  return { id, emailMasked: `u${id}***@example.test`, role: 'user' };
+  return { id, email: `u${id}@example.test`, emailMasked: `u${id}***@example.test`, role: 'user' };
 }
 
 function successRedeem(input) {
@@ -55,6 +57,59 @@ function entry(order, overrides = {}) {
     type: '收款',
     ...overrides
   };
+}
+
+for (const hasEmailSnapshot of [true, false]) {
+  test(`anomaly email after restart ${hasEmailSnapshot ? 'shows the original full account' : 'identifies legacy orders by user ID'}`, async (t) => {
+    const context = accountLogContext();
+    let db = context.db;
+    t.after(() => {
+      if (db.open) db.close();
+      context.cleanup();
+    });
+    const account = { ...user(42), email: 'alice+recharge@example.test' };
+    const originalEmail = account.email;
+    let now = baseTime;
+    const creator = new OrderService({ db, config: context.config, sub2api: {}, clock: () => now });
+    const order = creator.create(account, '20.00');
+    const stored = db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(order.id);
+    assert.match(stored.user_email_ciphertext, /^sealed:v1:/);
+    assert.equal(JSON.stringify(stored).includes(originalEmail), false);
+    assert.equal(JSON.stringify(creator.getForAdmin(order.id)).includes(originalEmail), false);
+    assert.equal(JSON.stringify(order).includes('user_email_ciphertext'), false);
+    assert.equal(JSON.stringify(order).includes(originalEmail), false);
+    if (!hasEmailSnapshot) {
+      db.prepare('UPDATE recharge_orders SET user_email_ciphertext = NULL WHERE id = ?').run(order.id);
+    }
+
+    db.close();
+    db = createDatabase(context.databasePath, context.config.secret);
+    account.email = 'changed@example.test';
+    now = new Date(baseTime.getTime() + 90000);
+    const messages = [];
+    const alerts = new NotificationService({ alertChannels: ['email'], smtpFrom: 'alerts@example.test',
+      alertEmailTo: ['ops@example.test'] }, {
+      transport: { async sendMail(message) { messages.push(message); } }
+    });
+    const service = new OrderService({ db, config: context.config, sub2api: {}, alerts, clock: () => now });
+    const result = await service.acceptAccountLogEntry(entry(order, {
+      direction: 'unknown', userId: 99, userEmail: 'spoofed@example.test'
+    }));
+    assert.equal(result.status, 'needs_attention');
+    assert.equal(result.accepted, false);
+    assert.equal(messages.length, 1);
+    assert.match(messages[0].text, /下单用户 ID: 42/);
+    if (hasEmailSnapshot) {
+      assert.ok(messages[0].text.includes(`下单账号（完整邮箱）: ${originalEmail}`));
+    } else {
+      assert.match(messages[0].text, /未记录完整邮箱，请按用户 ID 查找/);
+      assert.equal(messages[0].text.includes(originalEmail), false);
+    }
+    assert.equal(messages[0].text.includes('spoofed@example.test'), false);
+    assert.equal(messages[0].text.includes(account.email), false);
+    const audit = db.prepare('SELECT metadata_json FROM audit_events WHERE order_id = ?').all(order.id);
+    assert.equal(JSON.stringify(audit).includes(originalEmail), false);
+  });
 }
 
 test('static accountlog orders use a high-entropy relay token and retain amount quarantine', (t) => {
@@ -202,7 +257,7 @@ test('one user cancelling and rebuilding among competing orders cannot take anot
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].orderNo, cancelled.orderNo);
   assert.equal(alerts[0].userId, 2);
-  assert.equal(alerts[0].userEmailMasked, user(2).emailMasked);
+  assert.equal(alerts[0].userEmail, user(2).email);
 });
 
 test('concurrent duplicate receipts for competing orders call fulfillment once per owner', async (t) => {
@@ -401,7 +456,7 @@ test('cancellation within a ledger second cannot choose either order at the ambi
   assert.equal(calls, 0);
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].userId, null);
-  assert.equal(alerts[0].userEmailMasked, null);
+  assert.equal(alerts[0].userEmail, null);
   assert.equal(service.getForUser(first.id, 1).status, 'payment_reported');
   assert.equal(service.getForUser(replacement.id, 1).status, 'payment_reported');
 });
@@ -501,7 +556,7 @@ test('a conflicting replay, non-income entry, or payment outside the order windo
   assert.equal(conflict.anomalyCode, 'ACCOUNT_LOG_ID_CONFLICT');
   assert.equal(calls.length, 1);
   assert.equal(alerts[0].userId, 1);
-  assert.equal(alerts[0].userEmailMasked, user(1).emailMasked);
+  assert.equal(alerts[0].userEmail, user(1).email);
 
   const expenseOrder = service.create(user(2), '20.00');
   const expense = await service.acceptAccountLogEntry(entry(expenseOrder, {
@@ -523,9 +578,9 @@ test('a conflicting replay, non-income entry, or payment outside the order windo
   assert.equal(calls.length, 1);
   assert.equal(alerts.length, 3);
   assert.equal(alerts[1].userId, null);
-  assert.equal(alerts[1].userEmailMasked, null);
+  assert.equal(alerts[1].userEmail, null);
   assert.equal(alerts[2].userId, null);
-  assert.equal(alerts[2].userEmailMasked, null);
+  assert.equal(alerts[2].userEmail, null);
 });
 
 test('an associated accountlog anomaly can be independently reviewed with its exact ledger id', async (t) => {

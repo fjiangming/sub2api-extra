@@ -292,6 +292,9 @@ class OrderService {
       };
       const redeemCode = randomRedeemCode();
       const sealedRedeemCode = sealText(this.config.secret, 'redeem-code:v1', redeemCode, row.id);
+      const sealedUserEmail = user.email
+        ? sealText(this.config.secret, 'order-user-email:v1', user.email, row.id)
+        : null;
       const paymentMemo = transferAutomatic ? randomPaymentMemo() : null;
       const paymentQrSource = transferAutomatic ? (this.config.transferQrSource || 'template') : null;
       const paymentQrStatus = transferAutomatic
@@ -305,14 +308,14 @@ class OrderService {
         : null;
       this.db.prepare(`
         INSERT INTO recharge_orders(
-          id, order_no, user_id, user_email_masked, payment_mode,
+          id, order_no, user_id, user_email_masked, user_email_ciphertext, payment_mode,
           requested_amount_minor, payable_amount_minor, credit_amount_micros,
           status, redeem_code, payment_memo_hash, payment_memo_ciphertext,
           payment_memo_last6, payment_qr_source, payment_qr_status,
           auto_match_status, expires_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_payment', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_payment', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        row.id, row.orderNo, user.id, user.emailMasked, this.config.paymentMode || 'personal_manual',
+        row.id, row.orderNo, user.id, user.emailMasked, sealedUserEmail, this.config.paymentMode || 'personal_manual',
         requestedMinor, payableMinor, creditMicros, sealedRedeemCode,
         paymentMemoHash, sealedPaymentMemo, paymentMemo?.slice(-6) || null,
         paymentQrSource, paymentQrStatus, automatic ? 'awaiting_match' : null,
@@ -714,7 +717,9 @@ class OrderService {
         anomalyCode,
         orderNo: prepared.order?.order_no || null,
         userId: prepared.order?.user_id || null,
-        userEmailMasked: prepared.order?.user_email_masked || null,
+        userEmail: prepared.order?.user_email_ciphertext
+          ? openText(this.config.secret, 'order-user-email:v1', prepared.order.user_email_ciphertext, prepared.order.id)
+          : null,
         amount: minorToDecimal(prepared.order?.payable_amount_minor || amountMinor),
         tradeLast6: prepared.paymentEvent.trade_last6,
         memoLast6: prepared.paymentEvent.memo_last6,
@@ -970,7 +975,9 @@ class OrderService {
         anomalyCode,
         orderNo: prepared.order?.order_no || null,
         userId: prepared.order?.user_id || null,
-        userEmailMasked: prepared.order?.user_email_masked || null,
+        userEmail: prepared.order?.user_email_ciphertext
+          ? openText(this.config.secret, 'order-user-email:v1', prepared.order.user_email_ciphertext, prepared.order.id)
+          : null,
         amount: minorToDecimal(Math.abs(prepared.order?.payable_amount_minor || amountMinor)),
         tradeLast6: prepared.entry.account_log_last6,
         memoLast6: prepared.entry.memo_last6 || '',

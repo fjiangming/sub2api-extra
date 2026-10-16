@@ -68,7 +68,7 @@ function setup(t) {
 }
 
 function user(id) {
-  return { id, emailMasked: `u${id}***@example.com`, role: 'user' };
+  return { id, email: `u${id}@example.com`, emailMasked: `u${id}***@example.com`, role: 'user' };
 }
 
 test('collector QR jobs stay pending until a verified opaque URL is encrypted at rest', async (t) => {
@@ -179,7 +179,7 @@ test('amount, memo, and reused QR mismatches cancel without exposing a payable c
     'QR_RECIPIENT_MISMATCH'
   ]);
   assert.deepEqual(ctx.alerts.map((event) => event.userId), [1, 3, 4]);
-  assert.deepEqual(ctx.alerts.map((event) => event.userEmailMasked), [1, 3, 4].map((id) => user(id).emailMasked));
+  assert.deepEqual(ctx.alerts.map((event) => event.userEmail), [1, 3, 4].map((id) => user(id).email));
   assert.ok(ctx.alerts.every((event) => event.tradeLast6 === '' && !JSON.stringify(event).includes(QR_URL)));
 });
 
@@ -238,7 +238,7 @@ test('adapter failures cancel the order and emit a redacted standalone alert', a
   assert.equal(ctx.db.prepare('SELECT status FROM recharge_orders WHERE id = ?').get(order.id).status, 'cancelled');
   assert.equal(ctx.alerts[0].anomalyCode, 'QR_ADAPTER_UNEXPECTED_PAGE');
   assert.equal(ctx.alerts[0].userId, 1);
-  assert.equal(ctx.alerts[0].userEmailMasked, user(1).emailMasked);
+  assert.equal(ctx.alerts[0].userEmail, user(1).email);
   assert.equal(JSON.stringify(ctx.alerts[0]).includes(job.memo), false);
 });
 

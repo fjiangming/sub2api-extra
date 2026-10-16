@@ -5,7 +5,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { hmacHex, safeEqual, sealText } = require('./security');
 
-const SCHEMA_VERSION = 10;
+const SCHEMA_VERSION = 11;
 const ORDER_STATUSES = [
   'awaiting_payment',
   'payment_reported',
@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS recharge_orders (
   order_no TEXT NOT NULL UNIQUE,
   user_id INTEGER NOT NULL CHECK (user_id > 0),
   user_email_masked TEXT NOT NULL,
+  user_email_ciphertext TEXT,
   payment_mode TEXT NOT NULL DEFAULT 'personal_manual',
   requested_amount_minor INTEGER NOT NULL CHECK (requested_amount_minor > 0),
   payable_amount_minor INTEGER NOT NULL CHECK (payable_amount_minor > 0),
@@ -325,6 +326,10 @@ function migrate(db, secret) {
   }
   db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(9, appliedAt);
   db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(10, appliedAt);
+  if (!hasColumn(db, 'recharge_orders', 'user_email_ciphertext')) {
+    db.exec('ALTER TABLE recharge_orders ADD COLUMN user_email_ciphertext TEXT');
+  }
+  db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(11, appliedAt);
 }
 
 function nowIso() {

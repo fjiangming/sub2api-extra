@@ -25,7 +25,7 @@ function autoContext(overrides = {}) {
 }
 
 function user(id) {
-  return { id, emailMasked: `u${id}***@example.com`, role: 'user' };
+  return { id, email: `u${id}@example.com`, emailMasked: `u${id}***@example.com`, role: 'user' };
 }
 
 function successRedeem(input) {
@@ -193,7 +193,7 @@ test('amount or recipient mismatches stop fulfillment, enter manual review, and 
       const order = service.create(user(42), '20.00');
       const memo = service.paymentQrData(order.id, user(42)).memo;
       const result = await service.acceptAutomaticPayment(paymentEvent(order, memo, {
-        ...mismatch, userId: 99, userEmailMasked: 'spoofed***@example.com'
+        ...mismatch, userId: 99, userEmail: 'spoofed@example.com'
       }));
       assert.equal(result.accepted, false);
       assert.equal(result.status, 'needs_attention');
@@ -202,7 +202,7 @@ test('amount or recipient mismatches stop fulfillment, enter manual review, and 
       assert.equal(alerts.length, 1);
       assert.equal(alerts[0].anomalyCode, mismatch.expected);
       assert.equal(alerts[0].userId, 42);
-      assert.equal(alerts[0].userEmailMasked, user(42).emailMasked);
+      assert.equal(alerts[0].userEmail, user(42).email);
       assert.equal(JSON.stringify(alerts[0]).includes(memo), false);
       const stored = context.db.prepare('SELECT status, auto_match_status FROM recharge_orders WHERE id = ?').get(order.id);
       assert.deepEqual(stored, { status: 'payment_reported', auto_match_status: 'needs_attention' });
@@ -289,6 +289,6 @@ test('an unknown automatic fulfillment result is never reported as success', asy
   assert.equal(result.anomalyCode, 'FULFILLMENT_RESULT_UNKNOWN');
   assert.equal(alerts.at(-1).anomalyCode, 'FULFILLMENT_RESULT_UNKNOWN');
   assert.equal(alerts.at(-1).userId, 42);
-  assert.equal(alerts.at(-1).userEmailMasked, user(42).emailMasked);
+  assert.equal(alerts.at(-1).userEmail, user(42).email);
   assert.equal(context.db.prepare('SELECT status FROM recharge_orders WHERE id = ?').get(order.id).status, 'needs_attention');
 });
