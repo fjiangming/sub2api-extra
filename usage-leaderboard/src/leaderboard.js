@@ -107,16 +107,30 @@ class LeaderboardService {
         trendGrowth: board.window.retainedFrom && new Date(board.window.retainedFrom) <= new Date(detail.previous_trend_start)
           ? percentChange(trend.reduce((sum, day) => sum + day.tokens, 0), amount(detail.previous_trend_tokens)) : null,
         modelMetric,
+        snapshotConsistent: me.tokens === totalTokens && me.requests === totalRequests,
         models: modelRows.map((model) => ({ ...model, percent: denominator > 0 ? model[modelMetric] / denominator * 100 : 0 }))
       };
     });
-    if (generation !== this.generation || date !== calendarDate(this.now(), this.config.timezone)) {
+    const { snapshotConsistent, ...me } = personal;
+    // A late log can arrive between the cached board and the personal queries.
+    const known = [...board.entries, ...board.qualifiedEntries].find((entry) => entry.key === me.key);
+    const missingFrom = (entries) => !entries.some((entry) => entry.key === me.key) &&
+      (entries.length < 10 || me[metric] > entries.at(-1)[metric]);
+    const floor = publication?.candidate.rules.boardMinimumTokens ?? publication?.candidate.rules.minimumTokens;
+    const inconsistent = !snapshotConsistent || Boolean(known && (!me.eligible ||
+      known.tokens !== me.tokens || known.requests !== me.requests || known.rank !== me.rank)) ||
+      me.eligible && me.requests > 0 && (missingFrom(board.entries) ||
+        floor != null && me.tokens >= floor && missingFrom(board.qualifiedEntries));
+    if (inconsistent || generation !== this.generation || date !== calendarDate(this.now(), this.config.timezone)) {
       if (attempt >= 2) throw new AppError('SERVICE_BUSY', '榜单正在更新，请稍后重试', 503);
+      if (inconsistent && generation === this.generation) this.invalidate();
       return this.get(period, metric, userId, attempt + 1);
     }
     const view = this.view(board, publication);
     const rankingAvailable = view.display.mode === 'real';
-    return { ...view, me: rankingAvailable ? { ...personal, rankingAvailable } : { ...personal, rankingAvailable,
+    const ownEntry = view.entries.find((entry) => entry.key === me.key);
+    const membership = { inLeaderboard: Boolean(ownEntry), boardRank: ownEntry?.rank ?? null };
+    return { ...view, me: rankingAvailable ? { ...me, ...membership, rankingAvailable } : { ...me, ...membership, rankingAvailable,
       rank: null, percentile: null, next: null, change: null, growth: null, newEntry: false, comparisonAvailable: false } };
   }
 

@@ -229,10 +229,10 @@ function projectSimulation(board, candidate, version) {
   const tieOrder = (a, b) => bounded ? randomKey(a.key, 'tie').localeCompare(randomKey(b.key, 'tie')) || a.key.localeCompare(b.key)
     : Number(a.source === 'simulation') - Number(b.source === 'simulation') || a.key.localeCompare(b.key);
   const realKeys = new Set(realEntries.map((entry) => entry.key));
-  if (realEntries.length >= 10 && board.entries.every((entry) => realKeys.has(entry.key))) {
+  if (realEntries.length >= 10) {
     return { ...board, display: { mode: 'real', realCount: board.entries.length, simulatedCount: 0, version } };
   }
-  const names = new Set(realEntries.map((entry) => entry.name));
+  const names = new Set([...realEntries, ...board.entries].map((entry) => entry.name));
   const simulated = candidate.rows.map((row) => {
     let name = row.name;
     for (let i = 0; names.has(name) && i < 676; i++) name = `${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + i % 26)}***@example.com`;
@@ -240,14 +240,22 @@ function projectSimulation(board, candidate, version) {
     return { key: row.key, name, avatar: null, ...row.values[board.period], source: 'simulation' };
   }).sort((a, b) => bounded ? randomKey(a.key, 'fill').localeCompare(randomKey(b.key, 'fill')) || a.key.localeCompare(b.key)
     : b[board.metric] - a[board.metric] || a.key.localeCompare(b.key)).slice(0, 10 - realEntries.length);
-  const entries = [...realEntries.map((entry) => ({ ...entry, source: 'real' })), ...simulated]
-    .sort((a, b) => b[board.metric] - a[board.metric] || tieOrder(a, b));
+  const order = (a, b) => b[board.metric] - a[board.metric] || tieOrder(a, b);
+  const filled = [...realEntries.map((entry) => ({ ...entry, source: 'real' })), ...simulated].sort(order);
+  // The Token floor must not exclude a real caller who beats the displayed cutoff.
+  const cutoff = filled.at(-1)?.[board.metric] ?? 0;
+  const contenders = board.entries.filter((entry) => !realKeys.has(entry.key) && entry[board.metric] > cutoff);
+  const entries = [...filled, ...contenders.map((entry) => ({ ...entry, source: 'real' }))].sort(order).slice(0, 10);
+  const simulatedCount = entries.filter((entry) => entry.source === 'simulation').length;
+  if (!simulatedCount) {
+    return { ...board, display: { mode: 'real', realCount: board.entries.length, simulatedCount: 0, version } };
+  }
   let rank = 0;
   entries.forEach((entry, index) => { if (index === 0 || entry[board.metric] !== entries[index - 1][board.metric]) rank = index + 1;
     entry.rank = rank; entry.comparisonAvailable = false; entry.change = null; entry.newEntry = false; entry.growth = null; });
   return { ...board, entries, comparisonAvailable: false,
     summary: { tokens: entries.reduce((sum, entry) => sum + entry.tokens, 0), requests: entries.reduce((sum, entry) => sum + entry.requests, 0), active: entries.length, deltas: null },
-    display: { ...(bounded ? { rangeApplied: true } : {}), ...(candidate.version === 4 ? { dynamic: true, intervalSeconds: TICK_MS / 1000 } : {}), mode: !simulated.length ? 'priority' : realEntries.length ? 'mixed' : 'simulation', realCount: realEntries.length, simulatedCount: simulated.length, version, snapshotAt: candidate.generatedAt, date: candidate.date } };
+    display: { ...(bounded ? { rangeApplied: true } : {}), ...(candidate.version === 4 ? { dynamic: true, intervalSeconds: TICK_MS / 1000 } : {}), mode: simulatedCount < entries.length ? 'mixed' : 'simulation', realCount: entries.length - simulatedCount, simulatedCount, version, snapshotAt: candidate.generatedAt, date: candidate.date } };
 }
 
 module.exports = { DEFAULT_RULES, rulesSchema, calendarDate, generateSimulation, generateSnapshot, advanceSimulation, validateCandidate, projectSimulation };

@@ -64,7 +64,7 @@ test('impossible or out of bounds ranges fail rather than widening bounds or loo
   assert.throws(() => generateSimulation({ ...DEFAULT_RULES, minimumTokens: 1e6, maximumTokens: 1000001, boardMinimumTokens: 1e6 }, options), { code: 'SIMULATION_RANGE_INVALID' });
 });
 
-test('real rows obey only the board floor, retain above-ceiling usage and merge by metric with matching totals and masked identities', () => {
+test('real rows retain above-ceiling usage and below-floor contenders beat the metric cutoff without changing actual values', () => {
   const candidate = generateSimulation(DEFAULT_RULES, options);
   const real = [
     { key: 'real-one', name: candidate.rows[0].name, tokens: candidate.rows[0].values.month.tokens, requests: 2, rank: 1 },
@@ -89,8 +89,11 @@ test('real rows obey only the board floor, retain above-ceiling usage and merge 
   assert.ok(mixed.entries.every((row) => !row.comparisonAvailable && row.change === null));
   assert.deepEqual(projectSimulation(board, candidate, 'test').entries, mixed.entries);
   const requests = projectSimulation({ ...board, metric: 'requests' }, candidate, 'test');
-  assert.ok(real.slice(0, 3).every((row) => requests.entries.some((entry) => entry.key === row.key)));
-  assert.ok(!requests.entries.some((row) => row.key === 'real-below'));
+  assert.equal(requests.entries.find((row) => row.key === 'real-below').requests, 100);
+  assert.equal(requests.entries.find((row) => row.key === 'real-below').tokens, 999999);
+  for (const row of real) if (row.requests > requests.entries.at(-1).requests) {
+    assert.ok(requests.entries.some((entry) => entry.key === row.key));
+  }
   assert.ok(requests.entries.every((row, i, rows) => !i || rows[i - 1].requests >= row.requests));
   assert.equal(real[0].rank, 1);
 });
@@ -130,6 +133,26 @@ test('equal values share a rank and seeded tie order does not favor either real 
     assert.deepEqual(projectSimulation(board, candidate, 'test').entries, result.entries);
   }
   assert.ok(realFirst && simulationFirst);
+});
+
+test('no real user beating the displayed cutoff is omitted across periods, metrics and candidate counts', () => {
+  const candidate = generateSimulation(DEFAULT_RULES, options);
+  for (let count = 0; count <= 25; count++) for (const period of ['today', 'week', 'month', 'all']) for (const metric of ['tokens', 'requests']) {
+    const real = Array.from({ length: count }, (_, i) => ({ key: `real-${i}`, name: `person-${i}`,
+      source: 'real', tokens: i % 3 ? 100000 + i : 2000000000 + i, requests: (count - i) * 2000 + i % 2 }));
+    const ordered = real.toSorted((a, b) => b[metric] - a[metric]);
+    const board = { period, metric, entries: ordered.slice(0, 10),
+      qualifiedEntries: ordered.filter((row) => row.tokens >= candidate.rules.boardMinimumTokens).slice(0, 10) };
+    const mixed = projectSimulation(board, candidate, 'test');
+    assert.equal(mixed.entries.length, 10);
+    assert.equal(new Set(mixed.entries.map((row) => row.key)).size, 10);
+    assert.ok(mixed.entries.every((row, i, entries) => !i || entries[i - 1][metric] >= row[metric]));
+    for (const row of real) if (row[metric] > mixed.entries.at(-1)[metric]) {
+      assert.ok(mixed.entries.some((entry) => entry.key === row.key), `${period}/${metric}: omitted ${row.key}`);
+    }
+    assert.equal(mixed.display.realCount, mixed.entries.filter((row) => row.source === 'real').length);
+    assert.equal(mixed.display.simulatedCount, mixed.entries.filter((row) => row.source === 'simulation').length);
+  }
 });
 
 test('legacy daily snapshots still replay until an administrator regenerates the new range rules', () => {

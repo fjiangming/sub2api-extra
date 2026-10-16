@@ -55,8 +55,17 @@ test('public polling preserves the board, pauses for visibility, offline and dia
   await settle();
   assert.equal(requests, 1);
   assert.equal(element('usage-content').hidden, false);
+  board.display = { mode: 'mixed', realCount: 1, simulatedCount: 9, rangeApplied: true, date: '2026-10-16', snapshotAt: board.generatedAt };
+  board.entries = [{ ...user, rank: 5 }];
+  board.me = { ...user, rank: null, percentile: null, next: null, rankingAvailable: false, boardRank: 5, inLeaderboard: true };
   await advance(59000); assert.equal(requests, 1);
   await advance(1000); assert.equal(requests, 2);
+  assert.equal(element('personal-title').textContent, '我的榜内排名');
+  assert.equal(element('my-rank').textContent, '05');
+  assert.equal(element('my-percentile').textContent, '当前展示榜单');
+  assert.equal(element('personal-ranking').hidden, false);
+  assert.equal(element('personal-next').hidden, true);
+  assert.equal(element('locate-me').hidden, false);
   document.hidden = true; events.get('visibilitychange')();
   await advance(600000); assert.equal(requests, 2);
   document.hidden = false; events.get('visibilitychange')(); await settle(); assert.equal(requests, 3);

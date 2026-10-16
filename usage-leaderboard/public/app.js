@@ -129,7 +129,7 @@ function renderStats(data) {
   $('rules-source').textContent = simulated ? `当前榜单含 ${data.display.simulatedCount} 位模拟用户，以“示例”标识；真实用户按设置的用量下限优先展示。汇总仅计当前榜单，个人用量始终来自主站真实记录。模拟快照日期：${data.display.date}。` : scoped ? '当前按 Token 下限筛选真实用户，再按所选指标展示前十位。汇总仅计当前榜单，不与全站名次比较；个人用量始终来自真实记录。' : '';
   if (bounded) {
     $('board-source-note').textContent = simulated ? '含示例数据 · 按用量混排' : '真实用量 · 按下限筛选';
-    $('rules-source').textContent = `真实用户达到 Token 下限即可参与，超过上限仍展示实际用量；不足十位时用符合所设区间、带“示例”标识的模拟用户补齐，最终按所选用量指标排名；同值并列，位置不按用户来源优先。汇总仅计当前榜单，个人用量始终来自真实记录。${data.display.dynamic ? '统计日期' : '快照日期'}：${data.display.date}。`;
+    $('rules-source').textContent = `优先纳入达到 Token 下限的真实用户，不足十位时用带“示例”标识的模拟用户补齐。任何真实用户按当前指标超过榜尾时均可入榜，不受 Token 下限排除；真实用量不受上限限制。最终按所选指标排名，同值并列，最多展示十位。汇总仅计当前榜单，个人用量始终来自真实记录。${data.display.dynamic ? '统计日期' : '快照日期'}：${data.display.date}。`;
   }
   $('rules-retention').textContent = simulated ? data.display.dynamic
     ? '真实用量基于主站现存记录；示例用量随时间增长，四个周期共享同一组示例历史，达到范围上限后更换示例身份。'
@@ -192,14 +192,17 @@ function renderTable(data) {
 function renderPersonal(data) {
   const me = data.me;
   const rankingAvailable = me.rankingAvailable !== false;
-  $('personal-title').textContent = rankingAvailable ? '我的排名' : '我的实际用量';
-  $('personal-ranking').hidden = !rankingAvailable;
+  const boardOnly = !rankingAvailable && me.boardRank != null;
+  const shownRank = boardOnly ? me.boardRank : me.rank;
+  $('personal-title').textContent = rankingAvailable ? '我的排名' : boardOnly ? '我的榜内排名' : '我的实际用量';
+  $('personal-ranking').hidden = !rankingAvailable && !boardOnly;
   $('personal-next').hidden = !rankingAvailable;
-  $('locate-me').hidden = !rankingAvailable;
+  $('locate-me').hidden = !rankingAvailable && !boardOnly;
   renderIdentity(me);
-  $('my-rank').textContent = me.rank ? String(me.rank).padStart(2, '0') : '—';
-  $('my-rank').classList.toggle('long-rank', me.rank >= 1000);
-  $('my-percentile').textContent = me.rank ? `超过 ${me.percentile}% 的创造者` : me.eligible ? '本期还没有用量记录' : '此账号不参与排行';
+  $('my-rank').textContent = shownRank ? String(shownRank).padStart(2, '0') : '—';
+  $('my-rank').classList.toggle('long-rank', shownRank >= 1000);
+  $('my-percentile').textContent = boardOnly ? '当前展示榜单' : me.rank ? `超过 ${me.percentile}% 的创造者` : me.eligible ? '本期还没有用量记录' : '此账号不参与排行';
+  $('my-change').hidden = boardOnly;
   $('my-change').classList.toggle('down', me.change < 0);
   $('my-change').innerHTML = !me.rank ? icon('sprout') + '每一次探索，都是新的开始' : !me.comparisonAvailable ? icon('sparkles') + '保持热爱，持续创造' : me.newEntry ? icon('sparkles') + '本期新上榜' : me.change == null ? icon('sprout') + '本期开始活跃' : me.change === 0 ? icon('minus') + '与上期排名持平' : icon(me.change > 0 ? 'move-up' : 'move-down') + `较上期${me.change > 0 ? '上升' : '下降'} ${Math.abs(me.change)} 位`;
   $('my-primary-label').textContent = METRICS[data.metric].label;
@@ -301,7 +304,8 @@ function showUser(key) {
   window.UsageAvatars.set($('detail-avatar'), user);
   hydrateIcons();
   $('user-dialog-title').textContent = user.name;
-  $('detail-rank').textContent = (user.source === 'simulation' ? '示例数据 · ' : '') + (user.rank ? `${PERIODS[data.period]}排名 #${user.rank} · ${METRICS[data.metric].label}` : '个人实际用量');
+  const shownRank = user.boardRank ?? user.rank;
+  $('detail-rank').textContent = (user.source === 'simulation' ? '示例数据 · ' : '') + (shownRank ? `${PERIODS[data.period]}排名 #${shownRank} · ${METRICS[data.metric].label}` : '个人实际用量');
   $('detail-range').textContent = user.source === 'simulation' ? `${data.display.dynamic ? '动态示例' : '模拟快照'} ${data.display.date}` : rangeText(data);
   $('detail-stats').innerHTML = Object.keys(METRICS).map((metric) => `<div><dt>${METRICS[metric].label}</dt><dd>${displayHtml(user[metric], metric)}</dd></div>`).join('');
   $('user-dialog').showModal();
