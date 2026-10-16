@@ -137,14 +137,14 @@ function renderStats(data) {
   $('ranking-period').textContent = data.period === 'all' ? '现存记录累计' : `${PERIODS[data.period]}排名`;
   $('personal-period').textContent = PERIODS[data.period];
   $('table-caption').textContent = `${PERIODS[data.period]}按${METRICS[data.metric].label}排序的前十位用户`;
-  $('updated-at').textContent = '更新于 ' + new Intl.DateTimeFormat('zh-CN', { timeZone: data.timezone, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(data.generatedAt));
+  $('updated-at').textContent = (simulated ? '示例快照 ' : '更新于 ') + new Intl.DateTimeFormat('zh-CN', { timeZone: data.timezone, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(simulated ? data.display.snapshotAt : data.generatedAt));
   const limited = data.window.retainedFrom && data.window.start && new Date(data.window.retainedFrom) > new Date(data.window.start);
   $('coverage-note').textContent = data.period === 'all'
     ? '仅累计主站现存记录，已清理的历史用量不计入。'
     : limited ? `当前记录最早始于 ${localDate(data.window.retainedFrom)}，仅统计仍保留的用量。` : '统计基于主站现存用量记录。';
   if (simulated) $('coverage-note').textContent = `真实 ${data.display.realCount} 位 · 示例 ${data.display.simulatedCount} 位。示例为 ${data.display.date} 的固定快照，汇总仅含当前榜单，个人用量为实际记录。`;
   else if (scoped) $('coverage-note').textContent = '按所设 Token 下限优先展示真实用户，再按当前指标排序；汇总仅含当前榜单，个人用量为实际记录。';
-  if (bounded) $('coverage-note').textContent = `真实 ${data.display.realCount} 位 · 示例 ${data.display.simulatedCount} 位。按所设 Token 区间筛选、按当前指标混排；汇总仅含当前榜单，个人用量为实际记录。`;
+  if (bounded && !simulated) $('coverage-note').textContent = `真实 ${data.display.realCount} 位。按所设 Token 区间筛选、按当前指标排序；汇总仅含当前榜单，个人用量为实际记录。`;
 }
 
 function renderPodium(data) {

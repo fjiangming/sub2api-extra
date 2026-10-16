@@ -77,7 +77,7 @@ test('board bounds precede SQL cutoff and simulation bounds, and drafts, publica
   }
   const before = await leaderboard.get('month', 'tokens', '4');
   const changed = { ...rules, boardMinimumTokens: 25e6, boardMaximumTokens: 50e6 };
-  await settings.generate({ revision: settings.snapshot().revision, rules: changed });
+  await settings.generate({ revision: settings.snapshot().revision, rules: changed, keepIdentities: false });
   const preview = await leaderboard.preview(settings.draftCandidate(), 'month', 'tokens');
   assert.equal(preview.display.realCount, 0);
   assert.ok(preview.entries.every((row) => row.tokens >= 25e6 && row.tokens <= 50e6));

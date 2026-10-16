@@ -43,7 +43,7 @@ class LeaderboardService {
     const now = this.now();
     const calendarDay = calendarDate(now, this.config.timezone);
     const rules = publication?.candidate.rules;
-    const bounded = publication?.candidate.version === 2;
+    const bounded = publication?.candidate.version >= 2;
     const range = rules ? { minimumTokens: bounded ? rules.boardMinimumTokens : rules.minimumTokens, maximumTokens: bounded ? rules.boardMaximumTokens : null } : null;
     return this.boardCache.getOrLoad(`${this.generation}:${period}:${metric}:${calendarDay}:${JSON.stringify(range)}`, async () => {
       const anchor = now.toISOString();

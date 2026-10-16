@@ -97,7 +97,7 @@ test('simulation uses the intersection of the independent single-user and board 
     const rules = { ...DEFAULT_RULES, minimumTokens: 20e6, maximumTokens: 200e6, boardMinimumTokens: 5e6, boardMaximumTokens: 80e6, distribution };
     const candidate = generateSimulation(rules, options);
     assert.deepEqual(candidate.rules, rules);
-    assert.equal(candidate.version, 2);
+    assert.equal(candidate.version, 3);
     assert.deepEqual(validateCandidate(candidate, options.timezone), candidate);
     for (const row of candidate.rows) for (const period of ['today', 'week', 'month', 'all']) {
       assert.ok(row.values[period].tokens >= 20e6 && row.values[period].tokens <= 80e6);
@@ -131,11 +131,70 @@ test('equal values share a rank and seeded tie order does not favor either real 
 
 test('legacy daily snapshots still replay until an administrator regenerates the new range rules', () => {
   const candidate = generateSimulation(DEFAULT_RULES, options);
+  const { origin, ...snapshot } = candidate;
   const { boardMinimumTokens, boardMaximumTokens, ...legacyRules } = candidate.rules;
-  const legacy = { ...candidate, version: 1, rules: legacyRules };
+  const legacy = { ...snapshot, version: 1, rules: legacyRules };
+  const bounded = { ...snapshot, version: 2 };
   assert.deepEqual(validateCandidate(legacy, options.timezone), legacy);
+  assert.deepEqual(validateCandidate(bounded, options.timezone), bounded);
+  assert.deepEqual(generateSimulation(DEFAULT_RULES, { ...options, previous: legacy }).rows, candidate.rows);
+  assert.deepEqual(generateSimulation(DEFAULT_RULES, { ...options, previous: bounded }).rows, candidate.rows);
   const large = { key: 'large', name: 'la***@test.com', tokens: 2e9, requests: 1 };
   const board = { period: 'month', metric: 'tokens', entries: [large], qualifiedEntries: [large] };
   assert.equal(projectSimulation(board, legacy, 'old').display.realCount, 1);
   assert.equal(projectSimulation(board, candidate, 'new').display.realCount, 0);
+});
+
+test('identical calendar windows select identical mixed boards for every real-user count and metric', () => {
+  const candidate = generateSimulation(DEFAULT_RULES, { ...options, now: new Date('2026-06-01T03:00:00Z') });
+  for (let count = 0; count <= 10; count++) for (const metric of ['tokens', 'requests']) {
+    const real = Array.from({ length: count }, (_, i) => ({ key: `real-${i}`, name: `person-${i}`, tokens: 30000123 + i, requests: 2000 + i }));
+    const boards = ['today', 'week', 'month'].map((period) => projectSimulation({ period, metric, entries: real, qualifiedEntries: real }, candidate, 'same'));
+    assert.deepEqual(boards[0].entries, boards[1].entries);
+    assert.deepEqual(boards[0].entries, boards[2].entries);
+    assert.deepEqual(boards[0].summary, boards[1].summary);
+  }
+});
+
+test('retained identities replay one history, append daily increments and ignore regeneration timing and path', () => {
+  const initialRules = { ...DEFAULT_RULES, minimumTokens: 1e6, boardMinimumTokens: 1e6, maximumTokens: 80e6, boardMaximumTokens: 80e6 };
+  const rules = { ...initialRules, maximumTokens: 1e9, boardMaximumTokens: 1e9 };
+  for (const [start, following, next] of [
+    ['2026-05-31T03:00:00Z', '2026-06-01T03:00:00Z', '2026-06-02T03:00:00Z'],
+    ['2026-12-31T03:00:00Z', '2027-01-01T03:00:00Z', '2027-01-02T03:00:00Z']
+  ]) {
+    const initial = generateSimulation(initialRules, { ...options, now: new Date(start) });
+    const first = generateSimulation(rules, { ...options, now: new Date(following), previous: initial });
+    const repeated = generateSimulation(rules, { ...options, seed: 'f'.repeat(32), now: new Date(following.replace('03:00', '08:00')), previous: first });
+    assert.deepEqual(repeated.rows, first.rows);
+    assert.equal(repeated.seed, initial.seed);
+    assert.deepEqual(validateCandidate(first, options.timezone), first);
+    const second = generateSimulation(rules, { ...options, now: new Date(next), previous: first });
+    const direct = generateSimulation(rules, { ...options, now: new Date(next), previous: initial });
+    assert.deepEqual(second, direct);
+    for (let i = 0; i < first.rows.length; i++) for (const metric of ['tokens', 'requests']) {
+      const before = initial.rows[i].values;
+      const middle = first.rows[i].values;
+      const after = second.rows[i].values;
+      assert.equal(middle.all[metric] - before.all[metric], middle.today[metric]);
+      assert.equal(middle.month[metric], middle.today[metric]);
+      if (first.date === '2026-06-01') assert.equal(middle.week[metric], middle.today[metric]);
+      assert.equal(after.all[metric] - middle.all[metric], after.today[metric]);
+      assert.equal(after.month[metric] - middle.month[metric], after.today[metric]);
+      assert.equal(after.week[metric] - middle.week[metric], after.today[metric]);
+    }
+    const altered = structuredClone(first);
+    altered.origin.generatedAt = start.replace('31T', '30T');
+    assert.throws(() => validateCandidate(altered, options.timezone), { code: 'SIMULATION_INVALID' });
+  }
+});
+
+test('incompatible bounds, distribution and backwards dates cannot rewrite retained history', () => {
+  const candidate = generateSimulation(DEFAULT_RULES, options);
+  for (const [rules, now] of [
+    [{ ...DEFAULT_RULES, boardMaximumTokens: 50e6 }, options.now],
+    [{ ...DEFAULT_RULES, distribution: 'close' }, options.now],
+    [DEFAULT_RULES, new Date('2026-10-14T03:00:00Z')],
+    [DEFAULT_RULES, new Date('9999-01-01T03:00:00Z')]
+  ]) assert.throws(() => generateSimulation(rules, { ...options, now, previous: candidate }), { code: 'SIMULATION_HISTORY_CONFLICT' });
 });

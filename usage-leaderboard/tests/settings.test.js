@@ -28,6 +28,7 @@ test('draft changes stay isolated, publish and restore are atomic, and only one 
   const regenerated = await generate(store);
   assert.deepEqual(store.active().candidate.rows, oldRows);
   assert.deepEqual(regenerated.draft.candidate.rows.map((row) => row.name), oldRows.map((row) => row.name));
+  assert.deepEqual(regenerated.draft.candidate.rows, oldRows);
   const result = await publish(store, 'real');
   assert.equal(store.active(), null);
   await store.rollback({ revision: result.revision }, 'ad***@example.com');
@@ -62,10 +63,23 @@ test('crossing the local date expires publication, draft and simulated rollback 
   await assert.rejects(store.rollback({ revision: store.snapshot().revision }, 'admin'), { code: 'SIMULATION_EXPIRED' });
   await assert.rejects(publish(store), { code: 'SIMULATION_EXPIRED' });
   assert.equal(store.snapshot().previous.expired, true);
-  await generate(store); await publish(store);
+  await store.generate({ revision: store.snapshot().revision, rules: DEFAULT_RULES, keepIdentities: false }); await publish(store);
   clock = new Date('2026-10-16T16:00:00Z');
   assert.equal(store.active(), null);
   assert.equal(store.snapshot().expired, true);
+});
+
+test('history conflicts leave draft and publication intact; new identities explicitly start a new series', async () => {
+  const store = new SettingsStore(config, { now });
+  await generate(store); await publish(store);
+  const before = store.snapshot();
+  const rules = { ...DEFAULT_RULES, boardMaximumTokens: 50e6 };
+  await assert.rejects(generate(store, rules), { code: 'SIMULATION_HISTORY_CONFLICT' });
+  assert.deepEqual(store.snapshot(), before);
+  const next = await store.generate({ revision: before.revision, rules, keepIdentities: false });
+  const oldKeys = new Set(before.published.candidate.rows.map((row) => row.key));
+  assert.ok(next.draft.candidate.rows.every((row) => !oldKeys.has(row.key)));
+  assert.deepEqual(next.published, before.published);
 });
 
 test('a fixed bounded settings file survives restart, write failures preserve publication, and corruption fails to real data', async (t) => {

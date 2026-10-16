@@ -64,7 +64,7 @@ window.UsageAdmin = (() => {
     el('storage').textContent = data.persistence ? '设置文件 ≤ 64 KiB' : '内存模式 · 重启恢复默认';
     el('candidate-version').textContent = `修订 ${data.revision}`;
     const messages = [data.storageError, data.expired ? '已发布模拟数据跨天失效，用户端已自动恢复真实榜单。' : '',
-      publication?.candidate?.version === 1 && !data.expired ? '当前为旧版模拟快照，榜单范围与新混排规则需重新生成并发布后生效。' : '',
+      publication?.candidate?.version < 3 && !data.expired ? '当前为旧版模拟快照，跨周期补位与历史连续性规则需重新生成并发布后生效。' : '',
       !data.persistence ? '当前为内存模式，容器重启后草稿和发布设置会清空。' : ''].filter(Boolean);
     el('notice').hidden = !messages.length;
     el('notice').textContent = messages.join(' ');
@@ -98,6 +98,9 @@ window.UsageAdmin = (() => {
     if ([401, 403].includes(error.status)) {
       root().replaceChildren(); initialized = false; snapshot = null; preview = null;
       context.onDenied(error);
+    } else if (error.code === 'SIMULATION_HISTORY_CONFLICT') {
+      el('range-error').textContent = error.message;
+      el('range-error').hidden = false;
     } else if (error.status === 409 || error.code === 'SIMULATION_EXPIRED') {
       const data = await context.api('admin/settings').catch(() => null);
       if (data) { applySnapshot(data); await loadPreview(); }
@@ -205,6 +208,7 @@ window.UsageAdmin = (() => {
         rangeInputs.forEach((id) => el(id).setAttribute('aria-invalid', 'true')); el('board-minimum').focus();
         return;
       }
+      el('range-error').hidden = true;
       mutate('simulation/preview', { rules: values, keepIdentities: el('keep-identities').checked }, { message: '候选已生成，尚未影响用户端' });
     });
     el('reset').addEventListener('click', () => {

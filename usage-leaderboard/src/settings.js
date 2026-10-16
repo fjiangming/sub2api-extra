@@ -92,8 +92,8 @@ class SettingsStore {
   generate({ revision, rules, keepIdentities = true }) {
     return this.change(revision, (next) => {
       const current = next.draft?.candidate || next.published?.candidate;
-      const roster = keepIdentities ? current?.rows.map(({ key, name, avatar }) => ({ key, name, avatar })) : undefined;
-      next.draft = { source: 'simulation', candidate: generateSimulation(rules, { now: this.now(), timezone: this.config.timezone, roster }) };
+      next.draft = { source: 'simulation', candidate: generateSimulation(rules, { now: this.now(), timezone: this.config.timezone,
+        previous: keepIdentities ? current : undefined }) };
     }, { persist: false });
   }
 
