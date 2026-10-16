@@ -112,7 +112,7 @@ window.UsageAdmin = (() => {
     const bounded = data.display.rangeApplied === true;
     const ordered = [metric, metric === 'tokens' ? 'requests' : 'tokens'];
     const format = (value, type) => type === 'tokens' ? token(value) : num(value);
-    el('preview-subtitle').textContent = source === 'real' ? '真实用量' : bounded ? '区间筛选 · 按用量混排' : mixed ? '真实优先 · 模拟补位' : '真实用户已占满 10 位';
+    el('preview-subtitle').textContent = source === 'real' ? '真实用量' : bounded ? '真实无上限 · 按用量混排' : mixed ? '真实优先 · 模拟补位' : '真实用户已占满 10 位';
     el('total-label').textContent = scoped ? '榜单 Token 用量' : '全站 Token 用量';
     el('count-label').textContent = scoped ? '上榜用户' : '活跃创造者';
     el('requests-label').textContent = scoped ? '榜单调用次数' : '全站调用次数';
@@ -129,7 +129,7 @@ window.UsageAdmin = (() => {
     const values = data.entries.map((row) => row.tokens).sort((a, b) => b - a);
     const maximum = Math.max(1, ...values);
     el('distribution-chart').innerHTML = values.map((value) => `<span style="height:${Math.max(2, value / maximum * 100)}%"></span>`).join('');
-    el('source-meta').textContent = source === 'real' ? '按主站实际用量排名' : '区间筛选 · 真实与模拟混排';
+    el('source-meta').textContent = source === 'real' ? '按主站实际用量排名' : '真实达下限 · 示例补位';
     el('preview-status').hidden = true;
     el('preview-content').hidden = false;
     icons();
@@ -174,8 +174,8 @@ window.UsageAdmin = (() => {
     pendingAction = { action, revision: snapshot.revision, source };
     el('dialog-title').textContent = titles[action];
     const details = action === 'publish' ? [
-      ['数据来源', source === 'simulation' ? '榜单区间内取真实用户，模拟补齐' : '主站真实用量'],
-      ...(source === 'simulation' ? [['榜单单人 Token', `${el('board-minimum').value}M ~ ${el('board-maximum').value}M`], ['单人模拟 Token', `${el('minimum').value}M ~ ${el('maximum').value}M`], ['展示顺序', '按当前用量指标混排'], ['数值分布', distributions[el('distribution').value]], ['更新方式', snapshot.draft.candidate.version === 4 ? '每 5 分钟增长 · 自动跨天续接' : '固定快照'] ] : []),
+      ['数据来源', source === 'simulation' ? '达到下限的真实用户，示例补齐' : '主站真实用量'],
+      ...(source === 'simulation' ? [['真实用户 Token', `至少 ${el('board-minimum').value}M，无上限`], ['榜单模拟 Token', `${el('board-minimum').value}M ~ ${el('board-maximum').value}M`], ['单人模拟 Token', `${el('minimum').value}M ~ ${el('maximum').value}M`], ['展示顺序', '按当前用量指标混排'], ['数值分布', distributions[el('distribution').value]], ['更新方式', snapshot.draft.candidate.version === 4 ? '每 5 分钟增长 · 自动跨天续接' : '固定快照'] ] : []),
       ['个人统计', '始终使用实际用量'], ['存储方式', snapshot.persistence ? '覆盖固定设置文件' : '内存，重启后恢复默认']
     ] : action === 'rollback' ? [['目标来源', snapshot.previous.source === 'real' ? '真实用量' : '模拟混合榜单'], ['目标版本', snapshot.previous.version.slice(0, 8)]] : [['数据来源', '主站真实用量'], ['生效范围', '所有统计周期']];
     el('publish-summary').innerHTML = details.map(([label, value]) => `<div><dt>${escape(label)}</dt><dd>${escape(value)}</dd></div>`).join('');

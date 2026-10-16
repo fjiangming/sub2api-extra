@@ -128,8 +128,8 @@ function renderStats(data) {
   $('rules-source').hidden = !scoped;
   $('rules-source').textContent = simulated ? `当前榜单含 ${data.display.simulatedCount} 位模拟用户，以“示例”标识；真实用户按设置的用量下限优先展示。汇总仅计当前榜单，个人用量始终来自主站真实记录。模拟快照日期：${data.display.date}。` : scoped ? '当前按 Token 下限筛选真实用户，再按所选指标展示前十位。汇总仅计当前榜单，不与全站名次比较；个人用量始终来自真实记录。' : '';
   if (bounded) {
-    $('board-source-note').textContent = simulated ? '含示例数据 · 按用量混排' : '真实用量 · 按区间筛选';
-    $('rules-source').textContent = `每位上榜用户均符合 Token 区间，真实用户不足十位时用带“示例”标识的模拟用户补齐，最终按所选用量指标排名；同值并列，位置不按用户来源优先。汇总仅计当前榜单，个人用量始终来自真实记录。${data.display.dynamic ? '统计日期' : '快照日期'}：${data.display.date}。`;
+    $('board-source-note').textContent = simulated ? '含示例数据 · 按用量混排' : '真实用量 · 按下限筛选';
+    $('rules-source').textContent = `真实用户达到 Token 下限即可参与，超过上限仍展示实际用量；不足十位时用符合所设区间、带“示例”标识的模拟用户补齐，最终按所选用量指标排名；同值并列，位置不按用户来源优先。汇总仅计当前榜单，个人用量始终来自真实记录。${data.display.dynamic ? '统计日期' : '快照日期'}：${data.display.date}。`;
   }
   $('rules-retention').textContent = simulated ? data.display.dynamic
     ? '真实用量基于主站现存记录；示例用量随时间增长，四个周期共享同一组示例历史，达到范围上限后更换示例身份。'
@@ -150,7 +150,7 @@ function renderStats(data) {
     : limited ? `当前记录最早始于 ${localDate(data.window.retainedFrom)}，仅统计仍保留的用量。` : '统计基于主站现存用量记录。';
   if (simulated) $('coverage-note').textContent = `真实 ${data.display.realCount} 位 · 示例 ${data.display.simulatedCount} 位。${data.display.dynamic ? '示例用量随时间自动更新' : `示例为 ${data.display.date} 的固定快照`}，汇总仅含当前榜单，个人用量为实际记录。`;
   else if (scoped) $('coverage-note').textContent = '按所设 Token 下限优先展示真实用户，再按当前指标排序；汇总仅含当前榜单，个人用量为实际记录。';
-  if (bounded && !simulated) $('coverage-note').textContent = `真实 ${data.display.realCount} 位。按所设 Token 区间筛选、按当前指标排序；汇总仅含当前榜单，个人用量为实际记录。`;
+  if (bounded && !simulated) $('coverage-note').textContent = `真实 ${data.display.realCount} 位。按所设 Token 下限筛选，真实用户不受上限限制；按当前指标排序，汇总仅含当前榜单，个人用量为实际记录。`;
 }
 
 function renderPodium(data) {

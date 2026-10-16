@@ -19,7 +19,7 @@ async function setup(t, users, logs, rules = DEFAULT_RULES) {
   return { db, settings, ...dependencies };
 }
 
-test('PostgreSQL includes only real users within both board bounds in every period and metric; personal usage stays real', async (t) => {
+test('PostgreSQL retains above-ceiling real users and excludes below-floor users in every period and metric; personal usage stays real', async (t) => {
   const users = [{ id: 2, email: 'actual@example.com' }, { id: 3 }, { id: 4 }, { id: 5, status: 'disabled' }, { id: 6, role: 'admin' }, { id: 7 }];
   const quantities = [1500123, 70000123, 999999, 9000000, 6000000, 1500000123];
   const logs = users.map((user, i) => ({ user_id: user.id, created_at: '2026-10-13T02:00Z', input_tokens: quantities[i] }));
@@ -27,10 +27,11 @@ test('PostgreSQL includes only real users within both board bounds in every peri
   for (const period of ['today', 'week', 'month', 'all']) for (const metric of ['tokens', 'requests']) {
     const board = await leaderboard.get(period, metric, '2');
     assert.equal(board.display.mode, 'mixed');
-    assert.equal(board.display.realCount, 2);
-    assert.equal(board.display.simulatedCount, 8);
+    assert.equal(board.display.realCount, 3);
+    assert.equal(board.display.simulatedCount, 7);
     assert.equal(board.entries.length, 10);
-    assert.deepEqual(board.entries.filter((row) => row.source === 'real').map((row) => row.tokens).sort((a, b) => a - b), quantities.slice(0, 2));
+    assert.deepEqual(board.entries.filter((row) => row.source === 'real').map((row) => row.tokens).sort((a, b) => a - b), [quantities[0], quantities[1], quantities[5]]);
+    assert.ok(board.entries.filter((row) => row.source === 'simulation').every((row) => row.tokens <= DEFAULT_RULES.boardMaximumTokens));
     assert.equal(board.entries.find((row) => row.name === 'ac***@example.com').tokens, 1500123);
     assert.equal(board.me.tokens, 1500123);
     assert.equal(board.me.requests, 1);
@@ -52,26 +53,27 @@ test('PostgreSQL includes only real users within both board bounds in every peri
   assert.equal(restored.summary.tokens, quantities[0] + quantities[1] + quantities[2] + quantities[5]);
 });
 
-test('board bounds precede SQL cutoff and simulation bounds, and drafts, publication and rollback retain the right ranges', async (t) => {
+test('the real floor precedes SQL cutoff while the ceiling only bounds simulation; drafts, publication and rollback retain their rules', async (t) => {
   const users = Array.from({ length: 17 }, (_, i) => ({ id: i + 2 }));
-  const quantities = [4e6, 5e6, 10e6, 60e6, 60e6 + 1, ...Array.from({ length: 12 }, (_, i) => 100e6 + i)];
+  const quantities = [4e6, 5e6, 10e6, 60e6, 60e6 + 1, ...Array.from({ length: 12 }, (_, i) => 1e6 + i)];
   const logs = users.map((user, i) => ({ user_id: user.id, created_at: '2026-10-13T02:00Z', input_tokens: quantities[i] }));
+  logs.push(...users.slice(5).flatMap((user) => Array.from({ length: 2 }, () => ({ user_id: user.id, created_at: '2026-10-13T02:00Z', input_tokens: 0 }))));
   const rules = { ...DEFAULT_RULES, minimumTokens: 20e6, maximumTokens: 100e6, boardMinimumTokens: 5e6, boardMaximumTokens: 60e6 };
   const { settings, leaderboard } = await setup(t, users, logs, rules);
   for (const period of ['today', 'week', 'month', 'all']) for (const metric of ['tokens', 'requests']) {
     const board = await leaderboard.get(period, metric, '4');
     assert.equal(board.entries.length, 10);
-    assert.equal(board.display.realCount, 3);
-    assert.equal(board.display.simulatedCount, 7);
-    assert.deepEqual(board.entries.filter((row) => row.source === 'real').map((row) => row.tokens).sort((a, b) => a - b), [5e6, 10e6, 60e6]);
-    assert.ok(board.entries.every((row) => row.tokens >= 5e6 && row.tokens <= 60e6));
-    assert.ok(board.entries.filter((row) => row.source === 'simulation').every((row) => row.tokens >= 20e6));
+    assert.equal(board.display.realCount, 4);
+    assert.equal(board.display.simulatedCount, 6);
+    assert.deepEqual(board.entries.filter((row) => row.source === 'real').map((row) => row.tokens).sort((a, b) => a - b), [5e6, 10e6, 60e6, 60e6 + 1]);
+    assert.ok(board.entries.every((row) => row.tokens >= 5e6));
+    assert.ok(board.entries.filter((row) => row.source === 'simulation').every((row) => row.tokens >= 20e6 && row.tokens <= 60e6));
     assert.ok(board.entries.every((row, i, rows) => !i || rows[i - 1][metric] >= row[metric]));
     assert.equal(board.summary.tokens, board.entries.reduce((sum, row) => sum + row.tokens, 0));
     assert.equal(board.me.tokens, 10e6);
     assert.equal(board.me.rankingAvailable, false);
     if (metric === 'tokens') {
-      assert.equal(board.entries[0].tokens, 60e6);
+      assert.equal(board.entries[0].tokens, 60e6 + 1);
       assert.equal(board.entries.at(-1).tokens, 5e6);
     }
   }
@@ -79,8 +81,9 @@ test('board bounds precede SQL cutoff and simulation bounds, and drafts, publica
   const changed = { ...rules, boardMinimumTokens: 25e6, boardMaximumTokens: 50e6 };
   await settings.generate({ revision: settings.snapshot().revision, rules: changed, keepIdentities: false });
   const preview = await leaderboard.preview(settings.draftCandidate(), 'month', 'tokens');
-  assert.equal(preview.display.realCount, 0);
-  assert.ok(preview.entries.every((row) => row.tokens >= 25e6 && row.tokens <= 50e6));
+  assert.equal(preview.display.realCount, 2);
+  assert.deepEqual(preview.entries.filter((row) => row.source === 'real').map((row) => row.tokens), [60e6 + 1, 60e6]);
+  assert.ok(preview.entries.filter((row) => row.source === 'simulation').every((row) => row.tokens >= 25e6 && row.tokens <= 50e6));
   assert.deepEqual((await leaderboard.get('month', 'tokens', '4')).entries, before.entries);
   await settings.publish({ revision: settings.snapshot().revision, source: 'simulation' }, 'admin');
   const live = await leaderboard.get('month', 'tokens', '4');
@@ -89,16 +92,18 @@ test('board bounds precede SQL cutoff and simulation bounds, and drafts, publica
   assert.deepEqual((await leaderboard.get('month', 'tokens', '4')).entries, before.entries);
 });
 
-test('ten qualifying real users turn simulation into the actual Top 10, including stable cutoff and personal ranking', async (t) => {
+test('ten above-ceiling real users fill the actual Top 10 in every period, including stable cutoff and personal ranking', async (t) => {
   const users = Array.from({ length: 12 }, (_, i) => ({ id: i + 2 }));
-  const logs = users.map((user, i) => ({ user_id: user.id, created_at: '2026-10-13T02:00Z', input_tokens: 2000000 + i }));
-  const { leaderboard } = await setup(t, users, logs);
-  for (const metric of ['tokens', 'requests']) {
-    const board = await leaderboard.get('month', metric, '2');
+  const logs = users.map((user, i) => ({ user_id: user.id, created_at: '2026-10-13T02:00Z', input_tokens: 20000000 + i }));
+  const rules = { ...DEFAULT_RULES, boardMaximumTokens: 10e6 };
+  const { leaderboard } = await setup(t, users, logs, rules);
+  for (const period of ['today', 'week', 'month', 'all']) for (const metric of ['tokens', 'requests']) {
+    const board = await leaderboard.get(period, metric, '2');
     assert.equal(board.display.mode, 'real');
     assert.equal(board.display.simulatedCount, 0);
     assert.equal(board.entries.length, 10);
     assert.ok(board.entries.every((row) => row.source === 'real'));
+    assert.ok(board.entries.every((row) => row.tokens > rules.boardMaximumTokens));
     assert.equal(board.me.rankingAvailable, true);
     assert.equal(board.me.rank, metric === 'tokens' ? 12 : 1);
     assert.equal(board.summary.active, 12);
@@ -148,22 +153,24 @@ test('request sorting cannot displace qualifying real users with below-floor hig
   assert.equal(tokens.me.rankingAvailable, true);
 });
 
-test('published real usage refreshes through its cache while live examples advance and survive midnight without republishing', async (t) => {
-  const { db, settings, leaderboard } = await setup(t, [{ id: 2 }], [{ user_id: 2, created_at: '2026-10-13T02:00Z', input_tokens: 1700123 }]);
+test('published real usage can cross the ceiling after a cache refresh while live examples advance and survive midnight without republishing', async (t) => {
+  const rules = { ...DEFAULT_RULES, boardMaximumTokens: 50e6 };
+  const { db, settings, leaderboard } = await setup(t, [{ id: 2 }], [{ user_id: 2, created_at: '2026-10-13T02:00Z', input_tokens: 17000123 }], rules);
   let clock = new Date('2026-10-13T03:30:00Z');
   settings.now = leaderboard.now = () => clock;
   leaderboard.boardCache.now = leaderboard.personalCache.now = () => clock.getTime();
   const original = await leaderboard.get('today', 'tokens', '2');
   const revision = settings.snapshot().revision;
-  await insertLogs(db, [{ user_id: 2, created_at: '2026-10-13T03:30:01Z', input_tokens: 1000000 }]);
+  await insertLogs(db, [{ user_id: 2, created_at: '2026-10-13T03:30:01Z', input_tokens: 40000000 }]);
   clock = new Date('2026-10-13T03:30:59Z');
   const cached = await leaderboard.get('today', 'tokens', '2');
   assert.equal(cached.me.tokens, original.me.tokens);
   assert.deepEqual(cached.entries, original.entries);
   clock = new Date('2026-10-13T05:30:00Z');
   const updated = await leaderboard.get('today', 'tokens', '2');
-  assert.equal(updated.me.tokens, 2700123);
-  assert.equal(updated.entries.find((row) => row.source === 'real').tokens, 2700123);
+  assert.equal(updated.me.tokens, 57000123);
+  assert.equal(updated.entries.find((row) => row.source === 'real').tokens, 57000123);
+  assert.ok(updated.entries.filter((row) => row.source === 'simulation').every((row) => row.tokens <= rules.boardMaximumTokens));
   assert.ok(updated.entries.some((row) => row.source === 'simulation' && row.tokens > original.entries.find((old) => old.key === row.key).tokens));
   clock = new Date('2026-10-13T16:00:00Z');
   const nextDay = await leaderboard.get('today', 'tokens', '2');

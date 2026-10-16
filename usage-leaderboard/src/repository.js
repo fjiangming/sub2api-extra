@@ -85,7 +85,6 @@ class UsageRepository {
                  p.rank AS previous_rank, r.previous_${metric} AS previous_value
           FROM ranked r LEFT JOIN previous_ranked p ON p.id = r.id
           WHERE $5::bigint IS NOT NULL AND r.tokens >= $5::bigint
-            AND ($6::bigint IS NULL OR r.tokens <= $6::bigint)
           ORDER BY r.${metric} DESC, r.id LIMIT 10
         ) t), '[]'::jsonb) AS qualified_entries,
         (SELECT jsonb_build_object('tokens', COALESCE(SUM(tokens), 0),
@@ -97,7 +96,7 @@ class UsageRepository {
           'previousStart', w.previous_start, 'previousEnd', w.previous_finish,
           'retainedFrom', (SELECT MIN(created_at) FROM public.usage_logs WHERE created_at < w.finish)) AS window
       FROM win w
-    `, [...this.params(period, metric, anchor), range?.minimumTokens ?? null, range?.maximumTokens ?? null]);
+    `, [...this.params(period, metric, anchor), range?.minimumTokens ?? null]);
     return rows[0];
   }
 

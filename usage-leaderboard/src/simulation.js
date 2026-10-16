@@ -224,7 +224,7 @@ function validateCandidate(value, timezone) {
 function projectSimulation(board, candidate, version) {
   const bounded = candidate.version >= 2;
   const realEntries = (board.qualifiedEntries || []).filter((entry) => !bounded ||
-    entry.tokens >= candidate.rules.boardMinimumTokens && entry.tokens <= candidate.rules.boardMaximumTokens).slice(0, 10);
+    entry.tokens >= candidate.rules.boardMinimumTokens).slice(0, 10);
   const randomKey = (key, purpose) => crypto.createHash('sha256').update(`${candidate.seed}:${candidate.version >= 3 ? '' : board.period}:${purpose}:${key}`).digest('hex');
   const tieOrder = (a, b) => bounded ? randomKey(a.key, 'tie').localeCompare(randomKey(b.key, 'tie')) || a.key.localeCompare(b.key)
     : Number(a.source === 'simulation') - Number(b.source === 'simulation') || a.key.localeCompare(b.key);

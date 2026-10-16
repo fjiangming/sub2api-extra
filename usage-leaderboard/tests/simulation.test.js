@@ -64,18 +64,20 @@ test('impossible or out of bounds ranges fail rather than widening bounds or loo
   assert.throws(() => generateSimulation({ ...DEFAULT_RULES, minimumTokens: 1e6, maximumTokens: 1000001, boardMinimumTokens: 1e6 }, options), { code: 'SIMULATION_RANGE_INVALID' });
 });
 
-test('real rows obey board bounds, retain actual usage and merge by metric with matching totals and masked identities', () => {
+test('real rows obey only the board floor, retain above-ceiling usage and merge by metric with matching totals and masked identities', () => {
   const candidate = generateSimulation(DEFAULT_RULES, options);
   const real = [
     { key: 'real-one', name: candidate.rows[0].name, tokens: candidate.rows[0].values.month.tokens, requests: 2, rank: 1 },
     { key: 'real-small', name: 'sm***@test.com', tokens: 3000123, requests: 1, rank: 2 },
-    { key: 'real-large', name: 'la***@test.com', tokens: 2000000001, requests: 1, rank: 3 }
+    { key: 'real-large', name: 'la***@test.com', tokens: 2000000001, requests: 1, rank: 3 },
+    { key: 'real-below', name: 'be***@test.com', tokens: 999999, requests: 100, rank: 4 }
   ];
   const board = { period: 'month', metric: 'tokens', entries: real, qualifiedEntries: real, summary: { tokens: 0 }, comparisonAvailable: true };
   const mixed = projectSimulation(board, candidate, 'test');
   assert.equal(mixed.entries.length, 10);
-  assert.deepEqual(mixed.display, { rangeApplied: true, mode: 'mixed', realCount: 2, simulatedCount: 8, version: 'test', snapshotAt: candidate.generatedAt, date: candidate.date });
-  assert.ok(!mixed.entries.some((row) => row.key === 'real-large'));
+  assert.deepEqual(mixed.display, { rangeApplied: true, mode: 'mixed', realCount: 3, simulatedCount: 7, version: 'test', snapshotAt: candidate.generatedAt, date: candidate.date });
+  assert.equal(mixed.entries.find((row) => row.key === 'real-large').tokens, 2000000001);
+  assert.ok(!mixed.entries.some((row) => row.key === 'real-below'));
   assert.ok(mixed.entries.every((row, i, rows) => !i || rows[i - 1].tokens >= row.tokens));
   assert.ok(mixed.entries.findIndex((row) => row.key === 'real-small') > 0);
   assert.equal(mixed.entries.find((row) => row.key === 'real-one').tokens, real[0].tokens);
@@ -87,7 +89,8 @@ test('real rows obey board bounds, retain actual usage and merge by metric with 
   assert.ok(mixed.entries.every((row) => !row.comparisonAvailable && row.change === null));
   assert.deepEqual(projectSimulation(board, candidate, 'test').entries, mixed.entries);
   const requests = projectSimulation({ ...board, metric: 'requests' }, candidate, 'test');
-  assert.ok(real.slice(0, 2).every((row) => requests.entries.some((entry) => entry.key === row.key)));
+  assert.ok(real.slice(0, 3).every((row) => requests.entries.some((entry) => entry.key === row.key)));
+  assert.ok(!requests.entries.some((row) => row.key === 'real-below'));
   assert.ok(requests.entries.every((row, i, rows) => !i || rows[i - 1].requests >= row.requests));
   assert.equal(real[0].rank, 1);
 });
@@ -142,7 +145,7 @@ test('legacy daily snapshots still replay until an administrator regenerates the
   const large = { key: 'large', name: 'la***@test.com', tokens: 2e9, requests: 1 };
   const board = { period: 'month', metric: 'tokens', entries: [large], qualifiedEntries: [large] };
   assert.equal(projectSimulation(board, legacy, 'old').display.realCount, 1);
-  assert.equal(projectSimulation(board, candidate, 'new').display.realCount, 0);
+  assert.equal(projectSimulation(board, candidate, 'new').display.realCount, 1);
 });
 
 test('identical calendar windows select identical mixed boards for every real-user count and metric', () => {
