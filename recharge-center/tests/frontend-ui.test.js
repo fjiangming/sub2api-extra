@@ -167,5 +167,5 @@ test('payment notices and creation controls show server quota, prevent exhausted
   assert.equal(button.disabled, false);
   assert.equal(label.textContent, '确认支付 ¥50.00');
   assert.equal(elements.get('create-order-error').hidden, true);
-  assert.match(html, /id="payment-notice-daily-limit"[\s\S]*?如果对订单有疑问，请联系客服。[\s\S]*?id="payment-notice-adjustment"/);
+  assert.match(html, /id="payment-notice-daily-limit"[\s\S]*?如果对订单有疑问或无法充值，请联系客服手动处理。[\s\S]*?id="payment-notice-adjustment"/);
 });
