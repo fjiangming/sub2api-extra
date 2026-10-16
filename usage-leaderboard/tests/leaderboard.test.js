@@ -78,7 +78,10 @@ test('today and Monday-start weeks include their boundary and exclude future rec
 
 test('zero-use users, excluded administrators and other users never share personal cached data', async (t) => {
   const { leaderboard, db } = await populated(t);
+  const initial = db.queryCount;
   const first = await leaderboard.get('month', 'tokens', '4');
+  assert.equal(db.queryCount, initial + 3, 'schema, shared ranking with the requester, and personal details');
+  assert.ok(!/"personal"|"email"|"userId"/.test(JSON.stringify(first)));
   const before = db.queryCount;
   const same = await leaderboard.get('month', 'tokens', '4');
   assert.equal(db.queryCount, before);
@@ -95,6 +98,46 @@ test('zero-use users, excluded administrators and other users never share person
   assert.equal(admin.me.rank, null);
   assert.equal(admin.me.tokens, 100000);
   await assert.rejects(leaderboard.get('month', 'tokens', '6'), { code: 'ACCOUNT_UNAVAILABLE' });
+});
+
+test('concurrent viewers share the station scan without sharing the first viewer\'s personal statistics', async (t) => {
+  const { leaderboard, db } = await populated(t);
+  const [first, second, unused] = await Promise.all(['4', '2', '8'].map((id) => leaderboard.get('month', 'tokens', id)));
+  assert.equal(db.queryCount, 7);
+  assert.deepEqual([first.me.tokens, second.me.tokens, unused.me.tokens], [60, 100, 0]);
+  assert.deepEqual([first.me.rank, second.me.rank, unused.me.rank], [3, 1, null]);
+  assert.deepEqual(first.entries, second.entries);
+  assert.deepEqual(first.entries, unused.entries);
+  assert.ok(!/"personal"|"email"|"userId"/.test(JSON.stringify([first, second, unused])));
+});
+
+test('bounded periods use both time bounds in index scans instead of filtering retained history', async (t) => {
+  const db = await memoryDatabase();
+  t.after(() => db.close());
+  await insertUsers(db, [{ id: 1 }, { id: 2 }]);
+  await db.engine.exec(`INSERT INTO public.usage_logs (user_id, created_at, input_tokens)
+    SELECT 1 + n % 2, '2025-01-01'::timestamptz + n * INTERVAL '20 minutes', 100
+    FROM generate_series(0, 19999) AS n;
+    ANALYZE public.usage_logs; ANALYZE public.users;`);
+  await insertLogs(db, [{ user_id: 1, created_at: '2026-10-13T02:00Z', input_tokens: 50 }]);
+  const { repository } = service(db);
+  const query = db.query.bind(db);
+  const plans = [];
+  db.query = async (sql, params) => {
+    plans.push((await query(`EXPLAIN (ANALYZE, FORMAT JSON) ${sql}`, params)).rows[0]['QUERY PLAN'][0].Plan);
+    return query(sql, params);
+  };
+  const anchor = '2026-10-13T03:30:00.000Z';
+  const board = await repository.board('today', 'tokens', anchor, null, {}, '1');
+  assert.equal(Number(board.personal.me.tokens), 50);
+  await repository.personal('today', 'tokens', anchor, '1');
+  await repository.details('today', anchor, '1', {});
+  const scans = (plan) => [plan, ...(plan.Plans || []).flatMap(scans)].filter((node) => node['Relation Name'] === 'usage_logs');
+  for (const plan of plans) {
+    const reads = scans(plan);
+    assert.ok(reads.some((node) => /created_at >=/.test(node['Index Cond']) && /created_at </.test(node['Index Cond'])));
+    assert.ok(reads.every((node) => (node['Rows Removed by Filter'] || 0) < 100), 'old history must not be read and discarded');
+  }
 });
 
 test('history cleanup changes cumulative totals and disables unavailable comparisons', async (t) => {

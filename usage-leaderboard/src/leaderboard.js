@@ -38,7 +38,7 @@ class LeaderboardService {
     };
   }
 
-  async board(period, metric, publication = null) {
+  async board(period, metric, publication = null, userId = null) {
     const schema = await this.inspector.inspect();
     const now = this.now();
     const calendarDay = calendarDate(now, this.config.timezone);
@@ -47,7 +47,7 @@ class LeaderboardService {
     const range = rules ? { minimumTokens: bounded ? rules.boardMinimumTokens : rules.minimumTokens } : null;
     return this.boardCache.getOrLoad(`${this.generation}:${period}:${metric}:${calendarDay}:${JSON.stringify(range)}`, async () => {
       const anchor = now.toISOString();
-      const raw = await this.repository.board(period, metric, anchor, range, schema);
+      const raw = await this.repository.board(period, metric, anchor, range, schema, userId);
       const compare = comparison(raw.window, period);
       const summary = { ...numeric(raw.summary), active: amount(raw.summary.active) };
       const previous = { ...numeric(raw.previous_summary), active: amount(raw.previous_summary.active) };
@@ -60,7 +60,8 @@ class LeaderboardService {
           active: percentChange(summary.active, previous.active)
         } : null },
         entries: raw.entries.map((row) => this.entry(row, metric, compare)),
-        qualifiedEntries: (raw.qualified_entries || []).map((row) => this.entry(row, metric, false))
+        qualifiedEntries: (raw.qualified_entries || []).map((row) => this.entry(row, metric, false)),
+        personal: userId ? { userId, value: raw.personal } : null
       };
     });
   }
@@ -69,7 +70,7 @@ class LeaderboardService {
     const candidate = publication?.candidate;
     const projected = candidate && (candidate.version === 4 || calendarDate(new Date(board.generatedAt), this.config.timezone) === candidate.date)
       ? projectSimulation(board, advanceSimulation(candidate, this.now()), publication.version) : { ...board, display: { mode: 'real', realCount: board.entries.length, simulatedCount: 0 } };
-    const { qualifiedEntries: _private, ...result } = projected;
+    const { qualifiedEntries: _private, personal: _personal, ...result } = projected;
     return result;
   }
 
@@ -85,9 +86,11 @@ class LeaderboardService {
     const date = calendarDate(this.now(), this.config.timezone);
     const schema = await this.inspector.inspect();
     const publication = this.settings?.active();
-    const board = await this.board(period, metric, publication);
+    const board = await this.board(period, metric, publication, userId);
     const personal = await this.personalCache.getOrLoad(`${generation}:${userId}:${period}:${metric}:${board.generatedAt}`, async () => {
-      const raw = await this.repository.personal(period, metric, board.generatedAt, userId, schema);
+      const raw = board.personal?.userId === userId ? board.personal.value
+        : await this.repository.personal(period, metric, board.generatedAt, userId, schema);
+      if (!raw) throw new AppError('ACCOUNT_UNAVAILABLE', '当前账号不可用，请重新登录', 401);
       const detail = await this.repository.details(period, board.generatedAt, userId, schema);
       const me = this.entry({ ...raw.me, rank: raw.rank, previous_rank: raw.previous_rank }, metric, board.comparisonAvailable);
       const trend = detail.trend.map((day) => ({ date: day.date, tokens: amount(day.tokens) }));

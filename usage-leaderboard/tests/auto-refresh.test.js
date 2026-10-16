@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-test('public polling preserves the board, pauses for visibility, offline and dialogs, backs off and stops on expired login', async () => {
+async function createPage() {
   const elements = new Map();
   const events = new Map();
   const timers = new Map();
@@ -15,6 +15,8 @@ test('public polling preserves the board, pauses for visibility, offline and dia
   let requests = 0;
   let failure = null;
   let dialog = false;
+  let defer = false;
+  const pending = [];
   const element = (id) => {
     if (!elements.has(id)) elements.set(id, { hidden: false, style: {}, classList: { toggle() {} },
       setAttribute() {}, addEventListener() {}, querySelector: () => element(`${id}-child`) });
@@ -38,9 +40,11 @@ test('public polling preserves the board, pauses for visibility, offline and dia
     fetch: async (url) => {
       if (url.includes('leaderboard?')) {
         requests++;
+        if (defer) await new Promise((resolve) => pending.push(resolve));
         if (failure === 'network') throw new Error('offline');
         if (failure === 'auth') return { ok: false, status: 401, json: async () => ({ error: { message: '登录已失效' } }) };
-        return { ok: true, json: async () => structuredClone(board) };
+        const period = new URLSearchParams(url.split('?')[1]).get('period');
+        return { ok: true, json: async () => ({ ...structuredClone(board), period }) };
       }
       return { ok: true, json: async () => url.endsWith('auth/config') ? { sub2apiUrl: 'https://main.example.com', timezone: 'Asia/Shanghai' } : { user } };
     }
@@ -51,15 +55,28 @@ test('public polling preserves the board, pauses for visibility, offline and dia
     for (const [id, timer] of [...timers]) if (timer.at <= time) { timers.delete(id); timer.run(); }
     await settle();
   };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../public/app.js'), 'utf8'), sandbox);
+  const context = vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/app.js'), 'utf8'), context);
   await settle();
-  assert.equal(requests, 1);
+  return { element, document, navigator, events, board, user, settle, advance,
+    run: (script) => vm.runInContext(script, context),
+    resolveRequest: (index = 0) => pending.splice(index, 1)[0](),
+    get requests() { return requests; },
+    set failure(value) { failure = value; },
+    set dialog(value) { dialog = value; },
+    set defer(value) { defer = value; } };
+}
+
+test('public polling preserves the board, pauses for visibility, offline and dialogs, backs off and stops on expired login', async () => {
+  const page = await createPage();
+  const { element, board, user, document, navigator, events, advance, settle } = page;
+  assert.equal(page.requests, 1);
   assert.equal(element('usage-content').hidden, false);
   board.display = { mode: 'mixed', realCount: 1, simulatedCount: 9, rangeApplied: true, date: '2026-10-16', snapshotAt: board.generatedAt };
   board.entries = [{ ...user, rank: 5 }];
   board.me = { ...user, rank: null, percentile: null, next: null, rankingAvailable: false, boardRank: 5, inLeaderboard: true };
-  await advance(59000); assert.equal(requests, 1);
-  await advance(1000); assert.equal(requests, 2);
+  await advance(59000); assert.equal(page.requests, 1);
+  await advance(1000); assert.equal(page.requests, 2);
   assert.equal(element('personal-title').textContent, '我的榜内排名');
   assert.equal(element('my-rank').textContent, '05');
   assert.equal(element('my-percentile').textContent, '当前展示榜单');
@@ -67,19 +84,86 @@ test('public polling preserves the board, pauses for visibility, offline and dia
   assert.equal(element('personal-next').hidden, true);
   assert.equal(element('locate-me').hidden, false);
   document.hidden = true; events.get('visibilitychange')();
-  await advance(600000); assert.equal(requests, 2);
-  document.hidden = false; events.get('visibilitychange')(); await settle(); assert.equal(requests, 3);
+  await advance(600000); assert.equal(page.requests, 2);
+  document.hidden = false; events.get('visibilitychange')(); await settle(); assert.equal(page.requests, 3);
   navigator.onLine = false; events.get('offline')();
-  await advance(600000); assert.equal(requests, 3);
-  navigator.onLine = true; events.get('online')(); await settle(); assert.equal(requests, 4);
-  dialog = true; await advance(60000); assert.equal(requests, 4);
-  dialog = false; await advance(60000); assert.equal(requests, 5);
-  failure = 'network'; await advance(60000); assert.equal(requests, 6);
+  await advance(600000); assert.equal(page.requests, 3);
+  navigator.onLine = true; events.get('online')(); await settle(); assert.equal(page.requests, 4);
+  page.dialog = true; await advance(60000); assert.equal(page.requests, 4);
+  page.dialog = false; await advance(60000); assert.equal(page.requests, 5);
+  page.failure = 'network'; await advance(60000); assert.equal(page.requests, 6);
   assert.equal(element('usage-content').hidden, false);
   assert.equal(element('page-status').hidden, true);
-  await advance(119000); assert.equal(requests, 6);
-  failure = 'auth'; await advance(1000); assert.equal(requests, 7);
+  await advance(119000); assert.equal(page.requests, 6);
+  page.failure = 'auth'; await advance(1000); assert.equal(page.requests, 7);
   assert.equal(element('usage-content').hidden, true);
   assert.equal(element('login-link').hidden, false);
-  await advance(600000); assert.equal(requests, 7);
+  await advance(600000); assert.equal(page.requests, 7);
+});
+
+test('manual refresh and revisiting a period render existing data while revalidating, and expired login clears it', async () => {
+  const page = await createPage();
+  const { element, run, settle } = page;
+  page.defer = true;
+  let request = run('loadBoard({ announce: true })');
+  await settle();
+  assert.equal(element('usage-content').hidden, false);
+  assert.equal(element('page-status').hidden, true);
+  assert.equal(element('refresh-button').disabled, true);
+  page.resolveRequest(); await request;
+
+  request = run("state.period = 'week'; loadBoard()");
+  await settle();
+  assert.equal(element('usage-content').hidden, true);
+  page.resolveRequest(); await request;
+  assert.match(element('table-caption').textContent, /本周/);
+
+  request = run("state.period = 'today'; loadBoard()");
+  await settle();
+  assert.equal(element('usage-content').hidden, false);
+  assert.match(element('table-caption').textContent, /今日/);
+  page.resolveRequest(); await request;
+
+  page.failure = 'network';
+  request = run("state.period = 'week'; loadBoard()");
+  await settle();
+  assert.equal(element('usage-content').hidden, false);
+  assert.match(element('table-caption').textContent, /本周/);
+  page.resolveRequest(); await request;
+  assert.equal(element('usage-content').hidden, false);
+  assert.equal(element('page-status').hidden, true);
+
+  page.failure = 'auth';
+  request = run('loadBoard()');
+  await settle();
+  page.resolveRequest(); await request;
+  assert.equal(element('usage-content').hidden, true);
+  assert.equal(element('login-link').hidden, false);
+  assert.equal(run('state.boards.size'), 0);
+  assert.equal(run('state.data'), null);
+});
+
+test('period reuse is bounded by age and local day, and late responses cannot overwrite a newer selection', async () => {
+  const page = await createPage();
+  const { element, run, settle } = page;
+  page.defer = true;
+  const week = run("state.period = 'week'; loadBoard()");
+  await settle();
+  const today = run("state.period = 'today'; loadBoard()");
+  await settle();
+  assert.equal(element('usage-content').hidden, false);
+  assert.match(element('table-caption').textContent, /今日/);
+  page.resolveRequest(1); await today;
+  page.resolveRequest(); await week;
+  assert.match(element('table-caption').textContent, /今日/);
+  assert.equal(run('state.boards.has("week")'), false);
+
+  for (const expire of ['cached.receivedAt = Date.now() - 300001', "cached.day = '2000.01.01'"]) {
+    run(`{ state.data = null; const cached = state.boards.get('today'); ${expire}; }`);
+    const request = run('loadBoard()');
+    await settle();
+    assert.equal(element('usage-content').hidden, true);
+    page.resolveRequest(); await request;
+    assert.equal(element('usage-content').hidden, false);
+  }
 });

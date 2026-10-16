@@ -250,11 +250,11 @@ test('a late usage write invalidates a cached board when personal totals would o
   assert.ok(!/qualifiedEntries|snapshotConsistent|"seed"|"email"/.test(JSON.stringify(board)));
 });
 
-test('writes between personal totals and model details trigger a bounded shared refresh instead of conflicting numbers', async (t) => {
+test('writes between shared ranking totals and model details trigger a bounded shared refresh instead of conflicting numbers', async (t) => {
   const { db, leaderboard, repository } = await setup(t, [{ id: 2 }], [{ user_id: 2, created_at: '2026-10-13T02:00Z', input_tokens: 20000000 }]);
-  const read = repository.personal.bind(repository);
+  const read = repository.board.bind(repository);
   let writes = 0;
-  repository.personal = async (...args) => {
+  repository.board = async (...args) => {
     const result = await read(...args);
     if (writes++ === 0) await insertLogs(db, [{ user_id: 2, created_at: '2026-10-13T03:29:59Z', input_tokens: 50000000 }]);
     return result;
@@ -269,7 +269,7 @@ test('writes between personal totals and model details trigger a bounded shared 
   assert.equal(board.me.trend.at(-1).tokens, board.me.tokens);
   leaderboard.invalidate();
   let attempts = 0;
-  repository.personal = async (...args) => {
+  repository.board = async (...args) => {
     attempts++;
     const result = await read(...args);
     await insertLogs(db, [{ user_id: 2, created_at: '2026-10-13T03:29:59Z', input_tokens: 1 }]);

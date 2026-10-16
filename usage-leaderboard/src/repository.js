@@ -39,20 +39,22 @@ const WINDOW_SQL = `
     FROM previous_window
   )`;
 
-function rankingCte(metric) {
-  validateSelection('all', metric);
+function rankingCte(period, metric) {
+  validateSelection(period, metric);
+  const current = period === 'all' ? 'TRUE' : 'l.created_at >= w.start';
+  const lowerBound = period === 'all' ? '' : 'l.created_at >= w.previous_start AND ';
   return `WITH ${WINDOW_SQL},
     scope_users AS (
       SELECT id, email, ($4::boolean OR lower(role) NOT IN ('admin', 'root')) AS eligible
       FROM public.users WHERE deleted_at IS NULL AND status = 'active'
     ), totals AS (
       SELECT u.id, u.email, u.eligible,
-        COALESCE(SUM(${tokenExpression('l')}) FILTER (WHERE w.start IS NULL OR l.created_at >= w.start), 0) AS tokens,
-        COUNT(*) FILTER (WHERE w.start IS NULL OR l.created_at >= w.start) AS requests,
+        COALESCE(SUM(${tokenExpression('l')}) FILTER (WHERE ${current}), 0) AS tokens,
+        COUNT(*) FILTER (WHERE ${current}) AS requests,
         COALESCE(SUM(${tokenExpression('l')}) FILTER (WHERE l.created_at >= w.previous_start AND l.created_at < w.previous_finish), 0) AS previous_tokens,
         COUNT(*) FILTER (WHERE l.created_at >= w.previous_start AND l.created_at < w.previous_finish) AS previous_requests
       FROM public.usage_logs l JOIN scope_users u ON u.id = l.user_id CROSS JOIN win w
-      WHERE (w.start IS NULL OR l.created_at >= w.previous_start) AND l.created_at < w.finish
+      WHERE ${lowerBound}l.created_at < w.finish
       GROUP BY u.id, u.email, u.eligible
     ), ranked AS (
       SELECT *, RANK() OVER (ORDER BY ${metric} DESC) AS rank
@@ -63,6 +65,20 @@ function rankingCte(metric) {
     )`;
 }
 
+function personalQuery(metric, schema, userParameter) {
+  return `SELECT to_jsonb(m) AS me,
+    (SELECT rank FROM ranked WHERE id = ${userParameter}::bigint) AS rank,
+    (SELECT rank FROM previous_ranked WHERE id = ${userParameter}::bigint) AS previous_rank,
+    (SELECT COUNT(*) FROM ranked WHERE ${metric} < m.${metric}) AS beaten,
+    (SELECT jsonb_build_object('rank', n.rank, 'value', n.${metric}) FROM ranked n
+      WHERE n.${metric} > m.${metric} ORDER BY n.${metric}, n.id LIMIT 1) AS next
+    FROM (
+      SELECT u.id::text, u.email, ${avatarExpression(schema, 'u')}, u.eligible, COALESCE(t.tokens, 0) AS tokens,
+        COALESCE(t.requests, 0) AS requests, COALESCE(t.previous_${metric}, 0) AS previous_value
+      FROM scope_users u LEFT JOIN totals t ON t.id = u.id WHERE u.id = ${userParameter}::bigint
+    ) m`;
+}
+
 class UsageRepository {
   constructor(database, config) { this.database = database; this.config = config; }
 
@@ -71,8 +87,8 @@ class UsageRepository {
     return [period, anchor, this.config.timezone, this.config.includeAdmins, ...(userId ? [userId] : [])];
   }
 
-  async board(period, metric, anchor, range = null, schema = {}) {
-    const { rows } = await this.database.query(`${rankingCte(metric)}
+  async board(period, metric, anchor, range = null, schema = {}, userId = null) {
+    const { rows } = await this.database.query(`${rankingCte(period, metric)}
       SELECT
         COALESCE((SELECT jsonb_agg(to_jsonb(t) ORDER BY t.${metric} DESC, t.id::bigint) FROM (
           SELECT r.id::text, r.email, ${avatarExpression(schema, 'r')}, r.tokens, r.requests, r.rank,
@@ -92,29 +108,18 @@ class UsageRepository {
         (SELECT jsonb_build_object('tokens', COALESCE(SUM(previous_tokens), 0),
           'requests', COALESCE(SUM(previous_requests), 0), 'active', COUNT(*))
           FROM totals WHERE eligible AND previous_requests > 0) AS previous_summary,
+        (SELECT to_jsonb(p) FROM (${personalQuery(metric, schema, '$6')}) p) AS personal,
         jsonb_build_object('start', w.start, 'end', w.finish,
           'previousStart', w.previous_start, 'previousEnd', w.previous_finish,
           'retainedFrom', (SELECT MIN(created_at) FROM public.usage_logs WHERE created_at < w.finish)) AS window
       FROM win w
-    `, [...this.params(period, metric, anchor), range?.minimumTokens ?? null]);
+    `, [...this.params(period, metric, anchor), range?.minimumTokens ?? null, userId]);
     return rows[0];
   }
 
   async personal(period, metric, anchor, userId, schema = {}) {
-    const { rows } = await this.database.query(`${rankingCte(metric)},
-      mine AS (
-        SELECT u.id::text, u.email, ${avatarExpression(schema, 'u')}, u.eligible, COALESCE(t.tokens, 0) AS tokens,
-          COALESCE(t.requests, 0) AS requests,
-          COALESCE(t.previous_${metric}, 0) AS previous_value
-        FROM scope_users u LEFT JOIN totals t ON t.id = u.id WHERE u.id = $5::bigint
-      )
-      SELECT to_jsonb(m) AS me,
-        (SELECT rank FROM ranked WHERE id = $5::bigint) AS rank,
-        (SELECT rank FROM previous_ranked WHERE id = $5::bigint) AS previous_rank,
-        (SELECT COUNT(*) FROM ranked WHERE ${metric} < m.${metric}) AS beaten,
-        (SELECT jsonb_build_object('rank', n.rank, 'value', n.${metric}) FROM ranked n
-          WHERE n.${metric} > m.${metric} ORDER BY n.${metric}, n.id LIMIT 1) AS next
-      FROM mine m
+    const { rows } = await this.database.query(`${rankingCte(period, metric)}
+      ${personalQuery(metric, schema, '$5')}
     `, this.params(period, metric, anchor, userId));
     if (!rows[0]) throw new AppError('ACCOUNT_UNAVAILABLE', '当前账号不可用，请重新登录', 401);
     return rows[0];
@@ -122,6 +127,7 @@ class UsageRepository {
 
   async details(period, anchor, userId, { requestedModel }) {
     validateSelection(period, 'tokens');
+    const lowerBound = period === 'all' ? '' : 'l.created_at >= w.start AND ';
     const model = requestedModel ? "COALESCE(NULLIF(l.requested_model, ''), NULLIF(l.model, ''), '未标注模型')" : "COALESCE(NULLIF(l.model, ''), '未标注模型')";
     const { rows } = await this.database.query(`WITH ${WINDOW_SQL},
       history AS (
@@ -138,7 +144,7 @@ class UsageRepository {
       ), models AS (
         SELECT ${model} AS name, SUM(${tokenExpression('l')}) AS tokens, COUNT(*) AS requests
         FROM public.usage_logs l CROSS JOIN win w
-        WHERE l.user_id = $4::bigint AND (w.start IS NULL OR l.created_at >= w.start) AND l.created_at < w.finish
+        WHERE l.user_id = $4::bigint AND ${lowerBound}l.created_at < w.finish
         GROUP BY 1
       ), model_ranked AS (
         SELECT *, ROW_NUMBER() OVER (ORDER BY tokens DESC, requests DESC, name) AS position FROM models

@@ -2,7 +2,7 @@
 
 const PERIODS = { today: '今日', week: '本周', month: '本月', all: '累计' };
 const $ = (id) => document.getElementById(id);
-const state = { period: 'today', data: null, session: '', config: null, controller: null, sequence: 0,
+const state = { period: 'today', data: null, boards: new Map(), session: '', config: null, controller: null, sequence: 0,
   authenticated: false, loading: false, pageActive: true, failures: 0 };
 const query = new URLSearchParams(location.search);
 let upstreamToken = query.get('token') || query.get('access_token') || '';
@@ -27,6 +27,7 @@ function displayHtml(value) {
   return `${formatted.value}${formatted.unit ? ` <small>${formatted.unit}</small>` : ''}`;
 }
 function saveSession(token) {
+  if (state.session !== token) { state.boards.clear(); state.data = null; }
   state.session = token;
   try {
     if (token) sessionStorage.setItem('usage-leaderboard.session', token);
@@ -239,10 +240,15 @@ async function loadBoard({ announce = false, background = false } = {}) {
   state.controller?.abort();
   state.controller = new AbortController();
   state.loading = true;
-  const retain = background && state.data;
-  if (!retain) state.data = null;
+  const previous = state.data;
+  const cached = state.boards.get(state.period);
+  const retain = previous?.period === state.period ? previous
+    : cached && Date.now() - cached.receivedAt < 300000 && cached.day === localDate(Date.now()) ? cached.data : null;
+  state.data = retain;
   document.querySelectorAll('[data-period]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.period === state.period)));
-  if (!retain) showStatus('正在获取用量排行');
+  if (retain) {
+    if (retain !== previous || $('usage-content').hidden) render(retain);
+  } else showStatus('正在获取用量排行');
   $('usage-content').setAttribute('aria-busy', 'true');
   $('refresh-button').disabled = true;
   try {
@@ -250,6 +256,7 @@ async function loadBoard({ announce = false, background = false } = {}) {
       { signal: AbortSignal.any([state.controller.signal, AbortSignal.timeout(60000)]) });
     if (sequence !== state.sequence) return;
     state.data = data;
+    state.boards.set(data.period, { data, receivedAt: Date.now(), day: localDate(Date.now()) });
     state.failures = 0;
     render(data);
     if (announce) toast('榜单已更新');
