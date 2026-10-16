@@ -6,7 +6,7 @@ const { SettingsStore } = require('../src/settings');
 const { DEFAULT_RULES } = require('../src/simulation');
 const { memoryDatabase, insertUsers, insertLogs, service } = require('./helpers');
 
-async function setup(t, users, logs) {
+async function setup(t, users, logs, rules = DEFAULT_RULES) {
   const db = await memoryDatabase();
   t.after(() => db.close());
   await insertUsers(db, users); await insertLogs(db, logs);
@@ -14,14 +14,14 @@ async function setup(t, users, logs) {
   const settings = new SettingsStore(dependencies.config, { now: () => new Date('2026-10-13T03:30:00Z') });
   dependencies.leaderboard.settings = settings;
   settings.onPublish = () => dependencies.leaderboard.invalidate();
-  const generated = await settings.generate({ revision: 0, rules: DEFAULT_RULES });
+  const generated = await settings.generate({ revision: 0, rules });
   await settings.publish({ revision: generated.revision, source: 'simulation' }, 'admin');
   return { db, settings, ...dependencies };
 }
 
-test('PostgreSQL real usage in range and above 1B is reserved in every period and metric; personal usage stays real', async (t) => {
-  const users = [{ id: 2, email: 'actual@example.com' }, { id: 3 }, { id: 4 }, { id: 5, status: 'disabled' }, { id: 6, role: 'admin' }];
-  const quantities = [1500123, 1500000123, 999999, 9000000, 6000000];
+test('PostgreSQL includes only real users within both board bounds in every period and metric; personal usage stays real', async (t) => {
+  const users = [{ id: 2, email: 'actual@example.com' }, { id: 3 }, { id: 4 }, { id: 5, status: 'disabled' }, { id: 6, role: 'admin' }, { id: 7 }];
+  const quantities = [1500123, 70000123, 999999, 9000000, 6000000, 1500000123];
   const logs = users.map((user, i) => ({ user_id: user.id, created_at: '2026-10-13T02:00Z', input_tokens: quantities[i] }));
   const { settings, leaderboard } = await setup(t, users, logs);
   for (const period of ['today', 'week', 'month', 'all']) for (const metric of ['tokens', 'requests']) {
@@ -47,9 +47,46 @@ test('PostgreSQL real usage in range and above 1B is reserved in every period an
   await settings.publish({ revision: settings.snapshot().revision, source: 'real' }, 'admin');
   const restored = await leaderboard.get('month', 'tokens', '2');
   assert.equal(restored.display.mode, 'real');
-  assert.equal(restored.me.rank, 2);
+  assert.equal(restored.me.rank, 3);
   assert.equal(restored.me.rankingAvailable, true);
-  assert.equal(restored.summary.tokens, quantities[0] + quantities[1] + quantities[2]);
+  assert.equal(restored.summary.tokens, quantities[0] + quantities[1] + quantities[2] + quantities[5]);
+});
+
+test('board bounds precede SQL cutoff and simulation bounds, and drafts, publication and rollback retain the right ranges', async (t) => {
+  const users = Array.from({ length: 17 }, (_, i) => ({ id: i + 2 }));
+  const quantities = [4e6, 5e6, 10e6, 60e6, 60e6 + 1, ...Array.from({ length: 12 }, (_, i) => 100e6 + i)];
+  const logs = users.map((user, i) => ({ user_id: user.id, created_at: '2026-10-13T02:00Z', input_tokens: quantities[i] }));
+  const rules = { ...DEFAULT_RULES, minimumTokens: 20e6, maximumTokens: 100e6, boardMinimumTokens: 5e6, boardMaximumTokens: 60e6 };
+  const { settings, leaderboard } = await setup(t, users, logs, rules);
+  for (const period of ['today', 'week', 'month', 'all']) for (const metric of ['tokens', 'requests']) {
+    const board = await leaderboard.get(period, metric, '4');
+    assert.equal(board.entries.length, 10);
+    assert.equal(board.display.realCount, 3);
+    assert.equal(board.display.simulatedCount, 7);
+    assert.deepEqual(board.entries.filter((row) => row.source === 'real').map((row) => row.tokens).sort((a, b) => a - b), [5e6, 10e6, 60e6]);
+    assert.ok(board.entries.every((row) => row.tokens >= 5e6 && row.tokens <= 60e6));
+    assert.ok(board.entries.filter((row) => row.source === 'simulation').every((row) => row.tokens >= 20e6));
+    assert.ok(board.entries.every((row, i, rows) => !i || rows[i - 1][metric] >= row[metric]));
+    assert.equal(board.summary.tokens, board.entries.reduce((sum, row) => sum + row.tokens, 0));
+    assert.equal(board.me.tokens, 10e6);
+    assert.equal(board.me.rankingAvailable, false);
+    if (metric === 'tokens') {
+      assert.equal(board.entries[0].tokens, 60e6);
+      assert.equal(board.entries.at(-1).tokens, 5e6);
+    }
+  }
+  const before = await leaderboard.get('month', 'tokens', '4');
+  const changed = { ...rules, boardMinimumTokens: 25e6, boardMaximumTokens: 50e6 };
+  await settings.generate({ revision: settings.snapshot().revision, rules: changed });
+  const preview = await leaderboard.preview(settings.draftCandidate(), 'month', 'tokens');
+  assert.equal(preview.display.realCount, 0);
+  assert.ok(preview.entries.every((row) => row.tokens >= 25e6 && row.tokens <= 50e6));
+  assert.deepEqual((await leaderboard.get('month', 'tokens', '4')).entries, before.entries);
+  await settings.publish({ revision: settings.snapshot().revision, source: 'simulation' }, 'admin');
+  const live = await leaderboard.get('month', 'tokens', '4');
+  assert.deepEqual(live.entries, preview.entries);
+  await settings.rollback({ revision: settings.snapshot().revision }, 'admin');
+  assert.deepEqual((await leaderboard.get('month', 'tokens', '4')).entries, before.entries);
 });
 
 test('ten qualifying real users turn simulation into the actual Top 10, including stable cutoff and personal ranking', async (t) => {

@@ -4,6 +4,7 @@ window.UsageAdmin = (() => {
   const periods = { today: '今日', week: '本周', month: '本月', all: '累计' };
   const metrics = { tokens: 'Token 用量', requests: '调用次数' };
   const distributions = { natural: '自然梯度', close: '差距接近', concentrated: '头部集中' };
+  const rangeInputs = ['minimum', 'maximum', 'board-minimum', 'board-maximum'];
   const root = () => document.getElementById('admin-content');
   const el = (id) => document.getElementById(`a-${id}`);
   const icons = () => window.lucide?.createIcons({ attrs: { 'aria-hidden': 'true' } });
@@ -25,8 +26,12 @@ window.UsageAdmin = (() => {
   function rules() {
     const minimum = Number(el('minimum').value);
     const maximum = Number(el('maximum').value);
+    const boardMinimum = Number(el('board-minimum').value);
+    const boardMaximum = Number(el('board-maximum').value);
     if (!Number.isFinite(minimum) || !Number.isFinite(maximum) || minimum < 1 || maximum > 1000 || maximum <= minimum) return null;
-    return { minimumTokens: Math.round(minimum * 1e6), maximumTokens: Math.round(maximum * 1e6), distribution: el('distribution').value };
+    if (!Number.isFinite(boardMinimum) || !Number.isFinite(boardMaximum) || boardMinimum < 1 || boardMaximum > 1000 || boardMaximum <= boardMinimum || Math.min(maximum, boardMaximum) <= Math.max(minimum, boardMinimum)) return null;
+    return { minimumTokens: Math.round(minimum * 1e6), maximumTokens: Math.round(maximum * 1e6), distribution: el('distribution').value,
+      boardMinimumTokens: Math.round(boardMinimum * 1e6), boardMaximumTokens: Math.round(boardMaximum * 1e6) };
   }
   function changedRules() {
     return source === 'simulation' && JSON.stringify(rules()) !== JSON.stringify(snapshot?.draft?.candidate?.rules);
@@ -58,15 +63,19 @@ window.UsageAdmin = (() => {
     el('published-at').textContent = publication ? `${date(publication.publishedAt)} · ${publication.actor}` : '尚未发布';
     el('storage').textContent = data.persistence ? '设置文件 ≤ 64 KiB' : '内存模式 · 重启恢复默认';
     el('candidate-version').textContent = `修订 ${data.revision}`;
-    const messages = [data.storageError, data.expired ? '已发布模拟数据跨天失效，用户端已自动恢复真实榜单。' : '', !data.persistence ? '当前为内存模式，容器重启后草稿和发布设置会清空。' : ''].filter(Boolean);
+    const messages = [data.storageError, data.expired ? '已发布模拟数据跨天失效，用户端已自动恢复真实榜单。' : '',
+      publication?.candidate?.version === 1 && !data.expired ? '当前为旧版模拟快照，榜单范围与新混排规则需重新生成并发布后生效。' : '',
+      !data.persistence ? '当前为内存模式，容器重启后草稿和发布设置会清空。' : ''].filter(Boolean);
     el('notice').hidden = !messages.length;
     el('notice').textContent = messages.join(' ');
     const candidate = data.draft?.candidate;
     el('valid-date').textContent = candidate ? candidate.date : '尚未生成';
     if (syncRules) {
-      const values = candidate?.rules || data.defaults;
+      const values = { ...data.defaults, ...candidate?.rules };
       el('minimum').value = values.minimumTokens / 1e6;
       el('maximum').value = values.maximumTokens / 1e6;
+      el('board-minimum').value = values.boardMinimumTokens / 1e6;
+      el('board-maximum').value = values.boardMaximumTokens / 1e6;
       el('distribution').value = values.distribution;
     }
     controls();
@@ -97,9 +106,10 @@ window.UsageAdmin = (() => {
   function renderPreview(data) {
     const mixed = data.display.simulatedCount > 0;
     const scoped = data.display.mode !== 'real';
+    const bounded = data.display.rangeApplied === true;
     const ordered = [metric, metric === 'tokens' ? 'requests' : 'tokens'];
     const format = (value, type) => type === 'tokens' ? token(value) : num(value);
-    el('preview-subtitle').textContent = source === 'real' ? '真实用量' : mixed ? '真实优先 · 模拟补位' : '真实用户已占满 10 位';
+    el('preview-subtitle').textContent = source === 'real' ? '真实用量' : bounded ? '区间筛选 · 按用量混排' : mixed ? '真实优先 · 模拟补位' : '真实用户已占满 10 位';
     el('total-label').textContent = scoped ? '榜单 Token 用量' : '全站 Token 用量';
     el('count-label').textContent = scoped ? '上榜用户' : '活跃创造者';
     el('requests-label').textContent = scoped ? '榜单调用次数' : '全站调用次数';
@@ -116,7 +126,7 @@ window.UsageAdmin = (() => {
     const values = data.entries.map((row) => row.tokens).sort((a, b) => b - a);
     const maximum = Math.max(1, ...values);
     el('distribution-chart').innerHTML = values.map((value) => `<span style="height:${Math.max(2, value / maximum * 100)}%"></span>`).join('');
-    el('source-meta').textContent = source === 'real' ? '按主站实际用量排名' : '真实用户优先，模拟补位';
+    el('source-meta').textContent = source === 'real' ? '按主站实际用量排名' : '区间筛选 · 真实与模拟混排';
     el('preview-status').hidden = true;
     el('preview-content').hidden = false;
     icons();
@@ -161,8 +171,8 @@ window.UsageAdmin = (() => {
     pendingAction = { action, revision: snapshot.revision, source };
     el('dialog-title').textContent = titles[action];
     const details = action === 'publish' ? [
-      ['数据来源', source === 'simulation' ? '真实用户优先，模拟数据补位' : '主站真实用量'],
-      ...(source === 'simulation' ? [['Token 范围', `${el('minimum').value}M – ${el('maximum').value}M`], ['数值分布', distributions[el('distribution').value]], ['有效日期', snapshot.draft.candidate.date]] : []),
+      ['数据来源', source === 'simulation' ? '榜单区间内取真实用户，模拟补齐' : '主站真实用量'],
+      ...(source === 'simulation' ? [['榜单单人 Token', `${el('board-minimum').value}M ~ ${el('board-maximum').value}M`], ['单人模拟 Token', `${el('minimum').value}M ~ ${el('maximum').value}M`], ['展示顺序', '按当前用量指标混排'], ['数值分布', distributions[el('distribution').value]], ['有效日期', snapshot.draft.candidate.date]] : []),
       ['个人统计', '始终使用实际用量'], ['存储方式', snapshot.persistence ? '覆盖固定设置文件' : '内存，重启后恢复默认']
     ] : action === 'rollback' ? [['目标来源', snapshot.previous.source === 'real' ? '真实用量' : '模拟混合榜单'], ['目标版本', snapshot.previous.version.slice(0, 8)]] : [['数据来源', '主站真实用量'], ['生效范围', '所有统计周期']];
     el('publish-summary').innerHTML = details.map(([label, value]) => `<div><dt>${escape(label)}</dt><dd>${escape(value)}</dd></div>`).join('');
@@ -182,17 +192,17 @@ window.UsageAdmin = (() => {
       loadPreview();
     }));
     el('metric').addEventListener('change', () => { metric = el('metric').value; loadPreview(); });
-    ['minimum', 'maximum', 'distribution'].forEach((id) => el(id).addEventListener('input', () => {
+    [...rangeInputs, 'distribution'].forEach((id) => el(id).addEventListener('input', () => {
       el('range-error').hidden = true;
-      el('minimum').removeAttribute('aria-invalid'); el('maximum').removeAttribute('aria-invalid');
+      rangeInputs.forEach((id) => el(id).removeAttribute('aria-invalid'));
       controls(); loadPreview();
     }));
     el('form').addEventListener('submit', (event) => {
       event.preventDefault();
       const values = rules();
       if (!values) {
-        el('range-error').textContent = '范围须在 1M～1000M 之间，且上限大于下限'; el('range-error').hidden = false;
-        el('minimum').setAttribute('aria-invalid', 'true'); el('maximum').setAttribute('aria-invalid', 'true'); el('minimum').focus();
+        el('range-error').textContent = '两个范围均须为 1M~1000M，上限须大于下限，且单人模拟范围与榜单范围须有交集'; el('range-error').hidden = false;
+        rangeInputs.forEach((id) => el(id).setAttribute('aria-invalid', 'true')); el('board-minimum').focus();
         return;
       }
       mutate('simulation/preview', { rules: values, keepIdentities: el('keep-identities').checked }, { message: '候选已生成，尚未影响用户端' });
@@ -200,6 +210,8 @@ window.UsageAdmin = (() => {
     el('reset').addEventListener('click', () => {
       el('minimum').value = snapshot.defaults.minimumTokens / 1e6;
       el('maximum').value = snapshot.defaults.maximumTokens / 1e6;
+      el('board-minimum').value = snapshot.defaults.boardMinimumTokens / 1e6;
+      el('board-maximum').value = snapshot.defaults.boardMaximumTokens / 1e6;
       el('distribution').value = snapshot.defaults.distribution;
       el('range-error').hidden = true;
       controls(); loadPreview();

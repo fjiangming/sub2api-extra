@@ -17,12 +17,18 @@
         <button type="button" data-source="real" aria-pressed="false"><i data-lucide="database"></i>真实用量</button>
         <button type="button" data-source="simulation" aria-pressed="true"><i data-lucide="sparkles"></i>模拟榜单</button>
       </div>
-      <div class="source-meta"><i data-lucide="users-round"></i><span id="a-source-meta">真实用户优先，模拟补位</span><span class="small-badge">TOP 10</span></div>
+      <div class="source-meta"><i data-lucide="users-round"></i><span id="a-source-meta">区间筛选 · 真实与模拟混排</span><span class="small-badge">TOP 10</span></div>
     </section>
     <section class="settings-section" id="a-generation-section">
       <div class="settings-section-heading"><span class="step-number">02</span><h2>生成规则</h2></div>
       <fieldset id="a-fields">
-        <div class="field-heading"><span>单人 Token 范围</span><span class="field-constraint">1M ≤ 用量 ≤ 1B</span></div>
+        <div class="field-heading"><span>榜单 Token 范围</span><span class="field-constraint">每位上榜用户 · 1M ~ 1B</span></div>
+        <div class="range-fields">
+          <label for="a-board-minimum"><span>下限</span><div class="number-input"><input id="a-board-minimum" type="number" min="1" max="1000" step="0.01" inputmode="decimal" aria-describedby="a-range-error"><span>M</span></div></label>
+          <span class="range-divider">~</span>
+          <label for="a-board-maximum"><span>上限</span><div class="number-input"><input id="a-board-maximum" type="number" min="1" max="1000" step="0.01" inputmode="decimal" aria-describedby="a-range-error"><span>M</span></div></label>
+        </div>
+        <div class="field-heading range-heading"><span>单人模拟 Token 范围</span><span class="field-constraint">1M ≤ 用量 ≤ 1B</span></div>
         <div class="range-fields">
           <label for="a-minimum"><span>下限</span><div class="number-input"><input id="a-minimum" type="number" min="1" max="1000" step="0.01" inputmode="decimal" aria-describedby="a-range-error"><span>M</span></div></label>
           <span class="range-divider">—</span>
@@ -41,7 +47,8 @@
       <div class="settings-section-heading"><span class="step-number">03</span><h2>展示范围</h2></div>
       <dl class="scope-list">
         <div><dt>用户身份</dt><dd>注册邮箱脱敏</dd></div>
-        <div><dt>真实用户</dt><dd>达到下限即优先</dd></div>
+        <div><dt>真实用户</dt><dd>榜单区间内按实际用量</dd></div>
+        <div><dt>展示顺序</dt><dd>按用量指标混排</dd></div>
         <div><dt>模拟身份</dt><dd>随机脱敏邮箱</dd></div>
         <div><dt>个人用量</dt><dd>实际用量</dd></div>
         <div><dt>有效日期</dt><dd id="a-valid-date">尚未生成</dd></div>
@@ -53,14 +60,14 @@
     <div class="preview-heading"><div><h2 id="a-preview-title">榜单预览</h2><span id="a-preview-subtitle">生成后预览</span></div><span class="draft-label"><i data-lucide="file-pen-line"></i>候选草稿</span></div>
     <div class="preview-toolbar">
       <div class="period-control" role="group" aria-label="预览统计周期"><button type="button" data-preview-period="today" aria-pressed="false">今日</button><button type="button" data-preview-period="week" aria-pressed="false">本周</button><button type="button" data-preview-period="month" aria-pressed="true">本月</button><button type="button" data-preview-period="all" aria-pressed="false">累计</button></div>
-      <label class="metric-select"><i data-lucide="sliders-horizontal"></i><select id="a-metric" aria-label="预览排名依据"><option value="tokens">Token 用量</option><option value="requests">调用次数</option></select><i data-lucide="chevron-down"></i></label>
+      <label class="metric-select"><i data-lucide="sliders-horizontal"></i><select id="a-metric" aria-label="预览用量指标"><option value="tokens">Token 用量</option><option value="requests">调用次数</option></select><i data-lucide="chevron-down"></i></label>
     </div>
     <div class="admin-preview-status" id="a-preview-status" role="status" aria-live="polite">尚未生成候选数据</div>
     <div id="a-preview-content" hidden>
       <div class="preview-stats"><div><span id="a-total-label">榜单 Token 用量</span><strong id="a-total"></strong></div><div><span id="a-count-label">上榜用户</span><strong id="a-count"></strong></div><div><span id="a-requests-label">榜单调用次数</span><strong id="a-requests"></strong></div></div>
       <div class="preview-table-heading"><div><h3>用量之星</h3><span class="small-badge">TOP 10</span></div><span class="preview-counts" id="a-source-counts"></span></div>
       <div class="preview-table-wrap"><table class="preview-table"><caption class="sr-only" id="a-caption">候选排行榜</caption><thead><tr><th scope="col">排名</th><th scope="col">创造者</th><th scope="col" class="right" id="a-primary-heading">Token 用量</th><th scope="col" class="right secondary-metric" id="a-secondary-heading">调用次数</th></tr></thead><tbody id="a-preview-body"></tbody></table></div>
-      <div class="preview-footnote"><span><i data-lucide="shield-check"></i>真实用户优先 · 最多 10 位</span><span id="a-snapshot-date"></span></div>
+      <div class="preview-footnote"><span><i data-lucide="shield-check"></i>区间筛选 · 最多 10 位</span><span id="a-snapshot-date"></span></div>
     </div>
   </section>
 </div>

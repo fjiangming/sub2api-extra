@@ -7,21 +7,29 @@ const { AppError } = require('./errors');
 
 const AVATARS = ['mountain', 'lake', 'night', 'forest', 'hills', 'sea', 'peak', 'valley', 'coast', 'green'];
 const PERIODS = ['today', 'week', 'month', 'all'];
-const rulesSchema = z.object({
+const legacyRulesSchema = z.object({
   minimumTokens: z.number().int().min(1e6).max(1e9),
   maximumTokens: z.number().int().min(1e6).max(1e9),
   distribution: z.enum(['natural', 'close', 'concentrated'])
 }).strict().refine((value) => value.maximumTokens > value.minimumTokens, '上限必须大于下限');
-const DEFAULT_RULES = { minimumTokens: 1370000, maximumTokens: 980830000, distribution: 'natural' };
+const rulesSchema = legacyRulesSchema.safeExtend({
+  boardMinimumTokens: z.number().int().min(1e6).max(1e9),
+  boardMaximumTokens: z.number().int().min(1e6).max(1e9)
+}).refine((value) => value.boardMaximumTokens > value.boardMinimumTokens, '榜单上限必须大于下限')
+  .refine((value) => Math.min(value.maximumTokens, value.boardMaximumTokens) > Math.max(value.minimumTokens, value.boardMinimumTokens),
+    '单人模拟范围与榜单范围必须有可生成的交集');
+const DEFAULT_RULES = { minimumTokens: 1370000, maximumTokens: 980830000, distribution: 'natural', boardMinimumTokens: 1370000, boardMaximumTokens: 980830000 };
 const identitySchema = z.object({
   key: z.string().regex(/^sim_[a-f0-9]{16}$/), name: z.string().regex(/^[a-z]{2}\*\*\*@example\.com$/), avatar: z.enum(AVATARS).nullable()
 }).strict();
 const valueSchema = z.object({ tokens: z.number().int().min(1e6).max(1e9), requests: z.number().int().positive().max(1e9) }).strict();
 const candidateSchema = z.object({
   version: z.literal(1), seed: z.string().regex(/^[a-f0-9]{32}$/), generatedAt: z.iso.datetime(),
-  timezone: z.string().max(80), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), rules: rulesSchema,
+  timezone: z.string().max(80), date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), rules: legacyRulesSchema,
   rows: z.array(identitySchema.extend({ values: z.object(Object.fromEntries(PERIODS.map((period) => [period, valueSchema]))).strict() }).strict()).length(10)
 }).strict();
+
+const currentCandidateSchema = candidateSchema.extend({ version: z.literal(2), rules: rulesSchema });
 
 function calendarDate(now, timezone) { return new Intl.DateTimeFormat('sv-SE', { timeZone: timezone }).format(now); }
 function shiftDay(date, days) { return new Date(Date.parse(`${date}T00:00:00Z`) + days * 86400000).toISOString().slice(0, 10); }
@@ -32,8 +40,8 @@ function randomSource(seed) {
 function fractional(value) { return Number.isSafeInteger(value) && value % 1000 !== 0 && !(value / 1e6).toFixed(2).endsWith('.00'); }
 function invalidRange() { return new AppError('SIMULATION_RANGE_INVALID', '当前范围无法生成十组随机小数，请扩大上下限间距', 400); }
 
-function generateSimulation(input, { now = new Date(), timezone = 'Asia/Shanghai', seed = crypto.randomBytes(16).toString('hex'), roster } = {}) {
-  const result = rulesSchema.safeParse(input);
+function generateLegacySimulation(input, { now = new Date(), timezone = 'Asia/Shanghai', seed = crypto.randomBytes(16).toString('hex'), roster } = {}) {
+  const result = legacyRulesSchema.safeParse(input);
   if (!result.success) throw new AppError('INVALID_REQUEST', '模拟 Token 范围须为 1M～1B，且上限大于下限', 400);
   const rules = result.data;
   const random = randomSource(seed);
@@ -88,11 +96,23 @@ function generateSimulation(input, { now = new Date(), timezone = 'Asia/Shanghai
   return { version: 1, seed, generatedAt: now.toISOString(), timezone, date, rules, rows };
 }
 
+function generateSimulation(input, options = {}) {
+  const result = rulesSchema.safeParse(input);
+  if (!result.success) throw new AppError('INVALID_REQUEST', '单人及榜单 Token 范围须为 1M～1B，上限大于下限，且两个范围须有交集', 400);
+  const rules = result.data;
+  const generated = generateLegacySimulation({
+    minimumTokens: Math.max(rules.minimumTokens, rules.boardMinimumTokens),
+    maximumTokens: Math.min(rules.maximumTokens, rules.boardMaximumTokens),
+    distribution: rules.distribution
+  }, options);
+  return { ...generated, version: 2, rules };
+}
+
 function validateCandidate(value, timezone) {
-  const parsed = candidateSchema.safeParse(value);
+  const parsed = z.discriminatedUnion('version', [candidateSchema, currentCandidateSchema]).safeParse(value);
   if (!parsed.success || parsed.data.timezone !== timezone) throw new AppError('SIMULATION_INVALID', '模拟数据无效，请重新生成', 400);
   const candidate = parsed.data;
-  const replay = generateSimulation(candidate.rules, { now: new Date(candidate.generatedAt), timezone, seed: candidate.seed,
+  const replay = (candidate.version === 1 ? generateLegacySimulation : generateSimulation)(candidate.rules, { now: new Date(candidate.generatedAt), timezone, seed: candidate.seed,
     roster: candidate.rows.map(({ key, name, avatar }) => ({ key, name, avatar })) });
   if (!isDeepStrictEqual(candidate, replay) || new Set(candidate.rows.map((row) => row.key)).size !== 10 || new Set(candidate.rows.map((row) => row.name)).size !== 10) {
     throw new AppError('SIMULATION_INVALID', '模拟数据校验失败，请重新生成', 400);
@@ -101,7 +121,12 @@ function validateCandidate(value, timezone) {
 }
 
 function projectSimulation(board, candidate, version) {
-  const realEntries = board.qualifiedEntries || [];
+  const bounded = candidate.version === 2;
+  const realEntries = (board.qualifiedEntries || []).filter((entry) => !bounded ||
+    entry.tokens >= candidate.rules.boardMinimumTokens && entry.tokens <= candidate.rules.boardMaximumTokens).slice(0, 10);
+  const randomKey = (key, purpose) => crypto.createHash('sha256').update(`${candidate.seed}:${board.period}:${purpose}:${key}`).digest('hex');
+  const tieOrder = (a, b) => bounded ? randomKey(a.key, 'tie').localeCompare(randomKey(b.key, 'tie')) || a.key.localeCompare(b.key)
+    : Number(a.source === 'simulation') - Number(b.source === 'simulation') || a.key.localeCompare(b.key);
   const realKeys = new Set(realEntries.map((entry) => entry.key));
   if (realEntries.length >= 10 && board.entries.every((entry) => realKeys.has(entry.key))) {
     return { ...board, display: { mode: 'real', realCount: board.entries.length, simulatedCount: 0, version } };
@@ -112,15 +137,16 @@ function projectSimulation(board, candidate, version) {
     for (let i = 0; names.has(name) && i < 676; i++) name = `${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + i % 26)}***@example.com`;
     names.add(name);
     return { key: row.key, name, avatar: null, ...row.values[board.period], source: 'simulation' };
-  }).sort((a, b) => b[board.metric] - a[board.metric] || a.key.localeCompare(b.key)).slice(0, 10 - realEntries.length);
+  }).sort((a, b) => bounded ? randomKey(a.key, 'fill').localeCompare(randomKey(b.key, 'fill')) || a.key.localeCompare(b.key)
+    : b[board.metric] - a[board.metric] || a.key.localeCompare(b.key)).slice(0, 10 - realEntries.length);
   const entries = [...realEntries.map((entry) => ({ ...entry, source: 'real' })), ...simulated]
-    .sort((a, b) => b[board.metric] - a[board.metric] || Number(a.source === 'simulation') - Number(b.source === 'simulation') || a.key.localeCompare(b.key));
+    .sort((a, b) => b[board.metric] - a[board.metric] || tieOrder(a, b));
   let rank = 0;
   entries.forEach((entry, index) => { if (index === 0 || entry[board.metric] !== entries[index - 1][board.metric]) rank = index + 1;
     entry.rank = rank; entry.comparisonAvailable = false; entry.change = null; entry.newEntry = false; entry.growth = null; });
   return { ...board, entries, comparisonAvailable: false,
     summary: { tokens: entries.reduce((sum, entry) => sum + entry.tokens, 0), requests: entries.reduce((sum, entry) => sum + entry.requests, 0), active: entries.length, deltas: null },
-    display: { mode: !simulated.length ? 'priority' : realEntries.length ? 'mixed' : 'simulation', realCount: realEntries.length, simulatedCount: simulated.length, version, snapshotAt: candidate.generatedAt, date: candidate.date } };
+    display: { ...(bounded ? { rangeApplied: true } : {}), mode: !simulated.length ? 'priority' : realEntries.length ? 'mixed' : 'simulation', realCount: realEntries.length, simulatedCount: simulated.length, version, snapshotAt: candidate.generatedAt, date: candidate.date } };
 }
 
 module.exports = { DEFAULT_RULES, rulesSchema, calendarDate, generateSimulation, validateCandidate, projectSimulation };

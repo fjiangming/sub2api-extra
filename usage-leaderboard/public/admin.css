@@ -45,7 +45,7 @@
 .number-input input { width: 100%; min-width: 0; border: 0; outline: 0; padding: 10px; font: inherit; font-variant-numeric: tabular-nums; background: transparent; color: var(--text); }
 .number-input > span { color: var(--muted); font-size: 11px; }
 .field-error { font-size: 11px; color: var(--peach); margin-top: 9px; }
-.distribution-heading { margin-top: 22px; }
+.range-heading, .distribution-heading { margin-top: 22px; }
 .select-input { position: relative; display: flex; align-items: center; }
 .select-input select { width: 100%; padding: 10px 32px 10px 34px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); appearance: none; font-size: 12px; }
 .select-input > svg { position: absolute; width: 14px; height: 14px; color: var(--soft-text); pointer-events: none; }

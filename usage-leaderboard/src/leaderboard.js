@@ -42,10 +42,12 @@ class LeaderboardService {
     const schema = await this.inspector.inspect();
     const now = this.now();
     const calendarDay = calendarDate(now, this.config.timezone);
-    const minimum = publication?.candidate.rules.minimumTokens ?? null;
-    return this.boardCache.getOrLoad(`${this.generation}:${period}:${metric}:${calendarDay}:${minimum}`, async () => {
+    const rules = publication?.candidate.rules;
+    const bounded = publication?.candidate.version === 2;
+    const range = rules ? { minimumTokens: bounded ? rules.boardMinimumTokens : rules.minimumTokens, maximumTokens: bounded ? rules.boardMaximumTokens : null } : null;
+    return this.boardCache.getOrLoad(`${this.generation}:${period}:${metric}:${calendarDay}:${JSON.stringify(range)}`, async () => {
       const anchor = now.toISOString();
-      const raw = await this.repository.board(period, metric, anchor, minimum, schema);
+      const raw = await this.repository.board(period, metric, anchor, range, schema);
       const compare = comparison(raw.window, period);
       const summary = { ...numeric(raw.summary), active: amount(raw.summary.active) };
       const previous = { ...numeric(raw.previous_summary), active: amount(raw.previous_summary.active) };
