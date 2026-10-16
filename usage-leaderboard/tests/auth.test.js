@@ -43,6 +43,8 @@ test('identity comes only from upstream; forged JWT claims and query user IDs ar
   const session = await middleware(auth, request({ 'user-agent': 'test-browser', authorization: `Session ${data.sessionToken}` }));
   assert.equal(session.user.id, '7');
   assert.equal(data.user.name, 'pr***@example.com');
+  assert.equal(data.capabilities, undefined);
+  assert.equal(data.csrfToken, undefined);
   assert.equal(auth.publicSession(session).user.name, 'pr***@example.com');
   assert.ok(!JSON.stringify(data).includes('真实昵称'));
   assert.ok(!JSON.stringify(data).includes('private@example.com'));

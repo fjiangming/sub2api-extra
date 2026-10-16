@@ -33,7 +33,7 @@ test('admin APIs require live upstream admin role, exact origin and CSRF, and ke
   });
   const base = `http://127.0.0.1:${server.address().port}`;
   const endpoints = [
-    ['GET', 'settings'], ['GET', 'view'], ['GET', 'leaderboard/preview?period=month&metric=tokens&source=real'],
+    ['GET', 'session'], ['GET', 'settings'], ['GET', 'view'], ['GET', 'leaderboard/preview?period=month&metric=tokens&source=real'],
     ['POST', 'simulation/preview'], ['PUT', 'settings/draft'], ['POST', 'leaderboard/publish'],
     ['POST', 'leaderboard/restore-real'], ['POST', 'leaderboard/rollback']
   ];
@@ -43,16 +43,20 @@ test('admin APIs require live upstream admin role, exact origin and CSRF, and ke
   }
   const forged = `header.${Buffer.from(JSON.stringify({ sub: 1, role: 'admin' })).toString('base64url')}.signature`;
   const reader = await login(forged);
-  assert.equal(reader.capabilities.manageLeaderboard, false);
+  assert.equal(reader.capabilities, undefined);
   assert.equal(reader.csrfToken, undefined);
   for (const [method, path] of endpoints) assert.equal((await fetch(`${base}/api/admin/${path}`, { method, headers: { authorization: `Session ${reader.sessionToken}` } })).status, 403);
   assert.equal((await fetch(`${base}/api/admin/settings?role=admin&user_id=1`, { headers: { authorization: `Session ${reader.sessionToken}` } })).status, 403);
   assert.equal((await fetch(`${base}/views/admin.html`)).status, 404);
   assert.ok(!(await (await fetch(base)).text()).includes('id="a-form"'));
   const administrator = await login('administrator');
-  assert.equal(administrator.capabilities.manageLeaderboard, true);
-  const headers = { authorization: `Session ${administrator.sessionToken}`, 'content-type': 'application/json', 'x-csrf-token': administrator.csrfToken, origin: base };
+  assert.equal(administrator.capabilities, undefined);
+  assert.equal(administrator.csrfToken, undefined);
+  const headers = { authorization: `Session ${administrator.sessionToken}`, 'content-type': 'application/json', origin: base };
   const call = (path, body, method = 'POST', overrides = {}) => fetch(`${base}/api/admin/${path}`, { method, headers: { ...headers, ...overrides }, ...(method !== 'GET' ? { body: JSON.stringify(body) } : {}) });
+  const adminSession = await (await call('session', null, 'GET')).json();
+  assert.equal(typeof adminSession.csrfToken, 'string');
+  headers['x-csrf-token'] = adminSession.csrfToken;
   assert.equal((await call('settings', null, 'GET')).headers.get('cache-control'), 'no-store');
   assert.ok((await (await call('view', null, 'GET')).json()).html.includes('id="a-form"'));
   for (const overrides of [{ origin: 'https://evil.example' }, { origin: `${base.replace('http:', 'https:')}` }, { origin: 'invalid' }, { 'x-csrf-token': '' }, { 'x-csrf-token': 'forged' }]) {
@@ -80,6 +84,7 @@ test('admin APIs require live upstream admin role, exact origin and CSRF, and ke
   assert.ok(!/admin@example.com|reader@example.com|"seed"|"draft"|"csrfToken"|"rules"/.test(JSON.stringify(mixed)));
   const before = settings.snapshot();
   adminRole = 'user';
+  assert.equal((await call('session', null, 'GET')).status, 403);
   assert.equal((await call('settings', null, 'GET')).status, 403);
   assert.equal((await call('leaderboard/restore-real', { revision: before.revision })).status, 403);
   assert.deepEqual(settings.snapshot(), before);

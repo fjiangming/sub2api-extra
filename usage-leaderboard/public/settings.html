@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f9f8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#171c19" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
+  <title>排行设置</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/styles.css?v=7">
+  <link rel="stylesheet" href="/admin.css?v=5">
+  <script src="/assets/lucide.min.js" defer></script>
+  <script src="/avatars.js?v=1" defer></script>
+  <script src="/admin.js?v=5" defer></script>
+  <script src="/settings.js?v=1" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#admin-content">跳至设置</a>
+  <main class="page admin-page">
+    <a class="text-button admin-back" href="/"><i data-lucide="arrow-left"></i>返回排行榜</a>
+    <div class="admin-status" id="admin-loading" role="status" aria-live="polite">正在验证管理员身份</div>
+    <div id="admin-content" hidden></div>
+  </main>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden><i data-lucide="circle-check"></i><span></span></div>
+</body>
+</html>

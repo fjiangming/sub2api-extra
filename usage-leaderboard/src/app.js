@@ -100,6 +100,7 @@ function createApp({ config, database, inspector, auth, leaderboard, settings = 
   });
   const admin = express.Router();
   admin.use(auth.adminMiddleware());
+  admin.get('/session', (req, res) => res.json({ csrfToken: req.auth.csrfToken }));
   admin.get('/view', (_req, res) => res.json({ html: fs.readFileSync(path.join(config.projectRoot, 'views', 'admin.html'), 'utf8') }));
   admin.get('/settings', (_req, res) => res.json(settings.snapshot()));
   admin.post('/simulation/preview', async (req, res) => res.json(await settings.generate(parse(generateSchema, req.body))));
@@ -117,6 +118,10 @@ function createApp({ config, database, inspector, auth, leaderboard, settings = 
   app.get('/', (_req, res) => {
     res.set('Cache-Control', 'no-store');
     res.sendFile(path.join(config.projectRoot, 'public', 'index.html'));
+  });
+  app.get('/settings', (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.sendFile(path.join(config.projectRoot, 'public', 'settings.html'));
   });
   app.use(express.static(path.join(config.projectRoot, 'public'), { index: false, maxAge: '1h', dotfiles: 'deny' }));
   app.use((_req, _res, next) => next(new AppError('NOT_FOUND', '页面不存在', 404)));

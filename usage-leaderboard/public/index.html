@@ -8,12 +8,10 @@
   <meta name="color-scheme" content="light dark">
   <title>用量排行榜</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="./styles.css?v=6">
-  <link rel="stylesheet" href="./admin.css?v=3">
+  <link rel="stylesheet" href="./styles.css?v=7">
   <script src="./assets/lucide.min.js" defer></script>
   <script src="./avatars.js?v=1" defer></script>
-  <script src="./admin.js?v=4" defer></script>
-  <script src="./app.js?v=6" defer></script>
+  <script src="./app.js?v=7" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">跳至榜单</a>
@@ -27,7 +25,6 @@
       <div class="heading-actions">
         <a class="signed-in" id="signed-in" href="#my-usage" aria-label="查看个人用量" hidden><span class="user-avatar" id="header-avatar" style="--avatar-size:30px" aria-hidden="true"><i data-lucide="user-round"></i></span><span id="header-name"></span></a>
         <div class="heading-tools">
-          <a class="icon-button" id="settings-link" href="#settings" aria-label="排行设置" data-tooltip="排行设置" hidden><i data-lucide="settings-2"></i></a>
           <button class="text-button rules-button" type="button" id="rules-button"><i data-lucide="info"></i>榜单规则<i class="small-icon" data-lucide="arrow-up-right"></i></button>
         </div>
       </div>
@@ -111,12 +108,6 @@
     </div>
     </div>
 
-  </main>
-
-  <main class="page admin-page" id="admin-page" hidden>
-    <a class="text-button admin-back" href="#leaderboard"><i data-lucide="arrow-left"></i>返回榜单</a>
-    <div class="admin-status" id="admin-loading" role="status" aria-live="polite">正在验证管理员身份</div>
-    <div id="admin-content"></div>
   </main>
 
   <dialog class="dialog" id="rules-dialog" aria-labelledby="rules-title">

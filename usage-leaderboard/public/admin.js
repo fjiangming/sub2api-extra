@@ -150,7 +150,6 @@ window.UsageAdmin = (() => {
       const data = await context.api(`admin/${path}`, { method, body: JSON.stringify({ revision: snapshot.revision, ...body }) });
       if (nextSource) source = nextSource;
       applySnapshot(data);
-      if (/publish|restore-real|rollback/.test(path)) context.onChanged();
       await loadPreview();
       if (message) context.notify(message);
     } catch (error) { await handleError(error); }

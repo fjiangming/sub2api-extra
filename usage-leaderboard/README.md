@@ -2,7 +2,7 @@
 
 面向 Sub2API 用户的独立排行子服务，默认端口 `9876`。页面包含前三名领奖台、Top 10 表格、个人排名、与上一名差距、近 7 天 Token 趋势和常用模型。支持今日、本周、本月、累计，以及 Token / 调用次数排序。用户名称统一使用脱敏的注册邮箱，页面自动跟随系统主题。
 
-已实现管理员专用「排行设置」页面：主站管理员登录后进入 `/#settings`，可生成 1M～1B 的模拟用量、预览四个周期、保存草稿、发布、恢复真实榜单或回退上一版。真实用户优先占位，模拟用户补位并带「示例」标识。详见[实现规则与设置说明](docs/admin-settings-design.md)。
+已实现独立的管理员「排行设置」页面 `https://排行域名/settings`。展示页不包含设置入口、管理脚本或后台操作；管理员页可生成 1M～1B 的模拟用量、预览四个周期、保存草稿、发布、恢复真实榜单或回退上一版。真实用户优先占位，模拟用户补位并带「示例」标识。详见[实现规则与设置说明](docs/admin-settings-design.md)。
 
 ## 数据与资源
 
@@ -121,7 +121,7 @@ server {
 
 ## 管理员设置与真实用户优先
 
-主站另加一个自定义菜单，名称「排行设置」，地址 `https://实际排行域名/#settings`，可见范围仅管理员，iframe 打开。使用现有 Nginx，无需新增端口或反代路由。主站会在 URL 查询参数中附加登录信息，并保留 `#settings`。普通用户既没有排行页内的设置入口，也无法获取后台表单；所有 `/api/admin/*` 都在服务端重新验证 `role === 'admin'`，降权或认证失败立即拒绝后台访问。写接口还校验同源 Origin 和会话 CSRF Token。
+在主站分别添加两个自定义菜单：「用量排行」指向 `https://实际排行域名/`，可见角色选普通用户；「排行设置」指向 `https://实际排行域名/settings`，可见角色选管理员。页面由 Sub2API 自定义页面自动以 iframe 打开并附加当前登录信息，无需手填 Token。使用现有 Nginx，无需新增端口或反代路由。展示页不包含设置入口、后台脚本或后台表单；管理页先通过受保护接口单独获取管理员 CSRF Token，再加载设置表单。所有 `/api/admin/*` 都在服务端重新验证 `role === 'admin'`，降权或认证失败立即拒绝后台访问。写接口还校验同源 Origin 和会话 CSRF Token。
 
 1. 选择模拟榜单、设置上下限与分布，点击「随机生成」。只有服务端生成的候选可以发布，不接收浏览器自编用量。
 2. 切换今日、本周、本月、累计及 Token / 调用次数，查看合并后的真实效果。修改参数后必须重新生成，才能发布。
@@ -242,6 +242,7 @@ PGlite 只属于开发依赖，用于测试专用的内存 PostgreSQL；Docker �
 | `GET /api/auth/me` | 当前会话的展示信息 |
 | `POST /api/auth/logout` | 撤销当前会话 |
 | `GET /api/leaderboard?period=month&metric=tokens` | Top 10 和当前用户统计；必须已登录 |
+| `GET /api/admin/session` | 实时验证管理员身份并提供会话 CSRF Token |
 | `GET /api/admin/view` / `GET /api/admin/settings` | 管理员表单、草稿、发布状态及修订号 |
 | `POST /api/admin/simulation/preview` | 服务端生成候选；不发布 |
 | `GET /api/admin/leaderboard/preview?source=simulation&period=month&metric=tokens` | 草稿与真实用户合并预览；`source=real` 预览真实榜 |

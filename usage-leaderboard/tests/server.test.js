@@ -76,7 +76,26 @@ test('HTTP authenticates ordinary users, isolates personal data, rejects forged 
   const html = await page.text();
   assert.ok(!html.includes('should-never-be-reflected'));
   assert.ok(!html.includes('设计预览'));
+  assert.ok(!html.includes('排行设置'));
+  assert.ok(!html.includes('admin.js'));
+  assert.ok(!html.includes('admin.css'));
+  assert.ok(!html.includes('admin-content'));
   assert.ok(!/消费金额|USD|cost-heading|value="cost"/.test(html));
+  const displayScript = await (await fetch(`${base}/app.js`)).text();
+  assert.doesNotMatch(displayScript, /UsageAdmin|settings-link|admin-content|admin\/|canManage|csrfToken/);
+  for (const settingsPath of ['/settings', '/settings/']) {
+    const settingsPage = await fetch(`${base}${settingsPath}?token=should-never-be-reflected`);
+    assert.equal(settingsPage.status, 200);
+    assert.equal(settingsPage.headers.get('cache-control'), 'no-store');
+    const settingsHtml = await settingsPage.text();
+    assert.match(settingsHtml, /src="\/settings\.js/);
+    assert.match(settingsHtml, /admin-content/);
+    assert.ok(!settingsHtml.includes('usage-content'));
+    assert.ok(!settingsHtml.includes('should-never-be-reflected'));
+    assert.ok(!settingsHtml.includes('id="a-form"'));
+  }
+  assert.equal((await fetch(`${base}/settings.js`)).status, 200);
+  assert.equal((await fetch(`${base}/admin.css`)).status, 200);
   assert.equal((await fetch(`${base}/assets/lucide.min.js`)).status, 200);
   assert.equal((await fetch(`${base}/.env`)).status, 404);
   assert.equal((await fetch(`${base}/api/auth/logout`, { method: 'POST', headers: user2 })).status, 200);

@@ -81,8 +81,6 @@ class AuthService {
 
   publicSession(session) {
     return { user: publicIdentity(session.user.id, session.user.email, session.user.avatar),
-      capabilities: { manageLeaderboard: session.user.role === 'admin' },
-      ...(session.user.role === 'admin' ? { csrfToken: session.csrfToken } : {}),
       sessionToken: session.id, expiresAt: new Date(session.expiresAt).toISOString() };
   }
 

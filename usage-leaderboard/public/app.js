@@ -3,7 +3,7 @@
 const PERIODS = { today: '今日', week: '本周', month: '本月', all: '累计' };
 const METRICS = { tokens: { label: 'Token 用量', unit: 'Tokens' }, requests: { label: '调用次数', unit: '次调用' } };
 const $ = (id) => document.getElementById(id);
-const state = { period: 'today', metric: 'tokens', data: null, session: '', csrf: '', authenticated: false, canManage: false, config: null, controller: null, sequence: 0 };
+const state = { period: 'today', metric: 'tokens', data: null, session: '', config: null, controller: null, sequence: 0 };
 const query = new URLSearchParams(location.search);
 let upstreamToken = query.get('token') || query.get('access_token') || '';
 for (const key of ['token', 'access_token', 'user_id', 'src_host', 'src_url']) query.delete(key);
@@ -39,10 +39,7 @@ function saveSession(token) {
 
 async function api(path, options = {}) {
   const headers = { accept: 'application/json', ...(state.session ? { authorization: `Session ${state.session}` } : {}), ...options.headers };
-  if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(options.method)) {
-    headers['content-type'] = 'application/json';
-    if (state.csrf) headers['x-csrf-token'] = state.csrf;
-  }
+  if (['POST', 'PUT', 'DELETE', 'PATCH'].includes(options.method)) headers['content-type'] = 'application/json';
   let response;
   try {
     response = await fetch(`./api/${path}`, { ...options, headers, credentials: 'same-origin',
@@ -71,11 +68,6 @@ function showStatus(message, { error = false, login = false } = {}) {
   $('usage-content').hidden = true;
   $('page-status').setAttribute('aria-busy', String(!error && !login));
   if (login) {
-    state.authenticated = false;
-    state.canManage = false;
-    state.csrf = '';
-    $('settings-link').hidden = true;
-    window.UsageAdmin.clear();
     saveSession('');
     $('signed-in').hidden = true;
     enableFilters(false);
@@ -314,25 +306,6 @@ $('locate-me').addEventListener('click', () => {
 });
 $('refresh-button').addEventListener('click', () => loadBoard({ announce: true }));
 $('retry-button').addEventListener('click', () => initialize());
-async function updateNavigation() {
-  const settings = location.hash === '#settings';
-  $('main').hidden = settings;
-  $('admin-page').hidden = !settings;
-  document.querySelector('.skip-link').href = settings ? '#admin-page' : '#main';
-  if (settings) {
-    state.controller?.abort(); state.sequence++;
-    if (state.authenticated && state.canManage) await window.UsageAdmin.show();
-    else {
-      $('admin-loading').hidden = false;
-      $('admin-loading').textContent = state.authenticated ? '该页面仅主站管理员可见' : '请先登录主站管理员账号后打开排行设置';
-    }
-  } else {
-    window.UsageAdmin.hide();
-    if (state.authenticated && !state.data) await loadBoard();
-  }
-}
-window.addEventListener('hashchange', updateNavigation);
-
 async function initialize() {
   showStatus('正在获取用量排行');
   try {
@@ -350,14 +323,9 @@ async function initialize() {
       upstreamToken = '';
     } else session = await api('auth/me');
     saveSession(session.sessionToken);
-    state.authenticated = true;
-    state.canManage = session.capabilities?.manageLeaderboard === true;
-    state.csrf = session.csrfToken || '';
-    $('settings-link').hidden = !state.canManage;
-    if (!state.canManage) window.UsageAdmin.clear();
     renderIdentity(session.user);
     enableFilters(true);
-    await updateNavigation();
+    await loadBoard();
   } catch (error) {
     const login = [401, 403].includes(error.status);
     showStatus(login ? '请登录主站后打开用量排行' : error.message || '暂时无法连接用量服务', { error: true, login });
@@ -365,9 +333,4 @@ async function initialize() {
   hydrateIcons();
 }
 
-window.UsageAdmin.configure({ api, notify: toast, onChanged() { state.data = null; }, onDenied(error) {
-  state.canManage = false; $('settings-link').hidden = true;
-  $('admin-loading').hidden = false; $('admin-loading').textContent = error.message;
-  if (error.status === 401) { showStatus('请重新登录主站后打开用量排行', { login: true, error: true }); location.hash = '#leaderboard'; }
-} });
-enableFilters(false); hydrateIcons(); updateNavigation(); initialize();
+enableFilters(false); hydrateIcons(); initialize();
