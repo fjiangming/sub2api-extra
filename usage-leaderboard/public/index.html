@@ -8,10 +8,10 @@
   <meta name="color-scheme" content="light dark">
   <title>用量排行榜</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="./styles.css?v=8">
+  <link rel="stylesheet" href="./styles.css?v=9">
   <script src="./assets/lucide.min.js" defer></script>
   <script src="./avatars.js?v=1" defer></script>
-  <script src="./app.js?v=14" defer></script>
+  <script src="./app.js?v=15" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">跳至榜单</a>
@@ -45,13 +45,6 @@
     <div class="page-status" id="page-status" role="status" aria-live="polite"><i data-lucide="loader-circle"></i><span id="status-message">正在获取用量排行</span><button type="button" class="text-button" id="retry-button" hidden><i data-lucide="refresh-cw"></i>重新加载</button><a class="text-button" id="login-link" target="_blank" rel="noopener noreferrer" hidden><i data-lucide="log-in"></i>前往登录</a></div>
 
     <div id="usage-content" hidden>
-    <section class="station-stats" aria-label="全站用量概览">
-      <div class="station-stat">
-        <div><span class="stat-label" id="tokens-summary-label">全站 Token 用量</span><div class="stat-number"><strong id="total-tokens">—</strong><span id="total-tokens-unit"></span><span class="stat-delta" id="total-tokens-delta" hidden></span></div></div>
-        <span class="stat-icon green"><i data-lucide="zap"></i></span>
-      </div>
-    </section>
-
     <div class="workspace">
       <section class="leaderboard" id="leaderboard" aria-labelledby="leaderboard-title">
         <div class="section-heading">
