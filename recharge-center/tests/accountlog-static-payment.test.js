@@ -201,6 +201,8 @@ test('one user cancelling and rebuilding among competing orders cannot take anot
   assert.equal(calls.length, 4);
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].orderNo, cancelled.orderNo);
+  assert.equal(alerts[0].userId, 2);
+  assert.equal(alerts[0].userEmailMasked, user(2).emailMasked);
 });
 
 test('concurrent duplicate receipts for competing orders call fulfillment once per owner', async (t) => {
@@ -398,6 +400,8 @@ test('cancellation within a ledger second cannot choose either order at the ambi
   assert.equal(result.anomalyCode, 'ACCOUNTLOG_ORDER_AMBIGUOUS');
   assert.equal(calls, 0);
   assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].userId, null);
+  assert.equal(alerts[0].userEmailMasked, null);
   assert.equal(service.getForUser(first.id, 1).status, 'payment_reported');
   assert.equal(service.getForUser(replacement.id, 1).status, 'payment_reported');
 });
@@ -496,6 +500,8 @@ test('a conflicting replay, non-income entry, or payment outside the order windo
   assert.equal(conflict.accepted, false);
   assert.equal(conflict.anomalyCode, 'ACCOUNT_LOG_ID_CONFLICT');
   assert.equal(calls.length, 1);
+  assert.equal(alerts[0].userId, 1);
+  assert.equal(alerts[0].userEmailMasked, user(1).emailMasked);
 
   const expenseOrder = service.create(user(2), '20.00');
   const expense = await service.acceptAccountLogEntry(entry(expenseOrder, {
@@ -516,6 +522,10 @@ test('a conflicting replay, non-income entry, or payment outside the order windo
   assert.equal(outside.anomalyCode, 'ACCOUNTLOG_ORDER_NOT_FOUND');
   assert.equal(calls.length, 1);
   assert.equal(alerts.length, 3);
+  assert.equal(alerts[1].userId, null);
+  assert.equal(alerts[1].userEmailMasked, null);
+  assert.equal(alerts[2].userId, null);
+  assert.equal(alerts[2].userEmailMasked, null);
 });
 
 test('an associated accountlog anomaly can be independently reviewed with its exact ledger id', async (t) => {

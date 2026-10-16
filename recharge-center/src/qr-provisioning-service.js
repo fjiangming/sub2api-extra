@@ -123,6 +123,8 @@ class QrProvisioningService {
         eventId: `qr:${row.id}:${code}`,
         anomalyCode: code,
         orderNo: row.order_no,
+        userId: row.user_id,
+        userEmailMasked: row.user_email_masked,
         amount: minorToDecimal(row.payable_amount_minor),
         tradeLast6: '',
         memoLast6: row.payment_memo_last6,
@@ -210,7 +212,8 @@ class QrProvisioningService {
     const result = this.db.transaction(() => {
       const row = this.db.prepare(`
         SELECT q.*, o.status AS order_status, o.order_no, o.expires_at, o.payable_amount_minor,
-               o.payment_memo_ciphertext, o.payment_memo_last6, o.payment_qr_hash
+               o.payment_memo_ciphertext, o.payment_memo_last6, o.payment_qr_hash,
+               o.user_id, o.user_email_masked
         FROM qr_provision_jobs q
         JOIN recharge_orders o ON o.id = q.order_id
         WHERE q.id = ?
@@ -288,7 +291,7 @@ class QrProvisioningService {
     const result = this.db.transaction(() => {
       const row = this.db.prepare(`
         SELECT q.*, o.status AS order_status, o.order_no, o.expires_at,
-               o.payable_amount_minor, o.payment_memo_last6
+               o.payable_amount_minor, o.payment_memo_last6, o.user_id, o.user_email_masked
         FROM qr_provision_jobs q
         JOIN recharge_orders o ON o.id = q.order_id
         WHERE q.id = ?

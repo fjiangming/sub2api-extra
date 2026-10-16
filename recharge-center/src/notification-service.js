@@ -6,12 +6,16 @@ const { AppError } = require('./errors');
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_FIELD_LENGTH = 180;
+const MAX_EMAIL_LENGTH = 320;
+const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
 
 function sanitizeEvent(input) {
   const event = {
     eventId: String(input?.eventId || ''),
     anomalyCode: String(input?.anomalyCode || ''),
     orderNo: input?.orderNo == null ? null : String(input.orderNo),
+    userId: input?.userId == null ? null : String(input.userId),
+    userEmailMasked: input?.userEmailMasked == null ? null : String(input.userEmailMasked),
     amount: String(input?.amount || ''),
     tradeLast6: String(input?.tradeLast6 || ''),
     memoLast6: String(input?.memoLast6 || ''),
@@ -20,12 +24,16 @@ function sanitizeEvent(input) {
   if (!/^[A-Za-z0-9._:-]{8,180}$/.test(event.eventId) ||
       !/^[A-Z0-9_]{3,80}$/.test(event.anomalyCode) ||
       (event.orderNo != null && !/^[A-Za-z0-9_-]{3,80}$/.test(event.orderNo)) ||
+      (event.userId != null && (!/^[1-9]\d{0,15}$/.test(event.userId) || !Number.isSafeInteger(Number(event.userId)))) ||
+      (event.userEmailMasked != null && (event.userId == null ||
+        !/^(?:\*{3}|[^@\s]*\*{3}@[^@\s]+)$/.test(event.userEmailMasked))) ||
       !/^(0|[1-9]\d{0,11})\.\d{2}$/.test(event.amount) ||
       !/^(?:|[A-Za-z0-9_-]{6})$/.test(event.tradeLast6) ||
       (event.tradeLast6 === '' && !event.anomalyCode.startsWith('QR_')) ||
       !/^(?:|[A-Za-z0-9_-]{1,6})$/.test(event.memoLast6) ||
       !Number.isFinite(Date.parse(event.occurredAt)) ||
-      Object.values(event).some((value) => value != null && String(value).length > MAX_FIELD_LENGTH)) {
+      Object.entries(event).some(([key, value]) => value != null &&
+        (UNSAFE_TEXT.test(value) || String(value).length > (key === 'userEmailMasked' ? MAX_EMAIL_LENGTH : MAX_FIELD_LENGTH)))) {
     throw new AppError('ALERT_EVENT_INVALID', '异常通知事件不符合安全字段白名单', { status: 500 });
   }
   event.occurredAt = new Date(event.occurredAt).toISOString();
@@ -60,6 +68,10 @@ function emailText(event) {
     '',
     `异常代码: ${event.anomalyCode}`,
     `订单号: ${event.orderNo || '未识别'}`,
+    `下单用户 ID: ${event.userId || '未识别'}`,
+    `下单账号（脱敏邮箱）: ${event.userId
+      ? event.userEmailMasked || '未记录，请按用户 ID 查找'
+      : '归属未确认，未匹配到唯一订单，请人工核对'}`,
     `应付金额: CNY ${event.amount}`,
     `支付宝交易/账务流水末六位: ${event.tradeLast6 || '无（付款前异常）'}`,
     `备注末六位: ${event.memoLast6 || '无'}`,
