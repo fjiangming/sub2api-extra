@@ -14,6 +14,11 @@ test('seeded simulation stays inside bounds, avoids integer displays, and reprod
     assert.deepEqual(generateSimulation(rules, { ...options, roster: candidate.rows.map(({ key, name, avatar }) => ({ key, name, avatar })) }), candidate);
     assert.equal(new Set(candidate.rows.map((row) => row.key)).size, 10);
     assert.equal(new Set(candidate.rows.map((row) => row.name)).size, 10);
+    assert.deepEqual(new Set(candidate.rows.map((row) => row.name.split('@')[1])), new Set(['qq.com', 'gmail.com', '163.com']));
+    for (const row of candidate.rows) {
+      assert.match(row.name, /^\w{2}\*\*\*@(qq\.com|gmail\.com|163\.com)$/);
+      if (row.name.endsWith('@qq.com')) assert.match(row.name, /^[1-9][0-9]\*\*\*@qq\.com$/);
+    }
     for (const period of ['today', 'week', 'month', 'all']) {
       assert.equal(new Set(candidate.rows.map((row) => (row.values[period].tokens / 1e6).toFixed(2))).size, 10);
       for (const row of candidate.rows) {
@@ -29,10 +34,29 @@ test('seeded simulation stays inside bounds, avoids integer displays, and reprod
   const first = generateSimulation(DEFAULT_RULES, options);
   const second = generateSimulation(DEFAULT_RULES, { ...options, seed: 'f'.repeat(32) });
   assert.notDeepEqual(first.rows.map((row) => row.values), second.rows.map((row) => row.values));
+  assert.notDeepEqual(first.rows.map((row) => row.name), second.rows.map((row) => row.name));
   const altered = structuredClone(first);
   altered.rows[0].values.today.tokens++;
   assert.throws(() => validateCandidate(altered, options.timezone), { code: 'SIMULATION_INVALID' });
   assert.throws(() => validateCandidate(first, 'UTC'), { code: 'SIMULATION_INVALID' });
+});
+
+test('masked email collisions choose distinct replacements using the supported providers', () => {
+  const candidate = generateSimulation(DEFAULT_RULES, options);
+  const originalNames = new Set(candidate.rows.map((row) => row.name));
+  const board = { period: 'month', metric: 'tokens', qualifiedEntries: [], entries: candidate.rows.map((row, index) => ({
+    key: `real-${index}`, name: row.name, tokens: 0, requests: 0
+  })) };
+  const mixed = projectSimulation(board, candidate, 'test');
+  assert.equal(mixed.entries.length, 10);
+  assert.equal(new Set(mixed.entries.map((row) => row.name)).size, 10);
+  for (const row of mixed.entries) {
+    assert.equal(row.source, 'simulation');
+    assert.ok(!originalNames.has(row.name));
+    assert.match(row.name, /^\w{2}\*\*\*@(qq\.com|gmail\.com|163\.com)$/);
+    if (row.name.endsWith('@qq.com')) assert.match(row.name, /^[1-9][0-9]\*\*\*@qq\.com$/);
+  }
+  assert.deepEqual(projectSimulation(board, candidate, 'test'), mixed);
 });
 
 test('calendar aggregates preserve subset relations at month, week, year and DST boundaries', () => {
@@ -156,7 +180,10 @@ test('no real user beating the displayed cutoff is omitted across periods, metri
 });
 
 test('legacy daily snapshots still replay until an administrator regenerates the new range rules', () => {
-  const candidate = generateSimulation(DEFAULT_RULES, options);
+  const generated = generateSimulation(DEFAULT_RULES, options);
+  const roster = generated.rows.map(({ key, avatar }, index) => ({ key, avatar, name: `${String.fromCharCode(97 + index)}a***@example.com` }));
+  const candidate = generateSimulation(DEFAULT_RULES, { ...options, roster });
+  assert.deepEqual(validateCandidate(candidate, options.timezone), candidate);
   const { origin, ...snapshot } = candidate;
   const { boardMinimumTokens, boardMaximumTokens, ...legacyRules } = candidate.rules;
   const legacy = { ...snapshot, version: 1, rules: legacyRules };

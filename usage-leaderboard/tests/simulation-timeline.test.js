@@ -12,6 +12,8 @@ function check(candidate, rules = candidate.rules) {
   assert.equal(new Set(candidate.rows.map((row) => row.key)).size, 10);
   assert.equal(new Set(candidate.rows.map((row) => row.name)).size, 10);
   for (const row of candidate.rows) {
+    assert.match(row.name, /^\w{2}\*\*\*@(qq\.com|gmail\.com|163\.com)$/);
+    if (row.name.endsWith('@qq.com')) assert.match(row.name, /^[1-9][0-9]\*\*\*@qq\.com$/);
     for (const period of periods) {
       assert.ok(row.values[period].tokens >= Math.max(rules.minimumTokens, rules.boardMinimumTokens));
       assert.ok(row.values[period].tokens <= Math.min(rules.maximumTokens, rules.boardMaximumTokens));
@@ -68,6 +70,7 @@ test('calendar resets and DST preserve period containment and never reverse the 
       check(next);
       for (const row of next.rows) {
         const old = before.rows.find((item) => item.key === row.key);
+        if (old) assert.equal(row.name, old.name);
         for (const metric of metrics) {
           if (old) assert.ok(row.values.all[metric] >= old.values.all[metric]);
           if (old && next.date === before.date) assert.ok(row.values.today[metric] >= old.values.today[metric]);
@@ -100,6 +103,19 @@ test('bounded examples renew distinct identities indefinitely with deterministic
     const later = advanceSimulation(candidate, new Date('2027-01-01T00:00Z'));
     assert.ok(later.rows.every((row) => !candidate.rows.some((old) => old.key === row.key)));
   }
+});
+
+test('stored example.com timelines retain their original names and remain valid after renewal', () => {
+  const generated = generateSnapshot(DEFAULT_RULES, options);
+  const prefixes = ['dt', 'pd', 'if', 'ok', 'xe', 'wq', 'hp', 'tr', 'wk', 'iz'];
+  const roster = generated.rows.map(({ key, avatar }, index) => ({ key, avatar, name: `${prefixes[index]}***@example.com` }));
+  const legacy = generateSnapshot(DEFAULT_RULES, { ...options, roster });
+  const candidate = generateSimulation(DEFAULT_RULES, { ...options, previous: legacy });
+  const renewed = generateSimulation(DEFAULT_RULES, { ...options, previous: candidate, now: new Date('2027-01-01T00:00:00Z') });
+  assert.deepEqual(renewed.rows.map((row) => row.name),
+    ['ov', 'dy', 'ck', 'bh', 'ay', 'wq', 'hp', 'ah', 'wk', 'iz'].map((prefix) => `${prefix}***@example.com`));
+  assert.deepEqual(validateCandidate(renewed, options.timezone), renewed);
+  assert.deepEqual(advanceSimulation(candidate, new Date(renewed.generatedAt)).rows, renewed.rows);
 });
 
 test('retaining live history preserves the root timeline across regeneration, migration and clock boundaries', () => {

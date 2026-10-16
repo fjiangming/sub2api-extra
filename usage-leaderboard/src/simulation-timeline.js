@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { createSimulationNames } = require('./simulation-identity');
 
 const TICK_MS = 5 * 60000;
 const DAY_MS = 86400000;
@@ -66,9 +67,12 @@ function evolveTimeline(baseline, history, now) {
   const end = dayStart(shiftDay(date, 1), baseline.timezone);
   const reservedNames = new Set(baseline.rows.map((row) => row.name));
   // Disjoint name pools keep a surviving identity's name stable as other slots renew.
-  const prefixes = Array.from({ length: 676 }, (_, i) => `${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + i % 26)}`)
-    .filter((prefix) => !reservedNames.has(`${prefix}***@example.com`));
-  const nameCycles = Math.floor(prefixes.length / 10);
+  // Stored example.com timelines retain their original renewal order for replay.
+  const names = baseline.rows.every((row) => row.name.endsWith('@example.com'))
+    ? Array.from({ length: 676 }, (_, i) => `${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + i % 26)}***@example.com`)
+      .filter((name) => !reservedNames.has(name))
+    : createSimulationNames(randomSource(`${baseline.seed}:renewal-names`), reservedNames);
+  const nameCycles = Math.floor(names.length / 10);
   const rows = baseline.rows.map((row, index) => {
     const random = randomSource(`${baseline.seed}:pace:${row.key}`);
     const dailyTokens = Math.max(minimum + 1, Math.round(row.values.today.tokens * (.9 + random() * .2)));
@@ -82,7 +86,7 @@ function evolveTimeline(baseline, history, now) {
     const shift = cycle * lifetime;
     const startDate = shiftDay(baseline.date, shift);
     const key = cycle ? `sim_${digest(`${baseline.seed}:renewal:${row.key}:${cycle}`).slice(0, 16)}` : row.key;
-    const name = cycle ? `${prefixes[index + 10 * ((cycle - 1) % nameCycles)]}***@example.com` : row.name;
+    const name = cycle ? names[index + 10 * ((cycle - 1) % nameCycles)] : row.name;
     const ratio = row.values.today.requests / row.values.today.tokens;
     const requests = (tokens) => tokens ? Math.max(1, Math.round(tokens * ratio)) : 0;
     const growthRequests = requests(firstGrowth);

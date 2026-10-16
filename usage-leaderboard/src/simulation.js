@@ -5,6 +5,7 @@ const { isDeepStrictEqual } = require('node:util');
 const { z } = require('zod');
 const { AppError } = require('./errors');
 const { evolveTimeline, TICK_MS } = require('./simulation-timeline');
+const { createSimulationNames } = require('./simulation-identity');
 
 const AVATARS = ['mountain', 'lake', 'night', 'forest', 'hills', 'sea', 'peak', 'valley', 'coast', 'green'];
 const PERIODS = ['today', 'week', 'month', 'all'];
@@ -21,7 +22,9 @@ const rulesSchema = legacyRulesSchema.safeExtend({
     '单人模拟范围与榜单范围必须有可生成的交集');
 const DEFAULT_RULES = { minimumTokens: 1370000, maximumTokens: 980830000, distribution: 'natural', boardMinimumTokens: 1370000, boardMaximumTokens: 980830000 };
 const identitySchema = z.object({
-  key: z.string().regex(/^sim_[a-f0-9]{16}$/), name: z.string().regex(/^[a-z]{2}\*\*\*@example\.com$/), avatar: z.enum(AVATARS).nullable()
+  key: z.string().regex(/^sim_[a-f0-9]{16}$/),
+  name: z.string().regex(/^(?:[1-9][0-9]\*\*\*@qq\.com|[a-z]{2}\*\*\*@(?:gmail\.com|163\.com|example\.com))$/),
+  avatar: z.enum(AVATARS).nullable()
 }).strict();
 const valueSchema = z.object({ tokens: z.number().int().min(1e6).max(1e9), requests: z.number().int().positive().max(1e9) }).strict();
 const candidateSchema = z.object({
@@ -64,10 +67,10 @@ function generateLegacySimulation(input, { now = new Date(), timezone = 'Asia/Sh
   const monthStart = `${date.slice(0, 7)}-01`;
   const floor = choose(rules.minimumTokens, rules.maximumTokens, rules.minimumTokens + 12347);
   const identityRandom = randomSource(`${seed}:names`);
-  const prefixes = Array.from({ length: 676 }, (_, i) => `${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + i % 26)}`);
+  const names = roster ? null : createSimulationNames(identityRandom);
   const identities = roster ? z.array(identitySchema).length(10).parse(roster) : Array.from({ length: 10 }, (_, i) => ({
     key: `sim_${crypto.createHash('sha256').update(`${seed}:identity:${i}`).digest('hex').slice(0, 16)}`,
-    name: `${prefixes.splice(Math.floor(identityRandom() * prefixes.length), 1)[0]}***@example.com`, avatar: null
+    name: names[i], avatar: null
   }));
   // Metrics use a separate stream so retaining identities does not change seeded replay.
   const metricRandom = randomSource(`${seed}:metrics`);
@@ -233,9 +236,14 @@ function projectSimulation(board, candidate, version) {
     return { ...board, display: { mode: 'real', realCount: board.entries.length, simulatedCount: 0, version } };
   }
   const names = new Set([...realEntries, ...board.entries].map((entry) => entry.name));
+  let replacementNames;
   const simulated = candidate.rows.map((row) => {
     let name = row.name;
-    for (let i = 0; names.has(name) && i < 676; i++) name = `${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + i % 26)}***@example.com`;
+    if (names.has(name)) {
+      replacementNames ||= createSimulationNames(randomSource(`${candidate.seed}:collision-names`),
+        new Set([...names, ...candidate.rows.map((entry) => entry.name)]));
+      name = replacementNames.shift();
+    }
     names.add(name);
     return { key: row.key, name, avatar: null, ...row.values[board.period], source: 'simulation' };
   }).sort((a, b) => bounded ? randomKey(a.key, 'fill').localeCompare(randomKey(b.key, 'fill')) || a.key.localeCompare(b.key)
