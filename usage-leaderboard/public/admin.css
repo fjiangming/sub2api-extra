@@ -72,11 +72,9 @@
 .draft-label svg { width: 13px; height: 13px; }
 .preview-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 20px; }
 .preview-toolbar .period-control button { min-width: 50px; padding: 6px 10px; font-size: 11px; }
-.preview-toolbar .metric-select { height: 34px; }
-.preview-toolbar .metric-select select { font-size: 11px; }
 .admin-preview-status { padding: 100px 12px; text-align: center; font-size: 12px; color: var(--muted); }
 .admin-preview-status button { display: block; margin: 15px auto 0; }
-.preview-stats { display: grid; grid-template-columns: 1.25fr .8fr 1.1fr; gap: 12px; padding: 22px 0; border-block: 1px solid var(--soft-line); margin-top: 20px; }
+.preview-stats { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, .8fr); gap: 12px; padding: 22px 0; border-block: 1px solid var(--soft-line); margin-top: 20px; }
 .preview-stats > div { min-width: 0; padding-left: 20px; border-left: 1px solid var(--soft-line); }
 .preview-stats > div:first-child { padding-left: 0; border-left: 0; }
 .preview-stats span { display: block; font-size: 10px; color: var(--muted); margin-bottom: 6px; }
@@ -101,7 +99,6 @@
 .medal-3 { color: var(--peach); background: var(--peach-soft); }
 .token-cell { font-weight: 600; }
 .token-cell small { font-size: 10px; font-weight: 400; color: var(--muted); margin-left: 3px; }
-.secondary-metric { color: var(--soft-text); font-size: 11px; }
 .preview-footnote { display: flex; justify-content: space-between; gap: 12px; padding-top: 16px; margin-top: 3px; border-top: 1px solid var(--line); font-size: 9px; color: var(--muted); }
 .preview-footnote > span { display: inline-flex; align-items: center; gap: 5px; }
 .preview-footnote svg { width: 12px; height: 12px; }
@@ -168,12 +165,10 @@ body:has(.admin-page) .toast { bottom: 88px; }
   .preview-toolbar { flex-wrap: wrap; gap: 12px; }
   .preview-toolbar .period-control { width: 100%; display: grid; grid-template-columns: repeat(4, 1fr); }
   .preview-toolbar .period-control button { min-width: 0; }
-  .preview-toolbar .metric-select { margin-left: auto; }
   .preview-stats { gap: 8px; padding: 18px 0; }
   .preview-stats > div { padding-left: 9px; }
   .preview-stats strong { font-size: 17px; }
   .preview-stats span, .preview-stats small { font-size: 9px; }
-  .preview-table .secondary-metric { display: none; }
   .preview-table td, .preview-table th { padding-inline: 5px; }
   .preview-table th:first-child { width: 30px; }
   .preview-table .identity { gap: 5px; }

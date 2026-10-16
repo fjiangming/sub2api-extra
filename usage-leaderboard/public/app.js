@@ -1,9 +1,8 @@
 'use strict';
 
 const PERIODS = { today: '今日', week: '本周', month: '本月', all: '累计' };
-const METRICS = { tokens: { label: 'Token 用量', unit: 'Tokens' }, requests: { label: '调用次数', unit: '次调用' } };
 const $ = (id) => document.getElementById(id);
-const state = { period: 'today', metric: 'tokens', data: null, session: '', config: null, controller: null, sequence: 0,
+const state = { period: 'today', data: null, session: '', config: null, controller: null, sequence: 0,
   authenticated: false, loading: false, pageActive: true, failures: 0 };
 const query = new URLSearchParams(location.search);
 let upstreamToken = query.get('token') || query.get('access_token') || '';
@@ -23,12 +22,8 @@ function compact(value) {
   if (value >= 1e3) return { value: (value / 1e3).toFixed(1), unit: 'K' };
   return { value: number(value), unit: '' };
 }
-function display(value, metric = state.metric) {
-  if (metric === 'tokens') return compact(value);
-  return { value: number(value), unit: '' };
-}
-function displayHtml(value, metric = state.metric) {
-  const formatted = display(value, metric);
+function displayHtml(value) {
+  const formatted = compact(value);
   return `${formatted.value}${formatted.unit ? ` <small>${formatted.unit}</small>` : ''}`;
 }
 function saveSession(token) {
@@ -79,7 +74,7 @@ function showStatus(message, { error = false, login = false } = {}) {
 }
 
 function enableFilters(enabled) {
-  document.querySelectorAll('[data-period], #metric-select').forEach((control) => { control.disabled = !enabled; });
+  document.querySelectorAll('[data-period]').forEach((control) => { control.disabled = !enabled; });
 }
 
 function renderIdentity(user) {
@@ -122,14 +117,13 @@ function renderStats(data) {
   const scoped = data.display.mode !== 'real';
   const bounded = data.display.rangeApplied === true;
   $('tokens-summary-label').textContent = scoped ? '榜单 Token 用量' : '全站 Token 用量';
-  $('requests-summary-label').textContent = scoped ? '榜单调用次数' : 'API 调用次数';
   document.querySelector('.station-stats').setAttribute('aria-label', scoped ? '当前榜单用量汇总' : '全站用量概览');
   $('board-source-note').textContent = simulated ? '含示例数据 · 真实用户优先' : scoped ? '真实用户优先 · 按用量下限筛选' : '每一次探索，都值得被看见';
   $('rules-source').hidden = !scoped;
-  $('rules-source').textContent = simulated ? `当前榜单含 ${data.display.simulatedCount} 位模拟用户，以“示例”标识；真实用户按设置的用量下限优先展示。汇总仅计当前榜单，个人用量始终来自主站真实记录。模拟快照日期：${data.display.date}。` : scoped ? '当前按 Token 下限筛选真实用户，再按所选指标展示前十位。汇总仅计当前榜单，不与全站名次比较；个人用量始终来自真实记录。' : '';
+  $('rules-source').textContent = simulated ? `当前榜单含 ${data.display.simulatedCount} 位模拟用户，以“示例”标识；真实用户按设置的用量下限优先展示。汇总仅计当前榜单，个人用量始终来自主站真实记录。模拟快照日期：${data.display.date}。` : scoped ? '当前按 Token 下限筛选真实用户，再按 Token 用量展示前十位。汇总仅计当前榜单，不与全站名次比较；个人用量始终来自真实记录。' : '';
   if (bounded) {
     $('board-source-note').textContent = simulated ? '含示例数据 · 按用量混排' : '真实用量 · 按下限筛选';
-    $('rules-source').textContent = `优先纳入达到 Token 下限的真实用户，不足十位时用带“示例”标识的模拟用户补齐。任何真实用户按当前指标超过榜尾时均可入榜，不受 Token 下限排除；真实用量不受上限限制。最终按所选指标排名，同值并列，最多展示十位。汇总仅计当前榜单，个人用量始终来自真实记录。${data.display.dynamic ? '统计日期' : '快照日期'}：${data.display.date}。`;
+    $('rules-source').textContent = `优先纳入达到 Token 下限的真实用户，不足十位时用带“示例”标识的模拟用户补齐。任何真实用户的 Token 用量超过榜尾时均可入榜，不受 Token 下限排除；真实用量不受上限限制。最终按 Token 用量排名，同值并列，最多展示十位。汇总仅计当前榜单，个人用量始终来自真实记录。${data.display.dynamic ? '统计日期' : '快照日期'}：${data.display.date}。`;
   }
   $('rules-retention').textContent = simulated ? data.display.dynamic
     ? '真实用量基于主站现存记录；示例用量随时间增长，四个周期共享同一组示例历史，达到范围上限后更换示例身份。'
@@ -137,55 +131,46 @@ function renderStats(data) {
   const total = compact(data.summary.tokens);
   $('total-tokens').textContent = total.value;
   $('total-tokens-unit').textContent = total.unit;
-  $('total-requests').textContent = number(data.summary.requests);
-  for (const [id, key] of [['total-tokens-delta', 'tokens'], ['total-requests-delta', 'requests']]) delta(id, data.summary.deltas?.[key]);
+  delta('total-tokens-delta', data.summary.deltas?.tokens);
   $('date-range').textContent = rangeText(data);
   $('ranking-period').textContent = data.period === 'all' ? '现存记录累计' : `${PERIODS[data.period]}排名`;
   $('personal-period').textContent = PERIODS[data.period];
-  $('table-caption').textContent = `${PERIODS[data.period]}按${METRICS[data.metric].label}排序的前十位用户`;
+  $('table-caption').textContent = `${PERIODS[data.period]}按 Token 用量排序的前十位用户`;
   $('updated-at').textContent = (simulated ? data.display.dynamic ? '示例更新于 ' : '示例快照 ' : '更新于 ') + new Intl.DateTimeFormat('zh-CN', { timeZone: data.timezone, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(simulated ? data.display.snapshotAt : data.generatedAt));
   const limited = data.window.retainedFrom && data.window.start && new Date(data.window.retainedFrom) > new Date(data.window.start);
   $('coverage-note').textContent = data.period === 'all'
     ? '仅累计主站现存记录，已清理的历史用量不计入。'
     : limited ? `当前记录最早始于 ${localDate(data.window.retainedFrom)}，仅统计仍保留的用量。` : '统计基于主站现存用量记录。';
   if (simulated) $('coverage-note').textContent = `真实 ${data.display.realCount} 位 · 示例 ${data.display.simulatedCount} 位。${data.display.dynamic ? '示例用量随时间自动更新' : `示例为 ${data.display.date} 的固定快照`}，汇总仅含当前榜单，个人用量为实际记录。`;
-  else if (scoped) $('coverage-note').textContent = '按所设 Token 下限优先展示真实用户，再按当前指标排序；汇总仅含当前榜单，个人用量为实际记录。';
-  if (bounded && !simulated) $('coverage-note').textContent = `真实 ${data.display.realCount} 位。按所设 Token 下限筛选，真实用户不受上限限制；按当前指标排序，汇总仅含当前榜单，个人用量为实际记录。`;
+  else if (scoped) $('coverage-note').textContent = '按所设 Token 下限优先展示真实用户，再按 Token 用量排序；汇总仅含当前榜单，个人用量为实际记录。';
+  if (bounded && !simulated) $('coverage-note').textContent = `真实 ${data.display.realCount} 位。按所设 Token 下限筛选，真实用户不受上限限制；按 Token 用量排序，汇总仅含当前榜单，个人用量为实际记录。`;
 }
 
 function renderPodium(data) {
   const labels = ['first', 'second', 'third'];
   $('podium').hidden = data.entries.length === 0;
   $('podium').innerHTML = data.entries.slice(0, 3).map((user, index) => {
-    const value = display(user[data.metric]);
+    const value = compact(user.tokens);
     const bottom = user.growth != null ? icon(user.growth < 0 ? 'trending-down' : 'trending-up') + `较上期 ${user.growth > 0 ? '+' : ''}${user.growth}%` : icon('sparkles') + '持续创造，保持热爱';
     return `<button class="podium-card ${labels[index]}" type="button" data-user-key="${user.key}" aria-label="查看第 ${user.rank} 名 ${escapeHtml(user.name)} 的用量详情">
       ${index === 0 ? `<span class="podium-kicker">${icon('crown')}${user.rank === 1 ? '用量之星' : PERIODS[data.period] + '榜首'}</span>` : ''}
       <span class="podium-avatar">${window.UsageAvatars.html(user, 50)}<span class="medal">${user.rank}</span></span>
       <span class="podium-name" title="${escapeHtml(user.name)}"><span>${escapeHtml(user.name)}</span>${user.key === data.me.key ? '<span class="you-label">你</span>' : ''}${user.source === 'simulation' ? '<span class="example-tag">示例</span>' : ''}</span>
-      <span class="podium-model">${number(user.requests)} 次探索</span>
-      <span class="podium-amount"><strong class="${value.value.length > 9 ? 'long-amount' : ''}">${value.value}</strong><span>${value.unit}</span></span><span class="podium-unit">${METRICS[data.metric].unit}</span>
+      <span class="podium-amount"><strong class="${value.value.length > 9 ? 'long-amount' : ''}">${value.value}</strong><span>${value.unit}</span></span><span class="podium-unit">Tokens</span>
       <span class="podium-bottom">${bottom}</span></button>`;
   }).join('');
 }
 
 function renderTable(data) {
-  const metrics = [data.metric, ...Object.keys(METRICS).filter((metric) => metric !== data.metric)];
-  ['tokens-heading', 'requests-heading'].forEach((id, index) => {
-    $(id).innerHTML = METRICS[metrics[index]].label + (index === 0 ? ' ' + icon('arrow-down') : '');
-    $(id).setAttribute('aria-sort', index === 0 ? 'descending' : 'none');
-  });
-  const maximum = data.entries[0]?.[data.metric] || 1;
+  const maximum = data.entries[0]?.tokens || 1;
   $('empty-ranking').hidden = data.entries.length !== 0;
   $('ranking-body').innerHTML = data.entries.map((user, index) => {
     const rank = index < 3 ? `<span class="table-medal ${index === 1 ? 'silver' : index === 2 ? 'bronze' : ''}" aria-label="第 ${user.rank} 名">${icon('medal')}<span class="sr-only">${user.rank}</span></span>` : String(user.rank).padStart(2, '0');
-    const cells = metrics.map((metric, column) => {
-      const value = display(user[metric], metric);
-      return `<td class="numeric-cell ${column === 0 ? 'primary-cell' : 'secondary-cell'}" title="${number(user[metric])}">${column === 0 ? `<span class="usage-cell"><span>${value.value}<span class="value-unit">${value.unit}</span></span><span class="usage-track"><span style="width:${Math.max(0, Math.min(100, user[metric] / maximum * 100))}%"></span></span></span>` : value.value + (value.unit ? ' ' + value.unit : '')}</td>`;
-    }).join('');
+    const value = compact(user.tokens);
+    const cell = `<td class="numeric-cell primary-cell" title="${number(user.tokens)}"><span class="usage-cell"><span>${value.value}<span class="value-unit">${value.unit}</span></span><span class="usage-track"><span style="width:${Math.max(0, Math.min(100, user.tokens / maximum * 100))}%"></span></span></span></td>`;
     return `<tr data-ranking-user="${user.key}" ${user.key === data.me.key ? 'class="is-me"' : ''}><td class="rank-cell">${rank}</td>
-      <td><div class="rank-user">${window.UsageAvatars.html(user, 31)}<div class="user-copy"><span class="user-name"><span title="${escapeHtml(user.name)}">${escapeHtml(user.name)}</span>${user.key === data.me.key ? '<span class="you-label">你</span>' : ''}${user.source === 'simulation' ? '<span class="example-tag">示例</span>' : ''}</span><span class="user-model">${number(user.requests)} 次调用</span></div></div></td>
-      ${cells}<td class="change-cell">${changeHtml(user)}</td><td class="action-column"><button class="row-detail" type="button" data-user-key="${user.key}" aria-label="查看${escapeHtml(user.name)}的用量详情" title="查看用量详情">${icon('chevron-right')}</button></td></tr>`;
+      <td><div class="rank-user">${window.UsageAvatars.html(user, 31)}<div class="user-copy"><span class="user-name"><span title="${escapeHtml(user.name)}">${escapeHtml(user.name)}</span>${user.key === data.me.key ? '<span class="you-label">你</span>' : ''}${user.source === 'simulation' ? '<span class="example-tag">示例</span>' : ''}</span></div></div></td>
+      ${cell}<td class="change-cell">${changeHtml(user)}</td><td class="action-column"><button class="row-detail" type="button" data-user-key="${user.key}" aria-label="查看${escapeHtml(user.name)}的用量详情" title="查看用量详情">${icon('chevron-right')}</button></td></tr>`;
   }).join('');
 }
 
@@ -205,13 +190,9 @@ function renderPersonal(data) {
   $('my-change').hidden = boardOnly;
   $('my-change').classList.toggle('down', me.change < 0);
   $('my-change').innerHTML = !me.rank ? icon('sprout') + '每一次探索，都是新的开始' : !me.comparisonAvailable ? icon('sparkles') + '保持热爱，持续创造' : me.newEntry ? icon('sparkles') + '本期新上榜' : me.change == null ? icon('sprout') + '本期开始活跃' : me.change === 0 ? icon('minus') + '与上期排名持平' : icon(me.change > 0 ? 'move-up' : 'move-down') + `较上期${me.change > 0 ? '上升' : '下降'} ${Math.abs(me.change)} 位`;
-  $('my-primary-label').textContent = METRICS[data.metric].label;
-  $('my-primary-value').innerHTML = displayHtml(me[data.metric], data.metric);
-  const secondary = data.metric === 'requests' ? 'tokens' : 'requests';
-  $('my-secondary-label').textContent = METRICS[secondary].label;
-  $('my-secondary-value').innerHTML = displayHtml(me[secondary], secondary);
+  $('my-primary-value').innerHTML = displayHtml(me.tokens);
   $('next-rank-label').textContent = me.next ? `距离第 ${me.next.rank} 名` : me.rank === 1 ? '你已位居榜首' : '每一份用量，都有意义';
-  $('next-rank-gap').textContent = me.next ? Object.values(display(me.next.gap, data.metric)).join(' ').trim() : me.rank === 1 ? 'TOP 01' : '—';
+  $('next-rank-gap').textContent = me.next ? Object.values(compact(me.next.gap)).join(' ').trim() : me.rank === 1 ? 'TOP 01' : '—';
   $('next-rank-progress').style.width = me.next ? `${me.next.progress}%` : me.rank === 1 ? '100%' : '0%';
   $('next-rank-copy').textContent = me.next ? '再向前一点，就能遇见新的风景。' : '保持热爱，让好想法继续发生。';
   $('locate-me').innerHTML = data.entries.some((entry) => entry.key === me.key)
@@ -220,7 +201,7 @@ function renderPersonal(data) {
 
 function renderChart(me) {
   const peak = Math.max(1, ...me.trend.map((day) => day.tokens));
-  $('weekly-total').innerHTML = displayHtml(me.trendTotal, 'tokens').replaceAll('small', 'span');
+  $('weekly-total').innerHTML = displayHtml(me.trendTotal).replaceAll('small', 'span');
   delta('trend-delta', me.trendGrowth);
   $('trend-delta').title = '较此前 7 天同期';
   $('usage-chart').innerHTML = me.trend.map((day, index) => `<span class="chart-bar ${index === 6 ? 'latest' : ''}" tabindex="0" style="--bar-height:${Math.max(0, day.tokens / peak * 90)}%" aria-label="${day.date.slice(5).replace('-', '/')}：${number(day.tokens)} Tokens"></span>`).join('');
@@ -229,16 +210,17 @@ function renderChart(me) {
 }
 
 function renderModels(me) {
-  $('model-basis').textContent = me.modelMetric === 'tokens' ? '按 Token' : '按调用';
-  $('model-distribution').hidden = me.models.length === 0;
-  $('model-empty').hidden = me.models.length !== 0;
-  $('model-distribution').setAttribute('aria-label', me.models.map((model) => `${model.name} ${model.percent.toFixed(1)}%`).join('，'));
-  $('model-distribution').innerHTML = me.models.map((model, index) => `<span class="model-segment model-color-${index}" style="width:${model.percent}%"></span>`).join('');
-  $('model-legend').innerHTML = me.models.map((model, index) => `<li><span class="model-dot model-color-${index}"></span><span class="model-name" title="${escapeHtml(model.name)}">${escapeHtml(model.name)}</span><strong>${model.percent.toFixed(1)}%</strong></li>`).join('');
+  const total = me.models.reduce((sum, model) => sum + model.tokens, 0);
+  const models = me.models.filter((model) => model.tokens > 0).map((model) => ({ ...model, percent: model.tokens / total * 100 }));
+  $('model-basis').textContent = '按 Token';
+  $('model-distribution').hidden = models.length === 0;
+  $('model-empty').hidden = models.length !== 0;
+  $('model-distribution').setAttribute('aria-label', models.map((model) => `${model.name} ${model.percent.toFixed(1)}%`).join('，'));
+  $('model-distribution').innerHTML = models.map((model, index) => `<span class="model-segment model-color-${index}" style="width:${model.percent}%"></span>`).join('');
+  $('model-legend').innerHTML = models.map((model, index) => `<li><span class="model-dot model-color-${index}"></span><span class="model-name" title="${escapeHtml(model.name)}">${escapeHtml(model.name)}</span><strong>${model.percent.toFixed(1)}%</strong></li>`).join('');
 }
 
 function render(data) {
-  document.body.dataset.metric = data.metric;
   renderStats(data); renderPodium(data); renderTable(data); renderPersonal(data); renderChart(data.me); renderModels(data.me);
   $('page-status').hidden = true;
   $('usage-content').hidden = false;
@@ -266,7 +248,7 @@ async function loadBoard({ announce = false, background = false } = {}) {
   $('usage-content').setAttribute('aria-busy', 'true');
   $('refresh-button').disabled = true;
   try {
-    const data = await api(`leaderboard?${new URLSearchParams({ period: state.period, metric: state.metric })}`,
+    const data = await api(`leaderboard?${new URLSearchParams({ period: state.period, metric: 'tokens' })}`,
       { signal: AbortSignal.any([state.controller.signal, AbortSignal.timeout(60000)]) });
     if (sequence !== state.sequence) return;
     state.data = data;
@@ -305,9 +287,9 @@ function showUser(key) {
   hydrateIcons();
   $('user-dialog-title').textContent = user.name;
   const shownRank = user.boardRank ?? user.rank;
-  $('detail-rank').textContent = (user.source === 'simulation' ? '示例数据 · ' : '') + (shownRank ? `${PERIODS[data.period]}排名 #${shownRank} · ${METRICS[data.metric].label}` : '个人实际用量');
+  $('detail-rank').textContent = (user.source === 'simulation' ? '示例数据 · ' : '') + (shownRank ? `${PERIODS[data.period]}排名 #${shownRank} · Token 用量` : '个人实际用量');
   $('detail-range').textContent = user.source === 'simulation' ? `${data.display.dynamic ? '动态示例' : '模拟快照'} ${data.display.date}` : rangeText(data);
-  $('detail-stats').innerHTML = Object.keys(METRICS).map((metric) => `<div><dt>${METRICS[metric].label}</dt><dd>${displayHtml(user[metric], metric)}</dd></div>`).join('');
+  $('detail-stats').innerHTML = `<div><dt>Token 用量</dt><dd>${displayHtml(user.tokens)}</dd></div>`;
   $('user-dialog').showModal();
 }
 
@@ -315,7 +297,6 @@ document.querySelectorAll('[data-period]').forEach((button) => button.addEventLi
   if (state.period === button.dataset.period) return;
   state.period = button.dataset.period; loadBoard();
 }));
-$('metric-select').addEventListener('change', (event) => { state.metric = event.target.value; loadBoard(); });
 $('rules-button').addEventListener('click', () => $('rules-dialog').showModal());
 document.querySelectorAll('[data-close-dialog]').forEach((button) => button.addEventListener('click', () => button.closest('dialog').close()));
 document.querySelectorAll('dialog').forEach((dialog) => dialog.addEventListener('click', (event) => {

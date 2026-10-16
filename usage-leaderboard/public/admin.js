@@ -2,7 +2,6 @@
 
 window.UsageAdmin = (() => {
   const periods = { today: '今日', week: '本周', month: '本月', all: '累计' };
-  const metrics = { tokens: 'Token 用量', requests: '调用次数' };
   const distributions = { natural: '自然梯度', close: '差距接近', concentrated: '头部集中' };
   const rangeInputs = ['minimum', 'maximum', 'board-minimum', 'board-maximum'];
   const root = () => document.getElementById('admin-content');
@@ -17,7 +16,6 @@ window.UsageAdmin = (() => {
   let busy = false;
   let source = 'simulation';
   let period = 'month';
-  let metric = 'tokens';
   let preview = null;
   let sequence = 0;
   let controller;
@@ -110,21 +108,15 @@ window.UsageAdmin = (() => {
     const mixed = data.display.simulatedCount > 0;
     const scoped = data.display.mode !== 'real';
     const bounded = data.display.rangeApplied === true;
-    const ordered = [metric, metric === 'tokens' ? 'requests' : 'tokens'];
-    const format = (value, type) => type === 'tokens' ? token(value) : num(value);
     el('preview-subtitle').textContent = source === 'real' ? '真实用量' : bounded ? '真实超榜尾可入榜 · 按用量混排' : mixed ? '真实优先 · 模拟补位' : '真实用户已占满 10 位';
     el('total-label').textContent = scoped ? '榜单 Token 用量' : '全站 Token 用量';
     el('count-label').textContent = scoped ? '上榜用户' : '活跃创造者';
-    el('requests-label').textContent = scoped ? '榜单调用次数' : '全站调用次数';
     el('total').innerHTML = token(data.summary.tokens);
     el('count').innerHTML = `${num(data.summary.active)} <small>位</small>`;
-    el('requests').textContent = num(data.summary.requests);
-    el('primary-heading').textContent = metrics[ordered[0]];
-    el('secondary-heading').textContent = metrics[ordered[1]];
     el('source-counts').textContent = `真实 ${data.display.realCount} · 模拟 ${data.display.simulatedCount}`;
-    el('caption').textContent = `${periods[period]}按${metrics[metric]}排序的候选前十位`;
-    el('preview-body').innerHTML = data.entries.map((user, i) => `<tr><td><span class="${i < 3 ? `rank-medal medal-${i + 1}` : 'rank-number'}">${String(user.rank).padStart(2, '0')}</span></td><td><div class="identity">${window.UsageAvatars.html(user, 28)}<span title="${escape(user.name)}">${escape(user.name)}</span>${user.source === 'simulation' ? '<b class="example-tag">示例</b>' : '<b class="small-badge">真实</b>'}</div></td><td class="right token-cell" title="${num(user[ordered[0]])}">${format(user[ordered[0]], ordered[0])}</td><td class="right secondary-metric">${format(user[ordered[1]], ordered[1])}</td></tr>`).join('');
-    if (!data.entries.length) el('preview-body').innerHTML = '<tr><td colspan="4">这个周期还没有用量记录</td></tr>';
+    el('caption').textContent = `${periods[period]}按 Token 用量排序的候选前十位`;
+    el('preview-body').innerHTML = data.entries.map((user, i) => `<tr><td><span class="${i < 3 ? `rank-medal medal-${i + 1}` : 'rank-number'}">${String(user.rank).padStart(2, '0')}</span></td><td><div class="identity">${window.UsageAvatars.html(user, 28)}<span title="${escape(user.name)}">${escape(user.name)}</span>${user.source === 'simulation' ? '<b class="example-tag">示例</b>' : '<b class="small-badge">真实</b>'}</div></td><td class="right token-cell" title="${num(user.tokens)}">${token(user.tokens)}</td></tr>`).join('');
+    if (!data.entries.length) el('preview-body').innerHTML = '<tr><td colspan="3">这个周期还没有用量记录</td></tr>';
     el('snapshot-date').textContent = mixed ? data.display.dynamic ? `示例更新于 ${date(data.display.snapshotAt)}` : `模拟快照 ${data.display.date}` : `更新于 ${date(data.generatedAt)}`;
     const values = data.entries.map((row) => row.tokens).sort((a, b) => b - a);
     const maximum = Math.max(1, ...values);
@@ -146,7 +138,7 @@ window.UsageAdmin = (() => {
     }
     status('正在读取真实用量并合并候选榜单');
     try {
-      const data = await context.api(`admin/leaderboard/preview?${new URLSearchParams({ period, metric, source })}`, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(60000)]) });
+      const data = await context.api(`admin/leaderboard/preview?${new URLSearchParams({ period, metric: 'tokens', source })}`, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(60000)]) });
       if (current !== sequence) return;
       preview = data;
       renderPreview(data);
@@ -175,7 +167,7 @@ window.UsageAdmin = (() => {
     el('dialog-title').textContent = titles[action];
     const details = action === 'publish' ? [
       ['数据来源', source === 'simulation' ? '真实用户优先，示例补齐' : '主站真实用量'],
-      ...(source === 'simulation' ? [['真实用户 Token', `${el('board-minimum').value}M 起优先纳入，无上限`], ['入榜补充规则', '按当前指标超过榜尾的真实用户也入榜'], ['榜单模拟 Token', `${el('board-minimum').value}M ~ ${el('board-maximum').value}M`], ['单人模拟 Token', `${el('minimum').value}M ~ ${el('maximum').value}M`], ['展示顺序', '按当前用量指标混排'], ['数值分布', distributions[el('distribution').value]], ['更新方式', snapshot.draft.candidate.version === 4 ? '每 5 分钟增长 · 自动跨天续接' : '固定快照'] ] : []),
+      ...(source === 'simulation' ? [['真实用户 Token', `${el('board-minimum').value}M 起优先纳入，无上限`], ['入榜补充规则', 'Token 用量超过榜尾的真实用户也入榜'], ['榜单模拟 Token', `${el('board-minimum').value}M ~ ${el('board-maximum').value}M`], ['单人模拟 Token', `${el('minimum').value}M ~ ${el('maximum').value}M`], ['展示顺序', '按 Token 用量混排'], ['数值分布', distributions[el('distribution').value]], ['更新方式', snapshot.draft.candidate.version === 4 ? '每 5 分钟增长 · 自动跨天续接' : '固定快照'] ] : []),
       ['个人统计', '始终使用实际用量'], ['存储方式', snapshot.persistence ? '覆盖固定设置文件' : '内存，重启后恢复默认']
     ] : action === 'rollback' ? [['目标来源', snapshot.previous.source === 'real' ? '真实用量' : '模拟混合榜单'], ['目标版本', snapshot.previous.version.slice(0, 8)]] : [['数据来源', '主站真实用量'], ['生效范围', '所有统计周期']];
     el('publish-summary').innerHTML = details.map(([label, value]) => `<div><dt>${escape(label)}</dt><dd>${escape(value)}</dd></div>`).join('');
@@ -194,7 +186,6 @@ window.UsageAdmin = (() => {
       root().querySelectorAll('[data-preview-period]').forEach((item) => item.setAttribute('aria-pressed', String(item === button)));
       loadPreview();
     }));
-    el('metric').addEventListener('change', () => { metric = el('metric').value; loadPreview(); });
     [...rangeInputs, 'distribution'].forEach((id) => el(id).addEventListener('input', () => {
       el('range-error').hidden = true;
       rangeInputs.forEach((id) => el(id).removeAttribute('aria-invalid'));
