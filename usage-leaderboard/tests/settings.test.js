@@ -6,7 +6,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { SettingsStore, MAX_SETTINGS_BYTES } = require('../src/settings');
-const { DEFAULT_RULES } = require('../src/simulation');
+const { DEFAULT_RULES, generateSnapshot, advanceSimulation } = require('../src/simulation');
 
 const now = () => new Date('2026-10-15T03:00:00Z');
 const config = { timezone: 'Asia/Shanghai', settingsDir: null };
@@ -54,10 +54,11 @@ test('optimistic revisions reject duplicates and competing saves without unbound
   assert.equal(store.active().source, 'simulation');
 });
 
-test('crossing the local date expires publication, draft and simulated rollback targets', async () => {
+test('legacy snapshots expire across local dates while live examples keep advancing and remain publishable', async () => {
   let clock = now();
   const store = new SettingsStore(config, { now: () => clock });
-  await generate(store); await publish(store); await publish(store, 'real');
+  await store.change(0, (next) => { next.draft = { source: 'simulation', candidate: generateSnapshot(DEFAULT_RULES, { now: clock }) }; });
+  await publish(store); await publish(store, 'real');
   clock = new Date('2026-10-15T16:00:00Z');
   assert.equal(store.snapshot().draftExpired, true);
   await assert.rejects(store.rollback({ revision: store.snapshot().revision }, 'admin'), { code: 'SIMULATION_EXPIRED' });
@@ -65,8 +66,13 @@ test('crossing the local date expires publication, draft and simulated rollback 
   assert.equal(store.snapshot().previous.expired, true);
   await store.generate({ revision: store.snapshot().revision, rules: DEFAULT_RULES, keepIdentities: false }); await publish(store);
   clock = new Date('2026-10-16T16:00:00Z');
-  assert.equal(store.active(), null);
-  assert.equal(store.snapshot().expired, true);
+  assert.equal(store.active().candidate.version, 4);
+  assert.equal(store.snapshot().expired, false);
+  assert.equal(store.snapshot().draftExpired, false);
+  await publish(store, 'real');
+  await store.rollback({ revision: store.snapshot().revision }, 'admin');
+  assert.equal(store.active().candidate.version, 4);
+  await publish(store);
 });
 
 test('history conflicts leave draft and publication intact; new identities explicitly start a new series', async () => {
@@ -94,6 +100,8 @@ test('a fixed bounded settings file survives restart, write failures preserve pu
   assert.ok((await fs.stat(filename)).size <= MAX_SETTINGS_BYTES);
   const restored = new SettingsStore(persistent, { now });
   assert.deepEqual(restored.active(), store.active());
+  const later = new Date('2026-11-01T03:00:00Z');
+  assert.deepEqual(advanceSimulation(restored.active().candidate, later), advanceSimulation(store.active().candidate, later));
   const broken = new SettingsStore(persistent, { now, writeFile: async () => { throw new Error('no space'); } });
   const previous = broken.snapshot();
   await assert.rejects(publish(broken, 'real'), { code: 'SETTINGS_WRITE_FAILED' });

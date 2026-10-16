@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { generateSimulation, validateCandidate, projectSimulation, DEFAULT_RULES } = require('../src/simulation');
+const { generateSnapshot: generateSimulation, validateCandidate, projectSimulation, DEFAULT_RULES } = require('../src/simulation');
 
 const options = { now: new Date('2026-10-15T03:00:00Z'), timezone: 'Asia/Shanghai', seed: '0123456789abcdef0123456789abcdef' };
 

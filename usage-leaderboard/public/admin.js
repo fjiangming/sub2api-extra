@@ -64,12 +64,12 @@ window.UsageAdmin = (() => {
     el('storage').textContent = data.persistence ? '设置文件 ≤ 64 KiB' : '内存模式 · 重启恢复默认';
     el('candidate-version').textContent = `修订 ${data.revision}`;
     const messages = [data.storageError, data.expired ? '已发布模拟数据跨天失效，用户端已自动恢复真实榜单。' : '',
-      publication?.candidate?.version < 3 && !data.expired ? '当前为旧版模拟快照，跨周期补位与历史连续性规则需重新生成并发布后生效。' : '',
+      publication?.candidate?.version < 4 && !data.expired ? '当前为固定模拟快照，自动增长与跨天续接需重新生成并发布后生效。' : '',
       !data.persistence ? '当前为内存模式，容器重启后草稿和发布设置会清空。' : ''].filter(Boolean);
     el('notice').hidden = !messages.length;
     el('notice').textContent = messages.join(' ');
     const candidate = data.draft?.candidate;
-    el('valid-date').textContent = candidate ? candidate.date : '尚未生成';
+    el('valid-date').textContent = candidate ? candidate.version === 4 ? '自动跨天续接' : candidate.date : '尚未生成';
     if (syncRules) {
       const values = { ...data.defaults, ...candidate?.rules };
       el('minimum').value = values.minimumTokens / 1e6;
@@ -125,7 +125,7 @@ window.UsageAdmin = (() => {
     el('caption').textContent = `${periods[period]}按${metrics[metric]}排序的候选前十位`;
     el('preview-body').innerHTML = data.entries.map((user, i) => `<tr><td><span class="${i < 3 ? `rank-medal medal-${i + 1}` : 'rank-number'}">${String(user.rank).padStart(2, '0')}</span></td><td><div class="identity">${window.UsageAvatars.html(user, 28)}<span title="${escape(user.name)}">${escape(user.name)}</span>${user.source === 'simulation' ? '<b class="example-tag">示例</b>' : '<b class="small-badge">真实</b>'}</div></td><td class="right token-cell" title="${num(user[ordered[0]])}">${format(user[ordered[0]], ordered[0])}</td><td class="right secondary-metric">${format(user[ordered[1]], ordered[1])}</td></tr>`).join('');
     if (!data.entries.length) el('preview-body').innerHTML = '<tr><td colspan="4">这个周期还没有用量记录</td></tr>';
-    el('snapshot-date').textContent = mixed ? `模拟快照 ${data.display.date}` : `更新于 ${date(data.generatedAt)}`;
+    el('snapshot-date').textContent = mixed ? data.display.dynamic ? `示例更新于 ${date(data.display.snapshotAt)}` : `模拟快照 ${data.display.date}` : `更新于 ${date(data.generatedAt)}`;
     const values = data.entries.map((row) => row.tokens).sort((a, b) => b - a);
     const maximum = Math.max(1, ...values);
     el('distribution-chart').innerHTML = values.map((value) => `<span style="height:${Math.max(2, value / maximum * 100)}%"></span>`).join('');
@@ -175,7 +175,7 @@ window.UsageAdmin = (() => {
     el('dialog-title').textContent = titles[action];
     const details = action === 'publish' ? [
       ['数据来源', source === 'simulation' ? '榜单区间内取真实用户，模拟补齐' : '主站真实用量'],
-      ...(source === 'simulation' ? [['榜单单人 Token', `${el('board-minimum').value}M ~ ${el('board-maximum').value}M`], ['单人模拟 Token', `${el('minimum').value}M ~ ${el('maximum').value}M`], ['展示顺序', '按当前用量指标混排'], ['数值分布', distributions[el('distribution').value]], ['有效日期', snapshot.draft.candidate.date]] : []),
+      ...(source === 'simulation' ? [['榜单单人 Token', `${el('board-minimum').value}M ~ ${el('board-maximum').value}M`], ['单人模拟 Token', `${el('minimum').value}M ~ ${el('maximum').value}M`], ['展示顺序', '按当前用量指标混排'], ['数值分布', distributions[el('distribution').value]], ['更新方式', snapshot.draft.candidate.version === 4 ? '每 5 分钟增长 · 自动跨天续接' : '固定快照'] ] : []),
       ['个人统计', '始终使用实际用量'], ['存储方式', snapshot.persistence ? '覆盖固定设置文件' : '内存，重启后恢复默认']
     ] : action === 'rollback' ? [['目标来源', snapshot.previous.source === 'real' ? '真实用量' : '模拟混合榜单'], ['目标版本', snapshot.previous.version.slice(0, 8)]] : [['数据来源', '主站真实用量'], ['生效范围', '所有统计周期']];
     el('publish-summary').innerHTML = details.map(([label, value]) => `<div><dt>${escape(label)}</dt><dd>${escape(value)}</dd></div>`).join('');

@@ -48,7 +48,7 @@ class SettingsStore {
     } finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
   }
 
-  expired(candidate) { return !candidate || candidate.date !== calendarDate(this.now(), this.config.timezone); }
+  expired(candidate) { return !candidate || candidate.version !== 4 && candidate.date !== calendarDate(this.now(), this.config.timezone); }
   active() { const published = this.state.published; return published?.source === 'simulation' && !this.expired(published.candidate) ? published : null; }
   draftCandidate() { return this.checkDraft(this.state); }
   snapshot() {

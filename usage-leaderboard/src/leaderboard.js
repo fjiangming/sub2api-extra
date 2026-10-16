@@ -2,7 +2,7 @@
 
 const { BoundedCache } = require('./cache');
 const { publicIdentity } = require('./identity');
-const { calendarDate, projectSimulation } = require('./simulation');
+const { calendarDate, projectSimulation, advanceSimulation } = require('./simulation');
 const { AppError } = require('./errors');
 
 const amount = (value) => Number(value || 0);
@@ -66,8 +66,9 @@ class LeaderboardService {
   }
 
   view(board, publication) {
-    const projected = publication && calendarDate(new Date(board.generatedAt), this.config.timezone) === publication.candidate.date
-      ? projectSimulation(board, publication.candidate, publication.version) : { ...board, display: { mode: 'real', realCount: board.entries.length, simulatedCount: 0 } };
+    const candidate = publication?.candidate;
+    const projected = candidate && (candidate.version === 4 || calendarDate(new Date(board.generatedAt), this.config.timezone) === candidate.date)
+      ? projectSimulation(board, advanceSimulation(candidate, this.now()), publication.version) : { ...board, display: { mode: 'real', realCount: board.entries.length, simulatedCount: 0 } };
     const { qualifiedEntries: _private, ...result } = projected;
     return result;
   }
@@ -75,7 +76,7 @@ class LeaderboardService {
   async preview(candidate, period, metric) {
     const publication = candidate ? { candidate, version: 'draft' } : null;
     const board = await this.board(period, metric, publication);
-    if (candidate && candidate.date !== calendarDate(this.now(), this.config.timezone)) throw new AppError('SIMULATION_EXPIRED', '模拟候选已跨天，请重新生成', 400);
+    if (candidate && candidate.version !== 4 && candidate.date !== calendarDate(this.now(), this.config.timezone)) throw new AppError('SIMULATION_EXPIRED', '模拟候选已跨天，请重新生成', 400);
     return this.view(board, publication);
   }
 

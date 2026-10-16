@@ -3,13 +3,15 @@
 const PERIODS = { today: '今日', week: '本周', month: '本月', all: '累计' };
 const METRICS = { tokens: { label: 'Token 用量', unit: 'Tokens' }, requests: { label: '调用次数', unit: '次调用' } };
 const $ = (id) => document.getElementById(id);
-const state = { period: 'today', metric: 'tokens', data: null, session: '', config: null, controller: null, sequence: 0 };
+const state = { period: 'today', metric: 'tokens', data: null, session: '', config: null, controller: null, sequence: 0,
+  authenticated: false, loading: false, pageActive: true, failures: 0 };
 const query = new URLSearchParams(location.search);
 let upstreamToken = query.get('token') || query.get('access_token') || '';
 for (const key of ['token', 'access_token', 'user_id', 'src_host', 'src_url']) query.delete(key);
 history.replaceState(null, '', location.pathname + (query.size ? `?${query}` : '') + location.hash);
 let toastTimer;
 let locateTimer;
+let refreshTimer;
 
 function icon(name) { return `<i data-lucide="${name}"></i>`; }
 function hydrateIcons() { window.lucide?.createIcons({ attrs: { 'aria-hidden': 'true' } }); }
@@ -68,6 +70,8 @@ function showStatus(message, { error = false, login = false } = {}) {
   $('usage-content').hidden = true;
   $('page-status').setAttribute('aria-busy', String(!error && !login));
   if (login) {
+    state.authenticated = false;
+    clearTimeout(refreshTimer);
     saveSession('');
     $('signed-in').hidden = true;
     enableFilters(false);
@@ -125,9 +129,11 @@ function renderStats(data) {
   $('rules-source').textContent = simulated ? `当前榜单含 ${data.display.simulatedCount} 位模拟用户，以“示例”标识；真实用户按设置的用量下限优先展示。汇总仅计当前榜单，个人用量始终来自主站真实记录。模拟快照日期：${data.display.date}。` : scoped ? '当前按 Token 下限筛选真实用户，再按所选指标展示前十位。汇总仅计当前榜单，不与全站名次比较；个人用量始终来自真实记录。' : '';
   if (bounded) {
     $('board-source-note').textContent = simulated ? '含示例数据 · 按用量混排' : '真实用量 · 按区间筛选';
-    $('rules-source').textContent = `每位上榜用户均符合 Token 区间，真实用户不足十位时用带“示例”标识的模拟用户补齐，最终按所选用量指标排名；同值并列，位置不按用户来源优先。汇总仅计当前榜单，个人用量始终来自真实记录。快照日期：${data.display.date}。`;
+    $('rules-source').textContent = `每位上榜用户均符合 Token 区间，真实用户不足十位时用带“示例”标识的模拟用户补齐，最终按所选用量指标排名；同值并列，位置不按用户来源优先。汇总仅计当前榜单，个人用量始终来自真实记录。${data.display.dynamic ? '统计日期' : '快照日期'}：${data.display.date}。`;
   }
-  $('rules-retention').textContent = simulated ? '真实用量基于主站现存记录，模拟数据为管理员发布的当日快照。' : '所有周期均基于主站现存用量记录。累计不代表已经清理的历史数据；主站清理记录后，相关统计会相应变化。';
+  $('rules-retention').textContent = simulated ? data.display.dynamic
+    ? '真实用量基于主站现存记录；示例用量随时间增长，四个周期共享同一组示例历史，达到范围上限后更换示例身份。'
+    : '真实用量基于主站现存记录，模拟数据为管理员发布的当日快照。' : '所有周期均基于主站现存用量记录。累计不代表已经清理的历史数据；主站清理记录后，相关统计会相应变化。';
   const total = compact(data.summary.tokens);
   $('total-tokens').textContent = total.value;
   $('total-tokens-unit').textContent = total.unit;
@@ -137,12 +143,12 @@ function renderStats(data) {
   $('ranking-period').textContent = data.period === 'all' ? '现存记录累计' : `${PERIODS[data.period]}排名`;
   $('personal-period').textContent = PERIODS[data.period];
   $('table-caption').textContent = `${PERIODS[data.period]}按${METRICS[data.metric].label}排序的前十位用户`;
-  $('updated-at').textContent = (simulated ? '示例快照 ' : '更新于 ') + new Intl.DateTimeFormat('zh-CN', { timeZone: data.timezone, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(simulated ? data.display.snapshotAt : data.generatedAt));
+  $('updated-at').textContent = (simulated ? data.display.dynamic ? '示例更新于 ' : '示例快照 ' : '更新于 ') + new Intl.DateTimeFormat('zh-CN', { timeZone: data.timezone, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(simulated ? data.display.snapshotAt : data.generatedAt));
   const limited = data.window.retainedFrom && data.window.start && new Date(data.window.retainedFrom) > new Date(data.window.start);
   $('coverage-note').textContent = data.period === 'all'
     ? '仅累计主站现存记录，已清理的历史用量不计入。'
     : limited ? `当前记录最早始于 ${localDate(data.window.retainedFrom)}，仅统计仍保留的用量。` : '统计基于主站现存用量记录。';
-  if (simulated) $('coverage-note').textContent = `真实 ${data.display.realCount} 位 · 示例 ${data.display.simulatedCount} 位。示例为 ${data.display.date} 的固定快照，汇总仅含当前榜单，个人用量为实际记录。`;
+  if (simulated) $('coverage-note').textContent = `真实 ${data.display.realCount} 位 · 示例 ${data.display.simulatedCount} 位。${data.display.dynamic ? '示例用量随时间自动更新' : `示例为 ${data.display.date} 的固定快照`}，汇总仅含当前榜单，个人用量为实际记录。`;
   else if (scoped) $('coverage-note').textContent = '按所设 Token 下限优先展示真实用户，再按当前指标排序；汇总仅含当前榜单，个人用量为实际记录。';
   if (bounded && !simulated) $('coverage-note').textContent = `真实 ${data.display.realCount} 位。按所设 Token 区间筛选、按当前指标排序；汇总仅含当前榜单，个人用量为实际记录。`;
 }
@@ -237,13 +243,23 @@ function render(data) {
   hydrateIcons();
 }
 
-async function loadBoard({ announce = false } = {}) {
+function scheduleRefresh() {
+  clearTimeout(refreshTimer);
+  if (!state.authenticated || !state.pageActive || document.hidden || !navigator.onLine) return;
+  refreshTimer = setTimeout(() => loadBoard({ background: true }), Math.min(300000, 60000 * 2 ** Math.min(state.failures, 3)));
+}
+
+async function loadBoard({ announce = false, background = false } = {}) {
+  if (background && (state.loading || document.querySelector('dialog[open]'))) { scheduleRefresh(); return; }
+  clearTimeout(refreshTimer);
   const sequence = ++state.sequence;
   state.controller?.abort();
   state.controller = new AbortController();
-  state.data = null;
+  state.loading = true;
+  const retain = background && state.data;
+  if (!retain) state.data = null;
   document.querySelectorAll('[data-period]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.period === state.period)));
-  showStatus('正在获取用量排行');
+  if (!retain) showStatus('正在获取用量排行');
   $('usage-content').setAttribute('aria-busy', 'true');
   $('refresh-button').disabled = true;
   try {
@@ -251,14 +267,22 @@ async function loadBoard({ announce = false } = {}) {
       { signal: AbortSignal.any([state.controller.signal, AbortSignal.timeout(60000)]) });
     if (sequence !== state.sequence) return;
     state.data = data;
+    state.failures = 0;
     render(data);
     if (announce) toast('榜单已更新');
   } catch (error) {
     if (sequence !== state.sequence) return;
+    state.failures++;
     const login = [401, 403].includes(error.status);
-    showStatus(login ? error.message : error.name === 'TimeoutError' ? '统计暂时超时，请稍后重试' : error.message || '暂时无法获取用量，请稍后重试', { error: true, login });
+    if (!retain || login) showStatus(login ? error.message : error.name === 'TimeoutError' ? '统计暂时超时，请稍后重试' : error.message || '暂时无法获取用量，请稍后重试', { error: true, login });
+    else if (state.failures === 1) toast('暂时无法更新，稍后自动重试');
   } finally {
-    if (sequence === state.sequence) $('refresh-button').disabled = false;
+    if (sequence === state.sequence) {
+      state.loading = false;
+      $('usage-content').setAttribute('aria-busy', 'false');
+      $('refresh-button').disabled = false;
+      scheduleRefresh();
+    }
   }
 }
 
@@ -278,7 +302,7 @@ function showUser(key) {
   hydrateIcons();
   $('user-dialog-title').textContent = user.name;
   $('detail-rank').textContent = (user.source === 'simulation' ? '示例数据 · ' : '') + (user.rank ? `${PERIODS[data.period]}排名 #${user.rank} · ${METRICS[data.metric].label}` : '个人实际用量');
-  $('detail-range').textContent = user.source === 'simulation' ? `模拟快照 ${data.display.date}` : rangeText(data);
+  $('detail-range').textContent = user.source === 'simulation' ? `${data.display.dynamic ? '动态示例' : '模拟快照'} ${data.display.date}` : rangeText(data);
   $('detail-stats').innerHTML = Object.keys(METRICS).map((metric) => `<div><dt>${METRICS[metric].label}</dt><dd>${displayHtml(user[metric], metric)}</dd></div>`).join('');
   $('user-dialog').showModal();
 }
@@ -312,7 +336,22 @@ $('locate-me').addEventListener('click', () => {
 });
 $('refresh-button').addEventListener('click', () => loadBoard({ announce: true }));
 $('retry-button').addEventListener('click', () => initialize());
+document.addEventListener('visibilitychange', () => {
+  clearTimeout(refreshTimer);
+  if (!document.hidden && state.authenticated && state.pageActive && navigator.onLine) loadBoard({ background: true });
+});
+window.addEventListener('offline', () => clearTimeout(refreshTimer));
+window.addEventListener('online', () => { if (state.authenticated && !document.hidden && state.pageActive) loadBoard({ background: true }); });
+window.addEventListener('pagehide', () => {
+  state.pageActive = false; clearTimeout(refreshTimer); state.controller?.abort(); state.sequence++; state.loading = false;
+});
+window.addEventListener('pageshow', () => {
+  state.pageActive = true;
+  if (state.authenticated && !document.hidden && navigator.onLine) loadBoard({ background: true });
+});
 async function initialize() {
+  clearTimeout(refreshTimer);
+  state.authenticated = false;
   showStatus('正在获取用量排行');
   try {
     state.config = await api('auth/config');
@@ -329,6 +368,7 @@ async function initialize() {
       upstreamToken = '';
     } else session = await api('auth/me');
     saveSession(session.sessionToken);
+    state.authenticated = true;
     renderIdentity(session.user);
     enableFilters(true);
     await loadBoard();

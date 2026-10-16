@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { isDeepStrictEqual } = require('node:util');
 const { z } = require('zod');
 const { AppError } = require('./errors');
+const { evolveTimeline, TICK_MS } = require('./simulation-timeline');
 
 const AVATARS = ['mountain', 'lake', 'night', 'forest', 'hills', 'sea', 'peak', 'valley', 'coast', 'green'];
 const PERIODS = ['today', 'week', 'month', 'all'];
@@ -34,6 +35,7 @@ const seriesCandidateSchema = currentCandidateSchema.extend({
   version: z.literal(3),
   origin: z.object({ generatedAt: z.iso.datetime(), rules: rulesSchema }).strict()
 });
+const liveCandidateSchema = currentCandidateSchema.extend({ version: z.literal(4), origin: seriesCandidateSchema });
 
 function calendarDate(now, timezone) { return new Intl.DateTimeFormat('sv-SE', { timeZone: timezone }).format(now); }
 function shiftDay(date, days) { return new Date(Date.parse(`${date}T00:00:00Z`) + days * 86400000).toISOString().slice(0, 10); }
@@ -119,7 +121,7 @@ function historyConflict() {
   return new AppError('SIMULATION_HISTORY_CONFLICT', '当前区间无法容纳保留身份的历史及新增用量；请扩大区间，或取消保留身份后生成新的示例名单', 400);
 }
 
-function generateSimulation(input, options = {}) {
+function generateSnapshot(input, options = {}) {
   const result = rulesSchema.safeParse(input);
   if (!result.success) throw new AppError('INVALID_REQUEST', '单人及榜单 Token 范围须为 1M～1B，上限大于下限，且两个范围须有交集', 400);
   const rules = result.data;
@@ -165,18 +167,51 @@ function generateSimulation(input, options = {}) {
       values[period].requests += day.requests;
     }
     if (PERIODS.some((period) => values[period].tokens < minimum || values[period].tokens > maximum)) throw historyConflict();
+    options.captureDays?.(row.key, days);
     return { key: row.key, name: row.name, avatar: row.avatar, values };
   });
   return { version: 3, seed, generatedAt: now.toISOString(), timezone, date, rules, origin, rows };
 }
 
+function advanceSimulation(candidate, now) {
+  if (candidate.version !== 4) return candidate;
+  const baseline = candidate.origin;
+  const history = new Map();
+  generateSnapshot(baseline.rules, { now: new Date(baseline.generatedAt), timezone: baseline.timezone,
+    seed: baseline.seed, origin: baseline.origin, roster: baseline.rows.map(({ key, name, avatar }) => ({ key, name, avatar })),
+    captureDays: (key, days) => history.set(key, days) });
+  return { ...candidate, ...evolveTimeline(baseline, history, now) };
+}
+
+function generateSimulation(input, options = {}) {
+  const result = rulesSchema.safeParse(input);
+  if (!result.success) throw new AppError('INVALID_REQUEST', '单人及榜单 Token 范围须为 1M～1B，上限大于下限，且两个范围须有交集', 400);
+  const rules = result.data;
+  const now = options.now || new Date();
+  const timezone = options.timezone || 'Asia/Shanghai';
+  const previous = options.previous ? validateCandidate(options.previous, timezone) : null;
+  let origin = options.origin;
+  if (previous?.version === 4) {
+    origin = previous.origin;
+    if (now < new Date(previous.generatedAt)) throw historyConflict();
+  }
+  origin ||= generateSnapshot(rules, { ...options, now, timezone, previous });
+  if (now < new Date(origin.generatedAt) || rules.distribution !== origin.rules.distribution ||
+    Math.max(rules.minimumTokens, rules.boardMinimumTokens) > Math.max(origin.rules.minimumTokens, origin.rules.boardMinimumTokens) ||
+    Math.min(rules.maximumTokens, rules.boardMaximumTokens) < Math.min(origin.rules.maximumTokens, origin.rules.boardMaximumTokens)) throw historyConflict();
+  const candidate = { version: 4, seed: origin.seed, generatedAt: now.toISOString(), timezone,
+    date: calendarDate(now, timezone), rules, origin, rows: origin.rows };
+  return { ...candidate, rows: advanceSimulation(candidate, now).rows };
+}
+
 function validateCandidate(value, timezone) {
-  const parsed = z.discriminatedUnion('version', [candidateSchema, currentCandidateSchema, seriesCandidateSchema]).safeParse(value);
+  const parsed = z.discriminatedUnion('version', [candidateSchema, currentCandidateSchema, seriesCandidateSchema, liveCandidateSchema]).safeParse(value);
   if (!parsed.success || parsed.data.timezone !== timezone) throw new AppError('SIMULATION_INVALID', '模拟数据无效，请重新生成', 400);
   const candidate = parsed.data;
   let replay;
   try {
-    replay = (candidate.version === 1 ? generateLegacySimulation : candidate.version === 2 ? generateBoundedSimulation : generateSimulation)(candidate.rules,
+    if (candidate.version === 4) validateCandidate(candidate.origin, timezone);
+    replay = (candidate.version === 1 ? generateLegacySimulation : candidate.version === 2 ? generateBoundedSimulation : candidate.version === 3 ? generateSnapshot : generateSimulation)(candidate.rules,
       { now: new Date(candidate.generatedAt), timezone, seed: candidate.seed, origin: candidate.origin,
         roster: candidate.rows.map(({ key, name, avatar }) => ({ key, name, avatar })) });
   } catch { throw new AppError('SIMULATION_INVALID', '模拟历史无法重放，请重新生成', 400); }
@@ -212,7 +247,7 @@ function projectSimulation(board, candidate, version) {
     entry.rank = rank; entry.comparisonAvailable = false; entry.change = null; entry.newEntry = false; entry.growth = null; });
   return { ...board, entries, comparisonAvailable: false,
     summary: { tokens: entries.reduce((sum, entry) => sum + entry.tokens, 0), requests: entries.reduce((sum, entry) => sum + entry.requests, 0), active: entries.length, deltas: null },
-    display: { ...(bounded ? { rangeApplied: true } : {}), mode: !simulated.length ? 'priority' : realEntries.length ? 'mixed' : 'simulation', realCount: realEntries.length, simulatedCount: simulated.length, version, snapshotAt: candidate.generatedAt, date: candidate.date } };
+    display: { ...(bounded ? { rangeApplied: true } : {}), ...(candidate.version === 4 ? { dynamic: true, intervalSeconds: TICK_MS / 1000 } : {}), mode: !simulated.length ? 'priority' : realEntries.length ? 'mixed' : 'simulation', realCount: realEntries.length, simulatedCount: simulated.length, version, snapshotAt: candidate.generatedAt, date: candidate.date } };
 }
 
-module.exports = { DEFAULT_RULES, rulesSchema, calendarDate, generateSimulation, validateCandidate, projectSimulation };
+module.exports = { DEFAULT_RULES, rulesSchema, calendarDate, generateSimulation, generateSnapshot, advanceSimulation, validateCandidate, projectSimulation };

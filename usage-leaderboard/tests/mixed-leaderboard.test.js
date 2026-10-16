@@ -147,3 +147,32 @@ test('request sorting cannot displace qualifying real users with below-floor hig
   assert.equal(tokens.display.mode, 'real');
   assert.equal(tokens.me.rankingAvailable, true);
 });
+
+test('published real usage refreshes through its cache while live examples advance and survive midnight without republishing', async (t) => {
+  const { db, settings, leaderboard } = await setup(t, [{ id: 2 }], [{ user_id: 2, created_at: '2026-10-13T02:00Z', input_tokens: 1700123 }]);
+  let clock = new Date('2026-10-13T03:30:00Z');
+  settings.now = leaderboard.now = () => clock;
+  leaderboard.boardCache.now = leaderboard.personalCache.now = () => clock.getTime();
+  const original = await leaderboard.get('today', 'tokens', '2');
+  const revision = settings.snapshot().revision;
+  await insertLogs(db, [{ user_id: 2, created_at: '2026-10-13T03:30:01Z', input_tokens: 1000000 }]);
+  clock = new Date('2026-10-13T03:30:59Z');
+  const cached = await leaderboard.get('today', 'tokens', '2');
+  assert.equal(cached.me.tokens, original.me.tokens);
+  assert.deepEqual(cached.entries, original.entries);
+  clock = new Date('2026-10-13T05:30:00Z');
+  const updated = await leaderboard.get('today', 'tokens', '2');
+  assert.equal(updated.me.tokens, 2700123);
+  assert.equal(updated.entries.find((row) => row.source === 'real').tokens, 2700123);
+  assert.ok(updated.entries.some((row) => row.source === 'simulation' && row.tokens > original.entries.find((old) => old.key === row.key).tokens));
+  clock = new Date('2026-10-13T16:00:00Z');
+  const nextDay = await leaderboard.get('today', 'tokens', '2');
+  assert.equal(nextDay.display.dynamic, true);
+  assert.equal(nextDay.display.date, '2026-10-14');
+  assert.equal(nextDay.entries.length, 10);
+  assert.equal(nextDay.me.tokens, 0);
+  assert.equal(settings.snapshot().revision, revision);
+  assert.equal(settings.snapshot().expired, false);
+  const preview = await leaderboard.preview(settings.draftCandidate(), 'today', 'tokens');
+  assert.deepEqual(preview.entries, nextDay.entries);
+});
