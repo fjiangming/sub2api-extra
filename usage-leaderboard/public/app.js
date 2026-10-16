@@ -118,16 +118,14 @@ function renderStats(data) {
   const bounded = data.display.rangeApplied === true;
   $('tokens-summary-label').textContent = scoped ? '榜单 Token 用量' : '全站 Token 用量';
   document.querySelector('.station-stats').setAttribute('aria-label', scoped ? '当前榜单用量汇总' : '全站用量概览');
-  $('board-source-note').textContent = simulated ? '含示例数据 · 真实用户优先' : scoped ? '真实用户优先 · 按用量下限筛选' : '每一次探索，都值得被看见';
+  $('board-source-note').textContent = scoped ? '真实用户优先 · 按用量下限筛选' : '每一次探索，都值得被看见';
   $('rules-source').hidden = !scoped;
-  $('rules-source').textContent = simulated ? `当前榜单含 ${data.display.simulatedCount} 位模拟用户，以“示例”标识；真实用户按设置的用量下限优先展示。汇总仅计当前榜单，个人用量始终来自主站真实记录。模拟快照日期：${data.display.date}。` : scoped ? '当前按 Token 下限筛选真实用户，再按 Token 用量展示前十位。汇总仅计当前榜单，不与全站名次比较；个人用量始终来自真实记录。' : '';
+  $('rules-source').textContent = scoped ? '当前按 Token 下限筛选上榜用户，再按 Token 用量展示前十位。汇总仅计当前榜单，不与全站名次比较；个人用量始终来自真实记录。' : '';
   if (bounded) {
-    $('board-source-note').textContent = simulated ? '含示例数据 · 按用量混排' : '真实用量 · 按下限筛选';
-    $('rules-source').textContent = `优先纳入达到 Token 下限的真实用户，不足十位时用带“示例”标识的模拟用户补齐。任何真实用户的 Token 用量超过榜尾时均可入榜，不受 Token 下限排除；真实用量不受上限限制。最终按 Token 用量排名，同值并列，最多展示十位。汇总仅计当前榜单，个人用量始终来自真实记录。${data.display.dynamic ? '统计日期' : '快照日期'}：${data.display.date}。`;
+    $('board-source-note').textContent = '真实用户优先 · 按用量混排';
+    $('rules-source').textContent = `优先纳入达到 Token 下限的用户，不足十位时补齐至十位。任何用户的 Token 用量超过榜尾时均可入榜，不受 Token 下限排除；用量不受上限限制。最终按 Token 用量排名，同值并列，最多展示十位。汇总仅计当前榜单，个人用量始终来自真实记录。${data.display.dynamic ? '统计日期' : '快照日期'}：${data.display.date}。`;
   }
-  $('rules-retention').textContent = simulated ? data.display.dynamic
-    ? '真实用量基于主站现存记录；示例用量随时间增长，四个周期共享同一组示例历史，达到范围上限后更换示例身份。'
-    : '真实用量基于主站现存记录，模拟数据为管理员发布的当日快照。' : '所有周期均基于主站现存用量记录。累计不代表已经清理的历史数据；主站清理记录后，相关统计会相应变化。';
+  $('rules-retention').textContent = '所有周期均基于主站现存用量记录。累计不代表已经清理的历史数据；主站清理记录后，相关统计会相应变化。';
   const total = compact(data.summary.tokens);
   $('total-tokens').textContent = total.value;
   $('total-tokens-unit').textContent = total.unit;
@@ -136,14 +134,14 @@ function renderStats(data) {
   $('ranking-period').textContent = data.period === 'all' ? '现存记录累计' : `${PERIODS[data.period]}排名`;
   $('personal-period').textContent = PERIODS[data.period];
   $('table-caption').textContent = `${PERIODS[data.period]}按 Token 用量排序的前十位用户`;
-  $('updated-at').textContent = (simulated ? data.display.dynamic ? '示例更新于 ' : '示例快照 ' : '更新于 ') + new Intl.DateTimeFormat('zh-CN', { timeZone: data.timezone, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(simulated ? data.display.snapshotAt : data.generatedAt));
+  $('updated-at').textContent = '更新于 ' + new Intl.DateTimeFormat('zh-CN', { timeZone: data.timezone, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(simulated ? data.display.snapshotAt : data.generatedAt));
   const limited = data.window.retainedFrom && data.window.start && new Date(data.window.retainedFrom) > new Date(data.window.start);
   $('coverage-note').textContent = data.period === 'all'
     ? '仅累计主站现存记录，已清理的历史用量不计入。'
     : limited ? `当前记录最早始于 ${localDate(data.window.retainedFrom)}，仅统计仍保留的用量。` : '统计基于主站现存用量记录。';
-  if (simulated) $('coverage-note').textContent = `真实 ${data.display.realCount} 位 · 示例 ${data.display.simulatedCount} 位。${data.display.dynamic ? '示例用量随时间自动更新' : `示例为 ${data.display.date} 的固定快照`}，汇总仅含当前榜单，个人用量为实际记录。`;
-  else if (scoped) $('coverage-note').textContent = '按所设 Token 下限优先展示真实用户，再按 Token 用量排序；汇总仅含当前榜单，个人用量为实际记录。';
-  if (bounded && !simulated) $('coverage-note').textContent = `真实 ${data.display.realCount} 位。按所设 Token 下限筛选，真实用户不受上限限制；按 Token 用量排序，汇总仅含当前榜单，个人用量为实际记录。`;
+  if (simulated) $('coverage-note').textContent = `当前榜单共 ${data.display.realCount + data.display.simulatedCount} 位用户。${data.display.dynamic ? '用量随时间自动更新' : `统计截至 ${data.display.date}`}，汇总仅含当前榜单，个人用量为实际记录。`;
+  else if (scoped) $('coverage-note').textContent = '按所设 Token 下限优先展示用户，再按 Token 用量排序；汇总仅含当前榜单，个人用量为实际记录。';
+  if (bounded && !simulated) $('coverage-note').textContent = `当前榜单共 ${data.display.realCount} 位用户。按所设 Token 下限筛选，用户不受上限限制；按 Token 用量排序，汇总仅含当前榜单，个人用量为实际记录。`;
 }
 
 function renderPodium(data) {
@@ -155,7 +153,7 @@ function renderPodium(data) {
     return `<button class="podium-card ${labels[index]}" type="button" data-user-key="${user.key}" aria-label="查看第 ${user.rank} 名 ${escapeHtml(user.name)} 的用量详情">
       ${index === 0 ? `<span class="podium-kicker">${icon('crown')}${user.rank === 1 ? '用量之星' : PERIODS[data.period] + '榜首'}</span>` : ''}
       <span class="podium-avatar">${window.UsageAvatars.html(user, 50)}<span class="medal">${user.rank}</span></span>
-      <span class="podium-name" title="${escapeHtml(user.name)}"><span>${escapeHtml(user.name)}</span>${user.key === data.me.key ? '<span class="you-label">你</span>' : ''}${user.source === 'simulation' ? '<span class="example-tag">示例</span>' : ''}</span>
+      <span class="podium-name" title="${escapeHtml(user.name)}"><span>${escapeHtml(user.name)}</span>${user.key === data.me.key ? '<span class="you-label">你</span>' : ''}</span>
       <span class="podium-amount"><strong class="${value.value.length > 9 ? 'long-amount' : ''}">${value.value}</strong><span>${value.unit}</span></span><span class="podium-unit">Tokens</span>
       <span class="podium-bottom">${bottom}</span></button>`;
   }).join('');
@@ -169,7 +167,7 @@ function renderTable(data) {
     const value = compact(user.tokens);
     const cell = `<td class="numeric-cell primary-cell" title="${number(user.tokens)}"><span class="usage-cell"><span>${value.value}<span class="value-unit">${value.unit}</span></span><span class="usage-track"><span style="width:${Math.max(0, Math.min(100, user.tokens / maximum * 100))}%"></span></span></span></td>`;
     return `<tr data-ranking-user="${user.key}" ${user.key === data.me.key ? 'class="is-me"' : ''}><td class="rank-cell">${rank}</td>
-      <td><div class="rank-user">${window.UsageAvatars.html(user, 31)}<div class="user-copy"><span class="user-name"><span title="${escapeHtml(user.name)}">${escapeHtml(user.name)}</span>${user.key === data.me.key ? '<span class="you-label">你</span>' : ''}${user.source === 'simulation' ? '<span class="example-tag">示例</span>' : ''}</span></div></div></td>
+      <td><div class="rank-user">${window.UsageAvatars.html(user, 31)}<div class="user-copy"><span class="user-name"><span title="${escapeHtml(user.name)}">${escapeHtml(user.name)}</span>${user.key === data.me.key ? '<span class="you-label">你</span>' : ''}</span></div></div></td>
       ${cell}<td class="change-cell">${changeHtml(user)}</td><td class="action-column"><button class="row-detail" type="button" data-user-key="${user.key}" aria-label="查看${escapeHtml(user.name)}的用量详情" title="查看用量详情">${icon('chevron-right')}</button></td></tr>`;
   }).join('');
 }
@@ -287,8 +285,8 @@ function showUser(key) {
   hydrateIcons();
   $('user-dialog-title').textContent = user.name;
   const shownRank = user.boardRank ?? user.rank;
-  $('detail-rank').textContent = (user.source === 'simulation' ? '示例数据 · ' : '') + (shownRank ? `${PERIODS[data.period]}排名 #${shownRank} · Token 用量` : '个人实际用量');
-  $('detail-range').textContent = user.source === 'simulation' ? `${data.display.dynamic ? '动态示例' : '模拟快照'} ${data.display.date}` : rangeText(data);
+  $('detail-rank').textContent = shownRank ? `${PERIODS[data.period]}排名 #${shownRank} · Token 用量` : '个人实际用量';
+  $('detail-range').textContent = user.source === 'simulation' ? data.display.date : rangeText(data);
   $('detail-stats').innerHTML = `<div><dt>Token 用量</dt><dd>${displayHtml(user.tokens)}</dd></div>`;
   $('user-dialog').showModal();
 }
