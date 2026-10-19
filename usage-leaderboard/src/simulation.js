@@ -6,6 +6,7 @@ const { z } = require('zod');
 const { AppError } = require('./errors');
 const { evolveTimeline, TICK_MS } = require('./simulation-timeline');
 const { createSimulationNames } = require('./simulation-identity');
+const { createUsageProfiles } = require('./simulation-distribution');
 
 const AVATARS = ['mountain', 'lake', 'night', 'forest', 'hills', 'sea', 'peak', 'valley', 'coast', 'green'];
 const PERIODS = ['today', 'week', 'month', 'all'];
@@ -36,7 +37,7 @@ const candidateSchema = z.object({
 const currentCandidateSchema = candidateSchema.extend({ version: z.literal(2), rules: rulesSchema });
 const seriesCandidateSchema = currentCandidateSchema.extend({
   version: z.literal(3),
-  origin: z.object({ generatedAt: z.iso.datetime(), rules: rulesSchema }).strict()
+  origin: z.object({ generatedAt: z.iso.datetime(), rules: rulesSchema, distributionVersion: z.literal(2).optional() }).strict()
 });
 const liveCandidateSchema = currentCandidateSchema.extend({ version: z.literal(4), origin: seriesCandidateSchema });
 
@@ -49,14 +50,19 @@ function randomSource(seed) {
 function fractional(value) { return Number.isSafeInteger(value) && value % 1000 !== 0 && !(value / 1e6).toFixed(2).endsWith('.00'); }
 function invalidRange() { return new AppError('SIMULATION_RANGE_INVALID', '当前范围无法生成十组随机小数，请扩大上下限间距', 400); }
 
-function generateLegacySimulation(input, { now = new Date(), timezone = 'Asia/Shanghai', seed = crypto.randomBytes(16).toString('hex'), roster, captureDays } = {}) {
+function generateLegacySimulation(input, { now = new Date(), timezone = 'Asia/Shanghai', seed = crypto.randomBytes(16).toString('hex'), roster, captureDays, distributionVersion = 1 } = {}) {
   const result = legacyRulesSchema.safeParse(input);
   if (!result.success) throw new AppError('INVALID_REQUEST', '模拟 Token 范围须为 1M～1B，且上限大于下限', 400);
   const rules = result.data;
   const random = randomSource(seed);
+  const profiles = distributionVersion === 2 ? createUsageProfiles(rules.distribution, randomSource(`${seed}:distribution:2`)) : null;
   const choose = (low, high, preferred) => {
     for (let attempt = 0; attempt < 64; attempt++) {
-      const value = attempt === 0 ? Math.round(preferred) : Math.floor(low + random() * (high - low + 1));
+      // Decimal display retries must not move an outlier into another usage group.
+      const radius = Math.max(25000, (high - low) * .015);
+      const from = profiles ? Math.max(low, preferred - radius) : low;
+      const to = profiles ? Math.min(high, preferred + radius) : high;
+      const value = attempt === 0 ? Math.round(preferred) : Math.floor(from + random() * (to - from + 1));
       if (value >= low && value <= high && fractional(value)) return value;
     }
     throw invalidRange();
@@ -77,11 +83,14 @@ function generateLegacySimulation(input, { now = new Date(), timezone = 'Asia/Sh
   const used = Object.fromEntries(PERIODS.map((period) => [period, new Set()]));
   const rows = identities.map((identity, index) => {
     for (let attempt = 0; attempt < 64; attempt++) {
-      const quantile = (10 - index - (.08 + metricRandom() * .77)) / 10;
-      const weight = rules.distribution === 'close' ? .66 + quantile * .32 : Math.pow(quantile, rules.distribution === 'concentrated' ? 2.5 : 1.35);
+      const profile = profiles?.[index];
+      const quantile = profile ? 0 : (10 - index - (.08 + metricRandom() * .77)) / 10;
+      const weight = profile ? Math.min(.99, Math.max(.001, profile.weight + (attempt ? (metricRandom() - .5) * .02 : 0)))
+        : rules.distribution === 'close' ? .66 + quantile * .32 : Math.pow(quantile, rules.distribution === 'concentrated' ? 2.5 : 1.35);
       const budget = choose(floor, rules.maximumTokens, floor + (rules.maximumTokens - floor) * weight);
-      const today = choose(floor, budget, floor + (budget - floor) * (.012 + metricRandom() * .05));
-      const weights = Array.from({ length: 93 }, () => .02 + metricRandom());
+      const share = profile ? profile.share + (attempt ? (metricRandom() - .5) * .03 : 0) : .012 + metricRandom() * .05;
+      const today = choose(floor, budget, floor + (budget - floor) * share);
+      const weights = Array.from({ length: 93 }, () => profile ? .005 + Math.pow(metricRandom(), 3) : .02 + metricRandom());
       const denominator = weights.reduce((sum, value) => sum + value, 0);
       let remaining = budget - today;
       const values = Object.fromEntries(PERIODS.map((period) => [period, { tokens: 0, requests: 0 }]));
@@ -137,12 +146,13 @@ function generateSnapshot(input, options = {}) {
   const roster = previous ? previous.rows.map(({ key, name, avatar }) => ({ key, name, avatar })) : options.roster;
   const seed = previous?.seed || options.seed || crypto.randomBytes(16).toString('hex');
   const initialRules = previous?.rules || rules;
-  const origin = previous?.origin || options.origin || { generatedAt: previous?.generatedAt || now.toISOString(), rules: {
+  const origin = previous?.origin || options.origin || { generatedAt: previous?.generatedAt || now.toISOString(), ...(previous ? {} : { distributionVersion: 2 }), rules: {
     ...initialRules, boardMinimumTokens: initialRules.boardMinimumTokens ?? initialRules.minimumTokens,
     boardMaximumTokens: initialRules.boardMaximumTokens ?? initialRules.maximumTokens
   } };
   const history = new Map();
   const baseline = generateBoundedSimulation(origin.rules, { now: new Date(origin.generatedAt), timezone, seed, roster,
+    distributionVersion: origin.distributionVersion,
     captureDays: (key, days) => history.set(key, days) });
   const date = calendarDate(now, timezone);
   const elapsed = Math.round((Date.parse(`${date}T00:00:00Z`) - Date.parse(`${baseline.date}T00:00:00Z`)) / 86400000);

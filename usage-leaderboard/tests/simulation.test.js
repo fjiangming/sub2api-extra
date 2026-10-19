@@ -182,7 +182,7 @@ test('no real user beating the displayed cutoff is omitted across periods, metri
 test('legacy daily snapshots still replay until an administrator regenerates the new range rules', () => {
   const generated = generateSimulation(DEFAULT_RULES, options);
   const roster = generated.rows.map(({ key, avatar }, index) => ({ key, avatar, name: `${String.fromCharCode(97 + index)}a***@example.com` }));
-  const candidate = generateSimulation(DEFAULT_RULES, { ...options, roster });
+  const candidate = generateSimulation(DEFAULT_RULES, { ...options, roster, origin: { generatedAt: options.now.toISOString(), rules: DEFAULT_RULES } });
   assert.deepEqual(validateCandidate(candidate, options.timezone), candidate);
   const { origin, ...snapshot } = candidate;
   const { boardMinimumTokens, boardMaximumTokens, ...legacyRules } = candidate.rules;

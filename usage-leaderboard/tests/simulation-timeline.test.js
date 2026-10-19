@@ -109,7 +109,7 @@ test('stored example.com timelines retain their original names and remain valid 
   const generated = generateSnapshot(DEFAULT_RULES, options);
   const prefixes = ['dt', 'pd', 'if', 'ok', 'xe', 'wq', 'hp', 'tr', 'wk', 'iz'];
   const roster = generated.rows.map(({ key, avatar }, index) => ({ key, avatar, name: `${prefixes[index]}***@example.com` }));
-  const legacy = generateSnapshot(DEFAULT_RULES, { ...options, roster });
+  const legacy = generateSnapshot(DEFAULT_RULES, { ...options, roster, origin: { generatedAt: options.now.toISOString(), rules: DEFAULT_RULES } });
   const candidate = generateSimulation(DEFAULT_RULES, { ...options, previous: legacy });
   const renewed = generateSimulation(DEFAULT_RULES, { ...options, previous: candidate, now: new Date('2027-01-01T00:00:00Z') });
   assert.deepEqual(renewed.rows.map((row) => row.name),
