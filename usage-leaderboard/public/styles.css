@@ -91,7 +91,6 @@ h1, h2, h3, p { margin: 0; }
 .empty-ranking > svg { width: 30px; height: 30px; color: var(--green); }
 .empty-ranking h3 { font-size: 15px; color: var(--text); font-weight: 500; }
 .empty-ranking p { font-size: 12px; }
-.coverage-note { font-size: 9px; color: var(--muted); margin-top: 8px; line-height: 1.8; }
 .stat-delta.negative { color: var(--peach); }
 .personal-identity strong { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .personal-rank > strong.long-rank { font-size: 28px; overflow-wrap: anywhere; max-width: 120px; }

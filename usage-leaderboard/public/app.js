@@ -118,25 +118,13 @@ function renderBoardInfo(data) {
   const scoped = data.display.mode !== 'real';
   const bounded = data.display.rangeApplied === true;
   $('board-source-note').textContent = scoped ? '真实用户优先 · 按用量下限筛选' : '每一次探索，都值得被看见';
-  $('rules-source').hidden = !scoped;
-  $('rules-source').textContent = scoped ? '当前按 Token 下限筛选上榜用户，再按 Token 用量展示前十位。当前榜单不与全站名次比较，个人用量始终来自真实记录。' : '';
-  if (bounded) {
-    $('board-source-note').textContent = '真实用户优先 · 按用量混排';
-    $('rules-source').textContent = `优先纳入达到 Token 下限的用户，不足十位时补齐至十位。任何用户的 Token 用量超过榜尾时均可入榜，不受 Token 下限排除；用量不受上限限制。最终按 Token 用量排名，同值并列，最多展示十位。个人用量始终来自真实记录。${data.display.dynamic ? '统计日期' : '快照日期'}：${data.display.date}。`;
-  }
+  if (bounded) $('board-source-note').textContent = '真实用户优先 · 按用量混排';
   $('rules-retention').textContent = '所有周期均基于主站现存用量记录。累计不代表已经清理的历史数据；主站清理记录后，相关统计会相应变化。';
   $('date-range').textContent = rangeText(data);
   $('ranking-period').textContent = data.period === 'all' ? '现存记录累计' : `${PERIODS[data.period]}排名`;
   $('personal-period').textContent = PERIODS[data.period];
   $('table-caption').textContent = `${PERIODS[data.period]}按 Token 用量排序的前十位用户`;
   $('updated-at').textContent = '更新于 ' + new Intl.DateTimeFormat('zh-CN', { timeZone: data.timezone, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(simulated ? data.display.snapshotAt : data.generatedAt));
-  const limited = data.window.retainedFrom && data.window.start && new Date(data.window.retainedFrom) > new Date(data.window.start);
-  $('coverage-note').textContent = data.period === 'all'
-    ? '仅累计主站现存记录，已清理的历史用量不计入。'
-    : limited ? `当前记录最早始于 ${localDate(data.window.retainedFrom)}，仅统计仍保留的用量。` : '统计基于主站现存用量记录。';
-  if (simulated) $('coverage-note').textContent = `当前榜单共 ${data.display.realCount + data.display.simulatedCount} 位用户。${data.display.dynamic ? '用量随时间自动更新' : `统计截至 ${data.display.date}`}，个人用量为实际记录。`;
-  else if (scoped) $('coverage-note').textContent = '按所设 Token 下限优先展示用户，再按 Token 用量排序；个人用量为实际记录。';
-  if (bounded && !simulated) $('coverage-note').textContent = `当前榜单共 ${data.display.realCount} 位用户。按所设 Token 下限筛选，用户不受上限限制；按 Token 用量排序，个人用量为实际记录。`;
 }
 
 function renderPodium(data) {
