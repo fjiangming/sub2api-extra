@@ -93,8 +93,6 @@ h1, h2, h3, p { margin: 0; }
 .empty-ranking p { font-size: 12px; }
 .stat-delta.negative { color: var(--peach); }
 .personal-identity strong { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.personal-rank > strong.long-rank { font-size: 28px; overflow-wrap: anywhere; max-width: 120px; }
-.personal-rank > div { min-width: 0; }
 .personal-metrics strong { overflow-wrap: anywhere; }
 .podium-name { max-width: 100%; min-width: 0; }
 .podium-name > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
@@ -110,12 +108,6 @@ h1, h2, h3, p { margin: 0; }
 .model-color-3 { background: #c2b387; }
 .model-color-4 { background: #a99fbb; }
 .model-segment { min-width: 0; }
-.detail-identity { min-width: 0; }
-.detail-identity > div { min-width: 0; }
-.detail-identity h2 { overflow-wrap: anywhere; }
-.detail-stats dd { overflow-wrap: anywhere; text-align: right; min-width: 0; }
-.detail-model { gap: 12px; }
-.detail-model > strong { overflow-wrap: anywhere; text-align: right; }
 .icon-button { position: relative; display: inline-flex; justify-content: center; align-items: center; width: 34px; height: 34px; padding: 0; background: transparent; border-radius: 6px; color: var(--soft-text); }
 .icon-button:hover { background: var(--green-soft); color: var(--green); }
 [data-tooltip]::after { content: attr(data-tooltip); position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%) translateY(3px); padding: 5px 8px; border-radius: 4px; background: var(--text); color: var(--surface); font-size: 11px; line-height: 1.4; white-space: nowrap; pointer-events: none; opacity: 0; transition: opacity .15s, transform .15s; z-index: 20; }
@@ -150,8 +142,7 @@ h2 { font-size: 16px; font-weight: 600; }
 .top-label { font-size: 9px; color: var(--green); background: var(--green-soft); padding: 3px 7px; border-radius: 4px; font-weight: 600; }
 .section-note { font-size: 10px; color: var(--muted); }
 .podium { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: end; margin-bottom: 29px; }
-.podium-card { position: relative; display: flex; align-items: center; flex-direction: column; padding: 18px 10px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; min-width: 0; box-shadow: var(--shadow); transition: transform .2s, border-color .2s; }
-.podium-card:hover { transform: translateY(-3px); }
+.podium-card { position: relative; display: flex; align-items: center; flex-direction: column; padding: 18px 10px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; min-width: 0; box-shadow: var(--shadow); }
 .podium-card.first { order: 2; padding-top: 14px; border-color: var(--podium-border); background: var(--gold-soft); }
 .podium-card.second { order: 1; border-top: 2px solid #c4d9e8; }
 .podium-card.third { order: 3; border-top: 2px solid #eccfc0; }
@@ -194,13 +185,10 @@ h2 { font-size: 16px; font-weight: 600; }
 .ranking-table .number-column { text-align: right; }
 .ranking-table .number-column:nth-child(3) { width: 24%; }
 .ranking-table th.number-column svg { display: inline-block; vertical-align: -2px; width: 10px; height: 10px; color: var(--green); }
-.ranking-table .change-column { width: 50px; text-align: center; }
-.ranking-table .action-column { width: 27px; padding: 0; }
 .ranking-table td.rank-cell { text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; padding-left: 0; }
 .ranking-table tr:hover td { background: var(--green-soft); }
 .ranking-table tr.is-me td { background: var(--green-soft); }
 .ranking-table tr.is-me td:first-child { box-shadow: inset 2px 0 var(--green); }
-.ranking-table tr.located td { animation: locate-pulse 1.7s ease; }
 .table-medal { display: inline-grid; place-items: center; width: 24px; height: 26px; color: var(--gold); }
 .table-medal svg { width: 20px; height: 20px; stroke-width: 1.6; fill: var(--gold-soft); }
 .table-medal.silver { color: var(--blue); }
@@ -223,16 +211,6 @@ h2 { font-size: 16px; font-weight: 600; }
 .ranking-table tr:nth-child(1) .usage-track > span { background: #c7ab6d; }
 .ranking-table tr:nth-child(2) .usage-track > span { background: #9fbed3; }
 .ranking-table tr:nth-child(3) .usage-track > span { background: #ddae94; }
-.change-cell { text-align: center; font-variant-numeric: tabular-nums; }
-.rank-up, .rank-down { display: inline-flex; align-items: center; gap: 2px; justify-content: center; font-size: 10px; }
-.rank-up { color: var(--green); }
-.rank-down { color: var(--peach); }
-.change-cell svg { width: 10px; height: 10px; stroke-width: 1.9; }
-.rank-new { color: var(--blue); background: var(--blue-soft); border-radius: 3px; padding: 2px 5px; font-size: 8px; }
-.rank-same { color: var(--muted); }
-.row-detail { width: 25px; height: 34px; padding: 0; color: var(--muted); background: transparent; display: grid; place-items: center; border-radius: 5px; }
-.row-detail:hover { color: var(--green); background: var(--green-soft); }
-.row-detail svg { width: 13px; height: 13px; }
 .table-footnote { display: flex; justify-content: space-between; align-items: center; font-size: 9px; color: var(--muted); padding-top: 15px; border-top: 1px solid var(--line); }
 .table-footnote > span:first-child { display: inline-flex; align-items: center; gap: 5px; }
 .table-footnote svg { width: 12px; height: 12px; }
@@ -246,27 +224,11 @@ h2 { font-size: 16px; font-weight: 600; }
 .personal-identity strong { font-size: 13px; font-weight: 600; }
 .personal-identity > div > span { color: var(--muted); font-size: 9px; }
 .personal-identity > .you-label { margin-left: auto; }
-.personal-rank { display: flex; align-items: center; gap: 15px; margin-top: 20px; }
-.personal-rank > strong { font-size: 52px; line-height: 1.2; font-weight: 550; color: var(--green); font-variant-numeric: tabular-nums; }
-.personal-rank > div { display: flex; flex-direction: column; gap: 7px; font-size: 9px; color: var(--soft-text); }
-.rank-change { display: inline-flex; align-items: center; gap: 3px; color: var(--green); font-size: 9px; }
-.rank-change svg { width: 10px; height: 10px; }
-.rank-change.down { color: var(--peach); }
-.personal-metrics { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 20px; padding-bottom: 19px; border-bottom: 1px solid var(--line); }
+.personal-metrics { display: grid; grid-template-columns: minmax(0, 1fr); margin-top: 20px; }
 .personal-metrics > div { display: flex; flex-direction: column; gap: 5px; }
 .personal-metrics > div > span { color: var(--muted); font-size: 10px; }
 .personal-metrics strong { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .personal-metrics strong small { font-size: 10px; font-weight: 400; color: var(--soft-text); }
-.next-rank { margin-top: 17px; }
-.next-rank > div:first-child { display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: var(--soft-text); }
-.next-rank strong { color: var(--green); font-size: 11px; font-weight: 600; }
-.next-rank-track { height: 5px; background: var(--soft-line); border-radius: 4px; margin-top: 9px; overflow: hidden; }
-.next-rank-track > span { display: block; width: 93%; height: 100%; background: var(--green); border-radius: 4px; transition: width .3s; }
-.next-rank p { font-size: 9px; color: var(--muted); margin-top: 8px; }
-.locate-button { width: 100%; margin-top: 20px; padding: 10px 12px; display: flex; align-items: center; gap: 8px; justify-content: center; font-size: 11px; background: var(--green); color: var(--surface); border-radius: 5px; transition: opacity .18s; }
-.locate-button:hover { opacity: .87; }
-.locate-button svg { width: 14px; height: 14px; }
-.locate-button svg:last-child { margin-left: auto; }
 .trend-section { border-top: 1px solid var(--line); margin-top: 28px; padding-top: 23px; }
 .subtle-label { color: var(--muted); font-size: 9px; }
 .trend-total { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 15px; }
@@ -307,21 +269,10 @@ h2 { font-size: 16px; font-weight: 600; }
 .dialog-note { margin-top: 15px; padding: 12px 0; border-top: 1px solid var(--line); font-size: 10px; color: var(--muted); }
 .primary-button { background: var(--green); color: var(--surface); padding: 11px 14px; border-radius: 5px; width: 100%; margin-top: 13px; font-size: 12px; }
 .primary-button:hover { opacity: .9; }
-.detail-identity { display: flex; align-items: center; gap: 16px; }
-.detail-identity p { color: var(--green); font-size: 11px; margin-top: 5px; }
-.detail-stats { display: grid; gap: 18px; margin: 26px 0; }
-.detail-stats > div { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid var(--line); padding-bottom: 13px; }
-.detail-stats dt { color: var(--soft-text); font-size: 12px; }
-.detail-stats dd { margin: 0; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.detail-stats dd small { font-size: 11px; color: var(--muted); font-weight: 400; }
-.detail-model { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 15px; }
-.detail-model > span { color: var(--soft-text); }
-.detail-model > strong { font-weight: 500; }
 .toast { position: fixed; z-index: 200; left: 50%; bottom: 28px; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 12px 18px; background: var(--text); color: var(--surface); box-shadow: 0 5px 25px rgba(0, 0, 0, .12); border-radius: 6px; font-size: 12px; max-width: calc(100% - 32px); white-space: nowrap; }
 .toast svg { width: 16px; height: 16px; }
 .spinning svg { animation: spin .75s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
-@keyframes locate-pulse { 0%, 100% { background: var(--green-soft); } 40% { background: var(--green-mid); } }
 @media (min-width: 1500px) {
   .page { max-width: 1372px; }
   .workspace { grid-template-columns: minmax(0, 1fr) 282px; gap: 40px; }
@@ -334,8 +285,6 @@ h2 { font-size: 16px; font-weight: 600; }
   .personal-sidebar { padding-left: 22px; }
   .ranking-table th, .ranking-table td { padding-left: 5px; padding-right: 5px; }
   .ranking-table .rank-column { width: 40px; }
-  .ranking-table .change-column { width: 38px; }
-  .ranking-table .action-column { width: 23px; }
   .rank-user { gap: 6px; }
   .rank-user .user-avatar { width: 27px; height: 27px; }
 }
@@ -348,7 +297,6 @@ h2 { font-size: 16px; font-weight: 600; }
   .date-range { font-size: 10px; }
   .ranking-table th, .ranking-table td { padding-left: 9px; padding-right: 9px; }
   .ranking-table .rank-column { width: 54px; }
-  .ranking-table .change-column { width: 54px; }
   .rank-user .user-avatar { width: 32px; height: 32px; }
   .user-name, .ranking-table td { font-size: 12px; }
 }
@@ -407,10 +355,6 @@ h2 { font-size: 16px; font-weight: 600; }
   .ranking-table .rank-column { width: 35px; font-size: 9px; }
   .ranking-table th:nth-child(2) { width: auto; }
   .ranking-table .number-column:nth-child(3) { width: 93px; }
-  .ranking-table .change-column { width: 34px; }
-  .ranking-table th.change-column { font-size: 9px; white-space: nowrap; }
-  .ranking-table .action-column { width: 20px; }
-  .row-detail { width: 20px; }
   .ranking-table td { height: 62px; font-size: 11px; }
   .rank-user { gap: 8px; }
   .rank-user .user-avatar { width: 30px; height: 30px; }
@@ -420,12 +364,8 @@ h2 { font-size: 16px; font-weight: 600; }
   .personal-sidebar { grid-template-columns: minmax(0, 1fr); gap: 26px; padding-top: 24px; }
   .personal-section { grid-row: auto; padding: 0; border: 0; }
   .personal-identity { margin-top: 20px; }
-  .personal-rank { margin-top: 15px; }
-  .personal-rank > strong { font-size: 46px; }
-  .personal-rank > div { font-size: 11px; }
   .personal-identity > div > span { font-size: 10px; }
   .personal-metrics strong { font-size: 22px; }
-  .next-rank p { font-size: 10px; }
   .trend-section { border-top: 1px solid var(--line); padding-top: 23px; }
   .usage-chart { gap: 20px; height: 110px; }
   .models-section { margin-top: 0; }
@@ -440,7 +380,6 @@ h2 { font-size: 16px; font-weight: 600; }
   .rank-user { gap: 5px; }
   .rank-user .user-avatar { width: 25px; height: 25px; }
   .ranking-table .number-column:nth-child(3) { width: 78px; }
-  .ranking-table .change-column { width: 29px; }
 }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }

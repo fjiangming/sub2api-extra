@@ -8,10 +8,10 @@
   <meta name="color-scheme" content="light dark">
   <title>用量排行榜</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="./styles.css?v=10">
+  <link rel="stylesheet" href="./styles.css?v=13">
   <script src="./assets/lucide.min.js" defer></script>
-  <script src="./avatars.js?v=1" defer></script>
-  <script src="./app.js?v=16" defer></script>
+  <script src="./avatars.js?v=2" defer></script>
+  <script src="./app.js?v=19" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">跳至榜单</a>
@@ -60,7 +60,7 @@
         <div class="ranking-table-wrap">
           <table class="ranking-table">
             <caption class="sr-only" id="table-caption">今日按 Token 用量排序的前十位用户</caption>
-            <thead><tr><th scope="col" class="rank-column">排名</th><th scope="col">创造者</th><th scope="col" class="number-column" id="tokens-heading" aria-sort="descending">Token 用量 <i data-lucide="arrow-down"></i></th><th scope="col" class="change-column">变动</th><th scope="col" class="action-column"><span class="sr-only">查看详情</span></th></tr></thead>
+            <thead><tr><th scope="col" class="rank-column">排名</th><th scope="col">创造者</th><th scope="col" class="number-column" id="tokens-heading" aria-sort="descending">Token 用量 <i data-lucide="arrow-down"></i></th></tr></thead>
             <tbody id="ranking-body"></tbody>
           </table>
         </div>
@@ -70,12 +70,9 @@
 
       <aside class="personal-sidebar" id="my-usage" aria-labelledby="personal-title">
         <section class="personal-section">
-          <div class="sidebar-heading"><h2 id="personal-title">我的排名</h2><span class="period-badge" id="personal-period">今日</span></div>
+          <div class="sidebar-heading"><h2 id="personal-title">我的实际用量</h2><span class="period-badge" id="personal-period">今日</span></div>
           <div class="personal-identity"><span class="user-avatar" id="personal-avatar" style="--avatar-size:42px" aria-hidden="true"><i data-lucide="user-round"></i></span><div><strong id="personal-name"></strong><span>保持热爱，持续创造</span></div><span class="you-label">你</span></div>
-          <div class="personal-rank" id="personal-ranking"><strong id="my-rank">—</strong><div><span id="my-percentile"></span><span class="rank-change" id="my-change"></span></div></div>
           <div class="personal-metrics"><div><span>Token 用量</span><strong id="my-primary-value">—</strong></div></div>
-          <div class="next-rank" id="personal-next"><div><span id="next-rank-label"></span><strong id="next-rank-gap"></strong></div><div class="next-rank-track"><span id="next-rank-progress"></span></div><p id="next-rank-copy"></p></div>
-          <button class="locate-button" type="button" id="locate-me"><i data-lucide="locate-fixed"></i>找到我的位置<i data-lucide="arrow-right"></i></button>
         </section>
 
         <section class="trend-section" aria-labelledby="trend-title">
@@ -101,18 +98,11 @@
     <div class="dialog-header"><span class="dialog-symbol"><i data-lucide="trophy"></i></span><button class="icon-button" type="button" data-close-dialog aria-label="关闭榜单规则" data-tooltip="关闭"><i data-lucide="x"></i></button></div>
     <h2 id="rules-title">用量与排名说明</h2>
     <p class="dialog-intro">用量排行榜 · 榜单规则</p>
-    <dl class="rules-list"><div><dt><i data-lucide="calendar-days"></i>统计周期</dt><dd id="rules-timezone">今日从 00:00、本周从周一、本月从 1 日开始。</dd></div><div><dt><i data-lucide="chart-no-axes-column-increasing"></i>排名依据</dt><dd>按 Token 用量降序排列，包含输入、输出、缓存创建和缓存读取，与主站统计一致。同值并列排名，最多展示 10 位用户。</dd></div><div><dt><i data-lucide="arrow-up-down"></i>排名变动</dt><dd>比较上日、上周或上月截至相同进度的排名；上月天数不足时截至月末。“新”表示上期未进入前十。累计榜和缺少上期记录时不显示变动。</dd></div><div><dt><i data-lucide="shield-check"></i>公开信息</dt><dd id="rules-privacy">仅展示主站已设置的用户头像、脱敏的注册邮箱和汇总用量，不展示完整邮箱、余额、密钥或逐笔请求。邮箱不可用时使用匿名名称。</dd></div><div><dt><i data-lucide="users-round"></i>参与范围</dt><dd id="rules-participants"></dd></div></dl>
-    <p class="dialog-note" id="rules-retention">所有周期均基于主站现存用量记录。累计不代表已经清理的历史数据；主站清理记录后，相关统计会相应变化。</p>
+    <dl class="rules-list"><div><dt><i data-lucide="calendar-days"></i>统计周期</dt><dd id="rules-timezone">今日从 00:00、本周从周一、本月从 1 日开始。</dd></div><div><dt><i data-lucide="chart-no-axes-column-increasing"></i>排名依据</dt><dd>按 Token 用量降序排列，包含输入、输出、缓存创建和缓存读取。同值并列排名，最多展示 10 位用户。</dd></div><div><dt><i data-lucide="shield-check"></i>公开信息</dt><dd id="rules-privacy">仅展示用户头像、脱敏邮箱和汇总用量，不展示完整邮箱、余额、密钥或逐笔请求。邮箱不可用时使用匿名名称。</dd></div><div><dt><i data-lucide="users-round"></i>参与范围</dt><dd id="rules-participants"></dd></div></dl>
+    <p class="dialog-note" id="rules-retention">累计统计以当前可用记录为准，已清理的历史记录不计入。</p>
     <button class="primary-button" type="button" data-close-dialog>了解了</button>
   </dialog>
 
-  <dialog class="dialog user-dialog" id="user-dialog" aria-labelledby="user-dialog-title">
-    <div class="dialog-header"><span class="subtle-label" id="detail-period">今日用量</span><button class="icon-button" type="button" data-close-dialog aria-label="关闭用量详情" data-tooltip="关闭"><i data-lucide="x"></i></button></div>
-    <div class="detail-identity"><span class="user-avatar" id="detail-avatar" style="--avatar-size:64px" aria-hidden="true"><i data-lucide="user-round"></i></span><div><h2 id="user-dialog-title"></h2><p id="detail-rank"></p></div></div>
-    <dl class="detail-stats" id="detail-stats"></dl>
-    <div class="detail-model"><span>统计范围</span><strong id="detail-range"></strong></div>
-    <button class="primary-button" type="button" data-close-dialog>返回榜单</button>
-  </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite" hidden><i data-lucide="circle-check"></i><span></span></div>
 </body>
 </html>

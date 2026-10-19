@@ -74,14 +74,38 @@ test('admin APIs require live upstream admin role, exact origin and CSRF, and ke
   const draft = await (await call('settings/draft', { revision: generated.revision, source: 'simulation' }, 'PUT')).json();
   const readerHeaders = { authorization: `Session ${reader.sessionToken}` };
   const realBoard = await (await fetch(`${base}/api/leaderboard`, { headers: readerHeaders })).json();
-  assert.equal(realBoard.display.mode, 'real');
+  assert.equal(realBoard.display, undefined);
   assert.equal((await call('leaderboard/publish', { revision: draft.revision, source: 'simulation', actor: 'forged' })).status, 400);
   const live = await (await call('leaderboard/publish', { revision: draft.revision, source: 'simulation' })).json();
   assert.equal(live.published.actor, 'ad***@example.com');
   assert.equal((await call('leaderboard/publish', { revision: draft.revision, source: 'real' })).status, 409);
   const mixed = await (await fetch(`${base}/api/leaderboard`, { headers: readerHeaders })).json();
-  assert.equal(mixed.display.mode, 'mixed');
-  assert.ok(!/admin@example.com|reader@example.com|"seed"|"draft"|"csrfToken"|"rules"/.test(JSON.stringify(mixed)));
+  assert.equal(mixed.display, undefined);
+  assert.equal(mixed.entries.length, 10);
+  assert.equal(mixed.me.key, reader.user.key);
+  assert.equal(mixed.me.tokens, realBoard.me.tokens);
+  assert.deepEqual(mixed.me.models, realBoard.me.models);
+  assert.deepEqual(Object.keys(mixed), Object.keys(realBoard));
+  assert.deepEqual(Object.keys(mixed.me), Object.keys(realBoard.me));
+  const rawKeys = new Set(generated.draft.candidate.rows.map((row) => row.key));
+  const publicKeys = new Map();
+  for (const period of ['today', 'week', 'month', 'all']) {
+    const board = await (await fetch(`${base}/api/leaderboard?period=${period}`, { headers: readerHeaders })).json();
+    assert.equal(board.entries.length, 10);
+    assert.ok(!/admin@example.com|reader@example.com|sim_|simulation|"(?:source|display|seed|draft|csrfToken|rules|realCount|simulatedCount|rangeApplied|snapshotAt|dynamic|rankingAvailable|boardRank)"/.test(JSON.stringify(board)));
+    for (const entry of board.entries) {
+      assert.match(entry.key, /^[a-f0-9]{16}$/);
+      assert.ok(!rawKeys.has(entry.key));
+      assert.deepEqual(Object.keys(entry), Object.keys(realBoard.entries[0]));
+      if (publicKeys.has(entry.name)) assert.equal(entry.key, publicKeys.get(entry.name));
+      publicKeys.set(entry.name, entry.key);
+    }
+    const ownEntry = board.entries.find((entry) => entry.key === board.me.key);
+    assert.equal(ownEntry.tokens, board.me.tokens);
+    assert.equal(ownEntry.requests, board.me.requests);
+  }
+  assert.equal(preview.display.mode, 'mixed');
+  assert.ok(preview.entries.some((entry) => entry.source === 'simulation' && rawKeys.has(entry.key)));
   const before = settings.snapshot();
   adminRole = 'user';
   assert.equal((await call('session', null, 'GET')).status, 403);

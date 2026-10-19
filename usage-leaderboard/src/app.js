@@ -8,6 +8,7 @@ const { z } = require('zod');
 const { AppError, errorMiddleware } = require('./errors');
 const { PERIODS, METRICS } = require('./repository');
 const { publicIdentity } = require('./identity');
+const { publicProfile, publicLeaderboard } = require('./public-leaderboard');
 const { SettingsStore } = require('./settings');
 const { rulesSchema } = require('./simulation');
 
@@ -88,15 +89,19 @@ function createApp({ config, database, inspector, auth, leaderboard, settings = 
   }));
   app.post('/api/auth/sso', originCheck, async (req, res) => {
     const header = String(req.get('authorization') || '');
-    res.json(await auth.sso(req, res, header.startsWith('Bearer ') ? header.slice(7) : ''));
+    const session = await auth.sso(req, res, header.startsWith('Bearer ') ? header.slice(7) : '');
+    res.json({ ...session, user: publicProfile(session.user) });
   });
   app.use('/api', auth.middleware());
-  app.get('/api/auth/me', (req, res) => res.json(auth.publicSession(req.auth)));
+  app.get('/api/auth/me', (req, res) => {
+    const session = auth.publicSession(req.auth);
+    res.json({ ...session, user: publicProfile(session.user) });
+  });
   app.post('/api/auth/logout', originCheck, (req, res) => { auth.logout(req, res); res.json({ ok: true }); });
   app.get('/api/leaderboard', async (req, res) => {
     const parsed = selection.safeParse(req.query);
     if (!parsed.success) throw new AppError('INVALID_REQUEST', '统计周期或排名依据无效', 400);
-    res.json(await leaderboard.get(parsed.data.period, parsed.data.metric, req.auth.user.id));
+    res.json(publicLeaderboard(await leaderboard.get(parsed.data.period, parsed.data.metric, req.auth.user.id)));
   });
   const admin = express.Router();
   admin.use(auth.adminMiddleware());

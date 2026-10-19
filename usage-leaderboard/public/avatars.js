@@ -3,7 +3,7 @@
 window.UsageAvatars = (() => {
   const escape = (value) => String(value).replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
   function source(user) {
-    if (user.source === 'simulation' || typeof user.avatar !== 'string') return null;
+    if (typeof user.avatar !== 'string') return null;
     const value = user.avatar.trim();
     if (/^data:image\/(?:png|jpeg|gif|webp);base64,[a-z0-9+/]+={0,2}$/i.test(value)) return value;
     try {

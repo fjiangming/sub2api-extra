@@ -9,7 +9,6 @@ let upstreamToken = query.get('token') || query.get('access_token') || '';
 for (const key of ['token', 'access_token', 'user_id', 'src_host', 'src_url']) query.delete(key);
 history.replaceState(null, '', location.pathname + (query.size ? `?${query}` : '') + location.hash);
 let toastTimer;
-let locateTimer;
 let refreshTimer;
 
 function icon(name) { return `<i data-lucide="${name}"></i>`; }
@@ -106,25 +105,12 @@ function delta(id, value) {
   element.innerHTML = value == null ? '' : icon(value < 0 ? 'trending-down' : 'trending-up') + `${value > 0 ? '+' : ''}${value}%`;
   element.title = '较上期同期';
 }
-function changeHtml(user) {
-  if (!user.comparisonAvailable) return '<span class="rank-same" aria-label="暂无可比较的排名">—</span>';
-  if (user.newEntry) return '<span class="rank-new" aria-label="本期新上榜">新</span>';
-  if (user.change === 0 || user.change == null) return '<span class="rank-same" aria-label="排名未变化">—</span>';
-  return `<span class="${user.change > 0 ? 'rank-up' : 'rank-down'}" aria-label="${user.change > 0 ? '上升' : '下降'} ${Math.abs(user.change)} 位">${icon(user.change > 0 ? 'arrow-up' : 'arrow-down')}${Math.abs(user.change)}</span>`;
-}
-
 function renderBoardInfo(data) {
-  const simulated = data.display.simulatedCount > 0;
-  const scoped = data.display.mode !== 'real';
-  const bounded = data.display.rangeApplied === true;
-  $('board-source-note').textContent = scoped ? '真实用户优先 · 按用量下限筛选' : '每一次探索，都值得被看见';
-  if (bounded) $('board-source-note').textContent = '真实用户优先 · 按用量混排';
-  $('rules-retention').textContent = '所有周期均基于主站现存用量记录。累计不代表已经清理的历史数据；主站清理记录后，相关统计会相应变化。';
   $('date-range').textContent = rangeText(data);
   $('ranking-period').textContent = data.period === 'all' ? '现存记录累计' : `${PERIODS[data.period]}排名`;
   $('personal-period').textContent = PERIODS[data.period];
   $('table-caption').textContent = `${PERIODS[data.period]}按 Token 用量排序的前十位用户`;
-  $('updated-at').textContent = '更新于 ' + new Intl.DateTimeFormat('zh-CN', { timeZone: data.timezone, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(simulated ? data.display.snapshotAt : data.generatedAt));
+  $('updated-at').textContent = '更新于 ' + new Intl.DateTimeFormat('zh-CN', { timeZone: data.timezone, hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(data.generatedAt));
 }
 
 function renderPodium(data) {
@@ -133,12 +119,12 @@ function renderPodium(data) {
   $('podium').innerHTML = data.entries.slice(0, 3).map((user, index) => {
     const value = compact(user.tokens);
     const bottom = user.growth != null ? icon(user.growth < 0 ? 'trending-down' : 'trending-up') + `较上期 ${user.growth > 0 ? '+' : ''}${user.growth}%` : icon('sparkles') + '持续创造，保持热爱';
-    return `<button class="podium-card ${labels[index]}" type="button" data-user-key="${user.key}" aria-label="查看第 ${user.rank} 名 ${escapeHtml(user.name)} 的用量详情">
+    return `<article class="podium-card ${labels[index]}" aria-label="第 ${user.rank} 名 ${escapeHtml(user.name)}">
       ${index === 0 ? `<span class="podium-kicker">${icon('crown')}${user.rank === 1 ? '用量之星' : PERIODS[data.period] + '榜首'}</span>` : ''}
       <span class="podium-avatar">${window.UsageAvatars.html(user, 50)}<span class="medal">${user.rank}</span></span>
       <span class="podium-name" title="${escapeHtml(user.name)}"><span>${escapeHtml(user.name)}</span>${user.key === data.me.key ? '<span class="you-label">你</span>' : ''}</span>
       <span class="podium-amount"><strong class="${value.value.length > 9 ? 'long-amount' : ''}">${value.value}</strong><span>${value.unit}</span></span><span class="podium-unit">Tokens</span>
-      <span class="podium-bottom">${bottom}</span></button>`;
+      <span class="podium-bottom">${bottom}</span></article>`;
   }).join('');
 }
 
@@ -149,35 +135,17 @@ function renderTable(data) {
     const rank = index < 3 ? `<span class="table-medal ${index === 1 ? 'silver' : index === 2 ? 'bronze' : ''}" aria-label="第 ${user.rank} 名">${icon('medal')}<span class="sr-only">${user.rank}</span></span>` : String(user.rank).padStart(2, '0');
     const value = compact(user.tokens);
     const cell = `<td class="numeric-cell primary-cell" title="${number(user.tokens)}"><span class="usage-cell"><span>${value.value}<span class="value-unit">${value.unit}</span></span><span class="usage-track"><span style="width:${Math.max(0, Math.min(100, user.tokens / maximum * 100))}%"></span></span></span></td>`;
-    return `<tr data-ranking-user="${user.key}" ${user.key === data.me.key ? 'class="is-me"' : ''}><td class="rank-cell">${rank}</td>
+    return `<tr${user.key === data.me.key ? ' class="is-me"' : ''}><td class="rank-cell">${rank}</td>
       <td><div class="rank-user">${window.UsageAvatars.html(user, 31)}<div class="user-copy"><span class="user-name"><span title="${escapeHtml(user.name)}">${escapeHtml(user.name)}</span>${user.key === data.me.key ? '<span class="you-label">你</span>' : ''}</span></div></div></td>
-      ${cell}<td class="change-cell">${changeHtml(user)}</td><td class="action-column"><button class="row-detail" type="button" data-user-key="${user.key}" aria-label="查看${escapeHtml(user.name)}的用量详情" title="查看用量详情">${icon('chevron-right')}</button></td></tr>`;
+      ${cell}</tr>`;
   }).join('');
 }
 
 function renderPersonal(data) {
   const me = data.me;
-  const rankingAvailable = me.rankingAvailable !== false;
-  const boardOnly = !rankingAvailable && me.boardRank != null;
-  const shownRank = boardOnly ? me.boardRank : me.rank;
-  $('personal-title').textContent = rankingAvailable ? '我的排名' : boardOnly ? '我的榜内排名' : '我的实际用量';
-  $('personal-ranking').hidden = !rankingAvailable && !boardOnly;
-  $('personal-next').hidden = !rankingAvailable;
-  $('locate-me').hidden = !rankingAvailable && !boardOnly;
+  $('personal-title').textContent = '我的实际用量';
   renderIdentity(me);
-  $('my-rank').textContent = shownRank ? String(shownRank).padStart(2, '0') : '—';
-  $('my-rank').classList.toggle('long-rank', shownRank >= 1000);
-  $('my-percentile').textContent = boardOnly ? '当前展示榜单' : me.rank ? `超过 ${me.percentile}% 的创造者` : me.eligible ? '本期还没有用量记录' : '此账号不参与排行';
-  $('my-change').hidden = boardOnly;
-  $('my-change').classList.toggle('down', me.change < 0);
-  $('my-change').innerHTML = !me.rank ? icon('sprout') + '每一次探索，都是新的开始' : !me.comparisonAvailable ? icon('sparkles') + '保持热爱，持续创造' : me.newEntry ? icon('sparkles') + '本期新上榜' : me.change == null ? icon('sprout') + '本期开始活跃' : me.change === 0 ? icon('minus') + '与上期排名持平' : icon(me.change > 0 ? 'move-up' : 'move-down') + `较上期${me.change > 0 ? '上升' : '下降'} ${Math.abs(me.change)} 位`;
   $('my-primary-value').innerHTML = displayHtml(me.tokens);
-  $('next-rank-label').textContent = me.next ? `距离第 ${me.next.rank} 名` : me.rank === 1 ? '你已位居榜首' : '每一份用量，都有意义';
-  $('next-rank-gap').textContent = me.next ? Object.values(compact(me.next.gap)).join(' ').trim() : me.rank === 1 ? 'TOP 01' : '—';
-  $('next-rank-progress').style.width = me.next ? `${me.next.progress}%` : me.rank === 1 ? '100%' : '0%';
-  $('next-rank-copy').textContent = me.next ? '再向前一点，就能遇见新的风景。' : '保持热爱，让好想法继续发生。';
-  $('locate-me').innerHTML = data.entries.some((entry) => entry.key === me.key)
-    ? icon('locate-fixed') + '找到我的位置' + icon('arrow-right') : icon('activity') + '查看我的用量' + icon('arrow-right');
 }
 
 function renderChart(me) {
@@ -264,22 +232,6 @@ function toast(message) {
   $('toast').hidden = false;
   toastTimer = setTimeout(() => { $('toast').hidden = true; }, 2800);
 }
-function showUser(key) {
-  const data = state.data;
-  if (!data) return;
-  const user = data.entries.find((entry) => entry.key === key) || (key === data.me.key ? data.me : null);
-  if (!user) return;
-  $('detail-period').textContent = PERIODS[data.period] + '用量';
-  window.UsageAvatars.set($('detail-avatar'), user);
-  hydrateIcons();
-  $('user-dialog-title').textContent = user.name;
-  const shownRank = user.boardRank ?? user.rank;
-  $('detail-rank').textContent = shownRank ? `${PERIODS[data.period]}排名 #${shownRank} · Token 用量` : '个人实际用量';
-  $('detail-range').textContent = user.source === 'simulation' ? data.display.date : rangeText(data);
-  $('detail-stats').innerHTML = `<div><dt>Token 用量</dt><dd>${displayHtml(user.tokens)}</dd></div>`;
-  $('user-dialog').showModal();
-}
-
 document.querySelectorAll('[data-period]').forEach((button) => button.addEventListener('click', () => {
   if (state.period === button.dataset.period) return;
   state.period = button.dataset.period; loadBoard();
@@ -291,21 +243,6 @@ document.querySelectorAll('dialog').forEach((dialog) => dialog.addEventListener(
   const bounds = dialog.getBoundingClientRect();
   if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) dialog.close();
 }));
-document.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-user-key]');
-  if (button) showUser(button.dataset.userKey);
-});
-$('locate-me').addEventListener('click', () => {
-  if (!state.data) return;
-  const row = document.querySelector(`[data-ranking-user="${state.data.me.key}"]`);
-  if (!row) return showUser(state.data.me.key);
-  row.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'center' });
-  row.querySelector('button').focus({ preventScroll: true });
-  row.classList.remove('located');
-  requestAnimationFrame(() => row.classList.add('located'));
-  clearTimeout(locateTimer);
-  locateTimer = setTimeout(() => row.classList.remove('located'), 1800);
-});
 $('refresh-button').addEventListener('click', () => loadBoard({ announce: true }));
 $('retry-button').addEventListener('click', () => initialize());
 document.addEventListener('visibilitychange', () => {
