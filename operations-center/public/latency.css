@@ -1,0 +1,47 @@
+.lt-toolbar { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; margin-bottom: 18px; }
+.lt-toolbar label { min-width: 140px; }
+.lt-segments { display: flex; flex-wrap: wrap; gap: 0; border-bottom: 1px solid var(--line); margin-right: auto; }
+.lt-segments button { min-height: 40px; border: 0; border-bottom: 2px solid transparent; padding: 8px 16px; background: transparent; color: var(--muted); }
+.lt-segments button[aria-pressed="true"] { border-bottom-color: var(--green); color: var(--green); font-weight: 600; }
+.lt-check { display: flex; align-items: center; gap: 8px; min-width: auto !important; min-height: 40px; }
+.lt-check input { width: 16px; min-height: 16px; height: 16px; accent-color: var(--green); }
+.lt-filter { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px; }
+.lt-filter label { min-width: 0; }
+.lt-filter-actions { display: flex; align-items: end; gap: 8px; }
+.lt-metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); border-block: 1px solid var(--line); margin-bottom: 24px; }
+.lt-metric { min-width: 0; padding: 18px 12px; }
+.lt-metric + .lt-metric { border-left: 1px solid var(--line); }
+.lt-metric span, .lt-metric small { display: block; color: var(--muted); font-size: 12px; }
+.lt-metric strong { display: block; font-size: 23px; font-weight: 600; margin: 8px 0 4px; overflow-wrap: anywhere; }
+.lt-metric.warn strong { color: var(--red); }
+.lt-section { min-width: 0; padding: 0; margin: 0 0 24px; }
+.lt-section > header { display: flex; gap: 12px; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.lt-section h2 { font-size: 15px; margin: 0; }
+.lt-section header span, .lt-pagination span { font-size: 12px; color: var(--muted); }
+.lt-analysis { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.lt-chart { height: 270px; width: 100%; }
+.lt-table { min-width: 880px; }
+.lt-secondary { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; max-width: 300px; overflow-wrap: anywhere; }
+.lt-pagination { display: flex; align-items: center; justify-content: end; gap: 8px; margin-top: 12px; }
+.lt-status { color: var(--muted); line-height: 1.7; padding: 12px 0; }
+.lt-definitions { color: var(--muted); line-height: 1.8; border-top: 1px solid var(--line); padding-top: 14px; }
+.lt-definitions summary { cursor: pointer; }
+.lt-collection { display: flex; flex-wrap: wrap; gap: 12px 28px; padding: 12px 0 20px; color: var(--muted); font-size: 13px; }
+.lt-dialog { width: min(1120px, calc(100% - 32px)); max-height: calc(100dvh - 48px); border: 1px solid var(--line); border-radius: 8px; padding: 24px; color: var(--text); background: var(--surface); }
+.lt-dialog::backdrop { background: rgb(20 28 24 / 35%); }
+.lt-dialog-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+.lt-dialog-heading h2 { font-size: 18px; margin: 0; }
+.lt-dialog-heading p { font-size: 12px; color: var(--muted); margin: 8px 0 0; overflow-wrap: anywhere; }
+.lt-dialog-heading .lt-toolbar { flex-wrap: nowrap; flex-shrink: 0; }
+.lt-dialog h3 { font-size: 14px; margin: 22px 0 12px; }
+.lt-evidence { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 12px 0; line-height: 1.7; }
+.lt-note { background: var(--blue-soft); border-left: 3px solid var(--blue); padding: 12px; line-height: 1.7; font-size: 13px; margin: 12px 0; }
+.lt-candidate { border-block: 1px solid var(--line); padding: 12px 0; margin: 12px 0; overflow-wrap: anywhere; }
+.lt-candidate button { margin-top: 10px; }
+.lt-timeline progress { width: 140px; height: 8px; accent-color: var(--blue); }
+.lt-timeline { min-width: 880px; }
+.lt-timeline td:nth-child(2) { min-width: 220px; }
+.lt-timeline td, .lt-dialog td { overflow-wrap: anywhere; max-width: 320px; }
+.lt-empty { text-align: center; padding: 36px 16px !important; color: var(--muted); }
+@media (max-width: 1100px) { .lt-filter { grid-template-columns: repeat(3, minmax(0, 1fr)); } .lt-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); } .lt-analysis { grid-template-columns: 1fr; } }
+@media (max-width: 600px) { .lt-filter { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; } .lt-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } .lt-metric strong { font-size: 20px; } .lt-metric { padding: 14px 10px; } .lt-dialog { width: calc(100% - 16px); padding: 16px; max-height: calc(100dvh - 16px); } .lt-segments button { padding-inline: 10px; } }

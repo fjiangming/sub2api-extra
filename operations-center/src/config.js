@@ -79,6 +79,13 @@ const schema = z.object({
   FINANCE_TIMEZONE: z.string().trim().min(1).max(100).default('Asia/Shanghai'),
   SUB2API_BASE_URL: optionalUrl,
   SUB2API_PUBLIC_URL: optionalUrl,
+  OPERATIONS_CENTER_USER_MESSAGES_ENABLED: boolFromEnv.default(false),
+  LATENCY_TELEMETRY_TOKEN: optionalIntegrationToken,
+  LATENCY_TELEMETRY_DIRECTORY: optionalString,
+  LATENCY_TELEMETRY_MOUNT_PATH: optionalString,
+  LATENCY_TELEMETRY_MAX_MB: z.coerce.number().int().min(32).max(65536).default(5120),
+  LATENCY_TELEMETRY_MIN_FREE_MB: z.coerce.number().int().min(0).max(65536).default(5120),
+  SUB2API_ANNOUNCEMENTS_UPSTREAM_URL: optionalUrl,
   SUB2API_ADMIN_TOKEN: optionalString,
   ADMIN_EMAIL: optionalString,
   ADMIN_PASSWORD: optionalString,
@@ -138,6 +145,13 @@ const schema = z.object({
     });
   }
   const hasSub2ApiCredentials = Boolean(value.SUB2API_ADMIN_TOKEN || (value.ADMIN_EMAIL && value.ADMIN_PASSWORD));
+  if (value.OPERATIONS_CENTER_USER_MESSAGES_ENABLED &&
+      !value.SUB2API_ANNOUNCEMENTS_UPSTREAM_URL && !value.SUB2API_BASE_URL) {
+    ctx.addIssue({
+      code: 'custom', path: ['SUB2API_ANNOUNCEMENTS_UPSTREAM_URL'],
+      message: '启用用户消息需要配置直连 Sub2API 的上游地址'
+    });
+  }
   if (value.OPERATIONS_CENTER_AUTO_CLEANUP_ENABLED && !value.SUB2API_BASE_URL) {
     ctx.addIssue({
       code: 'custom',
@@ -267,6 +281,15 @@ function loadConfig(env = process.env, runtime = {}) {
     sub2apiPublicUrl: value.SUB2API_PUBLIC_URL?.replace(/\/$/, '') ||
       value.SUB2API_BASE_URL?.replace(/\/$/, '') || null,
     sub2apiAdminToken: value.SUB2API_ADMIN_TOKEN || null,
+    userMessagesEnabled: value.OPERATIONS_CENTER_USER_MESSAGES_ENABLED,
+    latencyTelemetry: {
+      token: value.LATENCY_TELEMETRY_TOKEN || null,
+      directory: value.LATENCY_TELEMETRY_DIRECTORY ? path.resolve(value.LATENCY_TELEMETRY_DIRECTORY) : null,
+      mountPath: value.LATENCY_TELEMETRY_MOUNT_PATH ? path.resolve(value.LATENCY_TELEMETRY_MOUNT_PATH) : null,
+      maxMb: value.LATENCY_TELEMETRY_MAX_MB,
+      minFreeMb: value.LATENCY_TELEMETRY_MIN_FREE_MB
+    },
+    sub2apiAnnouncementsUpstreamUrl: value.SUB2API_ANNOUNCEMENTS_UPSTREAM_URL?.replace(/\/$/, '') || null,
     sub2apiAdminEmail: value.ADMIN_EMAIL || null,
     sub2apiAdminPassword: value.ADMIN_PASSWORD || null,
     sub2apiCredentialSource: runtime.sub2api

@@ -11,8 +11,8 @@ function request(headers = {}) {
   return { ip: '::ffff:127.0.0.1', headers, get: (name) => headers[name.toLowerCase()] };
 }
 function response() { return { headers: {}, setHeader(name, value) { this.headers[name] = value; } }; }
-function middleware(auth, req) {
-  return new Promise((resolve, reject) => auth.middleware()(req, {}, (error) => error ? reject(error) : resolve(req.auth)));
+function middleware(auth, req, res = response()) {
+  return new Promise((resolve, reject) => auth.middleware()(req, res, (error) => error ? reject(error) : resolve(req.auth)));
 }
 function token(claims) { return `header.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.unsigned`; }
 
@@ -82,6 +82,181 @@ test('upstream expiry caps sessions, cleanup releases memory, and revoked users 
   auth.cleanup();
   assert.equal(auth.sessions.size, 0);
 });
+
+test('successful revalidation rolls active sessions past their original deadline and renews cookie-only access', async (t) => {
+  let clock = 100000;
+  let calls = 0;
+  const config = loadConfig({ NODE_ENV: 'test', USAGE_LEADERBOARD_SESSION_MINUTES: '5' });
+  const auth = new AuthService(config, { async me() {
+    calls++;
+    return { id: '2', email: 'reader@gmail.com' };
+  } }, { now: () => clock });
+  t.after(() => auth.close());
+  const login = await auth.sso(request(), response(), 'opaque-token');
+  const originalDeadline = Date.parse(login.expiresAt);
+  const req = request({ authorization: `Session ${login.sessionToken}` });
+  clock += 59000;
+  const cached = response();
+  const session = await middleware(auth, req, cached);
+  assert.equal(calls, 1);
+  assert.equal(session.expiresAt, originalDeadline);
+  assert.equal(cached.headers['Set-Cookie'], undefined);
+
+  clock += 2000;
+  const first = response();
+  const second = response();
+  await Promise.all([middleware(auth, req, first), middleware(auth, req, second)]);
+  assert.equal(calls, 2);
+  for (const res of [first, second]) {
+    assert.match(res.headers['Set-Cookie'], /HttpOnly; SameSite=Lax; Max-Age=300$/);
+    assert.ok(!res.headers['Set-Cookie'].includes('opaque-token'));
+  }
+  assert.equal(session.expiresAt, clock + config.sessionTtlMs);
+  assert.equal(auth.sessions.size, 1);
+  assert.equal(auth.publicSession(session).sessionToken, login.sessionToken);
+
+  clock = originalDeadline + 1;
+  const cookieRequest = request({ cookie: first.headers['Set-Cookie'].split(';')[0] });
+  const renewed = response();
+  assert.equal(await middleware(auth, cookieRequest, renewed), session);
+  assert.equal(session.expiresAt, clock + config.sessionTtlMs);
+  assert.equal(Date.parse(auth.publicSession(session).expiresAt), session.expiresAt);
+  assert.match(renewed.headers['Set-Cookie'], /Max-Age=300$/);
+
+  clock = session.expiresAt;
+  await assert.rejects(middleware(auth, cookieRequest), { code: 'AUTH_REQUIRED' });
+  assert.equal(calls, 3);
+  assert.equal(auth.sessions.size, 0);
+});
+
+test('rolling sessions and both secure cookies remain capped by the original upstream token expiry', async (t) => {
+  let clock = 100000;
+  let calls = 0;
+  const config = { ...loadConfig({ NODE_ENV: 'test', USAGE_LEADERBOARD_SESSION_MINUTES: '5' }), cookieSecure: true };
+  const auth = new AuthService(config, { async me() {
+    calls++;
+    return { id: '2', email: 'reader@gmail.com' };
+  } }, { now: () => clock });
+  t.after(() => auth.close());
+  const jwt = token({ exp: 900 });
+  const login = await auth.sso(request(), response(), jwt);
+  const req = request({ authorization: `Session ${login.sessionToken}` });
+  for (const now of [300000, 550000, 800000]) {
+    clock = now;
+    const res = response();
+    const session = await middleware(auth, req, res);
+    assert.equal(session.expiresAt, Math.min(clock + config.sessionTtlMs, 900000));
+    const cookies = res.headers['Set-Cookie'];
+    assert.equal(cookies.length, 2);
+    assert.match(cookies[0], /^__Host-ul_session=.*Path=\/; HttpOnly; SameSite=Lax; Max-Age=\d+; Secure$/);
+    assert.match(cookies[1], /^__Host-ul_session_partitioned=.*HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=\d+$/);
+    for (const cookie of cookies) {
+      assert.equal(Number(/Max-Age=(\d+)/.exec(cookie)[1]), Math.min(300, (900000 - clock) / 1000));
+      assert.ok(!cookie.includes(jwt));
+    }
+  }
+  clock = 900000;
+  const expired = response();
+  await assert.rejects(middleware(auth, req, expired), { code: 'AUTH_REQUIRED' });
+  assert.equal(expired.headers['Set-Cookie'], undefined);
+  assert.equal(auth.sessions.size, 0);
+  assert.equal(calls, 4);
+});
+
+test('authentication rejection, disabled users and changed identities cannot renew a session', async (t) => {
+  for (const failure of [new AppError('AUTH_FAILED', 'revoked', 401), new AppError('ACCOUNT_UNAVAILABLE', 'disabled', 403), null]) {
+    let clock = 100000;
+    let calls = 0;
+    const config = loadConfig({ NODE_ENV: 'test', USAGE_LEADERBOARD_SESSION_MINUTES: '5' });
+    const auth = new AuthService(config, { async me() {
+      calls++;
+      if (calls > 1 && failure) throw failure;
+      return { id: calls > 1 ? '3' : '2', email: 'reader@gmail.com' };
+    } }, { now: () => clock });
+    t.after(() => auth.close());
+    const login = await auth.sso(request(), response(), 'opaque-token');
+    const session = auth.sessions.get(login.sessionToken);
+    clock += 61000;
+    const res = response();
+    await assert.rejects(middleware(auth, request({ authorization: `Session ${login.sessionToken}` }), res),
+      { code: failure?.code || 'AUTH_REQUIRED' });
+    assert.equal(session.expiresAt, Date.parse(login.expiresAt));
+    assert.equal(res.headers['Set-Cookie'], undefined);
+    assert.equal(auth.sessions.size, 0);
+  }
+});
+
+test('temporary upstream failures do not renew sessions and recovery requires an unexpired session', async (t) => {
+  let clock = 100000;
+  let failure;
+  let calls = 0;
+  const config = loadConfig({ NODE_ENV: 'test', USAGE_LEADERBOARD_SESSION_MINUTES: '5' });
+  const auth = new AuthService(config, { async me() {
+    calls++;
+    if (failure) throw failure;
+    return { id: '2', email: 'reader@gmail.com' };
+  } }, { now: () => clock });
+  t.after(() => auth.close());
+  const login = await auth.sso(request(), response(), 'opaque-token');
+  const session = auth.sessions.get(login.sessionToken);
+  const req = request({ authorization: `Session ${login.sessionToken}` });
+  clock += 61000;
+  failure = new AppError('AUTH_UPSTREAM_UNAVAILABLE', 'temporarily unavailable', 503);
+  const unavailable = response();
+  await assert.rejects(middleware(auth, req, unavailable), { status: 503 });
+  assert.equal(unavailable.headers['Set-Cookie'], undefined);
+  assert.equal(session.expiresAt, Date.parse(login.expiresAt));
+  assert.equal(auth.sessions.get(session.id), session);
+
+  failure = null;
+  await middleware(auth, req);
+  assert.equal(session.expiresAt, clock + config.sessionTtlMs);
+  clock += 61000;
+  failure = new AppError('AUTH_UPSTREAM_TIMEOUT', 'timed out', 504);
+  await assert.rejects(middleware(auth, req), { status: 504 });
+  assert.equal(session.expiresAt, Date.parse(login.expiresAt) + 61000);
+  clock = session.expiresAt;
+  failure = null;
+  await assert.rejects(middleware(auth, req), { code: 'AUTH_REQUIRED' });
+  assert.equal(calls, 4);
+  assert.equal(auth.sessions.size, 0);
+});
+
+for (const invalidation of ['expiry', 'logout', 'replacement', 'shutdown']) {
+  test(`in-flight revalidation cannot revive a session after ${invalidation}`, async (t) => {
+    let clock = 100000;
+    const user = { id: '2', email: 'reader@gmail.com' };
+    const pending = Promise.withResolvers();
+    const started = Promise.withResolvers();
+    let calls = 0;
+    const auth = new AuthService(loadConfig({ NODE_ENV: 'test' }), { async me(value) {
+      calls++;
+      if (value === 'original' && calls > 1) { started.resolve(); return pending.promise; }
+      return user;
+    } }, { now: () => clock });
+    t.after(() => auth.close());
+    const login = await auth.sso(request(), response(), 'original');
+    const req = request({ authorization: `Session ${login.sessionToken}` });
+    clock += 61000;
+    const res = response();
+    const rejected = assert.rejects(middleware(auth, req, res), { code: 'AUTH_REQUIRED' });
+    await started.promise;
+    let replacement;
+    if (invalidation === 'expiry') clock = Date.parse(login.expiresAt);
+    else if (invalidation === 'logout') {
+      const loggedOut = response();
+      auth.logout(req, loggedOut);
+      assert.match(loggedOut.headers['Set-Cookie'], /Max-Age=0$/);
+    } else if (invalidation === 'replacement') replacement = await auth.sso(req, response(), 'replacement');
+    else auth.close();
+    pending.resolve(user);
+    await rejected;
+    assert.equal(res.headers['Set-Cookie'], undefined);
+    assert.equal(auth.sessions.has(login.sessionToken), false);
+    assert.equal(auth.sessions.size, replacement ? 1 : 0);
+    if (replacement) assert.ok(auth.sessions.has(replacement.sessionToken));
+  });
+}
 
 test('concurrent logins obey the memory cap and secure iframe cookies have a Session-header fallback', async (t) => {
   const auth = new AuthService({ ...loadConfig({ NODE_ENV: 'test' }), maxSessions: 1, cookieSecure: true },

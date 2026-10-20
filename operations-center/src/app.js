@@ -136,7 +136,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, costAnalysis, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, messages, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -247,6 +247,15 @@ function createApp({ config, database, auth, inspector, metrics, profiles, costA
   }));
 
   const authenticated = auth.middleware();
+  const telemetryLimiter = rateLimit({ windowMs: 60000, limit: 6000, standardHeaders: 'draft-8', legacyHeaders: false });
+  app.post('/api/latency/ingest', telemetryLimiter, asyncRoute(async (req, res) => {
+    const supplied = bearerToken(req);
+    const expected = config.latencyTelemetry?.token;
+    if (!expected || !supplied || !crypto.timingSafeEqual(
+      crypto.createHash('sha256').update(supplied).digest(), crypto.createHash('sha256').update(expected).digest()
+    )) throw new AppError('TELEMETRY_AUTH_REQUIRED', '采集认证无效', { status: 401 });
+    res.set('cache-control', 'no-store').json(telemetry.ingest(req.body));
+  }));
   const csrf = auth.csrfMiddleware();
   app.get('/api/auth/me', authenticated, (req, res) => {
     res.set('cache-control', 'no-store').json(auth.publicSession(req.auth));
@@ -256,6 +265,27 @@ function createApp({ config, database, auth, inspector, metrics, profiles, costA
     res.status(204).end();
   });
 
+  const announcementLimiter = rateLimit({
+    windowMs: 60000, limit: 300, standardHeaders: 'draft-8', legacyHeaders: false
+  });
+  app.use('/api/v1/announcements', announcementLimiter, (_req, res, next) => {
+    res.set('cache-control', 'no-store');
+    if (_req.get('x-operations-announcements-hop')) {
+      return next(new AppError('ANNOUNCEMENT_GATEWAY_LOOP', '公告上游地址形成回环，请配置直连 Sub2API 的地址', { status: 508 }));
+    }
+    if (!messages) return next(new AppError('USER_MESSAGE_DELIVERY_DISABLED', '消息投递尚未启用', { status: 503 }));
+    next();
+  });
+  app.get('/api/v1/announcements', asyncRoute(async (req, res) => {
+    const unreadOnly = ['1', 'true', 'yes', 'y', 'on'].includes(String(req.query.unread_only || '').toLowerCase());
+    const data = await messages.listForUser(bearerToken(req), unreadOnly);
+    res.set('x-operations-announcements', '1').json({ code: 0, message: 'success', data });
+  }));
+  app.post('/api/v1/announcements/:id/read', asyncRoute(async (req, res) => {
+    const data = await messages.markReadForUser(bearerToken(req), req.params.id);
+    res.json({ code: 0, message: 'success', data });
+  }));
+
   const api = express.Router();
   api.use(authenticated);
   api.use((_req, res, next) => {
@@ -264,6 +294,31 @@ function createApp({ config, database, auth, inspector, metrics, profiles, costA
   });
 
   api.get('/overview', asyncRoute(async (_req, res) => res.json(await metrics.getOverview())));
+  api.get('/latency/options', asyncRoute(async (_req, res) => res.json(await latency.options())));
+  api.get('/latency/requests', asyncRoute(async (req, res) => res.json(await latency.report(req.query))));
+  api.get('/latency/requests/:id', asyncRoute(async (req, res) => res.json(await latency.detail(req.params.id, req.auth.upstreamAccessToken))));
+  api.get('/latency/live', (_req, res) => res.json({ items: telemetry.recent(), status: telemetry.status() }));
+  api.get('/latency/resources', (req, res) => res.json({ items: telemetry.resources(req.query) }));
+  api.get('/user-messages/status', (_req, res) => res.json(messages.status()));
+  api.get('/user-messages/users', asyncRoute(async (req, res) => {
+    res.json(await messages.searchUsers(req.query, req.auth.upstreamAccessToken));
+  }));
+  api.get('/user-messages', (req, res) => res.json(messages.list(req.query)));
+  api.post('/user-messages', csrf, asyncRoute(async (req, res) => {
+    res.status(201).json(await messages.create(req.body, {
+      actor: req.auth.actor, accessToken: req.auth.upstreamAccessToken, requestKey: req.get('idempotency-key')
+    }));
+  }));
+  api.put('/user-messages/:id', csrf, asyncRoute(async (req, res) => {
+    res.json(await messages.update(req.params.id, req.body, { actor: req.auth.actor, accessToken: req.auth.upstreamAccessToken }));
+  }));
+  api.post('/user-messages/:id/archive', csrf, asyncRoute(async (req, res) => {
+    res.json(await messages.archive(req.params.id, req.auth.actor));
+  }));
+  api.delete('/user-messages/:id', csrf, asyncRoute(async (req, res) => {
+    await messages.remove(req.params.id);
+    res.status(204).end();
+  }));
   api.get('/metrics/usage', asyncRoute(async (req, res) => res.json(await metrics.getUsage(req.query))));
   api.get('/metrics/usage/dimensions', asyncRoute(async (req, res) => res.json(await metrics.getUsageDimensions(req.query))));
   api.get('/metrics/users', asyncRoute(async (req, res) => res.json(await metrics.getUsers(req.query))));
@@ -393,6 +448,8 @@ function createApp({ config, database, auth, inspector, metrics, profiles, costA
   const echartsDir = path.dirname(require.resolve('echarts/package.json'));
   app.get('/vendor/lucide.js', (_req, res) => res.sendFile(path.join(lucideDir, 'dist', 'umd', 'lucide.js')));
   app.get('/vendor/echarts.js', (_req, res) => res.sendFile(path.join(echartsDir, 'dist', 'echarts.min.js')));
+  app.get('/vendor/marked.js', (_req, res) => res.sendFile(require.resolve('marked')));
+  app.get('/vendor/dompurify.js', (_req, res) => res.sendFile(require.resolve('dompurify').replace(/purify\.cjs\.js$/, 'purify.min.js')));
   app.use(express.static(publicDir, {
     index: false,
     etag: true,

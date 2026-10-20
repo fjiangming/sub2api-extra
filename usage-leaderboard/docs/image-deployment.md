@@ -237,6 +237,7 @@ USAGE_LEADERBOARD_QUERY_TIMEOUT_MS=15000
 USAGE_LEADERBOARD_CACHE_SECONDS=60
 USAGE_LEADERBOARD_PERSONAL_CACHE_ENTRIES=256
 USAGE_LEADERBOARD_MAX_SESSIONS=1000
+# Rolling idle window; successful upstream checks renew it, bounded by JWT exp.
 USAGE_LEADERBOARD_SESSION_MINUTES=30
 USAGE_LEADERBOARD_INCLUDE_ADMINS=false
 
@@ -255,6 +256,7 @@ chmod 600 usage-leaderboard/.env
 - 密码有 `@`、`#`、`/`、`$`、`%` 等特殊字符时，先对密码部分 URL 编码；可以用单引号包住整个连接串避免 Compose 插值。连接串不接受 `?sslmode=...` 等查询参数。
 - `SUB2API_DATABASE_SSL=disable` 适用于这个未启用 SSL 的 Docker 内部 PostgreSQL；若实际服务器启用了 SSL，按证书配置使用 `verify-full`。
 - `TRUST_PROXY=true` 适用于第 8 步中覆盖转发头的单层可信反代；直接访问 Node 时设为 `false`。主站启用会话绑定时，按[会话绑定说明](../README.md#添加到主站菜单)配置可信来源和客户端指纹转发，不直接跳过主站校验。
+- `USAGE_LEADERBOARD_SESSION_MINUTES` 为滚动空闲窗口，默认 30 分钟。页面正常刷新且主站验证成功会续期，仍受原主站 Token 到期时间限制，不使用 Refresh Token。升级不需要增加配置；重启后从主站菜单重新进入即可。详见[续期边界与安全影响](session-renewal.md)。
 
 ## 5. 登记到已有根 Compose
 

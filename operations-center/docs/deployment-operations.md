@@ -56,7 +56,7 @@ docker compose --env-file compose.services.env pull operations-center
 docker compose --env-file compose.services.env up -d --no-build operations-center
 ```
 
-Compose 会创建 `operations-center-data` 命名卷，用于保存加密后的运行配置、本机配置密钥和手工收支台账。容器根文件系统仍为只读，不挂载 Docker socket。
+Compose 会创建 `operations-center-data` 命名卷，用于保存加密后的运行配置、本机配置密钥、手工收支台账，以及定向用户消息和已读记录。容器根文件系统仍为只读，不挂载 Docker socket。
 
 ### Node.js
 
@@ -66,7 +66,11 @@ npm ci
 npm start
 ```
 
-本地运行默认把加密配置和手工收支台账保存在 `operations-center/data`，可以通过 `OPERATIONS_CENTER_DATA_DIR` 改变位置。
+本地运行默认把加密配置、手工收支台账和用户消息保存在 `operations-center/data`，可以通过 `OPERATIONS_CENTER_DATA_DIR` 改变位置。
+
+### 定向用户消息
+
+“用户消息”tab 可直接维护草稿；发布、用户端消息列表和强制弹窗需要额外接入主站的两个用户公告接口。按[定向用户消息接入说明](user-messages.md)配置反向代理与直连上游后，设置 `OPERATIONS_CENTER_USER_MESSAGES_ENABLED=true` 并重启运营中心。无需修改 Sub2API 源码或新增业务数据库权限。
 
 ## 5. 接入 Sub2API 菜单
 

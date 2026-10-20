@@ -109,7 +109,11 @@ server {
 
 在 Sub2API 管理后台的自定义菜单中添加用户可见条目，名称为“用量排行”，URL 填排行服务的 HTTPS 根地址，使用 iframe 页面。主站的自定义页面会自动追加 `token`、`user_id` 等参数，**不要把永久 Token 写在菜单 URL 中**。
 
-页面会立即移除地址中的原始 Token，只通过同源 POST 的 `Authorization: Bearer` 头交换短期内存会话。用户身份以主站 `/api/v1/auth/me` 为准，不相信 URL 的 `user_id` 或 JWT 中自称的身份。后续请求使用 HttpOnly Cookie；跨站 iframe Cookie 被限制时，使用当前标签页的短期 `Session` 令牌兜底。原始主站 Token 不写入浏览器存储，服务端只在会话期限内存于内存，每 60 秒重新验证主站状态。会话固定到期，不滚动延长，且不超过主站 Token 的到期时间。
+页面会立即移除地址中的原始 Token，只通过同源 POST 的 `Authorization: Bearer` 头交换短期内存会话。用户身份以主站 `/api/v1/auth/me` 为准，不相信 URL 的 `user_id` 或 JWT 中自称的身份。后续请求使用 HttpOnly Cookie；跨站 iframe Cookie 被限制时，使用当前标签页的短期 `Session` 令牌兜底。原始主站 Token 不写入浏览器存储，服务端只在会话有效期内存于内存。
+
+会话采用滚动续期：`USAGE_LEADERBOARD_SESSION_MINUTES` 是本地空闲有效窗口，默认 30 分钟，范围仍为 5～120 分钟。请求按原有 60 秒间隔重新验证主站身份，成功后将会话延长至当前时间加空闲窗口，并同步更新普通 Cookie 和安全 iframe 的 Partitioned Cookie；`Session` 令牌保持不变。可解析的主站 JWT `exp` 始终是到期上限，未知到期时间的令牌仍须通过主站验证。页面可见时已有的每分钟榜单刷新即可触发续期，无需增加心跳请求。
+
+长期隐藏、离线或打开规则弹窗时自动刷新暂停，超过窗口后仍须从主站重新打开排行。主站认证失败、账号停用或身份变化会撤销会话；主站暂不可用或超时不会延长会话。服务不接收 Refresh Token，也不刷新主站 Access Token，原 Token 到期后仍需从主站菜单重新进入。主站退出是否立即使旧 Token 失效取决于主站校验，不能把滚动续期视为主站退出的实时通知。完整边界与安全影响见[会话滚动续期说明](docs/session-renewal.md)。
 
 如果主站开启了会话绑定，需要确保两条路径看到一致的真实客户端 IP 和 User-Agent：
 

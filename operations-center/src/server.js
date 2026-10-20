@@ -5,13 +5,17 @@ const { loadConfig, resolveDataDir } = require('./config');
 const { createDatabase } = require('./db');
 const { RuntimeSettingsStore } = require('./runtime-settings-store');
 const { CostLedgerStore } = require('./cost-ledger-store');
+const { UserMessageStore } = require('./user-message-store');
 const { AuthService } = require('./auth');
 const { SchemaInspector } = require('./schema-inspector');
 const { Sub2ApiClient } = require('./sub2api-client');
 const { ProviderMonitorClient } = require('./provider-monitor-client');
+const { LatencyTelemetryStore } = require('./latency-telemetry-store');
+const { LatencyService } = require('./services/latency-service');
 const { MetricsService } = require('./services/metrics-service');
 const { UserProfilesService } = require('./services/user-profiles-service');
 const { CostAnalysisService } = require('./services/cost-analysis-service');
+const { UserMessagesService } = require('./services/user-messages-service');
 const { StorageService } = require('./services/storage-service');
 const { RetentionService } = require('./services/retention-service');
 const { CleanupScheduler } = require('./services/cleanup-scheduler');
@@ -25,8 +29,17 @@ async function main() {
   const database = createDatabase(config);
   const sub2api = new Sub2ApiClient(config);
   const providerMonitor = new ProviderMonitorClient(config);
+  const telemetry = new LatencyTelemetryStore(config);
+  try { telemetry.initialize(); } catch (error) {
+    telemetry.close();
+    telemetry.lastError = error.code || 'TELEMETRY_INITIALIZATION_FAILED';
+    console.warn(`latency telemetry unavailable: ${telemetry.lastError}`);
+  }
   const costStore = new CostLedgerStore(config.dataDir);
   await costStore.initialize();
+  const messageStore = new UserMessageStore(config.dataDir);
+  await messageStore.initialize();
+  const messages = new UserMessagesService({ config, store: messageStore, sub2api });
   const auth = new AuthService(config, {
     onAdminToken: (token, expiresAt) => sub2api.setRuntimeToken(token, expiresAt),
     onAdminTokenCleared: (token) => sub2api.clearRuntimeToken(token)
@@ -34,6 +47,7 @@ async function main() {
   const inspector = new SchemaInspector(database.read);
   const metrics = new MetricsService(database.read, inspector, config);
   const profiles = new UserProfilesService(database.read, inspector, config);
+  const latency = new LatencyService({ pool: database.read, inspector, config, providerMonitor, telemetry });
   const costAnalysis = new CostAnalysisService({
     pool: database.read,
     inspector,
@@ -62,7 +76,7 @@ async function main() {
     sub2api
   });
   const app = createApp({
-    config, database, auth, inspector, metrics, profiles, costAnalysis, storage, retention, scheduler, sub2api, settings
+    config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, messages, storage, retention, scheduler, sub2api, settings
   });
   const server = http.createServer(app);
   server.requestTimeout = 120000;
@@ -86,6 +100,7 @@ async function main() {
     storage.stop();
     auth.close();
     await new Promise((resolve) => server.close(resolve));
+    telemetry.close();
     await database.close();
   };
   process.on('SIGTERM', () => shutdown('SIGTERM').then(() => process.exit(0)));

@@ -1,0 +1,22 @@
+[Unit]
+Description=Sub2API latency resource and proxy collector
+After=network-online.target
+RequiresMountsFor=/www
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/sub2api-latency.env
+ExecStart=/usr/bin/node /opt/sub2api-extra/operations-center/integrations/collector.cjs
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+MemoryMax=96M
+CPUQuota=10%
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,76 @@
+.um-filter { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; }
+.um-search { flex: 1; min-width: min(280px, 100%); }
+.um-filter > label:not(.um-search) { min-width: 130px; }
+#um-new { margin-left: auto; }
+.um-history { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--surface); }
+.um-history table { min-width: 920px; }
+.um-history td:first-child { max-width: 300px; overflow-wrap: anywhere; }
+.um-history td:nth-child(2) { max-width: 260px; overflow-wrap: anywhere; }
+.um-history strong { display: block; font-size: 13px; }
+.um-history small { display: block; margin-top: 5px; color: var(--muted); }
+.um-page-actions, .um-footer-actions { display: flex; gap: 8px; }
+.um-dialog { width: min(1040px, calc(100% - 32px)); max-height: calc(100dvh - 48px); margin: auto; padding: 0; border: 1px solid var(--line); border-radius: 8px; color: var(--text); background: var(--surface); box-shadow: 0 16px 64px #0003; }
+.um-dialog::backdrop { background: #18211ccc; }
+.um-dialog-heading { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.um-dialog-heading h2 { margin: 0; font-size: 17px; }
+.um-compose { display: grid; grid-template-columns: 260px minmax(0, 1fr); }
+.um-options { display: flex; flex-direction: column; align-items: stretch; gap: 16px; padding: 20px; border-right: 1px solid var(--line); background: var(--surface-subtle); }
+.um-options > *, .um-writing > *, .um-selected-recipient > * { min-width: 0; }
+.um-options input { min-width: 0; }
+.um-muted { font-size: 12px; line-height: 1.6; color: var(--muted); }
+.um-recipients { display: grid; gap: 0; max-height: 220px; overflow-y: auto; }
+.um-recipients:empty { display: none; }
+.um-user-result { width: 100%; padding: 10px 6px; border: 0; border-bottom: 1px solid var(--line); text-align: left; color: var(--text); background: transparent; overflow-wrap: anywhere; }
+.um-user-result:hover, .um-user-result:focus-visible { background: var(--green-soft); }
+.um-user-result strong, .um-user-result span { display: block; }
+.um-user-result span { margin-top: 4px; font-size: 12px; color: var(--muted); }
+.um-selected-recipient { padding: 10px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.um-selected-recipient strong, .um-selected-recipient span { display: block; margin-bottom: 5px; }
+.um-selected-recipient span { font-size: 12px; color: var(--muted); }
+.um-selected-recipient .icon-button { margin-top: 8px; }
+.um-writing { display: flex; flex-direction: column; padding: 20px; min-width: 0; }
+.um-editor-heading { display: flex; align-items: center; justify-content: space-between; margin-top: 20px; gap: 8px; font-size: 13px; font-weight: 600; }
+.um-modes { display: flex; background: var(--surface-subtle); border: 1px solid var(--line); border-radius: 5px; padding: 3px; }
+.um-modes button { padding: 5px 12px; border: 0; border-radius: 3px; color: var(--muted); background: transparent; }
+.um-modes button[aria-pressed="true"] { background: var(--surface); color: var(--green); box-shadow: var(--shadow); }
+.um-toolbar { display: flex; gap: 4px; flex-wrap: wrap; padding: 8px 0; }
+.um-toolbar .icon-button { width: 30px; height: 30px; border-color: transparent; }
+#um-content { flex: 1; width: 100%; min-height: 300px; resize: vertical; padding: 12px; border: 1px solid var(--line-strong); border-radius: 5px; font: 13px/1.7 ui-monospace, Consolas, monospace; color: var(--text); background: var(--surface); letter-spacing: 0; }
+#um-content:focus { outline: 2px solid var(--green); outline-offset: 1px; }
+#um-preview { flex: 1; min-height: 300px; margin-top: 8px; padding: 12px; border-top: 1px solid var(--line); }
+.um-markdown { color: var(--text); line-height: 1.75; overflow-wrap: anywhere; min-width: 0; }
+.um-markdown > :first-child { margin-top: 0; }
+.um-markdown h1 { font-size: 24px; }
+.um-markdown h2 { font-size: 20px; }
+.um-markdown h3 { font-size: 17px; }
+.um-markdown pre { overflow-x: auto; padding: 12px; background: var(--surface-subtle); border-radius: 4px; }
+.um-markdown code { font: 13px/1.6 ui-monospace, Consolas, monospace; }
+.um-markdown blockquote { margin-left: 0; padding-left: 16px; border-left: 3px solid var(--line-strong); color: var(--muted); }
+.um-markdown img { max-width: 100%; height: auto; }
+.um-markdown table { display: block; max-width: 100%; overflow: auto; }
+.um-markdown a { color: var(--blue); }
+.um-dialog-footer { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex-wrap: wrap; padding: 14px 20px; border-top: 1px solid var(--line); background: var(--surface); }
+.um-dialog-footer .form-error { flex-basis: 100%; }
+#um-save-status { margin-right: auto; }
+.um-confirm { width: min(680px, calc(100% - 32px)); }
+.um-confirm-body { padding: 20px; }
+.um-confirm-body > p:first-child { margin-top: 0; color: var(--muted); overflow-wrap: anywhere; }
+.um-confirm-body h3 { font-size: 18px; overflow-wrap: anywhere; }
+.um-confirm-body .um-markdown { max-height: 45dvh; overflow: auto; border-top: 1px solid var(--line); padding-top: 16px; }
+.um-markdown:empty { display: none; }
+@media (max-width: 720px) {
+  .um-dialog { max-height: calc(100dvh - 16px); width: calc(100% - 16px); }
+  .um-compose { grid-template-columns: minmax(0, 1fr); }
+  .um-options { border-right: 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 16px; gap: 12px; }
+  .um-options > :nth-child(-n+5), .um-options > .um-muted { grid-column: 1 / -1; }
+  .um-options > .check-row { margin-top: 2px; }
+  .um-writing { padding: 16px; }
+  .um-dialog-heading, .um-dialog-footer { padding: 12px 16px; }
+  .um-footer-actions { width: 100%; }
+  .um-footer-actions > button { flex: 1; padding-inline: 8px; }
+  .um-filter { gap: 8px; }
+  #um-new { margin-left: 0; }
+}
+@media (max-width: 480px) {
+  .um-options { grid-template-columns: minmax(0, 1fr); }
+}

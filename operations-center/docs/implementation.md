@@ -221,3 +221,11 @@ operations-center/
 - 不宣称退款估算是支付渠道结算结果。
 
 这些边界避免扩展服务成为第二个业务数据库或高权限宿主机代理。详细删除影响见[清理范围报告](cleanup-scope-report.md)。
+
+## 11. 慢请求诊断扩展
+
+慢请求页读取现有 PostgreSQL 的 `usage_logs` 与可用的 `ops_error_logs`，不复制这些业务记录。`LatencyService` 在只读快照内计算分位数、分组和分页；`ProviderMonitorClient` 通过固定只读路径取得映射账号的上游样本。请求 ID、指纹候选、歧义与缺失状态分别保留。
+
+可选的 `LatencyTelemetryStore` 使用独立 SQLite 保存白名单阶段事件、资源样本和 Nginx 摘要；它属于可淘汰诊断数据，不是业务账本。默认最多 5 GiB，另有记录数、事件数、保留时间、低空间和挂载检查。普通完成轨迹保留 7 天，慢/错误/取消轨迹和资源保留 30 天，均可能因容量提前淘汰。服务端导入不包含任意 SQL、日志正文、提示词或头部透传。
+
+应用导出器、Nginx 和 Linux 资源采集代码位于 `integrations/`。它们不在服务启动时自动安装或修改生产 Sub2API。源码接入工具在写入前校验锚点及目标文件是否干净，参考版本为 `d2e319b2a17006122cd2d53d828c44a0bf21bd9b`。详见[部署与验收说明](slow-requests.md)。

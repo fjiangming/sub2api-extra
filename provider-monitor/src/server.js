@@ -35,6 +35,7 @@ const { BackupService } = require('./services/backup-service');
 const { RetentionService } = require('./services/retention-service');
 const { SimulationService } = require('./services/simulation-service');
 const { AccountMonitorService } = require('./services/account-monitor-service');
+const { LatencySamplesService } = require('./services/latency-samples-service');
 const { KeyProbeService } = require('./services/key-probe-service');
 const { KeyTtftAlertService } = require('./services/key-ttft-alert-service');
 const { GrossProfitService } = require('./services/gross-profit-service');
@@ -687,6 +688,7 @@ function createApplication(options = {}) {
     adminApiKeyStatus.capabilities?.accountKeyExport === true ? 'verified' : null
   );
   const accountMonitor = new AccountMonitorService({ db, config, sub2api, http });
+  const latencySamples = new LatencySamplesService(db);
   const keyProbes = new KeyProbeService({ db, config, sub2api, http });
   const keyTtftAlerts = new KeyTtftAlertService({ db, notifications });
   const grossProfit = new GrossProfitService({ db, config });
@@ -1029,6 +1031,14 @@ function createApplication(options = {}) {
         currency: provider.threshold_currency || 'USD'
       }))
     });
+  });
+  app.get('/api/integrations/latency-samples', (req, res, next) => {
+    if (!secureTokenEqual(bearerToken(req), config.integrationToken)) {
+      return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
+    }
+    try {
+      res.set('Cache-Control', 'no-store').json(latencySamples.query(req.query));
+    } catch (error) { next(error); }
   });
   app.get('/metrics', asyncRoute(async (_req, res) => {
     if (!config.metricsEnabled) return res.status(404).end();
@@ -2110,6 +2120,7 @@ function createApplication(options = {}) {
     res.setHeader('Cache-Control', 'no-store');
     res.json(result);
   }));
+  api.get('/latency-samples', (req, res) => res.json(latencySamples.query(req.query)));
   api.get('/sub2api/comparisons', asyncRoute(async (req, res) => res.json(await mappings.comparisons({
     connectionId: req.query.connectionId || null
   }))));

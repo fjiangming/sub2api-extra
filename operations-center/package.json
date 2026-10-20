@@ -7,18 +7,22 @@
   "scripts": {
     "start": "node --env-file=.env src/server.js",
     "dev": "node --env-file=.env --watch src/server.js",
+    "preview:latency": "node scripts/latency-preview.cjs",
     "test": "node --test --test-concurrency=1 tests/*.test.js",
-    "check": "node --check src/server.js && node --check src/services/user-profiles-service.js && node --check public/user-profiles-ui.js && node --check public/cost-analysis-ui.js && node --check public/app.js"
+    "check": "node --check src/server.js && node --check src/user-message-store.js && node --check src/services/user-messages-service.js && node --check src/services/user-profiles-service.js && node --check src/latency-telemetry-store.js && node --check src/services/latency-service.js && node --check integrations/collector.cjs && node --check integrations/sub2api/install.cjs && node --check scripts/latency-preview.cjs && node --check public/latency-ui.js && node --check public/user-messages-ui.js && node --check public/user-profiles-ui.js && node --check public/cost-analysis-ui.js && node --check public/app.js"
   },
   "engines": {
     "node": ">=20.18.1"
   },
   "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "dompurify": "^3.4.17",
     "echarts": "^6.0.0",
     "express": "^5.1.0",
     "express-rate-limit": "^8.1.0",
     "helmet": "^8.1.0",
     "lucide": "^0.544.0",
+    "marked": "^18.1.1",
     "node-cron": "^4.6.0",
     "pg": "^8.16.3",
     "zod": "^4.1.11"

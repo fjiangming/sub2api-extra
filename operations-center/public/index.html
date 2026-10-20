@@ -7,11 +7,16 @@
   <title>Sub2API 运营中心</title>
   <link rel="stylesheet" href="/styles.css?v=20260930-2">
   <link rel="stylesheet" href="/user-profiles.css?v=20261013-1">
+  <link rel="stylesheet" href="/user-messages.css?v=20261019-1">
+  <link rel="stylesheet" href="/latency.css?v=20261020-1">
   <script src="/vendor/echarts.js" defer></script>
   <script src="/vendor/lucide.js" defer></script>
   <script src="/cost-analysis-ui.js?v=20260929-3" defer></script>
   <script src="/user-profiles-ui.js?v=20261013-1" defer></script>
-  <script src="/app.js?v=20261014-2" defer></script>
+  <script src="/vendor/dompurify.js" defer></script>
+  <script src="/user-messages-ui.js?v=20261019-1" defer></script>
+  <script src="/latency-ui.js?v=20261020-1" defer></script>
+  <script src="/app.js?v=20261019-1" defer></script>
 </head>
 <body>
   <div id="login-view" class="login-view" hidden>
@@ -39,8 +44,10 @@
       <nav id="main-nav" class="module-tabs" aria-label="模块导航" role="tablist">
         <button class="module-tab active" data-view="overview" role="tab" aria-selected="true" aria-controls="content" tabindex="0"><i data-lucide="layout-dashboard"></i><span>运营概览</span></button>
         <button class="module-tab" data-view="usage" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="activity"></i><span>用量分析</span></button>
+        <button class="module-tab" data-view="latency" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="timer"></i><span>慢请求</span></button>
         <button class="module-tab" data-view="users" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="users"></i><span>用户分析</span></button>
         <button class="module-tab" data-view="profiles" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="contact-round"></i><span>用户画像</span></button>
+        <button class="module-tab" data-view="messages" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="mail"></i><span>用户消息</span></button>
         <button class="module-tab" data-view="finance" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="landmark"></i><span>收款与入账</span></button>
         <button class="module-tab" data-view="costs" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="chart-spline"></i><span>成本分析</span></button>
         <button class="module-tab" data-view="storage" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="database"></i><span>存储容量</span></button>
@@ -96,6 +103,57 @@
           <div id="usage-metrics" class="metric-grid"></div>
           <section class="panel chart-panel"><div class="panel-heading"><div><h2>用量趋势</h2><p id="usage-zone"></p></div></div><div id="usage-chart" class="chart"></div></section>
           <section class="panel"><div class="panel-heading"><div><h2>维度分布</h2><p>仅显示仍在线的请求明细 · 全部指标不含 ID 1</p></div></div><div class="table-wrap"><table><thead><tr><th>维度</th><th>请求</th><th>输入 Token</th><th>输出 Token</th><th>总 Token</th><th>用户消费</th><th>平均耗时</th></tr></thead><tbody id="usage-dimensions"></tbody></table></div></section>
+        </section>
+
+        <section id="view-latency" class="view" aria-labelledby="page-title">
+          <div class="lt-toolbar">
+            <div id="lt-modes" class="lt-segments" role="group" aria-label="监测视图">
+              <button type="button" data-mode="requests" aria-pressed="true">请求记录</button>
+              <button type="button" data-mode="live" aria-pressed="false">实时阶段</button>
+              <button type="button" data-mode="resources" aria-pressed="false">资源历史</button>
+            </div>
+            <label class="lt-check"><input id="lt-auto" type="checkbox">自动刷新</label>
+          </div>
+          <div id="lt-notices" class="alert-stack" aria-live="polite"></div>
+          <p id="lt-status" class="lt-status" role="status" hidden></p>
+          <div id="lt-requests">
+            <form id="lt-filter" class="lt-filter">
+              <label>开始日期<input name="start" type="date" required></label>
+              <label>结束日期<input name="end" type="date" required></label>
+              <label>账号 ID<input name="accountId" inputmode="numeric" placeholder="全部账号"></label>
+              <label>用户 ID<input name="userId" inputmode="numeric" placeholder="全部用户"></label>
+              <label>模型<input name="model" maxlength="120" placeholder="模型名称"></label>
+              <label>请求 ID<input name="requestId" maxlength="128" placeholder="本地或上游 ID"></label>
+              <label>推理档位<select name="effort"><option value="all">全部档位</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option><option value="unknown">未记录</option></select></label>
+              <label>记录范围<select name="kind"><option value="slow">慢请求</option><option value="all">全部记录</option><option value="error">错误记录</option></select></label>
+              <label>排序<select name="sort"><option value="time">最近发生</option><option value="ttft">首输出最慢</option><option value="duration">总耗时最长</option></select></label>
+              <label>普通首输出阈值 / 秒<input name="firstTokenSeconds" type="number" min="1" max="3600" value="60" required></label>
+              <label>高推理首输出阈值 / 秒<input name="highEffortSeconds" type="number" min="1" max="7200" value="180" required></label>
+              <label>总耗时阈值 / 秒<input name="durationSeconds" type="number" min="1" max="14400" value="300" required></label>
+              <div class="lt-filter-actions"><button class="button primary" type="submit"><i data-lucide="search"></i><span>查询</span></button><button id="lt-export" class="icon-button" type="button" title="导出本页记录" aria-label="导出本页记录"><i data-lucide="download"></i></button></div>
+            </form>
+            <div id="lt-data" hidden>
+              <div id="lt-metrics" class="lt-metrics"></div>
+              <section class="lt-section"><header><h2>请求记录</h2><span id="lt-count"></span></header>
+                <div class="table-wrap"><table class="lt-table"><thead><tr><th>时间 / 请求 ID</th><th>账号 / 用户</th><th>模型 / 档位</th><th>记录类型</th><th class="numeric">首输出</th><th class="numeric">总耗时</th><th></th></tr></thead><tbody id="lt-rows"></tbody></table></div>
+                <div class="lt-pagination"><span id="lt-page"></span><button id="lt-previous" type="button" class="icon-button" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><button id="lt-next" type="button" class="icon-button" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div>
+              </section>
+              <div class="lt-analysis"><section class="lt-section"><header><h2>每日记录分布</h2></header><div id="lt-trend" class="lt-chart" role="img" aria-label="每日慢记录与错误记录趋势"></div></section>
+                <section class="lt-section"><header><h2>慢记录集中分布</h2><span>账号 · 模型 · 档位</span></header><div class="table-wrap"><table><thead><tr><th>账号 / 模型</th><th>档位</th><th class="numeric">慢 / 全部</th><th class="numeric">首输出 P95</th></tr></thead><tbody id="lt-groups"></tbody></table></div></section></div>
+              <details class="lt-definitions"><summary>数据范围与统计口径</summary><ul id="lt-definitions"></ul></details>
+            </div>
+          </div>
+          <div id="lt-live" hidden><div id="lt-collection" class="lt-collection"></div><div class="table-wrap"><table><thead><tr><th>请求 ID / 主机</th><th>账号 / 模型</th><th>状态</th><th>最近阶段</th><th class="numeric">已历时</th><th></th></tr></thead><tbody id="lt-live-rows"></tbody></table></div></div>
+          <div id="lt-resources" hidden>
+            <form id="lt-resource-filter" class="lt-toolbar"><label>主机<input name="host" maxlength="128" placeholder="全部主机"></label><label>最近时段<select name="hours"><option value="1">1 小时</option><option value="6">6 小时</option><option value="24">24 小时</option></select></label><button class="button" type="submit"><i data-lucide="search"></i><span>查询</span></button></form>
+            <p id="lt-resource-meta" class="lt-status"></p>
+            <div class="lt-analysis"><section class="lt-section"><header><h2>CPU 与宿主机争用</h2></header><div id="lt-cpu" class="lt-chart" role="img" aria-label="CPU 使用率与 steal"></div></section><section class="lt-section"><header><h2>网络与重传</h2></header><div id="lt-network" class="lt-chart" role="img" aria-label="网卡流量与 TCP 重传"></div></section></div>
+            <div class="table-wrap"><table><thead><tr><th>采样时间 / 主机</th><th class="numeric">可用内存</th><th class="numeric">Swap 已用</th><th class="numeric">磁盘可用</th><th class="numeric">磁盘读 / 写</th><th class="numeric">收 / 发</th><th class="numeric">重传 / 秒</th></tr></thead><tbody id="lt-resource-rows"></tbody></table></div>
+          </div>
+          <dialog id="lt-detail" class="lt-dialog" aria-labelledby="lt-detail-title">
+            <header class="lt-dialog-heading"><div><h2 id="lt-detail-title">请求诊断</h2><p id="lt-detail-id"></p></div><div class="lt-toolbar"><button id="lt-detail-export" class="icon-button" type="button" title="导出诊断 JSON" aria-label="导出诊断 JSON"><i data-lucide="download"></i></button><button id="lt-detail-close" class="icon-button" type="button" title="关闭详情" aria-label="关闭详情"><i data-lucide="x"></i></button></div></header>
+            <div id="lt-detail-body"></div>
+          </dialog>
         </section>
 
         <section id="view-users" class="view" aria-labelledby="page-title">
@@ -421,6 +479,27 @@
           <section class="panel"><div class="panel-heading"><div><h2>Schema 能力</h2><p id="schema-checked-at"></p></div></div><div class="table-wrap"><table><thead><tr><th>对象</th><th>状态</th><th>分区</th><th>字段数</th></tr></thead><tbody id="schema-capabilities"></tbody></table></div></section>
         </section>
 
+        <section id="view-messages" class="view" aria-labelledby="page-title">
+          <div id="um-delivery-notice" class="alert warning" role="status" hidden>消息投递尚未启用，当前可以保存草稿。</div>
+          <form id="um-filter" class="um-filter">
+            <label class="um-search">搜索消息<input name="search" type="search" maxlength="200" placeholder="标题、收件人邮箱、用户名或 ID"></label>
+            <label>状态<select name="status"><option value="all">全部状态</option><option value="draft">草稿</option><option value="active">已发布</option><option value="archived">已撤回</option></select></label>
+            <button class="button secondary" type="submit"><i data-lucide="search"></i><span>查询</span></button>
+            <button id="um-new" class="button primary" type="button"><i data-lucide="plus"></i><span>新建消息</span></button>
+          </form>
+          <div id="um-error" class="form-error" role="alert" hidden></div>
+          <div class="um-history table-wrap">
+            <table><thead><tr><th>消息</th><th>收件人</th><th>状态</th><th>通知方式</th><th>阅读状态</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="um-list"></tbody></table>
+          </div>
+          <div class="pagination-bar">
+            <span id="um-pagination" aria-live="polite"></span>
+            <div class="um-page-actions">
+              <button id="um-prev" class="icon-button" type="button" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button>
+              <button id="um-next" class="icon-button" type="button" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button>
+            </div>
+          </div>
+        </section>
+
         <section id="view-settings" class="view" aria-labelledby="page-title">
           <div id="settings-alerts" class="alert-stack"></div>
           <div id="settings-metrics" class="metric-grid compact"></div>
@@ -516,6 +595,49 @@
       </main>
     </div>
   </div>
+
+  <dialog id="um-editor" class="um-dialog" aria-labelledby="um-editor-title">
+    <header class="um-dialog-heading"><h2 id="um-editor-title">新建消息</h2><button id="um-editor-close" class="icon-button" type="button" title="关闭编辑" aria-label="关闭编辑"><i data-lucide="x"></i></button></header>
+    <form id="um-form" autocomplete="off">
+      <div class="um-compose">
+        <aside class="um-options">
+          <label>收件人<input id="um-recipient-search" type="search" maxlength="200" placeholder="邮箱、用户名或用户 ID" aria-controls="um-recipients" autocomplete="off"></label>
+          <div id="um-recipient-status" class="um-muted" role="status"></div>
+          <div id="um-recipients" class="um-recipients" aria-label="匹配用户"></div>
+          <div id="um-recipient" class="um-selected-recipient" hidden></div>
+          <label class="check-row"><input name="popup" type="checkbox"><span>强制弹窗</span></label>
+          <label>开始时间<input name="startsAt" type="datetime-local" step="60"></label>
+          <label>结束时间<input name="endsAt" type="datetime-local" step="60"></label>
+          <span class="um-muted">留空为立即生效 / 永不过期</span>
+        </aside>
+        <div class="um-writing">
+          <label>消息标题<input name="title" maxlength="200" required></label>
+          <div class="um-editor-heading"><span>消息正文</span><div id="um-modes" class="um-modes" role="group" aria-label="正文视图"><button type="button" data-mode="edit" aria-pressed="true">编辑</button><button type="button" data-mode="preview" aria-pressed="false">预览</button></div></div>
+          <div id="um-toolbar" class="um-toolbar" role="toolbar" aria-label="Markdown 格式">
+            <button class="icon-button" type="button" data-format="bold" title="加粗" aria-label="加粗"><i data-lucide="bold"></i></button>
+            <button class="icon-button" type="button" data-format="italic" title="斜体" aria-label="斜体"><i data-lucide="italic"></i></button>
+            <button class="icon-button" type="button" data-format="heading" title="标题" aria-label="标题"><i data-lucide="heading-2"></i></button>
+            <button class="icon-button" type="button" data-format="list" title="列表" aria-label="列表"><i data-lucide="list"></i></button>
+            <button class="icon-button" type="button" data-format="quote" title="引用" aria-label="引用"><i data-lucide="quote"></i></button>
+            <button class="icon-button" type="button" data-format="link" title="链接" aria-label="链接"><i data-lucide="link"></i></button>
+            <button class="icon-button" type="button" data-format="code" title="代码块" aria-label="代码块"><i data-lucide="code"></i></button>
+          </div>
+          <textarea id="um-content" name="content" maxlength="16000" aria-label="消息正文"></textarea>
+          <div id="um-preview" class="um-markdown" hidden></div>
+        </div>
+      </div>
+      <footer class="um-dialog-footer">
+        <p id="um-form-error" class="form-error" role="alert" hidden></p>
+        <span id="um-save-status" class="um-muted" role="status"></span>
+        <div class="um-footer-actions"><button id="um-save" class="button secondary" type="submit" value="draft"><i data-lucide="save"></i><span>保存草稿</span></button><button id="um-send" class="button primary" type="submit" value="active"><i data-lucide="send"></i><span>发送消息</span></button></div>
+      </footer>
+    </form>
+  </dialog>
+  <dialog id="um-confirm" class="um-dialog um-confirm" aria-labelledby="um-confirm-title">
+    <header class="um-dialog-heading"><h2 id="um-confirm-title">确认发送</h2><button id="um-confirm-close" class="icon-button" type="button" title="关闭确认" aria-label="关闭确认"><i data-lucide="x"></i></button></header>
+    <div class="um-confirm-body"><p id="um-confirm-description"></p><h3 id="um-confirm-subject"></h3><div id="um-confirm-content" class="um-markdown"></div><p id="um-confirm-error" class="form-error" role="alert" hidden></p></div>
+    <footer class="um-dialog-footer"><button id="um-confirm-cancel" class="button secondary" type="button">取消</button><button id="um-confirm-submit" class="button primary" type="button"><i data-lucide="send"></i><span>确认发送</span></button></footer>
+  </dialog>
 
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
 </body>

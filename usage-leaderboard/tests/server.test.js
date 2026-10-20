@@ -114,6 +114,64 @@ test('HTTP authenticates ordinary users, isolates personal data, rejects forged 
   assert.equal((await fetch(`${base}/api/auth/me`, { headers: user2 })).status, 401);
 });
 
+test('HTTP polling renews cookies and Session-header access beyond the initial deadline without changing personal data', async (t) => {
+  const db = await memoryDatabase();
+  await insertUsers(db, [{ id: 2, email: 'reader@gmail.com' }]);
+  await insertLogs(db, [{ user_id: 2, created_at: '2026-10-12T18:00Z', input_tokens: 10 }]);
+  const dependencies = service(db, { sessionTtlMs: 300000 });
+  let clock = Date.parse('2026-10-13T03:30:00Z');
+  const upstreamToken = `header.${Buffer.from(JSON.stringify({ exp: clock / 1000 + 3600 })).toString('base64url')}.unsigned`;
+  let verifications = 0;
+  const auth = new AuthService(dependencies.config, { async me(value) {
+    assert.equal(value, upstreamToken);
+    verifications++;
+    return { id: '2', email: 'reader@gmail.com', role: 'user' };
+  } }, { now: () => clock });
+  const app = createApp({ ...dependencies, auth, database: db });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(async () => {
+    await new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); });
+    auth.close(); await db.close();
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const loginResponse = await fetch(`${base}/api/auth/sso`, { method: 'POST', headers: { authorization: `Bearer ${upstreamToken}` } });
+  assert.equal(loginResponse.status, 200);
+  const login = await loginResponse.json();
+  let cookie = loginResponse.headers.getSetCookie()[0].split(';')[0];
+  const originalDeadline = Date.parse(login.expiresAt);
+  const sessionHeaders = { authorization: `Session ${login.sessionToken}` };
+  for (let minute = 1; minute <= 6; minute++) {
+    clock += 61000;
+    const headers = minute % 2 ? { cookie } : sessionHeaders;
+    const boardResponse = await fetch(`${base}/api/leaderboard`, { headers });
+    assert.equal(boardResponse.status, 200);
+    assert.equal(boardResponse.headers.get('cache-control'), 'no-store');
+    const renewedCookie = boardResponse.headers.getSetCookie()[0];
+    assert.match(renewedCookie, /HttpOnly; SameSite=Lax; Max-Age=300$/);
+    cookie = renewedCookie.split(';')[0];
+    const board = await boardResponse.json();
+    assert.equal(board.me.tokens, 10);
+    assert.equal(board.me.key, login.user.key);
+    const profileResponse = await fetch(`${base}/api/auth/me`, { headers });
+    assert.equal(profileResponse.status, 200);
+    const profile = await profileResponse.json();
+    assert.equal(profile.sessionToken, login.sessionToken);
+    assert.equal(Date.parse(profile.expiresAt), clock + dependencies.config.sessionTtlMs);
+    assert.ok(!JSON.stringify(profile).includes(upstreamToken));
+  }
+  assert.ok(clock > originalDeadline);
+  assert.equal(verifications, 7);
+  const logout = await fetch(`${base}/api/auth/logout`, { method: 'POST', headers: { cookie } });
+  assert.equal(logout.status, 200);
+  assert.match(logout.headers.getSetCookie()[0], /Max-Age=0$/);
+  for (const headers of [{ cookie }, sessionHeaders]) {
+    const rejected = await fetch(`${base}/api/leaderboard`, { headers });
+    assert.equal(rejected.status, 401);
+    assert.equal(rejected.headers.getSetCookie().length, 0);
+  }
+});
+
 test('missing database reports readiness failure and public errors omit internal credentials', async (t) => {
   const { createRuntime } = require('../src/server');
   const { loadConfig } = require('../src/config');

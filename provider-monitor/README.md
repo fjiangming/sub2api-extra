@@ -526,7 +526,7 @@ HTTPS iframe 会同时设置普通 Cookie 和分区 Cookie，并在 URL Fragment
 
 如果 `SUB2API_BASE_URL` 使用 `host.docker.internal` 或内网域名，必须单独配置浏览器可访问的 `SUB2API_PUBLIC_URL`。需要允许其他前端来源时，在"设置与备份 -> 系统参数"中维护准确的浏览器 Origin。
 
-运营中心的成本分析只需要供应商 ID、名称、适配器、启停状态和币种。两个服务都使用 Sub2API SSO 时可复用当前管理员会话；Provider Monitor 使用本地认证时，应在两个服务中配置相同的 `PROVIDER_MONITOR_INTEGRATION_TOKEN`。该 Token 至少 32 个字符，并且只授权 `GET /api/integrations/providers` 脱敏列表接口。
+运营中心的成本分析需要供应商 ID、名称、适配器、启停状态和币种；慢请求页还会读取已同步的上游请求耗时和用量。两个服务都使用 Sub2API SSO 时可复用当前管理员会话；Provider Monitor 使用本地认证时，应在两个服务中配置相同的 `PROVIDER_MONITOR_INTEGRATION_TOKEN`。该 Token 至少 32 个字符，只授权 `GET /api/integrations/providers` 和 `GET /api/integrations/latency-samples` 两个只读接口。后者必须提供账号 ID 和最长 48 小时的时间窗口，只返回已映射上游 Key 的脱敏请求样本及同步覆盖，不返回凭据或请求正文，也不会发起模型探测。
 
 ### 运营中心供应商同步
 

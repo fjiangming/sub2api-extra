@@ -1,0 +1,14 @@
+# Place map/log_format in http {}, access_log in the gateway server {}.
+map $upstream_http_x_request_id $oc_request_id {
+    "" $request_id;
+    default $upstream_http_x_request_id;
+}
+log_format operations_latency escape=json
+    '{"at":"$time_iso8601","request_id":"$oc_request_id",'
+    '"cf_ray":"$http_cf_ray","status":"$status",'
+    '"request_bytes":"$request_length","sent_bytes":"$bytes_sent",'
+    '"request_time":"$request_time","upstream_connect_time":"$upstream_connect_time",'
+    '"upstream_header_time":"$upstream_header_time","upstream_response_time":"$upstream_response_time"}';
+
+# access_log /www/api-observability/nginx/latency.jsonl operations_latency buffer=64k flush=1s;
+# Nginx's upstream here is Sub2API, not the model provider. Rotate and cap this log.

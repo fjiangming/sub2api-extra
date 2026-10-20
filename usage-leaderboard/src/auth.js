@@ -72,11 +72,15 @@ class AuthService {
       verifiedAt: this.now(), verification: null
     };
     this.sessions.set(session.id, session);
-    const age = Math.max(1, Math.floor((expiresAt - this.now()) / 1000));
+    this.setSessionCookies(res, session);
+    return this.publicSession(session);
+  }
+
+  setSessionCookies(res, session) {
+    const age = Math.max(1, Math.floor((session.expiresAt - this.now()) / 1000));
     const cookie = `${this.cookieName}=${session.id}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${age}${this.config.cookieSecure ? '; Secure' : ''}`;
     res.setHeader('Set-Cookie', this.config.cookieSecure ? [cookie,
       `${this.cookieName}_partitioned=${session.id}; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=${age}`] : cookie);
-    return this.publicSession(session);
   }
 
   publicSession(session) {
@@ -84,23 +88,35 @@ class AuthService {
       sessionToken: session.id, expiresAt: new Date(session.expiresAt).toISOString() };
   }
 
+  requireActive(session, now = this.now()) {
+    if (this.sessions.get(session.id) !== session || session.expiresAt <= now) {
+      if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
+      throw new AppError('AUTH_REQUIRED', '登录状态已过期', 401);
+    }
+  }
+
   async refresh(session, context) {
+    this.requireActive(session);
     if (!session.verification) {
       session.verification = this.verify(session.token, context).then((user) => {
+        const now = this.now();
+        // A completed upstream call must not revive an expired or revoked session.
+        this.requireActive(session, now);
         if (user.id !== session.user.id) throw new AppError('AUTH_REQUIRED', '登录身份已变化', 401);
         session.user = user;
-        session.verifiedAt = this.now();
+        session.verifiedAt = now;
+        session.expiresAt = Math.min(now + this.config.sessionTtlMs, tokenExpiry(session.token, now + this.config.sessionTtlMs));
       }).catch((error) => {
         if ([401, 403].includes(error.status)) this.sessions.delete(session.id);
         throw error;
       }).finally(() => { session.verification = null; });
     }
     await session.verification;
-    if (session.expiresAt <= this.now() || !this.sessions.has(session.id)) throw new AppError('AUTH_REQUIRED', '登录状态已过期', 401);
+    this.requireActive(session);
   }
 
   adminMiddleware() {
-    return async (req, _res, next) => {
+    return async (req, res, next) => {
       try {
         await this.refresh(req.auth, requestContext(req));
         if (req.auth.user.role !== 'admin') throw new AppError('ADMIN_REQUIRED', '只有主站管理员可以访问排行设置', 403);
@@ -113,13 +129,14 @@ class AuthService {
           const expected = Buffer.from(req.auth.csrfToken);
           if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) throw new AppError('CSRF_INVALID', '页面状态已失效，请重新加载设置', 403);
         }
+        this.setSessionCookies(res, req.auth);
         next();
       } catch (error) { next(error); }
     };
   }
 
   middleware() {
-    return async (req, _res, next) => {
+    return async (req, res, next) => {
       try {
         const id = this.sessionId(req);
         const session = id && this.sessions.get(id);
@@ -130,8 +147,9 @@ class AuthService {
         if (session.context.userAgent !== requestContext(req).userAgent) throw new AppError('AUTH_REQUIRED', '登录环境已变化，请重新从主站打开排行', 401);
         if (this.now() - session.verifiedAt >= 60000) {
           await this.refresh(session, requestContext(req));
+          this.setSessionCookies(res, session);
         }
-        if (session.expiresAt <= this.now() || !this.sessions.has(id)) throw new AppError('AUTH_REQUIRED', '登录状态已过期', 401);
+        this.requireActive(session);
         req.auth = session;
         next();
       } catch (error) { next(error); }
