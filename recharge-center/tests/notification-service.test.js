@@ -46,7 +46,7 @@ test('notification events are rebuilt from a strict redacted field allowlist', (
   const safe = sanitizeEvent(event);
   assert.deepEqual(Object.keys(safe), [
     'eventId', 'anomalyCode', 'orderNo', 'userId', 'userEmail',
-    'amount', 'tradeLast6', 'memoLast6', 'occurredAt'
+    'amount', 'tradeLast6', 'memoLast6', 'occurredAt', 'payment', 'nearbyOrders'
   ]);
   assert.equal(safe.userId, '42');
   assert.equal(safe.userEmail, event.userEmail);
@@ -78,6 +78,77 @@ test('unattributed anomalies explicitly request review instead of guessing an ac
   const { userId, userEmail, ...legacyEvent } = event;
   assert.equal(sanitizeEvent(legacyEvent).userId, null);
   assert.match(emailText(sanitizeEvent({ ...event, userEmail: null })), /未记录完整邮箱，请按用户 ID 查找/);
+});
+
+function nearbyOrder(overrides = {}) {
+  return {
+    orderNo: 'RC202610030001', userId: '42', userEmail: 'alice@example.test',
+    requestedAmount: '10.00', payableAmount: '10.18', status: 'awaiting_payment',
+    createdAt: '2026-10-03T00:00:00.000Z', expiresAt: '2026-10-03T00:03:00.000Z',
+    ...overrides
+  };
+}
+
+function nearbyContext(overrides = {}) {
+  return {
+    from: '2026-10-02T23:58:00.000Z', until: '2026-10-03T00:04:00.000Z',
+    total: 1, totalUsers: 1, orders: [nearbyOrder()], ...overrides
+  };
+}
+
+test('unattributed alerts display nearby full accounts as candidates and preserve the signed bill evidence', async () => {
+  const messages = [];
+  const webhooks = [];
+  const service = new NotificationService(config({
+    alertChannels: ['email', 'webhook'], alertWebhookUrl: 'https://alerts.example.test/recharge'
+  }), {
+    transport: { async sendMail(message) { messages.push(message); } },
+    fetch: async (_url, options) => { webhooks.push(JSON.parse(options.body)); return new Response('ok'); }
+  });
+  const input = {
+    ...event, orderNo: null, userId: null, userEmail: null,
+    payment: { amount: '-10.18', direction: 'expense', paidAt: '2026-10-03T00:01:00.000Z',
+      tradeNo: event.tradeNo },
+    nearbyOrders: nearbyContext({ total: 101, orders: [nearbyOrder({ secret: 'must-not-leak' })] })
+  };
+  await service.send(input);
+  const text = messages[0].text;
+  assert.match(text, /未能唯一关联订单的支付宝流水/);
+  assert.match(text, /下单账号（完整邮箱）: 归属未确认/);
+  assert.match(text, /账单收支方向: 支出/);
+  assert.match(text, /账单原始金额（保留正负号）: CNY -10\.18/);
+  assert.match(text, /2026\/10\/03 08:01:00/);
+  assert.match(text, /仅供人工核对，归属未确认/);
+  assert.match(text, /用户 ID: 42; 完整邮箱: alice@example\.test/);
+  assert.match(text, /另有 100 笔未展开/);
+  assert.equal(webhooks[0].orderNo, null);
+  assert.equal(webhooks[0].userId, null);
+  assert.equal(webhooks[0].nearbyOrders.orders[0].userEmail, 'alice@example.test');
+  assert.equal(webhooks[0].payment.amount, '-10.18');
+  assert.equal(JSON.stringify(webhooks).includes('must-not-leak'), false);
+  assert.equal(JSON.stringify(webhooks).includes(event.tradeNo), false);
+  const safe = sanitizeEvent(input);
+  assert.ok(Object.isFrozen(safe.nearbyOrders.orders[0]));
+  assert.ok(Object.isFrozen(safe.payment));
+});
+
+test('nearby-order context is bounded and rejects account, time, and text injection errors', () => {
+  for (const order of [nearbyOrder({ userEmail: 'alice@example.test\n伪造' }),
+    nearbyOrder({ userId: '42\n' }), nearbyOrder({ orderNo: 'RC0001\n' }),
+    nearbyOrder({ payableAmount: '10.18\n' }), nearbyOrder({ status: 'fake\n' })]) {
+    assert.throws(() => sanitizeEvent({ ...event, nearbyOrders: nearbyContext({ orders: [order] }) }),
+      { code: 'ALERT_EVENT_INVALID' });
+  }
+  for (const nearbyOrders of [nearbyContext({ total: 0 }), nearbyContext({ until: 'invalid' }),
+    nearbyContext({ from: '2026-10-04T00:00:00Z' }),
+    nearbyContext({ total: 101, orders: Array.from({ length: 101 }, () => nearbyOrder()) })]) {
+    assert.throws(() => sanitizeEvent({ ...event, nearbyOrders }), { code: 'ALERT_EVENT_INVALID' });
+  }
+  assert.throws(() => sanitizeEvent({ ...event,
+    payment: { amount: '-10.18\n', direction: 'expense', paidAt: event.occurredAt } }),
+  { code: 'ALERT_EVENT_INVALID' });
+  const text = emailText(sanitizeEvent({ ...event, nearbyOrders: nearbyContext({ total: 0, totalUsers: 0, orders: [] }) }));
+  assert.match(text, /该时间段内没有充值订单/);
 });
 
 test('standalone SMTP delivery identifies the ordering account using only safe reconciliation fields', async () => {

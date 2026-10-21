@@ -4,12 +4,54 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const { z } = require('zod');
 const { AppError } = require('./errors');
+const { MAX_NEARBY_ORDERS } = require('./order-alert-context');
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_FIELD_LENGTH = 180;
 const MAX_EMAIL_LENGTH = 320;
-const USER_EMAIL_SCHEMA = z.string().email().max(MAX_EMAIL_LENGTH);
 const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+const USER_EMAIL_SCHEMA = z.string().email().max(MAX_EMAIL_LENGTH).refine((value) => !UNSAFE_TEXT.test(value));
+const MONEY_SCHEMA = z.string().regex(/^(0|[1-9]\d{0,11})\.\d{2}$/);
+const DATE_SCHEMA = z.string().datetime({ offset: true });
+const PAYMENT_SCHEMA = z.object({
+  amount: z.string().regex(/^-?(0|[1-9]\d{0,11})\.\d{2}$/),
+  direction: z.enum(['income', 'expense', 'unknown']),
+  paidAt: DATE_SCHEMA
+});
+const NEARBY_ORDERS_SCHEMA = z.object({
+  from: DATE_SCHEMA,
+  until: DATE_SCHEMA,
+  total: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  totalUsers: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  orders: z.array(z.object({
+    orderNo: z.string().regex(/^[A-Za-z0-9_-]{3,80}$/),
+    userId: z.string().regex(/^[1-9]\d{0,15}$/).refine((value) => Number.isSafeInteger(Number(value))),
+    userEmail: USER_EMAIL_SCHEMA.nullable(),
+    requestedAmount: MONEY_SCHEMA,
+    payableAmount: MONEY_SCHEMA,
+    status: z.enum(['awaiting_payment', 'payment_reported', 'fulfilling', 'needs_attention',
+      'completed', 'rejected', 'expired', 'cancelled']),
+    createdAt: DATE_SCHEMA,
+    expiresAt: DATE_SCHEMA
+  })).max(MAX_NEARBY_ORDERS)
+}).refine((value) => value.total >= value.orders.length && value.totalUsers <= value.total &&
+  value.totalUsers >= new Set(value.orders.map((order) => order.userId)).size &&
+  Date.parse(value.from) <= Date.parse(value.until));
+
+function containsUnsafeText(value) {
+  if (typeof value === 'string') return UNSAFE_TEXT.test(value);
+  if (value && typeof value === 'object') return Object.values(value).some(containsUnsafeText);
+  return false;
+}
+
+function sanitizeContext(schema, input) {
+  if (input == null) return null;
+  const result = schema.safeParse(input);
+  if (!result.success || containsUnsafeText(result.data)) {
+    throw new AppError('ALERT_EVENT_INVALID', '异常通知事件不符合安全字段白名单', { status: 500 });
+  }
+  return result.data;
+}
 
 function sanitizeEvent(input) {
   const event = {
@@ -38,6 +80,19 @@ function sanitizeEvent(input) {
     throw new AppError('ALERT_EVENT_INVALID', '异常通知事件不符合安全字段白名单', { status: 500 });
   }
   event.occurredAt = new Date(event.occurredAt).toISOString();
+  const payment = sanitizeContext(PAYMENT_SCHEMA, input?.payment);
+  event.payment = payment ? Object.freeze({ ...payment, paidAt: new Date(payment.paidAt).toISOString() }) : null;
+  const nearby = sanitizeContext(NEARBY_ORDERS_SCHEMA, input?.nearbyOrders);
+  event.nearbyOrders = nearby ? Object.freeze({
+    ...nearby,
+    from: new Date(nearby.from).toISOString(),
+    until: new Date(nearby.until).toISOString(),
+    orders: Object.freeze(nearby.orders.map((order) => Object.freeze({
+      ...order,
+      createdAt: new Date(order.createdAt).toISOString(),
+      expiresAt: new Date(order.expiresAt).toISOString()
+    })))
+  }) : null;
   return Object.freeze(event);
 }
 
@@ -63,9 +118,42 @@ async function readBoundedResponse(response) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+function beijingTime(value) {
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+  }).format(new Date(value));
+}
+
+function nearbyOrdersText(nearby) {
+  if (!nearby) return [];
+  const statusLabels = {
+    awaiting_payment: '待付款', payment_reported: '待核验', fulfilling: '入账中', needs_attention: '待人工处理',
+    completed: '已完成', rejected: '已拒绝', expired: '已过期', cancelled: '已取消'
+  };
+  return [
+    '',
+    '附近订单候选（仅供人工核对，归属未确认，不能据此自动补款）',
+    `查询时段（北京时间）: ${beijingTime(nearby.from)} 至 ${beijingTime(nearby.until)}`,
+    '范围: 付款窗口与流水交易时间前后各 3 分钟有交集的充值订单；先列出每位用户的一笔订单，再列其他订单，金额相同者优先。',
+    `共 ${nearby.totalUsers} 位用户、${nearby.total} 笔订单；展示 ${new Set(nearby.orders.map((order) => order.userId)).size} 位用户、${nearby.orders.length} 笔订单。`,
+    ...nearby.orders.map((order, index) => [
+      `${index + 1}. 用户 ID: ${order.userId}; 完整邮箱: ${order.userEmail || '不可用，请按用户 ID 查找'}`,
+      `   订单号: ${order.orderNo}; 目标金额: CNY ${order.requestedAmount}; 应付金额: CNY ${order.payableAmount}; 状态: ${statusLabels[order.status]}`,
+      `   创建时间（北京时间）: ${beijingTime(order.createdAt)}; 到期时间: ${beijingTime(order.expiresAt)}`
+    ].join('\n')),
+    ...(nearby.total === 0 ? ['该时间段内没有充值订单，不能认定该流水来自充值用户。'] : []),
+    ...(nearby.total > nearby.orders.length
+      ? [`另有 ${nearby.total - nearby.orders.length} 笔未展开，请按上述时间段在充值中心管理页面继续核对。`]
+      : [])
+  ];
+}
+
 function emailText(event) {
   return [
-    '充值中心检测到异常订单，已停止自动放款并进入人工处理。',
+    event.orderNo
+      ? '充值中心检测到异常订单，已停止本次自动放款，请人工核对。'
+      : '充值中心检测到未能唯一关联订单的支付宝流水，本次未自动充值，请人工核对。',
     '',
     `异常代码: ${event.anomalyCode}`,
     `订单号: ${event.orderNo || '未识别'}`,
@@ -73,10 +161,16 @@ function emailText(event) {
     `下单账号（完整邮箱）: ${event.userId
       ? event.userEmail || '未记录完整邮箱，请按用户 ID 查找'
       : '归属未确认，未匹配到唯一订单，请人工核对'}`,
-    `应付金额: CNY ${event.amount}`,
+    `${event.orderNo ? '应付金额' : '流水金额（绝对值）'}: CNY ${event.amount}`,
+    ...(event.payment ? [
+      `账单收支方向: ${{ income: '收入', expense: '支出', unknown: '无法识别' }[event.payment.direction]}`,
+      `账单原始金额（保留正负号）: CNY ${event.payment.amount}`,
+      `账单交易时间（北京时间）: ${beijingTime(event.payment.paidAt)}`
+    ] : []),
     `支付宝交易/账务流水末六位: ${event.tradeLast6 || '无（付款前异常）'}`,
     `备注末六位: ${event.memoLast6 || '无'}`,
-    `发生时间: ${event.occurredAt}`,
+    `告警时间（北京时间）: ${beijingTime(event.occurredAt)}`,
+    ...nearbyOrdersText(event.nearbyOrders),
     '',
     '请在受信设备上独立核对支付宝最终交易详情和 Sub2API 兑换记录。不要仅凭本邮件执行补款。'
   ].join('\n');

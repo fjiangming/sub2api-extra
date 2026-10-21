@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const { AppError } = require('./errors');
 const { DailyOrderLimit } = require('./daily-order-limit');
+const { buildOrderAlertContext } = require('./order-alert-context');
 const {
   hmacHex,
   microsToDecimal,
@@ -715,11 +716,9 @@ class OrderService {
       await this.alerts.send({
         eventId: `recharge:${prepared.paymentEvent.id}:${anomalyCode}`,
         anomalyCode,
-        orderNo: prepared.order?.order_no || null,
-        userId: prepared.order?.user_id || null,
-        userEmail: prepared.order?.user_email_ciphertext
-          ? openText(this.config.secret, 'order-user-email:v1', prepared.order.user_email_ciphertext, prepared.order.id)
-          : null,
+        ...buildOrderAlertContext({ db: this.db, secret: this.config.secret, order: prepared.order,
+          paymentMode: TRANSFER_AUTO_MODE, paidAt: prepared.paymentEvent.paid_at,
+          amountMinor: prepared.paymentEvent.amount_minor }),
         amount: minorToDecimal(prepared.order?.payable_amount_minor || amountMinor),
         tradeLast6: prepared.paymentEvent.trade_last6,
         memoLast6: prepared.paymentEvent.memo_last6,
@@ -916,7 +915,7 @@ class OrderService {
 
     if (prepared.kind === 'duplicate') return this.#accountLogPaymentResult(prepared, true);
     if (prepared.kind === 'anomaly') {
-      await this.#notifyAccountLogAnomaly(prepared, prepared.anomalyCode, amountMinor);
+      await this.#notifyAccountLogAnomaly(prepared, prepared.anomalyCode);
       return this.#accountLogPaymentResult(prepared, false);
     }
     try {
@@ -949,7 +948,7 @@ class OrderService {
         entry: this.db.prepare('SELECT * FROM alipay_accountlog_entries WHERE id = ?').get(prepared.entry.id),
         order: this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(prepared.order.id)
       };
-      await this.#notifyAccountLogAnomaly(attention, attention.anomalyCode, amountMinor);
+      await this.#notifyAccountLogAnomaly(attention, attention.anomalyCode);
       return this.#accountLogPaymentResult(attention, false, 'needs_attention');
     }
   }
@@ -967,18 +966,21 @@ class OrderService {
     };
   }
 
-  async #notifyAccountLogAnomaly(prepared, anomalyCode, amountMinor) {
+  async #notifyAccountLogAnomaly(prepared, anomalyCode) {
     if (!this.alerts) return;
     try {
       await this.alerts.send({
         eventId: `recharge-accountlog:${prepared.entry.id}:${anomalyCode}`,
         anomalyCode,
-        orderNo: prepared.order?.order_no || null,
-        userId: prepared.order?.user_id || null,
-        userEmail: prepared.order?.user_email_ciphertext
-          ? openText(this.config.secret, 'order-user-email:v1', prepared.order.user_email_ciphertext, prepared.order.id)
-          : null,
-        amount: minorToDecimal(Math.abs(prepared.order?.payable_amount_minor || amountMinor)),
+        ...buildOrderAlertContext({ db: this.db, secret: this.config.secret, order: prepared.order,
+          paymentMode: ACCOUNTLOG_STATIC_MODE, paidAt: prepared.entry.paid_at,
+          amountMinor: prepared.entry.amount_minor }),
+        amount: minorToDecimal(Math.abs(prepared.order?.payable_amount_minor || prepared.entry.amount_minor)),
+        payment: {
+          amount: minorToDecimal(prepared.entry.amount_minor),
+          direction: prepared.entry.direction,
+          paidAt: prepared.entry.paid_at
+        },
         tradeLast6: prepared.entry.account_log_last6,
         memoLast6: prepared.entry.memo_last6 || '',
         occurredAt: prepared.entry.received_at

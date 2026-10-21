@@ -129,6 +129,28 @@ test('replacing a cancelled transfer order keeps its amount and rejects the old 
   assert.equal(calls[0].value, 1);
 });
 
+test('an unknown memo includes nearby owners only in alerts without assigning or crediting an order', async (t) => {
+  const context = autoContext();
+  t.after(() => context.cleanup());
+  const alerts = [];
+  let calls = 0;
+  const service = new OrderService({ db: context.db, config: context.config, clock: () => baseTime,
+    alerts: { async send(event) { alerts.push(event); } },
+    sub2api: { async createAndRedeemWithAdminKey() { calls += 1; } } });
+  const first = service.create(user(1), '10.00');
+  const second = service.create(user(2), '20.00');
+  const result = await service.acceptAutomaticPayment(paymentEvent(first, 'S2-AAAAAAAAAAAAAAAA'));
+  assert.equal(result.anomalyCode, 'MEMO_UNKNOWN');
+  assert.equal(result.orderId, null);
+  assert.equal(calls, 0);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].userId, null);
+  assert.equal(alerts[0].nearbyOrders.total, 2);
+  assert.equal(alerts[0].nearbyOrders.orders[0].userEmail, user(1).email);
+  assert.equal(service.getForUser(first.id, 1).status, 'awaiting_payment');
+  assert.equal(service.getForUser(second.id, 2).status, 'awaiting_payment');
+});
+
 test('full transaction-detail evidence fulfills exactly once without storing the trade number or memo', async (t) => {
   const context = autoContext();
   t.after(() => context.cleanup());

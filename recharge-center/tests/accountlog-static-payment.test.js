@@ -59,6 +59,97 @@ function entry(order, overrides = {}) {
   };
 }
 
+test('an unassociated expense lists nearby order owners without assigning the bill or changing their balances', async (t) => {
+  const context = accountLogContext();
+  t.after(() => context.cleanup());
+  let now = new Date(baseTime.getTime() - 10 * 60000);
+  const alerts = [];
+  let redemptions = 0;
+  const service = new OrderService({ db: context.db, config: context.config, clock: () => now,
+    alerts: { async send(event) { alerts.push(event); } },
+    sub2api: { async createAndRedeemWithAdminKey() { redemptions += 1; } } });
+  const old = service.create(user(9), '90.00');
+  now = new Date(baseTime.getTime() - 4 * 60000);
+  const adjacent = service.create(user(3), '30.00');
+  now = baseTime;
+  const sameAmount = service.create(user(1), '10.18');
+  const differentAmount = service.create(user(2), '20.00');
+  const cancelled = service.create(user(4), '40.00');
+  service.cancel(cancelled.id, user(4));
+  const otherMode = service.create(user(6), '60.00');
+  context.db.prepare('UPDATE recharge_orders SET payment_mode = ? WHERE id = ?').run('personal_manual', otherMode.id);
+  now = new Date(baseTime.getTime() + 5 * 60000);
+  const future = service.create(user(5), '50.00');
+  now = new Date(baseTime.getTime() + 8 * 60000);
+  const result = await service.acceptAccountLogEntry(entry(sameAmount, {
+    amountMinor: -1018, direction: 'expense', userEmail: 'spoofed@example.test'
+  }));
+  assert.equal(result.accepted, false);
+  assert.equal(result.orderId, null);
+  assert.equal(redemptions, 0);
+  assert.equal(alerts.length, 1);
+  const alert = alerts[0];
+  assert.equal(alert.userId, null);
+  assert.equal(alert.userEmail, null);
+  assert.deepEqual(alert.payment, { amount: '-10.18', direction: 'expense',
+    paidAt: new Date(baseTime.getTime() + 60000).toISOString() });
+  assert.equal(alert.nearbyOrders.from, new Date(baseTime.getTime() - 2 * 60000).toISOString());
+  assert.equal(alert.nearbyOrders.until, new Date(baseTime.getTime() + 4 * 60000).toISOString());
+  assert.equal(alert.nearbyOrders.total, 4);
+  assert.equal(alert.nearbyOrders.totalUsers, 4);
+  assert.equal(alert.nearbyOrders.orders[0].orderNo, sameAmount.orderNo);
+  assert.deepEqual(new Set(alert.nearbyOrders.orders.map((order) => order.orderNo)),
+    new Set([sameAmount, differentAmount, adjacent, cancelled].map((order) => order.orderNo)));
+  for (const order of alert.nearbyOrders.orders) {
+    assert.equal(order.userEmail, user(Number(order.userId)).email);
+    assert.ok(!['payment_reported', 'needs_attention', 'fulfilling', 'completed'].includes(order.status));
+  }
+  for (const excluded of [old, future, otherMode]) {
+    assert.equal(alert.nearbyOrders.orders.some((order) => order.orderNo === excluded.orderNo), false);
+  }
+  const stored = context.db.prepare('SELECT order_id FROM alipay_accountlog_entries').get();
+  assert.equal(stored.order_id, null);
+  assert.equal(Object.hasOwn(result, 'nearbyOrders'), false);
+  assert.equal(JSON.stringify(service.getForAdmin(sameAmount.id)).includes(user(1).email), false);
+});
+
+test('candidate lists disclose truncation above 100 orders while retaining every counted nearby order', async (t) => {
+  const context = accountLogContext();
+  t.after(() => context.cleanup());
+  const alerts = [];
+  const service = new OrderService({ db: context.db, config: context.config, sub2api: {}, clock: () => baseTime,
+    alerts: { async send(event) { alerts.push(event); } } });
+  const first = service.create(user(1), '10.00');
+  service.cancel(first.id, user(1));
+  service.create(user(1), '10.00');
+  for (let id = 2; id <= 100; id += 1) service.create(user(id), '10.00');
+  await service.acceptAccountLogEntry(entry(first, { amountMinor: -1000, direction: 'expense', paidAt: first.createdAt }));
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].nearbyOrders.total, 101);
+  assert.equal(alerts[0].nearbyOrders.totalUsers, 100);
+  assert.equal(alerts[0].nearbyOrders.orders.length, 100);
+  assert.equal(new Set(alerts[0].nearbyOrders.orders.map((order) => order.userId)).size, 100);
+  assert.equal(alerts[0].orderNo, null);
+});
+
+test('a damaged candidate email snapshot does not suppress the remaining users or identify the wrong account', async (t) => {
+  const context = accountLogContext();
+  t.after(() => context.cleanup());
+  const alerts = [];
+  const service = new OrderService({ db: context.db, config: context.config, sub2api: {}, clock: () => baseTime,
+    alerts: { async send(event) { alerts.push(event); } } });
+  const first = service.create(user(1), '10.00');
+  const second = service.create(user(2), '20.00');
+  context.db.prepare(`
+    UPDATE recharge_orders SET user_email_ciphertext =
+      (SELECT user_email_ciphertext FROM recharge_orders WHERE id = ?) WHERE id = ?
+  `).run(first.id, second.id);
+  await service.acceptAccountLogEntry(entry(first, { amountMinor: -1000, direction: 'expense', paidAt: first.createdAt }));
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].nearbyOrders.orders.find((order) => order.userId === '1').userEmail, user(1).email);
+  assert.equal(alerts[0].nearbyOrders.orders.find((order) => order.userId === '2').userEmail, null);
+});
+
 for (const hasEmailSnapshot of [true, false]) {
   test(`anomaly email after restart ${hasEmailSnapshot ? 'shows the original full account' : 'identifies legacy orders by user ID'}`, async (t) => {
     const context = accountLogContext();
@@ -107,6 +198,12 @@ for (const hasEmailSnapshot of [true, false]) {
     }
     assert.equal(messages[0].text.includes('spoofed@example.test'), false);
     assert.equal(messages[0].text.includes(account.email), false);
+    if (hasEmailSnapshot) {
+      assert.equal(messages[0].text.includes('附近订单候选'), false);
+    } else {
+      assert.match(messages[0].text, /附近订单候选/);
+      assert.ok(messages[0].text.includes(order.orderNo));
+    }
     const audit = db.prepare('SELECT metadata_json FROM audit_events WHERE order_id = ?').all(order.id);
     assert.equal(JSON.stringify(audit).includes(originalEmail), false);
   });
@@ -457,6 +554,9 @@ test('cancellation within a ledger second cannot choose either order at the ambi
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].userId, null);
   assert.equal(alerts[0].userEmail, null);
+  assert.equal(alerts[0].nearbyOrders.total, 2);
+  assert.deepEqual(new Set(alerts[0].nearbyOrders.orders.map((candidate) => candidate.orderNo)),
+    new Set([first.orderNo, replacement.orderNo]));
   assert.equal(service.getForUser(first.id, 1).status, 'payment_reported');
   assert.equal(service.getForUser(replacement.id, 1).status, 'payment_reported');
 });
