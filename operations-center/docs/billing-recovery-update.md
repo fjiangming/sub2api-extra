@@ -25,19 +25,33 @@
 
 主站使用 [fork 的 Release](https://github.com/fjiangming/sub2api/releases)，运营中心使用现有 [extra 镜像流水线](https://github.com/fjiangming/sub2api-extra/actions/workflows/docker-publish.yml)。目标 commit 的构建通过后再更新。主站分支比生产二进制新，除个性化补丁外也包含这段时间的原作者更新和迁移。
 
-在 VPS 的 Bash 中选择主站最新正式发行版和运营中心镜像：
+主站 `latest` 只应在同一提交的 CI、安全检查、归档构建和镜像验证成功后提升。它表示最新成功发行；dev 有尚未构建或失败的提交时，latest 会暂时落后。首次切换及后续更新均不需要在 VPS 安装 Git、拉取源码或执行编译。
+
+在 VPS 的 Bash 中拉取两个更新通道：
 
 ```bash
 set -euo pipefail
-SUB2API_VERSION="$(curl -fsSL https://api.github.com/repos/fjiangming/sub2api/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"].removeprefix("v"))')"
-export SUB2API_IMAGE="ghcr.io/fjiangming/sub2api:${SUB2API_VERSION}"
+export SUB2API_IMAGE="ghcr.io/fjiangming/sub2api:latest"
 export OPERATIONS_IMAGE="ghcr.io/fjiangming/sub2api-extra:operations-center-latest"
 printf '主站: %s\n运营中心: %s\n' "$SUB2API_IMAGE" "$OPERATIONS_IMAGE"
 docker pull "$SUB2API_IMAGE"
 docker pull "$OPERATIONS_IMAGE"
+
+for image in "$SUB2API_IMAGE" "$OPERATIONS_IMAGE"; do
+  docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}} {{index .Config.Labels "org.opencontainers.image.version"}} {{index .Config.Labels "org.opencontainers.image.revision"}}' "$image"
+done
+
+expected_core="$(curl -fsSL https://api.github.com/repos/fjiangming/sub2api/branches/dev | python3 -c 'import json,sys; print(json.load(sys.stdin)["commit"]["sha"])')"
+expected_ops="$(curl -fsSL https://api.github.com/repos/fjiangming/sub2api-extra/branches/main | python3 -c 'import json,sys; print(json.load(sys.stdin)["commit"]["sha"])')"
+actual_core="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$SUB2API_IMAGE")"
+actual_ops="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$OPERATIONS_IMAGE")"
+if [ "$actual_core" != "$expected_core" ] || [ "$actual_ops" != "$expected_ops" ]; then
+  printf '镜像尚未对应最新源码提交，请检查目标提交的 Actions，等待成功后重新拉取。\n' >&2
+  exit 1
+fi
 ```
 
-需要固定运营中心版本时，将 `operations-center-latest` 改成目标构建提供的 `operations-center-sha-<7 位 commit>`。公开包不需要登录；若包仍为私有，请通过 GitHub Packages 的正常授权登录 GHCR，不要在脚本中写明文 Token。
+需要固定版本时，将主站 latest 改成已发布版本号（不带 v），运营中心改成目标构建提供的 `operations-center-sha-<7 位 commit>`。此时应核对所选目标提交，而不是要求等于分支 HEAD。公开包不需要登录；若包仍为私有，请通过 GitHub Packages 的正常授权登录 GHCR，不要在脚本中写明文 Token。
 
 ## 2. 备份并安排短暂停机
 
@@ -118,7 +132,22 @@ docker inspect --format '{{.Config.Image}} {{.State.Health.Status}}' sub2api sub
 
 ## 5. 后续更新与回滚
 
-以后只需选择已成功发布的镜像版本，更新原配置中的主站 image，再对主站及运营中心分别执行 pull / `up -d --no-deps`。主站左上角更新源已改为 fork，但容器中的网页更新只替换运行时文件；持久升级仍应以 Compose 的镜像版本为准，否则重建可能退回旧版本。
+首次按本手册把两个 image 切换到 latest 通道后，后续不用再修改源码或 Compose 镜像名称。先重复第 1 步拉取并核对镜像 revision，再按第 2 步安排低峰、等待在途请求和备份。之后只更新两个目标服务：
+
+```bash
+cd /root/sub2api-deploy
+docker compose pull --policy always sub2api
+docker compose up -d --no-deps --wait --wait-timeout 180 sub2api
+
+cd /root/sub2api-extra
+docker compose --env-file compose.services.env pull --policy always operations-center
+docker compose --env-file compose.services.env up -d --no-deps --wait --wait-timeout 180 operations-center
+
+docker exec sub2api /app/sub2api -version
+docker inspect --format '{{.Name}} {{.Image}} {{.State.Health.Status}}' sub2api sub2api-operations-center
+```
+
+按第 4 步复核健康状态及计费核查功能。主站左上角更新源已改为 fork，但容器中的网页更新只替换运行时文件；持久升级仍应以 Compose 镜像为准，否则重建可能退回旧版本。
 
 回滚前保持新流量暂停。使用第 2 步实际打印的备份目录恢复两个 Compose 文件，再启动原来的两个目标服务：
 
