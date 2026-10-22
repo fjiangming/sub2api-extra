@@ -105,7 +105,7 @@ docker compose --env-file compose.services.env up -d --no-build operations-cente
 | `SUB2API_PUBLIC_URL` | 同 `SUB2API_BASE_URL` | 管理员浏览器可访问的 Sub2API 地址及 iframe 来源 |
 | `OPERATIONS_CENTER_USER_MESSAGES_ENABLED` | `false` | 完成主站公告接口转发后启用定向消息发布与接收；未启用时仅允许草稿 |
 | `SUB2API_ANNOUNCEMENTS_UPSTREAM_URL` | 同 `SUB2API_BASE_URL` | 用户公告网关直连的 Sub2API 地址，必须绕过主站公告接口转发，不能形成回环 |
-| `SUB2API_ADMIN_TOKEN` | 无 | 可选的 Sub2API 管理员 JWT |
+| `SUB2API_ADMIN_TOKEN` | 无 | 可选的 Sub2API 管理员 JWT 或原生 `admin-` 管理员 API Key |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | 无 | 可选；无人值守调用需要持久认证时使用 |
 | `PROVIDER_MONITOR_BASE_URL` | 无 | 供应商监控服务端地址；Compose 网络通常为 `http://provider-monitor:9871` |
 | `PROVIDER_MONITOR_INTEGRATION_TOKEN` | 无 | 可选的只读服务间 Token；Provider Monitor 使用本地认证时需要配置相同值 |
@@ -194,7 +194,7 @@ PROVIDER_MONITOR_BASE_URL=https://monitor.example.com
 
 Sub2API 的会话绑定会校验登录浏览器的 IP 和 User-Agent，独立服务无法代替浏览器通过该校验。使用自定义菜单 SSO 时需要关闭会话绑定并重新登录；必须保留会话绑定时，请改用 `local` 模式。
 
-`SUB2API_ADMIN_TOKEN`、`ADMIN_EMAIL` 和 `ADMIN_PASSWORD` 对交互式 SSO 均非必填。当前有效的 SSO Token 可以触发手动原生备份，也可暂时供自动清理使用；但它会过期且服务重启后丢失。要求每日自动清理长期无人值守时，可在系统设置中验证并加密保存管理员 Token 或邮箱密码，否则认证不可用的场次会在备份阶段安全失败，不会执行删除。
+`SUB2API_ADMIN_TOKEN`、`ADMIN_EMAIL` 和 `ADMIN_PASSWORD` 对交互式 SSO 均非必填。当前有效的 SSO Token 可以触发手动原生备份，也可暂时供自动清理使用；但它会过期且服务重启后丢失。要求每日自动清理长期无人值守时，可在系统设置中验证并加密保存管理员 Token 或邮箱密码，否则认证不可用的场次会在备份阶段安全失败，不会执行删除。开启 2FA 的管理员不能仅凭邮箱密码运行后台；可复用原生 `admin-` 管理员 API Key，按 `x-api-key` 调用管理接口。敏感操作仍受主站 step-up 限制，浏览器 SSO 继续使用管理员 JWT。
 
 ## 数据库最小权限
 

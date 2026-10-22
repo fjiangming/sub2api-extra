@@ -1,6 +1,6 @@
 # 现有 Docker 环境的计费修复更新步骤
 
-2026-10-23 只读核验。本文件不包含服务器密码、数据库口令或管理员 Token。
+2026-10-23 核验。本文件描述首次切换前的部署基线及后续更新步骤，实际部署记录见根目录 CUSTOMIZATIONS.md。本文件不包含服务器密码、数据库口令或管理员 Token。
 
 ## 已确认的部署
 
@@ -61,7 +61,7 @@ fi
 
 ```bash
 umask 077
-backup_dir="/root/sub2api-upgrade-backups/$(date +%Y%m%d-%H%M%S)"
+backup_dir="/root/sub2api-deploy/backups/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$backup_dir"
 cp -a /root/sub2api-deploy/docker-compose.yml "$backup_dir/sub2api-compose.yml"
 cp -a /root/sub2api-deploy/.env "$backup_dir/sub2api.env"
@@ -76,6 +76,9 @@ cd /root/sub2api-deploy
 docker compose stop sub2api
 docker exec sub2api-postgres sh -c 'exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > "$backup_dir/sub2api.dump"
 test -s "$backup_dir/sub2api.dump"
+docker exec sub2api-postgres sh -c 'exec pg_dumpall -U "$POSTGRES_USER" --globals-only' > "$backup_dir/postgres-roles.sql"
+test -s "$backup_dir/postgres-roles.sql"
+docker exec -i sub2api-postgres pg_restore --list < "$backup_dir/sub2api.dump" > "$backup_dir/sub2api-dump-contents.txt"
 tar -C /root/sub2api-deploy -czf "$backup_dir/sub2api-data.tgz" data
 tar -C /var/lib/docker/volumes/sub2api-extra_operations-center-data/_data -czf "$backup_dir/operations-center-data.tgz" .
 printf '备份目录: %s\n' "$backup_dir"
@@ -129,6 +132,10 @@ docker inspect --format '{{.Config.Image}} {{.State.Health.Status}}' sub2api sub
 主站启动自动应用迁移，查询应返回 `sub2api_custom.billing_recovery`。主站启动失败时先查看 `docker logs --tail 100 sub2api`，不要继续重启或绕过迁移错误。
 
 两个服务健康后重新从管理菜单进入运营中心，查看“计费核查”tab：应显示“自动恢复已开启”，列表和详情可读取。若显示等待持久认证，到系统设置的 Sub2API 管理 API 检查原持久凭据是否仍有效，不需要打印或复制现有密码。查单继续使用供应商监控的历史业务样本，不重发推理。
+
+开启 2FA 的管理员不能仅凭邮箱密码运行后台。持久认证可使用原生 `admin-` 管理员 API Key，运营中心按 `x-api-key` 调用原生 admin 接口；浏览器 SSO 仍使用当前管理员 JWT。复用已有集成 Key 时不要重新生成或轮换，否则会影响其他服务。验证应包含实际的 pending 列表读取及后台 lastError，不能只检查“凭据已配置”。
+
+原生仪表盘默认保留请求日志 90 天，重启时可能清理刚到期的旧记录。升级前后核对记录 ID、计费总额及余额；发现差异时从备份确认具体记录和保留策略。不要整库恢复覆盖已恢复接单后的新交易。
 
 保护只自动追踪升级后的调用，不会扫描历史 CSV 并扣费。人工补记仍需核对归属、最终用量和历史价格，确认后由使用记录结算。
 

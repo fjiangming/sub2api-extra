@@ -68,7 +68,11 @@ class Sub2ApiClient {
     this.runtimeToken = null;
     this.setPersistentCredentials(credentials);
     try {
-      await this.login();
+      const token = await this.login();
+      if (token.startsWith('admin-')) {
+        await this.raw('/api/v1/admin/system/version');
+        return { valid: true, user: 'Admin API Key' };
+      }
       const data = unwrap(await this.raw('/api/v1/auth/me'));
       const user = data?.user || data?.profile || data || {};
       if (!isAdminUser(user)) {
@@ -150,9 +154,12 @@ class Sub2ApiClient {
     const mayRetryAtAnotherOrigin = ['GET', 'HEAD'].includes(method) || path === '/api/v1/auth/login';
     baseUrls = sub2apiBaseUrls(this.config);
     if (!mayRetryAtAnotherOrigin && baseUrls.length > 1 && !this.config.sub2apiResolvedBaseUrl) {
-      await this.raw('/api/v1/auth/me', {}, authenticated);
+      await this.raw(token?.startsWith('admin-') ? '/api/v1/admin/system/version' : '/api/v1/auth/me', {}, authenticated);
       baseUrls = sub2apiBaseUrls(this.config);
     }
+    const suppliedHeaders = new Headers(options.headers || {});
+    const authHeaders = token && !suppliedHeaders.has('authorization') && !suppliedHeaders.has('x-api-key')
+      ? (token.startsWith('admin-') ? { 'x-api-key': token } : { authorization: `Bearer ${token}` }) : {};
 
     let lastConnectionError = null;
     for (const [index, baseUrl] of baseUrls.entries()) {
@@ -164,7 +171,7 @@ class Sub2ApiClient {
           headers: {
             accept: 'application/json',
             'content-type': 'application/json',
-            ...(token ? { authorization: `Bearer ${token}` } : {}),
+            ...authHeaders,
             ...(options.headers || {})
           },
           signal: controller.signal
