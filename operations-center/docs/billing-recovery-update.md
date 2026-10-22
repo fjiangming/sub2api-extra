@@ -68,6 +68,8 @@ cp -a /root/sub2api-deploy/.env "$backup_dir/sub2api.env"
 cp -a /root/sub2api-extra/operations-center/compose.yaml "$backup_dir/operations-center-compose.yaml"
 cp -a /root/sub2api-extra/operations-center/.env "$backup_dir/operations-center.env"
 cp -a /root/sub2api-extra/compose.services.env "$backup_dir/compose.services.env"
+docker inspect --format '{{.Image}}' sub2api > "$backup_dir/sub2api-image-id"
+docker inspect --format '{{.Image}}' sub2api-operations-center > "$backup_dir/operations-center-image-id"
 cd /root/sub2api-extra
 docker compose --env-file compose.services.env stop operations-center
 cd /root/sub2api-deploy
@@ -149,12 +151,30 @@ docker inspect --format '{{.Name}} {{.Image}} {{.State.Health.Status}}' sub2api 
 
 按第 4 步复核健康状态及计费核查功能。主站左上角更新源已改为 fork，但容器中的网页更新只替换运行时文件；持久升级仍应以 Compose 镜像为准，否则重建可能退回旧版本。
 
-回滚前保持新流量暂停。使用第 2 步实际打印的备份目录恢复两个 Compose 文件，再启动原来的两个目标服务：
+回滚前保持新流量暂停。使用第 2 步实际打印的备份目录恢复两个 Compose 文件，并固定到备份时运行的镜像。之后采用 latest 部署时，单纯恢复仍写着 latest 的 Compose 不会回到旧版本；因此这里同时记录旧镜像 ID 并在回滚时创建本地标签：
 
 ```bash
 # backup_dir 必须指向本次真实备份目录。
 cp -a "$backup_dir/sub2api-compose.yml" /root/sub2api-deploy/docker-compose.yml
 cp -a "$backup_dir/operations-center-compose.yaml" /root/sub2api-extra/operations-center/compose.yaml
+export ROLLBACK_CORE_IMAGE="sub2api-local-rollback:$(basename "$backup_dir")"
+export ROLLBACK_OPERATIONS_IMAGE="operations-center-local-rollback:$(basename "$backup_dir")"
+docker image tag "$(cat "$backup_dir/sub2api-image-id")" "$ROLLBACK_CORE_IMAGE"
+docker image tag "$(cat "$backup_dir/operations-center-image-id")" "$ROLLBACK_OPERATIONS_IMAGE"
+python3 - <<'PY'
+import os
+from pathlib import Path
+import yaml
+
+for filename, name, image in [
+    ('/root/sub2api-deploy/docker-compose.yml', 'sub2api', os.environ['ROLLBACK_CORE_IMAGE']),
+    ('/root/sub2api-extra/operations-center/compose.yaml', 'operations-center', os.environ['ROLLBACK_OPERATIONS_IMAGE']),
+]:
+    path = Path(filename)
+    config = yaml.safe_load(path.read_text())
+    config['services'][name].update(image=image, pull_policy='never')
+    path.write_text(yaml.safe_dump(config, sort_keys=False, allow_unicode=True))
+PY
 cd /root/sub2api-deploy
 docker compose up -d --no-deps --wait --wait-timeout 180 sub2api
 cd /root/sub2api-extra
@@ -162,3 +182,5 @@ docker compose --env-file compose.services.env up -d --no-deps --wait --wait-tim
 ```
 
 新增计费 Schema 留在数据库中，程序回滚不会删除它。若原作者迁移导致旧二进制不兼容，数据库恢复需要另行评估；恢复备份会丢失备份之后的新交易，不能在已经恢复接单后直接覆盖数据库。回滚旧二进制后本次计费保护停止生效。
+
+回滚使用本地固定镜像及 never 策略；下次正式升级时重复第 1、3 步切回更新通道，再按第 4 步启动。
