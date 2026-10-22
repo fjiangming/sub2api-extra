@@ -16,6 +16,7 @@ const { MetricsService } = require('./services/metrics-service');
 const { UserProfilesService } = require('./services/user-profiles-service');
 const { CostAnalysisService } = require('./services/cost-analysis-service');
 const { UserMessagesService } = require('./services/user-messages-service');
+const { BillingRecoveryService } = require('./services/billing-recovery-service');
 const { StorageService } = require('./services/storage-service');
 const { RetentionService } = require('./services/retention-service');
 const { CleanupScheduler } = require('./services/cleanup-scheduler');
@@ -29,6 +30,7 @@ async function main() {
   const database = createDatabase(config);
   const sub2api = new Sub2ApiClient(config);
   const providerMonitor = new ProviderMonitorClient(config);
+  const billingRecovery = new BillingRecoveryService({ config, sub2api, providerMonitor });
   const telemetry = new LatencyTelemetryStore(config);
   try { telemetry.initialize(); } catch (error) {
     telemetry.close();
@@ -76,7 +78,7 @@ async function main() {
     sub2api
   });
   const app = createApp({
-    config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, messages, storage, retention, scheduler, sub2api, settings
+    config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, messages, billingRecovery, storage, retention, scheduler, sub2api, settings
   });
   const server = http.createServer(app);
   server.requestTimeout = 120000;
@@ -89,6 +91,7 @@ async function main() {
   });
   storage.start();
   scheduler.start();
+  billingRecovery.start();
   console.info(`operations-center listening on http://${config.bindHost}:${config.port}`);
 
   let stopping = false;
@@ -97,6 +100,7 @@ async function main() {
     stopping = true;
     console.info(`operations-center shutting down (${signal})`);
     scheduler.stop();
+    await billingRecovery.stop();
     storage.stop();
     auth.close();
     await new Promise((resolve) => server.close(resolve));

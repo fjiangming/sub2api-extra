@@ -136,7 +136,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, messages, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, messages, billingRecovery, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -292,6 +292,15 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
     res.set('cache-control', 'no-store');
     next();
   });
+
+  api.get('/billing-recovery/status', (_req, res) => res.json(billingRecovery.status()));
+  api.get('/billing-recovery', asyncRoute(async (req, res) => res.json(await billingRecovery.list(req.query, req.auth.upstreamAccessToken))));
+  api.get('/billing-recovery/:id', asyncRoute(async (req, res) => res.json(await billingRecovery.detail(req.params.id, req.auth.upstreamAccessToken))));
+  api.post('/billing-recovery/retry', csrf, asyncRoute(async (req, res) => res.json(await billingRecovery.retryPending(req.auth.upstreamAccessToken))));
+  api.post('/billing-recovery/:id/lookup', csrf, asyncRoute(async (req, res) => res.json(await billingRecovery.lookup(req.params.id, req.auth.upstreamAccessToken))));
+  api.post('/billing-recovery/:id/review', csrf, asyncRoute(async (req, res) => res.json(await billingRecovery.review(req.params.id, req.body, req.auth.upstreamAccessToken))));
+  api.post('/billing-recovery/:id/usage', csrf, asyncRoute(async (req, res) => res.json(await billingRecovery.restore(req.params.id, req.body, req.auth.upstreamAccessToken))));
+  api.post('/billing-recovery/:id/settle', csrf, asyncRoute(async (req, res) => res.json(await billingRecovery.settle(req.params.id, req.body, req.auth.upstreamAccessToken))));
 
   api.get('/overview', asyncRoute(async (_req, res) => res.json(await metrics.getOverview())));
   api.get('/latency/options', asyncRoute(async (_req, res) => res.json(await latency.options())));

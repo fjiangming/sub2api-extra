@@ -46,6 +46,7 @@ const titles = {
   users: '用户分析',
   profiles: '用户画像',
   messages: '用户消息',
+  billing: '计费核查',
   finance: '收款与入账',
   costs: '成本分析',
   storage: '存储容量',
@@ -246,6 +247,7 @@ function showLogin(message = '') {
   profilesUi.reset();
   messagesUi.reset();
   latencyUi.reset();
+  billingUi.reset();
   if (state.runPoller) clearInterval(state.runPoller);
   state.runPoller = null;
   state.csrfToken = '';
@@ -1546,6 +1548,7 @@ async function loadCurrentView(options = {}) {
     users: loadUsers,
     profiles: () => profilesUi.load(options),
     messages: () => messagesUi.load(),
+    billing: () => billingUi.load(),
     finance: loadFinance,
     costs: state.costAutomaticIncome.active
       ? (state.costAutomaticIncome.selectedUserKey ? loadAutomaticIncomeRecords : loadAutomaticIncomeUsers)
@@ -1574,6 +1577,7 @@ function navigate(view) {
   if (state.currentView === 'profiles') profilesUi.leave();
   if (state.currentView === 'messages') messagesUi.leave();
   if (state.currentView === 'latency') latencyUi.leave();
+  if (state.currentView === 'billing') billingUi.leave();
   if (state.costAutomaticIncome.active) closeAutomaticIncomeDrilldown({ restoreHeader: false });
   state.currentView = view;
   window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
@@ -1798,6 +1802,11 @@ const messagesUi = window.UserMessagesUi.create({
 const latencyUi = window.LatencyUi.create({
   api, escapeHtml, icon, refreshIcons, toast, setPageMeta,
   isActive: () => state.currentView === 'latency' && Boolean(state.user)
+});
+
+const billingUi = window.BillingRecoveryUi.create({
+  api, escapeHtml, icon, refreshIcons, toast, setPageMeta,
+  isActive: () => state.currentView === 'billing' && Boolean(state.user)
 });
 
 initialize();

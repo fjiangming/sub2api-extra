@@ -1,0 +1,21 @@
+#view-billing { min-width: 0; }
+#br-filter { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+#br-status { font-size: 13px; color: var(--muted, #6b7280); align-self: center; }
+#br-list td small { display: block; overflow-wrap: anywhere; max-width: 260px; }
+.br-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin: 12px 0 24px; }
+.br-detail { border-top: 1px solid var(--border, #d9dde3); padding-top: 20px; margin-top: 16px; }
+.br-detail h2 { font-size: 18px; }
+.br-detail h3 { font-size: 15px; margin: 20px 0 12px; }
+.br-summary { display: grid; grid-template-columns: 130px minmax(0,1fr); gap: 8px 16px; font-size: 13px; }
+.br-summary dt { color: var(--muted, #6b7280); }
+.br-summary dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.br-actions { display: flex; gap: 10px; flex-wrap: wrap; margin: 16px 0; }
+.br-fields { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,200px),1fr)); gap: 12px; }
+.br-form label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.br-form input,.br-form textarea { width: 100%; min-width: 0; box-sizing: border-box; }
+.br-form > label { margin: 16px 0; }
+.br-review { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border, #d9dde3); }
+.br-review > label { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.br-review input[type="checkbox"] { width: 16px; height: 16px; min-height: 16px; padding: 0; margin: 0; flex: 0 0 16px; }
+#br-lookup-result { overflow-wrap: anywhere; font-size: 13px; }
+@media(max-width:600px) { .br-summary { grid-template-columns: 85px minmax(0,1fr); gap: 8px; } #br-filter { align-items: stretch; } #br-filter .button { width: 100%; justify-content: center; } }

@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/user-profiles.css?v=20261013-1">
   <link rel="stylesheet" href="/user-messages.css?v=20261019-1">
   <link rel="stylesheet" href="/latency.css?v=20261020-1">
+  <link rel="stylesheet" href="/billing-recovery.css?v=20261023-1">
   <script src="/vendor/echarts.js" defer></script>
   <script src="/vendor/lucide.js" defer></script>
   <script src="/cost-analysis-ui.js?v=20260929-3" defer></script>
@@ -16,6 +17,7 @@
   <script src="/vendor/dompurify.js" defer></script>
   <script src="/user-messages-ui.js?v=20261019-1" defer></script>
   <script src="/latency-ui.js?v=20261020-1" defer></script>
+  <script src="/billing-recovery-ui.js?v=20261023-1" defer></script>
   <script src="/app.js?v=20261022-1" defer></script>
 </head>
 <body>
@@ -48,6 +50,7 @@
         <button class="module-tab" data-view="users" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="users"></i><span>用户分析</span></button>
         <button class="module-tab" data-view="profiles" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="contact-round"></i><span>用户画像</span></button>
         <button class="module-tab" data-view="messages" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="mail"></i><span>用户消息</span></button>
+        <button class="module-tab" data-view="billing" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="receipt-text"></i><span>计费核查</span></button>
         <button class="module-tab" data-view="finance" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="landmark"></i><span>收款与入账</span></button>
         <button class="module-tab" data-view="costs" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="chart-spline"></i><span>成本分析</span></button>
         <button class="module-tab" data-view="storage" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="database"></i><span>存储容量</span></button>
@@ -500,6 +503,57 @@
           </div>
         </section>
 
+        <section id="view-billing" class="view" aria-labelledby="page-title">
+          <form id="br-filter" class="filter-bar">
+            <label>状态<select name="state"><option value="unknown">结果未知</option><option value="prepared">待结算</option><option value="review">待核查</option><option value="settled">已结算</option><option value="ignored">已排除</option><option value="">全部</option></select></label>
+            <button class="icon-button" type="submit" title="刷新" aria-label="刷新"><i data-lucide="refresh-cw"></i></button>
+            <button id="br-retry" class="button secondary" type="button"><i data-lucide="rotate-cw"></i><span>重试待结算记录</span></button>
+            <span id="br-status" role="status"></span>
+          </form>
+          <div id="br-error" class="alert danger" role="alert" hidden></div>
+          <div class="table-wrap"><table><thead><tr><th>时间 / 请求</th><th>平台 / 模型</th><th>用户 / Key / 账号</th><th>状态</th><th>用户费用</th><th>重试 / 异常</th><th></th></tr></thead><tbody id="br-list"></tbody></table></div>
+          <div class="br-pagination"><button id="br-prev" class="icon-button" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><span id="br-pagination"></span><button id="br-next" class="icon-button" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div>
+          <section id="br-detail" class="br-detail" hidden>
+            <div class="panel-heading"><h2 id="br-title">核查记录</h2><button id="br-close" class="icon-button" title="关闭详情" aria-label="关闭详情"><i data-lucide="x"></i></button></div>
+            <dl id="br-summary" class="br-summary"></dl>
+            <div class="br-actions"><button id="br-lookup" class="button secondary"><i data-lucide="search-check"></i><span>查询上游账单</span></button><button id="br-settle" class="button primary"><i data-lucide="receipt"></i><span>按记录结算</span></button></div>
+            <div id="br-lookup-result" role="status"></div>
+            <form id="br-usage-form" class="br-form">
+              <h3 id="br-usage-heading">补充使用记录</h3>
+              <div class="br-fields">
+                <label>计费模型<input name="Model" required maxlength="200"></label>
+                <label>输入 Token<input name="InputTokens" type="number" min="0" step="1" value="0" required></label>
+                <label>输出 Token<input name="OutputTokens" type="number" min="0" step="1" value="0" required></label>
+                <label>缓存创建 Token<input name="CacheCreationTokens" type="number" min="0" step="1" value="0" required></label>
+                <label>缓存读取 Token<input name="CacheReadTokens" type="number" min="0" step="1" value="0" required></label>
+                <label>缓存创建 5m Token<input name="CacheCreation5mTokens" type="number" min="0" step="1" value="0"></label>
+                <label>缓存创建 1h Token<input name="CacheCreation1hTokens" type="number" min="0" step="1" value="0"></label>
+                <label>图片输入 Token<input name="ImageInputTokens" type="number" min="0" step="1" value="0"></label>
+                <label>图片输出 Token<input name="ImageOutputTokens" type="number" min="0" step="1" value="0"></label>
+                <label>输入费用<input name="InputCost" type="number" min="0" step="0.00000001" value="0"></label>
+                <label>输出费用<input name="OutputCost" type="number" min="0" step="0.00000001" value="0"></label>
+                <label>缓存创建费用<input name="CacheCreationCost" type="number" min="0" step="0.00000001" value="0"></label>
+                <label>缓存读取费用<input name="CacheReadCost" type="number" min="0" step="0.00000001" value="0"></label>
+                <label>图片输入费用<input name="ImageInputCost" type="number" min="0" step="0.00000001" value="0"></label>
+                <label>图片输出费用<input name="ImageOutputCost" type="number" min="0" step="0.00000001" value="0"></label>
+                <label>标准费用<input name="TotalCost" type="number" min="0.00000001" step="0.00000001" required></label>
+                <label>历史售卖倍率<input name="RateMultiplier" type="number" min="0.00000001" step="0.00000001" required></label>
+                <label>历史账号倍率<input name="AccountRateMultiplier" type="number" min="0" step="0.00000001" value="1" required></label>
+                <label>图片数量<input name="ImageCount" type="number" min="0" step="1" value="0"></label>
+                <label>视频数量<input name="VideoCount" type="number" min="0" step="1" value="0"></label>
+                <label>视频秒数<input name="VideoDurationSeconds" type="number" min="0" step="1"></label>
+                <label>视频分辨率<input name="VideoResolution" maxlength="40"></label>
+              </div>
+              <label>上游账单及历史价格凭据<textarea id="br-evidence" name="evidence" rows="3" minlength="8" maxlength="4000" required></textarea></label>
+              <button id="br-save-usage" class="button secondary" type="submit"><i data-lucide="file-plus-2"></i><span>保存待核查记录</span></button>
+            </form>
+            <div class="br-review">
+              <label><input id="br-checked" type="checkbox">已核对使用量、归属及历史价格</label>
+              <div class="br-actions"><button id="br-approve" class="button primary"><i data-lucide="check-check"></i><span>确认记录</span></button><button id="br-review" class="button secondary"><i data-lucide="clipboard-list"></i><span>转人工核查</span></button><button id="br-ignore" class="button secondary"><i data-lucide="circle-slash"></i><span>凭据确认未收费</span></button></div>
+            </div>
+            <h3>处理历史</h3><div class="table-wrap"><table><thead><tr><th>时间</th><th>处理</th><th>操作者</th><th>凭据</th></tr></thead><tbody id="br-events"></tbody></table></div>
+          </section>
+        </section>
         <section id="view-settings" class="view" aria-labelledby="page-title">
           <div id="settings-alerts" class="alert-stack"></div>
           <div id="settings-metrics" class="metric-grid compact"></div>
