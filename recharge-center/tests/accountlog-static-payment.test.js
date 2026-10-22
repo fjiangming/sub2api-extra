@@ -59,7 +59,139 @@ function entry(order, overrides = {}) {
   };
 }
 
-test('an unassociated expense lists nearby order owners without assigning the bill or changing their balances', async (t) => {
+for (const amountMinor of [-80000, 80000]) {
+  test(`an 800 CNY expense (${amountMinor}) is recorded without alerts or interfering with a same-amount recharge`, async (t) => {
+    const context = accountLogContext();
+    t.after(() => context.cleanup());
+    let now = baseTime;
+    const alerts = [];
+    const calls = [];
+    const service = new OrderService({ db: context.db, config: context.config, clock: () => now,
+      alerts: { async send(event) { alerts.push(event); } },
+      sub2api: { async createAndRedeemWithAdminKey(input) { calls.push(input); return successRedeem(input); } } });
+    const order = service.create(user(1), '800.00');
+    const before = context.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(order.id);
+    const reservation = context.db.prepare('SELECT * FROM amount_reservations WHERE order_id = ?').get(order.id);
+    now = new Date(baseTime.getTime() + 90000);
+    const expense = entry(order, { direction: 'expense', amountMinor,
+      amount: amountMinor < 0 ? '-800.00' : '800.00' });
+    const result = await service.acceptAccountLogEntry(expense);
+    assert.deepEqual(result, { accepted: false, duplicate: false, status: 'ignored',
+      anomalyCode: null, orderId: null, orderNo: null });
+    assert.equal(alerts.length, 0);
+    assert.equal(calls.length, 0);
+    assert.deepEqual(context.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(order.id), before);
+    assert.deepEqual(context.db.prepare('SELECT * FROM amount_reservations WHERE order_id = ?').get(order.id), reservation);
+    const stored = context.db.prepare('SELECT * FROM alipay_accountlog_entries').get();
+    assert.equal(stored.direction, 'expense');
+    assert.equal(stored.amount_minor, amountMinor);
+    assert.equal(stored.match_status, 'ignored');
+    assert.equal(stored.anomaly_code, null);
+    assert.equal(stored.order_id, null);
+    assert.equal(JSON.stringify(stored).includes(expense.accountLogId), false);
+    assert.equal(JSON.stringify(stored).includes(expense.otherAccount), false);
+    const replay = await service.acceptAccountLogEntry(expense);
+    assert.equal(replay.status, 'ignored');
+    assert.equal(replay.accepted, false);
+    assert.equal(replay.duplicate, true);
+    assert.equal(context.db.prepare('SELECT COUNT(*) AS count FROM alipay_accountlog_entries').get().count, 1);
+    assert.equal(context.db.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_type = 'ACCOUNTLOG_EXPENSE_IGNORED'").get().count, 1);
+    const payment = await service.acceptAccountLogEntry(entry(order, { accountLogId: '117007123456789152' }));
+    assert.equal(payment.status, 'completed');
+    assert.equal(payment.orderId, order.id);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].value, 800);
+    assert.equal(calls[0].userId, 1);
+    assert.equal(alerts.length, 0);
+  });
+}
+
+test('an expense without any recharge orders cannot create an order or anomaly notification', async (t) => {
+  const context = accountLogContext();
+  t.after(() => context.cleanup());
+  const alerts = [];
+  const service = new OrderService({ db: context.db, config: context.config, clock: () => baseTime,
+    alerts: { async send(event) { alerts.push(event); } }, sub2api: {} });
+  const result = await service.acceptAccountLogEntry(entry({ payableAmount: '800.00',
+    createdAt: baseTime.toISOString() }, { direction: 'expense', amountMinor: -80000, amount: '-800.00',
+    paidAt: baseTime.toISOString() }));
+  assert.equal(result.status, 'ignored');
+  assert.equal(result.accepted, false);
+  assert.equal(alerts.length, 0);
+  assert.equal(context.db.prepare('SELECT COUNT(*) AS count FROM recharge_orders').get().count, 0);
+});
+
+test('an ignored expense cannot be replayed as income to credit an order', async (t) => {
+  const context = accountLogContext();
+  t.after(() => context.cleanup());
+  let now = baseTime;
+  const alerts = [];
+  let calls = 0;
+  const service = new OrderService({ db: context.db, config: context.config, clock: () => now,
+    alerts: { async send(event) { alerts.push(event); } },
+    sub2api: { async createAndRedeemWithAdminKey() { calls += 1; } } });
+  const order = service.create(user(1), '800.00');
+  now = new Date(baseTime.getTime() + 90000);
+  const expense = entry(order, { direction: 'expense', amountMinor: -80000, amount: '-800.00' });
+  assert.equal((await service.acceptAccountLogEntry(expense)).status, 'ignored');
+  const conflict = await service.acceptAccountLogEntry(entry(order));
+  assert.equal(conflict.accepted, false);
+  assert.equal(conflict.anomalyCode, 'ACCOUNT_LOG_ID_CONFLICT');
+  assert.equal(conflict.orderId, null);
+  assert.equal(calls, 0);
+  assert.equal(service.getForUser(order.id, 1).status, 'awaiting_payment');
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].payment.direction, 'expense');
+  assert.equal(alerts[0].payment.amount, '-800.00');
+  assert.equal(alerts[0].nearbyOrders.orders[0].orderNo, order.orderNo);
+});
+
+test('an income replayed as an expense still triggers a conflict after fulfillment', async (t) => {
+  const context = accountLogContext();
+  t.after(() => context.cleanup());
+  let now = baseTime;
+  const alerts = [];
+  let calls = 0;
+  const service = new OrderService({ db: context.db, config: context.config, clock: () => now,
+    alerts: { async send(event) { alerts.push(event); } },
+    sub2api: { async createAndRedeemWithAdminKey(input) { calls += 1; return successRedeem(input); } } });
+  const order = service.create(user(1), '800.00');
+  now = new Date(baseTime.getTime() + 90000);
+  const payment = entry(order);
+  assert.equal((await service.acceptAccountLogEntry(payment)).status, 'completed');
+  const conflict = await service.acceptAccountLogEntry({ ...payment, direction: 'expense' });
+  assert.equal(conflict.accepted, false);
+  assert.equal(conflict.anomalyCode, 'ACCOUNT_LOG_ID_CONFLICT');
+  assert.equal(calls, 1);
+  assert.equal(service.getForUser(order.id, 1).status, 'completed');
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].userEmail, user(1).email);
+  assert.equal(alerts[0].payment.direction, 'income');
+});
+
+for (const amountMinor of [0, -80000]) {
+  test(`an entry marked income with a nonpositive amount (${amountMinor}) still raises an anomaly`, async (t) => {
+    const context = accountLogContext();
+    t.after(() => context.cleanup());
+    let now = baseTime;
+    const alerts = [];
+    const service = new OrderService({ db: context.db, config: context.config, clock: () => now,
+      alerts: { async send(event) { alerts.push(event); } }, sub2api: {} });
+    const order = service.create(user(1), '800.00');
+    now = new Date(baseTime.getTime() + 90000);
+    const result = await service.acceptAccountLogEntry(entry(order, { amountMinor,
+      amount: amountMinor < 0 ? '-800.00' : '0.00' }));
+    assert.equal(result.accepted, false);
+    assert.equal(result.status, 'needs_attention');
+    assert.equal(result.anomalyCode, 'PAYMENT_AMOUNT_INVALID');
+    assert.equal(result.orderId, null);
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].nearbyOrders.orders[0].orderNo, order.orderNo);
+    assert.equal(service.getForUser(order.id, 1).status, 'awaiting_payment');
+  });
+}
+
+test('an unassociated entry with unknown direction lists nearby owners without assigning the bill or changing balances', async (t) => {
   const context = accountLogContext();
   t.after(() => context.cleanup());
   let now = new Date(baseTime.getTime() - 10 * 60000);
@@ -82,7 +214,7 @@ test('an unassociated expense lists nearby order owners without assigning the bi
   const future = service.create(user(5), '50.00');
   now = new Date(baseTime.getTime() + 8 * 60000);
   const result = await service.acceptAccountLogEntry(entry(sameAmount, {
-    amountMinor: -1018, direction: 'expense', userEmail: 'spoofed@example.test'
+    amountMinor: -1018, direction: 'unknown', userEmail: 'spoofed@example.test'
   }));
   assert.equal(result.accepted, false);
   assert.equal(result.orderId, null);
@@ -91,7 +223,7 @@ test('an unassociated expense lists nearby order owners without assigning the bi
   const alert = alerts[0];
   assert.equal(alert.userId, null);
   assert.equal(alert.userEmail, null);
-  assert.deepEqual(alert.payment, { amount: '-10.18', direction: 'expense',
+  assert.deepEqual(alert.payment, { amount: '-10.18', direction: 'unknown',
     paidAt: new Date(baseTime.getTime() + 60000).toISOString() });
   assert.equal(alert.nearbyOrders.from, new Date(baseTime.getTime() - 2 * 60000).toISOString());
   assert.equal(alert.nearbyOrders.until, new Date(baseTime.getTime() + 4 * 60000).toISOString());
@@ -123,7 +255,7 @@ test('candidate lists disclose truncation above 100 orders while retaining every
   service.cancel(first.id, user(1));
   service.create(user(1), '10.00');
   for (let id = 2; id <= 100; id += 1) service.create(user(id), '10.00');
-  await service.acceptAccountLogEntry(entry(first, { amountMinor: -1000, direction: 'expense', paidAt: first.createdAt }));
+  await service.acceptAccountLogEntry(entry(first, { amountMinor: -1000, direction: 'unknown', paidAt: first.createdAt }));
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].nearbyOrders.total, 101);
   assert.equal(alerts[0].nearbyOrders.totalUsers, 100);
@@ -144,7 +276,7 @@ test('a damaged candidate email snapshot does not suppress the remaining users o
     UPDATE recharge_orders SET user_email_ciphertext =
       (SELECT user_email_ciphertext FROM recharge_orders WHERE id = ?) WHERE id = ?
   `).run(first.id, second.id);
-  await service.acceptAccountLogEntry(entry(first, { amountMinor: -1000, direction: 'expense', paidAt: first.createdAt }));
+  await service.acceptAccountLogEntry(entry(first, { amountMinor: -1000, direction: 'unknown', paidAt: first.createdAt }));
   assert.equal(alerts.length, 1);
   assert.equal(alerts[0].nearbyOrders.orders.find((order) => order.userId === '1').userEmail, user(1).email);
   assert.equal(alerts[0].nearbyOrders.orders.find((order) => order.userId === '2').userEmail, null);
@@ -666,7 +798,10 @@ test('a conflicting replay, non-income entry, or payment outside the order windo
     direction: 'expense'
   }));
   assert.equal(expense.accepted, false);
-  assert.equal(expense.anomalyCode, 'PAYMENT_DIRECTION_INVALID');
+  assert.equal(expense.status, 'ignored');
+  assert.equal(expense.anomalyCode, null);
+  assert.equal(expense.orderId, null);
+  assert.equal(service.getForUser(expenseOrder.id, 2).status, 'awaiting_payment');
 
   const lateOrder = service.create(user(3), '30.00');
   const outside = await service.acceptAccountLogEntry(entry(lateOrder, {
@@ -676,11 +811,9 @@ test('a conflicting replay, non-income entry, or payment outside the order windo
   assert.equal(outside.accepted, false);
   assert.equal(outside.anomalyCode, 'ACCOUNTLOG_ORDER_NOT_FOUND');
   assert.equal(calls.length, 1);
-  assert.equal(alerts.length, 3);
+  assert.equal(alerts.length, 2);
   assert.equal(alerts[1].userId, null);
   assert.equal(alerts[1].userEmail, null);
-  assert.equal(alerts[2].userId, null);
-  assert.equal(alerts[2].userEmail, null);
 });
 
 test('an associated accountlog anomaly can be independently reviewed with its exact ledger id', async (t) => {

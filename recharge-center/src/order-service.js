@@ -798,40 +798,47 @@ class OrderService {
         };
       }
 
+      // Account queries also include routine expenses, which must not affect recharge orders.
+      const ignored = direction === 'expense';
       let anomalyCode = null;
-      if (direction !== 'income') anomalyCode = 'PAYMENT_DIRECTION_INVALID';
-      else if (amountMinor <= 0) anomalyCode = 'PAYMENT_AMOUNT_INVALID';
-      else if (paidAtTimestamp > Date.parse(receivedAt) + 60000) anomalyCode = 'PAYMENT_TIME_IN_FUTURE';
-      else if (paidAtTimestamp < Date.parse(receivedAt) - this.config.accountLogLookbackSeconds * 1000) {
-        anomalyCode = 'PAYMENT_EVENT_TOO_OLD';
-      }
+      let candidates = [];
+      let order = null;
+      let priorTradeOrder = null;
+      if (!ignored) {
+        if (direction !== 'income') anomalyCode = 'PAYMENT_DIRECTION_INVALID';
+        else if (amountMinor <= 0) anomalyCode = 'PAYMENT_AMOUNT_INVALID';
+        else if (paidAtTimestamp > Date.parse(receivedAt) + 60000) anomalyCode = 'PAYMENT_TIME_IN_FUTURE';
+        else if (paidAtTimestamp < Date.parse(receivedAt) - this.config.accountLogLookbackSeconds * 1000) {
+          anomalyCode = 'PAYMENT_EVENT_TOO_OLD';
+        }
 
-      // Include the whole cancellation second so boundary collisions cannot be resolved by guessing.
-      const candidates = amountMinor > 0 ? this.db.prepare(`
-        SELECT * FROM recharge_orders
-        WHERE payment_mode = ? AND payable_amount_minor = ?
-          AND created_at <= ? AND expires_at >= ?
-          AND (payment_match_until IS NULL OR substr(payment_match_until, 1, 19) >= substr(?, 1, 19))
-        ORDER BY created_at, id
-      `).all(ACCOUNTLOG_STATIC_MODE, amountMinor, paidAt, paidAt, paidAt) : [];
-      let order = candidates.length === 1 ? candidates[0] : null;
-      if (!anomalyCode && candidates.length === 0) anomalyCode = 'ACCOUNTLOG_ORDER_NOT_FOUND';
-      else if (!anomalyCode && candidates.length > 1) anomalyCode = 'ACCOUNTLOG_ORDER_AMBIGUOUS';
-      if (!anomalyCode && !['awaiting_payment', 'expired'].includes(order.status)) {
-        anomalyCode = 'ORDER_STATE_INVALID';
+        // Include the whole cancellation second so boundary collisions cannot be resolved by guessing.
+        candidates = amountMinor > 0 ? this.db.prepare(`
+          SELECT * FROM recharge_orders
+          WHERE payment_mode = ? AND payable_amount_minor = ?
+            AND created_at <= ? AND expires_at >= ?
+            AND (payment_match_until IS NULL OR substr(payment_match_until, 1, 19) >= substr(?, 1, 19))
+          ORDER BY created_at, id
+        `).all(ACCOUNTLOG_STATIC_MODE, amountMinor, paidAt, paidAt, paidAt) : [];
+        order = candidates.length === 1 ? candidates[0] : null;
+        if (!anomalyCode && candidates.length === 0) anomalyCode = 'ACCOUNTLOG_ORDER_NOT_FOUND';
+        else if (!anomalyCode && candidates.length > 1) anomalyCode = 'ACCOUNTLOG_ORDER_AMBIGUOUS';
+        if (!anomalyCode && !['awaiting_payment', 'expired'].includes(order.status)) {
+          anomalyCode = 'ORDER_STATE_INVALID';
+        }
+        if (!anomalyCode) {
+          const anotherPayment = this.db.prepare(`
+            SELECT id FROM alipay_accountlog_entries
+            WHERE order_id = ? AND account_log_hash <> ?
+            LIMIT 1
+          `).get(order.id, accountLogHash);
+          if (anotherPayment) anomalyCode = 'MULTIPLE_PAYMENTS_FOR_ORDER';
+        }
+        priorTradeOrder = this.db.prepare(`
+          SELECT id FROM recharge_orders WHERE trade_hash = ? AND (? IS NULL OR id <> ?)
+        `).get(tradeHash, order?.id || null, order?.id || null);
+        if (priorTradeOrder) anomalyCode = 'PAYMENT_TRADE_ALREADY_USED';
       }
-      if (!anomalyCode) {
-        const anotherPayment = this.db.prepare(`
-          SELECT id FROM alipay_accountlog_entries
-          WHERE order_id = ? AND account_log_hash <> ?
-          LIMIT 1
-        `).get(order.id, accountLogHash);
-        if (anotherPayment) anomalyCode = 'MULTIPLE_PAYMENTS_FOR_ORDER';
-      }
-      const priorTradeOrder = this.db.prepare(`
-        SELECT id FROM recharge_orders WHERE trade_hash = ? AND (? IS NULL OR id <> ?)
-      `).get(tradeHash, order?.id || null, order?.id || null);
-      if (priorTradeOrder) anomalyCode = 'PAYMENT_TRADE_ALREADY_USED';
 
       const entryId = crypto.randomUUID();
       this.db.prepare(`
@@ -847,8 +854,19 @@ class OrderService {
         amountMinor, paidAt, direction,
         hashOptional('alipay-accountlog-memo:v1', memo), null,
         hashOptional('alipay-other-account:v1', otherAccount), order?.id || null,
-        anomalyCode ? 'needs_attention' : 'matched', anomalyCode, receivedAt, receivedAt
+        ignored ? 'ignored' : anomalyCode ? 'needs_attention' : 'matched', anomalyCode, receivedAt, receivedAt
       );
+
+      if (ignored) {
+        this.#audit(null, { type: 'system', id: 'alipay-accountlog' }, 'ACCOUNTLOG_EXPENSE_IGNORED', request, {
+          accountLogLast6, amount: minorToDecimal(amountMinor), paidAt
+        });
+        return {
+          kind: 'ignored',
+          entry: this.db.prepare('SELECT * FROM alipay_accountlog_entries WHERE id = ?').get(entryId),
+          order: null
+        };
+      }
 
       if (anomalyCode) {
         const affected = order ? [order] : candidates;
@@ -913,7 +931,9 @@ class OrderService {
       };
     })();
 
-    if (prepared.kind === 'duplicate') return this.#accountLogPaymentResult(prepared, true);
+    if (prepared.kind === 'duplicate' || prepared.kind === 'ignored') {
+      return this.#accountLogPaymentResult(prepared, prepared.kind === 'duplicate');
+    }
     if (prepared.kind === 'anomaly') {
       await this.#notifyAccountLogAnomaly(prepared, prepared.anomalyCode);
       return this.#accountLogPaymentResult(prepared, false);
