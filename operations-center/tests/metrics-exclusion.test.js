@@ -20,7 +20,7 @@ test.before(async () => {
   await database.exec(`
     CREATE TABLE users (id bigint PRIMARY KEY, email text, username text, balance numeric,
       status text DEFAULT 'active', created_at timestamptz, deleted_at timestamptz);
-    CREATE TABLE usage_logs (user_id bigint, created_at timestamptz,
+    CREATE TABLE usage_logs (user_id bigint, created_at timestamptz, billing_type smallint DEFAULT 0,
       input_tokens bigint DEFAULT 0, output_tokens bigint DEFAULT 0,
       cache_creation_tokens bigint DEFAULT 0, cache_read_tokens bigint DEFAULT 0,
       actual_cost numeric DEFAULT 0, total_cost numeric DEFAULT 0,
@@ -140,6 +140,8 @@ test('cost income, profit, user audit, pagination and drilldown consistently exc
   assert.equal(report.summary.balanceUsers, 3);
   assert.equal(report.summary.profit, 122);
   assert.equal(report.summary.actualProfit, 62);
+  assert.equal(report.periods.find((row) => row.start === today).balanceConsumption, 5);
+  assert.equal(report.periods.find((row) => row.start === today).consumptionProfit, 5);
   const users = await costs.getAutomaticIncomeUsers(range);
   assert.deepEqual(users.summary, { users: 3, transactions: 4, totalIncome: 122 });
   assert.equal(users.pagination.total, 3);

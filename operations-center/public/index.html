@@ -16,7 +16,7 @@
   <script src="/vendor/dompurify.js" defer></script>
   <script src="/user-messages-ui.js?v=20261019-1" defer></script>
   <script src="/latency-ui.js?v=20261020-1" defer></script>
-  <script src="/app.js?v=20261019-1" defer></script>
+  <script src="/app.js?v=20261022-1" defer></script>
 </head>
 <body>
   <div id="login-view" class="login-view" hidden>
@@ -360,7 +360,7 @@
             </details>
           </div>
           <div id="cost-analysis-metrics" class="metric-grid compact"></div>
-          <section class="panel chart-panel"><div class="panel-heading"><div><h2>收支与利润趋势</h2><p id="cost-analysis-zone"></p></div></div><div id="cost-analysis-chart" class="chart"></div></section>
+          <section class="panel chart-panel"><div class="panel-heading"><div><h2>余额消费与实际利润趋势</h2><p id="cost-analysis-zone"></p></div></div><div id="cost-analysis-chart" class="chart" role="img" aria-label="用户余额消费、支出与实际利润趋势图"></div></section>
 
           <div class="split-layout equal">
             <section class="panel">
@@ -379,8 +379,8 @@
           </section>
 
           <section class="panel">
-            <div class="panel-heading"><div><h2>周期明细</h2><p>自动收入、手工收入与支出</p></div></div>
-            <div class="table-wrap"><table class="wide-table"><thead><tr><th>周期</th><th class="numeric">自动收入</th><th class="numeric">手工收入</th><th class="numeric">总收入</th><th class="numeric">支出</th><th class="numeric">利润</th><th class="numeric">利润率</th><th class="numeric">兑换笔数</th></tr></thead><tbody id="cost-periods"></tbody></table></div>
+            <div class="panel-heading"><div><h2>周期明细</h2><p>收支、余额消费与利润</p></div></div>
+            <div class="table-wrap"><table class="wide-table"><thead><tr><th>周期</th><th class="numeric">自动收入</th><th class="numeric">手工收入</th><th class="numeric">总收入</th><th class="numeric">支出</th><th class="numeric">利润</th><th class="numeric">利润率</th><th class="numeric">余额消费</th><th class="numeric">实际利润</th><th class="numeric">兑换笔数</th></tr></thead><tbody id="cost-periods"></tbody></table></div>
           </section>
 
           <section class="panel">

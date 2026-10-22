@@ -78,6 +78,9 @@ function createPeriods(range, granularity) {
       revenue: 0,
       expense: 0,
       profit: 0,
+      balanceConsumption: null,
+      consumptionProfit: null,
+      consumptionComplete: false,
       transactions: 0,
       incomeCount: 0,
       expenseCount: 0,
@@ -420,7 +423,7 @@ class CostAnalysisService {
   async getReport(input = {}) {
     const { range, granularity, currency } = parseReportInput(input, this.config);
     await this.#requireAutomaticIncomeTables();
-    const [automaticIncomeResult, balanceResult] = await Promise.all([
+    const [automaticIncomeResult, balanceResult, consumptionResult] = await Promise.all([
       this.pool.query(`
         SELECT (r.used_at AT TIME ZONE $3)::date::text AS date,
                COUNT(*) AS transactions,
@@ -435,12 +438,14 @@ class CostAnalysisService {
         FROM users
         WHERE id <> 1
           AND deleted_at IS NULL
-      `)
+      `),
+      this.#dailyBalanceConsumption(range, currency)
     ]);
     const rows = automaticIncomeResult.rows;
 
     const periods = createPeriods(range, granularity);
     const periodMap = new Map(periods.map((period) => [period.key, period]));
+    const consumptionByDate = new Map(consumptionResult.rows.map((row) => [row.date, row]));
     for (const row of rows) {
       const period = periodMap.get(periodStart(row.date, granularity));
       if (!period) continue;
@@ -510,6 +515,18 @@ class CostAnalysisService {
       period.expense = Number(period.expense.toFixed(2));
       period.profit = Number((period.revenue - period.expense).toFixed(2));
       period.margin = period.revenue ? Number((period.profit / period.revenue * 100).toFixed(2)) : null;
+      let consumption = 0;
+      let complete = true;
+      for (let date = period.start; date <= period.end; date = addUtcDays(date, 1)) {
+        const row = consumptionByDate.get(date);
+        complete = complete && row?.complete === true;
+        consumption += number(row?.balance_consumption);
+      }
+      period.consumptionComplete = complete;
+      if (complete) {
+        period.balanceConsumption = Number(consumption.toFixed(8));
+        period.consumptionProfit = Number((consumption - period.expense).toFixed(8));
+      }
     }
     automaticRevenue = Number(automaticRevenue.toFixed(2));
     manualRevenue = Number(manualRevenue.toFixed(2));
@@ -564,6 +581,9 @@ class CostAnalysisService {
       periods,
       breakdown,
       incomeBreakdown,
+      notices: consumptionResult.notice ? [consumptionResult.notice] :
+        periods.some((period) => !period.consumptionComplete)
+          ? ['部分日期的用量明细不完整或无法核验，余额消费与实际利润趋势留空；支出仍完整展示。'] : [],
       caveats: [
         '自动收入只统计 Sub2API 兑换页面中已使用的余额记录（balance、admin_balance），排除用户 ID 1，以 used_at 归属日期；每条记录只统计一次。',
         '并发、管理员并发调整、订阅和邀请记录不是金额，均不计入自动收入。',
@@ -574,9 +594,60 @@ class CostAnalysisService {
         '支出按手工台账的发生日期归集；不同币种不会自动换算。',
         '利润为总收入减手工支出，不包含税费，也不扣除退款估算。',
         '用户总余额是当前未删除用户的 balance 合计并排除 ID 1；实际利润为利润减用户总余额，余额是当前快照且不随查询日期回溯。',
+        '趋势图的实际利润按当期余额消费减支出计算；余额消费取 usage_logs.actual_cost，仅含 billing_type = 0 且 user_id <> 1 的记录，不叠加充值、手工收入或订阅消费，也不再次扣除当前余额。',
+        '余额消费按资金时区归属日期，保留已删除用户的历史消费；使用全部请求与原生日汇总核验明细覆盖，周期内任一天不完整时不展示该周期的消费和实际利润。非 CNY 不计算余额消费利润。',
         '自动收入直接依赖 Sub2API 当前兑换记录；源记录被删除后，历史报表会同步减少。'
       ]
     };
+  }
+
+  async #dailyBalanceConsumption(range, currency) {
+    if (currency !== 'CNY') {
+      return { rows: [], notice: '余额消费与实际利润趋势仅适用于 CNY；当前币种仅展示支出。' };
+    }
+    const missing = await this.inspector.requireTables(['usage_logs', 'usage_dashboard_daily']);
+    if (missing.length) {
+      return { rows: [], notice: '缺少用量明细或日汇总表，暂无法核验余额消费与实际利润；支出仍完整展示。' };
+    }
+    // Coverage uses full usage days, including days crossing the finance timezone boundary.
+    const { rows } = await this.pool.query(`
+      WITH bounds AS (
+        SELECT ($1::date::timestamp AT TIME ZONE $3 AT TIME ZONE $4)::date AS first_date,
+               (($2::date::timestamp AT TIME ZONE $3 - INTERVAL '1 microsecond') AT TIME ZONE $4)::date AS last_date
+      ), retained_usage AS MATERIALIZED (
+        SELECT created_at, user_id, billing_type, actual_cost
+        FROM usage_logs, bounds
+        WHERE created_at >= bounds.first_date::timestamp AT TIME ZONE $4
+          AND created_at < (bounds.last_date + 1)::timestamp AT TIME ZONE $4
+      ), detail_counts AS (
+        SELECT (created_at AT TIME ZONE $4)::date AS date, COUNT(*) AS requests
+        FROM retained_usage GROUP BY 1
+      ), consumption AS (
+        SELECT (created_at AT TIME ZONE $3)::date AS date,
+               COALESCE(SUM(actual_cost) FILTER (WHERE user_id <> 1 AND billing_type = 0), 0) AS amount
+        FROM retained_usage
+        WHERE created_at >= $1::date::timestamp AT TIME ZONE $3
+          AND created_at < $2::date::timestamp AT TIME ZONE $3
+        GROUP BY 1
+      ), dates AS (
+        SELECT generate_series($1::date, $2::date - 1, INTERVAL '1 day')::date AS date
+      )
+      SELECT dates.date::text, COALESCE(consumption.amount, 0) AS balance_consumption,
+             BOOL_AND(d.bucket_date IS NOT NULL AND COALESCE(detail_counts.requests, 0) >= d.total_requests) AS complete
+      FROM dates
+      CROSS JOIN LATERAL generate_series(
+        (dates.date::timestamp AT TIME ZONE $3 AT TIME ZONE $4)::date::timestamp,
+        (((dates.date + 1)::timestamp AT TIME ZONE $3 - INTERVAL '1 microsecond') AT TIME ZONE $4)::date::timestamp,
+        INTERVAL '1 day'
+      ) source_date
+      LEFT JOIN usage_dashboard_daily d ON d.bucket_date = source_date::date
+      LEFT JOIN detail_counts ON detail_counts.date = source_date::date
+      LEFT JOIN consumption ON consumption.date = dates.date
+      GROUP BY dates.date, consumption.amount
+      ORDER BY dates.date
+    `, [range.start, range.endExclusive, this.config.financeTimezone,
+      this.config.sub2apiTimezone || this.config.financeTimezone]);
+    return { rows };
   }
 
   async #requireAutomaticIncomeTables() {

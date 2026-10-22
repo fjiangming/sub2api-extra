@@ -20,6 +20,7 @@ const state = {
   costIncomes: [],
   costExpenses: [],
   costCaveats: [],
+  costNotices: [],
   costMainPageMeta: '',
   costAutomaticIncome: {
     active: false,
@@ -556,9 +557,10 @@ function renderCostExpenses(items, currency, customItems = []) {
 }
 
 function renderCostAnalysisNotices(providers) {
-  const operationalNotices = providers.sync?.status === 'error'
-    ? [alertHtml('warning', `供应商同步失败，当前使用上次快照：${providers.sync.error}`)]
-    : [];
+  const operationalNotices = state.costNotices.map((message) => alertHtml('warning', message));
+  if (providers.sync?.status === 'error') {
+    operationalNotices.push(alertHtml('warning', `供应商同步失败，当前使用上次快照：${providers.sync.error}`));
+  }
   const operationalContainer = $('cost-analysis-operational-notices');
   operationalContainer.innerHTML = operationalNotices.join('');
   operationalContainer.hidden = operationalNotices.length === 0;
@@ -810,17 +812,17 @@ async function loadCostAnalysis() {
   ].join('');
   $('cost-analysis-zone').textContent = `${report.timezone} · ${report.range.start} 至 ${report.range.end} · ${report.currency}`;
   state.costCaveats = report.caveats || [];
+  state.costNotices = report.notices || [];
   renderCostAnalysisNotices(providers);
 
   chart('cost-analysis-chart', {
-    legend: { top: 2, right: 10, data: ['自动收入', '手工收入', '支出', '利润'] },
+    legend: { top: 2, right: 10, data: ['余额消费', '支出', '实际利润'] },
     xAxis: { type: 'category', data: report.periods.map((period) => period.label), axisLabel: { hideOverlap: true } },
     yAxis: { type: 'value', splitLine: { lineStyle: { color: '#edf0eb' } } },
     series: [
-      lineSeries('自动收入', report.periods.map((period) => period.automaticRevenue), '#176b4d'),
-      lineSeries('手工收入', report.periods.map((period) => period.manualRevenue), '#c28a32'),
+      lineSeries('余额消费', report.periods.map((period) => period.balanceConsumption), '#176b4d'),
       { name: '支出', type: 'bar', data: report.periods.map((period) => period.expense), itemStyle: { color: '#b05a3c' }, barMaxWidth: 28 },
-      lineSeries('利润', report.periods.map((period) => period.profit), '#2d5ea8')
+      lineSeries('实际利润', report.periods.map((period) => period.consumptionProfit), '#2d5ea8')
     ]
   });
 
@@ -832,8 +834,8 @@ async function loadCostAnalysis() {
     <tr><td><strong>${escapeHtml(row.name)}</strong></td><td>${escapeHtml(costKindLabel(row.kind))}</td><td class="numeric">${formatInteger(row.count)}</td><td class="numeric">${escapeHtml(formatMoney(row.amount, report.currency))}</td><td class="numeric">${formatPercent(row.percentage)}</td></tr>
   `).join('') : emptyRow(5, '所选范围暂无成本');
   $('cost-periods').innerHTML = report.periods.length ? report.periods.map((period) => `
-    <tr><td><strong>${escapeHtml(period.label)}</strong><div class="muted">${escapeHtml(period.start)} 至 ${escapeHtml(period.end)}</div></td><td class="numeric">${escapeHtml(formatMoney(period.automaticRevenue, report.currency))}</td><td class="numeric">${escapeHtml(formatMoney(period.manualRevenue, report.currency))}</td><td class="numeric">${escapeHtml(formatMoney(period.revenue, report.currency))}</td><td class="numeric">${escapeHtml(formatMoney(period.expense, report.currency))}</td><td class="numeric ${period.profit < 0 ? 'negative-value' : ''}">${escapeHtml(formatMoney(period.profit, report.currency))}</td><td class="numeric">${formatPercent(period.margin)}</td><td class="numeric">${formatInteger(period.transactions)}</td></tr>
-  `).join('') : emptyRow(8);
+    <tr><td><strong>${escapeHtml(period.label)}</strong><div class="muted">${escapeHtml(period.start)} 至 ${escapeHtml(period.end)}</div></td><td class="numeric">${escapeHtml(formatMoney(period.automaticRevenue, report.currency))}</td><td class="numeric">${escapeHtml(formatMoney(period.manualRevenue, report.currency))}</td><td class="numeric">${escapeHtml(formatMoney(period.revenue, report.currency))}</td><td class="numeric">${escapeHtml(formatMoney(period.expense, report.currency))}</td><td class="numeric ${period.profit < 0 ? 'negative-value' : ''}">${escapeHtml(formatMoney(period.profit, report.currency))}</td><td class="numeric">${formatPercent(period.margin)}</td><td class="numeric">${period.balanceConsumption == null ? 'N/A' : escapeHtml(formatMoney(period.balanceConsumption, report.currency, 8))}</td><td class="numeric ${period.consumptionProfit < 0 ? 'negative-value' : ''}">${period.consumptionProfit == null ? 'N/A' : escapeHtml(formatMoney(period.consumptionProfit, report.currency, 8))}</td><td class="numeric">${formatInteger(period.transactions)}</td></tr>
+  `).join('') : emptyRow(10);
   renderCostProviders(providers);
   renderCostIncomes(incomes.items || [], report.currency, incomes.customItems || []);
   renderCostExpenses(expenses.items || [], report.currency, expenses.customItems || []);
