@@ -519,6 +519,7 @@ test('Sub2API user session reads request logs separately for each remote API Key
     firstTokenMs: 650,
     inputTokens: 80,
     outputTokens: 20,
+    usageComplete: true,
     cacheCreationTokens: 10,
     cacheReadTokens: 40,
     actualCost: 0.0123,

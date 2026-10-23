@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const {
   ProviderAdapter,
   joinUrl,
+  isBillingTokenCount,
   toFiniteNumber,
   toIsoDate,
   unwrapEnvelope,
@@ -455,7 +456,9 @@ class OneApiFamilyAdapter extends ProviderAdapter {
 
     const status = await this.ensureStatus();
     const quotaPerUnit = toFiniteNumber(status?.quota_per_unit, 500000) || 500000;
-    const endTimestamp = Math.floor(Date.now() / 1000);
+    const requestedUntil = Date.parse(options.until || '');
+    const endAtMs = Number.isFinite(requestedUntil) ? Math.min(Date.now(), requestedUntil) : Date.now();
+    const endTimestamp = Math.floor(endAtMs / 1000);
     const oldestTimestamp = endTimestamp - lookbackDays * 86400;
     const requestedSince = Math.floor(Date.parse(options.since || '') / 1000);
     const startTimestamp = Math.max(
@@ -467,6 +470,8 @@ class OneApiFamilyAdapter extends ProviderAdapter {
     let total = null;
     let hasTotal = false;
     for (let page = 1; rows.length < maxRecords; page += 1) {
+      if (options.requestDelayMs) await new Promise(resolve => setTimeout(resolve,
+        Math.min(2000, Math.max(0, Number(options.requestDelayMs) || 0))));
       const query = new URLSearchParams({
         p: String(page),
         page_size: String(pageSize),
@@ -498,7 +503,8 @@ class OneApiFamilyAdapter extends ProviderAdapter {
       if (!other || typeof other !== 'object' || Array.isArray(other)) other = {};
       const tokenId = row.token_id == null ? null : String(row.token_id);
       const tokenName = String(row.token_name || '').trim();
-      const knownKey = (tokenId && keysById.get(tokenId)) || keysByName.get(tokenName) || null;
+      const knownKey = restrictToKeys && tokenId ? keysById.get(tokenId) || null :
+        (tokenId && keysById.get(tokenId)) || keysByName.get(tokenName) || null;
       if (restrictToKeys && !knownKey) continue;
       const remoteKeyId = String(knownKey?.remoteId ?? tokenId ?? tokenName);
       const createdAt = toIsoDate(row.created_at);
@@ -539,6 +545,10 @@ class OneApiFamilyAdapter extends ProviderAdapter {
         firstTokenMs: firstTokenMs == null ? null : Math.round(firstTokenMs),
         inputTokens: Math.max(0, promptTokens - cacheReadTokens),
         outputTokens: Math.max(0, toFiniteNumber(row.completion_tokens, 0) || 0),
+        usageComplete: [row.prompt_tokens, row.completion_tokens, other.cache_tokens ?? 0].every(isBillingTokenCount) &&
+          Number(other.cache_tokens ?? 0) <= Number(row.prompt_tokens) &&
+          Object.entries(other).every(([name, value]) =>
+            !/(?:cache.*(?:creat|writ)|(?:image|audio).*tokens|(?:web_search|web_fetch).*requests)/i.test(name) || value === 0),
         cacheCreationTokens: 0,
         cacheReadTokens,
         actualCost: finiteNonnegative(row.quota) == null ? null : Number(row.quota) / quotaPerUnit,
@@ -564,7 +574,7 @@ class OneApiFamilyAdapter extends ProviderAdapter {
       total: hasTotal ? total : rows.length,
       truncated: rows.length >= maxRecords && (!hasTotal || Number(total) > rows.length),
       coverageFrom: new Date(startTimestamp * 1000).toISOString(),
-      coverageTo: new Date(endTimestamp * 1000).toISOString()
+      coverageTo: new Date(endAtMs).toISOString()
     };
   }
 

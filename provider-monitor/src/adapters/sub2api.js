@@ -1,6 +1,7 @@
 const {
   ProviderAdapter,
   joinUrl,
+  isBillingTokenCount,
   toFiniteNumber,
   toIsoDate,
   unwrapEnvelope,
@@ -258,6 +259,8 @@ function normalizeRequestLog(row, expectedKey, options = {}) {
     firstTokenMs: firstTokenMs == null || firstTokenMs <= 0 ? null : Math.round(firstTokenMs),
     inputTokens: Math.max(0, Math.round(toFiniteNumber(row.input_tokens, 0))),
     outputTokens: Math.max(0, Math.round(toFiniteNumber(row.output_tokens, 0))),
+    usageComplete: [row.input_tokens, row.output_tokens,
+      row.cache_creation_tokens ?? 0, row.cache_read_tokens ?? 0].every(isBillingTokenCount),
     cacheCreationTokens: Math.max(0, Math.round(toFiniteNumber(row.cache_creation_tokens, 0))),
     cacheReadTokens: Math.max(0, Math.round(toFiniteNumber(row.cache_read_tokens, 0))),
     actualCost: toFiniteNumber(row.actual_cost ?? row.total_cost),
@@ -1132,7 +1135,8 @@ class Sub2ApiAdapter extends ProviderAdapter {
     const suppliedKeys = Array.isArray(options.keys) ? options.keys : [];
     const knownKeys = suppliedKeys.length > 0 ? suppliedKeys : await this.listKeys();
     const requestedKeys = knownKeys.filter((key) => key?.remoteId != null);
-    const endAt = new Date();
+    const requestedUntil = Date.parse(options.until || '');
+    const endAt = new Date(Number.isFinite(requestedUntil) ? Math.min(Date.now(), requestedUntil) : Date.now());
     const oldestAt = new Date(endAt.getTime() - lookbackDays * 86400000);
     const requestedSince = Date.parse(options.since || '');
     const startAt = new Date(Math.max(
@@ -1168,7 +1172,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
     const results = new Array(queryableKeys.length);
     let cursor = 0;
     const workerCount = Math.min(
-      boundedInteger(options.concurrency, 4, 1, 10),
+      boundedInteger(options.concurrency, 1, 1, 10),
       queryableKeys.length
     );
     const workers = Array.from({ length: workerCount }, async () => {
@@ -1201,12 +1205,15 @@ class Sub2ApiAdapter extends ProviderAdapter {
             );
           }
           const requestPage = async (page) => {
+            if (options.requestDelayMs) await new Promise(resolve => setTimeout(resolve,
+              Math.min(2000, Math.max(0, Number(options.requestDelayMs) || 0))));
             const query = new URLSearchParams({
               start_date: dateKey(keyStartAt, timeZone),
               end_date: endDate,
               timezone: timeZone,
               page: String(page),
-              page_size: String(pageSize)
+              page_size: String(pageSize),
+              sort_by: 'created_at', sort_order: 'desc'
             });
             if (!gatewayApiKeyLogs) {
               query.set('api_key_id', remoteKeyId);
@@ -1238,6 +1245,13 @@ class Sub2ApiAdapter extends ProviderAdapter {
             nextPage: 2,
             failed: false
           };
+          if (options.until && rows.some(row => {
+            const at = Date.parse(toIsoDate(row.created_at ?? row.timestamp) || '');
+            return Number.isFinite(at) && at < keyStartAt.getTime();
+          })) {
+            states[index].windowExhausted = true;
+            states[index].exhausted = true;
+          }
         } catch (error) {
           results[index] = {
             ok: false,
@@ -1262,7 +1276,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
     const successfulStates = states.filter(Boolean);
     const refreshDemand = (state) => {
       const reportedTotal = Number(state.total);
-      state.demand = state.hasTotal && Number.isFinite(reportedTotal)
+      state.demand = state.windowExhausted ? state.rows.length : state.hasTotal && Number.isFinite(reportedTotal)
         ? Math.max(state.rows.length, Math.max(0, Math.trunc(reportedTotal)))
         : state.exhausted ? state.rows.length : Number.POSITIVE_INFINITY;
       state.limit = Math.min(state.limit, state.demand);
@@ -1324,6 +1338,10 @@ class Sub2ApiAdapter extends ProviderAdapter {
                   state.hasTotal = true;
                 }
                 state.rows.push(...extracted.items.slice(0, pageSize));
+                if (options.until && extracted.items.some(row => {
+                  const at = Date.parse(toIsoDate(row.created_at ?? row.timestamp) || '');
+                  return Number.isFinite(at) && at < state.keyStartAt.getTime();
+                })) { state.windowExhausted = true; state.exhausted = true; }
                 if (
                   extracted.items.length === 0 ||
                   extracted.items.length < pageSize ||
@@ -1363,9 +1381,9 @@ class Sub2ApiAdapter extends ProviderAdapter {
       const retainedRows = state.rows.slice(0, state.limit);
       const items = retainedRows.map((row) => normalizeRequestLog(row, state.key, {
         validateRemoteKeyId: !gatewayApiKeyLogs
-      })).filter(Boolean);
+      })).filter(item => item && (!options.until || Date.parse(item.createdAt) >= state.keyStartAt.getTime() && Date.parse(item.createdAt) < endAt.getTime()));
       const reportedTotal = Number(state.total);
-      const truncated = state.hasTotal && Number.isFinite(reportedTotal)
+      const truncated = state.windowExhausted ? retainedRows.length < state.rows.length : state.hasTotal && Number.isFinite(reportedTotal)
         ? reportedTotal > retainedRows.length
         : !state.exhausted && retainedRows.length >= state.limit;
       results[index] = {

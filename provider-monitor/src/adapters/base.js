@@ -11,6 +11,12 @@ function toFiniteNumber(value, fallback = null) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function isBillingTokenCount(value) {
+  if (typeof value !== 'number' && !(typeof value === 'string' && /^\d+$/.test(value))) return false;
+  const count = Number(value);
+  return Number.isSafeInteger(count) && count >= 0 && count <= 2147483647;
+}
+
 function toIsoDate(value) {
   if (value == null || value === '' || value === -1 || value === 0) return null;
   const numeric = Number(value);
@@ -193,6 +199,7 @@ class ProviderAdapter {
 }
 
 module.exports = {
+  isBillingTokenCount,
   ProviderAdapter,
   joinUrl,
   toFiniteNumber,

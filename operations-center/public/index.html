@@ -18,6 +18,7 @@
   <script src="/user-messages-ui.js?v=20261019-1" defer></script>
   <script src="/latency-ui.js?v=20261020-1" defer></script>
   <script src="/billing-recovery-ui.js?v=20261023-1" defer></script>
+  <script src="/billing-import-ui.js?v=20261023-1" defer></script>
   <script src="/app.js?v=20261022-1" defer></script>
 </head>
 <body>
@@ -504,26 +505,80 @@
         </section>
 
         <section id="view-billing" class="view" aria-labelledby="page-title">
+          <div class="bci-tabs" role="tablist" aria-label="计费核查视图">
+            <button id="br-requests-tab" type="button" role="tab" aria-selected="true" aria-controls="br-requests-pane">异常请求</button>
+            <button id="br-import-tab" type="button" role="tab" aria-selected="false" aria-controls="br-import-pane">CSV 补记</button>
+          </div>
+          <div id="br-import-pane" role="tabpanel" aria-labelledby="br-import-tab" hidden>
+            <div id="bci-error" class="alert danger" role="alert" hidden></div>
+            <form id="bci-upload" class="bci-toolbar">
+              <label>上游账单 CSV<input id="bci-file" type="file" accept=".csv,text/csv" required></label>
+              <label>文件编码<select id="bci-encoding"><option value="utf-8">UTF-8</option><option value="gb18030">GB18030</option></select></label>
+              <button class="button secondary" type="submit"><i data-lucide="upload"></i><span>导入账单</span></button>
+              <label>历史批次<select id="bci-batches"><option value="">选择批次</option></select></label>
+            </form>
+            <details id="bci-columns-box" hidden><summary>CSV 字段映射</summary><div id="bci-columns" class="br-fields bci-fields"></div></details>
+            <div id="bci-workspace" hidden>
+              <div class="bci-heading"><h2 id="bci-title">导入账单</h2><span id="bci-summary" role="status"></span></div>
+              <form id="bci-match" class="br-form">
+                <div id="bci-mappings" class="br-fields"></div>
+                <div class="br-fields bci-fields">
+                  <label>CSV 时区<input name="timezone" value="Asia/Shanghai" required></label>
+                  <label>CSV 时间含义<select name="timeKind"><option value="start">请求开始时间</option><option value="end">请求结束时间</option></select></label>
+                  <label>时间容差（秒）<input name="toleranceSeconds" type="number" min="1" max="120" value="5" required></label>
+                  <label>时钟修正（秒）<input name="clockOffsetSeconds" type="number" min="-300" max="300" value="0" required></label>
+                </div>
+                <label class="bci-check"><input name="inputIncludesCache" type="checkbox">CSV 输入 Token 包含缓存读取和创建 Token</label>
+                <button class="button secondary" type="submit"><i data-lucide="search-check"></i><span>自动匹配用户</span></button>
+              </form>
+              <details id="bci-prices" open><summary>历史售卖价格 · USD / 百万 Token</summary><div class="table-wrap"><table><thead><tr><th>模型</th><th>输入</th><th>输出</th><th>缓存读取</th><th>缓存创建 5m</th><th>缓存创建 1h</th><th>售卖倍率</th><th>账号倍率</th><th>缓存归属</th></tr></thead><tbody id="bci-price-list"></tbody></table></div></details>
+              <div class="br-fields bci-fields">
+                <label>历史价格核对依据<textarea id="bci-price-evidence" rows="2" maxlength="1500"></textarea></label>
+                <label>冲突记录的用户归属核对依据<textarea id="bci-assignment-evidence" rows="2" maxlength="1000"></textarea></label>
+              </div>
+              <div class="bci-checks">
+                <label class="bci-check"><input id="bci-final-usage" type="checkbox">已核对 CSV 为最终计费用量</label>
+                <label class="bci-check"><input id="bci-time-checked" type="checkbox">已核对时间候选的用户归属</label>
+                <label class="bci-check"><input id="bci-cache-zero" type="checkbox">缺失的缓存明细已核实为零</label>
+              </div>
+              <div class="bci-toolbar"><label>匹配结果<select id="bci-filter"><option value="all">全部记录</option><option value="actionable">可补记 / 待确认</option><option value="review">待核查 / 归属冲突</option><option value="recorded">已有使用记录</option><option value="settled">已补记扣费</option></select></label></div>
+              <div class="table-wrap"><table class="bci-table"><thead><tr><th><input id="bci-select-all" type="checkbox" aria-label="选择本页可补记记录"></th><th>行 / 时间 / 模型</th><th>匹配用户 / 本地请求</th><th>匹配结果</th><th>输入 / 输出 / 缓存</th><th>上游支出</th><th>用户扣费预览</th><th>处理结果</th></tr></thead><tbody id="bci-list"></tbody></table></div>
+              <div class="br-pagination"><button id="bci-prev" type="button" class="icon-button" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><span id="bci-page"></span><button id="bci-next" type="button" class="icon-button" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div>
+              <div class="bci-footer">
+                <button id="bci-preview" type="button" class="button secondary"><i data-lucide="calculator"></i><span>生成所选扣费预览</span></button>
+                <strong id="bci-total">待生成预览</strong>
+                <label class="bci-check"><input id="bci-acknowledge" type="checkbox">确认所选用户、用量和扣费金额</label>
+                <button id="bci-confirm" type="button" class="button primary" disabled><i data-lucide="receipt"></i><span>确认补记并扣费</span></button>
+              </div>
+              <div id="bci-user-preview" class="table-wrap" hidden></div>
+            </div>
+          </div>
+          <div id="br-requests-pane" role="tabpanel" aria-labelledby="br-requests-tab">
           <form id="br-filter" class="filter-bar">
-            <label>状态<select name="state"><option value="unknown">结果未知</option><option value="prepared">待结算</option><option value="review">待核查</option><option value="settled">已结算</option><option value="ignored">已排除</option><option value="">全部</option></select></label>
+            <label>状态<select name="state"><option value="unknown">结果未知</option><option value="incomplete">已记账用量待核对</option><option value="prepared">待结算</option><option value="review">待核查</option><option value="settled">已结算</option><option value="ignored">已排除</option><option value="">全部</option></select></label>
+            <label>用户 ID<input name="user_id" type="number" min="1" step="1"></label>
+            <label>Key ID<input name="api_key_id" type="number" min="1" step="1"></label>
+            <label>上游账号 ID<input name="account_id" type="number" min="1" step="1"></label>
+            <label>请求 ID<input name="request_id" maxlength="128"></label>
+            <label class="check-row"><input name="timeout_only" type="checkbox">仅超时 / 中断</label>
             <button class="icon-button" type="submit" title="刷新" aria-label="刷新"><i data-lucide="refresh-cw"></i></button>
             <button id="br-retry" class="button secondary" type="button"><i data-lucide="rotate-cw"></i><span>重试待结算记录</span></button>
             <span id="br-status" role="status"></span>
           </form>
           <div id="br-error" class="alert danger" role="alert" hidden></div>
-          <div class="table-wrap"><table><thead><tr><th>时间 / 请求</th><th>平台 / 模型</th><th>用户 / Key / 账号</th><th>状态</th><th>用户费用</th><th>重试 / 异常</th><th></th></tr></thead><tbody id="br-list"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>时间 / 请求</th><th>平台 / 模型</th><th>用户 / Key / 账号</th><th>状态 / HTTP</th><th>输入 / 输出 Token</th><th>缓存创建 / 读取</th><th>用户费用</th><th>查单 / 异常</th><th></th></tr></thead><tbody id="br-list"></tbody></table></div>
           <div class="br-pagination"><button id="br-prev" class="icon-button" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><span id="br-pagination"></span><button id="br-next" class="icon-button" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div>
           <section id="br-detail" class="br-detail" hidden>
             <div class="panel-heading"><h2 id="br-title">核查记录</h2><button id="br-close" class="icon-button" title="关闭详情" aria-label="关闭详情"><i data-lucide="x"></i></button></div>
             <dl id="br-summary" class="br-summary"></dl>
-            <div class="br-actions"><button id="br-lookup" class="button secondary"><i data-lucide="search-check"></i><span>查询上游账单</span></button><button id="br-settle" class="button primary"><i data-lucide="receipt"></i><span>按记录结算</span></button></div>
+            <div class="br-actions"><button id="br-lookup" class="button secondary"><i data-lucide="search-check"></i><span>查询上游账单</span></button><button id="br-draft" class="button secondary"><i data-lucide="clipboard-check"></i><span>生成核查记录</span></button><button id="br-settle" class="button primary"><i data-lucide="receipt"></i><span>按记录结算</span></button></div>
             <div id="br-lookup-result" role="status"></div>
             <form id="br-usage-form" class="br-form">
               <h3 id="br-usage-heading">补充使用记录</h3>
               <div class="br-fields">
                 <label>计费模型<input name="Model" required maxlength="200"></label>
-                <label>输入 Token<input name="InputTokens" type="number" min="0" step="1" value="0" required></label>
-                <label>输出 Token<input name="OutputTokens" type="number" min="0" step="1" value="0" required></label>
+                <label>输入 Token<input name="InputTokens" type="number" min="0" step="1" required></label>
+                <label>输出 Token<input name="OutputTokens" type="number" min="0" step="1" required></label>
                 <label>缓存创建 Token<input name="CacheCreationTokens" type="number" min="0" step="1" value="0" required></label>
                 <label>缓存读取 Token<input name="CacheReadTokens" type="number" min="0" step="1" value="0" required></label>
                 <label>缓存创建 5m Token<input name="CacheCreation5mTokens" type="number" min="0" step="1" value="0"></label>
@@ -553,6 +608,7 @@
             </div>
             <h3>处理历史</h3><div class="table-wrap"><table><thead><tr><th>时间</th><th>处理</th><th>操作者</th><th>凭据</th></tr></thead><tbody id="br-events"></tbody></table></div>
           </section>
+          </div>
         </section>
         <section id="view-settings" class="view" aria-labelledby="page-title">
           <div id="settings-alerts" class="alert-stack"></div>

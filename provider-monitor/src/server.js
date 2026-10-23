@@ -1040,6 +1040,13 @@ function createApplication(options = {}) {
       res.set('Cache-Control', 'no-store').json(latencySamples.query(req.query));
     } catch (error) { next(error); }
   });
+  app.post('/api/integrations/billing-samples/refresh', asyncRoute(async (req, res) => {
+    if (!secureTokenEqual(bearerToken(req), config.integrationToken)) {
+      throw new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 });
+    }
+    latencySamples.query(req.body || {});
+    res.set('Cache-Control', 'no-store').json(await sync.refreshBillingSamples(req.body));
+  }));
   app.get('/metrics', asyncRoute(async (_req, res) => {
     if (!config.metricsEnabled) return res.status(404).end();
     res.type(metrics.contentType()).send(await metrics.render());
@@ -2121,6 +2128,10 @@ function createApplication(options = {}) {
     res.json(result);
   }));
   api.get('/latency-samples', (req, res) => res.json(latencySamples.query(req.query)));
+  api.post('/billing-samples/refresh', asyncRoute(async (req, res) => {
+    latencySamples.query(req.body || {});
+    res.set('Cache-Control', 'no-store').json(await sync.refreshBillingSamples(req.body));
+  }));
   api.get('/sub2api/comparisons', asyncRoute(async (req, res) => res.json(await mappings.comparisons({
     connectionId: req.query.connectionId || null
   }))));

@@ -1,6 +1,7 @@
 'use strict';
 
 const http = require('http');
+const path = require('node:path');
 const { loadConfig, resolveDataDir } = require('./config');
 const { createDatabase } = require('./db');
 const { RuntimeSettingsStore } = require('./runtime-settings-store');
@@ -17,6 +18,10 @@ const { UserProfilesService } = require('./services/user-profiles-service');
 const { CostAnalysisService } = require('./services/cost-analysis-service');
 const { UserMessagesService } = require('./services/user-messages-service');
 const { BillingRecoveryService } = require('./services/billing-recovery-service');
+const { BillingRecoveryStore } = require('./billing-recovery-store');
+const { BillingImportStore } = require('./billing-import-store');
+const { BillingImportSource } = require('./services/billing-import-source');
+const { BillingImportService } = require('./services/billing-import-service');
 const { StorageService } = require('./services/storage-service');
 const { RetentionService } = require('./services/retention-service');
 const { CleanupScheduler } = require('./services/cleanup-scheduler');
@@ -30,7 +35,9 @@ async function main() {
   const database = createDatabase(config);
   const sub2api = new Sub2ApiClient(config);
   const providerMonitor = new ProviderMonitorClient(config);
-  const billingRecovery = new BillingRecoveryService({ config, sub2api, providerMonitor });
+  const billingRecoveryStore = new BillingRecoveryStore(path.join(config.dataDir, 'billing-recovery'));
+  billingRecoveryStore.initialize();
+  const billingRecovery = new BillingRecoveryService({ config, sub2api, providerMonitor, store: billingRecoveryStore });
   const telemetry = new LatencyTelemetryStore(config);
   try { telemetry.initialize(); } catch (error) {
     telemetry.close();
@@ -47,6 +54,10 @@ async function main() {
     onAdminTokenCleared: (token) => sub2api.clearRuntimeToken(token)
   });
   const inspector = new SchemaInspector(database.read);
+  const billingImportStore = new BillingImportStore(billingRecoveryStore);
+  billingImportStore.initialize();
+  const billingImports = new BillingImportService({ store: billingImportStore, recovery: billingRecovery,
+    source: new BillingImportSource({ pool: database.read, inspector, recovery: billingRecovery }) });
   const metrics = new MetricsService(database.read, inspector, config);
   const profiles = new UserProfilesService(database.read, inspector, config);
   const latency = new LatencyService({ pool: database.read, inspector, config, providerMonitor, telemetry });
@@ -78,7 +89,7 @@ async function main() {
     sub2api
   });
   const app = createApp({
-    config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, messages, billingRecovery, storage, retention, scheduler, sub2api, settings
+    config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
   });
   const server = http.createServer(app);
   server.requestTimeout = 120000;
@@ -101,6 +112,7 @@ async function main() {
     console.info(`operations-center shutting down (${signal})`);
     scheduler.stop();
     await billingRecovery.stop();
+    billingRecoveryStore.close();
     storage.stop();
     auth.close();
     await new Promise((resolve) => server.close(resolve));

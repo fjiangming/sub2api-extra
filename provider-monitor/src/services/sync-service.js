@@ -71,12 +71,66 @@ class SyncService {
 
   run(connectionId, options = {}) {
     const existing = this.inFlight.get(connectionId);
-    if (existing) return existing;
+    if (existing) return existing.billingRefresh
+      ? existing.catch(() => {}).then(() => this.run(connectionId, options)) : existing;
     const operation = this.#run(connectionId, options).finally(() => {
       if (this.inFlight.get(connectionId) === operation) this.inFlight.delete(connectionId);
     });
     this.inFlight.set(connectionId, operation);
     return operation;
+  }
+
+  async refreshBillingSamples(input) {
+    const from = Date.parse(input.from), to = Date.parse(input.to);
+    if (!/^[1-9]\d{0,18}$/.test(String(input.accountId)) || !Number.isFinite(from) ||
+        !Number.isFinite(to) || from >= to || to - from > 2 * 86400000) {
+      throw new AppError('INVALID_REQUEST', 'Invalid billing sample window', { status: 400 });
+    }
+    const targets = this.db.prepare(`SELECT DISTINCT history.connection_id,history.key_id,
+      key.remote_id,key.name,key.metadata_json FROM sub2api_mapping_history history
+      JOIN remote_keys key ON key.id=history.key_id AND key.connection_id=history.connection_id
+      WHERE history.account_id=? AND history.enabled=1 AND history.valid_from<?
+        AND (history.valid_to IS NULL OR history.valid_to>?) LIMIT 51`)
+      .all(String(input.accountId), new Date(to).toISOString(), new Date(from).toISOString());
+    if (targets.length > 50) throw new AppError('MAPPING_LIMIT', 'Too many historical key mappings', { status: 409 });
+    const results = [];
+    const grouped = new Map();
+    for (const target of targets) {
+      const rows = grouped.get(target.connection_id) || [];
+      rows.push(target); grouped.set(target.connection_id, rows);
+    }
+    // Serial, bounded, account-scoped reads. Never send a model request or run a
+    // whole provider inventory refresh merely to investigate one missing bill.
+    for (const [connectionId, rows] of grouped) {
+      if (this.inFlight.has(connectionId)) { results.push({ status: 'busy' }); continue; }
+      const due = rows.filter(row => {
+        const state = this.db.prepare('SELECT updated_at,last_error_code FROM provider_request_key_sync_state WHERE key_id=?').get(row.key_id);
+        const cooldown = state?.last_error_code === 'RATE_LIMITED' ? 5 * 60000 : 60000;
+        return !state?.updated_at || Date.now() - Date.parse(state.updated_at) >= cooldown;
+      });
+      if (!due.length) { results.push({ status: 'cooldown' }); continue; }
+      const operation = (async () => {
+        const connection = this.providers.get(connectionId, { forAdapter: true });
+        if (!connection.enabled) return { status: 'disabled' };
+        const adapter = createAdapter(connection.adapter_type, { connection,
+          credentials: this.providers.getCredentials(connection), http: this.http, config: this.config,
+          onCredentialsUpdated: async credentials => this.providers.updateCredentials(connection, credentials) });
+        const keys = due.map(row => ({ remoteId: row.remote_id, name: row.name, metadata: parseJson(row.metadata_json, {}) }));
+        const warnings = [];
+        const result = await this.#optional('getRequestLogs', () => adapter.getRequestLogs({
+          keys, since: new Date(from).toISOString(), until: new Date(Math.min(to, Date.now())).toISOString(),
+          lookbackDays: 90, maxRecords: 1000, concurrency: 1, requestDelayMs: 300, restrictToKeys: true
+        }), warnings);
+        const count = this.db.transaction(() => this.#insertRequestLogs(connectionId, result, nowIso(), keys, true))();
+        return { status: result.ok ? 'succeeded' : 'unavailable', count,
+          truncated: Boolean(result.value?.truncated), errorCode: result.error?.code || null };
+      })();
+      operation.billingRefresh = true;
+      this.inFlight.set(connectionId, operation);
+      try { results.push(await operation); }
+      finally { if (this.inFlight.get(connectionId) === operation) this.inFlight.delete(connectionId); }
+    }
+    return { status: targets.length ? 'checked' : 'mapping_missing', results };
   }
 
   #nextCheckAt(connection) {
@@ -868,7 +922,7 @@ class SyncService {
     }
   }
 
-  #insertRequestLogs(connectionId, result, capturedAt, keys = []) {
+  #insertRequestLogs(connectionId, result, capturedAt, keys = [], targeted = false) {
     if (!result) return 0;
     const keyIdByRemoteId = this.db.prepare(`
       SELECT id, remote_id FROM remote_keys WHERE connection_id = ?
@@ -927,7 +981,7 @@ class SyncService {
       const errorMessage = redactText(
         result.error?.message || 'Provider request logs are unavailable'
       ).slice(0, 1000);
-      this.db.prepare(`
+      if (!targeted) this.db.prepare(`
         INSERT INTO provider_request_log_sync_state(
           connection_id, status, last_error_code, last_error_message, updated_at
         ) VALUES (?, 'unavailable', ?, ?, ?)
@@ -954,14 +1008,15 @@ class SyncService {
         connection_id, key_id, source_log_id, request_id, model, upstream_model,
         stream, status, duration_ms, first_token_ms, input_tokens, output_tokens,
         cache_creation_tokens, cache_read_tokens, actual_cost, currency,
-        created_at, ingested_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        created_at, ingested_at, usage_complete
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(connection_id, source_log_id) DO UPDATE SET
         key_id = excluded.key_id,
         request_id = excluded.request_id,
         model = excluded.model,
         upstream_model = excluded.upstream_model,
         stream = excluded.stream,
+        usage_complete = excluded.usage_complete,
         status = excluded.status,
         duration_ms = excluded.duration_ms,
         first_token_ms = excluded.first_token_ms,
@@ -1058,7 +1113,8 @@ class SyncService {
         item.actualCost ?? null,
         item.currency || 'USD',
         item.createdAt,
-        capturedAt
+        capturedAt,
+        item.usageComplete === true ? 1 : item.usageComplete === false ? 0 : null
       );
       insertCost.run(
         connectionId,
@@ -1167,7 +1223,7 @@ class SyncService {
             source_missing_at = COALESCE(source_missing_at, ?),
             source_last_checked_at = ?, updated_at = ?
           WHERE ledger.connection_id = ? AND ledger.remote_key_id = ?
-            AND ledger.occurred_at >= ? AND ledger.occurred_at <= ?
+            AND ledger.occurred_at >= ? AND ledger.occurred_at < ?
             AND NOT EXISTS (
               SELECT 1 FROM provider_request_log_presence presence
               WHERE presence.connection_id = ledger.connection_id
@@ -1184,7 +1240,7 @@ class SyncService {
       'DELETE FROM provider_request_log_presence WHERE connection_id = ?'
     ).run(connectionId);
     const partial = keyCoverage.some((coverage) => coverage.status !== 'succeeded');
-    this.db.prepare(`
+    if (!targeted) this.db.prepare(`
       INSERT INTO provider_request_log_sync_state(
         connection_id, status, coverage_from, coverage_to, truncated,
         total_count, last_error_code, last_error_message, last_synced_at, updated_at

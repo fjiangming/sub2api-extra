@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 32;
+const SCHEMA_VERSION = 33;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -2490,6 +2490,14 @@ function migrateActiveProbeTtftAlertsV32(db) {
   ).run(nowIso());
 }
 
+function migrateBillingUsageCompletenessV33(db) {
+  const columns = db.prepare('PRAGMA table_info(provider_request_samples)').all();
+  if (!columns.some(column => column.name === 'usage_complete')) {
+    db.exec('ALTER TABLE provider_request_samples ADD COLUMN usage_complete INTEGER');
+  }
+  db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (33, ?)').run(nowIso());
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -2528,6 +2536,7 @@ function createDatabase(databasePath) {
     migrateKeyTtftAlertsV30(db);
     migrateNotificationRoutingV31(db);
     migrateActiveProbeTtftAlertsV32(db);
+    migrateBillingUsageCompletenessV33(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

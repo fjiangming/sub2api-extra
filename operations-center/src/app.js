@@ -136,7 +136,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, messages, billingRecovery, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -160,7 +160,8 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
       }
     }
   }));
-  app.use(express.json({ limit: '64kb' }));
+  const jsonBody = express.json({ limit: '64kb' });
+  app.use((req, res, next) => req.method === 'POST' && ['/api/billing-imports', '/api/billing-imports/inspect'].includes(req.path) ? next() : jsonBody(req, res, next));
 
   app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
   app.get('/readyz', asyncRoute(async (_req, res) => {
@@ -293,11 +294,20 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
     next();
   });
 
+  api.get('/billing-imports/options', asyncRoute(async (_req, res) => res.json(await billingImports.options())));
+  api.post('/billing-imports/inspect', csrf, express.json({ limit: '12mb' }), asyncRoute(async (req, res) => res.json(billingImports.inspect(req.body))));
+  api.get('/billing-imports/:id', asyncRoute(async (req, res) => res.json(billingImports.detail(req.params.id, req.query))));
+  api.post('/billing-imports', csrf, express.json({ limit: '12mb' }), asyncRoute(async (req, res) => res.json(await billingImports.import(req.body))));
+  api.post('/billing-imports/:id/match', csrf, asyncRoute(async (req, res) => res.json(await billingImports.match(req.params.id, req.body, req.auth.upstreamAccessToken))));
+  api.post('/billing-imports/:id/preview', csrf, asyncRoute(async (req, res) => res.json(await billingImports.preview(req.params.id, req.body, req.auth.upstreamAccessToken))));
+  api.post('/billing-imports/:id/confirm', csrf, asyncRoute(async (req, res) => res.json(await billingImports.confirm(req.params.id, req.body, req.auth.upstreamAccessToken))));
+
   api.get('/billing-recovery/status', (_req, res) => res.json(billingRecovery.status()));
   api.get('/billing-recovery', asyncRoute(async (req, res) => res.json(await billingRecovery.list(req.query, req.auth.upstreamAccessToken))));
   api.get('/billing-recovery/:id', asyncRoute(async (req, res) => res.json(await billingRecovery.detail(req.params.id, req.auth.upstreamAccessToken))));
   api.post('/billing-recovery/retry', csrf, asyncRoute(async (req, res) => res.json(await billingRecovery.retryPending(req.auth.upstreamAccessToken))));
   api.post('/billing-recovery/:id/lookup', csrf, asyncRoute(async (req, res) => res.json(await billingRecovery.lookup(req.params.id, req.auth.upstreamAccessToken))));
+  api.post('/billing-recovery/:id/draft', csrf, asyncRoute(async (req, res) => res.json(await billingRecovery.draftVerifiedUsage(req.params.id, req.auth.upstreamAccessToken))));
   api.post('/billing-recovery/:id/review', csrf, asyncRoute(async (req, res) => res.json(await billingRecovery.review(req.params.id, req.body, req.auth.upstreamAccessToken))));
   api.post('/billing-recovery/:id/usage', csrf, asyncRoute(async (req, res) => res.json(await billingRecovery.restore(req.params.id, req.body, req.auth.upstreamAccessToken))));
   api.post('/billing-recovery/:id/settle', csrf, asyncRoute(async (req, res) => res.json(await billingRecovery.settle(req.params.id, req.body, req.auth.upstreamAccessToken))));

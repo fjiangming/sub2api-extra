@@ -2,6 +2,8 @@
 
 2026-10-23 核验。本文件描述首次切换前的部署基线及后续更新步骤，实际部署记录见根目录 CUSTOMIZATIONS.md。本文件不包含服务器密码、数据库口令或管理员 Token。
 
+本轮同步请求桥接和自动查单代码尚未在本地发布或部署。下方第 1–5 节保留首次主站 / 运营中心切换步骤；更新本轮功能时必须同时执行第 6 节的供应商监控备份、镜像更新及 schema 33 核验，不能只更新前两个服务。已有生产超时覆盖及备份情况以主站 `docs/server-changes-2026-10-23.md` 的追加记录为准。
+
 ## 已确认的部署
 
 | 项目 | 当前情况 |
@@ -131,7 +133,7 @@ docker inspect --format '{{.Config.Image}} {{.State.Health.Status}}' sub2api sub
 
 主站启动自动应用迁移，查询应返回 `sub2api_custom.billing_recovery`。主站启动失败时先查看 `docker logs --tail 100 sub2api`，不要继续重启或绕过迁移错误。
 
-两个服务健康后重新从管理菜单进入运营中心，查看“计费核查”tab：应显示“自动恢复已开启”，列表和详情可读取。若显示等待持久认证，到系统设置的 Sub2API 管理 API 检查原持久凭据是否仍有效，不需要打印或复制现有密码。查单继续使用供应商监控的历史业务样本，不重发推理。
+两个服务健康后重新从管理菜单进入运营中心，查看“计费核查”tab：应显示“自动查单 / 结算重试已开启”，列表和详情可读取。若显示等待持久认证，到系统设置的 Sub2API 管理 API 检查原持久凭据是否仍有效，不需要打印或复制现有密码。本轮查单会在缺少样本时定向刷新上游业务日志，仍不重发推理。
 
 开启 2FA 的管理员不能仅凭邮箱密码运行后台。持久认证可使用原生 `admin-` 管理员 API Key，运营中心按 `x-api-key` 调用原生 admin 接口；浏览器 SSO 仍使用当前管理员 JWT。复用已有集成 Key 时不要重新生成或轮换，否则会影响其他服务。验证应包含实际的 pending 列表读取及后台 lastError，不能只检查“凭据已配置”。
 
@@ -191,3 +193,40 @@ docker compose --env-file compose.services.env up -d --no-deps --wait --wait-tim
 新增计费 Schema 留在数据库中，程序回滚不会删除它。若原作者迁移导致旧二进制不兼容，数据库恢复需要另行评估；恢复备份会丢失备份之后的新交易，不能在已经恢复接单后直接覆盖数据库。回滚旧二进制后本次计费保护停止生效。
 
 回滚使用本地固定镜像及 never 策略；下次正式升级时重复第 1、3 步切回更新通道，再按第 4 步启动。
+
+## 6. 本轮同步保护与查单的额外更新要求
+
+主站仍用 `ghcr.io/fjiangming/sub2api:latest`，运营中心用 `ghcr.io/fjiangming/sub2api-extra:operations-center-latest`，供应商监控用 `ghcr.io/fjiangming/sub2api-extra:provider-monitor-latest`。后两者应来自同一个已通过流水线的 extra 提交；拉取后分别核对 OCI revision。保留现有网络、所有持久卷、数据库、供应商连接、映射和加密 Secret，不用服务器源码。
+
+在第 2 节的同一次维护窗口、同一个私有 `backup_dir` 下，补充备份供应商监控的 Compose、.env、原镜像 ID、挂载信息和完整数据目录。先停止其写入，再归档 SQLite 所在的整个目录，或使用其现有在线 SQLite 备份功能；不能直接复制运行中的 `provider-monitor.db` 主文件。运营中心也必须停止后归档完整 data，新增的 `billing-recovery/` 目录与原数据一起备份，不能漏掉 `.sqlite-wal`。
+
+以下命令只用于实际更新时，需在上文已设置的 `backup_dir` 同一 Bash 会话中执行。先完成这里的备份，再进行第 3、4 节的服务切换：
+
+```bash
+cd /root/sub2api-extra
+provider_container="$(docker compose --env-file compose.services.env ps -q provider-monitor)"
+test -n "$provider_container"
+cp -a provider-monitor/compose.yaml "$backup_dir/provider-monitor-compose.yaml"
+cp -a provider-monitor/.env "$backup_dir/provider-monitor.env"
+docker inspect --format '{{.Image}}' "$provider_container" > "$backup_dir/provider-monitor-image-id"
+docker inspect --format '{{json .Mounts}}' "$provider_container" > "$backup_dir/provider-monitor-mounts.json"
+docker compose --env-file compose.services.env stop provider-monitor
+mkdir -p "$backup_dir/provider-monitor-data"
+docker cp "$provider_container:/app/data/." "$backup_dir/provider-monitor-data/"
+docker pull ghcr.io/fjiangming/sub2api-extra:provider-monitor-latest
+docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' ghcr.io/fjiangming/sub2api-extra:provider-monitor-latest
+```
+
+使用实际 `provider-monitor/compose.yaml` 的镜像覆盖方式，将该服务指向上述 fork 通道；如果存在 `pull_policy: never`，按第 3 节仅修改该服务的 image / pull_policy。保留已有 `GATEWAY_RESPONSE_HEADER_TIMEOUT=1800`、`BILLING_RECOVERY_TIMEOUT_SECONDS=1800` 及 Nginx 超时配置。同步桥接默认开启，不必额外新增环境变量；需要兼容性回退时只关闭 `BILLING_RECOVERY_SYNC_STREAM`，不要关闭意图保护。
+
+先启动主站及供应商监控，核验健康和迁移，再启动运营中心后台。供应商监控启动自动应用 schema 33，旧样本不删除，`usage_complete` 留未知。后续只需镜像拉取及仅重建该服务：
+
+```bash
+cd /root/sub2api-extra
+docker compose --env-file compose.services.env pull --policy always provider-monitor
+docker compose --env-file compose.services.env up -d --no-deps --wait --wait-timeout 180 provider-monitor
+```
+
+确认 unknown、review、incomplete、pending 的列表及详情均能读取；核查详情能看到用户、Key、上游账号、已观察 Token 和已保存的查单结果。真实请求最终 usage 应进入原生使用记录及 settled；无最终 usage 的请求必须保留待核查。上游业务日志接口不可用时不能把健康检查当作准确扣费验收。不要以重复收费推理或真实补扣来代替只读核验。
+
+回滚仍需暂停新流量、等待在途请求完成并备份新交易。除前述两个服务外，也把供应商监控固定到备份的镜像 ID，恢复原服务配置；不要用旧 SQLite 或旧 PostgreSQL 备份覆盖维护后已发生的业务。新增的核心查询索引和可空完整性列保留，运营中心 SQLite 归档保留供后续恢复。此次没有执行文档中的命令。

@@ -25,7 +25,7 @@ test('recovery retries persisted pending work and coalesces overlapping runs', a
  };
  first.service.settle = async (caseId) => { settled.push(caseId); if (caseId === 'second') throw new Error('database unavailable'); };
  const a = first.service.retryPending(); const b = first.service.retryPending(); resolve();
- assert.deepEqual(await a, { settled: 1, failed: 1 }); assert.deepEqual(await b, await a);
+ assert.deepEqual(await a, { settled: 1, failed: 1, checked: 0, unresolved: 0 }); assert.deepEqual(await b, await a);
  assert.deepEqual(settled, [id, 'second']); assert.equal(first.service.running, null);
  // A fresh process has no memory of work; it reads the same durable queue again.
  const restarted = fixture().service; let query;
@@ -38,11 +38,12 @@ test('lookup requires unique request ID and historical account mapping', async (
  const { service } = fixture({ providerMonitor: { getLatencySamples: async () => payload } });
  service.detail = async () => ({ case: { account_id: 3, upstream_request_id: 'upstream-1', created_at: '2026-10-22T00:00:00Z' } });
  const row = { request_id: 'upstream-1', mappingScope: 'history', model: 'test' };
- payload = { items: [row] }; assert.equal((await service.lookup(id)).status, 'exact');
+ payload = { items: [row], billingCoverageComplete: true }; assert.equal((await service.lookup(id)).status, 'exact');
  payload = { items: [row, row] }; assert.equal((await service.lookup(id)).exact, null);
  payload = { items: [row], truncated: true }; assert.equal((await service.lookup(id)).exact, null);
  payload = { items: [{ ...row, mappingScope: 'current_unverified' }] }; assert.equal((await service.lookup(id)).exact, null);
  payload = { items: [{ model: 'test', input_tokens: 100 }] }; assert.equal((await service.lookup(id)).exact, null);
+ payload = { items: [row], billingCoverageComplete: false }; assert.equal((await service.lookup(id)).exact, null);
 });
 
 test('supplement proxy rejects balance deltas and requires record and evidence', async () => {
