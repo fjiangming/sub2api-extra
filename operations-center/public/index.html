@@ -520,11 +520,12 @@
             <details id="bci-columns-box" hidden><summary>CSV 字段映射</summary><div id="bci-columns" class="br-fields bci-fields"></div></details>
             <div id="bci-workspace" hidden>
               <div class="bci-heading"><h2 id="bci-title">导入账单</h2><span id="bci-summary" role="status"></span></div>
+              <p id="bci-diagnostics" role="status"></p>
               <form id="bci-match" class="br-form">
                 <div id="bci-mappings" class="br-fields"></div>
                 <div class="br-fields bci-fields">
                   <label>CSV 时区<input name="timezone" value="Asia/Shanghai" required></label>
-                  <label>CSV 时间含义<select name="timeKind"><option value="start">请求开始时间</option><option value="end">请求结束时间</option></select></label>
+                  <label>CSV 时间含义<select name="timeKind"><option value="auto">自动核对</option><option value="start">请求开始时间</option><option value="end">请求结束时间</option></select></label>
                   <label>时间容差（秒）<input name="toleranceSeconds" type="number" min="1" max="120" value="5" required></label>
                   <label>时钟修正（秒）<input name="clockOffsetSeconds" type="number" min="-300" max="300" value="0" required></label>
                 </div>
@@ -541,7 +542,7 @@
                 <label class="bci-check"><input id="bci-time-checked" type="checkbox">已核对时间候选的用户归属</label>
                 <label class="bci-check"><input id="bci-cache-zero" type="checkbox">缺失的缓存明细已核实为零</label>
               </div>
-              <div class="bci-toolbar"><label>匹配结果<select id="bci-filter"><option value="all">全部记录</option><option value="actionable">可补记 / 待确认</option><option value="review">待核查 / 归属冲突</option><option value="recorded">已有使用记录</option><option value="settled">已补记扣费</option></select></label></div>
+              <div class="bci-toolbar"><label>匹配结果<select id="bci-filter"><option value="all">全部记录</option><option value="actionable">可补记 / 待确认</option><option value="owners">已定位用户 / 请求待核查</option><option value="unresolved">有记录 / 扣费待核查</option><option value="review">全部待核查 / 冲突</option><option value="recorded">已确认本地扣费</option><option value="settled">已补记扣费</option></select></label></div>
               <div class="table-wrap"><table class="bci-table"><thead><tr><th><input id="bci-select-all" type="checkbox" aria-label="选择本页可补记记录"></th><th>行 / 时间 / 模型</th><th>匹配用户 / 本地请求</th><th>匹配结果</th><th>输入 / 输出 / 缓存</th><th>上游支出</th><th>用户扣费预览</th><th>处理结果</th></tr></thead><tbody id="bci-list"></tbody></table></div>
               <div class="br-pagination"><button id="bci-prev" type="button" class="icon-button" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><span id="bci-page"></span><button id="bci-next" type="button" class="icon-button" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div>
               <div class="bci-footer">

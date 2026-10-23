@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { parseBillingCSV, describeBillingCSV } = require('../src/services/billing-import-csv');
-const { normalizeSources, matchBillingRows } = require('../src/services/billing-import-source');
+const { normalizeSources, matchBillingRows, reconcileBillingRows } = require('../src/services/billing-import-source');
 const { BillingRecoveryStore } = require('../src/billing-recovery-store');
 const { BillingImportStore } = require('../src/billing-import-store');
 const { BillingImportService, optionsSchema, manualUsage } = require('../src/services/billing-import-service');
@@ -22,7 +22,7 @@ const csvRow = (overrides = {}) => ({ Time: '2026-10-22T09:08:08+08:00', 'API Ke
   'Input Tokens': '4964', 'Output Tokens': '13212', 'Cache Read Tokens': '0', 'Cache Creation Tokens': '0',
   'Duration (ms)': '174000', 'Billed Cost': '0.224436', Type: 'Sync', 'Billing Mode': '按量', 'Request ID': '', ...overrides });
 const csv = (overrides = [{}]) => `${header}\n${overrides.map(override => Object.values(csvRow(override)).map(value => `"${String(value).replaceAll('"', '""')}"`).join(',')).join('\n')}`;
-const options = (extra = {}) => optionsSchema.parse({ accountMappings: { 'ccmax-key': 356 }, ...extra });
+const options = (extra = {}) => optionsSchema.parse({ timeKind: 'start', accountMappings: { 'ccmax-key': 356 }, ...extra });
 const nativeCase = (extra = {}) => ({ id: caseId, user_id: 11, api_key_id: 12, account_id: 356, group_id: 15, version: 1,
   state: 'unknown', model: 'claude-opus-5-5', created_at: at, updated_at: '2026-10-22T01:10:13Z',
   request_snapshot: { user_email: 'owner@example.test', request_id: 'root-1' }, ...extra });
@@ -152,7 +152,7 @@ test('simultaneous users and multiple upstream attempts remain ambiguous', () =>
 test('missing duration keeps an uncertain interval and exact IDs never cross accounts or models', () => {
   const sources = normalizeSources([nativeError({ response_latency_ms: null, upstream_errors: [{ account_id: 356, upstream_request_id: 'up-1' }] })], [], []);
   let match = matchBillingRows(parseBillingCSV(csv()).rows, sources, options())[0];
-  assert.equal(match.status, 'time_candidate'); assert.equal(match.candidates[0].startUncertain, true);
+  assert.equal(match.status, 'time_uncertain'); assert.equal(match.selected, null); assert.equal(match.candidates[0].startUncertain, true);
   match = matchBillingRows(parseBillingCSV(csv([{ 'Request ID': 'up-1', Time: '2026-10-21T00:00:00Z' }])).rows, sources, options())[0];
   assert.equal(match.status, 'exact');
   assert.equal(matchBillingRows(parseBillingCSV(csv()).rows, sources, options({ accountMappings: { 'ccmax-key': 1 } }))[0].status, 'unmatched');
@@ -170,7 +170,7 @@ test('durable dispatch and its legacy error and native usage are not counted as 
 });
 
 test('native billed requests normalize end timestamps back to the start and cannot be charged again', () => {
-  const sources = normalizeSources([], [{ ...nativeError(), duration_ms: 125000, input_tokens: 4964, output_tokens: 13212, cache_read_tokens: 0, cache_creation_tokens: 0 }], []);
+  const sources = normalizeSources([], [{ ...nativeError(), duration_ms: 125000, billing_dedup: true, input_tokens: 4964, output_tokens: 13212, cache_read_tokens: 0, cache_creation_tokens: 0 }], []);
   const result = matchBillingRows(parseBillingCSV(csv()).rows, sources, options())[0];
   assert.equal(result.status, 'already_recorded'); assert.equal(result.selected, null);
 });
@@ -310,6 +310,54 @@ test('expired previews, stale versions, overlapping confirmations and changed co
   const result = await f.service.confirm(batch.id, confirmBody(batch));
   assert.equal(result.results[0].status, 'failed'); assert.match(result.results[0].error, /与预览不一致/);
   assert.equal(f.charges(), 0); assert.equal(lease.status, 'confirming');
+});
+
+test('a native bill appearing after matching or after preview blocks CSV charging on a fresh read', async t => {
+  const f = fixture(t); let batch = await matched(f);
+  const nativeLoad = f.source.load;
+  const billed = normalizeSources([], [{ id: 100, user_id: 11, api_key_id: 12, account_id: 356, group_id: 15,
+    model: 'claude-opus-5-5', created_at: '2026-10-22T01:11:02Z', duration_ms: 174000, request_id: 'native-new', billing_dedup: true,
+    input_tokens: 4964, output_tokens: 13212, cache_read_tokens: 0, cache_creation_tokens: 0 }], []);
+  f.source.load = async () => ({ candidates: [...(await nativeLoad()).candidates, ...billed], coreAvailable: true });
+  batch = await previewed(f, batch);
+  assert.equal(batch.rows[0].status, 'needs_review'); assert.equal(batch.rows[0].preview, null);
+  assert.equal(f.calls.length, 0);
+  f.source.load = nativeLoad; batch = await previewed(f, await matched(f));
+  f.source.load = async () => ({ candidates: [...(await nativeLoad()).candidates, ...billed], coreAvailable: true });
+  await assert.rejects(f.service.confirm(batch.id, confirmBody(batch)), /停止补扣/);
+  assert.equal(f.calls.length, 0); assert.equal(f.charges(), 0);
+});
+
+test('obsolete matching algorithms cannot preview or confirm an old saved charge', async t => {
+  const f = fixture(t); let batch = await previewed(f, await matched(f));
+  let current = batch.rows[0];
+  f.store.save(current.id, { match: { ...current.match, algorithmVersion: 1 } }, current.version);
+  batch = f.service.detail(batch.id);
+  await assert.rejects(f.service.confirm(batch.id, confirmBody(batch)), /旧匹配逻辑/);
+  batch = await previewed(f, batch);
+  assert.equal(batch.rows[0].status, 'needs_review'); assert.match(batch.rows[0].result.error, /旧匹配逻辑/);
+  assert.equal(f.charges(), 0); assert.equal(f.calls.length, 0);
+});
+
+test('new concurrent candidates appearing after a preview require renewed ownership review', async t => {
+  const f = fixture(t); const batch = await previewed(f, await matched(f));
+  f.entries.set('new-intent', nativeCase({ id: 'new-intent', user_id: 20 }));
+  await assert.rejects(f.service.confirm(batch.id, confirmBody(batch)), /停止补扣/);
+  assert.equal(f.charges(), 0); assert.equal(f.calls.length, 0);
+});
+
+test('owner-only file evidence remains visible and cannot be converted to a native reservation by selecting it', async t => {
+  const f = fixture(t);
+  const log = { reference: 'log:legacy', kind: 'log', state: 'legacy_log', recorded: false,
+    userId: '11', apiKeyId: '12', accountId: '356', groupId: '15', models: ['claude-opus-5-5'], ids: [],
+    startMs: Date.parse(at), endMs: Date.parse(at) + 125000, blockedReason: '仅文件日志归属', startUncertain: false };
+  f.source.load = async () => ({ candidates: [log], coreAvailable: true });
+  let batch = await matched(f);
+  assert.equal(batch.rows[0].status, 'owner_candidate'); assert.equal(batch.rows[0].match.owner.userId, '11');
+  assert.equal(f.service.detail(batch.id, { filter: 'owners' }).filteredTotal, 1);
+  assert.equal(f.service.detail(batch.id, { filter: 'actionable' }).filteredTotal, 0);
+  batch = await previewed(f, batch, { assignments: { [batch.rows[0].id]: 'log:legacy' } });
+  assert.equal(batch.rows[0].status, 'needs_review'); assert.equal(f.calls.length, 0);
 });
 
 test('CSV endpoints enforce admin authentication and CSRF before parsing large upload bodies', async t => {

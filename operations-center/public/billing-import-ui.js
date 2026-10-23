@@ -1,7 +1,8 @@
 (function (root) {
   'use strict';
   const labels = { unmatched: '未匹配', unmapped: '待映射账号', invalid: '数据无效', duplicate: '重复行', ambiguous: '多个候选',
-    exact: '请求 ID 匹配', time_candidate: '时间候选', assignment_conflict: '归属冲突', already_recorded: '已有使用记录',
+    exact: '请求 ID 匹配', time_candidate: '时间候选', assignment_conflict: '归属冲突', already_recorded: '已确认本地扣费',
+    owner_candidate: '已定位用户，请求待核查', billing_unresolved: '有记录，扣费待核查', time_uncertain: '时间证据不足', recorded_conflict: '多笔账单争用本地记录',
     usage_difference: '已有记录，用量不同', needs_review: '待核查', preview: '待确认扣费', confirming: '结算待恢复', failed: '结算未完成', settled: '已补记扣费' };
   const fieldNames = { time: '时间', key: '上游 Key 名称', model: '模型', requestId: '请求 ID', input: '输入 Token', output: '输出 Token',
     cacheRead: '缓存读取 Token', cacheCreation: '缓存创建 Token', cache5m: '缓存创建 5m', cache1h: '缓存创建 1h',
@@ -10,10 +11,10 @@
     const $ = id => document.getElementById(id);
     let accounts = [], batch = null, fileText = null, columns = {}, busy = false, epoch = 0, dirty = false, matchDirty = false;
     const rules = new Map(), assignments = new Map();
-    const amount = value => Number.isFinite(Number(value)) ? Number(value).toFixed(8) : '未知';
+    const amount = value => value != null && value !== '' && Number.isFinite(Number(value)) ? Number(value).toFixed(8) : '未知';
     const date = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '';
     function candidateDetails(item) {
-      return !item ? '' : `<small>用户 ${esc(item.userId)} · Key ${esc(item.apiKeyId)} · 账号 ${esc(item.accountId)}</small><small>${esc(item.reference)}${item.statusCode ? ` · HTTP ${esc(item.statusCode)}` : ''}</small><small>${item.startUncertain ? '开始时间范围' : '本地开始'} ${esc(date(item.startMs))}${item.startUncertain ? ` 至 ${esc(date(item.endMs))}` : ''}</small>`;
+      return !item ? '' : `<small>用户 ${esc(item.userId)} · Key ${esc(item.apiKeyId)} · 账号 ${esc(item.accountId)} · 分组 ${esc(item.groupId)}</small><small>${esc(item.reference)}${item.statusCode ? ` · HTTP ${esc(item.statusCode)}` : ''}</small><small>${item.startUncertain ? '开始时间范围' : '本地开始'} ${esc(date(item.startMs))}${item.startUncertain ? ` 至 ${esc(date(item.endMs))}` : ''}</small>${item.recorded ? `<small>本地实际费用 ${esc(amount(item.cost))} · ${item.billed ? '已确认原生扣费' : '原生扣费未确认'}</small>` : ''}`;
     }
     function error(message = '') { $('bci-error').textContent = message; $('bci-error').hidden = !message; }
     function chosen() { return [...$('bci-list').querySelectorAll('[data-select]:checked')].map(input => batch.rows.find(row => row.id === input.dataset.select)).filter(Boolean); }
@@ -67,7 +68,14 @@
     }
     function render() {
       $('bci-workspace').hidden = false; $('bci-title').textContent = batch.fileName;
-      $('bci-summary').textContent = `共 ${batch.total} 条 · 已补记 ${batch.summary.settled || 0} 条`;
+      const summary = batch.summary;
+      $('bci-summary').textContent = `共 ${batch.total} 条 · 已确认扣费 ${summary.already_recorded || 0} · 可预览 ${(summary.exact || 0) + (summary.time_candidate || 0)} · 已定位待核查 ${summary.owner_candidate || 0} · 扣费异常 ${summary.billing_unresolved || 0} · 已补记 ${summary.settled || 0} 条`;
+      const diagnostics = batch.matchDiagnostics;
+      $('bci-diagnostics').textContent = diagnostics?.algorithmVersion === 2 ? [
+        ...(diagnostics.clocks || []).map(clock => `${clock.key || '未命名 Key'}：${clock.effective === 'end' ? '结束时间' : clock.effective === 'start' ? '开始时间' : '时间含义待确认'}，开始 / 结束证据 ${clock.start} / ${clock.end}${clock.conflict ? '，设置与证据冲突，请重新匹配' : ''}`),
+        diagnostics.logs?.status === 'read' ? '已读取文件日志，覆盖范围不保证完整' : '未读取文件日志，历史取消请求可能缺少归属证据',
+        diagnostics.coreAvailable === false ? '主站历史预留接口不可用' : ''
+      ].filter(Boolean).join('；') : '请自动匹配；旧版匹配和预览需要重新核查。';
       $('bci-filter').value = batch.filter;
       const form = $('bci-match');
       for (const key of ['timezone','timeKind','toleranceSeconds','clockOffsetSeconds']) form.elements[key].value = batch.options[key];
@@ -77,12 +85,15 @@
       $('bci-list').innerHTML = batch.rows.map(row => {
         const record = row.record, preview = row.preview, candidates = row.match?.candidates || [];
         const selected = assignments.get(row.id) || row.selection || row.match?.selected || '';
-        const eligible = !['invalid','duplicate','unmapped','unmatched','already_recorded','usage_difference','settled'].includes(row.status);
+        const eligible = row.match?.algorithmVersion === 2 && !['invalid','duplicate','unmapped','unmatched','already_recorded','usage_difference','billing_unresolved','recorded_conflict','time_uncertain','settled'].includes(row.status) &&
+          (Boolean(preview) || candidates.some(item => !item.recorded && !item.blockedReason));
         const candidate = preview ? `用户 ${preview.userId} · ${preview.userEmail} · Key ${preview.apiKeyId}` : '';
         const options = candidates.map(item => `<option value="${esc(item.reference)}"${selected === item.reference ? ' selected' : ''}${item.recorded || item.blockedReason ? ' disabled' : ''}>用户 ${esc(item.userId)} · Key ${esc(item.apiKeyId)} · ${esc(item.userEmail)} · ${esc(item.reference)} · ${esc((item.timeDifferenceMs / 1000).toFixed(3))}s${item.recorded ? ' · 已记账' : item.blockedReason ? ` · ${esc(item.blockedReason)}` : ''}</option>`).join('');
         const status = row.result?.error || row.match?.reason || record.error || (row.status === 'settled' ? `账单 ${row.case_id}` : '');
         const dims = record.tokens || {};
-        return `<tr><td><input data-select="${row.id}" type="checkbox" aria-label="选择第 ${row.number} 行"${eligible ? selected || preview ? ' checked' : '' : ' disabled'}></td><td>${esc(row.number)} · ${esc(date(record.startedAt))}<small>${esc(record.model)}</small><small>${esc(record.requestId || record.key)}</small></td><td>${preview ? `<span>${esc(candidate)}</span><small>${preview.billingType === 'subscription' ? '订阅用量' : '余额计费'}</small>` : ''}<select data-assignment="${row.id}" aria-label="第 ${row.number} 行匹配用户"${preview || !candidates.length ? ' disabled' : ''}><option value="">选择候选请求</option>${options}</select><div data-candidate="${row.id}">${candidateDetails(candidates.find(item => item.reference === selected))}</div></td><td>${esc(labels[row.status] || row.status)}${row.match?.method === 'time' ? `<small>${row.selection_confirmed ? '时间归属已核对' : '按时间匹配，待人工确认'}</small>` : ''}</td><td>${esc(dims.InputTokens ?? '未知')} / ${esc(dims.OutputTokens ?? '未知')}<small>缓存 ${esc(dims.CacheCreationTokens ?? '未知')} / ${esc(dims.CacheReadTokens ?? '未知')}</small></td><td>${esc(record.cost || '未知')}</td><td>${preview ? `${esc(amount(preview.usage.ActualCost))} USD<small>${preview.pricingSource === 'immutable_dispatch_snapshot' ? '请求历史价格快照' : '人工核定历史售价'}</small><small>售卖倍率 ${esc(preview.usage.RateMultiplier)}</small>` : '待核定'}</td><td>${esc(status)}</td></tr>`;
+        const owner = row.match?.owner;
+        const details = candidateDetails(candidates.find(item => item.reference === selected) || (candidates.length === 1 ? candidates[0] : null));
+        return `<tr><td><input data-select="${row.id}" type="checkbox" aria-label="选择第 ${row.number} 行"${eligible ? selected || preview ? ' checked' : '' : ' disabled'}></td><td>${esc(row.number)} · ${esc(date(record.startedAt))}<small>${esc(record.model)}</small><small>${esc(record.requestId || record.key)}</small></td><td>${preview ? `<span>${esc(candidate)}</span><small>${preview.billingType === 'subscription' ? '订阅用量' : '余额计费'}</small>` : owner ? `<span>用户 ${esc(owner.userId)} · Key ${esc(owner.apiKeyId)} · 分组 ${esc(owner.groupId)}</span>` : ''}<select data-assignment="${row.id}" aria-label="第 ${row.number} 行匹配用户"${preview || !eligible ? ' disabled' : ''}><option value="">选择候选请求</option>${options}</select><div data-candidate="${row.id}">${details}</div></td><td>${esc(labels[row.status] || row.status)}${row.match?.method === 'time' && eligible ? `<small>${row.selection_confirmed ? '时间归属已核对' : '按时间匹配，待人工确认'}</small>` : row.match?.method === 'tokens_time' ? '<small>Token 与时间核对</small>' : ''}</td><td>${esc(dims.InputTokens ?? '未知')} / ${esc(dims.OutputTokens ?? '未知')}<small>缓存 ${esc(dims.CacheCreationTokens ?? '未知')} / ${esc(dims.CacheReadTokens ?? '未知')}</small></td><td>${esc(record.cost || '未知')}</td><td>${preview ? `${esc(amount(preview.usage.ActualCost))} USD<small>${preview.pricingSource === 'immutable_dispatch_snapshot' ? '请求历史价格快照' : '人工核定历史售价'}</small><small>售卖倍率 ${esc(preview.usage.RateMultiplier)}</small>` : '待核定'}</td><td>${esc(status)}</td></tr>`;
       }).join('');
       $('bci-page').textContent = `${batch.filteredTotal} 条 · 第 ${batch.page} / ${Math.max(1, Math.ceil(batch.filteredTotal / 20))} 页`;
       $('bci-prev').disabled = batch.page <= 1; $('bci-next').disabled = batch.page * 20 >= batch.filteredTotal;
@@ -176,6 +187,7 @@
       for (const name of ['bci-price-evidence', 'bci-assignment-evidence']) $(name).value = '';
       for (const name of ['bci-final-usage','bci-time-checked','bci-cache-zero','bci-acknowledge']) $(name).checked = false;
       for (const name of ['bci-list','bci-price-list','bci-columns','bci-mappings']) $(name).replaceChildren();
+      for (const name of ['bci-summary','bci-diagnostics','bci-title']) $(name).textContent = '';
       error(); update();
     } };
   }

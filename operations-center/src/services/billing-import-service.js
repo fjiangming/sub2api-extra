@@ -5,13 +5,13 @@ const Decimal = require('decimal.js');
 const { z } = require('zod');
 const { AppError } = require('../errors');
 const { parseBillingCSV, describeBillingCSV, hash } = require('./billing-import-csv');
-const { matchBillingRows } = require('./billing-import-source');
+const { reconcileBillingRows, MATCH_VERSION } = require('./billing-import-source');
 const { observedTokens } = require('./billing-recovery-usage');
 
 const id = z.string().uuid();
 const positiveId = z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const optionsSchema = z.object({
-  timezone: z.string().max(100).default('Asia/Shanghai'), timeKind: z.enum(['start', 'end']).default('start'),
+  timezone: z.string().max(100).default('Asia/Shanghai'), timeKind: z.enum(['auto', 'start', 'end']).default('auto'),
   toleranceSeconds: z.number().int().min(1).max(120).default(5), clockOffsetSeconds: z.number().int().min(-300).max(300).default(0),
   inputIncludesCache: z.boolean().default(false),
   accountMappings: z.record(z.string().max(200), positiveId).default({}),
@@ -31,6 +31,9 @@ const validate = (schema, value) => {
 const conflict = message => new AppError('IMPORT_REVIEW_REQUIRED', message, { status: 409 });
 const money = value => new Decimal(value).toDecimalPlaces(8, Decimal.ROUND_HALF_UP).toNumber();
 const metadata = parsed => ({ headers: parsed.headers, columns: parsed.columns, keys: parsed.keys, models: parsed.models });
+const matchProof = match => hash([match.method, match.status, match.totalCandidates, match.candidates.map(candidate =>
+  ['reference', 'kind', 'userId', 'apiKeyId', 'accountId', 'groupId', 'version', 'startMs', 'endMs', 'startUncertain', 'recorded', 'billed', 'blockedReason']
+    .map(key => candidate[key] ?? null))]);
 
 function verifiedTokens(record, input, rule) {
   const tokens = { ...record.tokens };
@@ -84,7 +87,7 @@ class BillingImportService {
   detail(batchId, query = {}) {
     validate(id, batchId);
     const batch = this.store.batch(batchId);
-    const filter = validate(z.enum(['all', 'actionable', 'review', 'recorded', 'settled']), query.filter || 'all');
+    const filter = validate(z.enum(['all', 'actionable', 'review', 'recorded', 'settled', 'owners', 'unresolved']), query.filter || 'all');
     const page = Math.max(1, Math.min(1000, Math.floor(Number(query.page) || 1)));
     const info = batch.metadata || metadata(parseBillingCSV(batch.csv, batch.options));
     if (!batch.metadata) this.store.metadata(batchId, info);
@@ -99,11 +102,12 @@ class BillingImportService {
     // Load before changing persistent selections. Query failure or truncation
     // must not leave a partially matched batch that appears ready to charge.
     const source = await this.source.load(parsed.rows, options, accessToken);
-    const matches = matchBillingRows(parsed.rows, source.candidates, options);
+    const reconciled = reconcileBillingRows(parsed.rows, source.candidates, options);
     this.store.db.transaction(() => {
-      this.store.configure(batchId, options, parsed.rows, metadata(parsed));
-      this.store.rows(batchId).forEach((row, index) => this.store.save(row.id, { match: matches[index], status: matches[index].status,
-        selection: matches[index].selected, preview: null, result: null }, row.version));
+      this.store.configure(batchId, options, reconciled.records, { ...metadata(parsed),
+        matchDiagnostics: { ...reconciled.diagnostics, ...source.diagnostics, coreAvailable: source.coreAvailable } });
+      this.store.rows(batchId).forEach((row, index) => this.store.save(row.id, { match: reconciled.matches[index], status: reconciled.matches[index].status,
+        selection: reconciled.matches[index].selected, preview: null, result: null }, row.version));
     })();
     return { ...this.detail(batchId), coreAvailable: source.coreAvailable };
   }
@@ -114,6 +118,7 @@ class BillingImportService {
       finalUsageConfirmed: z.literal(true), missingCacheIsZero: z.boolean().default(false)
     }).strict(), input);
     const batch = this.store.batch(validate(id, batchId));
+    const freshMatches = await this.recheck(batch, accessToken);
     const results = [];
     for (const rowId of new Set(body.rowIds)) {
       const row = this.store.get(rowId);
@@ -121,16 +126,23 @@ class BillingImportService {
       if (['confirming', 'settled', 'failed'].includes(row.status)) { results.push({ rowId, status: row.status }); continue; }
       try {
         const record = row.record;
+        this.checkMatchVersion(row);
+        const freshMatch = freshMatches.get(row.number);
+        if (['already_recorded', 'usage_difference', 'billing_unresolved', 'recorded_conflict', 'time_uncertain'].includes(freshMatch?.status)) throw conflict(freshMatch.reason || '该上游记录已有本地账单，请重新匹配');
+        if (freshMatch?.totalCandidates > 30) throw conflict('新的候选过多，请缩小时间容差后重新匹配');
         if (record.error || record.duplicateOf) throw conflict(record.error || '重复记录不能补扣');
         if (row.match?.totalCandidates > 30) throw conflict('候选过多，请缩小时间容差后重新匹配');
         if (record.billingMode && !/^(按量|tokens?|按token)$/i.test(record.billingMode)) throw conflict('该行不是标准 Token 计费，需原生维度核查');
         const reference = Object.hasOwn(body.assignments, row.id) ? body.assignments[row.id] : row.match?.selected;
         const candidate = row.match?.candidates.find(item => item.reference === reference);
+        const freshCandidate = freshMatch?.candidates.find(item => item.reference === reference);
+        if (!freshCandidate || freshCandidate.recorded || freshCandidate.blockedReason ||
+          ['userId', 'apiKeyId', 'accountId', 'groupId', 'version'].some(key => freshCandidate[key] !== candidate?.[key])) throw conflict('本地计费或匹配证据已变化，请重新匹配');
         if (!candidate || candidate.recorded || !['unknown', 'review', 'legacy_error'].includes(candidate.state)) throw conflict('需要选择尚未记账的本地请求');
         if (candidate.blockedReason) throw conflict(candidate.blockedReason);
         if ([candidate.userId, candidate.apiKeyId, candidate.accountId].some(value => !Number.isSafeInteger(Number(value)) || Number(value) <= 0)) throw conflict('原生归属 ID 超出可核对范围');
-        if (row.match.method !== 'request_id' && !body.confirmTimeMatches) throw conflict('时间匹配需要确认用户归属');
-        if ((row.match.totalCandidates > 1 || row.match.status === 'assignment_conflict') && body.assignmentEvidence.length < 8) throw conflict('冲突匹配需要填写用户归属核对依据');
+        if (freshMatch.method !== 'request_id' && !body.confirmTimeMatches) throw conflict('时间匹配需要确认用户归属');
+        if ((freshMatch.totalCandidates > 1 || freshMatch.status === 'assignment_conflict') && body.assignmentEvidence.length < 8) throw conflict('冲突匹配需要填写用户归属核对依据');
         if (this.store.hasPreview(batchId, reference, row.id)) throw conflict('同一本地请求已被其他行选择');
         const rule = Object.hasOwn(body.pricing, record.model) ? body.pricing[record.model] : null;
         const tokens = verifiedTokens(record, body, rule);
@@ -171,6 +183,7 @@ class BillingImportService {
           ...(candidate.kind === 'case' ? { case_id: candidate.caseId, version: candidate.version } : { error_id: candidate.errorId, event_index: candidate.eventIndex }) };
         const preview = { id: crypto.randomUUID(), reference, userId: candidate.userId, userEmail: candidate.userEmail,
           apiKeyId: candidate.apiKeyId, billingType: candidate.billingType, usage, pricingSource, reservation,
+          matchProof: matchProof(freshMatch),
           expiresAt: this.now() + 3600000, assignmentEvidence: body.assignmentEvidence };
         this.store.save(row.id, { preview, selection: reference, selection_confirmed: 1, status: 'preview', result: null }, row.version);
         results.push({ rowId, status: 'preview' });
@@ -186,12 +199,22 @@ class BillingImportService {
   }
   async confirm(batchId, input, accessToken) {
     const body = validate(z.object({ acknowledge: z.literal(true), rows: z.array(z.object({ id, version: z.number().int().positive(), previewId: id }).strict()).min(1).max(20) }).strict(), input);
-    validate(id, batchId); const results = [];
+    const batch = this.store.batch(validate(id, batchId)); const results = [];
+    let freshMatches;
     for (const selected of body.rows) {
       let row = this.store.get(selected.id);
       if (row.batch_id !== batchId || row.preview?.id !== selected.previewId) throw conflict('预览不属于当前记录');
       if (row.status === 'settled') { results.push({ id: row.id, status: 'settled', caseId: row.case_id }); continue; }
+      this.checkMatchVersion(row);
       if (row.status === 'preview' && row.preview.expiresAt < this.now()) throw conflict('扣费预览已过期，请重新生成');
+      if (row.status === 'preview') {
+        freshMatches ||= await this.recheck(batch, accessToken);
+        const current = freshMatches.get(row.number);
+        const candidate = current?.candidates.find(item => item.reference === row.preview.reference);
+        if (['already_recorded', 'usage_difference', 'billing_unresolved', 'recorded_conflict', 'time_uncertain'].includes(current?.status) || current?.totalCandidates > 30 || !candidate || candidate.recorded || candidate.blockedReason || row.preview.matchProof !== matchProof(current)) {
+          throw conflict('预览后的本地账单或时间证据已变化，请重新匹配，已停止补扣');
+        }
+      }
       row = this.store.claim(row.id, selected.version, selected.previewId);
       try {
         const preview = row.preview;
@@ -229,6 +252,15 @@ class BillingImportService {
       }
     }
     return { results, detail: this.detail(batchId) };
+  }
+  checkMatchVersion(row) {
+    if (row.match?.algorithmVersion !== MATCH_VERSION) throw conflict('该记录使用旧匹配逻辑，请重新自动匹配；已开始的旧结算需先核实核心回执');
+  }
+  async recheck(batch, accessToken) {
+    const parsed = parseBillingCSV(batch.csv, batch.options);
+    const source = await this.source.load(parsed.rows, batch.options, accessToken);
+    const result = reconcileBillingRows(parsed.rows, source.candidates, batch.options);
+    return new Map(result.matches.map((match, index) => [parsed.rows[index].number, match]));
   }
 }
 

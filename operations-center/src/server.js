@@ -21,6 +21,7 @@ const { BillingRecoveryService } = require('./services/billing-recovery-service'
 const { BillingRecoveryStore } = require('./billing-recovery-store');
 const { BillingImportStore } = require('./billing-import-store');
 const { BillingImportSource } = require('./services/billing-import-source');
+const { BillingImportLogs } = require('./services/billing-import-logs');
 const { BillingImportService } = require('./services/billing-import-service');
 const { StorageService } = require('./services/storage-service');
 const { RetentionService } = require('./services/retention-service');
@@ -57,7 +58,8 @@ async function main() {
   const billingImportStore = new BillingImportStore(billingRecoveryStore);
   billingImportStore.initialize();
   const billingImports = new BillingImportService({ store: billingImportStore, recovery: billingRecovery,
-    source: new BillingImportSource({ pool: database.read, inspector, recovery: billingRecovery }) });
+    source: new BillingImportSource({ pool: database.read, inspector, recovery: billingRecovery,
+      logs: new BillingImportLogs(config.billingLogDir) }) });
   const metrics = new MetricsService(database.read, inspector, config);
   const profiles = new UserProfilesService(database.read, inspector, config);
   const latency = new LatencyService({ pool: database.read, inspector, config, providerMonitor, telemetry });

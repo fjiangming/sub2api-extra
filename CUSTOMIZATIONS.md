@@ -112,3 +112,31 @@
 ## 2026-10-23：授权提交与推送计费修复
 
 用户授权提交并推送本轮持久核查、供应商定向查单与 CSV 补记功能，extra 使用 `main`，配套核心使用 `dev`。保留镜像构建前的运营中心和供应商监控等测试门禁；无关的 `usage-leaderboard/public/assets/leaderboard.svg` 继续保留本地，不纳入本轮提交。暂存新增文件后发现并移除 `operations-center/tests/billing-import.test.js` 末尾多余空行，仅调整空白；复核暂存区 diff --check。不连接或更新服务器，不执行生产数据迁移及真实扣费，等待用户后续通知再部署。
+
+## 2026-10-24：修正 CSV 漏计费匹配与历史取消请求归属
+
+用户要求修改匹配逻辑并与此前服务器检测结果自测对比。本轮只改本地运营中心，extra 保持 `main`；核心保持 `dev` 且没有源码改动。未连接或变更生产，没有提交 / 推送 / 发布 / 部署，也没有预留或补扣用户。保留本台账原有生产镜像通道记录、核心已有文档改动，以及无关未跟踪的 `usage-leaderboard/public/assets/leaderboard.svg`。
+
+| 文件 | 改动与后续必须保留的约定 |
+| --- | --- |
+| `operations-center/src/services/billing-import-matcher.js`（新增） | 从原 source 模块分离纯匹配。先以同账号 / 模型的完整四类 Token、原生用量时间和 ID 排除已有账单，再找未占用的精确时间候选；开始 / 结束两种时间均用于防误补扣。每 Key 至少 3 个有区分度样本、90% 一致才自动校准，显式时间设置冲突阻止补记。缺耗时的四小时区间不再淹没精确候选，也不允许仅靠区间生成扣费预览。区分用户归属唯一与具体 dispatch 唯一；一笔本地收费不能排除多笔不同上游账单。ID 与 Token 矛盾、用量差异及一对多冲突单列核查。算法版本为 2。 |
+| `operations-center/src/services/billing-import-source.js` | SQL 只读读取原生 dedup 热表和归档，按 request_id + api_key_id 核实处理证明，缺表不冒充已扣费。保留已有用量的零费 / 未核实状态，区分 prepared 使用草稿与 settled。合并原生使用记录时保留持久意图的真实开始时间，附原生结束时间、三种模型别名及缓存 TTL 明细。读取范围兼容两种 CSV 时间解释；整次源读取失败或截断仍停止。接入可选文件日志并只对同一原生请求归属补全开始时间。 |
+| `operations-center/src/services/billing-import-logs.js`（新增） | 可选只读流式读取主站结构化 `.log` / `.log.gz`，只保留时间、请求 ID、用户 / Key / 分组 / 账号、模型、流式和状态元数据，丢弃正文和错误明文；通过同一服务端 ID 的唯一账号选择、用户归属和访问结束关联历史取消请求。不递归 / 不跟随文件链接，128 文件 / 1 GiB 解压数据 / 600000 事件 / 64 KiB 单行上限，超限或损坏失败而非使用部分证据。文件日志不声明完整覆盖；仅文件日志不能伪造原生错误或成为直接扣费来源。 |
+| `operations-center/src/services/billing-import-service.js` | 默认自动时间校准，持久化匹配诊断和修正后的开始时间；新增归属 / 未核实扣费筛选。预览前、首次确认前重新读源，阻止已有账单、候选变化、过多候选、时间证据变化和旧算法预览；冻结证据摘要。已开始的新版本确认保留原生预留幂等与失败续办，不增加第二套结算。 |
+| `operations-center/src/billing-import-store.js` | 原 JSON 表结构中增加已定位用户 / 扣费待核查 / 时间不足 / 争用记录状态筛选，无数据库迁移或资金表。 |
+| `operations-center/src/config.js`、`.env.example`、`src/server.js` | 可选 `OPERATIONS_CENTER_BILLING_LOG_DIR`，未配置不读文件日志，显式挂载不可读则阻断匹配并给出原因；只在现有进程中注入读源。 |
+| `operations-center/public/index.html`、`public/billing-import-ui.js` | 展示时间校准证据、各类数量、原生扣费是否核实、零实际费及用户 / Key / 分组，未知费用保留未知；新增已定位 / 扣费待核查筛选，禁止仅文件来源和时间不足项被勾选补扣。旧匹配要求重跑，未匹配不再显示“时间匹配待确认”，退出清理诊断文本。保留价格核定和原生计费流程。 |
+| `operations-center/scripts/billing-import-replay.cjs`（新增） | 从外部审计文件离线回放，断言旧误报排除、完整用量保护、文件日志用户一致、完整 Token / 原生扣费证明和一对一排除。没有 DB / API / 预留 / 结算调用，真实源文件不入 Git。 |
+| `operations-center/tests/billing-import-matching.test.js`、`billing-import-logs.test.js`（新增）、`billing-import-source.test.js`、`billing-import.test.js` | 匿名回归覆盖错误时间含义、4 条类零费场景、实际 SQL dedup / 归档 / 错 Key 排除、模型别名 / 缓存 TTL、四小时区间、同用户并发与跨 Key / 分组冲突、一笔记录争用、多来源合并、gzip / 损坏 / 限制 / 秘密字段剔除、旧预览、预览后新账单 / 新候选、文件来源禁止预留及原确认幂等 / 重启 / 租约。 |
+| `operations-center/scripts/billing-import-preview.cjs`、`billing-import-browser-check.cjs` | 隔离演示扩展已收费 / 文件归属 / 零费用状态，桌面 / 手机验证新增筛选与不可扣费项。浏览器测试使用 OS 分配临时端口；手动演示探测占用端口后递增，避免 Windows 下读到本机旧演示。所有测试创建的服务均关闭，不停止已有演示进程。 |
+| `operations-center/package.json` | 新模块和离线脚本纳入原 check，原 test glob 自动运行新测试，无新增依赖或发行工作流改动。 |
+| `operations-center/docs/billing-csv-import.md`、`README.md` | 改正实际 Lingsu CSV 的 Time 为结束时间；说明新状态、自动校准、读源 / 确认防重、仅文件日志的原生预留限制、可选只读日志挂载及旧批次重匹配。挂载示例仅文档，本轮不修改生产 Compose 或权限。 |
+| `CUSTOMIZATIONS.md` | 本节登记全部改动及验证；不覆盖前轮维护记录。 |
+
+资金边界保持原约定：已有用量但未核实扣费不能按 CSV 再建整笔消费；少计用量在已有原生案件差额链核查。仅文件日志可定位用户，但当前核心导入 API 仅接受原生恢复案件或 ops_error_logs，故保留待核查，不向原生错误表造记录，不改余额。含原生候选的同用户并发也需具体请求归属证据，不能随机选择一个 dispatch。旧算法的已开始确认批次先核对核心预留 / 回执，不绕过冻结另建批次。
+
+验证：运营中心全量 216 项测试、npm run check、1440px / 390px Playwright 导入 → 自动校准 → 新筛选 / 禁选 → 报价预览 → 原生模拟结算 → 刷新回执全部通过，无未捕获脚本错误、按钮溢出或整页横向溢出。使用此前保存的生产快照离线回放 14,480 行：旧 24 条误报全部正确排除；此前 13,045 条已有关联用量全部保护，其中 4 条无扣费证明单列异常；此前 761 条文件日志归属逐条一致。新结果 13,176 已核实扣费、1,111 已定位用户待核查（757 仅文件、354 含原生来源）、5 条唯一原生时间候选、4 条扣费未核实、16 条用量差异、122 条多归属、12 条时间不足、34 条重复。新增排除项也逐条验证四类完整 Token、原生处理证明及一对一关系。上游支出不能当已确认损失或用户补扣金额。只读挂载未配置时不能复现文件归属结果。
+
+详细本机验证报告位于用户 Downloads 的 `sub2api-billing-audit-20261023/MATCHING-FIX-VALIDATION.md`；真实快照仅位于该外部目录，未加入仓库。没有运行 Docker 构建、GitHub CI 或真实资金结算；核心无需新迁移。
+
+用户随后明确授权提交 GitHub。本次仅提交并推送上述运营中心匹配修复、配置示例、文档、匿名测试及离线回放脚本到 `fjiangming/sub2api-extra` 的 `main`，沿用既有测试门禁和镜像自动构建；本地验证结果见上文，发布结果以本次 SHA 的 GitHub Actions 为准。此前生产镜像通道维护记录、核心两份文档及无关 SVG 继续保留本地未提交，真实 CSV、服务器快照、日志和凭据不进入 Git；本次不更新服务器或执行生产补扣。

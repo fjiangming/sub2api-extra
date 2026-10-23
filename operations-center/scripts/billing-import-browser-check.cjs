@@ -13,7 +13,7 @@ async function main() {
   fs.mkdirSync(directory, { recursive: true });
   try {
     for (const [name, viewport] of [['desktop', { width: 1440, height: 1024 }], ['mobile', { width: 390, height: 844 }]]) {
-      const preview = await startPreview();
+      const preview = await startPreview({ port: 0 });
       const context = await browser.newContext({ viewport });
       try {
         const page = await context.newPage(), errors = [];
@@ -25,12 +25,27 @@ async function main() {
         await page.locator('#bci-upload button[type=submit]').click();
         await page.locator('#bci-workspace').waitFor({ state: 'visible' });
         await page.locator('#bci-mappings select').selectOption('356');
-        await Promise.all([page.waitForResponse(response => response.url().endsWith('/match') && response.ok()),
+        const [matchResponse] = await Promise.all([page.waitForResponse(response => response.url().endsWith('/match') && response.ok()),
           page.locator('#bci-match button[type=submit]').click()]);
-        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 6);
-        assert.equal(await page.locator('#bci-list tr').filter({ hasText: '时间候选' }).count(), 2);
+        const matchResult = await matchResponse.json();
+        await page.waitForFunction(() => !document.querySelector('#bci-match button[type=submit]').disabled);
+        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 10);
+        assert.equal(await page.locator('#bci-list tr').filter({ hasText: '时间候选' }).count(), 2, JSON.stringify({ summary: matchResult.summary, diagnostics: matchResult.matchDiagnostics }));
         assert.equal(await page.locator('#bci-list tr').filter({ hasText: '多个候选' }).count(), 1);
-        assert.equal(await page.locator('#bci-list tr').filter({ hasText: '已有使用记录' }).count(), 1);
+        assert.equal(await page.locator('#bci-list tr').filter({ hasText: '已确认本地扣费' }).count(), 3, JSON.stringify({ summary: matchResult.summary, diagnostics: matchResult.matchDiagnostics }));
+        assert.equal(await page.locator('#bci-list tr').filter({ hasText: '已定位用户，请求待核查' }).count(), 1);
+        assert.equal(await page.locator('#bci-list tr').filter({ hasText: '有记录，扣费待核查' }).count(), 1);
+        assert.match(await page.locator('#bci-diagnostics').innerText(), /开始时间.*4 \/ 0/);
+        await page.locator('#bci-filter').selectOption('owners');
+        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 1);
+        assert.match(await page.locator('#bci-list').innerText(), /用户 22.*Key 122/);
+        assert.equal(await page.locator('#bci-list input[data-select]').isDisabled(), true);
+        await page.locator('#bci-filter').selectOption('unresolved');
+        await page.waitForFunction(() => document.getElementById('bci-list').textContent.includes('扣费待核查'));
+        assert.match(await page.locator('#bci-list').innerText(), /本地实际费用 0.00000000/);
+        assert.equal(await page.locator('#bci-list input[data-select]').isDisabled(), true);
+        await page.locator('#bci-filter').selectOption('all');
+        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 10);
         assert.equal(await page.locator('#bci-list tr').filter({ hasText: '重复行' }).count(), 1);
         await page.locator('#bci-price-evidence').fill('Local demo: historical price snapshot verified.');
         await page.locator('#bci-final-usage').check(); await page.locator('#bci-time-checked').check();

@@ -45,7 +45,8 @@ class BillingImportStore {
   rows(id) { return this.db.prepare('SELECT * FROM import_rows WHERE batch_id=? ORDER BY number').all(id).map(decode); }
   page(id, filter, page, size = 20) {
     const where = { all: '', actionable: " AND status IN ('exact','time_candidate','preview','failed','confirming')",
-      review: " AND status IN ('ambiguous','assignment_conflict','needs_review','unmatched','unmapped','invalid','duplicate','usage_difference')",
+      review: " AND status IN ('ambiguous','assignment_conflict','needs_review','unmatched','unmapped','invalid','duplicate','usage_difference','billing_unresolved','owner_candidate','time_uncertain','recorded_conflict')",
+      owners: " AND status='owner_candidate'", unresolved: " AND status='billing_unresolved'",
       recorded: " AND status='already_recorded'", settled: " AND status='settled'" }[filter];
     const summary = Object.fromEntries(this.db.prepare('SELECT status,COUNT(*) AS total FROM import_rows WHERE batch_id=? GROUP BY status').all(id).map(row => [row.status, row.total]));
     const total = Object.values(summary).reduce((sum, count) => sum + count, 0);

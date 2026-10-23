@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const net = require('node:net');
 const { createApp } = require('../src/app');
 const { AuthService } = require('../src/auth');
 const { loadConfig } = require('../src/config');
@@ -14,6 +15,7 @@ const { BillingRecoveryStore } = require('../src/billing-recovery-store');
 const { BillingImportStore } = require('../src/billing-import-store');
 const { BillingImportService, manualUsage } = require('../src/services/billing-import-service');
 const { normalizeSources } = require('../src/services/billing-import-source');
+const { buildLogCandidates } = require('../src/services/billing-import-logs');
 
 const sample = `Time,API Key Name,Model,Input Tokens,Output Tokens,Cache Read Tokens,Cache Creation Tokens,Duration (ms),Billed Cost,Type,Billing Mode
 2026-10-22T09:08:08+08:00,demo-key,claude-opus-5-5,4964,13212,0,0,174000,0.224436,Sync,按量
@@ -22,9 +24,22 @@ const sample = `Time,API Key Name,Model,Input Tokens,Output Tokens,Cache Read To
 2026-10-22T09:11:08+08:00,demo-key,claude-opus-5-5,5746,12855,0,0,165000,0.221266,Sync,按量
 2026-10-22T09:12:08+08:00,demo-key,claude-opus-5-5,5198,16003,0,0,208000,0.269273,Sync,按量
 2026-10-22T09:08:08+08:00,demo-key,claude-opus-5-5,4964,13212,0,0,174000,0.224436,Sync,按量
+2026-10-22T09:20:00+08:00,demo-key,gpt-4.1,21,52,0,0,10000,0.001,Sync,按量
+2026-10-22T09:21:00+08:00,demo-key,gemini-flash,22,53,0,0,10000,0.001,Sync,按量
+2026-10-22T09:22:00+08:00,demo-key,claude-opus-5-5,503,1934,0,0,210000,0.3,Sync,按量
+2026-10-22T09:23:00+08:00,demo-key,gpt-5.2,23,54,0,0,20000,0.001,Sync,按量
 `;
 
-async function startPreview() {
+async function portInUse(port) {
+  return new Promise(resolve => {
+    const socket = net.createConnection({ port, host: '127.0.0.1' });
+    const finish = inUse => { socket.destroy(); resolve(inUse); };
+    socket.once('connect', () => finish(true)); socket.once('error', () => finish(false));
+    socket.setTimeout(300, () => finish(true));
+  });
+}
+
+async function startPreview({ port: requestedPort } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'billing-import-preview-'));
   const config = loadConfig({ NODE_ENV: 'test', OPERATIONS_CENTER_AUTH_MODE: 'local', OPERATIONS_CENTER_ADMIN_PASSWORD: crypto.randomBytes(24).toString('hex') });
   const auth = new AuthService(config);
@@ -54,10 +69,21 @@ async function startPreview() {
   };
   const errors = [13, 14].map(user => ({ id: String(user), user_id: String(user), api_key_id: String(user + 100), account_id: '356', group_id: '15',
     user_email: `demo-user-${user}@example.test`, request_id: `demo-error-${user}`, model: 'claude-opus-5-5', created_at: '2026-10-22T01:13:13Z', response_latency_ms: 125000 }));
+  const common = { user_id: '15', api_key_id: '115', group_id: '15', account_id: '356', cache_read_tokens: 0, cache_creation_tokens: 0, billing_dedup: true, actual_cost: 0.001 };
+  const logs = buildLogCandidates([
+    { component: 'gateway', request_id: 'demo-file-only', ts: '2026-10-22T01:22:00Z', user_id: 22, api_key_id: 122, group_id: 15 },
+    { component: 'gateway', request_id: 'demo-file-only', ts: '2026-10-22T01:22:00Z', selected_account_id: 356, model: 'claude-opus-5-5', stream: false },
+    { component: 'http.access', request_id: 'demo-file-only', ts: '2026-10-22T01:24:05Z', account_id: 356, status_code: 499, latency_ms: 125000 }
+  ], { accounts: ['356'], from: '2026-10-22T00:00:00Z', to: '2026-10-23T00:00:00Z' });
   const source = { accounts: async () => [{ id: '356', name: '演示上游 / demo-key', platform: 'anthropic' }],
     load: async () => ({ coreAvailable: true, candidates: normalizeSources(errors, [{ id: '20', user_id: '15', api_key_id: '115',
       account_id: '356', model: 'gemini-2.5-pro', created_at: '2026-10-22T01:11:43Z', duration_ms: 95000,
-      input_tokens: 1000, output_tokens: 3000, cache_read_tokens: 0, cache_creation_tokens: 0 }], [...entries.values()]) }) };
+      group_id: '15', billing_dedup: true, actual_cost: 0.05,
+      input_tokens: 1000, output_tokens: 3000, cache_read_tokens: 0, cache_creation_tokens: 0 },
+    { ...common, id: '21', model: 'gpt-4.1', created_at: '2026-10-22T01:20:10Z', duration_ms: 10000, input_tokens: 21, output_tokens: 52 },
+    { ...common, id: '22', model: 'gemini-flash', created_at: '2026-10-22T01:21:10Z', duration_ms: 10000, input_tokens: 22, output_tokens: 53 },
+    { ...common, id: '23', model: 'gpt-5.2', created_at: '2026-10-22T01:23:20Z', duration_ms: 20000, input_tokens: 23, output_tokens: 54, billing_dedup: false, actual_cost: 0 }
+    ], [...entries.values()], logs), diagnostics: { logs: { status: 'read', coverageComplete: false } } }) };
   const imports = new BillingImportService({ store, source, recovery });
   const batch = await imports.import({ fileName: '演示账单.csv', csv: sample });
   await imports.match(batch.id, { accountMappings: { 'demo-key': 356 } });
@@ -70,14 +96,16 @@ async function startPreview() {
   });
   outer.get('/sample.csv', (_req, res) => res.type('text/csv').send(sample));
   outer.use(app);
-  let port = Number(process.env.BILLING_IMPORT_PREVIEW_PORT || 19876), server;
+  let port = requestedPort ?? Number(process.env.BILLING_IMPORT_PREVIEW_PORT || 19876), server;
   while (!server) {
+    if (port && await portInUse(port)) { port++; continue; }
     try {
       server = await new Promise((resolve, reject) => {
         const candidate = outer.listen({ port, host: '127.0.0.1', exclusive: true }, () => resolve(candidate)); candidate.once('error', reject);
       });
     } catch (error) { if (error.code !== 'EADDRINUSE') throw error; port++; }
   }
+  port = server.address().port;
   console.log(`CSV billing preview (demo data only): http://127.0.0.1:${port}/preview`);
   let stopped = false;
   return { port, async stop() {
