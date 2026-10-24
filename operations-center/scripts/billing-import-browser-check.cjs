@@ -12,7 +12,12 @@ async function main() {
   const directory = process.env.BILLING_IMPORT_QA_DIR || path.join(os.tmpdir(), 'sub2api-csv-billing-ui-qa');
   fs.mkdirSync(directory, { recursive: true });
   try {
-    for (const [name, viewport] of [['desktop', { width: 1440, height: 1024 }], ['mobile', { width: 390, height: 844 }]]) {
+    for (const [name, viewport, supplierCost] of [
+      ['desktop', { width: 1440, height: 1024 }, '0.224436'],
+      ['mobile', { width: 390, height: 844 }, '0.224436'],
+      ['positive-gap', { width: 1440, height: 1024 }, '0.3'],
+      ['unknown-cost', { width: 390, height: 844 }, '']
+    ]) {
       const preview = await startPreview({ port: 0 });
       const context = await browser.newContext({ viewport });
       try {
@@ -21,7 +26,7 @@ async function main() {
         await page.goto(`http://127.0.0.1:${preview.port}/preview`);
         await page.locator('#br-import-tab').click();
         await Promise.all([page.waitForResponse(response => response.url().endsWith('/api/billing-imports/inspect') && response.ok()),
-          page.locator('#bci-file').setInputFiles({ name: 'browser-demo.csv', mimeType: 'text/csv', buffer: Buffer.from(sample) })]);
+          page.locator('#bci-file').setInputFiles({ name: 'browser-demo.csv', mimeType: 'text/csv', buffer: Buffer.from(sample.replaceAll('174000,0.224436,', `174000,${supplierCost},`)) })]);
         await page.locator('#bci-upload button[type=submit]').click();
         await page.locator('#bci-workspace').waitFor({ state: 'visible' });
         await page.locator('#bci-mappings select').selectOption('356');
@@ -54,6 +59,19 @@ async function main() {
         assert.equal(await page.locator('#bci-user-preview tbody tr').count(), 2);
         assert.match(await page.locator('#bci-user-preview').innerText(), /订阅用量/);
         assert.match(await page.locator('#bci-user-preview').innerText(), /余额/);
+        const gap = supplierCost === '' ? '未知' : supplierCost === '0.3' ? '上游多扣 0.05141600' : '本站拟多收 0.02414800';
+        const balanceRow = page.locator('#bci-list tr').filter({ hasText: '用户 11' });
+        const subscriptionRow = page.locator('#bci-list tr').filter({ hasText: '用户 12' });
+        assert.equal(await balanceRow.locator('[data-cost-gap]').innerText(), gap);
+        assert.equal(await subscriptionRow.locator('[data-cost-gap]').innerText(), '不适用：订阅用量');
+        const summary = page.locator('#bci-cost-preview tbody tr').filter({ hasText: '余额补扣' });
+        assert.match(await summary.innerText(), new RegExp(supplierCost === '' ? '1 笔未知.*0.24858400.*未知：上游费用不完整' : `${supplierCost === '0.3' ? '0.30000000' : '0.22443600'}.*0.24858400.*${gap}`));
+        assert.match(await page.locator('#bci-user-preview tbody tr').filter({ hasText: 'demo-user-11' }).innerText(), new RegExp(gap));
+        await balanceRow.locator('[data-select]').uncheck();
+        assert.equal(await page.locator('#bci-cost-preview tbody tr').count(), 1);
+        assert.match(await page.locator('#bci-total').innerText(), /本页所选 1 笔/);
+        assert.equal(await page.locator('#bci-user-preview tbody tr').count(), 1);
+        await balanceRow.locator('[data-select]').check();
         await page.locator('#bci-acknowledge').check(); assert.equal(await page.locator('#bci-confirm').isEnabled(), true);
         await page.locator('#bci-price-list input[data-price=multiplier]').first().fill('1.2');
         assert.equal(await page.locator('#bci-confirm').isEnabled(), false);

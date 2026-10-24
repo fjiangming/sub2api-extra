@@ -12,6 +12,20 @@
     let accounts = [], batch = null, fileText = null, columns = {}, busy = false, epoch = 0, dirty = false, matchDirty = false;
     const rules = new Map(), assignments = new Map();
     const amount = value => value != null && value !== '' && Number.isFinite(Number(value)) ? Number(value).toFixed(8) : '未知';
+    const units = value => value == null ? null : BigInt(value.replace('.', ''));
+    const fixed = value => `${value < 0n ? '-' : ''}${(value < 0n ? -value : value) / 100000000n}.${((value < 0n ? -value : value) % 100000000n).toString().padStart(8, '0')}`;
+    const difference = value => value == null ? '未知' : value > 0n ? `上游多扣 ${fixed(value)}` : value < 0n ? `本站拟多收 ${fixed(-value)}` : '持平 0.00000000';
+    function totals(rows) {
+      let supplier = 0n, local = 0n, unknown = 0;
+      for (const row of rows) {
+        const comparison = row.costComparison;
+        local += units(comparison?.localCost) ?? units(amount(row.preview.usage.ActualCost));
+        if (comparison?.supplierCost == null) unknown++;
+        else supplier += units(comparison.supplierCost);
+      }
+      return { supplier, local, unknown };
+    }
+    const supplierAmount = total => `${total.unknown ? `已知 ${fixed(total.supplier)} · ${total.unknown} 笔未知` : fixed(total.supplier)}`;
     const date = value => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '';
     function candidateDetails(item) {
       return !item ? '' : `<small>用户 ${esc(item.userId)} · Key ${esc(item.apiKeyId)} · 账号 ${esc(item.accountId)} · 分组 ${esc(item.groupId)}</small><small>${esc(item.reference)}${item.statusCode ? ` · HTTP ${esc(item.statusCode)}` : ''}</small><small>${item.startUncertain ? '开始时间范围' : '本地开始'} ${esc(date(item.startMs))}${item.startUncertain ? ` 至 ${esc(date(item.endMs))}` : ''}</small>${item.recorded ? `<small>本地实际费用 ${esc(amount(item.cost))} · ${item.billed ? '已确认原生扣费' : '原生扣费未确认'}</small>` : ''}`;
@@ -20,9 +34,16 @@
     function chosen() { return [...$('bci-list').querySelectorAll('[data-select]:checked')].map(input => batch.rows.find(row => row.id === input.dataset.select)).filter(Boolean); }
     function update() {
       const rows = batch ? chosen().filter(row => ['preview', 'failed', 'confirming'].includes(row.status) && row.preview) : [];
-      const total = rows.reduce((sum, row) => sum + Number(row.preview.usage.ActualCost), 0);
+      const total = totals(rows);
       const users = new Set(rows.map(row => row.preview.userId));
-      $('bci-total').textContent = rows.length ? `${rows.length} 笔 · ${users.size} 位用户 · ${amount(total)} USD` : '待生成预览';
+      $('bci-total').textContent = rows.length ? `本页所选 ${rows.length} 笔 · ${users.size} 位用户 · 补记 ${fixed(total.local)} USD` : '待生成预览';
+      const balances = rows.filter(row => row.preview.billingType === 'balance'), balance = totals(balances);
+      const subscriptions = rows.filter(row => row.preview.billingType === 'subscription'), subscription = totals(subscriptions);
+      $('bci-cost-preview').hidden = !rows.length;
+      $('bci-cost-note').hidden = !rows.length;
+      $('bci-cost-preview').innerHTML = rows.length ? `<table><thead><tr><th>本页所选预览</th><th>笔数</th><th>上游支出（USD）</th><th>本站拟补记（USD）</th><th>上游多扣余额差额（USD）</th></tr></thead><tbody>${
+        [[balances, balance, '余额补扣'], [subscriptions, subscription, '订阅用量']].filter(([items]) => items.length).map(([items, value, name]) => `<tr><td>${name}</td><td>${items.length}</td><td>${supplierAmount(value)}</td><td>${fixed(value.local)}</td><td>${items === subscriptions ? '不适用：订阅用量' : value.unknown ? '未知：上游费用不完整' : difference(value.supplier - value.local)}</td></tr>`).join('')
+      }</tbody></table>` : '';
       $('bci-confirm').disabled = busy || dirty || matchDirty || !rows.length || !$('bci-acknowledge').checked;
       $('bci-preview').disabled = busy || matchDirty || !batch || !chosen().length;
       for (const button of $('br-import-pane').querySelectorAll('button:not(#bci-confirm):not(#bci-preview)')) button.disabled = busy;
@@ -31,11 +52,14 @@
       const grouped = new Map();
       for (const row of rows) {
         const value = row.preview, key = `${value.userId}:${value.billingType}`;
-        const group = grouped.get(key) || { name: value.userEmail || `用户 ${value.userId}`, userId: value.userId, type: value.billingType, count: 0, amount: 0 };
-        group.count++; group.amount += Number(value.usage.ActualCost); grouped.set(key, group);
+        const group = grouped.get(key) || { name: value.userEmail || `用户 ${value.userId}`, userId: value.userId, type: value.billingType, rows: [] };
+        group.rows.push(row); grouped.set(key, group);
       }
       $('bci-user-preview').hidden = !grouped.size;
-      $('bci-user-preview').innerHTML = grouped.size ? `<table><thead><tr><th>所选用户</th><th>计费类型</th><th>笔数</th><th>补记合计（USD）</th></tr></thead><tbody>${[...grouped.values()].map(group => `<tr><td>${esc(group.name)} · ${esc(group.userId)}</td><td>${group.type === 'subscription' ? '订阅用量' : '余额'}</td><td>${group.count}</td><td>${amount(group.amount)}</td></tr>`).join('')}</tbody></table>` : '';
+      $('bci-user-preview').innerHTML = grouped.size ? `<table><thead><tr><th>所选用户</th><th>计费类型</th><th>笔数</th><th>上游支出（USD）</th><th>补记合计（USD）</th><th>上游多扣余额差额（USD）</th></tr></thead><tbody>${[...grouped.values()].map(group => {
+        const value = totals(group.rows);
+        return `<tr><td>${esc(group.name)} · ${esc(group.userId)}</td><td>${group.type === 'subscription' ? '订阅用量' : '余额'}</td><td>${group.rows.length}</td><td>${supplierAmount(value)}</td><td>${fixed(value.local)}</td><td>${group.type === 'subscription' ? '不适用：订阅用量' : value.unknown ? '未知：上游费用不完整' : difference(value.supplier - value.local)}</td></tr>`;
+      }).join('')}</tbody></table>` : '';
     }
     async function run(action) {
       if (busy) return; busy = true; error(); update();
@@ -92,8 +116,10 @@
         const status = row.result?.error || row.match?.reason || record.error || (row.status === 'settled' ? `账单 ${row.case_id}` : '');
         const dims = record.tokens || {};
         const owner = row.match?.owner;
+        const comparison = row.costComparison;
+        const gap = !preview ? '待生成预览' : preview.billingType === 'subscription' ? '不适用：订阅用量' : difference(units(comparison?.balanceDifference));
         const details = candidateDetails(candidates.find(item => item.reference === selected) || (candidates.length === 1 ? candidates[0] : null));
-        return `<tr><td><input data-select="${row.id}" type="checkbox" aria-label="选择第 ${row.number} 行"${eligible ? selected || preview ? ' checked' : '' : ' disabled'}></td><td>${esc(row.number)} · ${esc(date(record.startedAt))}<small>${esc(record.model)}</small><small>${esc(record.requestId || record.key)}</small></td><td>${preview ? `<span>${esc(candidate)}</span><small>${preview.billingType === 'subscription' ? '订阅用量' : '余额计费'}</small>` : owner ? `<span>用户 ${esc(owner.userId)} · Key ${esc(owner.apiKeyId)} · 分组 ${esc(owner.groupId)}</span>` : ''}<select data-assignment="${row.id}" aria-label="第 ${row.number} 行匹配用户"${preview || !eligible ? ' disabled' : ''}><option value="">选择候选请求</option>${options}</select><div data-candidate="${row.id}">${details}</div></td><td>${esc(labels[row.status] || row.status)}${row.match?.method === 'time' && eligible ? `<small>${row.selection_confirmed ? '时间归属已核对' : '按时间匹配，待人工确认'}</small>` : row.match?.method === 'tokens_time' ? '<small>Token 与时间核对</small>' : ''}</td><td>${esc(dims.InputTokens ?? '未知')} / ${esc(dims.OutputTokens ?? '未知')}<small>缓存 ${esc(dims.CacheCreationTokens ?? '未知')} / ${esc(dims.CacheReadTokens ?? '未知')}</small></td><td>${esc(record.cost || '未知')}</td><td>${preview ? `${esc(amount(preview.usage.ActualCost))} USD<small>${preview.pricingSource === 'immutable_dispatch_snapshot' ? '请求历史价格快照' : '人工核定历史售价'}</small><small>售卖倍率 ${esc(preview.usage.RateMultiplier)}</small>` : '待核定'}</td><td>${esc(status)}</td></tr>`;
+        return `<tr><td><input data-select="${row.id}" type="checkbox" aria-label="选择第 ${row.number} 行"${eligible ? selected || preview ? ' checked' : '' : ' disabled'}></td><td>${esc(row.number)} · ${esc(date(record.startedAt))}<small>${esc(record.model)}</small><small>${esc(record.requestId || record.key)}</small></td><td>${preview ? `<span>${esc(candidate)}</span><small>${preview.billingType === 'subscription' ? '订阅用量' : '余额计费'}</small>` : owner ? `<span>用户 ${esc(owner.userId)} · Key ${esc(owner.apiKeyId)} · 分组 ${esc(owner.groupId)}</span>` : ''}<select data-assignment="${row.id}" aria-label="第 ${row.number} 行匹配用户"${preview || !eligible ? ' disabled' : ''}><option value="">选择候选请求</option>${options}</select><div data-candidate="${row.id}">${details}</div></td><td>${esc(labels[row.status] || row.status)}${row.match?.method === 'time' && eligible ? `<small>${row.selection_confirmed ? '时间归属已核对' : '按时间匹配，待人工确认'}</small>` : row.match?.method === 'tokens_time' ? '<small>Token 与时间核对</small>' : ''}</td><td>${esc(dims.InputTokens ?? '未知')} / ${esc(dims.OutputTokens ?? '未知')}<small>缓存 ${esc(dims.CacheCreationTokens ?? '未知')} / ${esc(dims.CacheReadTokens ?? '未知')}</small></td><td>${esc(comparison?.supplierCost ?? (record.cost || '未知'))}</td><td>${preview ? `${esc(amount(preview.usage.ActualCost))} USD<small>${preview.pricingSource === 'immutable_dispatch_snapshot' ? '请求历史价格快照' : '人工核定历史售价'}</small><small>售卖倍率 ${esc(preview.usage.RateMultiplier)}</small>` : '待核定'}</td><td data-cost-gap>${esc(gap)}</td><td>${esc(status)}</td></tr>`;
       }).join('');
       $('bci-page').textContent = `${batch.filteredTotal} 条 · 第 ${batch.page} / ${Math.max(1, Math.ceil(batch.filteredTotal / 20))} 页`;
       $('bci-prev').disabled = batch.page <= 1; $('bci-next').disabled = batch.page * 20 >= batch.filteredTotal;

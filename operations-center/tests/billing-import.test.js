@@ -192,6 +192,44 @@ test('reimport resumes saved batch and previews never reserve, write usage or ch
   assert.notEqual(preview.rows[0].preview.usage.ActualCost, Number(csvRow()['Billed Cost']));
 });
 
+test('preview comparisons use actual CSV USD cost and preserve signed differences and unknown amounts', async t => {
+  const f = fixture(t);
+  for (const [cost, supplierCost, balanceDifference] of [
+    ['0.30', '0.30000000', '0.05141600'], ['0.224436', '0.22443600', '-0.02414800'],
+    ['0.248584', '0.24858400', '0.00000000'], ['0', '0.00000000', '-0.24858400'],
+    ['$0.30', '0.30000000', '0.05141600'], ['USD 1,000.00000001', '1000.00000001', '999.75141601'],
+    ['0.300000005', '0.30000001', '0.05141601'],
+    ...['', '-', 'NaN', '-1', 'CNY 1.00', '0.30 USD CNY', '0x10', '1,23.4'].map(value => [value, null, null])
+  ]) {
+    const batch = await previewed(f, await matched(f, csv([{ 'Billed Cost': cost }])));
+    assert.deepEqual(batch.rows[0].costComparison, { supplierCost, localCost: '0.24858400', balanceDifference }, cost);
+    assert.equal(batch.rows[0].preview.usage.AccountRateMultiplier, 1);
+  }
+  assert.equal(f.calls.length, 0); assert.equal(f.charges(), 0);
+});
+
+test('preview cost comparisons are read-only, survive reload and never change native settlement', async t => {
+  const f = fixture(t); let batch = await matched(f);
+  assert.equal(batch.rows[0].costComparison, null);
+  batch = await previewed(f, batch);
+  const frozen = f.store.get(batch.rows[0].id);
+  assert.equal(Object.hasOwn(frozen.preview, 'costComparison'), false);
+  f.persistent.close(); f.persistent.initialize(); f.store.initialize();
+  const reloaded = f.service.detail(batch.id);
+  assert.deepEqual(reloaded.rows[0].costComparison, batch.rows[0].costComparison);
+  assert.deepEqual(f.store.get(batch.rows[0].id), frozen);
+  await f.service.confirm(reloaded.id, confirmBody(reloaded));
+  assert.equal(f.charges(), 1); assert.equal(f.amount(), 0.248584);
+});
+
+test('subscription previews show upstream costs without claiming a user balance difference', async t => {
+  const f = fixture(t); f.entries.get(caseId).subscription_id = 7;
+  const batch = await previewed(f, await matched(f, csv([{ 'Billed Cost': '0.30' }])));
+  assert.equal(batch.rows[0].preview.billingType, 'subscription');
+  assert.deepEqual(batch.rows[0].costComparison, { supplierCost: '0.30000000', localCost: '0.24858400', balanceDifference: null });
+  assert.equal(f.charges(), 0);
+});
+
 test('time ownership, final usage, historical prices, missing cache and TTL each require verification', async t => {
   const f = fixture(t); const batch = await matched(f);
   let result = await previewed(f, batch, { confirmTimeMatches: false }); assert.equal(result.rows[0].status, 'needs_review');

@@ -140,3 +140,17 @@
 详细本机验证报告位于用户 Downloads 的 `sub2api-billing-audit-20261023/MATCHING-FIX-VALIDATION.md`；真实快照仅位于该外部目录，未加入仓库。没有运行 Docker 构建、GitHub CI 或真实资金结算；核心无需新迁移。
 
 用户随后明确授权提交 GitHub。本次仅提交并推送上述运营中心匹配修复、配置示例、文档、匿名测试及离线回放脚本到 `fjiangming/sub2api-extra` 的 `main`，沿用既有测试门禁和镜像自动构建；本地验证结果见上文，发布结果以本次 SHA 的 GitHub Actions 为准。此前生产镜像通道维护记录、核心两份文档及无关 SVG 继续保留本地未提交，真实 CSV、服务器快照、日志和凭据不进入 Git；本次不更新服务器或执行生产补扣。
+
+## 2026-10-24：CSV 扣费预览增加上游余额差额
+
+用户授权实现、验证后提交并推送 GitHub。本轮只修改 `sub2api-extra/operations-center`，保持 `main`；主站核心无需修改、迁移或重新发行。上游多扣余额差额定义为 CSV 的实际上游 USD 支出减本站拟补扣，负差额显示“本站拟多收”；仅为金额比较，不表示已回款或判定供应商错扣，不能把上游费用当作用户补扣金额。
+
+| 文件 | 改动及后续保留要求 |
+| --- | --- |
+| `operations-center/src/services/billing-import-service.js` | 在详情返回时为已有预览派生 `costComparison`，Decimal 计算并返回 8 位定点金额。接受非负十进制、USD / 美元符号和规范千分位；缺失、负数、其他币种或无法识别的金额返回未知。订阅只返回支出与用量金额，余额差额为空。兼容旧持久预览；不写入预览、摘要或主站，不改变定价 / 预留 / 幂等 / 确认事务。 |
+| `operations-center/public/billing-import-ui.js`、`public/index.html`、`public/billing-recovery.css` | 增加逐笔差额列、本页所选合计和按用户汇总的上游支出 / 本站拟补记 / 差额。前端以 8 位定点整数汇总，正负差额明确区分；余额与订阅单列，已知支出与未知条数同时保留，费用不完整则合计差额未知。勾选变化立即更新；表格在手机内部横向滚动，不撑宽整页。 |
+| `operations-center/tests/billing-import.test.js` | 增加实际费用与售卖价正负 / 零差额、规范金额 / 非法金额、半单位舍入、未知不当零、订阅不当余额、旧预览重启可读、只读派生不改变原生结算的回归。 |
+| `operations-center/scripts/billing-import-browser-check.cjs` | 验证桌面 / 手机及正差额 / 缺上游费用四组隔离模拟流程，核对逐笔、按用户和所选合计、取消勾选、订阅隔离、原生模拟结算及刷新回执。没有新增生产依赖。 |
+| `operations-center/docs/billing-csv-import.md`、`CUSTOMIZATIONS.md` | 记录操作、金额公式、范围和验证；保留先前未提交的生产镜像通道维护记录。 |
+
+验证：运营中心完整 219 项测试、`npm run check`、四组 Playwright 模拟流程全部通过，1440px 桌面 / 390px 手机没有整页或按钮溢出、没有未捕获脚本错误，截图已复核。前端和详情读取均未触发补扣；原生模拟确认仍只结算一次。浏览器测试依赖仅安装在本机临时目录，不改锁文件或镜像依赖。沿用 GitHub 既有测试和镜像构建流程，发行结果以本次 SHA 的 Actions 为准；本轮不连接或更新生产、不补扣真实用户，无关 SVG 和核心已有文档继续保留本地。

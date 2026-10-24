@@ -68,6 +68,15 @@ function manualUsage(record, tokens, rule) {
   return usage;
 }
 
+function costComparison(record, preview) {
+  if (!preview) return null;
+  const match = String(record.cost || '').trim().match(/^(?:USD\s*|\$\s*)?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)(?:\s*USD)?$/i);
+  const supplier = match ? new Decimal(match[1].replaceAll(',', '')).toDecimalPlaces(8, Decimal.ROUND_HALF_UP) : null;
+  const local = new Decimal(preview.usage.ActualCost);
+  return { supplierCost: supplier?.toFixed(8) ?? null, localCost: local.toFixed(8),
+    balanceDifference: supplier && preview.billingType === 'balance' ? supplier.minus(local).toFixed(8) : null };
+}
+
 class BillingImportService {
   constructor({ store, source, recovery, now = () => Date.now() }) { Object.assign(this, { store, source, recovery, now }); }
   async options() { return { accounts: await this.source.accounts(), batches: this.store.batches() }; }
@@ -91,8 +100,9 @@ class BillingImportService {
     const page = Math.max(1, Math.min(1000, Math.floor(Number(query.page) || 1)));
     const info = batch.metadata || metadata(parseBillingCSV(batch.csv, batch.options));
     if (!batch.metadata) this.store.metadata(batchId, info);
+    const result = this.store.page(batchId, filter, page);
     return { id: batch.id, fileName: batch.file_name, createdAt: batch.created_at, options: batch.options,
-      ...info, ...this.store.page(batchId, filter, page) };
+      ...info, ...result, rows: result.rows.map(row => ({ ...row, costComparison: costComparison(row.record, row.preview) })) };
   }
   async match(batchId, input, accessToken) {
     const options = validate(optionsSchema, input);
