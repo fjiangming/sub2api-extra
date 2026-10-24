@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
+const crypto = require('node:crypto');
 const { AppError } = require('../errors');
 
 const MAX_BYTES = 1024 * 1024 * 1024;
@@ -101,11 +102,14 @@ function buildLogCandidates(events, { from, to, accounts }) {
     const endMs = millis(end.completed_at || end.ts), startMs = millis(selected.ts);
     if (!Number.isFinite(endMs) || startMs > endMs || Math.abs(startMs - (endMs - end.latency_ms)) > 5000) continue;
     const [userId, apiKeyId, groupId] = JSON.parse(users[0]).map(String);
-    candidates.push({ reference: `log:${requestId}:${startMs}`, kind: 'log', state: 'legacy_log', recorded: false,
+    const digest = crypto.createHash('sha256').update(JSON.stringify(list.slice().sort((a, b) => millis(a.ts) - millis(b.ts) || JSON.stringify(a).localeCompare(JSON.stringify(b))))).digest('hex');
+    candidates.push({ reference: `log:${requestId}`, kind: 'log', state: 'legacy_log', recorded: false,
       userId, apiKeyId, groupId, accountId: String(selected.selected_account_id), userEmail: '', groupName: '', billingType: 'unknown',
       models: [selected.model], stream: selected.stream, startMs, endMs, startUncertain: false, statusCode: end.status_code,
       rootIds: [requestId, end.client_request_id].filter(Boolean), ids: [],
-      blockedReason: '仅文件日志可定位用户；缺少可预留的原生异常或恢复案件，需核查后补齐原生来源' });
+      logSource: { request_id: requestId, client_request_id: end.client_request_id || '', group_id: Number(groupId),
+        model: selected.model, ended_at: new Date(endMs).toISOString(), latency_ms: Math.round(end.latency_ms),
+        status_code: end.status_code, stream: selected.stream === true, digest } });
   }
   return candidates;
 }

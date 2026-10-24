@@ -1,6 +1,8 @@
 'use strict';
 
-const MATCH_VERSION = 2;
+const crypto = require('node:crypto');
+
+const MATCH_VERSION = 3;
 const FIELDS = ['InputTokens', 'OutputTokens', 'CacheReadTokens', 'CacheCreationTokens'];
 const clean = value => String(value || '').trim().toLowerCase();
 const millis = value => value == null ? NaN : new Date(value).getTime();
@@ -139,6 +141,7 @@ function reconcileBillingRows(records, candidates, options) {
     matches[n] = finish(row, pool, 'time_range', pool.length ? { status: 'time_uncertain', selected: null,
       reason: '本地缺少精确开始时间，仅有宽泛时间范围，不能据此确认遗漏归属' } : {});
   }
+  resolveUniqueAssignments(matches);
   const assignments = new Map();
   matches.forEach((match, i) => {
     const reference = match.selected || (match.candidates.length === 1 && match.candidates[0].recorded ? match.candidates[0].reference : null);
@@ -149,6 +152,50 @@ function reconcileBillingRows(records, candidates, options) {
     reason: '多条上游记录对应同一本地请求，不能把一笔扣费视为多笔均已收费，也不能重复补扣' });
   return { records: adjusted, matches, diagnostics: { algorithmVersion: MATCH_VERSION, clocks: [...clocks.values()],
     sources: candidates.reduce((out, item) => { out[item.kind] = (out[item.kind] || 0) + 1; return out; }, {}) } };
+}
+
+// Resolve only edges required in every full one-to-one assignment. Choosing the
+// nearest request would hide ambiguity during concurrent requests and retries.
+function resolveUniqueAssignments(matches) {
+  const eligible = new Set(['exact', 'time_candidate', 'owner_candidate', 'ambiguous']);
+  const rows = new Map(), refs = new Map(), blocked = new Set();
+  matches.forEach((match, index) => {
+    const usable = eligible.has(match.status) && match.totalCandidates <= 30 && match.candidates.length &&
+      match.candidates.every(item => !item.recorded && !item.blockedReason && !item.startUncertain);
+    if (!usable) { for (const item of match.candidates) if (!item.recorded) blocked.add(item.reference); return; }
+    rows.set(index, match.candidates.map(item => item.reference));
+    for (const item of match.candidates) { const owners = refs.get(item.reference) || []; owners.push(index); refs.set(item.reference, owners); }
+  });
+  const seen = new Set();
+  for (const first of rows.keys()) {
+    if (seen.has(first)) continue;
+    const component = [], queue = [first], sources = new Set();
+    while (queue.length) {
+      const index = queue.pop(); if (seen.has(index)) continue;
+      seen.add(index); component.push(index);
+      for (const ref of rows.get(index)) { sources.add(ref); for (const next of refs.get(ref)) if (!seen.has(next)) queue.push(next); }
+    }
+    if (component.length > 160 || sources.size > 400 || [...sources].some(ref => blocked.has(ref))) continue;
+    const perfect = (withoutRow = -1, withoutRef = '') => {
+      const assigned = new Map();
+      const visit = (index, visited) => {
+        for (const ref of rows.get(index)) {
+          if (index === withoutRow && ref === withoutRef || visited.has(ref)) continue;
+          visited.add(ref);
+          if (!assigned.has(ref) || visit(assigned.get(ref), visited)) { assigned.set(ref, index); return true; }
+        }
+        return false;
+      };
+      return component.every(index => visit(index, new Set())) ? new Map([...assigned].map(([ref, index]) => [index, ref])) : null;
+    };
+    const assignment = perfect(); if (!assignment) continue;
+    const proof = crypto.createHash('sha256').update(JSON.stringify(component.slice().sort((a, b) => a - b).map(index => [index, rows.get(index)]))).digest('hex');
+    for (const [index, reference] of assignment) {
+      if (matches[index].totalCandidates === 1 || perfect(index, reference)) continue;
+      Object.assign(matches[index], { selected: reference, status: 'time_candidate', batchAssignment: proof,
+        reason: '整批账单一对一核对后，该请求是唯一可行归属；请核对预览后确认' });
+    }
+  }
 }
 
 const matchBillingRows = (records, candidates, options) => reconcileBillingRows(records, candidates, options).matches;

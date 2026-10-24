@@ -80,6 +80,19 @@ class BillingImportSource {
       throw new AppError('LOG_SOURCE_UNAVAILABLE', '无法读取配置的主站文件日志，请检查只读挂载与权限', { status: 503 });
     }
     const logs = buildLogCandidates(logResult.events, { from, to, accounts });
+    if (logs.length) {
+      const users = (await this.pool.query(`SELECT k.id::text,k.user_id::text,u.email FROM api_keys k
+        JOIN users u ON u.id=k.user_id AND u.deleted_at IS NULL WHERE k.deleted_at IS NULL AND k.id=ANY($1::bigint[])`,
+      [[...new Set(logs.map(item => item.apiKeyId))]])).rows;
+      const groups = (await this.pool.query(`SELECT id::text,name,subscription_type FROM groups WHERE deleted_at IS NULL AND id=ANY($1::bigint[])`,
+        [[...new Set(logs.map(item => item.groupId))]])).rows;
+      const keys = new Map(users.map(item => [String(item.id), item])), groupMap = new Map(groups.map(item => [String(item.id), item]));
+      for (const item of logs) {
+        const key = keys.get(item.apiKeyId), group = groupMap.get(item.groupId);
+        if (!key || String(key.user_id) !== item.userId || !group) item.blockedReason = '日志归属对应的用户、Key 或分组已删除或不一致';
+        else Object.assign(item, { userEmail: key.email, groupName: group.name, billingType: group.subscription_type === 'subscription' ? 'subscription' : 'balance' });
+      }
+    }
     return { candidates: normalizeSources(enrichErrorsFromLogs(errors, logs), usages, cases, logs), coreAvailable,
       diagnostics: { logs: logResult.diagnostics, native: { usages: usages.length, errors: errors.length, cases: cases.length } } };
   }

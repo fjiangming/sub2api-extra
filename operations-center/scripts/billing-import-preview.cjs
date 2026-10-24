@@ -56,12 +56,31 @@ async function startPreview({ port: requestedPort } = {}) {
     [caseID(2), entry(2, 'gpt-5', 12, '2026-10-22T01:09:08Z', true)]
   ]);
   const rule = { input: 5, output: 25, cacheRead: 0.5, cache5m: 6.25, cache1h: 10, multiplier: 0.7, accountMultiplier: 1 };
+  const claims = new Map();
   const recovery = {
     status: () => ({ automaticEnabled: false }),
     list: async ({ state }) => { const items = [...entries.values()].filter(row => !state || row.state === state); return { items, total: items.length }; },
     detail: async id => ({ case: structuredClone(entries.get(id)), events: [] }),
-    request: async (url, { body }) => url === '/imports/reserve' ? { case_id: body.case_id } : {
-      usage_record: manualUsage({ model: entries.get(url.split('/')[1]).model, stream: false }, body.tokens, rule)
+    request: async (url, { body }) => {
+      if (url === '/imports/reserve') {
+        let id = body.case_id || claims.get(body.bill_identity);
+        if (!id) {
+          id = caseID(10000 + claims.size);
+          const row = entry(10000 + claims.size, body.model, body.user_id, body.started_at);
+          row.api_key_id = body.api_key_id;
+          row.request_snapshot = { request_id: body.log_source?.request_id, user_email: `demo-user-${body.user_id}@example.test` };
+          entries.set(id, row); claims.set(body.bill_identity, id);
+        }
+        return { case_id: id };
+      }
+      if (url === '/imports/quote') {
+        const source = body.source, historical = Boolean(source.case_id);
+        const prices = historical ? rule : { ...rule, multiplier: 0.9, accountMultiplier: 0.79 };
+        return { usage_record: { ...manualUsage({ model: source.model, stream: false }, body.tokens, prices),
+          UserID: source.user_id, APIKeyID: source.api_key_id, AccountID: source.account_id, GroupID: 15 },
+        pricing_source: historical ? 'immutable_dispatch_snapshot' : 'current_sub2api_prices', pricing_at: new Date().toISOString() };
+      }
+      return { usage_record: manualUsage({ model: entries.get(url.split('/')[1]).model, stream: false }, body.tokens, rule) };
     },
     restore: async (id, body) => { const row = entries.get(id); row.usage_record = structuredClone(body.usage_record); row.state = 'review'; row.version++; },
     review: async (id, body) => { const row = entries.get(id); row.state = body.state; row.version++; },
@@ -75,6 +94,7 @@ async function startPreview({ port: requestedPort } = {}) {
     { component: 'gateway', request_id: 'demo-file-only', ts: '2026-10-22T01:22:00Z', selected_account_id: 356, model: 'claude-opus-5-5', stream: false },
     { component: 'http.access', request_id: 'demo-file-only', ts: '2026-10-22T01:24:05Z', account_id: 356, status_code: 499, latency_ms: 125000 }
   ], { accounts: ['356'], from: '2026-10-22T00:00:00Z', to: '2026-10-23T00:00:00Z' });
+  for (const row of logs) { row.billingType = 'balance'; row.userEmail = `demo-user-${row.userId}@example.test`; }
   const source = { accounts: async () => [{ id: '356', name: '演示上游 / demo-key', platform: 'anthropic' }],
     load: async () => ({ coreAvailable: true, candidates: normalizeSources(errors, [{ id: '20', user_id: '15', api_key_id: '115',
       account_id: '356', model: 'gemini-2.5-pro', created_at: '2026-10-22T01:11:43Z', duration_ms: 95000,

@@ -73,3 +73,29 @@ test('source supports original core without recovery API and rejects truncated o
   await assert.rejects(source.load([record], options), { code: 'SOURCE_TRUNCATED' });
   await assert.rejects(source.load([record, { ...record, startedAt: '2026-08-01Z' }], options), { code: 'IMPORT_RANGE' });
 });
+
+test('file sources load native identity and billing type and reject deleted or conflicting owners', async t => {
+  const db = new PGlite(); t.after(() => db.close());
+  await db.exec(`CREATE TABLE users(id bigint,email text,deleted_at timestamptz);
+    CREATE TABLE api_keys(id bigint,user_id bigint,deleted_at timestamptz);
+    CREATE TABLE groups(id bigint,name text,subscription_type text,deleted_at timestamptz);
+    CREATE TABLE accounts(id bigint,name text,platform text,deleted_at timestamptz);
+    CREATE TABLE usage_logs(id bigint,user_id bigint,api_key_id bigint,account_id bigint,group_id bigint,created_at timestamptz,model text);
+    INSERT INTO users VALUES(11,'owner@example.test',NULL); INSERT INTO api_keys VALUES(12,11,NULL);
+    INSERT INTO groups VALUES(15,'original group','subscription',NULL); INSERT INTO accounts VALUES(356,'vendor','anthropic',NULL);`);
+  const events = [
+    { component: 'gateway', request_id: 'server-id', ts: record.startedAt, user_id: 11, api_key_id: 12, group_id: 15 },
+    { component: 'gateway', request_id: 'server-id', ts: record.startedAt, selected_account_id: 356, model: record.model },
+    { component: 'http.access', request_id: 'server-id', ts: '2026-10-22T01:10:13Z', status_code: 499, latency_ms: 125000 }
+  ];
+  const source = new BillingImportSource({ pool: db, inspector: new SchemaInspector(db), recovery: { list: async () => ({ items: [], total: 0 }) },
+    logs: { load: async () => ({ events, diagnostics: { status: 'read' } }) } });
+  let result = await source.load([record], options);
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].billingType, 'subscription');
+  assert.equal(result.candidates[0].userEmail, 'owner@example.test');
+  assert.equal(result.candidates[0].blockedReason, undefined);
+  await db.exec('UPDATE api_keys SET deleted_at=NOW()');
+  result = await source.load([record], options);
+  assert.match(result.candidates[0].blockedReason, /已删除或不一致/);
+});

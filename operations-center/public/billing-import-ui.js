@@ -1,9 +1,9 @@
 (function (root) {
   'use strict';
   const labels = { unmatched: '未匹配', unmapped: '待映射账号', invalid: '数据无效', duplicate: '重复行', ambiguous: '多个候选',
-    exact: '请求 ID 匹配', time_candidate: '时间候选', assignment_conflict: '归属冲突', already_recorded: '已确认本地扣费',
+    exact: '待自动报价', time_candidate: '待自动报价', assignment_conflict: '归属冲突', already_recorded: '已核平',
     owner_candidate: '已定位用户，请求待核查', billing_unresolved: '有记录，扣费待核查', time_uncertain: '时间证据不足', recorded_conflict: '多笔账单争用本地记录',
-    usage_difference: '已有记录，用量不同', needs_review: '待核查', preview: '待确认扣费', confirming: '结算待恢复', failed: '结算未完成', settled: '已补记扣费' };
+    usage_difference: '已有记录，用量不同', needs_review: '待核查', preview: '可补记，待确认', confirming: '结算待恢复', failed: '结算未完成', settled: '已补记' };
   const fieldNames = { time: '时间', key: '上游 Key 名称', model: '模型', requestId: '请求 ID', input: '输入 Token', output: '输出 Token',
     cacheRead: '缓存读取 Token', cacheCreation: '缓存创建 Token', cache5m: '缓存创建 5m', cache1h: '缓存创建 1h',
     duration: '总耗时（ms）', cost: '上游支出', type: '同步 / 流式', endpoint: '入站接口', billingMode: '计费模式' };
@@ -47,6 +47,8 @@
       $('bci-confirm').disabled = busy || dirty || matchDirty || !rows.length || !$('bci-acknowledge').checked;
       $('bci-preview').disabled = busy || matchDirty || !batch || !chosen().length;
       for (const button of $('br-import-pane').querySelectorAll('button:not(#bci-confirm):not(#bci-preview)')) button.disabled = busy;
+      for (const input of $('bci-match').querySelectorAll('input,select')) input.disabled = busy;
+      $('bci-manual-prices').hidden = $('bci-pricing-mode').value !== 'manual';
       $('bci-prev').disabled = busy || !batch || batch.page <= 1;
       $('bci-next').disabled = busy || !batch || batch.page * 20 >= batch.filteredTotal;
       const grouped = new Map();
@@ -93,9 +95,10 @@
     function render() {
       $('bci-workspace').hidden = false; $('bci-title').textContent = batch.fileName;
       const summary = batch.summary;
-      $('bci-summary').textContent = `共 ${batch.total} 条 · 已确认扣费 ${summary.already_recorded || 0} · 可预览 ${(summary.exact || 0) + (summary.time_candidate || 0)} · 已定位待核查 ${summary.owner_candidate || 0} · 扣费异常 ${summary.billing_unresolved || 0} · 已补记 ${summary.settled || 0} 条`;
+      const actionable = ['exact','time_candidate','preview','failed','confirming'].reduce((n, key) => n + (summary[key] || 0), 0);
+      $('bci-summary').textContent = `共 ${batch.total} 条 · 可补记 ${actionable} · 待核查 ${batch.total - actionable - (summary.already_recorded || 0) - (summary.settled || 0)} · 已核平 ${summary.already_recorded || 0} · 已补记 ${summary.settled || 0} 条`;
       const diagnostics = batch.matchDiagnostics;
-      $('bci-diagnostics').textContent = diagnostics?.algorithmVersion === 2 ? [
+      $('bci-diagnostics').textContent = diagnostics?.algorithmVersion === 3 ? [
         ...(diagnostics.clocks || []).map(clock => `${clock.key || '未命名 Key'}：${clock.effective === 'end' ? '结束时间' : clock.effective === 'start' ? '开始时间' : '时间含义待确认'}，开始 / 结束证据 ${clock.start} / ${clock.end}${clock.conflict ? '，设置与证据冲突，请重新匹配' : ''}`),
         diagnostics.logs?.status === 'read' ? '已读取文件日志，覆盖范围不保证完整' : '未读取文件日志，历史取消请求可能缺少归属证据',
         diagnostics.coreAvailable === false ? '主站历史预留接口不可用' : ''
@@ -109,7 +112,7 @@
       $('bci-list').innerHTML = batch.rows.map(row => {
         const record = row.record, preview = row.preview, candidates = row.match?.candidates || [];
         const selected = assignments.get(row.id) || row.selection || row.match?.selected || '';
-        const eligible = row.match?.algorithmVersion === 2 && !['invalid','duplicate','unmapped','unmatched','already_recorded','usage_difference','billing_unresolved','recorded_conflict','time_uncertain','settled'].includes(row.status) &&
+        const eligible = row.match?.algorithmVersion === 3 && !['invalid','duplicate','unmapped','unmatched','already_recorded','usage_difference','billing_unresolved','recorded_conflict','time_uncertain','settled'].includes(row.status) &&
           (Boolean(preview) || candidates.some(item => !item.recorded && !item.blockedReason));
         const candidate = preview ? `用户 ${preview.userId} · ${preview.userEmail} · Key ${preview.apiKeyId}` : '';
         const options = candidates.map(item => `<option value="${esc(item.reference)}"${selected === item.reference ? ' selected' : ''}${item.recorded || item.blockedReason ? ' disabled' : ''}>用户 ${esc(item.userId)} · Key ${esc(item.apiKeyId)} · ${esc(item.userEmail)} · ${esc(item.reference)} · ${esc((item.timeDifferenceMs / 1000).toFixed(3))}s${item.recorded ? ' · 已记账' : item.blockedReason ? ` · ${esc(item.blockedReason)}` : ''}</option>`).join('');
@@ -119,18 +122,34 @@
         const comparison = row.costComparison;
         const gap = !preview ? '待生成预览' : preview.billingType === 'subscription' ? '不适用：订阅用量' : difference(units(comparison?.balanceDifference));
         const details = candidateDetails(candidates.find(item => item.reference === selected) || (candidates.length === 1 ? candidates[0] : null));
-        return `<tr><td><input data-select="${row.id}" type="checkbox" aria-label="选择第 ${row.number} 行"${eligible ? selected || preview ? ' checked' : '' : ' disabled'}></td><td>${esc(row.number)} · ${esc(date(record.startedAt))}<small>${esc(record.model)}</small><small>${esc(record.requestId || record.key)}</small></td><td>${preview ? `<span>${esc(candidate)}</span><small>${preview.billingType === 'subscription' ? '订阅用量' : '余额计费'}</small>` : owner ? `<span>用户 ${esc(owner.userId)} · Key ${esc(owner.apiKeyId)} · 分组 ${esc(owner.groupId)}</span>` : ''}<select data-assignment="${row.id}" aria-label="第 ${row.number} 行匹配用户"${preview || !eligible ? ' disabled' : ''}><option value="">选择候选请求</option>${options}</select><div data-candidate="${row.id}">${details}</div></td><td>${esc(labels[row.status] || row.status)}${row.match?.method === 'time' && eligible ? `<small>${row.selection_confirmed ? '时间归属已核对' : '按时间匹配，待人工确认'}</small>` : row.match?.method === 'tokens_time' ? '<small>Token 与时间核对</small>' : ''}</td><td>${esc(dims.InputTokens ?? '未知')} / ${esc(dims.OutputTokens ?? '未知')}<small>缓存 ${esc(dims.CacheCreationTokens ?? '未知')} / ${esc(dims.CacheReadTokens ?? '未知')}</small></td><td>${esc(comparison?.supplierCost ?? (record.cost || '未知'))}</td><td>${preview ? `${esc(amount(preview.usage.ActualCost))} USD<small>${preview.pricingSource === 'immutable_dispatch_snapshot' ? '请求历史价格快照' : '人工核定历史售价'}</small><small>售卖倍率 ${esc(preview.usage.RateMultiplier)}</small>` : '待核定'}</td><td data-cost-gap>${esc(gap)}</td><td>${esc(status)}</td></tr>`;
+        return `<tr><td><input data-select="${row.id}" type="checkbox" aria-label="选择第 ${row.number} 行"${eligible ? selected || preview ? ' checked' : '' : ' disabled'}></td><td>${esc(row.number)} · ${esc(date(record.startedAt))}<small>${esc(record.model)}</small><small>${esc(record.requestId || record.key)}</small></td><td>${preview ? `<span>${esc(candidate)}</span><small>${preview.billingType === 'subscription' ? '订阅用量' : '余额计费'}</small>` : owner ? `<span>用户 ${esc(owner.userId)} · Key ${esc(owner.apiKeyId)} · 分组 ${esc(owner.groupId)}</span>` : ''}<select data-assignment="${row.id}" aria-label="第 ${row.number} 行匹配用户"${preview || !eligible ? ' disabled' : ''}><option value="">选择候选请求</option>${options}</select><div data-candidate="${row.id}">${details}</div></td><td>${esc(labels[row.status] || row.status)}${row.match?.method === 'time' && eligible ? '<small>按时间匹配，确认扣费前核对归属</small>' : row.match?.method === 'tokens_time' ? '<small>Token 与时间核对</small>' : ''}</td><td>${esc(dims.InputTokens ?? '未知')} / ${esc(dims.OutputTokens ?? '未知')}<small>缓存 ${esc(dims.CacheCreationTokens ?? '未知')} / ${esc(dims.CacheReadTokens ?? '未知')}</small></td><td>${esc(comparison?.supplierCost ?? (record.cost || '未知'))}</td><td>${preview ? `${esc(amount(preview.usage.ActualCost))} USD<small>${preview.pricingSource === 'immutable_dispatch_snapshot' ? '请求历史价格快照' : preview.pricingSource === 'current_sub2api_prices' ? '当前主站价格' : '人工核定历史售价'}</small>${preview.pricingAt ? `<small>报价 ${esc(date(preview.pricingAt))}</small>` : ''}<small>售卖倍率 ${esc(preview.usage.RateMultiplier)}</small>` : '待核定'}</td><td data-cost-gap>${esc(gap)}</td><td>${esc(status)}</td></tr>`;
       }).join('');
       $('bci-page').textContent = `${batch.filteredTotal} 条 · 第 ${batch.page} / ${Math.max(1, Math.ceil(batch.filteredTotal / 20))} 页`;
       $('bci-prev').disabled = batch.page <= 1; $('bci-next').disabled = batch.page * 20 >= batch.filteredTotal;
       $('bci-select-all').checked = false; $('bci-acknowledge').checked = false;
       renderPrices(); dirty = false; matchDirty = false; update(); refreshIcons();
     }
-    async function open(id, page = 1, filter = batch?.filter || 'all') {
+    async function automaticPreview() {
+      if ($('bci-pricing-mode').value !== 'auto') return;
+      const rows = batch.rows.filter(row => ['exact','time_candidate'].includes(row.status) && row.match?.selected);
+      if (!rows.length) return;
+      const current = epoch, wasBusy = busy; busy = true; update();
+      try {
+        const result = await api(`/api/billing-imports/${batch.id}/preview`, { method: 'POST', body: JSON.stringify({ rowIds: rows.map(row => row.id), pricingMode: 'auto' }) });
+        if (current !== epoch || !isActive()) return;
+        const summary = result.detail.summary;
+        const filter = batch.filter === 'actionable' && !['exact','time_candidate','preview','failed','confirming'].some(key => summary[key]) ? 'review' : batch.filter;
+        await open(result.detail.id, batch.page, filter, false);
+        const failed = result.results.filter(row => row.status === 'needs_review');
+        if (failed.length) error(`${failed.length} 条未能生成预览，已列入“待核查”：${failed[0].error}`);
+      } finally { busy = wasBusy; update(); }
+    }
+    async function open(id, page = 1, filter = batch?.filter || 'actionable', generate = true) {
       const current = ++epoch;
       const result = await api(`/api/billing-imports/${encodeURIComponent(id)}?page=${page}&filter=${encodeURIComponent(filter)}`);
       if (current !== epoch || !isActive()) return;
       batch = result; render();
+      if (generate) await automaticPreview();
     }
     async function load() {
       const current = ++epoch;
@@ -157,7 +176,7 @@
     $('bci-upload').addEventListener('submit', event => { event.preventDefault(); run(async () => {
       if (!fileText) await inspectFile();
       const result = await api('/api/billing-imports', { method: 'POST', body: JSON.stringify({ fileName: $('bci-file').files[0].name, csv: fileText, options: { columns: readColumns() } }) });
-      rules.clear(); assignments.clear(); batch = result; render(); await load();
+      rules.clear(); assignments.clear(); $('bci-pricing-mode').value = 'auto'; batch = result; render(); await load();
     }); });
     $('bci-batches').addEventListener('change', () => { if ($('bci-batches').value) run(async () => { rules.clear(); assignments.clear(); await open($('bci-batches').value); }); });
     $('bci-match').addEventListener('submit', event => { event.preventDefault(); run(async () => {
@@ -168,6 +187,7 @@
         toleranceSeconds: Number(form.elements.toleranceSeconds.value), clockOffsetSeconds: Number(form.elements.clockOffsetSeconds.value),
         inputIncludesCache: form.elements.inputIncludesCache.checked, accountMappings, columns: readColumns() }) });
       assignments.clear(); batch = result; render();
+      await open(batch.id, 1, result.summary.exact || result.summary.time_candidate || result.summary.preview ? 'actionable' : 'review');
       if (!result.coreAvailable) error('已读取原版日志。执行补记前需要更新支持历史导入的主站版本。');
     }); });
     $('bci-list').addEventListener('change', event => {
@@ -185,31 +205,35 @@
     });
     $('bci-select-all').addEventListener('change', event => { for (const input of $('bci-list').querySelectorAll('[data-select]:not(:disabled)')) input.checked = event.target.checked; update(); });
     $('bci-filter').addEventListener('change', () => run(async () => { readPrices(); await open(batch.id, 1, $('bci-filter').value); }));
-    for (const name of ['bci-price-list','bci-price-evidence','bci-assignment-evidence','bci-time-checked','bci-final-usage','bci-cache-zero']) $(name).addEventListener('input', () => { dirty = true; $('bci-acknowledge').checked = false; update(); });
+    for (const name of ['bci-pricing-mode','bci-cache-ttl','bci-price-list','bci-price-evidence','bci-assignment-evidence','bci-time-checked','bci-final-usage','bci-cache-zero']) $(name).addEventListener('input', () => { dirty = true; $('bci-acknowledge').checked = false; update(); });
     $('bci-acknowledge').addEventListener('change', update);
     $('bci-preview').addEventListener('click', () => run(async () => {
       readPrices();
       const pricing = Object.create(null);
       for (const row of chosen()) {
         const rule = rules.get(row.record.model);
-        if (rule) pricing[row.record.model] = Object.fromEntries(Object.entries(rule).filter(([, value]) => value != null));
+        if ($('bci-pricing-mode').value === 'auto') pricing[row.record.model] = { cacheTTL: $('bci-cache-ttl').value };
+        else if (rule) pricing[row.record.model] = Object.fromEntries(Object.entries(rule).filter(([, value]) => value != null));
       }
       const result = await api(`/api/billing-imports/${batch.id}/preview`, { method: 'POST', body: JSON.stringify({ rowIds: chosen().map(row => row.id),
-        assignments: Object.fromEntries(assignments), pricing, pricingEvidence: $('bci-price-evidence').value.trim(),
+        assignments: Object.fromEntries(assignments), pricing, pricingMode: $('bci-pricing-mode').value, pricingEvidence: $('bci-price-evidence').value.trim(),
         assignmentEvidence: $('bci-assignment-evidence').value.trim(), confirmTimeMatches: $('bci-time-checked').checked,
         finalUsageConfirmed: $('bci-final-usage').checked, missingCacheIsZero: $('bci-cache-zero').checked }) });
-      await open(result.detail.id, batch.page); toast('扣费预览已生成');
+      await open(result.detail.id, batch.page, batch.filter, false); toast('扣费预览已生成');
     }));
     $('bci-confirm').addEventListener('click', () => run(async () => {
       const rows = chosen().filter(row => row.preview && ['preview','failed','confirming'].includes(row.status)).map(row => ({ id: row.id, version: row.version, previewId: row.preview.id }));
       const result = await api(`/api/billing-imports/${batch.id}/confirm`, { method: 'POST', body: JSON.stringify({ acknowledge: $('bci-acknowledge').checked, rows }) });
-      await open(batch.id, batch.page); toast(`已补记 ${result.results.filter(row => row.status === 'settled').length} 笔`);
+      const remaining = ['exact','time_candidate','preview','failed','confirming'].some(key => result.detail.summary[key]);
+      await open(batch.id, batch.page, batch.filter === 'actionable' && !remaining ? 'settled' : batch.filter);
+      toast(`已补记 ${result.results.filter(row => row.status === 'settled').length} 笔`);
     }));
     for (const [name, direction] of [['bci-prev',-1],['bci-next',1]]) $(name).addEventListener('click', () => run(async () => { readPrices(); await open(batch.id, batch.page + direction); }));
     update();
     return { load, leave() { epoch++; }, reset() {
       epoch++; batch = null; fileText = null; rules.clear(); assignments.clear(); dirty = false; matchDirty = false;
       $('bci-upload').reset(); $('bci-workspace').hidden = true; $('bci-columns-box').hidden = true;
+      $('bci-pricing-mode').value = 'auto'; $('bci-cache-ttl').value = 'split';
       for (const name of ['bci-price-evidence', 'bci-assignment-evidence']) $(name).value = '';
       for (const name of ['bci-final-usage','bci-time-checked','bci-cache-zero','bci-acknowledge']) $(name).checked = false;
       for (const name of ['bci-list','bci-price-list','bci-columns','bci-mappings']) $(name).replaceChildren();

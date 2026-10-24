@@ -43,6 +43,13 @@ function fixture(t) {
     async detail(id) { return { case: structuredClone(entries.get(id)) }; },
     async request(url, request) {
       calls.push({ url, ...structuredClone(request) });
+      if (url === '/imports/quote') {
+        const source = request.body.source;
+        return { usage_record: { ...manualUsage({ model: source.model, stream: false }, request.body.tokens, pricing),
+          UserID: source.user_id, APIKeyID: source.api_key_id, AccountID: source.account_id, GroupID: 15 },
+        pricing_source: entries.get(source.case_id)?.request_snapshot?.pricing ? 'immutable_dispatch_snapshot' : 'current_sub2api_prices',
+        pricing_at: '2026-10-24T04:00:00Z' };
+      }
       if (url.endsWith('/quote')) {
         return { usage_record: manualUsage({ model: 'claude-opus-5-5', stream: false }, request.body.tokens, pricing) };
       }
@@ -192,6 +199,64 @@ test('reimport resumes saved batch and previews never reserve, write usage or ch
   assert.notEqual(preview.rows[0].preview.usage.ActualCost, Number(csvRow()['Billed Cost']));
 });
 
+test('automatic core pricing needs no manual rules and freezes the displayed quote through confirmation', async t => {
+  const f = fixture(t); let batch = await matched(f);
+  await f.service.preview(batch.id, { rowIds: [batch.rows[0].id] });
+  batch = f.service.detail(batch.id);
+  const preview = batch.rows[0].preview;
+  assert.equal(preview.pricingSource, 'current_sub2api_prices');
+  assert.equal(preview.pricingAt, '2026-10-24T04:00:00Z');
+  assert.equal(preview.usage.ActualCost, 0.248584);
+  assert.equal(f.charges(), 0); assert.deepEqual(f.calls.map(call => call.url), ['/imports/quote']);
+  const request = f.recovery.request;
+  f.recovery.request = async (...args) => { assert.notEqual(args[0], '/imports/quote', 'confirmation uses the frozen quote'); return request(...args); };
+  await f.service.confirm(batch.id, confirmBody(batch));
+  assert.equal(f.amount(), preview.usage.ActualCost); assert.equal(f.charges(), 1);
+  const evidence = JSON.parse(f.calls.find(call => call.url === '/imports/reserve').body.evidence);
+  assert.equal(evidence.tokens_confirmed_final, true); assert.equal(evidence.pricing_confirmed, true);
+  assert.equal(evidence.pricing_source, 'current_sub2api_prices');
+});
+
+test('automatic quote errors and ownership changes remain reviewable without falling back to guessed prices', async t => {
+  const f = fixture(t); let batch = await matched(f);
+  f.recovery.request = async () => { throw new AppError('MAIN_SITE_OLD', 'update required', { status: 404 }); };
+  await f.service.preview(batch.id, { rowIds: [batch.rows[0].id], pricingMode: 'auto', pricing: { 'claude-opus-5-5': pricing } });
+  batch = f.service.detail(batch.id);
+  assert.equal(batch.rows[0].status, 'needs_review'); assert.match(batch.rows[0].result.error, /自动报价未完成/);
+  assert.equal(batch.rows[0].preview, null); assert.equal(f.charges(), 0);
+  f.recovery.request = async () => ({ pricing_source: 'current_sub2api_prices', usage_record: { UserID: 99, APIKeyID: 12, AccountID: 356, GroupID: 15 } });
+  await f.service.preview(batch.id, { rowIds: [batch.rows[0].id] });
+  assert.match(f.service.detail(batch.id).rows[0].result.error, /报价归属/);
+});
+
+test('a verified file source can preview and settle through the native import contract without fabricated errors', async t => {
+  const f = fixture(t);
+  const log = { reference: 'log:server-request', kind: 'log', state: 'legacy_log', recorded: false, billed: false,
+    userId: '11', apiKeyId: '12', accountId: '356', groupId: '15', billingType: 'balance', models: ['claude-opus-5-5'],
+    startMs: Date.parse(at), endMs: Date.parse(at) + 125000, startUncertain: false, ids: [], rootIds: ['server-request'],
+    logSource: { request_id: 'server-request', client_request_id: '', group_id: 15, model: 'claude-opus-5-5',
+      ended_at: '2026-10-22T01:10:13Z', latency_ms: 125000, status_code: 499, stream: false, digest: 'c'.repeat(64) } };
+  f.source.load = async () => ({ candidates: [log], coreAvailable: true });
+  let batch = await matched(f);
+  await f.service.preview(batch.id, { rowIds: [batch.rows[0].id] }); batch = f.service.detail(batch.id);
+  assert.equal(batch.rows[0].status, 'preview');
+  assert.equal(batch.rows[0].preview.reservation.log_source.request_id, 'server-request');
+  assert.equal(batch.rows[0].preview.reservation.error_id, undefined);
+  assert.equal(f.charges(), 0);
+  assert.equal((await f.service.confirm(batch.id, confirmBody(batch))).results[0].status, 'settled');
+  assert.equal(f.charges(), 1);
+  await f.service.confirm(batch.id, confirmBody(f.service.detail(batch.id))); assert.equal(f.charges(), 1);
+});
+
+test('successful mapping settings are reused for subsequent exports without replacing an existing batch', async t => {
+  const f = fixture(t); const first = await matched(f);
+  const next = await f.service.import({ fileName: 'next.csv', csv: csv([{ Time: '2026-10-22T10:08:08+08:00' }]) });
+  assert.deepEqual(next.options.accountMappings, first.options.accountMappings);
+  assert.equal(next.options.timeKind, first.options.timeKind);
+  assert.notEqual(first.id, next.id);
+  assert.equal((await f.service.import({ fileName: 'same.csv', csv: csv() })).id, first.id);
+});
+
 test('preview comparisons use actual CSV USD cost and preserve signed differences and unknown amounts', async t => {
   const f = fixture(t);
   for (const [cost, supplierCost, balanceDifference] of [
@@ -230,12 +295,12 @@ test('subscription previews show upstream costs without claiming a user balance 
   assert.equal(f.charges(), 0);
 });
 
-test('time ownership, final usage, historical prices, missing cache and TTL each require verification', async t => {
+test('preview can precede operator approval while missing cache and manual prices still need evidence', async t => {
   const f = fixture(t); const batch = await matched(f);
-  let result = await previewed(f, batch, { confirmTimeMatches: false }); assert.equal(result.rows[0].status, 'needs_review');
-  await assert.rejects(previewed(f, result, { finalUsageConfirmed: false }), { code: 'INVALID_REQUEST' });
-  result = await previewed(f, result, { pricing: {} }); assert.match(result.rows[0].result.error, /历史售卖/);
-  result = await previewed(f, result, { pricingEvidence: '' }).catch(error => error); assert.equal(result.code, 'INVALID_REQUEST');
+  let result = await previewed(f, batch, { confirmTimeMatches: false, finalUsageConfirmed: false }); assert.equal(result.rows[0].status, 'preview');
+  assert.equal(JSON.parse(result.rows[0].preview.reservation.evidence).tokens_confirmed_final, false);
+  await assert.rejects(f.service.confirm(batch.id, { ...confirmBody(result), acknowledge: false }), { code: 'INVALID_REQUEST' });
+  result = await previewed(f, result, { pricingEvidence: '' }); assert.match(result.rows[0].result.error, /人工定价/);
   const missing = await matched(f, csv([{ 'Cache Read Tokens': '', 'Cache Creation Tokens': '10' }]));
   result = await previewed(f, missing); assert.match(result.rows[0].result.error, /缓存明细/);
   result = await previewed(f, result, { missingCacheIsZero: true }); assert.match(result.rows[0].result.error, /归属/);
@@ -296,7 +361,9 @@ test('confirmed preview restores usage then uses native approval and settlement 
   assert.equal(result.results[0].status, 'settled'); assert.equal(f.charges(), 1); assert.equal(f.amount(), 0.248584);
   assert.deepEqual(f.calls.map(call => call.url || Object.keys(call)[0]), ['/imports/reserve', 'restore', 'review', 'settle']);
   await f.service.confirm(batch.id, confirmBody(batch)); assert.equal(f.charges(), 1);
-  await assert.rejects(f.service.match(batch.id, options()), { code: 'IMPORT_LOCKED' });
+  const refreshed = await f.service.match(batch.id, options());
+  assert.equal(refreshed.rows[0].status, 'settled'); assert.equal(refreshed.rows[0].result.caseId, caseId);
+  await assert.rejects(f.service.match(batch.id, options({ toleranceSeconds: 6 })), { code: 'IMPORT_LOCKED' });
 });
 
 test('lost native settlement response is recovered by reading persisted state without charging again', async t => {

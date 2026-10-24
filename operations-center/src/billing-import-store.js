@@ -37,6 +37,14 @@ class BillingImportStore {
       SUM(CASE WHEN r.status='settled' THEN 1 ELSE 0 END) AS settled FROM import_batches b
       LEFT JOIN import_rows r ON r.batch_id=b.id GROUP BY b.id ORDER BY b.created_at DESC LIMIT 50`).all();
   }
+  defaults(metadata) {
+    const signature = value => JSON.stringify([value.headers, value.keys?.slice().sort()]);
+    for (const row of this.db.prepare('SELECT options,metadata FROM import_batches WHERE metadata IS NOT NULL ORDER BY created_at DESC LIMIT 50').all()) {
+      const info = JSON.parse(row.metadata);
+      if (info.matchDiagnostics && signature(info) === signature(metadata)) return JSON.parse(row.options);
+    }
+    return {};
+  }
   batch(id) {
     const row = this.db.prepare('SELECT * FROM import_batches WHERE id=?').get(id);
     if (!row) throw new AppError('NOT_FOUND', '导入批次不存在', { status: 404 });
@@ -77,13 +85,15 @@ class BillingImportStore {
   }
   configure(id, options, records, metadata) {
     this.db.transaction(() => {
-      if (this.db.prepare("SELECT 1 FROM import_rows WHERE batch_id=? AND (status IN ('confirming','settled','failed') OR case_id IS NOT NULL) LIMIT 1").get(id)) {
+      const started = this.db.prepare("SELECT 1 FROM import_rows WHERE batch_id=? AND (status IN ('confirming','settled','failed') OR case_id IS NOT NULL) LIMIT 1").get(id);
+      if (started && JSON.stringify(this.batch(id).options) !== JSON.stringify(options)) {
         throw new AppError('IMPORT_LOCKED', '已开始结算的批次不能更改匹配设置', { status: 409 });
       }
       this.db.prepare('UPDATE import_batches SET options=? WHERE id=?').run(JSON.stringify(options), id);
       this.metadata(id, metadata);
       for (const record of records) this.db.prepare(`UPDATE import_rows SET record=?,match=NULL,selection=NULL,selection_confirmed=0,
-        preview=NULL,status='unmatched',result=NULL,updated_at=?,version=version+1 WHERE batch_id=? AND number=?`).run(JSON.stringify(record), this.now(), id, record.number);
+        preview=NULL,status='unmatched',result=NULL,updated_at=?,version=version+1 WHERE batch_id=? AND number=?
+        AND case_id IS NULL AND status NOT IN ('confirming','settled','failed')`).run(JSON.stringify(record), this.now(), id, record.number);
     })();
   }
   claim(id, version, previewId) {

@@ -31,7 +31,7 @@ const validate = (schema, value) => {
 const conflict = message => new AppError('IMPORT_REVIEW_REQUIRED', message, { status: 409 });
 const money = value => new Decimal(value).toDecimalPlaces(8, Decimal.ROUND_HALF_UP).toNumber();
 const metadata = parsed => ({ headers: parsed.headers, columns: parsed.columns, keys: parsed.keys, models: parsed.models });
-const matchProof = match => hash([match.method, match.status, match.totalCandidates, match.candidates.map(candidate =>
+const matchProof = match => hash([match.method, match.status, match.totalCandidates, match.selected, match.batchAssignment, match.candidates.map(candidate =>
   ['reference', 'kind', 'userId', 'apiKeyId', 'accountId', 'groupId', 'version', 'startMs', 'endMs', 'startUncertain', 'recorded', 'billed', 'blockedReason']
     .map(key => candidate[key] ?? null))]);
 
@@ -87,9 +87,13 @@ class BillingImportService {
   }
   async import(input) {
     const body = validate(z.object({ fileName: z.string().trim().min(1).max(200), csv: z.string(), options: optionsSchema.optional() }).strict(), input);
-    const options = validate(optionsSchema, body.options || {});
+    let options = validate(optionsSchema, body.options || {});
     if (Object.keys(options.accountMappings).length > 20) throw conflict('每批最多映射 20 个上游 Key');
-    const parsed = parseBillingCSV(body.csv, options);
+    let parsed = parseBillingCSV(body.csv, options);
+    if (!body.options?.accountMappings) {
+      options = validate(optionsSchema, { ...this.store.defaults(metadata(parsed)), ...body.options });
+      parsed = parseBillingCSV(body.csv, options);
+    }
     const batchId = this.store.create(body.fileName.replace(/[\\/]/g, '_'), body.csv, hash(body.csv), options, parsed.rows, metadata(parsed));
     return this.detail(batchId);
   }
@@ -116,16 +120,20 @@ class BillingImportService {
     this.store.db.transaction(() => {
       this.store.configure(batchId, options, reconciled.records, { ...metadata(parsed),
         matchDiagnostics: { ...reconciled.diagnostics, ...source.diagnostics, coreAvailable: source.coreAvailable } });
-      this.store.rows(batchId).forEach((row, index) => this.store.save(row.id, { match: reconciled.matches[index], status: reconciled.matches[index].status,
-        selection: reconciled.matches[index].selected, preview: null, result: null }, row.version));
+      this.store.rows(batchId).forEach((row, index) => {
+        if (row.case_id || ['confirming', 'settled', 'failed'].includes(row.status)) return;
+        this.store.save(row.id, { match: reconciled.matches[index], status: reconciled.matches[index].status,
+          selection: reconciled.matches[index].selected, preview: null, result: null }, row.version);
+      });
     })();
     return { ...this.detail(batchId), coreAvailable: source.coreAvailable };
   }
   async preview(batchId, input, accessToken) {
     const body = validate(z.object({ rowIds: z.array(id).min(1).max(20), assignments: z.record(id, z.string().max(200)).default({}),
-      pricing: pricingSchema.default({}), pricingEvidence: z.string().trim().min(8).max(1500),
+      pricing: pricingSchema.default({}), pricingMode: z.enum(['auto', 'manual']).optional(),
+      pricingEvidence: z.string().trim().max(1500).default(''),
       assignmentEvidence: z.string().trim().max(1000).default(''), confirmTimeMatches: z.boolean().default(false),
-      finalUsageConfirmed: z.literal(true), missingCacheIsZero: z.boolean().default(false)
+      finalUsageConfirmed: z.boolean().default(false), missingCacheIsZero: z.boolean().default(false)
     }).strict(), input);
     const batch = this.store.batch(validate(id, batchId));
     const freshMatches = await this.recheck(batch, accessToken);
@@ -148,15 +156,23 @@ class BillingImportService {
         const freshCandidate = freshMatch?.candidates.find(item => item.reference === reference);
         if (!freshCandidate || freshCandidate.recorded || freshCandidate.blockedReason ||
           ['userId', 'apiKeyId', 'accountId', 'groupId', 'version'].some(key => freshCandidate[key] !== candidate?.[key])) throw conflict('本地计费或匹配证据已变化，请重新匹配');
-        if (!candidate || candidate.recorded || !['unknown', 'review', 'legacy_error'].includes(candidate.state)) throw conflict('需要选择尚未记账的本地请求');
+        if (!candidate || candidate.recorded || !['unknown', 'review', 'legacy_error', 'legacy_log'].includes(candidate.state)) throw conflict('需要选择尚未记账的本地请求');
         if (candidate.blockedReason) throw conflict(candidate.blockedReason);
         if ([candidate.userId, candidate.apiKeyId, candidate.accountId].some(value => !Number.isSafeInteger(Number(value)) || Number(value) <= 0)) throw conflict('原生归属 ID 超出可核对范围');
-        if (freshMatch.method !== 'request_id' && !body.confirmTimeMatches) throw conflict('时间匹配需要确认用户归属');
-        if ((freshMatch.totalCandidates > 1 || freshMatch.status === 'assignment_conflict') && body.assignmentEvidence.length < 8) throw conflict('冲突匹配需要填写用户归属核对依据');
+        if ((freshMatch.totalCandidates > 1 || freshMatch.status === 'assignment_conflict') && !freshMatch.batchAssignment && body.assignmentEvidence.length < 8) throw conflict('冲突匹配需要填写用户归属核对依据');
         if (this.store.hasPreview(batchId, reference, row.id)) throw conflict('同一本地请求已被其他行选择');
         const rule = Object.hasOwn(body.pricing, record.model) ? body.pricing[record.model] : null;
         const tokens = verifiedTokens(record, body, rule);
-        let usage, pricingSource = 'operator_historical_prices';
+        const accountId = Object.hasOwn(batch.options.accountMappings, record.key) ? Number(batch.options.accountMappings[record.key]) : 0;
+        if (!accountId || String(accountId) !== candidate.accountId) throw conflict('上游账号归属已变化，请重新匹配');
+        const nativeSource = { account_id: accountId, bill_identity: record.identity, payload_digest: hash([reference, tokens]),
+          user_id: Number(candidate.userId), api_key_id: Number(candidate.apiKeyId),
+          started_at: new Date(candidate.startUncertain ? record.startedAt : candidate.startMs).toISOString(), model: record.model,
+          upstream_request_id: record.requestId || '', evidence: 'CSV analysis; awaiting administrator confirmation',
+          ...(candidate.kind === 'case' ? { case_id: candidate.caseId, version: candidate.version }
+            : candidate.kind === 'log' ? { log_source: candidate.logSource } : { error_id: candidate.errorId, event_index: candidate.eventIndex }) };
+        const automatic = body.pricingMode === 'auto' || body.pricingMode !== 'manual' && !Object.keys(body.pricing).length;
+        let usage, pricingSource = 'operator_historical_prices', pricingAt = null;
         if (candidate.kind === 'case') {
           const fresh = (await this.recovery.detail(candidate.caseId, accessToken)).case;
           if (fresh.version !== candidate.version || fresh.usage_record) throw conflict('本地记录已变化，请重新匹配');
@@ -167,32 +183,37 @@ class BillingImportService {
             const count = observed[['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens', 'cache_creation_5m_tokens', 'cache_creation_1h_tokens'][i]];
             return count != null && (observed.complete ? tokens[field] !== count : tokens[field] < count);
           })) throw conflict('CSV 与本站已观察用量冲突');
-          if (fresh.request_snapshot?.pricing?.eligible) {
+          if (fresh.request_snapshot?.pricing?.eligible && !automatic) {
             usage = (await this.recovery.request(`/${candidate.caseId}/quote`, { method: 'POST', body: { version: fresh.version, tokens } }, accessToken)).usage_record;
             pricingSource = 'immutable_dispatch_snapshot';
           }
         }
+        if (automatic) {
+          let quote;
+          try { quote = await this.recovery.request('/imports/quote', { method: 'POST', body: { source: nativeSource, tokens } }, accessToken); }
+          catch (cause) { throw conflict(`主站自动报价未完成：${cause.message}；请核对主站版本、价格及原请求状态`); }
+          if (!quote?.usage_record || !['immutable_dispatch_snapshot', 'current_sub2api_prices'].includes(quote.pricing_source)) throw conflict('主站自动报价响应无效，请更新配套主站');
+          usage = quote.usage_record; pricingSource = quote.pricing_source; pricingAt = quote.pricing_at;
+          if (String(usage.UserID) !== candidate.userId || String(usage.APIKeyID) !== candidate.apiKeyId || String(usage.AccountID) !== candidate.accountId ||
+              String(usage.GroupID ?? '') !== String(candidate.groupId ?? '')) throw conflict('主站报价归属与本地候选不一致');
+        }
         if (!usage) {
+          if (body.pricingEvidence.length < 8) throw conflict('人工定价需要填写核对依据');
           if (!rule || ['input', 'output', 'cacheRead', 'cache5m', 'cache1h', 'multiplier', 'accountMultiplier'].some(key => rule[key] == null)) throw conflict('缺少该模型的历史售卖单价和倍率');
           usage = manualUsage(record, tokens, rule);
         }
         usage.ActualCost = money(usage.TotalCost * usage.RateMultiplier);
         if (usage.ActualCost <= 0) throw conflict('零元账单无需补扣');
-        const accountId = Object.hasOwn(batch.options.accountMappings, record.key) ? Number(batch.options.accountMappings[record.key]) : 0;
-        if (!accountId || String(accountId) !== candidate.accountId) throw conflict('上游账号归属已变化，请重新匹配');
         const evidence = JSON.stringify({ source: 'operator_confirmed_supplier_csv', file: batch.file_name,
           file_hash: batch.content_hash, row: row.number, bill_identity: record.identity, supplier_cost: record.cost || null,
           match_method: row.match.method, time_difference_ms: candidate.timeDifferenceMs, local_reference: reference,
-          assignment_evidence: body.assignmentEvidence, pricing_source: pricingSource, pricing_evidence: body.pricingEvidence,
+          assignment_evidence: body.assignmentEvidence, pricing_source: pricingSource, pricing_at: pricingAt,
+          pricing_evidence: automatic ? '主站自动报价：历史快照优先，缺失时采用报价时的主站模型价格与用户/分组倍率' : body.pricingEvidence,
           manual_price_rule: pricingSource === 'operator_historical_prices' ? rule : null,
-          tokens_confirmed_final: true });
-        const reservation = { account_id: accountId, bill_identity: record.identity,
-          payload_digest: hash([reference, tokens, usage, pricingSource]), user_id: Number(candidate.userId), api_key_id: Number(candidate.apiKeyId),
-          started_at: new Date(candidate.startUncertain ? record.startedAt : candidate.startMs).toISOString(), model: record.model,
-          upstream_request_id: record.requestId || '', evidence,
-          ...(candidate.kind === 'case' ? { case_id: candidate.caseId, version: candidate.version } : { error_id: candidate.errorId, event_index: candidate.eventIndex }) };
+          tokens_confirmed_final: body.finalUsageConfirmed });
+        const reservation = { ...nativeSource, payload_digest: hash([reference, tokens, usage, pricingSource]), evidence };
         const preview = { id: crypto.randomUUID(), reference, userId: candidate.userId, userEmail: candidate.userEmail,
-          apiKeyId: candidate.apiKeyId, billingType: candidate.billingType, usage, pricingSource, reservation,
+          apiKeyId: candidate.apiKeyId, billingType: candidate.billingType, usage, pricingSource, pricingAt, reservation,
           matchProof: matchProof(freshMatch),
           expiresAt: this.now() + 3600000, assignmentEvidence: body.assignmentEvidence };
         this.store.save(row.id, { preview, selection: reference, selection_confirmed: 1, status: 'preview', result: null }, row.version);
@@ -228,21 +249,23 @@ class BillingImportService {
       row = this.store.claim(row.id, selected.version, selected.previewId);
       try {
         const preview = row.preview;
-        const reserved = await this.recovery.request('/imports/reserve', { method: 'POST', body: preview.reservation }, accessToken);
+        const evidence = JSON.stringify({ ...JSON.parse(preview.reservation.evidence), tokens_confirmed_final: true,
+          ownership_confirmed: true, pricing_confirmed: true });
+        const reserved = await this.recovery.request('/imports/reserve', { method: 'POST', body: { ...preview.reservation, evidence } }, accessToken);
         row = this.store.save(row.id, { case_id: reserved.case_id }, row.version);
         let entry = (await this.recovery.detail(reserved.case_id, accessToken)).case;
         if (String(entry.user_id) !== preview.userId || String(entry.api_key_id) !== preview.apiKeyId ||
             Number(entry.account_id) !== preview.reservation.account_id ||
             (entry.subscription_id ? 'subscription' : 'balance') !== preview.billingType) throw conflict('核心使用记录归属或计费类型与预览不一致');
         if (!entry.usage_record) {
-          await this.recovery.restore(entry.id, { version: entry.version, usage_record: preview.usage, evidence: preview.reservation.evidence }, accessToken);
+          await this.recovery.restore(entry.id, { version: entry.version, usage_record: preview.usage, evidence }, accessToken);
           entry = (await this.recovery.detail(entry.id, accessToken)).case;
         }
         const fields = ['Model', 'InputTokens', 'OutputTokens', 'CacheReadTokens', 'CacheCreationTokens', 'CacheCreation5mTokens',
           'CacheCreation1hTokens', 'InputCost', 'OutputCost', 'CacheReadCost', 'CacheCreationCost', 'TotalCost', 'RateMultiplier', 'ActualCost', 'AccountRateMultiplier'];
         if (fields.some(field => entry.usage_record?.[field] !== preview.usage[field])) throw conflict('核心待结算使用记录与预览不一致，已停止结算');
         if (entry.state === 'review') {
-          await this.recovery.review(entry.id, { version: entry.version, state: 'prepared', evidence: preview.reservation.evidence }, accessToken);
+          await this.recovery.review(entry.id, { version: entry.version, state: 'prepared', evidence }, accessToken);
           entry = (await this.recovery.detail(entry.id, accessToken)).case;
         }
         if (entry.state === 'prepared') {

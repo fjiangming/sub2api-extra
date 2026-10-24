@@ -71,6 +71,19 @@ test('multiple dispatches can share user ownership without arbitrarily selecting
   assert.equal(match.status, 'ambiguous');
 });
 
+test('batch one-to-one constraints resolve a forced request without choosing the nearest candidate', () => {
+  const rows = [row(2, { time: new Date(at).toISOString() }), row(3, { time: new Date(at + 4000).toISOString() })];
+  const source = normalizeSources([], [], [intent('one'), intent('two', { created_at: new Date(at + 8000).toISOString(), user_id: 9 })]);
+  const matches = matchBillingRows(rows, source, options);
+  assert.equal(matches[0].selected, 'case:one');
+  assert.equal(matches[1].selected, 'case:two'); assert.equal(matches[1].status, 'time_candidate');
+  assert.match(matches[1].batchAssignment, /^[a-f0-9]{64}$/);
+  const ambiguous = matchBillingRows([rows[1]], source, options)[0];
+  assert.equal(ambiguous.selected, null); assert.equal(ambiguous.status, 'ambiguous');
+  const insufficient = matchBillingRows([...rows, row(4, { time: rows[1].time })], source, options);
+  assert.ok(insufficient.every(match => !match.batchAssignment));
+});
+
 test('one paid local request cannot exclude two distinct supplier rows and request-ID conflicts stay blocked', () => {
   const rows = [row(2), row(3, { tokens: tokens(2), time: new Date(at + 210100).toISOString() })];
   const matches = matchBillingRows(rows, normalizeSources([], [usage()], []), options);
@@ -104,11 +117,14 @@ const events = (id = 'req-a', extra = {}) => [
 ];
 const range = { from: new Date(at - 10000).toISOString(), to: new Date(at + 300000).toISOString(), accounts: ['9'] };
 
-test('file-only cancellations identify ownership but are never actionable without a native recovery source', () => {
+test('complete file-only cancellations carry auditable attribution for native import review', () => {
   const logs = buildLogCandidates(events(), range);
   assert.equal(logs.length, 1); assert.equal(logs[0].userId, '3'); assert.equal(logs[0].startMs, at);
   const match = matchBillingRows([row()], normalizeSources([], [], [], logs), { ...options, timeKind: 'end' })[0];
-  assert.equal(match.status, 'owner_candidate'); assert.equal(match.selected, null); assert.match(match.reason, /文件日志/);
+  assert.equal(match.status, 'time_candidate'); assert.equal(match.selected, 'log:req-a');
+  assert.match(match.candidates[0].logSource.digest, /^[a-f0-9]{64}$/);
+  assert.equal(match.candidates[0].logSource.request_id, 'req-a');
+  assert.equal(match.candidates[0].logSource.latency_ms, 125000);
 });
 
 test('log joins reject reused internal IDs, multiple account selections, conflicting identities, or wrong accounts', () => {
