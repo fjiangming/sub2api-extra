@@ -154,3 +154,17 @@
 | `operations-center/docs/billing-csv-import.md`、`CUSTOMIZATIONS.md` | 记录操作、金额公式、范围和验证；保留先前未提交的生产镜像通道维护记录。 |
 
 验证：运营中心完整 219 项测试、`npm run check`、四组 Playwright 模拟流程全部通过，1440px 桌面 / 390px 手机没有整页或按钮溢出、没有未捕获脚本错误，截图已复核。前端和详情读取均未触发补扣；原生模拟确认仍只结算一次。浏览器测试依赖仅安装在本机临时目录，不改锁文件或镜像依赖。沿用 GitHub 既有测试和镜像构建流程，发行结果以本次 SHA 的 Actions 为准；本轮不连接或更新生产、不补扣真实用户，无关 SVG 和核心已有文档继续保留本地。
+
+## 2026-10-24：修复跨日测试和 ARM64 镜像构建失败
+
+用户要求修复 GitHub 构建失败，沿用此前提交 / 推送授权；本轮仅修改 extra 的测试及发布工作流，不更新服务器、不补扣用户、不改变主站源码或资金契约。保留原有未提交的生产镜像通道维护记录、核心文档及无关 SVG。
+
+完整 Actions 日志确认两处不同原因：`b6522e4` 的供应商监控测试在 UTC 00:34 运行，相对当前时间的 40 / 20 / 10 分钟样本跨越 UTC 午夜，趋势实际为 2 天，测试却固定断言 1 天；`9b5ddb8` 的运营中心在 `linux/arm64` 的依赖安装阶段触发 `qemu: uncaught target signal 4 (Illegal instruction)` / 132，AMD64 阶段已成功。不能将测试失败解释为 CSV 计费功能失败，也不能将失败发行的 latest 当作新版本。
+
+| 文件 | 改动及后续保留要求 |
+| --- | --- |
+| `provider-monitor/tests/account-monitor.test.js` | 将同窗口成本比较用例的完整时钟固定，复用既有断言覆盖白天和实际失败的 UTC 跨午夜时间；核对趋势日期、请求合计和所有原有金额 / 覆盖 / 归属保护。不放宽生产匹配，不移除或重试失败测试。 |
+| `.github/workflows/docker-publish.yml` | 四类测试使用固定 Ubuntu 24.04。七个服务分别使用 `ubuntu-24.04` / `ubuntu-24.04-arm` 原生构建 AMD64 / ARM64，移除 QEMU；缓存按服务及架构隔离。先按 digest 推送候选，在各原生 runner 校验 Node 架构、SQLite 原生模块和完整 OCI revision，成功后导出当前运行专用 digest；所有构建完成后再合并双架构并更新原 latest / 分支 / SHA / 版本标签，检查最终架构。PR 保留测试和双架构构建但不推送；测试和构建失败不推进正式标签，保留 provenance 和原有 GHCR 仓库 / 标签契约。 |
+| `CUSTOMIZATIONS.md` | 本节记录原因、改动和验证；不纳入此前独立生产维护记录。 |
+
+验证：Linux / Node 20.20.2 完整 288 项供应商监控测试全部通过，Windows 两个固定时钟用例通过；actionlint、14 个原生构建矩阵项 / 7 个发布项 / 原四类测试门禁关系及 14 个 Bash 步骤语法检查通过，diff --check 通过。本机 Docker daemon 未运行，镜像原生构建 / 运行检查及正式标签发布结果以本次 SHA 的 GitHub Actions 为准，推送后继续核验；不能将推送成功声明为发布成功或生产已上线。

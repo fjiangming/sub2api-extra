@@ -19,7 +19,7 @@ concurrency:
 jobs:
   test-operations-center:
     name: Operations center billing and API tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -37,7 +37,7 @@ jobs:
         working-directory: operations-center
   test-provider-monitor:
     name: Provider monitor billing sample tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -53,7 +53,7 @@ jobs:
         working-directory: provider-monitor
   test-video-adapter:
     name: Video adapter financial and protocol tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -71,7 +71,7 @@ jobs:
         working-directory: video-adapter
   test-usage-leaderboard:
     name: Usage leaderboard statistics and authentication tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
@@ -88,13 +88,19 @@ jobs:
       - run: npm test
         working-directory: usage-leaderboard
   build:
-    name: Build ${{ matrix.service }}
-    runs-on: ubuntu-latest
+    name: Build ${{ matrix.service }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     needs: [test-operations-center, test-provider-monitor, test-video-adapter, test-usage-leaderboard]
     strategy:
       fail-fast: false
       matrix:
+        service: [account-manager, provider-monitor, operations-center, degradation-detector, recharge-center, video-adapter, usage-leaderboard]
+        arch: [amd64, arm64]
         include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
           - service: account-manager
             context: ./account-manager
             tag_prefix: ""
@@ -124,9 +130,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -150,14 +153,130 @@ jobs:
             type=semver,pattern={{version}},prefix=${{ matrix.tag_prefix }}
             type=sha,prefix=${{ matrix.tag_prefix }}sha-
 
-      - name: Build and push Docker image
+      - name: Build native Docker image
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          cache-from: type=gha,scope=${{ matrix.service }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}-${{ matrix.arch }}
           provenance: mode=max
+
+      - name: Check native runtime and image revision
+        if: github.event_name != 'pull_request'
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+          TARGET_ARCH: ${{ matrix.arch }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          image_ref="$REGISTRY/$IMAGE_NAME@$BUILD_DIGEST"
+          docker run --rm --network none --read-only \
+            -e EXPECTED_ARCH="${TARGET_ARCH/amd64/x64}" --entrypoint node "$image_ref" -e '
+              const assert = require("node:assert/strict");
+              assert.equal(process.arch, process.env.EXPECTED_ARCH);
+              if (require("node:fs").existsSync("node_modules/better-sqlite3")) {
+                const db = require("better-sqlite3")(":memory:");
+                assert.equal(db.prepare("SELECT 1 AS value").get().value, 1);
+                db.close();
+              }
+              console.log(process.version, process.arch, "runtime OK");
+            '
+          revision=$(docker image inspect "$image_ref" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+          test "$revision" = "$EXPECTED_REVISION"
+
+      - name: Export image digest
+        if: github.event_name != 'pull_request'
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${BUILD_DIGEST#sha256:}"
+
+      - name: Upload image digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.service }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish ${{ matrix.service }}
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: account-manager
+            tag_prefix: ""
+          - service: provider-monitor
+            tag_prefix: provider-monitor-
+          - service: operations-center
+            tag_prefix: operations-center-
+          - service: degradation-detector
+            tag_prefix: degradation-detector-
+          - service: recharge-center
+            tag_prefix: recharge-center-
+          - service: video-adapter
+            tag_prefix: video-adapter-
+          - service: usage-leaderboard
+            tag_prefix: usage-leaderboard-
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ matrix.tag_prefix }}latest,enable={{is_default_branch}}
+            type=ref,event=branch,prefix=${{ matrix.tag_prefix }}
+            type=semver,pattern={{version}},prefix=${{ matrix.tag_prefix }}
+            type=sha,prefix=${{ matrix.tag_prefix }}sha-
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ matrix.service }}-*
+          merge-multiple: true
+
+      - name: Publish verified multi-platform tags
+        env:
+          METADATA_JSON: ${{ steps.meta.outputs.json }}
+        run: |
+          set -euo pipefail
+          mapfile -t tags < <(jq -r '.tags[]' <<< "$METADATA_JSON")
+          test "${#tags[@]}" -gt 0
+          tag_args=()
+          for tag in "${tags[@]}"; do tag_args+=(--tag "$tag"); done
+          shopt -s nullglob
+          files=("$RUNNER_TEMP/digests/"*)
+          test "${#files[@]}" -eq 2
+          sources=()
+          for file in "${files[@]}"; do
+            digest=$(basename "$file")
+            [[ "$digest" =~ ^[a-f0-9]{64}$ ]]
+            sources+=("$REGISTRY/$IMAGE_NAME@sha256:$digest")
+          done
+          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+          docker buildx imagetools inspect "${tags[0]}" --raw > "$RUNNER_TEMP/manifest.json"
+          jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | sort == ["amd64", "arm64"]' "$RUNNER_TEMP/manifest.json"

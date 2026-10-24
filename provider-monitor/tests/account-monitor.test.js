@@ -289,7 +289,8 @@ test('account monitor syncs redacted metrics and scores dynamic capability probe
   assert.ok(detail.metrics.qualityScore > 90);
 });
 
-test('account quality compares mapped provider logs and same-window upstream cost', (t) => {
+function checkMappedAccountComparison(t, current, expectedTrendDays) {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(current) });
   const context = createTestContext();
   t.after(() => context.cleanup());
   const providers = new ProviderRepository(context.db, context.config);
@@ -487,7 +488,8 @@ test('account quality compares mapped provider logs and same-window upstream cos
     WHERE key_id = 'mapped-key'
   `).run(iso(0));
   const detail = monitor.account('501', { days: 7 });
-  assert.equal(detail.upstreamTrends.length, 1);
+  assert.deepEqual(detail.upstreamTrends.map((item) => item.day), expectedTrendDays);
+  assert.equal(detail.upstreamTrends.reduce((sum, item) => sum + item.requests, 0), 3);
   assert.equal(detail.comparison.cost.source, 'provider_request_logs');
   context.db.prepare(`
     UPDATE usage_snapshots SET cost = 1, requests = 10
@@ -508,6 +510,14 @@ test('account quality compares mapped provider logs and same-window upstream cos
   assert.equal(unverified.comparison.source, 'unavailable');
   assert.equal(unverified.comparison.metricReason, 'request_logs_key_unverified');
   assert.equal(unverified.comparison.upstream, null);
+}
+
+test('account quality compares mapped provider logs and same-window upstream cost', (t) => {
+  checkMappedAccountComparison(t, '2026-10-24T12:00:00.000Z', ['2026-10-24']);
+});
+
+test('account quality keeps same-window costs when provider logs cross UTC midnight', (t) => {
+  checkMappedAccountComparison(t, '2026-10-24T00:34:00.000Z', ['2026-10-23', '2026-10-24']);
 });
 
 test('provider quality aggregates every key and retains audited costs after samples disappear', (t) => {
