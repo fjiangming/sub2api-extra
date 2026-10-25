@@ -545,18 +545,20 @@
                 <label class="bci-check"><input id="bci-time-checked" type="checkbox">已核对时间候选的用户归属</label>
                 <label class="bci-check"><input id="bci-cache-zero" type="checkbox">缺失的缓存明细已核实为零</label>
               </div></details>
-              <div class="bci-toolbar"><label>核查结果<select id="bci-filter"><option value="actionable">可补记</option><option value="review">待核查</option><option value="recorded">已核平</option><option value="settled">已补记</option><option value="all">全部记录</option></select></label></div>
+              <div class="bci-toolbar"><label>核查结果<select id="bci-filter"><option value="actionable">可补记</option><option value="review">待核查</option><option value="recorded">已计费</option><option value="settled">已补记</option><option value="all">全部记录</option></select></label><label id="bci-user-filter" hidden>按用户核查<select id="bci-user"><option value="">全部用户</option></select></label></div>
+              <p id="bci-review-summary" role="status" hidden></p>
               <div class="table-wrap"><table class="bci-table"><thead><tr><th><input id="bci-select-all" type="checkbox" aria-label="选择本页可补记记录"></th><th>行 / 时间 / 模型</th><th>匹配用户 / 本地请求</th><th>匹配结果</th><th>输入 / 输出 / 缓存</th><th>上游支出</th><th>用户扣费预览</th><th>上游多扣余额差额（USD）</th><th>处理结果</th></tr></thead><tbody id="bci-list"></tbody></table></div>
               <div class="br-pagination"><button id="bci-prev" type="button" class="icon-button" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><span id="bci-page"></span><button id="bci-next" type="button" class="icon-button" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div>
+              <div id="bci-cost-preview" class="table-wrap" hidden></div>
+              <div id="bci-group-preview" class="table-wrap" hidden></div>
+              <div id="bci-user-preview" class="table-wrap" hidden></div>
+              <p id="bci-cost-note" hidden>差额 = CSV 上游支出 − 本站拟补扣；本站拟多收表示差额为负。订阅仅补记用量，不计入余额差额。</p>
               <div class="bci-footer">
                 <button id="bci-preview" type="button" class="button secondary"><i data-lucide="calculator"></i><span>生成所选扣费预览</span></button>
                 <strong id="bci-total">待生成预览</strong>
                 <label class="bci-check"><input id="bci-acknowledge" type="checkbox">确认所选用户归属、CSV 最终用量、价格来源和扣费金额</label>
                 <button id="bci-confirm" type="button" class="button primary" disabled><i data-lucide="receipt"></i><span>确认补记并扣费</span></button>
               </div>
-              <div id="bci-cost-preview" class="table-wrap" hidden></div>
-              <div id="bci-user-preview" class="table-wrap" hidden></div>
-              <p id="bci-cost-note" hidden>差额 = CSV 上游支出 − 本站拟补扣；本站拟多收表示差额为负。订阅仅补记用量，不计入余额差额。</p>
             </div>
           </div>
           <div id="br-requests-pane" role="tabpanel" aria-labelledby="br-requests-tab">

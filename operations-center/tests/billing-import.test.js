@@ -328,7 +328,9 @@ test('frozen core pricing is preferred and conflicting final observed usage cann
   assert.equal(f.calls.length, 1); assert.match(f.calls[0].url, /quote$/);
   f.entries.get(caseId).observed_usage = { input_tokens: 4964, output_tokens: 14000, _recovery: { complete: true } };
   batch = await previewed(f, batch, { pricing: {} });
-  assert.equal(batch.rows[0].status, 'needs_review'); assert.match(batch.rows[0].result.error, /观察用量冲突/);
+  assert.equal(batch.rows[0].status, 'needs_review'); assert.equal(batch.rows[0].preview, null);
+  assert.match(batch.rows[0].result.error, /证据已变化/);
+  assert.equal(f.calls.length, 1, 'Changed observations block a second quote before pricing');
   f.entries.get(caseId).observed_usage = {};
   f.entries.get(caseId).request_snapshot.pricing.eligible = false;
   batch = await previewed(f, batch);
@@ -449,6 +451,102 @@ test('new concurrent candidates appearing after a preview require renewed owners
   f.entries.set('new-intent', nativeCase({ id: 'new-intent', user_id: 20 }));
   await assert.rejects(f.service.confirm(batch.id, confirmBody(batch)), /停止补扣/);
   assert.equal(f.charges(), 0); assert.equal(f.calls.length, 0);
+});
+
+test('review groups and paginated user filters cover the whole CSV batch without assigning ambiguous requests', async t => {
+  const f = fixture(t);
+  const cases = [], rows = Array.from({ length: 29 }, (_, index) => {
+    const time = new Date(Date.parse(at) + index * 10000).toISOString();
+    if (index < 28) for (const attempt of [1, 2]) cases.push(nativeCase({ id: `case-${index}-${attempt}`,
+      user_id: index < 25 ? 11 : 22, api_key_id: index < 25 ? 12 : 23, created_at: time }));
+    return { Time: time, 'Output Tokens': String(100 + index) };
+  });
+  f.source.load = async () => ({ candidates: normalizeSources([], [], cases), coreAvailable: true });
+  const batch = await matched(f, csv(rows));
+  assert.equal(batch.summary.owner_candidate, 28); assert.equal(batch.summary.unmatched, 1);
+  assert.deepEqual(batch.reviewUsers, [{ userId: '11', count: 25, keys: 1, accounts: 1 }, { userId: '22', count: 3, keys: 1, accounts: 1 }]);
+  const page = f.service.detail(batch.id, { filter: 'review', userId: '11', page: 2 });
+  assert.equal(page.filteredTotal, 25); assert.equal(page.rows.length, 5); assert.equal(page.page, 2);
+  assert.ok(page.rows.every(row => row.match.owner.userId === '11' && !row.selection && !row.preview));
+  assert.equal(f.service.detail(batch.id, { filter: 'review', userId: '22' }).filteredTotal, 3);
+  assert.throws(() => f.service.detail(batch.id, { userId: '11 OR 1=1' }), { code: 'INVALID_REQUEST' });
+  assert.equal(f.calls.length, 0); assert.equal(f.charges(), 0);
+});
+
+test('changed historical log evidence stops both preview and confirmation even when owner and timestamps agree', async t => {
+  const f = fixture(t);
+  const log = { reference: 'log:server-request', kind: 'log', state: 'legacy_log', recorded: false,
+    userId: '11', apiKeyId: '12', accountId: '356', groupId: '15', billingType: 'balance', models: ['claude-opus-5-5'],
+    startMs: Date.parse(at), endMs: Date.parse(at) + 125000, startUncertain: false, ids: [], rootIds: ['server-request'],
+    logSource: { request_id: 'server-request', group_id: 15, model: 'claude-opus-5-5', ended_at: '2026-10-22T01:10:13Z',
+      latency_ms: 125000, status_code: 499, stream: false, digest: 'c'.repeat(64) } };
+  f.source.load = async () => ({ candidates: [structuredClone(log)], coreAvailable: true });
+  let batch = await matched(f);
+  log.logSource.digest = 'd'.repeat(64);
+  batch = await previewed(f, batch);
+  assert.equal(batch.rows[0].status, 'needs_review'); assert.match(batch.rows[0].result.error, /证据已变化/);
+  assert.equal(f.calls.length, 0);
+  batch = await previewed(f, await matched(f));
+  log.logSource.digest = 'e'.repeat(64);
+  await assert.rejects(f.service.confirm(batch.id, confirmBody(batch)), /停止补扣/);
+  assert.equal(f.calls.length, 0); assert.equal(f.charges(), 0);
+});
+
+for (const legacyVersion of [3, 4]) test(`started version-${legacyVersion} confirmations resume frozen native settlement while unstarted previews must rematch`, async t => {
+  const f = fixture(t);
+  let batch = await previewed(f, await matched(f));
+  let row = batch.rows[0];
+  f.store.save(row.id, { match: { ...row.match, algorithmVersion: legacyVersion } }, row.version);
+  batch = f.service.detail(batch.id);
+  await assert.rejects(f.service.confirm(batch.id, confirmBody(batch)), /旧匹配逻辑/);
+  row = batch.rows[0];
+  f.store.claim(row.id, row.version, row.preview.id);
+  f.advance(300001);
+  batch = f.service.detail(batch.id);
+  assert.equal((await f.service.confirm(batch.id, confirmBody(batch))).results[0].status, 'settled');
+  assert.equal(f.charges(), 1);
+  assert.equal((await f.service.confirm(batch.id, confirmBody(f.service.detail(batch.id)))).results[0].status, 'settled');
+  assert.equal(f.charges(), 1);
+});
+
+test('same-owner complete groups are automatically explained but never treated as an approved request assignment', async t => {
+  const f = fixture(t);
+  f.entries.set('00000000-0000-4000-8000-000000000002', nativeCase({ id: '00000000-0000-4000-8000-000000000002' }));
+  const batch = await matched(f, csv([{}, { 'Output Tokens': '13213' }]));
+  assert.ok(batch.rows.every(row => row.match.candidateGroup.status === 'sameOwner' && row.match.candidateGroup.balanced));
+  assert.ok(batch.rows.every(row => row.status === 'owner_candidate' && !row.selection && !row.preview));
+  const attempt = await f.service.preview(batch.id, { rowIds: batch.rows.map(row => row.id), pricingMode: 'auto' });
+  assert.ok(attempt.results.every(row => row.status === 'needs_review'));
+  assert.equal(f.calls.length, 0); assert.equal(f.charges(), 0);
+});
+
+test('updated usage observations invalidate a frozen preview even if attribution and native version are unchanged', async t => {
+  const f = fixture(t);
+  f.entries.get(caseId).observed_usage = { output_tokens: 1000 };
+  const batch = await previewed(f, await matched(f));
+  assert.equal(batch.rows[0].status, 'preview');
+  f.entries.get(caseId).observed_usage.output_tokens = 2000;
+  await assert.rejects(f.service.confirm(batch.id, confirmBody(batch)), /停止补扣/);
+  assert.equal(f.calls.length, 0); assert.equal(f.charges(), 0);
+});
+
+test('file evidence correlated to a durable request is rechecked before both preview and first confirmation', async t => {
+  const f = fixture(t);
+  const log = { reference: 'log:root-1', kind: 'log', state: 'legacy_log', recorded: false,
+    userId: '11', apiKeyId: '12', accountId: '356', groupId: '15', billingType: 'balance', models: ['claude-opus-5-5'],
+    startMs: Date.parse(at), endMs: Date.parse(at) + 125000, startUncertain: false, ids: [], rootIds: ['root-1'],
+    logSource: { request_id: 'root-1', digest: 'a'.repeat(64) } };
+  f.source.load = async () => ({ candidates: normalizeSources([], [], [...f.entries.values()], [structuredClone(log)]), coreAvailable: true });
+  let batch = await matched(f);
+  assert.equal(batch.rows[0].match.candidates.length, 1);
+  assert.equal(batch.rows[0].match.candidates[0].sourceEvidence.length, 2);
+  log.logSource.digest = 'b'.repeat(64);
+  batch = await previewed(f, batch);
+  assert.equal(batch.rows[0].status, 'needs_review'); assert.match(batch.rows[0].result.error, /证据已变化/);
+  batch = await previewed(f, await matched(f));
+  log.logSource.digest = 'c'.repeat(64);
+  await assert.rejects(f.service.confirm(batch.id, confirmBody(batch)), /停止补扣/);
+  assert.equal(f.calls.length, 0); assert.equal(f.charges(), 0);
 });
 
 test('owner-only file evidence remains visible and cannot be converted to a native reservation by selecting it', async t => {

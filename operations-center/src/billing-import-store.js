@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const { AppError } = require('./errors');
+const REVIEW_STATUSES = "'ambiguous','assignment_conflict','needs_review','unmatched','unmapped','invalid','duplicate','usage_difference','billing_unresolved','owner_candidate','time_uncertain','recorded_conflict','import_pending'";
 
 class BillingImportStore {
   constructor(store) { this.store = store; this.now = store.now; }
@@ -51,17 +52,27 @@ class BillingImportStore {
     return { ...row, options: JSON.parse(row.options), metadata: row.metadata ? JSON.parse(row.metadata) : null };
   }
   rows(id) { return this.db.prepare('SELECT * FROM import_rows WHERE batch_id=? ORDER BY number').all(id).map(decode); }
-  page(id, filter, page, size = 20) {
-    const where = { all: '', actionable: " AND status IN ('exact','time_candidate','preview','failed','confirming')",
-      review: " AND status IN ('ambiguous','assignment_conflict','needs_review','unmatched','unmapped','invalid','duplicate','usage_difference','billing_unresolved','owner_candidate','time_uncertain','recorded_conflict')",
+  page(id, filter, page, size = 20, userId = '') {
+    let where = { all: '', actionable: " AND status IN ('exact','time_candidate','group_candidate','preview','failed','confirming')",
+      review: ` AND status IN (${REVIEW_STATUSES})`,
       owners: " AND status='owner_candidate'", unresolved: " AND status='billing_unresolved'",
-      recorded: " AND status='already_recorded'", settled: " AND status='settled'" }[filter];
+      recorded: " AND status IN ('already_recorded','already_imported')", settled: " AND status='settled'" }[filter];
+    const args = [id];
+    if (userId) {
+      where += " AND COALESCE(json_extract(preview,'$.userId'),json_extract(match,'$.owner.userId'))=?";
+      args.push(userId);
+    }
     const summary = Object.fromEntries(this.db.prepare('SELECT status,COUNT(*) AS total FROM import_rows WHERE batch_id=? GROUP BY status').all(id).map(row => [row.status, row.total]));
     const total = Object.values(summary).reduce((sum, count) => sum + count, 0);
-    const filteredTotal = this.db.prepare(`SELECT COUNT(*) AS total FROM import_rows WHERE batch_id=?${where}`).get(id).total;
+    const filteredTotal = this.db.prepare(`SELECT COUNT(*) AS total FROM import_rows WHERE batch_id=?${where}`).get(...args).total;
     page = Math.max(1, Math.min(Math.max(1, Math.ceil(filteredTotal / size)), page));
-    const rows = this.db.prepare(`SELECT * FROM import_rows WHERE batch_id=?${where} ORDER BY number LIMIT ? OFFSET ?`).all(id, size, (page - 1) * size).map(decode);
-    return { rows, total, filteredTotal, summary, page, pageSize: size, filter };
+    const rows = this.db.prepare(`SELECT * FROM import_rows WHERE batch_id=?${where} ORDER BY number LIMIT ? OFFSET ?`).all(...args, size, (page - 1) * size).map(decode);
+    const reviewUsers = this.db.prepare(`SELECT json_extract(match,'$.owner.userId') AS userId,COUNT(*) AS count,
+      COUNT(DISTINCT json_extract(match,'$.owner.apiKeyId')) AS keys,
+      COUNT(DISTINCT json_extract(match,'$.owner.accountId')) AS accounts
+      FROM import_rows WHERE batch_id=? AND status IN (${REVIEW_STATUSES})
+      AND json_extract(match,'$.owner.userId') IS NOT NULL GROUP BY userId ORDER BY count DESC,userId`).all(id);
+    return { rows, total, filteredTotal, summary, page, pageSize: size, filter, userId, reviewUsers };
   }
   hasPreview(batchId, reference, excludeId) {
     return Boolean(this.db.prepare(`SELECT 1 FROM import_rows WHERE batch_id=? AND id<>? AND json_extract(preview,'$.reference')=?

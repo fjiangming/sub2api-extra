@@ -14,7 +14,7 @@ const { loadConfig } = require('../src/config');
 const { BillingRecoveryStore } = require('../src/billing-recovery-store');
 const { BillingImportStore } = require('../src/billing-import-store');
 const { BillingImportService, manualUsage } = require('../src/services/billing-import-service');
-const { normalizeSources } = require('../src/services/billing-import-source');
+const { normalizeSources, billingImportWindow } = require('../src/services/billing-import-source');
 const { buildLogCandidates } = require('../src/services/billing-import-logs');
 
 const sample = `Time,API Key Name,Model,Input Tokens,Output Tokens,Cache Read Tokens,Cache Creation Tokens,Duration (ms),Billed Cost,Type,Billing Mode
@@ -29,6 +29,9 @@ const sample = `Time,API Key Name,Model,Input Tokens,Output Tokens,Cache Read To
 2026-10-22T09:22:00+08:00,demo-key,claude-opus-5-5,503,1934,0,0,210000,0.3,Sync,按量
 2026-10-22T09:23:00+08:00,demo-key,gpt-5.2,23,54,0,0,20000,0.001,Sync,按量
 `;
+const groupSample = sample + `2026-10-22T09:30:00+08:00,demo-key,claude-opus-5-5,1200,4500,0,0,210000,0.11,Sync,按量
+2026-10-22T09:30:01+08:00,demo-key,claude-opus-5-5,1400,4700,0,0,210000,0.12,Sync,按量
+`;
 
 async function portInUse(port) {
   return new Promise(resolve => {
@@ -39,7 +42,7 @@ async function portInUse(port) {
   });
 }
 
-async function startPreview({ port: requestedPort } = {}) {
+async function startPreview({ port: requestedPort, includeGroups = false } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'billing-import-preview-'));
   const config = loadConfig({ NODE_ENV: 'test', OPERATIONS_CENTER_AUTH_MODE: 'local', OPERATIONS_CENTER_ADMIN_PASSWORD: crypto.randomBytes(24).toString('hex') });
   const auth = new AuthService(config);
@@ -55,13 +58,27 @@ async function startPreview({ port: requestedPort } = {}) {
     [caseID(1), entry(1, 'claude-opus-5-5', 11, '2026-10-22T01:08:08Z')],
     [caseID(2), entry(2, 'gpt-5', 12, '2026-10-22T01:09:08Z', true)]
   ]);
+  entries.get(caseID(1)).observed_usage = { output_tokens: 1000 };
+  entries.set(caseID(3), { ...entry(3, 'claude-opus-5-5', 11, '2026-10-22T01:08:08Z'),
+    observed_usage: { output_tokens: 14000 } });
   const rule = { input: 5, output: 25, cacheRead: 0.5, cache5m: 6.25, cache1h: 10, multiplier: 0.7, accountMultiplier: 1 };
-  const claims = new Map();
+  const claims = new Map(), groupReceipts = new Map(), claimEvidence = new Map();
   const recovery = {
     status: () => ({ automaticEnabled: false }),
     list: async ({ state }) => { const items = [...entries.values()].filter(row => !state || row.state === state); return { items, total: items.length }; },
     detail: async id => ({ case: structuredClone(entries.get(id)), events: [] }),
-    request: async (url, { body }) => {
+    request: async (url, { body } = {}) => {
+      if (url.startsWith('/imports/claims')) return { claims: [...claimEvidence.values()] };
+      if (url === '/imports/reserve-group') {
+        if (groupReceipts.has(body.identity)) return { claims: groupReceipts.get(body.identity) };
+        const receipt = [];
+        for (const member of body.members) {
+          const result = await recovery.request('/imports/reserve', { body: member.source });
+          receipt.push({ ...claimEvidence.get(member.source.bill_identity), case_id: result.case_id });
+        }
+        groupReceipts.set(body.identity, receipt);
+        return { claims: receipt };
+      }
       if (url === '/imports/reserve') {
         let id = body.case_id || claims.get(body.bill_identity);
         if (!id) {
@@ -71,6 +88,9 @@ async function startPreview({ port: requestedPort } = {}) {
           row.request_snapshot = { request_id: body.log_source?.request_id, user_email: `demo-user-${body.user_id}@example.test` };
           entries.set(id, row); claims.set(body.bill_identity, id);
         }
+        claimEvidence.set(body.bill_identity, { account_id: body.account_id, bill_identity: body.bill_identity,
+          local_reference: body.case_id ? `case:${body.case_id}` : body.log_source ? `log:${body.log_source.request_id}` : `error:${body.error_id}:${body.event_index}`,
+          case_id: id, user_id: body.user_id, api_key_id: body.api_key_id, group_id: 15, state: entries.get(id).state });
         return { case_id: id };
       }
       if (url === '/imports/quote') {
@@ -84,10 +104,16 @@ async function startPreview({ port: requestedPort } = {}) {
     },
     restore: async (id, body) => { const row = entries.get(id); row.usage_record = structuredClone(body.usage_record); row.state = 'review'; row.version++; },
     review: async (id, body) => { const row = entries.get(id); row.state = body.state; row.version++; },
-    settle: async id => { const row = entries.get(id); row.state = 'settled'; row.version++; }
+    settle: async id => { const row = entries.get(id); row.state = 'settled'; row.version++;
+      for (const claim of claimEvidence.values()) if (claim.case_id === id) claim.state = 'settled'; }
   };
   const errors = [13, 14].map(user => ({ id: String(user), user_id: String(user), api_key_id: String(user + 100), account_id: '356', group_id: '15',
     user_email: `demo-user-${user}@example.test`, request_id: `demo-error-${user}`, model: 'claude-opus-5-5', created_at: '2026-10-22T01:13:13Z', response_latency_ms: 125000 }));
+  errors.push({ id: '11', user_id: '11', api_key_id: '111', account_id: '356', group_id: '15',
+    request_id: 'demo-root-1', model: 'claude-opus-5-5', created_at: '2026-10-22T01:10:13Z', response_latency_ms: 125000 });
+  if (includeGroups) for (let index = 0; index < 2; index++) errors.push({ id: String(30 + index), user_id: '24', api_key_id: '124', account_id: '356',
+    group_id: '15', request_id: `demo-group-${index}`, model: 'claude-opus-5-5',
+    user_email: 'demo-user-24@example.test', created_at: '2026-10-22T01:32:05Z', response_latency_ms: 125000 });
   const common = { user_id: '15', api_key_id: '115', group_id: '15', account_id: '356', cache_read_tokens: 0, cache_creation_tokens: 0, billing_dedup: true, actual_cost: 0.001 };
   const logs = buildLogCandidates([
     { component: 'gateway', request_id: 'demo-file-only', ts: '2026-10-22T01:22:00Z', user_id: 22, api_key_id: 122, group_id: 15 },
@@ -96,16 +122,19 @@ async function startPreview({ port: requestedPort } = {}) {
   ], { accounts: ['356'], from: '2026-10-22T00:00:00Z', to: '2026-10-23T00:00:00Z' });
   for (const row of logs) { row.billingType = 'balance'; row.userEmail = `demo-user-${row.userId}@example.test`; }
   const source = { accounts: async () => [{ id: '356', name: '演示上游 / demo-key', platform: 'anthropic' }],
-    load: async () => ({ coreAvailable: true, candidates: normalizeSources(errors, [{ id: '20', user_id: '15', api_key_id: '115',
+    load: async (records, options) => ({ coreAvailable: true, candidates: normalizeSources(errors, [{ id: '20', user_id: '15', api_key_id: '115',
       account_id: '356', model: 'gemini-2.5-pro', created_at: '2026-10-22T01:11:43Z', duration_ms: 95000,
       group_id: '15', billing_dedup: true, actual_cost: 0.05,
       input_tokens: 1000, output_tokens: 3000, cache_read_tokens: 0, cache_creation_tokens: 0 },
     { ...common, id: '21', model: 'gpt-4.1', created_at: '2026-10-22T01:20:10Z', duration_ms: 10000, input_tokens: 21, output_tokens: 52 },
     { ...common, id: '22', model: 'gemini-flash', created_at: '2026-10-22T01:21:10Z', duration_ms: 10000, input_tokens: 22, output_tokens: 53 },
     { ...common, id: '23', model: 'gpt-5.2', created_at: '2026-10-22T01:23:20Z', duration_ms: 20000, input_tokens: 23, output_tokens: 54, billing_dedup: false, actual_cost: 0 }
-    ], [...entries.values()], logs), diagnostics: { logs: { status: 'read', coverageComplete: false } } }) };
+    ], [...entries.values()], logs), claims: [...claimEvidence.values()], diagnostics: { window: billingImportWindow(records, options), claimsAvailable: true,
+      native: { usages: 4, errors: errors.length, cases: entries.size },
+      logs: { status: 'read', coverageComplete: false, first: '2026-10-22T01:22:00Z', last: '2026-10-22T01:24:05Z' } } }) };
   const imports = new BillingImportService({ store, source, recovery });
-  const batch = await imports.import({ fileName: '演示账单.csv', csv: sample });
+  const demoCSV = includeGroups ? groupSample : sample;
+  const batch = await imports.import({ fileName: '演示账单.csv', csv: demoCSV });
   await imports.match(batch.id, { accountMappings: { 'demo-key': 356 } });
   const app = createApp({ config, auth, database: { configured: () => false }, billingRecovery: recovery, billingImports: imports,
     settings: { getStatus: () => ({ setupRequired: false }) } });
@@ -114,7 +143,7 @@ async function startPreview({ port: requestedPort } = {}) {
     try { await auth.login(req, res, { username: config.adminUser, password: config.adminPassword }); res.redirect('/#billing'); }
     catch (error) { next(error); }
   });
-  outer.get('/sample.csv', (_req, res) => res.type('text/csv').send(sample));
+  outer.get('/sample.csv', (_req, res) => res.type('text/csv').send(demoCSV));
   outer.use(app);
   let port = requestedPort ?? Number(process.env.BILLING_IMPORT_PREVIEW_PORT || 19876), server;
   while (!server) {
@@ -128,7 +157,7 @@ async function startPreview({ port: requestedPort } = {}) {
   port = server.address().port;
   console.log(`CSV billing preview (demo data only): http://127.0.0.1:${port}/preview`);
   let stopped = false;
-  return { port, async stop() {
+  return { port, imports, async stop() {
     if (stopped) return; stopped = true;
     auth.close();
     await new Promise(resolve => server.close(resolve));
@@ -136,9 +165,9 @@ async function startPreview({ port: requestedPort } = {}) {
   } };
 }
 
-if (require.main === module) startPreview().then(({ stop }) => {
+if (require.main === module) startPreview({ includeGroups: true }).then(({ stop }) => {
   process.once('SIGINT', () => stop().then(() => process.exit(0)));
   process.once('SIGTERM', () => stop().then(() => process.exit(0)));
 }).catch(error => { console.error(error); process.exitCode = 1; });
 
-module.exports = { startPreview, sample };
+module.exports = { startPreview, sample, groupSample };

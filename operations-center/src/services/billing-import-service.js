@@ -7,6 +7,7 @@ const { AppError } = require('../errors');
 const { parseBillingCSV, describeBillingCSV, hash } = require('./billing-import-csv');
 const { reconcileBillingRows, MATCH_VERSION } = require('./billing-import-source');
 const { observedTokens } = require('./billing-recovery-usage');
+const { previewGroups, confirmGroups } = require('./billing-import-groups');
 
 const id = z.string().uuid();
 const positiveId = z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER);
@@ -31,9 +32,10 @@ const validate = (schema, value) => {
 const conflict = message => new AppError('IMPORT_REVIEW_REQUIRED', message, { status: 409 });
 const money = value => new Decimal(value).toDecimalPlaces(8, Decimal.ROUND_HALF_UP).toNumber();
 const metadata = parsed => ({ headers: parsed.headers, columns: parsed.columns, keys: parsed.keys, models: parsed.models });
-const matchProof = match => hash([match.method, match.status, match.totalCandidates, match.selected, match.batchAssignment, match.candidates.map(candidate =>
-  ['reference', 'kind', 'userId', 'apiKeyId', 'accountId', 'groupId', 'version', 'startMs', 'endMs', 'startUncertain', 'recorded', 'billed', 'blockedReason']
-    .map(key => candidate[key] ?? null))]);
+const matchProof = match => hash([match.method, match.status, match.totalCandidates, match.selected, match.batchAssignment,
+  match.candidateGroup, match.usageConstraints, (match.candidates || []).map(candidate =>
+  ['reference', 'kind', 'userId', 'apiKeyId', 'accountId', 'groupId', 'version', 'startMs', 'endMs', 'startUncertain', 'recorded', 'billed', 'blockedReason', 'statusCode', 'billingType']
+    .map(key => candidate[key] ?? null).concat(candidate.logSource?.digest ?? null, candidate.sourceEvidence ?? null, candidate.usageEvidence ?? null))]);
 
 function verifiedTokens(record, input, rule) {
   const tokens = { ...record.tokens };
@@ -102,11 +104,15 @@ class BillingImportService {
     const batch = this.store.batch(batchId);
     const filter = validate(z.enum(['all', 'actionable', 'review', 'recorded', 'settled', 'owners', 'unresolved']), query.filter || 'all');
     const page = Math.max(1, Math.min(1000, Math.floor(Number(query.page) || 1)));
+    const userId = query.userId ? String(validate(positiveId, query.userId)) : '';
     const info = batch.metadata || metadata(parseBillingCSV(batch.csv, batch.options));
     if (!batch.metadata) this.store.metadata(batchId, info);
-    const result = this.store.page(batchId, filter, page);
+    const result = this.store.page(batchId, filter, page, 20, userId);
+    const relatedIds = new Set(result.rows.flatMap(row => row.preview?.group?.memberIds || []));
+    const relatedRows = relatedIds.size ? this.store.rows(batchId).filter(row => relatedIds.has(row.id)) : [];
     return { id: batch.id, fileName: batch.file_name, createdAt: batch.created_at, options: batch.options,
-      ...info, ...result, rows: result.rows.map(row => ({ ...row, costComparison: costComparison(row.record, row.preview) })) };
+      ...info, ...result, relatedRows: relatedRows.map(row => ({ ...row, costComparison: costComparison(row.record, row.preview) })),
+      rows: result.rows.map(row => ({ ...row, costComparison: costComparison(row.record, row.preview) })) };
   }
   async match(batchId, input, accessToken) {
     const options = validate(optionsSchema, input);
@@ -116,7 +122,8 @@ class BillingImportService {
     // Load before changing persistent selections. Query failure or truncation
     // must not leave a partially matched batch that appears ready to charge.
     const source = await this.source.load(parsed.rows, options, accessToken);
-    const reconciled = reconcileBillingRows(parsed.rows, source.candidates, options);
+    const reconciled = reconcileBillingRows(parsed.rows, source.candidates,
+      { ...options, groupClaimsAvailable: source.diagnostics?.claimsAvailable === true }, source.claims);
     this.store.db.transaction(() => {
       this.store.configure(batchId, options, reconciled.records, { ...metadata(parsed),
         matchDiagnostics: { ...reconciled.diagnostics, ...source.diagnostics, coreAvailable: source.coreAvailable } });
@@ -137,8 +144,11 @@ class BillingImportService {
     }).strict(), input);
     const batch = this.store.batch(validate(id, batchId));
     const freshMatches = await this.recheck(batch, accessToken);
-    const results = [];
+    for (const rowId of body.rowIds) if (this.store.get(rowId).batch_id !== batchId) throw conflict('记录不属于当前批次');
+    const grouped = await previewGroups(this, batch, body, freshMatches, accessToken, { verifiedTokens, matchProof });
+    const results = [...grouped.results];
     for (const rowId of new Set(body.rowIds)) {
+      if (grouped.handled.has(rowId)) continue;
       const row = this.store.get(rowId);
       if (row.batch_id !== batchId) throw conflict('记录不属于当前批次');
       if (['confirming', 'settled', 'failed'].includes(row.status)) { results.push({ rowId, status: row.status }); continue; }
@@ -146,7 +156,7 @@ class BillingImportService {
         const record = row.record;
         this.checkMatchVersion(row);
         const freshMatch = freshMatches.get(row.number);
-        if (['already_recorded', 'usage_difference', 'billing_unresolved', 'recorded_conflict', 'time_uncertain'].includes(freshMatch?.status)) throw conflict(freshMatch.reason || '该上游记录已有本地账单，请重新匹配');
+        if (['already_recorded', 'already_imported', 'import_pending', 'group_candidate', 'usage_difference', 'billing_unresolved', 'recorded_conflict', 'time_uncertain'].includes(freshMatch?.status)) throw conflict(freshMatch.reason || '该上游记录已有本地账单或须整组处理，请重新匹配');
         if (freshMatch?.totalCandidates > 30) throw conflict('新的候选过多，请缩小时间容差后重新匹配');
         if (record.error || record.duplicateOf) throw conflict(record.error || '重复记录不能补扣');
         if (row.match?.totalCandidates > 30) throw conflict('候选过多，请缩小时间容差后重新匹配');
@@ -155,7 +165,12 @@ class BillingImportService {
         const candidate = row.match?.candidates.find(item => item.reference === reference);
         const freshCandidate = freshMatch?.candidates.find(item => item.reference === reference);
         if (!freshCandidate || freshCandidate.recorded || freshCandidate.blockedReason ||
-          ['userId', 'apiKeyId', 'accountId', 'groupId', 'version'].some(key => freshCandidate[key] !== candidate?.[key])) throw conflict('本地计费或匹配证据已变化，请重新匹配');
+          ['userId', 'apiKeyId', 'accountId', 'groupId', 'version', 'startMs', 'endMs', 'startUncertain', 'statusCode', 'billingType']
+            .some(key => freshCandidate[key] !== candidate?.[key]) ||
+          freshCandidate.logSource?.digest !== candidate?.logSource?.digest ||
+          hash([freshCandidate.sourceEvidence, freshCandidate.usageEvidence]) !== hash([candidate?.sourceEvidence, candidate?.usageEvidence])) {
+          throw conflict('本地计费或匹配证据已变化，请重新匹配');
+        }
         if (!candidate || candidate.recorded || !['unknown', 'review', 'legacy_error', 'legacy_log'].includes(candidate.state)) throw conflict('需要选择尚未记账的本地请求');
         if (candidate.blockedReason) throw conflict(candidate.blockedReason);
         if ([candidate.userId, candidate.apiKeyId, candidate.accountId].some(value => !Number.isSafeInteger(Number(value)) || Number(value) <= 0)) throw conflict('原生归属 ID 超出可核对范围');
@@ -229,31 +244,44 @@ class BillingImportService {
     return { results, detail: this.detail(batchId) };
   }
   async confirm(batchId, input, accessToken) {
-    const body = validate(z.object({ acknowledge: z.literal(true), rows: z.array(z.object({ id, version: z.number().int().positive(), previewId: id }).strict()).min(1).max(20) }).strict(), input);
-    const batch = this.store.batch(validate(id, batchId)); const results = [];
+    const body = validate(z.object({ acknowledge: z.literal(true), rows: z.array(z.object({ id, version: z.number().int().positive(), previewId: id }).strict()).min(1).max(400) }).strict(), input);
+    const batch = this.store.batch(validate(id, batchId));
+    for (const selected of body.rows) if (this.store.get(selected.id).batch_id !== batchId) throw conflict('记录不属于当前批次');
+    if (body.rows.filter(selected => !this.store.get(selected.id).preview?.group).length > 20) throw conflict('每次最多确认 20 条逐笔记录');
+    const grouped = await confirmGroups(this, batch, body, accessToken, matchProof);
+    const results = [...grouped.results];
     let freshMatches;
     for (const selected of body.rows) {
+      if (grouped.handled.has(selected.id)) continue;
       let row = this.store.get(selected.id);
       if (row.batch_id !== batchId || row.preview?.id !== selected.previewId) throw conflict('预览不属于当前记录');
       if (row.status === 'settled') { results.push({ id: row.id, status: 'settled', caseId: row.case_id }); continue; }
-      this.checkMatchVersion(row);
+      this.checkMatchVersion(row, true);
       if (row.status === 'preview' && row.preview.expiresAt < this.now()) throw conflict('扣费预览已过期，请重新生成');
       if (row.status === 'preview') {
         freshMatches ||= await this.recheck(batch, accessToken);
         const current = freshMatches.get(row.number);
         const candidate = current?.candidates.find(item => item.reference === row.preview.reference);
-        if (['already_recorded', 'usage_difference', 'billing_unresolved', 'recorded_conflict', 'time_uncertain'].includes(current?.status) || current?.totalCandidates > 30 || !candidate || candidate.recorded || candidate.blockedReason || row.preview.matchProof !== matchProof(current)) {
+        if (['already_recorded', 'already_imported', 'import_pending', 'group_candidate', 'usage_difference', 'billing_unresolved', 'recorded_conflict', 'time_uncertain'].includes(current?.status) || current?.totalCandidates > 30 || !candidate || candidate.recorded || candidate.blockedReason || row.preview.matchProof !== matchProof(current)) {
           throw conflict('预览后的本地账单或时间证据已变化，请重新匹配，已停止补扣');
         }
       }
       row = this.store.claim(row.id, selected.version, selected.previewId);
+      results.push(await this.settlePreview(row, accessToken));
+    }
+    return { results, detail: this.detail(batchId) };
+  }
+  async settlePreview(row, accessToken, reservedCaseId = null) {
       try {
         const preview = row.preview;
         const evidence = JSON.stringify({ ...JSON.parse(preview.reservation.evidence), tokens_confirmed_final: true,
           ownership_confirmed: true, pricing_confirmed: true });
-        const reserved = await this.recovery.request('/imports/reserve', { method: 'POST', body: { ...preview.reservation, evidence } }, accessToken);
-        row = this.store.save(row.id, { case_id: reserved.case_id }, row.version);
-        let entry = (await this.recovery.detail(reserved.case_id, accessToken)).case;
+        if (!reservedCaseId) {
+          const reserved = await this.recovery.request('/imports/reserve', { method: 'POST', body: { ...preview.reservation, evidence } }, accessToken);
+          reservedCaseId = reserved.case_id;
+          row = this.store.save(row.id, { case_id: reservedCaseId }, row.version);
+        }
+        let entry = (await this.recovery.detail(reservedCaseId, accessToken)).case;
         if (String(entry.user_id) !== preview.userId || String(entry.api_key_id) !== preview.apiKeyId ||
             Number(entry.account_id) !== preview.reservation.account_id ||
             (entry.subscription_id ? 'subscription' : 'balance') !== preview.billingType) throw conflict('核心使用记录归属或计费类型与预览不一致');
@@ -278,21 +306,23 @@ class BillingImportService {
         }
         if (entry.state !== 'settled') throw conflict('核心记录尚未完成结算');
         this.store.save(row.id, { status: 'settled', lease_until: 0, result: { caseId: entry.id, amount: entry.usage_record.ActualCost, settledAt: new Date(this.now()).toISOString() } }, row.version);
-        results.push({ id: row.id, status: 'settled', caseId: entry.id });
+        return { id: row.id, status: 'settled', caseId: entry.id };
       } catch (error) {
         this.store.save(row.id, { status: 'failed', lease_until: 0, result: { error: error.message } }, row.version);
-        results.push({ id: row.id, status: 'failed', error: error.message });
+        return { id: row.id, status: 'failed', error: error.message };
       }
-    }
-    return { results, detail: this.detail(batchId) };
   }
-  checkMatchVersion(row) {
+  checkMatchVersion(row, resume = false) {
+    // Older confirmations already started with a frozen native reservation must
+    // remain resumable. Unstarted previews require the new evidence matching.
+    if (resume && [3, 4, 5].includes(row.match?.algorithmVersion) && ['failed', 'confirming'].includes(row.status) && row.preview) return;
     if (row.match?.algorithmVersion !== MATCH_VERSION) throw conflict('该记录使用旧匹配逻辑，请重新自动匹配；已开始的旧结算需先核实核心回执');
   }
   async recheck(batch, accessToken) {
     const parsed = parseBillingCSV(batch.csv, batch.options);
     const source = await this.source.load(parsed.rows, batch.options, accessToken);
-    const result = reconcileBillingRows(parsed.rows, source.candidates, batch.options);
+    const result = reconcileBillingRows(parsed.rows, source.candidates,
+      { ...batch.options, groupClaimsAvailable: source.diagnostics?.claimsAvailable === true }, source.claims);
     return new Map(result.matches.map((match, index) => [parsed.rows[index].number, match]));
   }
 }

@@ -23,6 +23,41 @@ test('unique full native tokens exclude paid rows even with the wrong timestamp 
   assert.equal(match.candidates[0].usageId, '2'); assert.equal(match.candidates[0].billingEvidence.dedup, true);
 });
 
+test('repeated token tuples are narrowed by their own CSV times before paid exclusion and calibration', () => {
+  const rows = [0, 1, 2].map((hour, index) => row(index + 2, { tokens: tokens(2),
+    time: new Date(at + hour * 3600000 + 210000).toISOString() }));
+  const sources = normalizeSources([], [0, 1, 2].map(hour => usage(hour + 2, { input_tokens: 2,
+    created_at: new Date(at + hour * 3600000 + 210000).toISOString() })),
+  [intent('unrelated', { created_at: rows[0].time })]);
+  const wrong = reconcileBillingRows(rows, sources, options);
+  assert.deepEqual(wrong.matches.map(match => match.status), Array(3).fill('already_recorded'));
+  assert.equal(wrong.diagnostics.clocks[0].detected, 'end');
+  const automatic = reconcileBillingRows(rows, sources, { ...options, timeKind: 'auto' });
+  assert.equal(automatic.diagnostics.clocks[0].end, 3);
+  assert.equal(automatic.records[0].matchedEndedAt, rows[0].time);
+  assert.deepEqual(automatic.matches.map(match => match.candidates[0].usageId), ['2', '3', '4']);
+});
+
+test('paid one-to-one assignment resolves only forced edges and cannot count one bill twice', () => {
+  const rows = [row(2), row(3, { tokens: tokens(2), time: new Date(at + 214000).toISOString() })];
+  const sources = normalizeSources([], [usage(), usage(3, { input_tokens: 2, created_at: new Date(at + 218000).toISOString() })], []);
+  const matches = matchBillingRows(rows, sources, options);
+  assert.deepEqual(matches.map(match => match.status), ['already_recorded', 'already_recorded']);
+  assert.deepEqual(matches.map(match => match.candidates[0].usageId), ['2', '3']);
+  assert.match(matches[1].batchAssignment, /^[a-f0-9]{64}$/);
+  const insufficient = matchBillingRows([...rows, row(4, { tokens: tokens(2), time: new Date(at + 214001).toISOString() })], sources, options);
+  assert.ok(insufficient.every(match => match.status === 'recorded_conflict' && !match.selected));
+});
+
+test('multiple CSV rows pointing to the same native request cannot supply independent clock votes', () => {
+  const rows = [0, 1, 2].map((ms, index) => row(index + 2, { tokens: tokens(2),
+    time: new Date(at + 210000 + ms).toISOString() }));
+  const result = reconcileBillingRows(rows, normalizeSources([], [usage()], []), { ...options, timeKind: 'auto' });
+  assert.equal(result.diagnostics.clocks[0].end, 0);
+  assert.equal(result.diagnostics.clocks[0].detected, null);
+  assert.ok(result.matches.every(match => match.status === 'recorded_conflict'));
+});
+
 test('automatic calibration detects end timestamps and maps the unbilled 210s request to its original dispatch', () => {
   const rows = [row(2), row(3), row(4), row(5)];
   const sources = normalizeSources([], [usage(2), usage(3), usage(4)], [intent('missing')]);
@@ -145,4 +180,80 @@ test('file correlation enriches only the same native owner and preserves separat
   assert.equal(sources.length, 1); assert.equal(sources[0].kind, 'error'); assert.equal(sources[0].startUncertain, false);
   const attempts = normalizeSources([{ ...enriched[0], upstream_errors: [{ account_id: 9 }, { account_id: 9 }] }], [], [], logs);
   assert.equal(attempts.length, 2); assert.ok(attempts.every(item => item.startUncertain));
+});
+
+test('shared server or upstream IDs correlate evidence without merging separate dispatch intents', () => {
+  const logs = buildLogCandidates(events(), range);
+  const error = { ...usage(), request_id: 'req-a', response_latency_ms: 125000, created_at: new Date(at + 125000).toISOString() };
+  const cases = [intent('one', { request_snapshot: { request_id: 'req-a' } })];
+  let sources = normalizeSources([error], [], cases, logs);
+  assert.equal(sources.length, 1);
+  assert.deepEqual(sources[0].sourceEvidence.map(item => item.kind), ['case', 'error', 'log']);
+  assert.match(sources[0].sourceEvidence[2].digest, /^[a-f0-9]{64}$/);
+  sources = normalizeSources([error], [], [...cases, intent('two', { request_snapshot: { request_id: 'req-a' } })], logs);
+  assert.equal(sources.length, 2); assert.ok(sources.every(item => item.kind === 'case'));
+  assert.ok(sources.every(item => item.sourceEvidence.length === 3));
+  sources = normalizeSources([{ ...error, request_id: 'different-server', upstream_errors: [{ account_id: 9, upstream_request_id: 'up-1' }] }], [],
+    [intent('upstream', { upstream_request_id: 'up-1' })]);
+  assert.equal(sources.length, 1); assert.equal(sources[0].sourceEvidence[1].kind, 'error');
+  sources = normalizeSources([{ ...error, upstream_errors: [{ account_id: 9 }, { account_id: 9 }] }], [], cases);
+  assert.equal(sources.length, 3, 'Repeated same-account attempts cannot be attached to one intent without a per-attempt ID');
+});
+
+test('reused client IDs and close timestamps never collapse unrelated request evidence', () => {
+  const error = { ...usage(), request_id: 'other-server', client_request_id: 'reused', response_latency_ms: 125000,
+    created_at: new Date(at + 125000).toISOString() };
+  const cases = [intent('one', { request_snapshot: { request_id: 'original-server', client_request_id: 'reused' } })];
+  assert.equal(normalizeSources([error], [], cases).length, 2);
+  assert.equal(normalizeSources([{ ...error, request_id: 'original-server', group_id: 6 }], [], cases).length, 2);
+  const sources = normalizeSources([error], [], [intent('no-ids')]);
+  const match = matchBillingRows([row(2, { time: new Date(at).toISOString() })], sources, options)[0];
+  assert.equal(match.status, 'owner_candidate'); assert.equal(match.selected, null);
+  assert.equal(match.candidateGroup.unlinkedCases, true);
+  assert.match(match.candidateGroup.reason, /共同关联 ID/);
+});
+
+test('final observed tokens disambiguate concurrent requests and participate in batch assignment', () => {
+  const rows = [row(2, { time: new Date(at).toISOString() }), row(3, { time: new Date(at).toISOString() })];
+  const sources = normalizeSources([], [], [2, 3].map(number => intent(`observed-${number}`, { observed_usage: {
+    input_tokens: number, output_tokens: 13000, cache_read_input_tokens: 120, cache_creation_input_tokens: 45,
+    _recovery: { complete: true } } })));
+  const result = reconcileBillingRows(rows, sources, options);
+  assert.deepEqual(result.matches.map(match => match.selected), ['case:observed-2', 'case:observed-3']);
+  assert.ok(result.matches.every(match => match.status === 'time_candidate' && match.usageConstraints.excluded === 1));
+  assert.equal(result.diagnostics.observedUsageExclusions, 2);
+});
+
+test('partial observations constrain lower bounds while unknown or invalid usage never becomes final proof', () => {
+  const current = row(2, { time: new Date(at).toISOString() });
+  const sources = normalizeSources([], [], [intent('partial', { observed_usage: { output_tokens: 10000 } }),
+    intent('too-large', { observed_usage: { output_tokens: 14000 } })]);
+  assert.equal(matchBillingRows([current], sources, options)[0].selected, 'case:partial');
+  for (const observed_usage of [{}, { output_tokens: 14000, _recovery: { invalid_usage: true } }]) {
+    const uncertain = normalizeSources([], [], [intent('one'), intent('unknown', { observed_usage })]);
+    assert.equal(matchBillingRows([current], uncertain, options)[0].status, 'owner_candidate');
+  }
+  const exact = normalizeSources([], [], [intent('exact', { upstream_request_id: 'upstream-one', observed_usage: { output_tokens: 14000 } })]);
+  const conflict = matchBillingRows([{ ...current, requestId: 'upstream-one' }], exact, options)[0];
+  assert.equal(conflict.status, 'needs_review'); assert.equal(conflict.selected, null); assert.match(conflict.reason, /Token.*冲突/);
+  const inclusive = normalizeSources([], [], [intent('inclusive', { observed_usage: { prompt_tokens: 100,
+    output_tokens: 13000, _recovery: { complete: true } } })]);
+  assert.equal(inclusive[0].usageEvidence.tokens.InputTokens, null, 'Unknown cache counts cannot be assumed zero when converting inclusive input');
+  assert.equal(matchBillingRows([current], inclusive, options)[0].selected, 'case:inclusive');
+});
+
+test('automatic group analysis distinguishes same-owner complete allocations from mixed owners and missing sources', () => {
+  const rows = [row(2, { time: new Date(at).toISOString() }), row(3, { time: new Date(at).toISOString() })];
+  const sources = normalizeSources([], [], [intent('one'), intent('two')]);
+  const result = reconcileBillingRows(rows, sources, options);
+  assert.ok(result.matches.every(match => match.status === 'owner_candidate' && !match.selected));
+  const group = result.matches[0].candidateGroup;
+  assert.deepEqual(result.matches[1].candidateGroup, group);
+  assert.equal(group.status, 'sameOwner'); assert.equal(group.balanced, true); assert.equal(group.allocationExists, true);
+  assert.equal(group.rows, 2); assert.equal(group.sources, 2); assert.deepEqual(group.rowNumbers, [2, 3]);
+  assert.equal(result.diagnostics.candidateGroups.sameOwner, 1);
+  const different = matchBillingRows(rows, normalizeSources([], [], [intent('one'), intent('two', { user_id: 8 })]), options);
+  assert.ok(different.every(match => match.candidateGroup.status === 'mixedOwners' && !match.selected));
+  const short = matchBillingRows([...rows, row(4, { time: new Date(at).toISOString() })], sources, options);
+  assert.ok(short.every(match => match.candidateGroup.status === 'incomplete' && !match.selected));
 });

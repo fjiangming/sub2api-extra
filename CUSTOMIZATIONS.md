@@ -216,3 +216,65 @@
 配套核心定价 / 导入 / 结算专项、4 项真实 PostgreSQL 回归、Windows server 构建通过；新增 Key 迁组和报价空依赖回归通过，原 CI 默认配置的三个完整核心包 golangci-lint 为 0 issues。两仓库最终 diff --check 通过。隔离本地预览 HTTP 为 200，确认包含自动分析与主站报价选项；不影响此前运行中的旧预览进程，无新增生产配置或运行依赖。
 
 用户随后授权验证后推送 GitHub。本次仅将上述 CSV 简化、自动报价、完整日志来源、测试与说明提交到 main，核心配套提交到 dev。推送前 fetch 确认与远端同步，复核验证记录与暂存差异；保留现有镜像构建门禁，发布结果以本次 SHA 的 Actions 为准。此前独立生产镜像通道维护台账和无关 usage-leaderboard SVG 继续保留本地未提交，不纳入本轮；没有更新服务器、预留或补扣真实用户。
+
+## 2026-10-24：按 CSV 请求时段重构计费核查匹配
+
+用户要求按最终讨论流程实施，以 CSV 对应请求时段的历史证据为准，不能绑定昨天或以未来新增日志字段补历史。本轮只修改 extra 既有运营中心，保留 main 及主站 dev；没有修改主站源码、数据库迁移、生产文件 / 余额，没有提交、推送、发布或部署。保留此前独立生产镜像通道台账、主站两份文档及无关 SVG。
+
+| 文件 | 改动及后续集成须保留的行为 |
+| --- | --- |
+| `operations-center/src/services/billing-import-source.js` | 提取共享 `billingImportWindow`，按有效、非重复、已映射 CSV 的时间 / 时钟修正和完整耗时计算证据范围，同时读取两种时间含义；支持任意日期、跨日和超过四小时的请求。未提供耗时仅增加读源余量，不增加归属确定性。原生 SQL、核心案件和文件日志共用范围；返回时间 / 来源诊断，保留原有查询上限及失败阻断。 |
+| `operations-center/src/services/billing-import-matcher.js` | MATCH_VERSION=4。相同四类 Token 先按开始 / 结束时间缩小范围，再做已有用量的一对一分析，避免要求全天 Token 唯一而漏排已扣费项。时间校准每个独立原生请求最多一票；已计费与未记账分阶段复用有界强制分配，冲突 / 超限 / 无完整分配的分量转核查，不选择最近请求。返回匹配依据、请求起止及阶段汇总；未知耗时、用量差异、无扣费凭据不当作新整笔消费。 |
+| `operations-center/src/billing-import-store.js` | 共用原表与参数化 SQL，增加跨整批的待核查用户分组和分页用户筛选，包含 Key / 上游账号数量；不创建资金表或新迁移，不改变冻结回执和唯一预览约束。 |
+| `operations-center/src/services/billing-import-service.js` | 验证用户筛选；报价前和首次确认前复查来源身份、时间 / 状态 / 计费类型及文件摘要，摘要变化即停止。新匹配版本要求未开始预览重跑；已进入 confirming / failed 的版本 3 补记按原冻结预览及原生预留幂等续办，禁止因此另建扣款。自动报价 / 原生使用记录 / review → prepared → settle 资金契约不变。 |
+| `operations-center/public/index.html`、`public/billing-import-ui.js`、`public/billing-recovery.css` | 展示 CSV 时间、读取时段 / 时区、来源数量 / 留存范围、每行的请求起止与匹配依据；已核平改名已计费。待核查按用户集中筛选 / 翻页，归属唯一但请求不唯一仍显示待核查；恢复中的版本 3 保留可选确认。沿用自动报价、金额对比和单次最终人工确认，不将候选费用冒充已回收金额。 |
+| `operations-center/tests/billing-import-matching.test.js`、`billing-import-source.test.js`、`billing-import.test.js` | 新增重复 Token 跨时段 / 唯一分配、同一本地请求不得提供多票、任意历史日期 / 跨日七小时的真实 PostgreSQL 读源、时钟偏移 / 无效与未映射不扩范围、整批用户分页、文件摘要变化阻断及版本 3 恢复回归。保留已有预览只读、原生幂等、并发确认 / 租约和历史用量保护测试。 |
+| `operations-center/scripts/billing-import-preview.cjs`、`billing-import-browser-check.cjs` | 隔离模拟显示同一范围诊断；桌面 / 手机增加按用户筛选及禁选已有账单，桌面验证旧版已开始记录可恢复。演示返回本地服务实例供测试操作，不增加 HTTP 测试接口；不连接真实凭据、DB 或上游。 |
+| `operations-center/scripts/billing-import-replay.cjs` | 外部历史快照按与正式源相同的 CSV 范围过滤后回放，保留 24 条误报排除、13,045 条原生用量和 761 条文件归属保护断言。仅读本地文件，无主站 / 供应商请求或资金动作。 |
+| `operations-center/docs/billing-csv-import.md`、`README.md`、`CUSTOMIZATIONS.md` | 记录按文件时段、两阶段核对、新状态和按用户核查、旧预览 / 在途兼容及部署范围。具备现有自动报价 / 文件来源接口时，只需更新运营中心。 |
+
+验证：运营中心完整 233 项测试、npm run check 及四组 1440px / 390px Playwright 模拟导入、自动报价、金额差额、用户筛选、确认 / 刷新通过；版本 3 已开始补记的恢复通过，桌面 / 手机截图已复核。真实快照离线回放 14,480 行：13,262 已计费（较前版多排除 86 条）、148 唯一请求候选待报价、961 用户归属已定位但具体请求待核查、9 多归属、27 已有记录争用、8 未记账来源争用、16 用量差异、11 时间不足、4 扣费待核查、34 重复。此前误报 / 原生用量 / 文件归属断言全部通过。148 条上游支出合计 47.47758491 USD，只是报价候选的采购支出，不是确定的用户补扣金额；未执行生产报价或扣费。真实快照不进入 Git。
+
+## 2026-10-24：自动关联候选证据与并发组核查
+
+用户继续要求通过程序自动匹配候选。本轮仍在 extra main 实现，主站 dev 源码不变；沿用现有主站自动报价 / 导入 / 原生使用记录与资金事务，无新服务、配置或数据库迁移。没有提交 / 推送 / 发布 / 部署、连接生产、预留或补扣真实用户。保留既有未提交的前一轮匹配改造、独立生产台账、主站文档和无关 SVG。
+
+| 文件 | 本轮改动及后续必须保留的约定 |
+| --- | --- |
+| `operations-center/src/services/billing-import-source.js` | 同账号 / 用户 / Key / 分组 / 模型下，用共同服务端请求 ID 或上游请求 ID 关联多份证据，记录来源引用及文件 SHA-256。客户端可复用 ID 和相近时间不能合并；多个 dispatch 案件分别保留，同账号重复尝试缺独立 ID 不压成一个。复用原有 Token 归一化读取已观察标准用量；缓存拆分未知的含缓存输入不假设缓存为零。 |
+| `operations-center/src/services/billing-import-matcher.js` | MATCH_VERSION=5。先按可靠的最终计数一致 / 未完成计数下限排除不符候选，再复用整批强制唯一分配；请求 ID 与观察用量冲突时核查。对未解决的连通组自动返回账单数、候选来源数 / 类型、归属是否一致、是否存在完整分配、原始行号及关联 ID 缺口；数量相等不证明实际调用已完整覆盖。不会用同用户或任意完整分配假装逐笔确定，也不自动执行整组补扣。 |
+| `operations-center/src/services/billing-import-service.js` | 关联来源摘要、已观察用量、组分析和排除关系纳入冻结匹配证明；预览及首次确认均检查证据变化。未开始的旧预览须重分析；版本 3 / 4 已开始确认可按原冻结预览 / 原生幂等继续，不另建资金事件。原报价和 review → prepared → settle 不变。 |
+| `operations-center/public/billing-import-ui.js`、`public/billing-recovery.css` | 展示自动组分析、观察用量排除数量、每行组账单 / 来源数和原因、已关联证据份数与已有观察 Token。结果列最小 220px，表内横向滚动，手机上不把长原因挤成几字一行；不会把待核查组计为可补记。 |
+| `operations-center/tests/billing-import-matching.test.js`、`billing-import.test.js` | 共同服务端 / 上游 ID、多 dispatch 保留、同账号多次尝试、复用客户端 ID / 分组隔离、最终 / 部分 / 无效 / 含缓存未知用量、同归属 / 跨归属 / 来源不足组、同组不得自动收费、关联文件和观察用量变化、版本 3 / 4 在途恢复回归。旧的观察用量冲突测试改为核对更早的证据变化阻断，并确认无第二次报价。 |
+| `operations-center/scripts/billing-import-preview.cjs`、`billing-import-browser-check.cjs` | 隔离演示增加可关联错误证据和可被观察用量排除的并发案件；浏览器验证组诊断、来源证据份数、自动报价和版本 4 续办，增加桌面 / 手机待核查截图。仅模拟数据，无真实资金或 HTTP 测试后门。 |
+| `operations-center/scripts/billing-import-replay.cjs` | 离线输出自动候选组和观察用量排除统计，保留原有误报 / 已扣费 / 历史归属保护断言。 |
+| `operations-center/docs/billing-csv-import.md`、`README.md`、`CUSTOMIZATIONS.md` | 记录自动分析和仍需核查的条件、没有整组资金功能、快照实际结果、版本 5 和旧在途兼容、只升级运营中心的条件。 |
+
+验证：运营中心完整 242 项测试及 npm run check 通过，四组桌面 / 手机 Playwright 导入、证据关联、观察 Token 排除、组诊断、自动报价、确认 / 刷新和旧版续办通过；截图复核及最终 diff --check 通过。真实快照 14,480 行回放仍有 13,262 条已计费、148 条唯一候选（上游 47.47758491 USD）、961 条同用户候选（上游 262.18099088 USD，607 仅文件 / 354 含原生）。旧案件缺关联 ID / 最终用量，本次不能编造证据提高可扣费数量。整批自动核查 279 组，其中 274 组归属一致、4 组不同归属、1 组来源不足，组分析不构成扣费许可；1 条原时间不足记录因取消不可靠客户端 ID 合并改为未匹配，其余金额与保护断言保持一致。没有执行生产报价、实际 Docker 构建或 GitHub 发行。
+
+## 2026-10-25：CSV 整组报价等价核查、原子认领与跨批次防重
+
+用户要求改造自动核查和去重。本轮 extra 保持 `main`，主站配套保持 `dev`。仅修改本地代码、文档和隔离测试，不提交、推送、发布、部署、连接生产或补扣真实用户。保留此前版本 4 / 5 的未提交改动、独立生产台账及无关文件。
+
+| 文件 | 本轮增量与后续集成须保留的约定 |
+| --- | --- |
+| `operations-center/src/services/billing-import-matcher.js` | MATCH_VERSION=6。先按主站认领排除已结算账单、标记未完成原案件；候选来源及关联别名被其他账单认领时清除选择并转核查。完整一对一同归属余额历史组、2–20 独立来源、标准 Token / 缓存时长完整且无组外可能来源才标 group_candidate；稳定分配按账单摘要 / 来源排序，不称为历史精确对应。未接入完整历史认领接口时不开组功能。 |
+| `operations-center/src/services/billing-import-source.js` | 按 CSV 证据时段逐账号读取主站 `/imports/claims`，验证账号、账单摘要和完整列表；404 / 503 保留旧逐笔流程并关闭组功能，多账号失败不能残留部分认领。原生异常分页同时检查总数稳定、完整页数及无重复案件，避免缺页被当完整覆盖。无效、截断或其他读取故障阻止匹配，不能降级为无重复。 |
+| `operations-center/src/services/billing-import-groups.js`（新增） | 预览只读核对全组，逐账单检查每个可能来源的原生当前报价，计费维度 / 金额不等价或 Key / 账号额度导致时间分配不等价则阻断，不能用人工售价绕过。SQLite 原事务保存全组冻结预览；最终确认须显式包含所有成员，整组取得 CAS 租约，调用主站事务预留后才逐笔原生结算。丢回包、部分结算和重启沿原案件续办；无已提交认领的失败重试必须重新核对证据。 |
+| `operations-center/src/services/billing-import-service.js` | 路由整组预览 / 确认；detail 返回触及组的全部 relatedRows 供跨页展示；原逐笔结算提取复用，不直扣余额。确认最多 400 条组成员、逐笔仍最多 20；请求不能混入其他批次。版本 3 / 4 / 5 已开始结算可按旧冻结预览续办，未开始须重分析。 |
+| `operations-center/src/billing-import-store.js` | 原筛选包含整组待报价 / 认领状态；复用现有 preview JSON 保存组清单和摘要，无 SQLite 新表或迁移。保留现有双唯一、CAS 和在途记录保护。 |
+| `operations-center/public/billing-import-ui.js`、`public/index.html`、`public/billing-recovery.css` | 默认自动分析 / 主站报价，整组选中带齐跨页成员；展示全组 CSV 时间、用户 / Key、模型、输入 / 输出 / 缓存 Token、费用、状态及原预览合计。区分稳定记账分配和历史对应，已成功成员在续办时完整展示但不纳入剩余扣费汇总。表内滚动及组表最小宽度防止手机压缩，确认仍须管理员勾选。 |
+| `operations-center/tests/billing-import-groups.test.js`（新增） | 确定排序、隐藏来源 / 订阅 / 缓存 / 大小阻断、认领与别名防重、所有对应报价等价、人工规则不可绕过、跨页完整确认、预览无资金、并发操作、认领回包丢失、重启 / 部分成功续办、重导不重复及失败后证据变化阻断。使用隔离 SQLite 和模拟主站。 |
+| `operations-center/tests/billing-import-source.test.js` | 完整多账号认领、旧主站部分响应清空、无效 / 超限结果和读取故障阻断。保留此前真实 PostgreSQL 时段 / 来源测试。 |
+| `operations-center/scripts/billing-import-preview.cjs`、`billing-import-browser-check.cjs` | 独立模拟主站组认领 / 回执并加入两笔同用户历史错误；CLI 演示含组，旧四种浏览器场景保留，增加桌面 / 手机整组展示、联动选择、原生认领及确认模拟。无真实凭据、供应商或生产数据。 |
+| `operations-center/scripts/billing-import-replay.cjs` | 输出组阻断原因；可选 `--saved-balance-context` 从外部已保存无订阅案件推断文件来源类型，明确标记为离线推断，不能当现存 Key / 配额 / 价格或认领验证。保留此前误报、原生用量及历史归属保护断言，真实数据不进入 Git。 |
+| `operations-center/package.json` | npm run check 的 precheck 纳入新增组编排模块语法检查，不改依赖和锁文件。 |
+| `operations-center/docs/billing-csv-import.md`、`README.md`、`CUSTOMIZATIONS.md` | 更新版本 6 全组操作、资金 / 非精确分配边界、快照实际结果及主站 / 运营中心配套升级要求，取代前轮“本次只升运营中心”的条件。 |
+
+配套主站仅增加可选整组认领 / 历史认领接口、新组回执表迁移，以及冻结用量和额度保护；详细源码清单位于主站 `CUSTOMIZATIONS.md` 同日章节。主站 PostgreSQL 的账号锁、同账单 / 同来源双唯一和原生 usage + dedup + 资金事务才是最终防重依据，SQLite 并非资金账本。组认领全成或全回滚，资金仍逐笔提交，失败保留原映射，不重新配对或直接扣余额。启用功能需同时更新两个组件，无新增机器、服务、生产依赖或供应商 API 凭据。
+
+历史快照实际回放：14,480 行仍为 13,262 已计费、148 唯一请求报价候选（上游采购支出 47.47758491 USD）、961 同用户待核查（采购支出 262.18099088 USD）、34 重复，其余差异 / 冲突 / 时间不足保持原样。新增可整组报价为 0；原快照缺文件来源的余额类型，即使补入同快照无订阅案件推断，仍有 108 组缺共同关联 ID、170 组有组外无耗时错误重叠、1 组来源不足。原生错误最长四小时范围不能凭数量相等排除。不能宣称 961 条已确定可补扣；补扣金额要以未来实际主站核价和管理员确认为准。24 条旧误报、13,045 条既有关联用量及 761 条文件归属断言全部保持通过。
+
+验证：完整运营中心 252 项测试、npm run check 和两仓库 diff --check 通过。六组 Playwright 覆盖 1440px / 390px、正差额 / 未知上游费、旧版在途恢复和新增整组联动选择 / 全成员展示 / 认领 / 模拟结算；截图复核后将组表和汇总移到确认按钮之前，手机组表保持水平滚动、不压缩长字段。核心计费专项、5 项 PostgreSQL/PGlite SQL、三个完整包的默认配置 golangci-lint 0 issues 和最终 Windows 构建通过。两种历史回放均只读本地快照；没有生产报价、预留或资金写入，没有实际 Docker / Linux CI 或 GitHub 发布。所有本轮改动保留本地待审核，未推送或部署。
+
+用户随后明确授权提交并推送 GitHub。本轮将上述匹配版本 4 / 5 / 6、整组编排、界面、测试和文档提交到 extra main，主站配套原子认领 / 防重接口和迁移提交到 dev。推送前 fetch 确认两仓库均与远端同分支同步；独立生产镜像通道台账、无关 SVG 和其他项目文件继续保留本地。沿用现有测试门禁和 GHCR 镜像发布流程，构建与发布结果以此次提交 SHA 的 Actions 为准；本次不部署服务器、预留请求或补扣真实用户。完整功能升级需主站和运营中心同时更新。

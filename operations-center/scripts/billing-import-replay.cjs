@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const Decimal = require('decimal.js');
-const { normalizeSources, reconcileBillingRows } = require('../src/services/billing-import-source');
+const { normalizeSources, reconcileBillingRows, billingImportWindow } = require('../src/services/billing-import-source');
 const { buildLogCandidates, enrichErrorsFromLogs } = require('../src/services/billing-import-logs');
 
 const directory = process.argv[2];
@@ -15,12 +15,28 @@ const read = name => JSON.parse(fs.readFileSync(path.join(directory, name), 'utf
 const input = read('import-rows.json'), source = read('sources.json');
 const evidence = new Map(fs.readFileSync(path.join(directory, 'billing-evidence.ndjson'), 'utf8').trim().split(/\r?\n/)
   .map(line => JSON.parse(line)).filter(row => row.usage_id != null).map(row => [String(row.usage_id), row]));
-const usages = source.usages.map(row => ({ ...row, billing_dedup: evidence.get(String(row.id))?.dedup ?? null,
-  billing_archived: evidence.get(String(row.id))?.archived ?? null }));
 const records = input.rows.map(row => row.record);
-const logs = buildLogCandidates(read('access-events.json'), { from: '2000-01-01Z', to: '2100-01-01Z',
+const window = billingImportWindow(records, input.batch.options);
+const inWindow = row => Date.parse(row.created_at) >= Date.parse(window.from) && Date.parse(row.created_at) < Date.parse(window.to);
+const usages = source.usages.filter(inWindow).map(row => ({ ...row, billing_dedup: evidence.get(String(row.id))?.dedup ?? null,
+  billing_archived: evidence.get(String(row.id))?.archived ?? null }));
+const logs = buildLogCandidates(read('access-events.json'), { from: window.from, to: window.to,
   accounts: Object.values(input.batch.options.accountMappings) });
-const candidates = normalizeSources(enrichErrorsFromLogs(source.errors, logs), usages, source.cases, logs);
+// Optional inference uses only the saved cases. It is not a live group / Key
+// lookup and cannot validate current prices, quotas, claims or reservability.
+const savedBalanceContext = process.argv.includes('--saved-balance-context');
+if (savedBalanceContext) {
+  const groups = new Map();
+  for (const entry of source.cases) {
+    const key = String(entry.group_id), status = groups.get(key) || { count: 0, subscription: false };
+    status.count++; status.subscription ||= entry.subscription_id != null; groups.set(key, status);
+  }
+  for (const log of logs) {
+    const group = groups.get(String(log.groupId));
+    if (group?.count && !group.subscription) log.billingType = 'balance';
+  }
+}
+const candidates = normalizeSources(enrichErrorsFromLogs(source.errors.filter(inWindow), logs), usages, source.cases.filter(inWindow), logs);
 const result = reconcileBillingRows(records, candidates, { ...input.batch.options, timeKind: 'auto' });
 const summary = {};
 const candidateByReference = new Map(candidates.map(item => [item.reference, item]));
@@ -62,7 +78,14 @@ result.matches.forEach((match, index) => {
   else unresolvedLegacy.push({ number: records[index].number, status: match.status });
 });
 assert.equal(checkedLegacy.length, legacyBaseline.length, 'Previously established file-log ownership must stay consistent');
-console.log(JSON.stringify({ rows: records.length, clocks: result.diagnostics.clocks, logRequests: logs.length, summary,
-  ownerCandidates,
+const auditReasons = {};
+for (const group of new Map(result.matches.filter(match => match.candidateGroup).map(match => [match.candidateGroup.id, match.candidateGroup])).values()) {
+  const reason = group.auditReason || 'eligible_for_native_quote'; auditReasons[reason] = (auditReasons[reason] || 0) + 1;
+}
+console.log(JSON.stringify({ rows: records.length, billingContext: savedBalanceContext ? 'inferred_from_saved_balance_cases' : 'raw_snapshot',
+  nativeGroupPricingAndReservationsVerified: false, window, clocks: result.diagnostics.clocks, logRequests: logs.length, summary,
+  ownerCandidates, candidateGroups: result.diagnostics.candidateGroups,
+  auditReasons,
+  observedUsageExclusions: result.diagnostics.observedUsageExclusions,
   comparison: { falsePositivesExcluded: previouslyActionable.length, knownNativeRowsProtected: known.length,
     legacyBaseline: legacyBaseline.length, sameOwner: checkedLegacy.length, unresolvedLegacy } }, null, 2));

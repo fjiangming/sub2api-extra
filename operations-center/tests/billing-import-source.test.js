@@ -4,13 +4,52 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { PGlite } = require('@electric-sql/pglite');
 const { SchemaInspector } = require('../src/schema-inspector');
-const { BillingImportSource } = require('../src/services/billing-import-source');
+const { BillingImportSource, billingImportWindow } = require('../src/services/billing-import-source');
 const { optionsSchema } = require('../src/services/billing-import-service');
 const { AppError } = require('../src/errors');
 const { matchBillingRows } = require('../src/services/billing-import-source');
 
 const record = { number: 2, key: 'vendor-key', model: 'claude-test', startedAt: '2026-10-22T01:08:08Z' };
 const options = optionsSchema.parse({ accountMappings: { 'vendor-key': 356 } });
+
+test('source windows follow mapped CSV timestamps, clock corrections and full cross-day durations', () => {
+  const rows = [{ ...record, time: '2024-02-01T00:01:00Z', durationMs: 7 * 3600000 },
+    { ...record, key: 'unmapped', time: '2020-01-01Z' },
+    { ...record, time: '2020-01-01Z', error: 'invalid tokens' }];
+  const window = billingImportWindow(rows, { ...options, clockOffsetSeconds: 120 });
+  assert.equal(window.csvFrom, '2024-02-01T00:03:00.000Z');
+  assert.equal(window.csvTo, window.csvFrom);
+  assert.equal(window.from, '2024-01-31T16:58:00.000Z');
+  assert.equal(window.to, '2024-02-01T07:08:00.000Z');
+  assert.equal(window.rows, 1); assert.deepEqual(window.accounts, ['356']);
+  assert.equal(window.unknownDurations, 0);
+  const unknown = billingImportWindow([{ ...rows[0], durationMs: null }], options);
+  assert.equal(unknown.unknownDurations, 1);
+  assert.equal(billingImportWindow([{ ...record, key: 'unmapped' }], options), null);
+});
+
+test('source SQL and durable evidence include a CSV start request completing over four hours later', async t => {
+  const db = new PGlite(); t.after(() => db.close());
+  await db.exec(`CREATE TABLE users(id bigint,email text); CREATE TABLE groups(id bigint,name text,subscription_type text);
+    CREATE TABLE usage_logs(id bigint,user_id bigint,api_key_id bigint,account_id bigint,group_id bigint,
+      created_at timestamptz,model text,request_id text,duration_ms bigint,input_tokens integer,output_tokens integer,
+      cache_read_tokens integer,cache_creation_tokens integer);
+    CREATE TABLE usage_billing_dedup(request_id text,api_key_id bigint);
+    INSERT INTO usage_logs VALUES(1,11,12,356,15,'2024-02-02T05:00:00Z','claude-test','long-request',25200000,20,30,0,0);
+    INSERT INTO usage_billing_dedup VALUES('long-request',12);`);
+  const calls = [], logCalls = [];
+  const source = new BillingImportSource({ pool: db, inspector: new SchemaInspector(db),
+    recovery: { list: async query => { calls.push(query); return { items: [], total: 0 }; } },
+    logs: { load: async query => { logCalls.push(query); return { events: [], diagnostics: { status: 'empty' } }; } } });
+  const row = { ...record, time: '2024-02-01T22:00:00Z', startedAt: '2024-02-01T22:00:00Z', durationMs: 25200000,
+    tokens: { InputTokens: 20, OutputTokens: 30, CacheReadTokens: 0, CacheCreationTokens: 0 } };
+  const result = await source.load([row], { ...options, timeKind: 'start' });
+  assert.equal(result.candidates.length, 1);
+  assert.equal(matchBillingRows([row], result.candidates, { ...options, timeKind: 'start' })[0].status, 'already_recorded');
+  assert.equal(calls[0].from, result.diagnostics.window.from);
+  assert.equal(logCalls[0].to, result.diagnostics.window.to);
+  assert.equal(result.diagnostics.window.csvFrom, row.time.replace('Z', '.000Z'));
+});
 
 test('source reads original native logs with array, SQL NULL, JSON null and scalar upstream errors', async t => {
   const db = new PGlite(); t.after(() => db.close());
@@ -69,9 +108,35 @@ test('source supports original core without recovery API and rejects truncated o
   await assert.rejects(source.load([record], options), { code: 'SOURCE_TRUNCATED' });
   source.recovery.list = async () => ({ items: [] });
   await assert.rejects(source.load([record], options), { code: 'SOURCE_INVALID' });
+  source.recovery.list = async () => ({ total: 1, items: [] });
+  await assert.rejects(source.load([record], options), { code: 'SOURCE_INVALID' });
+  source.recovery.list = async query => ({ total: 101, items: query.page === 1 ? Array.from({ length: 100 }, (_, i) => ({ id: String(i) })) : [{ id: '0' }] });
+  await assert.rejects(source.load([record], options), { code: 'SOURCE_INVALID' });
   pool.query = async () => ({ rows: Array.from({ length: 20001 }, () => ({})) });
   await assert.rejects(source.load([record], options), { code: 'SOURCE_TRUNCATED' });
   await assert.rejects(source.load([record, { ...record, startedAt: '2026-08-01Z' }], options), { code: 'IMPORT_RANGE' });
+});
+
+test('native claims require complete account coverage, valid responses and never retain a partial fallback', async () => {
+  const source = new BillingImportSource({ pool: { query: async () => ({ rows: [] }) },
+    inspector: { inspect: async () => ({ tables: { usage_logs: { columns: ['id'] } } }) },
+    recovery: { list: async () => ({ total: 0, items: [] }) } });
+  const claim = { account_id: 356, bill_identity: 'a'.repeat(64), local_reference: 'error:1:-1', case_id: 'original', state: 'settled' };
+  source.recovery.request = async () => ({ claims: [claim] });
+  let result = await source.load([record], options);
+  assert.equal(result.diagnostics.claimsAvailable, true); assert.equal(result.claims.length, 1);
+  source.recovery.request = async url => {
+    if (url.includes('account_id=357')) throw new AppError('OLD_CORE', 'missing', { status: 404 });
+    return { claims: [claim] };
+  };
+  result = await source.load([record, { ...record, key: 'other' }], { ...options, accountMappings: { 'vendor-key': 356, other: 357 } });
+  assert.equal(result.diagnostics.claimsAvailable, false); assert.equal(result.claims.length, 0);
+  for (const invalid of [{}, { claims: [{ ...claim, account_id: 357 }] }, { claims: Array(20001).fill(claim) }]) {
+    source.recovery.request = async () => invalid;
+    await assert.rejects(source.load([record], options), { code: 'SOURCE_INVALID' });
+  }
+  source.recovery.request = async () => { throw new AppError('UPSTREAM', 'unavailable', { status: 502 }); };
+  await assert.rejects(source.load([record], options), { code: 'UPSTREAM' });
 });
 
 test('file sources load native identity and billing type and reject deleted or conflicting owners', async t => {
