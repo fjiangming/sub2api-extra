@@ -5,6 +5,7 @@ const Ajv = require('ajv');
 const { load: loadHtml } = require('cheerio');
 const safeRegex = require('safe-regex2');
 const { z } = require('zod');
+const { normalizeVisualReview } = require('./visual-config');
 
 const apiTypes = [
   'responses',
@@ -207,7 +208,7 @@ const visualReviewSchema = z.object({
   if (value.api_key?.trim() && value.clear_api_key) {
     context.addIssue({ code: 'custom', path: ['api_key'], message: '不能同时填写和清除审核 Key' });
   }
-});
+}).transform(normalizeVisualReview);
 
 const validationPolicySchema = z.object({
   version: z.literal(2).default(2),

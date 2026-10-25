@@ -27,6 +27,14 @@ function reviewTest(overrides = {}) {
 test('visual configuration is opt-in, validates endpoints, and rejects injected credential fields', () => {
   assert.equal(validateTestConfig('openai', defaultTests.openai).validation.visual, undefined);
   assert.equal(reviewTest().validation.visual.protocol, 'manxue');
+  assert.equal(reviewTest().validation.visual.benchmark, 'html');
+  assert.equal(reviewTest().validation.visual.model, 'gpt-6-astra');
+  const legacy = reviewTest({ api_url: 'https://legacy.example.com/api/v1/tests' }).validation.visual;
+  assert.equal(legacy.benchmark, 'pelican');
+  assert.equal(legacy.model, '');
+  const upgraded = reviewTest({ benchmark: 'pelican', model: 'old-model' }).validation.visual;
+  assert.equal(upgraded.benchmark, 'html');
+  assert.equal(upgraded.model, 'gpt-6-astra');
   for (const api_url of ['http://example.com/api', 'https://user:secret@example.com/api', 'https://example.com/api?key=secret', 'https://example.com/api#part']) {
     assert.throws(() => reviewTest({ api_url }), /HTTPS/);
   }
@@ -97,19 +105,23 @@ test('review preparation preserves scripts, external content and incomplete mark
   assert.equal(globalThis.__reviewSourceExecuted, undefined);
 });
 
-test('manxue submits exactly the tutorial payload, polls the same task and maps quality', async () => {
+test('manxue classifies existing HTML without generation credentials and maps both valid qualities', async () => {
   for (const quality of ['normal', 'degraded']) {
     const calls = [];
     const reviewer = new VisualReviewer({ sleep: async () => {}, request: async (url, options) => {
       calls.push({ url, options });
-      return options.method === 'POST' ? { id: 'task-1', status: 'queued', benchmark: 'pelican' }
-        : { id: 'task-1', status: 'succeeded', benchmark: 'pelican', assessment: { quality } };
+      return options.method === 'POST' ? { id: 'task-1', status: 'queued', benchmark: 'html' }
+        : { id: 'task-1', status: 'succeeded', benchmark: 'html', assessment: { quality } };
     } });
     const result = await reviewer.review({ visual: reviewTest().validation.visual, html: scriptHtml, apiKey: '', runId: 17 });
     assert.equal(result.status, quality);
     assert.equal(result.state, 'completed');
+    assert.equal(result.method, 'source_classifier');
     assert.equal(calls.length, 2);
-    assert.deepEqual(calls[0].options.body, { benchmark: 'pelican', html: scriptHtml });
+    assert.deepEqual(calls[0].options.body, {
+      benchmark: 'html', html: scriptHtml, base_url: 'https://example.com/v1',
+      api_key: 'not-used-for-html-classification', model: 'gpt-6-astra'
+    });
     assert.match(calls[0].options.taskKey, /^degradation-review-17-[a-f0-9-]{36}$/);
     assert.equal(calls[1].options.taskKey, calls[0].options.taskKey);
     assert.equal(calls[1].url, 'https://manxue.ai/api/v1/tests/task-1');
@@ -122,16 +134,19 @@ test('manxue accepts HTTP 202 tasks and polls until a valid completed assessment
   for (const quality of ['normal', 'degraded', 'future']) {
     const calls = [];
     const responses = [
-      { httpStatus: 202, body: { id: 'task-202', status: 'queued', benchmark: 'pelican' } },
-      { httpStatus: 202, body: { id: 'task-202', status: 'running', benchmark: 'pelican' } },
-      { httpStatus: 200, body: { id: 'task-202', status: 'succeeded', benchmark: 'pelican', assessment: { quality } } }
+      { httpStatus: 202, body: { id: 'task-202', status: 'queued', benchmark: 'html' } },
+      { httpStatus: 202, body: { id: 'task-202', status: 'running', benchmark: 'html' } },
+      { httpStatus: 200, body: { id: 'task-202', status: 'succeeded', benchmark: 'html', assessment: { quality } } }
     ];
     const transport = (url, options, receive) => {
       const connection = new EventEmitter();
       connection.end = (raw) => {
         calls.push({ url: url.href, method: options.method });
         if (options.method === 'POST') {
-          assert.deepEqual(JSON.parse(raw.toString('utf8')), { benchmark: 'pelican', html: scriptHtml });
+          assert.deepEqual(JSON.parse(raw.toString('utf8')), {
+            benchmark: 'html', html: scriptHtml, base_url: 'https://example.com/v1',
+            api_key: 'not-used-for-html-classification', model: 'gpt-6-astra'
+          });
         }
         const next = responses.shift();
         const response = Readable.from([Buffer.from(JSON.stringify(next.body))]);
@@ -154,9 +169,81 @@ test('manxue accepts HTTP 202 tasks and polls until a valid completed assessment
   }
 });
 
+test('other asynchronous compatible services retain the legacy HTML submission contract', async () => {
+  const visual = reviewTest({ api_url: 'https://legacy.example.com/api/v1/tests' }).validation.visual;
+  const calls = [];
+  const reviewer = new VisualReviewer({ request: async (_url, options) => {
+    calls.push(options);
+    return { id: 'legacy-task', benchmark: 'pelican', status: 'succeeded', assessment: { quality: 'normal' } };
+  } });
+  const result = await reviewer.review({ visual, html, apiKey: 'audit-only', runId: 1 });
+  assert.equal(result.status, 'normal');
+  assert.equal(result.method, undefined);
+  assert.deepEqual(calls[0].body, { benchmark: 'pelican', html });
+  assert.equal(calls[0].apiKey, 'audit-only');
+});
+
+test('official HTML submission normalizes raw legacy config and never switches into generation modes', async () => {
+  for (const benchmark of ['pelican', 'creative', 'candy', 'html']) {
+    const calls = [];
+    const reviewer = new VisualReviewer({ request: async (_url, options) => {
+      calls.push(options);
+      return { id: 'classified', benchmark: 'html', status: 'succeeded', assessment: { quality: 'normal' } };
+    } });
+    const visual = { ...reviewTest().validation.visual, benchmark, model: 'generation-model' };
+    const result = await reviewer.review({ visual, html, apiKey: 'audit-http-auth-only', runId: 1 });
+    assert.equal(result.status, 'normal');
+    assert.equal(calls[0].body.benchmark, 'html');
+    assert.equal(calls[0].body.model, 'gpt-6-astra');
+    assert.equal(calls[0].body.api_key, 'not-used-for-html-classification');
+    assert.equal(JSON.stringify(calls[0].body).includes('audit-http-auth-only'), false);
+    assert.equal(visual.benchmark, benchmark);
+  }
+});
+
+test('JSON rejection details are bounded and redacted while HTTP failures remain unknown', async () => {
+  const responses = [
+    { error: 'model is required and must be gpt-6-astra for pelican, creative and html' },
+    { error: { code: 'INVALID_REQUEST', message: 'Use HTTPS https://private.example.com/path?token=secret and Bearer audit-secret-key' },
+      api_key: 'do-not-copy', html: '<html>do-not-copy</html>' },
+    { error: { code: 'UNSUPPORTED_HTML', message: '<script>private work source</script>' } },
+    { error: { code: 'TOO_LONG', message: 'x'.repeat(9000) } }
+  ];
+  for (const body of responses) {
+    const logs = [];
+    const reviewer = new VisualReviewer({ logger: { warn: message => logs.push(message) },
+      request: (url, options) => requestReviewJson(url, options, {
+        lookup: async () => [{ address: '8.8.8.8', family: 4 }],
+        request: (_url, _options, receive) => {
+          const connection = new EventEmitter();
+          connection.end = () => {
+            const response = Readable.from([Buffer.from(JSON.stringify(body))]);
+            response.statusCode = 400;
+            response.headers = {};
+            receive(response);
+          };
+          return connection;
+        }
+      })
+    });
+    const result = await reviewer.review({ visual: reviewTest().validation.visual, html,
+      apiKey: 'audit-secret-key', runId: 400 });
+    assert.equal(result.status, 'unknown');
+    assert.match(result.reason, /请求参数不符合接口要求/);
+    assert.equal(result.diagnostic.stage, 'submit');
+    assert.equal(result.diagnostic.http_status, 400);
+    assert.ok((result.diagnostic.provider_message || '').length <= 300);
+    assert.doesNotMatch(JSON.stringify({ result, logs }), /audit-secret-key|private\.example|token=secret|do-not-copy|private work source/);
+    if (typeof body.error === 'string') assert.equal(result.diagnostic.provider_message, body.error);
+    else if (body.error.code === 'INVALID_REQUEST') assert.equal(result.diagnostic.provider_code, 'INVALID_REQUEST');
+    else assert.equal(result.diagnostic.provider_message, undefined);
+    assert.doesNotMatch(JSON.stringify(logs), /provider_message|model is required/);
+  }
+});
+
 test('audit HTTP failures keep their status and log safe submit or poll diagnostics without resubmitting', async () => {
   for (const stage of ['submit', 'poll']) {
-    for (const httpStatus of [302, 401, 403, 404, 429, 503]) {
+    for (const httpStatus of [302, 400, 401, 403, 404, 413, 422, 429, 503]) {
       const calls = [];
       const logs = [];
       const transport = (_url, options, receive) => {
@@ -165,7 +252,7 @@ test('audit HTTP failures keep their status and log safe submit or poll diagnost
           calls.push(options.method);
           const queued = stage === 'poll' && options.method === 'POST';
           const response = Readable.from([Buffer.from(queued
-            ? JSON.stringify({ id: 'task-1', status: 'queued', benchmark: 'pelican' })
+            ? JSON.stringify({ id: 'task-1', status: 'queued', benchmark: 'html' })
             : 'private upstream response with sk-private-audit-key')]);
           response.statusCode = queued ? 201 : httpStatus;
           response.headers = { location: 'https://private.example.com/private/path?token=secret' };
@@ -193,12 +280,13 @@ test('audit HTTP failures keep their status and log safe submit or poll diagnost
 
 test('manxue rejects mismatched tasks, unknown conclusions, invalid statuses and never resubmits', async () => {
   for (const task of [
-    { id: 'wrong', benchmark: 'pelican', status: 'succeeded', assessment: { quality: 'normal' } },
+    { id: 'wrong', benchmark: 'html', status: 'succeeded', assessment: { quality: 'normal' } },
     { id: 'task-1', benchmark: 'other', status: 'succeeded', assessment: { quality: 'normal' } },
-    { id: 'task-1', benchmark: 'pelican', status: 'running', assessment: { quality: 'normal' } },
-    { id: 'task-1', benchmark: 'pelican', status: 'succeeded', assessment: { quality: 'future' } },
-    { id: 'task-1', benchmark: 'pelican', status: 'succeeded', quality: 'normal' },
-    { id: 'task-1', benchmark: 'pelican', status: 'failed' }
+    { id: 'task-1', benchmark: 'pelican', status: 'succeeded', assessment: { quality: 'normal' } },
+    { id: 'task-1', benchmark: 'html', status: 'running', assessment: { quality: 'normal' } },
+    { id: 'task-1', benchmark: 'html', status: 'succeeded', assessment: { quality: 'future' } },
+    { id: 'task-1', benchmark: 'html', status: 'succeeded', quality: 'normal' },
+    { id: 'task-1', benchmark: 'html', status: 'failed' }
   ]) {
     let posts = 0;
     const reviewer = new VisualReviewer({ sleep: async () => {}, request: async (_url, options) => {
@@ -233,7 +321,7 @@ test('review total timeout covers polling, while empty and oversized output neve
   let calls = 0;
   const reviewer = new VisualReviewer({ now: () => time, sleep: async (ms) => { time += ms; }, request: async () => {
     calls++;
-    return { id: 'task-1', status: 'running', benchmark: 'pelican' };
+    return { id: 'task-1', status: 'running', benchmark: 'html' };
   } });
   const visual = reviewTest({ timeout_seconds: 5, poll_interval_seconds: 2 }).validation.visual;
   const result = await reviewer.review({ visual, html, runId: 1 });

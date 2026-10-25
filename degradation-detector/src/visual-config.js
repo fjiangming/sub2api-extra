@@ -2,6 +2,20 @@
 
 const crypto = require('crypto');
 
+function usesManxueHtmlApi(visual) {
+  if (visual?.protocol !== 'manxue') return false;
+  try {
+    const url = new URL(visual.api_url);
+    return url.origin === 'https://manxue.ai' && url.pathname.replace(/\/$/, '') === '/api/v1/tests';
+  } catch { return false; }
+}
+
+function normalizeVisualReview(visual) {
+  return usesManxueHtmlApi(visual)
+    ? { ...visual, benchmark: 'html', model: 'gpt-6-astra' }
+    : visual;
+}
+
 function publicVisualSettings(visual) {
   if (!visual) return undefined;
   const { api_key: _key, clear_api_key: _clear, key_cipher: _cipher,
@@ -41,4 +55,4 @@ function storeVisualTest(test, vault, scope, previousTest, inheritedTest) {
   return { ...test, validation: { ...test.validation, visual } };
 }
 
-module.exports = { publicVisualSettings, snapshotValidation, storeVisualTest };
+module.exports = { normalizeVisualReview, publicVisualSettings, snapshotValidation, storeVisualTest, usesManxueHtmlApi };

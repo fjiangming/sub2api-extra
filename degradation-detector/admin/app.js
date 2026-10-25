@@ -326,7 +326,7 @@ function visualReviewEditorHtml(visual = {}) {
           <input data-visual="enabled" type="checkbox" ${visual.enabled ? 'checked' : ''}>
           <span class="switch-track" aria-hidden="true"><span></span></span><span>启用视觉审核</span>
         </label>
-        <label class="field"><span>审核协议</span><select data-visual="protocol">${optionsHtml(['manxue', 'html_review'], visual.protocol || 'manxue', { manxue: '满血 AI / 异步任务', html_review: '兼容 HTML 审核 / 同步返回' })}</select></label>
+        <label class="field"><span>审核协议</span><select data-visual="protocol">${optionsHtml(['manxue', 'html_review'], visual.protocol || 'manxue', { manxue: '满血 AI / 异步分类', html_review: '兼容 HTML 审核 / 同步返回' })}</select></label>
         <label class="field"><span>判定方式</span><select data-visual="decision_mode">${optionsHtml(['visual', 'both'], visual.decision_mode || 'visual', { visual: '以视觉审核为准', both: '现有规则与视觉审核共同判定' })}</select></label>
         <label class="field field-wide"><span>审核 API 地址</span><input data-visual="api_url" type="url" maxlength="2000" value="${escapeHtml(visual.api_url || 'https://manxue.ai/api/v1/tests')}"></label>
         <label class="field field-wide"><span>审核专用 Key（可选）</span><input data-visual="api_key" type="password" autocomplete="new-password" maxlength="8192" value="${escapeHtml(visual.api_key || '')}" placeholder="${visual.api_key_configured ? '已配置，留空保留' : '无鉴权的审核服务可留空'}"></label>
@@ -334,7 +334,7 @@ function visualReviewEditorHtml(visual = {}) {
         <label class="field"><span>检测基准</span><input data-visual="benchmark" maxlength="64" value="${escapeHtml(visual.benchmark || 'pelican')}"></label>
         <label class="field"><span>审核总超时（秒）</span><input data-visual="timeout_seconds" type="number" min="5" max="1800" value="${escapeHtml(visual.timeout_seconds || 120)}"></label>
         <label class="field" data-visual-async><span>轮询间隔（秒）</span><input data-visual="poll_interval_seconds" type="number" min="1" max="30" value="${escapeHtml(visual.poll_interval_seconds || 2)}"></label>
-        <label class="field" data-visual-sync><span>审核模型（可选）</span><input data-visual="model" maxlength="200" value="${escapeHtml(visual.model || '')}"></label>
+        <label class="field"><span data-visual-model-label>审核模型（可选）</span><input data-visual="model" maxlength="200" value="${escapeHtml(visual.model || '')}"></label>
         <label class="field field-wide" data-visual-sync><span>审核要求（可选）</span><textarea data-visual="instructions" maxlength="10000">${escapeHtml(visual.instructions || '')}</textarea></label>
       </div>
     </details>`;
@@ -348,6 +348,22 @@ function updateVisualEditor(editor) {
   toggle.disabled = !supportsReview;
   const enabled = supportsReview && toggle.checked;
   const asynchronous = details.querySelector('[data-visual="protocol"]').value === 'manxue';
+  let classifier = false;
+  try {
+    const url = new URL(details.querySelector('[data-visual="api_url"]').value);
+    classifier = asynchronous && url.origin === 'https://manxue.ai'
+      && url.pathname.replace(/\/$/, '') === '/api/v1/tests';
+  } catch {}
+  const benchmark = details.querySelector('[data-visual="benchmark"]');
+  const model = details.querySelector('[data-visual="model"]');
+  if (classifier) {
+    benchmark.value = 'html';
+    model.value = 'gpt-6-astra';
+  }
+  benchmark.readOnly = classifier;
+  model.readOnly = classifier;
+  details.querySelector('[data-visual-model-label]').textContent = classifier ? '接口模型字段（固定）' : '审核模型（可选）';
+  model.title = classifier ? '接口要求的固定字段，不代表被检测模型或视觉模型' : '';
   details.querySelector('summary span').textContent = enabled ? '已开启' : '未开启';
   for (const control of details.querySelectorAll('[data-visual]')) {
     if (control === toggle) continue;
@@ -974,6 +990,10 @@ function renderHistoryList() {
       const reviewMeta = run.review
         ? `<small><span class="history-reviewed"><i data-lucide="badge-check"></i>人工复核</span> · 自动判定：${escapeHtml(statusLabels[run.automatic_status] || run.automatic_status)} · ${escapeHtml(run.automatic_reason || '没有自动判定说明')}</small>`
         : '';
+      const diagnostic = run.review_diagnostic;
+      const diagnosticMeta = diagnostic
+        ? `<small>审核诊断 · ${escapeHtml({ submit: '提交', poll: '查询', prepare: '准备' }[diagnostic.stage] || '审核')}${diagnostic.http_status ? ` · HTTP ${Number(diagnostic.http_status)}` : ''}${diagnostic.provider_code ? ` · ${escapeHtml(diagnostic.provider_code)}` : ''}${diagnostic.provider_message ? ` · ${escapeHtml(diagnostic.provider_message)}` : ''}</small>`
+        : '';
       return `
       <div class="history-row" data-status="${escapeHtml(run.status)}" data-deletable="${run.deletable === true}">
         <input type="checkbox" data-history-run-id="${run.id}"
@@ -984,6 +1004,7 @@ function renderHistoryList() {
           <span class="history-row-reason">${escapeHtml(run.reason || (run.deletable ? '没有判定说明' : '任务尚未完成'))}</span>
           <small>${taskMeta}</small>
           ${reviewMeta}
+          ${diagnosticMeta}
         </span>
         <button class="button history-review-button" type="button" data-review-run-id="${run.id}"
           ${run.reviewable && !state.historyDeleting ? '' : 'disabled'} title="${run.reviewable ? '人工复核检测状态' : '该记录不能人工复核'}">

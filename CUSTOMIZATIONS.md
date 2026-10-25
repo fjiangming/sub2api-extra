@@ -1,5 +1,23 @@
 # 个性化功能维护台账
 
+## 2026-10-25：修复满血 AI HTML 审核 HTTP 400 与管理员诊断
+
+用户要求修复降智检测审核不可用，并随后授权提交 GitHub。本轮只提交降智检测及对应台账，保留运营中心、独立生产台账及其它无关未提交改动；推送至 main 后沿用现有 Actions 构建镜像，不部署，不改 Sub2API 源码、生产配置或历史记录。
+
+根因：满血 AI 当前公开 API 文档已与旧教程不同。`pelican` 用于上游生成，提交已有作品必须使用 `html` 模式，并携带 `base_url`、`api_key`、固定 `model=gpt-6-astra`。旧格式实际返回 HTTP 400 / `model is required and must be gpt-6-astra for pelican, creative and html`。官方文档明确 HTML 模式是源码分类器，不调用上游、不消耗上游 Token，也不是真正的截图视觉判断。
+
+| 文件 | 本轮改动与后续必须保留的约定 |
+| --- | --- |
+| `degradation-detector/src/visual-config.js`、`src/config.js` | 仅识别官方 HTTPS origin 与 `/api/v1/tests` 路径，将已有配置自动归一为 HTML 分类与固定模型字段；生成模型不变，非官方兼容接口保留原协议与可配置基准。无新增环境变量或迁移。 |
+| `degradation-detector/src/visual-review.js` | 提交已保存 HTML，固定发送非真实的 URL / Key 占位值满足官方格式校验，不转发用户或分组生成凭据，不进入上游生成模式；轮询校验实际 HTML 基准、任务 ID 和最终结论，正常 / 疑似降智 / 无法判定映射不变。HTTP 400 / 422、401、403、404、413、429、重定向与 5xx 分别给出通用错误，不误记正常或降智，不自动重发提交。 |
+| `degradation-detector/src/review-http.js` | 非成功响应仅限时 2 秒读取最多 8 KiB JSON，提取错误码和最多 300 字符说明；过滤已知凭据、Key 模式、长令牌、URL、邮箱、控制字符及包含源码的消息。保留 HTTP 状态，不保存整段正文；DNS 固定公网、禁止重定向及原总超时保持。 |
+| `degradation-detector/src/server.js`、`src/store.js` | 脱敏审核诊断只加入现有管理员分组历史，沿用实时角色及分组授权；普通用户结果列表、详情及预览不返回诊断。公开结果仅新增安全枚举 `method=source_classifier` 标识实际方法，旧记录的 HTTP 状态可供管理员查看，缺失说明不编造。 |
+| `degradation-detector/admin/app.js`、`public/app.js` | 官方接口的基准与模型字段自动填充且只读，其它兼容模型字段可编辑；管理员历史展示转义后的提交 / 查询、状态码及脱敏说明。结果详情明确显示源码分类及其依据，保留原有折叠证据、HTML 预览、人工复核及只读结果页边界。 |
+| `degradation-detector/tests/visual-review.test.js`、`tests/server.test.js` | 更新官方真实请求契约与 HTML 基准；覆盖旧配置归一、不发送真实生成凭据、兼容旧异步服务和同步 HTML 服务、两种有效结论、HTTP 分类 / 大小限制 / 脱敏、管理员专有诊断、普通用户隔离与角色撤销；保留任务不匹配、超时与不重复提交回归。 |
+| `degradation-detector/README.md`、`CUSTOMIZATIONS.md` | 说明新格式、固定占位值、源码分类的实际能力、旧配置兼容、管理员诊断入口和原历史不自动重判。 |
+
+验证：降智检测完整 117 项测试通过；本机用无真实凭据的示例 HTML 调用公开 API，旧格式得到上述 400，新格式返回 202 并轮询至 succeeded；修复后的实际 VisualReviewer 模块也取得 completed / degraded，生成模型保持不变。仅圆形 SVG 的简化示例被分类为疑似降智符合其输入，不代表用户的真实分组结论。1280px 桌面 / 390px 手机 Playwright 验证固定与自定义模型控件、管理员诊断、源码分类依据、默认折叠证据及 iframe 内 SVG 渲染，无页面错误或横向溢出；使用隔离演示数据库且不发生成请求，测试服务已关闭。截图留在忽略的 `degradation-detector/data-preview/manxue-protocol-20261025/`。生产 SSH 接口探测仍被自动审批拒绝，因此没有生产侧复测或重启；不把本机实测称为服务器已修复。
+
 ## 2026-10-23：运营中心计费核查
 
 配套 `fjiangming/sub2api` dev，核心基线 `dba770d56a0ee0ae5bad1b3dc5e11614d323163c`。

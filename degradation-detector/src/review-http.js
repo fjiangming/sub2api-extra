@@ -19,13 +19,65 @@ for (const [address, prefix] of [['2001::', 32], ['2001:db8::', 32], ['2002::', 
 }
 
 class ReviewError extends Error {
-  constructor(code, { httpStatus } = {}) {
+  constructor(code, { httpStatus, diagnostic } = {}) {
     super(code);
     this.code = code;
     if (Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599) {
       this.httpStatus = httpStatus;
     }
+    if (diagnostic) this.diagnostic = diagnostic;
   }
+}
+
+function sanitizeReviewDiagnostic(value, secrets = []) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const clean = (input, limit) => {
+    if (typeof input !== 'string') return '';
+    let text = input.slice(0, 8192);
+    for (const secret of secrets) {
+      if (typeof secret === 'string' && secret) text = text.split(secret).join('[REDACTED]');
+    }
+    if (/<[!/?a-z]/i.test(text)) return '';
+    return text
+      .replace(/https?:\/\/[^\s<>"']+/gi, '[URL]')
+      .replace(/\bBearer\s+\S+/gi, 'Bearer [REDACTED]')
+      .replace(/\b(?:sk-|admin-|sess-)[a-zA-Z0-9_-]+/g, '[REDACTED]')
+      .replace(/\b(api[_ -]?key|authorization|token|password|secret)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1=[REDACTED]')
+      .replace(/\b[A-Za-z0-9_-]{32,}\b/g, '[REDACTED]')
+      .replace(/[^\s@]+@[^\s@]+\.[^\s@]+/g, '[EMAIL]')
+      .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, ' ')
+      .replace(/\s+/g, ' ').trim().slice(0, limit);
+  };
+  const result = {};
+  if (['prepare', 'submit', 'poll'].includes(value.stage)) result.stage = value.stage;
+  if (Number.isInteger(value.http_status) && value.http_status >= 300 && value.http_status <= 599) {
+    result.http_status = value.http_status;
+  }
+  const code = clean(value.provider_code, 64);
+  if (/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,63}$/.test(code)) result.provider_code = code;
+  const message = clean(value.provider_message, 300);
+  if (message) result.provider_message = message;
+  return Object.keys(result).length ? result : undefined;
+}
+
+async function responseDiagnostic(response, apiKey) {
+  const chunks = [];
+  let length = 0;
+  const timer = setTimeout(() => response.destroy(), 2000);
+  try {
+    for await (const chunk of response) {
+      length += chunk.length;
+      if (length > 8192) return undefined;
+      chunks.push(chunk);
+    }
+    const data = JSON.parse(Buffer.concat(chunks, length).toString('utf8'));
+    const error = data?.error;
+    return sanitizeReviewDiagnostic({
+      provider_code: error?.code ?? data?.code ?? data?.error_code,
+      provider_message: typeof error === 'string' ? error : error?.message ?? data?.message ?? data?.detail
+    }, [apiKey]);
+  } catch { return undefined; }
+  finally { clearTimeout(timer); }
 }
 
 function publicAddress(address) {
@@ -85,7 +137,8 @@ async function requestReviewJson(value, { method, body, apiKey, signal, taskKey 
       try {
         // Redirects never receive credentials or trigger an additional POST.
         if (![200, 201, 202].includes(response.statusCode)) {
-          throw new ReviewError('REVIEW_HTTP_ERROR', { httpStatus: response.statusCode });
+          const diagnostic = response.statusCode >= 400 ? await responseDiagnostic(response, apiKey) : undefined;
+          throw new ReviewError('REVIEW_HTTP_ERROR', { httpStatus: response.statusCode, diagnostic });
         }
         if (Number(response.headers['content-length'] || 0) > 256 * 1024) throw new ReviewError('REVIEW_RESPONSE_TOO_LARGE');
         const chunks = [];
@@ -110,4 +163,4 @@ async function requestReviewJson(value, { method, body, apiKey, signal, taskKey 
   });
 }
 
-module.exports = { ReviewError, publicAddress, requestReviewJson, resolveReviewAddress, reviewUrl };
+module.exports = { ReviewError, publicAddress, requestReviewJson, resolveReviewAddress, reviewUrl, sanitizeReviewDiagnostic };

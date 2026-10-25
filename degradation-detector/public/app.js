@@ -244,8 +244,9 @@ function validationBasisHtml(detail) {
       }
     } catch {}
     const completed = visual.state === 'completed' && ['normal', 'degraded'].includes(visual.status);
+    const kind = visual.method === 'source_classifier' ? 'HTML 源码分类' : '作品审核';
     basis = completed
-      ? `${visual.decision_mode === 'both' ? '结合本地规则与' : '参考'} ${site} 的作品审核结果，结论仅供模型能力评估参考。`
+      ? `${visual.decision_mode === 'both' ? '结合本地规则与' : '参考'} ${site} 的${kind}结果，结论仅供模型能力评估参考。`
       : `本次配置的作品审核服务为 ${site}，未取得有效审核结论。`;
   }
   return `<p class="validation-basis"><i data-lucide="info"></i><span><strong>${title}：</strong>${basis}</span></p>`;
@@ -263,12 +264,13 @@ function validationEvidenceHtml(validation, manuallyReviewed = false) {
       <span><strong>${escapeHtml(rule.label)}</strong><small>${escapeHtml(rule.message)} · ${rule.severity === 'hard' ? '核心规则' : '辅助规则'} · 权重 ${Number(rule.weight) || 0}</small></span>
     </li>`).join('');
   const visual = validation.visual;
+  const reviewLabel = visual?.method === 'source_classifier' ? '源码分类' : '视觉';
   const summary = visual
-    ? `视觉 ${labels[visual.status] || '无法判定'}`
+    ? `${reviewLabel} ${labels[visual.status] || '无法判定'}`
     : `${score}${coverage} · ${Number(validation.passed) || 0}/${Number(validation.total) || 0} 条通过`;
   const reviewEvidence = visual ? `
     <li data-passed="${visual.status === 'normal' ? 'true' : visual.status === 'degraded' ? 'false' : 'unknown'}">
-      <i data-lucide="eye"></i><span><strong>视觉审核 · ${escapeHtml(labels[visual.status] || '无法判定')}</strong>
+      <i data-lucide="eye"></i><span><strong>${reviewLabel}审核 · ${escapeHtml(labels[visual.status] || '无法判定')}</strong>
       <small>${escapeHtml(visual.reason)} · ${visual.protocol === 'manxue' ? '满血 AI 兼容协议' : 'HTML 审核协议'} · ${(Number(visual.duration_ms || 0) / 1000).toFixed(1)} 秒</small></span>
     </li>` : '';
   return `

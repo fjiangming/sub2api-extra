@@ -2,7 +2,8 @@
 
 const { setTimeout: delay } = require('timers/promises');
 const crypto = require('crypto');
-const { ReviewError, requestReviewJson, reviewUrl } = require('./review-http');
+const { ReviewError, requestReviewJson, reviewUrl, sanitizeReviewDiagnostic } = require('./review-http');
+const { normalizeVisualReview, usesManxueHtmlApi } = require('./visual-config');
 
 const errorReasons = {
   REVIEW_TIMEOUT: '视觉审核超时，无法判定',
@@ -32,18 +33,34 @@ function prepareReviewHtml(source) {
   return html;
 }
 
-function reviewFailure(visual, code, durationMs = 0, httpStatus = null) {
+function reviewHttpReason(status) {
+  if ([400, 422].includes(status)) return '视觉审核请求参数不符合接口要求，无法判定';
+  if (status === 401) return '视觉审核鉴权失败，请管理员检查审核专用 Key，无法判定';
+  if (status === 403) return '视觉审核接口拒绝访问，无法判定';
+  if (status === 404) return '视觉审核接口或任务不存在，无法判定';
+  if (status === 413) return '作品超过视觉审核接口的大小限制，无法判定';
+  if (status === 429) return '视觉审核请求被限流，请稍后重试，无法判定';
+  if (status >= 300 && status < 400) return '视觉审核接口发生重定向，请管理员核对最终地址，无法判定';
+  if (status >= 400 && status < 500) return '视觉审核请求被接口拒绝，无法判定';
+  return errorReasons.REVIEW_HTTP_ERROR;
+}
+
+function reviewFailure(visual, code, durationMs = 0, httpStatus = null, diagnostic) {
   const knownCode = Object.hasOwn(errorReasons, code) ? code : 'REVIEW_NETWORK_ERROR';
+  let reason = knownCode === 'REVIEW_HTTP_ERROR' ? reviewHttpReason(httpStatus) : errorReasons[knownCode];
+  const classifier = usesManxueHtmlApi(visual);
+  if (classifier) reason = reason.replace(/^视觉审核/, 'HTML 分类');
   return {
     protocol: visual.protocol,
     decision_mode: visual.decision_mode,
     status: 'unknown',
     state: 'failed',
     error_code: knownCode,
-    reason: errorReasons[knownCode],
+    reason,
+    ...(classifier ? { method: 'source_classifier' } : {}),
     duration_ms: Math.max(0, durationMs),
     ...(knownCode === 'REVIEW_HTTP_ERROR' && Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599
-      ? { http_status: httpStatus } : {})
+      ? { http_status: httpStatus, diagnostic: sanitizeReviewDiagnostic({ ...diagnostic, http_status: httpStatus }) } : {})
   };
 }
 
@@ -56,6 +73,8 @@ class VisualReviewer {
   }
 
   async review({ visual, html, apiKey, runId }) {
+    visual = normalizeVisualReview(visual);
+    const classifier = usesManxueHtmlApi(visual);
     const started = this.now();
     const controller = new AbortController();
     const deadline = started + visual.timeout_seconds * 1000;
@@ -89,6 +108,8 @@ class VisualReviewer {
       let task = await request('POST', base, {
         benchmark: visual.benchmark,
         html: reviewHtml,
+        // HTML classification validates these placeholders without contacting an upstream.
+        ...(classifier ? { base_url: 'https://example.com/v1', api_key: 'not-used-for-html-classification', model: visual.model } : {}),
         ...(visual.protocol === 'html_review' && visual.model ? { model: visual.model } : {}),
         ...(visual.protocol === 'html_review' && visual.instructions ? { instructions: visual.instructions } : {})
       });
@@ -118,12 +139,13 @@ class VisualReviewer {
         decision_mode: visual.decision_mode,
         status: quality,
         state: 'completed',
-        reason: quality === 'normal' ? '视觉审核判定为正常' : '视觉审核判定为疑似降智',
+        reason: (classifier ? 'HTML 源码分类' : '视觉审核') + (quality === 'normal' ? '判定为正常' : '判定为疑似降智'),
+        ...(classifier ? { method: 'source_classifier' } : {}),
         duration_ms: Math.max(0, this.now() - started)
       };
     } catch (error) {
       const failure = reviewFailure(visual, controller.signal.aborted ? 'REVIEW_TIMEOUT' : error.code,
-        this.now() - started, error.httpStatus);
+        this.now() - started, error.httpStatus, { ...error.diagnostic, stage });
       this.logger.warn(JSON.stringify({
         event: 'visual_review_failed', runId, protocol: visual.protocol, stage, code: failure.error_code,
         ...(failure.http_status ? { httpStatus: failure.http_status } : {})

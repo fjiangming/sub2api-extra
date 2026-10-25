@@ -12,6 +12,7 @@ const { CredentialVault } = require('./credential-vault');
 const { DetectionRunner, deterministicVerdict } = require('./detection-runner');
 const { AppError, publicError } = require('./errors');
 const { GroupMetrics, publicGroupCacheStats } = require('./group-metrics');
+const { sanitizeReviewDiagnostic } = require('./review-http');
 const { Scheduler } = require('./scheduler');
 const { MaintenanceService } = require('./maintenance');
 const { Store, publicRun, publicValidationResult } = require('./store');
@@ -260,8 +261,17 @@ async function removeArtifactFiles(config, filenames) {
 
 function adminHistoryRun(row) {
   const payload = publicRun(row);
+  let diagnostic = null;
+  try {
+    const visual = JSON.parse(row.validation_result_json || '{}').visual;
+    diagnostic = sanitizeReviewDiagnostic({
+      ...visual?.diagnostic,
+      http_status: visual?.http_status ?? visual?.diagnostic?.http_status
+    }) || null;
+  } catch {}
   return {
     ...payload,
+    review_diagnostic: diagnostic,
     trigger_type: row.trigger_type,
     automatic_status: row.status,
     automatic_reason: row.reason,

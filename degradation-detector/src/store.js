@@ -87,6 +87,7 @@ function publicValidationResult(row, includeRules = false) {
       decision_mode: visual.decision_mode === 'both' ? 'both' : 'visual',
       status: ['normal', 'degraded'].includes(visual.status) ? visual.status : 'unknown',
       state: visual.state === 'completed' ? 'completed' : 'failed',
+      ...(visual.method === 'source_classifier' ? { method: 'source_classifier' } : {}),
       reason: String(visual.reason || '').slice(0, 300),
       duration_ms: Math.max(0, Number(visual.duration_ms) || 0),
       ...(visual.error_code ? { error_code: String(visual.error_code).slice(0, 60) } : {})

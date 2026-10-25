@@ -847,6 +847,62 @@ test('artifact MIME values are normalized before being used as response headers'
   assert.equal(artifactMime('text/html\r\nx-unsafe: yes'), 'application/octet-stream');
 });
 
+test('review rejection diagnostics are visible only in authorized administrator history', async (t) => {
+  const config = testConfig(t);
+  const sub2api = new FakeSub2Api();
+  const { app, runtime } = createApp(config, { sub2api, runner: { execute: async () => null }, startScheduler: false });
+  const http = await listen(app);
+  t.after(async () => {
+    await http.close(); await runtime.scheduler.close(); runtime.auth.close(); runtime.store.close();
+  });
+  const admin = await session(http.baseUrl, 'token-a');
+  const ordinary = await session(http.baseUrl, 'token-b');
+  const testCase = { ...defaultTests.openai, validation: { version: 2, rules: [], visual: { enabled: true, benchmark: 'pelican' } } };
+  const save = await fetch(`${http.baseUrl}/api/admin/config`, {
+    method: 'PUT', headers: headers(admin, admin.csrfToken),
+    body: JSON.stringify(configuration([{ id: '1', enabled: true, key: 'sk-detection-dedicated-12345678' }], '09:00', testCase))
+  });
+  assert.equal(save.status, 200);
+  const effective = runtime.store.getPlatformTest('openai');
+  assert.equal(effective.validation.visual.benchmark, 'html');
+  assert.equal(effective.validation.visual.model, 'gpt-6-astra');
+  const run = runtime.store.createRun(runtime.store.getMonitor(config.serviceOwnerId, '1'), effective, 'manual');
+  assert.equal(JSON.parse(run.validation_snapshot).visual.benchmark, 'html');
+  runtime.store.markRunRunning(run.id);
+  runtime.store.completeRun(run.id, {
+    status: 'unknown', quality: 'unknown', reason: 'HTML 分类请求参数不符合接口要求，无法判定',
+    source: 'visual_review', outputText: '<html><body><svg/></body></html>',
+    validationResult: { passed: 0, total: 0, results: [], visual: {
+      protocol: 'manxue', method: 'source_classifier', state: 'failed', status: 'unknown',
+      reason: 'HTML 分类请求参数不符合接口要求，无法判定', http_status: 400,
+      diagnostic: { stage: 'submit', http_status: 400, provider_code: 'INVALID_REQUEST',
+        provider_message: 'model is required; key=sk-private-diagnostic-key https://private.example.com/api?token=secret',
+        raw_response: 'private upstream response', api_key: 'sk-private-diagnostic-key' }
+    } }
+  });
+  const endpoint = `${http.baseUrl}/api/admin/groups/1/runs`;
+  assert.equal((await fetch(endpoint)).status, 401);
+  assert.equal((await fetch(endpoint, { headers: headers(ordinary) })).status, 403);
+  const response = await fetch(endpoint, { headers: headers(admin) });
+  assert.equal(response.status, 200);
+  const history = await response.json();
+  const diagnostic = history.runs[0].review_diagnostic;
+  assert.equal(diagnostic.stage, 'submit');
+  assert.equal(diagnostic.http_status, 400);
+  assert.equal(diagnostic.provider_code, 'INVALID_REQUEST');
+  assert.match(diagnostic.provider_message, /model is required/);
+  assert.doesNotMatch(JSON.stringify(history), /sk-private|private\.example|token=secret|raw_response|api_key|private upstream/);
+  for (const path of ['/api/results', `/api/results/${run.id}`]) {
+    const publicResponse = await fetch(http.baseUrl + path, { headers: headers(ordinary) });
+    assert.equal(publicResponse.status, 200);
+    const payload = await publicResponse.text();
+    assert.doesNotMatch(payload, /review_diagnostic|diagnostic|http_status|provider_code|provider_message|model is required|sk-private/);
+    assert.match(payload, /source_classifier/);
+  }
+  sub2api.tokenARole = 'user';
+  assert.equal((await fetch(endpoint, { headers: headers(admin) })).status, 403);
+});
+
 test('visual settings enforce administrator access and keep credentials out of configs, history and result APIs', async (t) => {
   const config = testConfig(t);
   const { app, runtime } = createApp(config, { sub2api: new FakeSub2Api(), runner: { execute: async () => null }, startScheduler: false });
