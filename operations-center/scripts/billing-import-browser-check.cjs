@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE_PATH || 'playwright');
-const { startPreview, sample, groupSample } = require('./billing-import-preview.cjs');
+const { startPreview, sample, groupSample, manySample } = require('./billing-import-preview.cjs');
 
 async function main() {
   const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}) });
@@ -130,6 +130,34 @@ async function main() {
         await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 3);
         assert.deepEqual(errors, []);
         console.log(`${name}: CSV upload, matching, preview, native demo settlement, reload, filtering and layout passed`);
+      } finally { await context.close(); await preview.stop(); }
+    }
+    {
+      const preview = await startPreview({ port: 0, includeMany: true });
+      const context = await browser.newContext({ viewport: { width: 1440, height: 1024 } });
+      try {
+        const page = await context.newPage(), previewChunkSizes = [];
+        page.on('request', request => {
+          if (request.url().endsWith('/preview') && request.method() === 'POST') {
+            previewChunkSizes.push(request.postDataJSON().rowIds.length);
+          }
+        });
+        await page.goto(`http://127.0.0.1:${preview.port}/preview`);
+        await page.locator('#br-import-tab').click();
+        await page.locator('#bci-file').setInputFiles({ name: 'many-rows.csv', mimeType: 'text/csv', buffer: Buffer.from(manySample) });
+        await page.locator('#bci-upload button[type=submit]').click();
+        await page.locator('#bci-workspace').waitFor({ state: 'visible' });
+        await page.locator('#bci-mappings select').selectOption('356');
+        await page.locator('#bci-match button[type=submit]').click();
+        await page.waitForFunction(() => document.getElementById('bci-summary').textContent.includes('可补记 21'));
+        assert.deepEqual(previewChunkSizes, [20, 1]);
+        assert.equal(await page.locator('#bci-list tr').count(), 20);
+        assert.match(await page.locator('#bci-summary').innerText(), /可补记 21/);
+        const batchId = preview.imports.store.batches()[0].id;
+        const rows = preview.imports.store.rows(batchId);
+        assert.equal(rows.filter(row => row.status === 'preview').length, 21);
+        assert.ok(rows.every(row => !row.case_id), 'preview generation must not reserve or settle cases');
+        console.log('many rows: full batch auto-previewed in bounded 20 + 1 chunks');
       } finally { await context.close(); await preview.stop(); }
     }
     for (const [name, viewport] of [['group-desktop', { width: 1440, height: 1024 }], ['group-mobile', { width: 390, height: 844 }]]) {

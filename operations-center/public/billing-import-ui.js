@@ -1,6 +1,7 @@
 (function (root) {
   'use strict';
   const MATCH_VERSION = 6;
+  const PREVIEW_CHUNK_SIZE = 20;
   const labels = { unmatched: '未匹配', unmapped: '待映射账号', invalid: '数据无效', duplicate: '重复行', ambiguous: '多个候选',
     exact: '待自动报价', time_candidate: '待自动报价', group_candidate: '整组待核价', assignment_conflict: '归属冲突', already_recorded: '已计费',
     already_imported: '此前已补记', import_pending: '此前已认领，待续办',
@@ -44,6 +45,32 @@
       const picked = new Map([...$('bci-list').querySelectorAll('[data-select]:checked')].map(input => [input.dataset.select, available.get(input.dataset.select)]).filter(([, row]) => row));
       for (const row of [...picked.values()]) for (const id of row.preview?.group?.memberIds || []) if (available.has(id)) picked.set(id, available.get(id));
       return [...picked.values()];
+    }
+    function previewRowIds(rows) {
+      const groups = new Set();
+      return rows.filter(row => {
+        const group = row.match?.candidateGroup?.id || row.preview?.group?.identity;
+        if (!group) return true;
+        if (groups.has(group)) return false;
+        groups.add(group);
+        return true;
+      }).map(row => row.id);
+    }
+    async function generatePreviewChunks(rowIds, body, current, batchId) {
+      const results = [];
+      const chunks = [];
+      for (let offset = 0; offset < rowIds.length; offset += PREVIEW_CHUNK_SIZE) {
+        chunks.push(rowIds.slice(offset, offset + PREVIEW_CHUNK_SIZE));
+      }
+      for (let index = 0; index < chunks.length; index++) {
+        if (current !== epoch || !isActive()) break;
+        $('bci-page').textContent = `生成预览批次 ${index + 1} / ${chunks.length}`;
+        const response = await api(`/api/billing-imports/${encodeURIComponent(batchId)}/preview`, {
+          method: 'POST', body: JSON.stringify({ ...body, rowIds: chunks[index] })
+        });
+        results.push(...response.results);
+      }
+      return results;
     }
     function update() {
       const rows = batch ? chosen().filter(row => ['preview', 'failed', 'confirming'].includes(row.status) && row.preview) : [];
@@ -172,16 +199,29 @@
     }
     async function automaticPreview() {
       if ($('bci-pricing-mode').value !== 'auto') return;
-      const rows = batch.rows.filter(row => row.status === 'group_candidate' || ['exact','time_candidate'].includes(row.status) && row.match?.selected);
-      if (!rows.length) return;
-      const current = epoch, wasBusy = busy; busy = true; update();
+      const current = epoch, batchId = batch.id, originalPage = batch.page, originalFilter = batch.filter, userId = batch.userId;
+      const wasBusy = busy; busy = true; update();
       try {
-        const result = await api(`/api/billing-imports/${batch.id}/preview`, { method: 'POST', body: JSON.stringify({ rowIds: rows.map(row => row.id), pricingMode: 'auto' }) });
+        const first = await api(`/api/billing-imports/${encodeURIComponent(batchId)}?page=1&filter=actionable`);
+        const rows = [...first.rows];
+        const pages = Math.ceil(first.filteredTotal / first.pageSize);
+        for (let page = 2; page <= pages; page++) {
+          if (current !== epoch || !isActive()) return;
+          const result = await api(`/api/billing-imports/${encodeURIComponent(batchId)}?page=${page}&filter=actionable`);
+          rows.push(...result.rows);
+        }
+        const eligible = rows.filter(row => row.status === 'group_candidate' ||
+          ['exact', 'time_candidate'].includes(row.status) && row.match?.selected);
+        const rowIds = previewRowIds(eligible);
+        if (!rowIds.length) return;
+        const results = await generatePreviewChunks(rowIds, { pricingMode: 'auto' }, current, batchId);
         if (current !== epoch || !isActive()) return;
-        const summary = result.detail.summary;
-        const filter = batch.filter === 'actionable' && !['exact','time_candidate','group_candidate','preview','failed','confirming'].some(key => summary[key]) ? 'review' : batch.filter;
-        await open(result.detail.id, batch.page, filter, false);
-        const failed = result.results.filter(row => row.status === 'needs_review');
+        const detail = await api(`/api/billing-imports/${encodeURIComponent(batchId)}?page=${originalPage}&filter=actionable`);
+        const actionable = ['exact', 'time_candidate', 'group_candidate', 'preview', 'failed', 'confirming']
+          .some(key => detail.summary[key]);
+        const filter = originalFilter === 'actionable' && !actionable ? 'review' : originalFilter;
+        await open(batchId, originalPage, filter, false, userId);
+        const failed = results.filter(row => row.status === 'needs_review');
         if (failed.length) error(`${failed.length} 条未能生成预览，已列入“待核查”：${failed[0].error}`);
       } finally { busy = wasBusy; update(); }
     }
@@ -258,16 +298,22 @@
     $('bci-preview').addEventListener('click', () => run(async () => {
       readPrices();
       const pricing = Object.create(null);
-      for (const row of chosen()) {
+      const selected = chosen();
+      for (const row of selected) {
         const rule = rules.get(row.record.model);
         if ($('bci-pricing-mode').value === 'auto') pricing[row.record.model] = { cacheTTL: $('bci-cache-ttl').value };
         else if (rule) pricing[row.record.model] = Object.fromEntries(Object.entries(rule).filter(([, value]) => value != null));
       }
-      const result = await api(`/api/billing-imports/${batch.id}/preview`, { method: 'POST', body: JSON.stringify({ rowIds: chosen().slice(0, 20).map(row => row.id),
-        assignments: Object.fromEntries(assignments), pricing, pricingMode: $('bci-pricing-mode').value, pricingEvidence: $('bci-price-evidence').value.trim(),
+      const current = epoch, rowIds = previewRowIds(selected);
+      const results = await generatePreviewChunks(rowIds, { assignments: Object.fromEntries(assignments), pricing,
+        pricingMode: $('bci-pricing-mode').value, pricingEvidence: $('bci-price-evidence').value.trim(),
         assignmentEvidence: $('bci-assignment-evidence').value.trim(), confirmTimeMatches: $('bci-time-checked').checked,
-        finalUsageConfirmed: $('bci-final-usage').checked, missingCacheIsZero: $('bci-cache-zero').checked }) });
-      await open(result.detail.id, batch.page, batch.filter, false); toast('扣费预览已生成');
+        finalUsageConfirmed: $('bci-final-usage').checked, missingCacheIsZero: $('bci-cache-zero').checked }, current, batch.id);
+      if (current !== epoch || !isActive()) return;
+      await open(batch.id, batch.page, batch.filter, false);
+      const ready = results.filter(row => row.status === 'preview').length;
+      const failed = results.filter(row => row.status === 'needs_review').length;
+      toast(`预览处理完成：${ready} 条可确认${failed ? `，${failed} 条待核查` : ''}`);
     }));
     $('bci-confirm').addEventListener('click', () => run(async () => {
       const rows = chosen().filter(row => row.preview && (row.preview.group || ['preview','failed','confirming'].includes(row.status))).map(row => ({ id: row.id, version: row.version, previewId: row.preview.id }));
