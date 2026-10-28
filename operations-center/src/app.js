@@ -297,6 +297,7 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.get('/billing-imports/options', asyncRoute(async (_req, res) => res.json(await billingImports.options())));
   api.post('/billing-imports/inspect', csrf, express.json({ limit: '12mb' }), asyncRoute(async (req, res) => res.json(billingImports.inspect(req.body))));
   api.get('/billing-imports/:id', asyncRoute(async (req, res) => res.json(billingImports.detail(req.params.id, req.query))));
+  api.post('/billing-imports/:id/rows', csrf, asyncRoute(async (req, res) => res.json(billingImports.selectedRows(req.params.id, req.body))));
   api.post('/billing-imports', csrf, express.json({ limit: '12mb' }), asyncRoute(async (req, res) => res.json(await billingImports.import(req.body))));
   api.post('/billing-imports/:id/match', csrf, asyncRoute(async (req, res) => res.json(await billingImports.match(req.params.id, req.body, req.auth.upstreamAccessToken))));
   api.post('/billing-imports/:id/preview', csrf, asyncRoute(async (req, res) => res.json(await billingImports.preview(req.params.id, req.body, req.auth.upstreamAccessToken))));

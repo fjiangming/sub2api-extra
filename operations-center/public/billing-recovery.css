@@ -29,6 +29,9 @@
 #bci-group-preview summary { font-size:13px; line-height:1.6; overflow-wrap:anywhere; }
 #bci-cost-note { font-size:12px; color:var(--muted); overflow-wrap:anywhere; }
 #bci-diagnostics,#bci-review-summary { font-size:13px; color:var(--muted); overflow-wrap:anywhere; line-height:1.6; }
+#bci-selection,#bci-confirm-note { font-size:13px; color:var(--muted); overflow-wrap:anywhere; }
+.bci-feedback { padding:12px 0; border-top:1px solid var(--border); font-size:14px; line-height:1.6; white-space:pre-line; overflow-wrap:anywhere; }
+.bci-feedback[data-kind="error"] { color:var(--danger,#b42318); }
 @media(max-width:600px) { .bci-toolbar { align-items:stretch; } .bci-toolbar label,.bci-toolbar input[type="file"] { width:100%; } .bci-footer .button { width:100%; justify-content:center; } }
 #br-filter { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
 #br-filter label { min-width: 0; max-width: 100%; }

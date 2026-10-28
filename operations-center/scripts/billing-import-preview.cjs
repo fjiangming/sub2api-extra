@@ -90,6 +90,7 @@ async function startPreview({ port: requestedPort, includeGroups = false, includ
     observed_usage: { output_tokens: 14000 } });
   const rule = { input: 5, output: 25, cacheRead: 0.5, cache5m: 6.25, cache1h: 10, multiplier: 0.7, accountMultiplier: 1 };
   const claims = new Map(), groupReceipts = new Map(), claimEvidence = new Map();
+  const ledger = { balances: new Map(), usageRecords: new Map(), charges: new Map() };
   const recovery = {
     status: () => ({ automaticEnabled: false }),
     list: async ({ state }) => { const items = [...entries.values()].filter(row => !state || row.state === state); return { items, total: items.length }; },
@@ -131,7 +132,15 @@ async function startPreview({ port: requestedPort, includeGroups = false, includ
     },
     restore: async (id, body) => { const row = entries.get(id); row.usage_record = structuredClone(body.usage_record); row.state = 'review'; row.version++; },
     review: async (id, body) => { const row = entries.get(id); row.state = body.state; row.version++; },
-    settle: async id => { const row = entries.get(id); row.state = 'settled'; row.version++;
+    settle: async id => { const row = entries.get(id);
+      if (row.state === 'settled') return;
+      if (row.state !== 'prepared' || !row.usage_record) throw new Error('demo settlement requires prepared usage');
+      ledger.usageRecords.set(id, structuredClone(row.usage_record));
+      if (!row.subscription_id) {
+        ledger.balances.set(String(row.user_id), Number(((ledger.balances.get(String(row.user_id)) ?? 100) - row.usage_record.ActualCost).toFixed(8)));
+        ledger.charges.set(id, (ledger.charges.get(id) || 0) + 1);
+      }
+      row.state = 'settled'; row.version++;
       for (const claim of claimEvidence.values()) if (claim.case_id === id) claim.state = 'settled'; }
   };
   const errors = [13, 14].map(user => ({ id: String(user), user_id: String(user), api_key_id: String(user + 100), account_id: '356', group_id: '15',
@@ -140,7 +149,7 @@ async function startPreview({ port: requestedPort, includeGroups = false, includ
     request_id: 'demo-root-1', model: 'claude-opus-5-5', created_at: '2026-10-22T01:10:13Z', response_latency_ms: 125000 });
   if (includeGroups) for (let index = 0; index < 2; index++) errors.push({ id: String(30 + index), user_id: '24', api_key_id: '124', account_id: '356',
     group_id: '15', request_id: `demo-group-${index}`, model: 'claude-opus-5-5',
-    user_email: 'demo-user-24@example.test', created_at: '2026-10-22T01:32:05Z', response_latency_ms: 125000 });
+    user_email: 'demo-user-24@example.test', created_at: includeMany ? '2026-10-22T02:32:05Z' : '2026-10-22T01:32:05Z', response_latency_ms: 125000 });
   const common = { user_id: '15', api_key_id: '115', group_id: '15', account_id: '356', cache_read_tokens: 0, cache_creation_tokens: 0, billing_dedup: true, actual_cost: 0.001 };
   const logs = buildLogCandidates([
     { component: 'gateway', request_id: 'demo-file-only', ts: '2026-10-22T01:22:00Z', user_id: 22, api_key_id: 122, group_id: 15 },
@@ -184,7 +193,7 @@ async function startPreview({ port: requestedPort, includeGroups = false, includ
   port = server.address().port;
   console.log(`CSV billing preview (demo data only): http://127.0.0.1:${port}/preview`);
   let stopped = false;
-  return { port, imports, async stop() {
+  return { port, imports, ledger, async stop() {
     if (stopped) return; stopped = true;
     auth.close();
     await new Promise(resolve => server.close(resolve));

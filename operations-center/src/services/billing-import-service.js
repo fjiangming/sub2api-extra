@@ -114,6 +114,17 @@ class BillingImportService {
       ...info, ...result, relatedRows: relatedRows.map(row => ({ ...row, costComparison: costComparison(row.record, row.preview) })),
       rows: result.rows.map(row => ({ ...row, costComparison: costComparison(row.record, row.preview) })) };
   }
+  selectedRows(batchId, input) {
+    this.store.batch(validate(id, batchId));
+    const body = validate(z.object({ rowIds: z.array(id).min(1).max(400) }).strict(), input);
+    const rows = [...new Set(body.rowIds)].map(rowId => this.store.get(rowId));
+    if (rows.some(row => row.batch_id !== batchId)) throw conflict('记录不属于当前批次');
+    const related = new Set(rows.flatMap(row => row.preview?.group?.memberIds || []));
+    const relatedRows = [...related].map(rowId => this.store.get(rowId));
+    if (relatedRows.some(row => row.batch_id !== batchId)) throw conflict('整组记录不属于当前批次');
+    const decorate = row => ({ ...row, costComparison: costComparison(row.record, row.preview) });
+    return { rows: rows.map(decorate), relatedRows: relatedRows.map(decorate) };
+  }
   async match(batchId, input, accessToken) {
     const options = validate(optionsSchema, input);
     if (Object.keys(options.accountMappings).length > 20) throw conflict('每批最多映射 20 个上游 Key');

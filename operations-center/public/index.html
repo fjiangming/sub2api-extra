@@ -549,6 +549,7 @@
               <p id="bci-review-summary" role="status" hidden></p>
               <div class="table-wrap"><table class="bci-table"><thead><tr><th><input id="bci-select-all" type="checkbox" aria-label="选择本页可补记记录"></th><th>行 / 时间 / 模型</th><th>匹配用户 / 本地请求</th><th>匹配结果</th><th>输入 / 输出 / 缓存</th><th>上游支出</th><th>用户扣费预览</th><th>上游多扣余额差额（USD）</th><th>处理结果</th></tr></thead><tbody id="bci-list"></tbody></table></div>
               <div class="br-pagination"><button id="bci-prev" type="button" class="icon-button" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><span id="bci-page"></span><button id="bci-next" type="button" class="icon-button" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div>
+              <div class="bci-toolbar"><button id="bci-select-filtered" type="button" class="button secondary"><i data-lucide="list-checks"></i><span>全选筛选结果</span></button><button id="bci-clear-selection" type="button" class="button secondary"><i data-lucide="list-x"></i><span>清空选择</span></button><span id="bci-selection" role="status"></span></div>
               <div id="bci-cost-preview" class="table-wrap" hidden></div>
               <div id="bci-group-preview" class="table-wrap" hidden></div>
               <div id="bci-user-preview" class="table-wrap" hidden></div>
@@ -559,6 +560,8 @@
                 <label class="bci-check"><input id="bci-acknowledge" type="checkbox">确认所选用户归属、CSV 最终用量、价格来源和扣费金额</label>
                 <button id="bci-confirm" type="button" class="button primary" disabled><i data-lucide="receipt"></i><span>确认补记并扣费</span></button>
               </div>
+              <p id="bci-confirm-note" hidden></p>
+              <p id="bci-action-status" class="bci-feedback" role="status" aria-live="polite" tabindex="-1" hidden></p>
             </div>
           </div>
           <div id="br-requests-pane" role="tabpanel" aria-labelledby="br-requests-tab">

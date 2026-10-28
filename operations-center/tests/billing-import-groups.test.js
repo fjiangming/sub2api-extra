@@ -135,6 +135,10 @@ test('off-page members are quoted, disclosed and confirmed together', async t =>
   let batch = await f.match(content); batch = await f.preview(batch);
   assert.equal(batch.rows.length, 20); assert.equal(batch.relatedRows.length, 2);
   assert.equal(batch.rows.at(-1).preview.group.count, 2);
+  const selected = f.service.selectedRows(batch.id, { rowIds: [batch.rows.at(-1).id] });
+  assert.equal(selected.rows.length, 1); assert.equal(selected.relatedRows.length, 2);
+  assert.ok(selected.relatedRows.every(row => row.preview.group.identity === selected.rows[0].preview.group.identity));
+  assert.equal(f.charges.size, 0, 'refreshing a cross-page group must not charge');
   const result = await f.service.confirm(batch.id, confirmBody(batch));
   assert.equal(result.results.length, 2); assert.equal(f.charges.size, 2);
 });

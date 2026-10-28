@@ -357,6 +357,26 @@ test('result filters hide settled pages without losing saved receipts', async t 
   assert.equal(f.service.detail(batch.id, { filter: 'settled' }).rows[0].result.caseId, caseId);
 });
 
+test('cross-page selection refresh is read-only, returns current receipts and rejects other batches', async t => {
+  const f = fixture(t), batch = await previewed(f, await matched(f));
+  const row = batch.rows[0], calls = f.calls.length;
+  const read = f.service.selectedRows(batch.id, { rowIds: [row.id, row.id] });
+  assert.equal(read.rows.length, 1);
+  assert.equal(read.rows[0].preview.id, row.preview.id);
+  assert.equal(read.rows[0].costComparison.localCost, '0.24858400');
+  assert.equal(read.rows[0].version, row.version);
+  assert.equal(f.calls.length, calls); assert.equal(f.charges(), 0);
+  const other = await f.service.import({ fileName: 'other.csv', csv: csv([{ 'Output Tokens': '100' }]) });
+  assert.throws(() => f.service.selectedRows(other.id, { rowIds: [row.id] }), /不属于当前批次/);
+  assert.throws(() => f.service.selectedRows(batch.id, { rowIds: [row.id, ...other.rows.map(item => item.id)] }), /不属于当前批次/);
+  assert.throws(() => f.service.selectedRows(batch.id, { rowIds: Array(401).fill(row.id) }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => f.service.selectedRows(batch.id, { rowIds: [] }), { code: 'INVALID_REQUEST' });
+  await f.service.confirm(batch.id, confirmBody(batch));
+  const receipt = f.service.selectedRows(batch.id, { rowIds: [row.id] }).rows[0];
+  assert.equal(receipt.status, 'settled'); assert.equal(receipt.case_id, caseId);
+  assert.equal(receipt.result.amount, 0.248584); assert.equal(f.charges(), 1);
+});
+
 test('confirmed preview restores usage then uses native approval and settlement exactly once', async t => {
   const f = fixture(t); const batch = await previewed(f, await matched(f));
   const result = await f.service.confirm(batch.id, confirmBody(batch));
@@ -569,6 +589,7 @@ test('CSV endpoints enforce admin authentication and CSRF before parsing large u
   const billingImports = Object.fromEntries(['options', 'inspect', 'import', 'detail', 'match', 'preview', 'confirm'].map(name => [name, async () => { changes.push(name); return {}; }]));
   // The real detail/inspect methods are synchronous.
   billingImports.detail = () => ({}); billingImports.inspect = () => { changes.push('inspect'); return {}; };
+  billingImports.selectedRows = () => { changes.push('rows'); return { rows: [], relatedRows: [] }; };
   const app = createApp({ config, auth, database: {}, billingImports });
   const server = app.listen(0, '127.0.0.1'); await new Promise(resolve => server.once('listening', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -577,12 +598,12 @@ test('CSV endpoints enforce admin authentication and CSRF before parsing large u
   assert.equal((await fetch(`${base}/api/billing-imports`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: big })).status, 401);
   const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'test-password-123' }) });
   const session = await login.json(); const headers = { authorization: `Session ${session.sessionToken}`, 'content-type': 'application/json' };
-  for (const url of ['', '/inspect', `/${caseId}/match`, `/${caseId}/preview`, `/${caseId}/confirm`]) {
+  for (const url of ['', '/inspect', `/${caseId}/match`, `/${caseId}/preview`, `/${caseId}/confirm`, `/${caseId}/rows`]) {
     assert.equal((await fetch(`${base}/api/billing-imports${url}`, { method: 'POST', headers, body: url === '' || url === '/inspect' ? big : '{}' })).status, 403);
   }
   assert.equal(changes.length, 0); headers['x-csrf-token'] = session.csrfToken;
-  for (const url of ['', '/inspect', `/${caseId}/match`, `/${caseId}/preview`, `/${caseId}/confirm`]) {
+  for (const url of ['', '/inspect', `/${caseId}/match`, `/${caseId}/preview`, `/${caseId}/confirm`, `/${caseId}/rows`]) {
     assert.equal((await fetch(`${base}/api/billing-imports${url}`, { method: 'POST', headers, body: url === '' || url === '/inspect' ? big : '{}' })).status, 200);
   }
-  assert.deepEqual(changes, ['import', 'inspect', 'match', 'preview', 'confirm']);
+  assert.deepEqual(changes, ['import', 'inspect', 'match', 'preview', 'confirm', 'rows']);
 });
