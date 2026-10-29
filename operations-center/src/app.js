@@ -298,6 +298,12 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.post('/billing-imports/inspect', csrf, express.json({ limit: '12mb' }), asyncRoute(async (req, res) => res.json(billingImports.inspect(req.body))));
   api.get('/billing-imports/:id', asyncRoute(async (req, res) => res.json(billingImports.detail(req.params.id, req.query))));
   api.post('/billing-imports/:id/rows', csrf, asyncRoute(async (req, res) => res.json(billingImports.selectedRows(req.params.id, req.body))));
+  api.post('/billing-imports/:id/tasks', csrf, asyncRoute(async (req, res) => res.status(202).json({
+    task: billingImports.tasks.submit(req.params.id, req.body, req.auth.upstreamAccessToken)
+  })));
+  api.get('/billing-imports/:id/tasks/:taskId', asyncRoute(async (req, res) => res.json({
+    task: billingImports.tasks.get(req.params.id, req.params.taskId)
+  })));
   api.post('/billing-imports', csrf, express.json({ limit: '12mb' }), asyncRoute(async (req, res) => res.json(await billingImports.import(req.body))));
   api.post('/billing-imports/:id/match', csrf, asyncRoute(async (req, res) => res.json(await billingImports.match(req.params.id, req.body, req.auth.upstreamAccessToken))));
   api.post('/billing-imports/:id/preview', csrf, asyncRoute(async (req, res) => res.json(await billingImports.preview(req.params.id, req.body, req.auth.upstreamAccessToken))));

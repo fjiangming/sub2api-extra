@@ -170,6 +170,7 @@ async function startPreview({ port: requestedPort, includeGroups = false, includ
       native: { usages: 4, errors: errors.length, cases: entries.size },
       logs: { status: 'read', coverageComplete: false, first: '2026-10-22T01:22:00Z', last: '2026-10-22T01:24:05Z' } } }) };
   const imports = new BillingImportService({ store, source, recovery });
+  imports.start();
   const demoCSV = includeMany ? makeManySample(manyCount) : includeGroups ? groupSample : sample;
   const batch = await imports.import({ fileName: '演示账单.csv', csv: demoCSV });
   if (!includeMany) await imports.match(batch.id, { accountMappings: { 'demo-key': 356 } });
@@ -196,6 +197,7 @@ async function startPreview({ port: requestedPort, includeGroups = false, includ
   let stopped = false;
   return { port, imports, ledger, async stop() {
     if (stopped) return; stopped = true;
+    await imports.stop();
     auth.close();
     await new Promise(resolve => server.close(resolve));
     persistent.close(); fs.rmSync(directory, { force: true, recursive: true });

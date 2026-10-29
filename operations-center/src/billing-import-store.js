@@ -19,7 +19,14 @@ class BillingImportStore {
       updated_at INTEGER NOT NULL, UNIQUE(batch_id,number));
       CREATE INDEX IF NOT EXISTS import_rows_batch ON import_rows(batch_id,number);
       CREATE UNIQUE INDEX IF NOT EXISTS import_one_preview_per_request ON import_rows(batch_id,json_extract(preview,'$.reference'))
-        WHERE preview IS NOT NULL AND status IN ('preview','confirming','failed','settled');`);
+        WHERE preview IS NOT NULL AND status IN ('preview','confirming','failed','settled');
+      CREATE TABLE IF NOT EXISTS import_tasks (
+        id TEXT PRIMARY KEY, batch_id TEXT NOT NULL REFERENCES import_batches(id), kind TEXT NOT NULL,
+        payload_hash TEXT NOT NULL, status TEXT NOT NULL, progress TEXT NOT NULL, result TEXT, error TEXT,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, finished_at INTEGER);
+      CREATE UNIQUE INDEX IF NOT EXISTS import_one_active_task_per_batch ON import_tasks(batch_id)
+        WHERE status IN ('queued','running');
+      CREATE INDEX IF NOT EXISTS import_tasks_batch ON import_tasks(batch_id,created_at DESC);`);
     if (!this.db.pragma('table_info(import_batches)').some(column => column.name === 'metadata')) this.db.exec('ALTER TABLE import_batches ADD COLUMN metadata TEXT');
   }
   create(fileName, csv, contentHash, options, rows, metadata) {
@@ -114,6 +121,42 @@ class BillingImportStore {
     if (!result.changes) throw new AppError('PREVIEW_CONFLICT', '预览已变化或结算正在进行，请刷新', { status: 409 });
     return this.get(id);
   }
+  task(id) {
+    const row = this.db.prepare('SELECT * FROM import_tasks WHERE id=?').get(id);
+    if (!row) throw new AppError('NOT_FOUND', '后台任务不存在', { status: 404 });
+    return decodeTask(row);
+  }
+  latestTask(batchId) {
+    const row = this.db.prepare('SELECT * FROM import_tasks WHERE batch_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1').get(batchId);
+    return row ? decodeTask(row) : null;
+  }
+  activeTask(batchId) {
+    const row = this.db.prepare("SELECT * FROM import_tasks WHERE batch_id=? AND status IN ('queued','running') LIMIT 1").get(batchId);
+    return row ? decodeTask(row) : null;
+  }
+  createTask(id, batchId, kind, payloadHash, total) {
+    const progress = { phase: 'queued', completed: 0, total };
+    this.db.prepare(`INSERT INTO import_tasks(id,batch_id,kind,payload_hash,status,progress,created_at,updated_at)
+      VALUES(?,?,?,?,'queued',?,?,?)`).run(id, batchId, kind, payloadHash, JSON.stringify(progress), this.now(), this.now());
+    return this.task(id);
+  }
+  updateTask(id, values) {
+    const keys = Object.keys(values).filter(key => ['status', 'progress', 'result', 'error', 'finished_at'].includes(key));
+    const args = keys.map(key => ['progress', 'result', 'error'].includes(key) ? JSON.stringify(values[key]) : values[key]);
+    this.db.prepare(`UPDATE import_tasks SET ${keys.map(key => `${key}=?`).join(',')},updated_at=?
+      WHERE id=? AND status IN ('queued','running')`).run(...args, this.now(), id);
+    return this.task(id);
+  }
+  interruptTasks() {
+    this.db.prepare(`UPDATE import_tasks SET status='interrupted',error=?,updated_at=?,finished_at=?
+      WHERE status IN ('queued','running')`).run(JSON.stringify({ code: 'IMPORT_TASK_INTERRUPTED',
+      message: '服务重启中断了后台任务；已保存的预览和主站回执保留，请刷新核对后继续原记录。' }), this.now(), this.now());
+  }
+}
+function decodeTask(row) {
+  return { id: row.id, batchId: row.batch_id, kind: row.kind, payloadHash: row.payload_hash, status: row.status,
+    progress: JSON.parse(row.progress), result: row.result ? JSON.parse(row.result) : null,
+    error: row.error ? JSON.parse(row.error) : null, createdAt: row.created_at, updatedAt: row.updated_at, finishedAt: row.finished_at };
 }
 function decode(row) {
   const result = { ...row };

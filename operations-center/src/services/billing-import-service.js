@@ -8,6 +8,7 @@ const { parseBillingCSV, describeBillingCSV, hash } = require('./billing-import-
 const { reconcileBillingRows, MATCH_VERSION } = require('./billing-import-source');
 const { observedTokens } = require('./billing-recovery-usage');
 const { previewGroups, confirmGroups } = require('./billing-import-groups');
+const { BillingImportTasks } = require('./billing-import-tasks');
 
 const id = z.string().uuid();
 const positiveId = z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER);
@@ -24,6 +25,13 @@ const pricingSchema = z.record(z.string().max(128), z.object({
   multiplier: z.number().finite().positive().max(1000000).optional(), accountMultiplier: price.optional(),
   cacheTTL: z.enum(['5m', '1h', 'split']).default('split')
 }).strict());
+const previewSchema = z.object({ rowIds: z.array(id).min(1).max(20), assignments: z.record(id, z.string().max(200)).default({}),
+  pricing: pricingSchema.default({}), pricingMode: z.enum(['auto', 'manual']).optional(),
+  pricingEvidence: z.string().trim().max(1500).default(''), assignmentEvidence: z.string().trim().max(1000).default(''),
+  confirmTimeMatches: z.boolean().default(false), finalUsageConfirmed: z.boolean().default(false), missingCacheIsZero: z.boolean().default(false)
+}).strict();
+const confirmSchema = z.object({ acknowledge: z.literal(true), rows: z.array(z.object({ id,
+  version: z.number().int().positive(), previewId: id }).strict()).min(1).max(400) }).strict();
 const validate = (schema, value) => {
   const parsed = schema.safeParse(value);
   if (!parsed.success) throw new AppError('INVALID_REQUEST', parsed.error.issues[0].message, { status: 400 });
@@ -80,7 +88,33 @@ function costComparison(record, preview) {
 }
 
 class BillingImportService {
-  constructor({ store, source, recovery, now = () => Date.now() }) { Object.assign(this, { store, source, recovery, now }); }
+  constructor({ store, source, recovery, now = () => Date.now() }) {
+    Object.assign(this, { store, source, recovery, now });
+    this.runningBatches = new Set();
+    this.tasks = new BillingImportTasks(this);
+  }
+  start() { this.tasks.start(); }
+  async stop() { await this.tasks.stop(); }
+  assertAvailable(batchId, taskId) {
+    const active = this.store.activeTask(batchId);
+    if (this.runningBatches.has(batchId) || active && active.id !== taskId) {
+      throw new AppError('PREVIEW_CONFLICT', '该批次正在处理，请等待后台任务完成后再操作', { status: 409 });
+    }
+  }
+  async exclusive(batchId, context, operation) {
+    this.store.batch(validate(id, batchId));
+    this.assertAvailable(batchId, context.taskId);
+    this.runningBatches.add(batchId);
+    try { return await operation(); } finally { this.runningBatches.delete(batchId); }
+  }
+  operationInput(kind, input) { return validate(kind === 'preview' ? previewSchema : confirmSchema, input); }
+  validateOperation(batchId, kind, body) {
+    const batch = this.store.batch(validate(id, batchId));
+    const rows = (kind === 'preview' ? body.rowIds : body.rows.map(row => row.id)).map(rowId => this.store.get(rowId));
+    if (rows.some(row => row.batch_id !== batchId)) throw conflict('记录不属于当前批次');
+    if (kind === 'confirm' && rows.filter(row => !row.preview?.group).length > 20) throw conflict('每次最多确认 20 条逐笔记录');
+    return batch;
+  }
   async options() { return { accounts: await this.source.accounts(), batches: this.store.batches() }; }
   inspect(input) {
     const body = validate(z.object({ csv: z.string() }).strict(), input);
@@ -114,7 +148,7 @@ class BillingImportService {
     const relatedRows = [...relatedIds].map(rowId => this.store.get(rowId));
     if (relatedRows.some(row => row.batch_id !== batchId)) throw conflict('整组记录不属于当前批次');
     return { id: batch.id, fileName: batch.file_name, createdAt: batch.created_at, options: batch.options,
-      ...info, ...result, view, relatedRows: relatedRows.map(row => ({ ...row, costComparison: costComparison(row.record, row.preview) })),
+      ...info, ...result, view, task: this.tasks.latest(batchId), relatedRows: relatedRows.map(row => ({ ...row, costComparison: costComparison(row.record, row.preview) })),
       rows: result.rows.map(row => ({ ...row, costComparison: costComparison(row.record, row.preview) })) };
   }
   selectedRows(batchId, input) {
@@ -129,6 +163,9 @@ class BillingImportService {
     return { rows: rows.map(decorate), relatedRows: relatedRows.map(decorate) };
   }
   async match(batchId, input, accessToken) {
+    return this.exclusive(batchId, {}, () => this.performMatch(batchId, input, accessToken));
+  }
+  async performMatch(batchId, input, accessToken) {
     const options = validate(optionsSchema, input);
     if (Object.keys(options.accountMappings).length > 20) throw conflict('每批最多映射 20 个上游 Key');
     const batch = this.store.batch(validate(id, batchId));
@@ -149,21 +186,21 @@ class BillingImportService {
     })();
     return { ...this.detail(batchId), coreAvailable: source.coreAvailable };
   }
-  async preview(batchId, input, accessToken) {
-    const body = validate(z.object({ rowIds: z.array(id).min(1).max(20), assignments: z.record(id, z.string().max(200)).default({}),
-      pricing: pricingSchema.default({}), pricingMode: z.enum(['auto', 'manual']).optional(),
-      pricingEvidence: z.string().trim().max(1500).default(''),
-      assignmentEvidence: z.string().trim().max(1000).default(''), confirmTimeMatches: z.boolean().default(false),
-      finalUsageConfirmed: z.boolean().default(false), missingCacheIsZero: z.boolean().default(false)
-    }).strict(), input);
-    const batch = this.store.batch(validate(id, batchId));
+  async preview(batchId, input, accessToken, context = {}) {
+    return this.exclusive(batchId, context, () => this.performPreview(batchId, input, accessToken, context));
+  }
+  async performPreview(batchId, input, accessToken, { report = () => {} } = {}) {
+    const body = this.operationInput('preview', input);
+    const batch = this.validateOperation(batchId, 'preview', body);
+    report({ phase: 'rechecking' });
     const freshMatches = await this.recheck(batch, accessToken);
-    for (const rowId of body.rowIds) if (this.store.get(rowId).batch_id !== batchId) throw conflict('记录不属于当前批次');
-    const grouped = await previewGroups(this, batch, body, freshMatches, accessToken, { verifiedTokens, matchProof });
+    const grouped = await previewGroups(this, batch, body, freshMatches, accessToken, { verifiedTokens, matchProof, report });
     const results = [...grouped.results];
+    const total = grouped.handled.size + body.rowIds.filter(rowId => !grouped.handled.has(rowId)).length;
     for (const rowId of new Set(body.rowIds)) {
       if (grouped.handled.has(rowId)) continue;
       const row = this.store.get(rowId);
+      report({ phase: 'quoting', rowNumber: row.number, completed: results.length, total });
       if (row.batch_id !== batchId) throw conflict('记录不属于当前批次');
       if (['confirming', 'settled', 'failed'].includes(row.status)) { results.push({ rowId, status: row.status }); continue; }
       try {
@@ -254,26 +291,33 @@ class BillingImportService {
         this.store.save(row.id, { preview: null, status: 'needs_review', result: { error: error.message } }, row.version);
         results.push({ rowId, status: 'needs_review', error: error.message });
       }
+      report({ completed: results.length });
     }
     return { results, detail: this.detail(batchId) };
   }
-  async confirm(batchId, input, accessToken) {
-    const body = validate(z.object({ acknowledge: z.literal(true), rows: z.array(z.object({ id, version: z.number().int().positive(), previewId: id }).strict()).min(1).max(400) }).strict(), input);
-    const batch = this.store.batch(validate(id, batchId));
-    for (const selected of body.rows) if (this.store.get(selected.id).batch_id !== batchId) throw conflict('记录不属于当前批次');
-    if (body.rows.filter(selected => !this.store.get(selected.id).preview?.group).length > 20) throw conflict('每次最多确认 20 条逐笔记录');
-    const grouped = await confirmGroups(this, batch, body, accessToken, matchProof);
+  async confirm(batchId, input, accessToken, context = {}) {
+    return this.exclusive(batchId, context, () => this.performConfirm(batchId, input, accessToken, context));
+  }
+  async performConfirm(batchId, input, accessToken, { report = () => {} } = {}) {
+    const body = this.operationInput('confirm', input);
+    const batch = this.validateOperation(batchId, 'confirm', body);
+    const grouped = await confirmGroups(this, batch, body, accessToken, matchProof, report);
     const results = [...grouped.results];
     let freshMatches;
     for (const selected of body.rows) {
       if (grouped.handled.has(selected.id)) continue;
       let row = this.store.get(selected.id);
+      report({ phase: 'settling', rowNumber: row.number, completed: results.length, total: body.rows.length });
       if (row.batch_id !== batchId || row.preview?.id !== selected.previewId) throw conflict('预览不属于当前记录');
       if (row.status === 'settled') { results.push({ id: row.id, status: 'settled', caseId: row.case_id }); continue; }
       this.checkMatchVersion(row, true);
       if (row.status === 'preview' && row.preview.expiresAt < this.now()) throw conflict('扣费预览已过期，请重新生成');
       if (row.status === 'preview') {
-        freshMatches ||= await this.recheck(batch, accessToken);
+        if (!freshMatches) {
+          report({ phase: 'rechecking' });
+          freshMatches = await this.recheck(batch, accessToken);
+          report({ phase: 'settling' });
+        }
         const current = freshMatches.get(row.number);
         const candidate = current?.candidates.find(item => item.reference === row.preview.reference);
         if (['already_recorded', 'already_imported', 'import_pending', 'group_candidate', 'usage_difference', 'billing_unresolved', 'recorded_conflict', 'time_uncertain'].includes(current?.status) || current?.totalCandidates > 30 || !candidate || candidate.recorded || candidate.blockedReason || row.preview.matchProof !== matchProof(current)) {
@@ -282,6 +326,7 @@ class BillingImportService {
       }
       row = this.store.claim(row.id, selected.version, selected.previewId);
       results.push(await this.settlePreview(row, accessToken));
+      report({ completed: results.length });
     }
     return { results, detail: this.detail(batchId) };
   }

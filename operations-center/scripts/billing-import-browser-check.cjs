@@ -7,6 +7,12 @@ const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE_PATH || 'playwright');
 const { startPreview, sample, groupSample, manySample, makeManySample } = require('./billing-import-preview.cjs');
 
+function taskInput(request, kind) {
+  if (request.method() !== 'POST' || !request.url().endsWith('/tasks')) return null;
+  const task = request.postDataJSON();
+  return task.kind === kind ? task.input : null;
+}
+
 async function quoteSelected(page) {
   await page.waitForFunction(() => !document.getElementById('bci-filter').disabled);
   await page.locator('#bci-preview').click();
@@ -106,7 +112,7 @@ async function main() {
         await page.locator('#bci-pricing-mode').selectOption('manual');
         assert.equal(await page.locator('#bci-confirm').isEnabled(), false);
         await page.locator('#bci-pricing-mode').selectOption('auto');
-        await Promise.all([page.waitForResponse(response => response.url().endsWith('/preview') && response.ok()),
+        await Promise.all([page.waitForResponse(response => response.url().endsWith('/tasks') && response.ok()),
           page.locator('#bci-preview').click()]);
         await page.waitForFunction(() => !document.getElementById('bci-preview').disabled);
         await page.locator('#bci-prices summary').click();
@@ -147,10 +153,10 @@ async function main() {
       try {
         const page = await context.newPage(), previewChunkSizes = [], confirmBodies = [];
         page.on('request', request => {
-          if (request.url().endsWith('/preview') && request.method() === 'POST') {
-            previewChunkSizes.push(request.postDataJSON().rowIds.length);
+          if (taskInput(request, 'preview')) {
+            previewChunkSizes.push(taskInput(request, 'preview').rowIds.length);
           }
-          if (request.url().endsWith('/confirm') && request.method() === 'POST') confirmBodies.push(request.postDataJSON());
+          if (taskInput(request, 'confirm')) confirmBodies.push(taskInput(request, 'confirm'));
         });
         await page.goto(`http://127.0.0.1:${preview.port}/preview`);
         await page.locator('#br-import-tab').click();
@@ -230,7 +236,7 @@ async function main() {
       const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
       try {
         const page = await context.newPage(), confirms = [];
-        page.on('request', request => { if (request.url().endsWith('/confirm') && request.method() === 'POST') confirms.push(request.postDataJSON()); });
+        page.on('request', request => { if (taskInput(request, 'confirm')) confirms.push(taskInput(request, 'confirm')); });
         const lines = manySample.trim().split('\n');
         // This export uses end timestamps; the group started 210 seconds earlier.
         const members = groupSample.trim().split('\n').slice(-2).map(line => line.replace('T09:30:00', 'T10:33:30').replace('T09:30:01', 'T10:33:31'));
@@ -288,8 +294,8 @@ async function main() {
         let confirms = 0, quotes = 0;
         page.on('pageerror', error => errors.push(error.message));
         page.on('request', request => {
-          if (request.method() === 'POST' && request.url().endsWith('/confirm')) confirms++;
-          if (request.method() === 'POST' && request.url().endsWith('/preview')) quotes++;
+          if (taskInput(request, 'confirm')) confirms++;
+          if (taskInput(request, 'preview')) quotes++;
         });
         await page.goto(`http://127.0.0.1:${preview.port}/preview`); await page.locator('#br-import-tab').click();
         const batchId = preview.imports.store.batches()[0].id;
@@ -320,7 +326,7 @@ async function main() {
         };
         await page.locator('#bci-acknowledge').check(); await page.locator('#bci-confirm').click();
         await blocked;
-        assert.match(await page.locator('#bci-action-status').innerText(), /正在补记并结算/);
+        assert.match(await page.locator('#bci-action-status').innerText(), /正在补记并结算|后台补记/);
         assert.equal(await page.locator('#bci-confirm').isEnabled(), false);
         await page.evaluate(() => document.getElementById('bci-confirm').click());
         assert.equal(confirms, 1, 'double click must not start another confirmation');
@@ -352,8 +358,8 @@ async function main() {
         await page.locator('#bci-batches').selectOption(preview.imports.store.batches()[0].id);
         await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 3 && !document.getElementById('bci-filter').disabled);
         await quoteSelected(page);
-        await page.route('**/api/billing-imports/*/confirm', async route => {
-          const response = await route.fetch(); assert.equal(response.status(), 200);
+        await page.route('**/api/billing-imports/*/tasks', async route => {
+          const response = await route.fetch(); assert.equal(response.status(), 202);
           await route.fulfill({ status: 502, contentType: 'application/json', body: JSON.stringify({ error: { message: '模拟回包丢失' } }) });
         });
         await page.locator('#bci-acknowledge').check(); await page.locator('#bci-confirm').click();
@@ -398,8 +404,8 @@ async function main() {
         let quotes = 0, reads = 0;
         page.on('pageerror', error => errors.push(error.message));
         page.on('request', request => {
-          if (request.url().endsWith('/confirm') && request.method() === 'POST') confirms.push(request.postDataJSON());
-          if (request.url().endsWith('/preview') && request.method() === 'POST') quotes++;
+          if (taskInput(request, 'confirm')) confirms.push(taskInput(request, 'confirm'));
+          if (taskInput(request, 'preview')) quotes++;
           if (request.url().includes('/api/billing-imports/') && request.method() === 'GET') reads++;
         });
         await page.goto(`http://127.0.0.1:${preview.port}/preview`); await page.locator('#br-import-tab').click();
@@ -451,7 +457,7 @@ async function main() {
       try {
         const page = await context.newPage();
         let confirms = 0;
-        page.on('request', request => { if (request.url().endsWith('/confirm') && request.method() === 'POST') confirms++; });
+        page.on('request', request => { if (taskInput(request, 'confirm')) confirms++; });
         await page.goto(`http://127.0.0.1:${preview.port}/preview`); await page.locator('#br-import-tab').click();
         const batchId = preview.imports.store.batches()[0].id;
         await page.locator('#bci-batches').selectOption(batchId);
@@ -472,6 +478,77 @@ async function main() {
         assert.ok([...preview.ledger.charges.values()].every(count => count === 1));
         console.log('receipt mismatch: HTTP success cannot continue the next chunk without verified persisted amounts');
       } finally { await context.close(); await preview.stop(); }
+    }
+    for (const [name, viewport] of [['background-desktop', { width: 1440, height: 1024 }], ['background-mobile', { width: 390, height: 844 }]]) {
+      const preview = await startPreview({ port: 0 }), context = await browser.newContext({ viewport });
+      let releaseQuote, releaseCommit;
+      try {
+        const page = await context.newPage(), errors = [];
+        let quoteEntered, commitEntered, previews = 0, confirmations = 0;
+        const quoting = new Promise(resolve => { quoteEntered = resolve; });
+        const committing = new Promise(resolve => { commitEntered = resolve; });
+        const request = preview.imports.recovery.request, settle = preview.imports.recovery.settle;
+        let blockQuote = true, blockCommit = true;
+        preview.imports.recovery.request = async (...args) => {
+          if (args[0] === '/imports/quote' && blockQuote) {
+            blockQuote = false;
+            await new Promise(resolve => { releaseQuote = resolve; quoteEntered(); });
+          }
+          return request(...args);
+        };
+        preview.imports.recovery.settle = async (...args) => {
+          await settle(...args);
+          if (blockCommit) {
+            blockCommit = false;
+            await new Promise(resolve => { releaseCommit = resolve; commitEntered(); });
+          }
+        };
+        page.on('pageerror', error => errors.push(error.message));
+        page.on('request', request => {
+          if (taskInput(request, 'preview')) previews++;
+          if (taskInput(request, 'confirm')) confirmations++;
+        });
+        const batchId = preview.imports.store.batches()[0].id;
+        await page.goto(`http://127.0.0.1:${preview.port}/preview`); await page.locator('#br-import-tab').click();
+        await page.locator('#bci-batches').selectOption(batchId);
+        await page.waitForFunction(() => !document.getElementById('bci-filter').disabled);
+        const [accepted] = await Promise.all([
+          page.waitForResponse(response => response.url().endsWith('/tasks') && response.request().method() === 'POST'),
+          page.locator('#bci-preview').click()
+        ]);
+        assert.equal(accepted.status(), 202); await quoting;
+        await page.waitForFunction(() => document.getElementById('bci-action-status').textContent.includes('后台预览'));
+        assert.equal(preview.ledger.usageRecords.size, 0);
+        assert.equal(await page.locator('#bci-confirm').isEnabled(), false);
+        await page.reload(); await page.locator('#br-import-tab').click();
+        await page.locator('#bci-batches').selectOption(batchId);
+        await page.waitForFunction(() => document.getElementById('bci-action-status').textContent.includes('后台预览'));
+        assert.equal(previews, 1, 'refresh must poll the original task without submitting another quote');
+        assert.equal(await page.locator('#bci-preview').isEnabled(), false);
+        assert.equal(await page.locator('#bci-select-all').isEnabled(), false);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth), false);
+        await page.screenshot({ path: path.join(directory, `${name}-preview.png`), fullPage: true });
+        releaseQuote();
+        await page.waitForFunction(() => !document.getElementById('bci-filter').disabled);
+        assert.equal(await page.locator('#bci-list tr').filter({ hasText: '可补记，待确认' }).count(), 3);
+        await page.locator('#bci-acknowledge').check(); await page.locator('#bci-confirm').click(); await committing;
+        assert.equal(preview.ledger.usageRecords.size, 1);
+        await page.reload(); await page.locator('#br-import-tab').click();
+        await page.locator('#bci-batches').selectOption(batchId);
+        await page.waitForFunction(() => document.getElementById('bci-action-status').textContent.includes('后台补记'));
+        assert.equal(confirmations, 1, 'refresh during a native commit must not replay confirmation');
+        await page.screenshot({ path: path.join(directory, `${name}-confirm.png`), fullPage: true });
+        releaseCommit();
+        await page.waitForFunction(() => !document.getElementById('bci-filter').disabled);
+        assert.match(await page.locator('#bci-summary').innerText(), /已补记 3 条/);
+        await page.locator('#bci-filter').selectOption('settled');
+        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 3);
+        assert.equal(preview.ledger.usageRecords.size, 3);
+        assert.equal(preview.ledger.charges.size, 2);
+        assert.ok([...preview.ledger.charges.values()].every(count => count === 1));
+        assert.deepEqual(errors, []);
+        console.log(`${name}: quick 202, slow quote/commit, reload resumes polling, and native demo receipts without replay passed`);
+      } finally { releaseQuote?.(); releaseCommit?.(); await context.close(); await preview.stop(); }
     }
     for (const [name, viewport] of [['group-desktop', { width: 1440, height: 1024 }], ['group-mobile', { width: 390, height: 844 }]]) {
       const preview = await startPreview({ port: 0, includeGroups: true });

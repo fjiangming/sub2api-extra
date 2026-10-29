@@ -60,6 +60,7 @@ async function main() {
   const billingImports = new BillingImportService({ store: billingImportStore, recovery: billingRecovery,
     source: new BillingImportSource({ pool: database.read, inspector, recovery: billingRecovery,
       logs: new BillingImportLogs(config.billingLogDir) }) });
+  billingImports.start();
   const metrics = new MetricsService(database.read, inspector, config);
   const profiles = new UserProfilesService(database.read, inspector, config);
   const latency = new LatencyService({ pool: database.read, inspector, config, providerMonitor, telemetry });
@@ -113,11 +114,12 @@ async function main() {
     stopping = true;
     console.info(`operations-center shutting down (${signal})`);
     scheduler.stop();
+    await billingImports.stop();
     await billingRecovery.stop();
-    billingRecoveryStore.close();
     storage.stop();
     auth.close();
     await new Promise((resolve) => server.close(resolve));
+    billingRecoveryStore.close();
     telemetry.close();
     await database.close();
   };

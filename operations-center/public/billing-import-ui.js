@@ -17,6 +17,8 @@
     const selection = new Map(), rowCache = new Map();
     const dateFormats = new Map();
     let selectionBatch = null, defaultSelection = true;
+    const taskActive = task => ['queued', 'running'].includes(task?.status);
+    const pause = () => new Promise(resolve => setTimeout(resolve, 2000));
     const amount = value => value != null && value !== '' && Number.isFinite(Number(value)) ? Number(value).toFixed(8) : '未知';
     const units = value => value == null ? null : BigInt(value.replace('.', ''));
     const fixed = value => `${value < 0n ? '-' : ''}${(value < 0n ? -value : value) / 100000000n}.${((value < 0n ? -value : value) % 100000000n).toString().padStart(8, '0')}`;
@@ -84,20 +86,21 @@
       $('bci-acknowledge').checked = false;
     }
     function syncSelection() {
+      const locked = busy || taskActive(batch?.task);
       const inputs = [...$('bci-list').querySelectorAll('[data-select]')];
       for (const input of inputs) {
         input.checked = selection.get(input.dataset.select) === true;
-        input.disabled = busy || !eligible(rowCache.get(input.dataset.select));
+        input.disabled = locked || !eligible(rowCache.get(input.dataset.select));
       }
       for (const input of $('bci-list').querySelectorAll('[data-assignment]')) {
         const row = rowCache.get(input.dataset.assignment);
-        input.disabled = busy || Boolean(row.preview) || Boolean(row.match?.candidateGroup?.auditEligible) || !eligible(row);
+        input.disabled = locked || Boolean(row.preview) || Boolean(row.match?.candidateGroup?.auditEligible) || !eligible(row);
       }
       const available = inputs.filter(input => eligible(rowCache.get(input.dataset.select)));
       const count = available.filter(input => input.checked).length;
       $('bci-select-all').checked = Boolean(available.length) && count === available.length;
       $('bci-select-all').indeterminate = count > 0 && count < available.length;
-      $('bci-select-all').disabled = busy || !available.length;
+      $('bci-select-all').disabled = locked || !available.length;
     }
     function chosen() {
       const picked = new Map([...selection].filter(([, checked]) => checked).map(([id]) => [id, rowCache.get(id)]).filter(([, row]) => row));
@@ -124,6 +127,48 @@
         return true;
       }).map(row => row.id);
     }
+    function taskFeedback(task) {
+      const progress = task.progress || {};
+      const phase = { queued: '等待处理', rechecking: '正在复核完整主站证据', quoting: '正在逐笔核价', settling: '正在补记并读取主站结算回执' }[progress.phase] || '正在处理';
+      feedback(`后台${task.kind === 'preview' ? '预览' : '补记'}：${phase}；已处理 ${progress.completed || 0} / ${progress.total || 0} 笔${progress.rowNumber ? `，当前 CSV 第 ${progress.rowNumber} 行` : ''}。${task.kind === 'preview' ? '尚未补记或扣费。' : '请等待主站回执，勿重复提交。'}`);
+    }
+    async function waitTask(task, current, batchId) {
+      let failures = 0;
+      while (taskActive(task)) {
+        if (current !== epoch || !isActive()) return null;
+        if (batch?.id === batchId) batch.task = task;
+        taskFeedback(task);
+        try {
+          ({ task } = await api(`/api/billing-imports/${encodeURIComponent(batchId)}/tasks/${encodeURIComponent(task.id)}`));
+          failures = 0;
+        } catch (cause) {
+          if (++failures >= 3) throw new Error(`无法读取后台进度：${cause.message}。任务可能仍在运行，请刷新当前批次核对，勿重复导入或提交。`);
+          feedback('进度连接暂时中断，正在重新读取；后台任务不受页面连接影响。');
+        }
+        if (taskActive(task)) await pause();
+      }
+      if (current !== epoch || !isActive()) return null;
+      if (batch?.id === batchId) batch.task = task;
+      return task;
+    }
+    async function runTask(kind, input, current, batchId) {
+      const id = root.crypto.randomUUID();
+      let task;
+      try {
+        ({ task } = await api(`/api/billing-imports/${encodeURIComponent(batchId)}/tasks`, {
+          method: 'POST', body: JSON.stringify({ id, kind, input })
+        }));
+      } catch (cause) {
+        // A lost acceptance response must only read the same task, never replay
+        // a money command with a new identity.
+        try { ({ task } = await api(`/api/billing-imports/${encodeURIComponent(batchId)}/tasks/${encodeURIComponent(id)}`)); }
+        catch { throw new Error(`提交结果未确认：${cause.message}。请刷新当前批次核对任务和回执。`); }
+      }
+      task = await waitTask(task, current, batchId);
+      if (!task) return null;
+      if (task.status !== 'succeeded') throw new Error(task.error?.message || '后台任务未完成，请刷新核对已保存的记录。');
+      return task.result;
+    }
     async function generatePreviewChunks(rowIds, body, current, batchId) {
       const results = [];
       const chunks = [];
@@ -137,9 +182,8 @@
         const chunkRows = chunks[index].map(id => rowCache.get(id)).filter(Boolean);
         const pricing = Object.fromEntries(chunkRows.map(row => [row.record.model, body.pricing?.[row.record.model]]).filter(([, rule]) => rule));
         const assignments = Object.fromEntries(chunks[index].filter(id => Object.hasOwn(body.assignments || {}, id)).map(id => [id, body.assignments[id]]));
-        const response = await api(`/api/billing-imports/${encodeURIComponent(batchId)}/preview`, {
-          method: 'POST', body: JSON.stringify({ ...body, pricing, assignments, rowIds: chunks[index] })
-        });
+        const response = await runTask('preview', { ...body, pricing, assignments, rowIds: chunks[index] }, current, batchId);
+        if (!response) break;
         results.push(...response.results);
         if (current !== epoch || !isActive()) break;
         await refreshSelected(batchId, response.results.map(row => row.rowId));
@@ -148,6 +192,7 @@
       return results;
     }
     function update() {
+      const locked = busy || taskActive(batch?.task);
       syncSelection();
       const selected = batch ? chosen() : [];
       const rows = selected.filter(row => ['preview', 'failed', 'confirming'].includes(row.status) && row.preview);
@@ -173,23 +218,23 @@
       const expired = rows.filter(row => row.status === 'preview' && row.preview.expiresAt <= Date.now()).length;
       const unquoted = selected.filter(row => row.status !== 'settled' && !row.preview).length;
       const leased = rows.some(row => row.status === 'confirming' && row.lease_until > Date.now());
-      const note = busy ? '正在处理，请等待当前操作完成。' : matchDirty ? '匹配设置已变更，需重新分析账单。' : dirty ? '核价或归属设置已变更，需重新生成所选预览。' :
+      const note = locked ? '后台任务正在处理，请等待完成；刷新页面可继续查看进度。' : matchDirty ? '匹配设置已变更，需重新分析账单。' : dirty ? '核价或归属设置已变更，需重新生成所选预览。' :
         leased ? '所选记录正在结算，刷新后核对回执。' : expired ? `${expired} 笔扣费预览已过期，需重新生成所选预览。` :
           unquoted ? `所选还有 ${unquoted} 笔未生成扣费预览。` : !rows.length ? '尚未选择可确认的扣费预览。' :
             !$('bci-acknowledge').checked ? '尚未确认所选归属、用量、价格和金额。' : '';
       $('bci-confirm-note').textContent = note; $('bci-confirm-note').hidden = !note;
-      $('bci-confirm').disabled = busy || dirty || matchDirty || expired > 0 || unquoted > 0 || leased || !rows.length || !$('bci-acknowledge').checked;
-      $('bci-acknowledge').disabled = busy;
-      $('bci-preview').disabled = busy || matchDirty || !batch || !selected.length;
-      for (const button of $('br-import-pane').querySelectorAll('button:not(#bci-confirm):not(#bci-preview)')) button.disabled = busy;
-      for (const input of $('bci-match').querySelectorAll('input,select')) input.disabled = busy;
-      for (const id of ['bci-prices', 'bci-upload']) for (const input of $(id).querySelectorAll('input,select,textarea')) input.disabled = busy;
-      for (const id of ['bci-filter', 'bci-user', 'bci-batches']) $(id).disabled = busy;
+      $('bci-confirm').disabled = locked || dirty || matchDirty || expired > 0 || unquoted > 0 || leased || !rows.length || !$('bci-acknowledge').checked;
+      $('bci-acknowledge').disabled = locked;
+      $('bci-preview').disabled = locked || matchDirty || !batch || !selected.length;
+      for (const button of $('br-import-pane').querySelectorAll('button:not(#bci-confirm):not(#bci-preview)')) button.disabled = locked;
+      for (const input of $('bci-match').querySelectorAll('input,select')) input.disabled = locked;
+      for (const id of ['bci-prices', 'bci-upload']) for (const input of $(id).querySelectorAll('input,select,textarea')) input.disabled = locked;
+      for (const id of ['bci-filter', 'bci-user', 'bci-batches']) $(id).disabled = locked;
       $('bci-manual-prices').hidden = $('bci-pricing-mode').value !== 'manual';
-      $('bci-prev').disabled = busy || !batch || batch.view === 'all' || batch.page <= 1;
-      $('bci-next').disabled = busy || !batch || batch.view === 'all' || batch.page * batch.pageSize >= batch.filteredTotal;
-      $('bci-clear-selection').disabled = busy || !selected.length;
-      $('bci-select-filtered').disabled = busy || !batch || !batch.filteredTotal;
+      $('bci-prev').disabled = locked || !batch || batch.view === 'all' || batch.page <= 1;
+      $('bci-next').disabled = locked || !batch || batch.view === 'all' || batch.page * batch.pageSize >= batch.filteredTotal;
+      $('bci-clear-selection').disabled = locked || !selected.length;
+      $('bci-select-filtered').disabled = locked || !batch || !batch.filteredTotal;
       const grouped = new Map();
       for (const row of rows) {
         const value = row.preview, key = `${value.userId}:${value.billingType}`;
@@ -288,12 +333,33 @@
       $('bci-select-all').checked = false; $('bci-acknowledge').checked = false;
       renderPrices(); update(); refreshIcons();
     }
-    async function open(id, page = 1, filter = batch?.filter || 'actionable', userId = batch?.userId || '') {
+    async function open(id, page = 1, filter = batch?.filter || 'actionable', userId = batch?.userId || '', followTask = true) {
       const current = ++epoch;
       const result = await api(`/api/billing-imports/${encodeURIComponent(id)}?page=${page}&filter=${encodeURIComponent(filter)}&userId=${encodeURIComponent(userId)}${filter === 'actionable' ? '&view=all' : ''}`);
       if (current !== epoch || !isActive()) return;
       if (selectionBatch !== result.id) { clearSelection(result.id); dirty = false; matchDirty = false; feedback(); }
       batch = result; remember(result); render();
+      if (taskActive(result.task) && followTask) {
+        const resume = async () => {
+          const task = await waitTask(result.task, current, id);
+          if (!task) return;
+          await open(id, batch.page, batch.filter);
+          if (task.status !== 'succeeded') throw new Error(task.error?.message || '后台任务中断，请核对已保存的记录。');
+          const results = task.result.results;
+          if (task.kind === 'preview') {
+            const ready = results.filter(row => row.status === 'preview').length;
+            const review = results.filter(row => row.status === 'needs_review');
+            feedback(`后台预览完成：${ready} 条可确认${review.length ? `，${review.length} 条待核查：${review[0].error}` : ''}；尚未补记或扣费。`, review.length ? 'error' : 'status');
+          } else {
+            await refreshSelected(id, results.map(row => row.id));
+            const rows = results.map(row => rowCache.get(row.id)), done = rows.filter(settledReceipt);
+            const charged = totals(done.filter(row => row.preview.billingType === 'balance'));
+            feedback(`后台补记已核实 ${done.length} 笔原生使用记录；余额扣费 ${fixed(charged.local)} USD，订阅用量 ${done.filter(row => row.preview.billingType === 'subscription').length} 笔。${rows.length > done.length ? `另有 ${rows.length - done.length} 笔未确认完成，请核对原记录。` : ''}`, rows.length > done.length ? 'error' : 'status');
+          }
+        };
+        if (busy) await resume(); else await run(resume);
+      }
+      else if (['failed', 'interrupted'].includes(result.task?.status)) feedback(result.task.error?.message || '上次后台任务未完成，请核对原记录。', 'error');
     }
     async function load() {
       if (busy) return;
@@ -406,10 +472,17 @@
         else if (rule) pricing[row.record.model] = Object.fromEntries(Object.entries(rule).filter(([, value]) => value != null));
       }
       const rowIds = previewRowIds(selected);
-      const results = await generatePreviewChunks(rowIds, { assignments: Object.fromEntries(assignments), pricing,
+      let results;
+      try { results = await generatePreviewChunks(rowIds, { assignments: Object.fromEntries(assignments), pricing,
         pricingMode: $('bci-pricing-mode').value, pricingEvidence: $('bci-price-evidence').value.trim(),
         assignmentEvidence: $('bci-assignment-evidence').value.trim(), confirmTimeMatches: $('bci-time-checked').checked,
-        finalUsageConfirmed: $('bci-final-usage').checked, missingCacheIsZero: $('bci-cache-zero').checked }, current, batchId);
+        finalUsageConfirmed: $('bci-final-usage').checked, missingCacheIsZero: $('bci-cache-zero').checked }, current, batchId); }
+      catch (cause) {
+        if (current === epoch && isActive()) {
+          try { await refreshSelected(batchId); await open(batchId, batch.page, batch.filter, batch.userId, false); } catch {}
+        }
+        throw cause;
+      }
       if (current !== epoch || !isActive()) return;
       dirty = false;
       await open(batch.id, batch.page, batch.filter);
@@ -429,7 +502,7 @@
         return latest.version !== row.version || latest.preview?.id !== row.preview?.id;
       });
       if (changed) {
-        await open(batchId, batch.page, batch.filter);
+        await open(batchId, batch.page, batch.filter, batch.userId, false);
         throw new Error('所选预览或结算状态已变化，已刷新；请重新核对金额并确认。');
       }
       // Keep each frozen group complete, and bound each confirmation request.
@@ -448,8 +521,9 @@
         if (current !== epoch || !isActive()) break;
         feedback(`正在补记并结算：第 ${index + 1} / ${chunks.length} 批，共 ${selected.filter(row => row.status !== 'settled').length} 笔；请等待回执。`);
         try {
-          const result = await api(`/api/billing-imports/${batchId}/confirm`, { method: 'POST', body: JSON.stringify({ acknowledge: true,
-            rows: chunks[index].map(row => ({ id: row.id, version: row.version, previewId: row.preview.id })) }) });
+          const result = await runTask('confirm', { acknowledge: true,
+            rows: chunks[index].map(row => ({ id: row.id, version: row.version, previewId: row.preview.id })) }, current, batchId);
+          if (!result) return;
           failure = [...new Set(result.results.filter(row => row.status !== 'settled').map(row => row.error || '结算尚未完成'))].slice(0, 3).join('；');
           await refreshSelected(batchId, chunks[index].map(row => row.id));
           if (current !== epoch || !isActive()) return;
@@ -468,7 +542,7 @@
       const subscriptions = completed.filter(row => row.preview.billingType === 'subscription').length;
       $('bci-acknowledge').checked = false;
       try {
-        await open(batchId, batch.page, batch.filter);
+        await open(batchId, batch.page, batch.filter, batch.userId, false);
         if (batch.filter === 'actionable' && !batch.filteredTotal) await open(batchId, 1, 'settled');
       } catch (cause) { refreshFailure ||= cause.message; }
       const pending = selected.filter(row => row.status !== 'settled').length - completed.length;

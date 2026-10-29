@@ -20,11 +20,13 @@ function nativeSource(row, candidate) {
 
 // Quote every possible pairing. The stable allocation is bookkeeping only; an
 // exact request link must never be invented to get past the per-request API.
-async function previewGroups(service, batch, body, freshMatches, accessToken, { verifiedTokens, matchProof }) {
+async function previewGroups(service, batch, body, freshMatches, accessToken, { verifiedTokens, matchProof, report = () => {} }) {
   const groups = new Set(body.rowIds.map(id => service.store.get(id).match?.candidateGroup).filter(group => group?.auditEligible).map(group => group.id));
   const handled = new Set(), results = [];
   if (!groups.size) return { handled, results };
   const rows = service.store.rows(batch.id);
+  const total = rows.filter(row => groups.has(row.match?.candidateGroup?.id)).length +
+    body.rowIds.filter(id => !groups.has(service.store.get(id).match?.candidateGroup?.id)).length;
   for (const identity of groups) {
     const members = rows.filter(row => row.match?.candidateGroup?.id === identity);
     members.forEach(row => handled.add(row.id));
@@ -35,6 +37,7 @@ async function previewGroups(service, batch, body, freshMatches, accessToken, { 
       if (members.length !== group.rows || members.length < 2 || members.length > 20) throw conflict('整组成员不完整，请重新分析');
       const previews = [];
       for (const row of members) {
+        report({ phase: 'quoting', rowNumber: row.number, completed: results.length, total });
         service.checkMatchVersion(row);
         const fresh = freshMatches.get(row.number);
         if (fresh?.status !== 'group_candidate' || !fresh.candidateGroup?.auditEligible || matchProof(fresh) !== matchProof(row.match)) throw conflict('整组来源或计费证据已变化，请重新分析');
@@ -87,17 +90,19 @@ async function previewGroups(service, batch, body, freshMatches, accessToken, { 
       })();
       results.push(...members.map(row => ({ rowId: row.id, status: 'needs_review', error: error.message })));
     }
+    report({ completed: results.length, total });
   }
   return { handled, results };
 }
 
-async function confirmGroups(service, batch, body, accessToken, matchProof) {
+async function confirmGroups(service, batch, body, accessToken, matchProof, report = () => {}) {
   const selected = new Map(body.rows.map(row => [row.id, row]));
   if (selected.size !== body.rows.length) throw conflict('确认列表存在重复记录');
   const groups = new Set(body.rows.map(row => service.store.get(row.id).preview?.group?.identity).filter(Boolean));
   const handled = new Set(), results = [];
   let freshMatches;
   for (const identity of groups) {
+    report({ phase: 'rechecking', completed: results.length, total: body.rows.length });
     const seed = body.rows.map(row => service.store.get(row.id)).find(row => row.preview?.group?.identity === identity);
     const group = seed.preview.group, members = group.memberIds.map(id => service.store.get(id));
     if (members.length !== group.count || members.some(row => row.batch_id !== batch.id || row.preview?.group?.identity !== identity ||
@@ -134,8 +139,12 @@ async function confirmGroups(service, batch, body, accessToken, matchProof) {
       })) throw conflict('主站整组认领回执不完整或归属不一致，已停止结算');
       const reserved = service.store.db.transaction(() => pending.map(row => row.status === 'settled' ? row :
         service.store.save(row.id, { case_id: claims.get(row.record.identity).case_id }, row.version)))();
-      for (const row of reserved) results.push(row.status === 'settled' ? { id: row.id, status: 'settled', caseId: row.case_id }
-        : await service.settlePreview(row, accessToken, row.case_id));
+      for (const row of reserved) {
+        report({ phase: 'settling', rowNumber: row.number, completed: results.length });
+        results.push(row.status === 'settled' ? { id: row.id, status: 'settled', caseId: row.case_id }
+          : await service.settlePreview(row, accessToken, row.case_id));
+        report({ completed: results.length });
+      }
     } catch (error) {
       service.store.db.transaction(() => {
         for (const member of pending) {
