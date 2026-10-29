@@ -16,6 +16,8 @@
 #br-import-pane .bci-check { display:flex; flex-direction:row; align-items:center; gap:8px; font-size:13px; }
 .bci-check input[type="checkbox"],.bci-table input[type="checkbox"] { width:16px; min-width:16px; height:16px; min-height:16px; padding:0; margin:0; flex:0 0 16px; }
 .bci-table { min-width:1100px; }
+.bci-list-wrap { max-height:640px; overflow:auto; }
+.bci-list-wrap thead th { position:sticky; top:0; z-index:1; background:var(--surface,#fff); }
 .bci-table td { max-width:270px; overflow-wrap:anywhere; }
 .bci-table td:last-child { min-width:220px; }
 .bci-table td small { display:block; font-size:12px; color:var(--muted); margin-top:4px; }

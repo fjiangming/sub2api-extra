@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="/user-profiles.css?v=20261013-1">
   <link rel="stylesheet" href="/user-messages.css?v=20261019-1">
   <link rel="stylesheet" href="/latency.css?v=20261020-1">
-  <link rel="stylesheet" href="/billing-recovery.css?v=20261023-1">
+  <link rel="stylesheet" href="/billing-recovery.css?v=20261029-2">
   <script src="/vendor/echarts.js" defer></script>
   <script src="/vendor/lucide.js" defer></script>
   <script src="/cost-analysis-ui.js?v=20260929-3" defer></script>
@@ -18,7 +18,7 @@
   <script src="/user-messages-ui.js?v=20261019-1" defer></script>
   <script src="/latency-ui.js?v=20261020-1" defer></script>
   <script src="/billing-recovery-ui.js?v=20261023-1" defer></script>
-  <script src="/billing-import-ui.js?v=20261023-1" defer></script>
+  <script src="/billing-import-ui.js?v=20261029-2" defer></script>
   <script src="/app.js?v=20261022-1" defer></script>
 </head>
 <body>
@@ -530,7 +530,7 @@
                   <label>时钟修正（秒）<input name="clockOffsetSeconds" type="number" min="-300" max="300" value="0" required></label>
                 </div>
                 <label class="bci-check"><input name="inputIncludesCache" type="checkbox">CSV 输入 Token 包含缓存读取和创建 Token</label></details>
-                <button class="button secondary" type="submit"><i data-lucide="search-check"></i><span>分析账单并生成预览</span></button>
+                <button class="button secondary" type="submit"><i data-lucide="search-check"></i><span>分析账单</span></button>
               </form>
               <details id="bci-prices"><summary>价格与用量核查设置</summary>
               <label>价格来源<select id="bci-pricing-mode"><option value="auto">主站自动报价：历史快照优先，缺失时按当前价格</option><option value="manual">人工核定历史价格</option></select></label>
@@ -547,7 +547,7 @@
               </div></details>
               <div class="bci-toolbar"><label>核查结果<select id="bci-filter"><option value="actionable">可补记</option><option value="review">待核查</option><option value="recorded">已计费</option><option value="settled">已补记</option><option value="all">全部记录</option></select></label><label id="bci-user-filter" hidden>按用户核查<select id="bci-user"><option value="">全部用户</option></select></label></div>
               <p id="bci-review-summary" role="status" hidden></p>
-              <div class="table-wrap"><table class="bci-table"><thead><tr><th><input id="bci-select-all" type="checkbox" aria-label="选择本页可补记记录"></th><th>行 / 时间 / 模型</th><th>匹配用户 / 本地请求</th><th>匹配结果</th><th>输入 / 输出 / 缓存</th><th>上游支出</th><th>用户扣费预览</th><th>上游多扣余额差额（USD）</th><th>处理结果</th></tr></thead><tbody id="bci-list"></tbody></table></div>
+              <div class="table-wrap bci-list-wrap" tabindex="0" role="region" aria-label="账单核查记录"><table class="bci-table"><thead><tr><th><input id="bci-select-all" type="checkbox" aria-label="选择本页可补记记录"></th><th>行 / 时间 / 模型</th><th>匹配用户 / 本地请求</th><th>匹配结果</th><th>输入 / 输出 / 缓存</th><th>上游支出</th><th>用户扣费预览</th><th>上游多扣余额差额（USD）</th><th>处理结果</th></tr></thead><tbody id="bci-list"></tbody></table></div>
               <div class="br-pagination"><button id="bci-prev" type="button" class="icon-button" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><span id="bci-page"></span><button id="bci-next" type="button" class="icon-button" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div>
               <div class="bci-toolbar"><button id="bci-select-filtered" type="button" class="button secondary"><i data-lucide="list-checks"></i><span>全选筛选结果</span></button><button id="bci-clear-selection" type="button" class="button secondary"><i data-lucide="list-x"></i><span>清空选择</span></button><span id="bci-selection" role="status"></span></div>
               <div id="bci-cost-preview" class="table-wrap" hidden></div>

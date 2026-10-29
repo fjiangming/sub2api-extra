@@ -377,6 +377,35 @@ test('cross-page selection refresh is read-only, returns current receipts and re
   assert.equal(receipt.result.amount, 0.248584); assert.equal(f.charges(), 1);
 });
 
+test('all actionable view includes every eligible row without loading unrelated records or quoting', async t => {
+  const f = fixture(t);
+  const batch = await f.service.import({ fileName: 'many.csv', csv: csv(Array.from({ length: 149 }, (_, index) => ({ 'Output Tokens': String(index + 1) }))) });
+  const rows = f.store.rows(batch.id);
+  for (const [index, row] of rows.entries()) f.store.save(row.id, { status: index === 148 ? 'needs_review' : 'time_candidate' }, row.version);
+  let loads = 0;
+  f.source.load = async () => { loads++; throw new Error('listing must never read upstream evidence'); };
+  const allRows = f.store.rows;
+  f.store.rows = () => { throw new Error('listing must not decode every row in the batch'); };
+  const detail = f.service.detail(batch.id, { filter: 'actionable', view: 'all', page: 2 });
+  assert.equal(detail.view, 'all'); assert.equal(detail.page, 1);
+  assert.equal(detail.rows.length, 148); assert.equal(detail.filteredTotal, 148);
+  assert.deepEqual(detail.rows.map(row => row.id), rows.slice(0, 148).map(row => row.id));
+  assert.equal(f.service.detail(batch.id, { filter: 'actionable' }).rows.length, 20);
+  assert.equal(f.service.detail(batch.id, { filter: 'all', page: 2 }).rows.length, 20);
+  assert.throws(() => f.service.detail(batch.id, { filter: 'all', view: 'all' }), /仅可补记/);
+  assert.throws(() => f.service.detail(batch.id, { filter: 'actionable', view: 'invalid' }), { code: 'INVALID_REQUEST' });
+  assert.equal(loads, 0); assert.equal(f.calls.length, 0); assert.equal(f.charges(), 0);
+  f.store.rows = allRows;
+});
+
+test('individual preview does not decode all stored rows for the group path', async t => {
+  const f = fixture(t), batch = await matched(f);
+  f.store.rows = () => { throw new Error('ordinary preview must not load all stored row JSON'); };
+  const result = await f.service.preview(batch.id, { rowIds: [batch.rows[0].id] });
+  assert.equal(result.results[0].status, 'preview');
+  assert.equal(f.charges(), 0);
+});
+
 test('confirmed preview restores usage then uses native approval and settlement exactly once', async t => {
   const f = fixture(t); const batch = await previewed(f, await matched(f));
   const result = await f.service.confirm(batch.id, confirmBody(batch));

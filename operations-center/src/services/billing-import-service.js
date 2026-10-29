@@ -103,15 +103,18 @@ class BillingImportService {
     validate(id, batchId);
     const batch = this.store.batch(batchId);
     const filter = validate(z.enum(['all', 'actionable', 'review', 'recorded', 'settled', 'owners', 'unresolved']), query.filter || 'all');
+    const view = validate(z.enum(['paged', 'all']), query.view || 'paged');
+    if (view === 'all' && filter !== 'actionable') throw conflict('仅可补记列表支持全部展示');
     const page = Math.max(1, Math.min(1000, Math.floor(Number(query.page) || 1)));
     const userId = query.userId ? String(validate(positiveId, query.userId)) : '';
     const info = batch.metadata || metadata(parseBillingCSV(batch.csv, batch.options));
     if (!batch.metadata) this.store.metadata(batchId, info);
-    const result = this.store.page(batchId, filter, page, 20, userId);
+    const result = this.store.page(batchId, filter, page, view === 'all' ? 20000 : 20, userId);
     const relatedIds = new Set(result.rows.flatMap(row => row.preview?.group?.memberIds || []));
-    const relatedRows = relatedIds.size ? this.store.rows(batchId).filter(row => relatedIds.has(row.id)) : [];
+    const relatedRows = [...relatedIds].map(rowId => this.store.get(rowId));
+    if (relatedRows.some(row => row.batch_id !== batchId)) throw conflict('整组记录不属于当前批次');
     return { id: batch.id, fileName: batch.file_name, createdAt: batch.created_at, options: batch.options,
-      ...info, ...result, relatedRows: relatedRows.map(row => ({ ...row, costComparison: costComparison(row.record, row.preview) })),
+      ...info, ...result, view, relatedRows: relatedRows.map(row => ({ ...row, costComparison: costComparison(row.record, row.preview) })),
       rows: result.rows.map(row => ({ ...row, costComparison: costComparison(row.record, row.preview) })) };
   }
   selectedRows(batchId, input) {

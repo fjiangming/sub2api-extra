@@ -21,9 +21,10 @@ function nativeSource(row, candidate) {
 // Quote every possible pairing. The stable allocation is bookkeeping only; an
 // exact request link must never be invented to get past the per-request API.
 async function previewGroups(service, batch, body, freshMatches, accessToken, { verifiedTokens, matchProof }) {
-  const rows = service.store.rows(batch.id), byId = new Map(rows.map(row => [row.id, row]));
-  const groups = new Set(body.rowIds.map(id => byId.get(id)?.match?.candidateGroup).filter(group => group?.auditEligible).map(group => group.id));
+  const groups = new Set(body.rowIds.map(id => service.store.get(id).match?.candidateGroup).filter(group => group?.auditEligible).map(group => group.id));
   const handled = new Set(), results = [];
+  if (!groups.size) return { handled, results };
+  const rows = service.store.rows(batch.id);
   for (const identity of groups) {
     const members = rows.filter(row => row.match?.candidateGroup?.id === identity);
     members.forEach(row => handled.add(row.id));

@@ -5,7 +5,13 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE_PATH || 'playwright');
-const { startPreview, sample, groupSample, manySample } = require('./billing-import-preview.cjs');
+const { startPreview, sample, groupSample, manySample, makeManySample } = require('./billing-import-preview.cjs');
+
+async function quoteSelected(page) {
+  await page.waitForFunction(() => !document.getElementById('bci-filter').disabled);
+  await page.locator('#bci-preview').click();
+  await page.waitForFunction(() => !document.getElementById('bci-filter').disabled);
+}
 
 async function main() {
   const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}) });
@@ -34,6 +40,8 @@ async function main() {
           page.locator('#bci-match button[type=submit]').click()]);
         const matchResult = await matchResponse.json();
         await page.waitForFunction(() => !document.querySelector('#bci-match button[type=submit]').disabled);
+        assert.equal(preview.ledger.usageRecords.size, 0);
+        await quoteSelected(page);
         await page.waitForFunction(() => [...document.querySelectorAll('#bci-list tr')].filter(row => row.textContent.includes('可补记，待确认')).length === 3);
         assert.equal(await page.locator('#bci-filter').inputValue(), 'actionable');
         assert.equal(await page.locator('#bci-prices').getAttribute('open'), null);
@@ -90,7 +98,7 @@ async function main() {
         assert.match(await page.locator('#bci-user-preview tbody tr').filter({ hasText: 'demo-user-11' }).innerText(), new RegExp(gap));
         await balanceRow.locator('[data-select]').uncheck();
         assert.equal(await page.locator('#bci-cost-preview tbody tr').count(), 2);
-        assert.match(await page.locator('#bci-total').innerText(), /本页所选 2 笔/);
+        assert.match(await page.locator('#bci-total').innerText(), /所选 2 笔/);
         assert.equal(await page.locator('#bci-user-preview tbody tr').count(), 2);
         await balanceRow.locator('[data-select]').check();
         await page.locator('#bci-acknowledge').check(); assert.equal(await page.locator('#bci-confirm').isEnabled(), true);
@@ -130,7 +138,7 @@ async function main() {
         await page.locator('#bci-filter').selectOption('settled');
         await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 3);
         assert.deepEqual(errors, []);
-        console.log(`${name}: CSV upload, matching, preview, native demo settlement, reload, filtering and layout passed`);
+        console.log(`${name}: CSV upload, explicit preview, unpaged actionable list, native demo settlement, reload, filtering and layout passed`);
       } finally { await context.close(); await preview.stop(); }
     }
     {
@@ -153,8 +161,16 @@ async function main() {
         await page.locator('#bci-match button[type=submit]').click();
         await page.waitForFunction(() => document.getElementById('bci-summary').textContent.includes('可补记 21'));
         await page.waitForFunction(() => !document.getElementById('bci-filter').disabled);
+        assert.deepEqual(previewChunkSizes, [], 'analysis and viewing must not start quotations');
+        assert.equal(await page.locator('#bci-list tr').count(), 21);
+        assert.equal(await page.locator('#bci-prev').isVisible(), false);
+        assert.equal(await page.locator('#bci-next').isVisible(), false);
+        assert.match(await page.locator('#bci-page').innerText(), /21.*全部展示/);
+        await page.locator('#bci-acknowledge').check();
+        assert.equal(await page.locator('#bci-confirm').isEnabled(), false);
+        assert.match(await page.locator('#bci-confirm-note').innerText(), /21 笔未生成扣费预览/);
+        await quoteSelected(page);
         assert.deepEqual(previewChunkSizes, [20, 1]);
-        assert.equal(await page.locator('#bci-list tr').count(), 20);
         assert.match(await page.locator('#bci-summary').innerText(), /可补记 21/);
         const batchId = preview.imports.store.batches()[0].id;
         const rows = preview.imports.store.rows(batchId);
@@ -164,24 +180,27 @@ async function main() {
         await page.locator('#bci-clear-selection').click();
         await page.locator('#bci-select-all').check();
         await page.locator('#bci-list [data-select]').first().uncheck();
+        await page.locator('#bci-filter').selectOption('all');
+        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 20 && !document.getElementById('bci-filter').disabled);
+        assert.equal(await page.locator('#bci-next').isVisible(), true);
         await page.locator('#bci-next').click();
-        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 1 && !document.getElementById('bci-filter').disabled);
-        await page.locator('#bci-list [data-select]').check();
+        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 4 && !document.getElementById('bci-filter').disabled);
         assert.match(await page.locator('#bci-selection').innerText(), /已选 20 笔/);
         await page.locator('#bci-prev').click();
         await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 20 && !document.getElementById('bci-filter').disabled);
-        assert.equal(await page.locator('#bci-list [data-select]').first().isChecked(), false);
-        assert.equal(await page.locator('#bci-list [data-select]:checked').count(), 19);
+        assert.equal(await page.locator('#bci-list [data-select]:enabled').first().isChecked(), false);
+        assert.equal(await page.locator('#bci-list [data-select]:checked').count(), 16);
         await page.locator('#bci-filter').selectOption('recorded');
         await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 3 && !document.getElementById('bci-filter').disabled);
         assert.match(await page.locator('#bci-selection').innerText(), /已选 20 笔/);
         await page.locator('#bci-clear-selection').click();
         await page.locator('#bci-filter').selectOption('actionable');
-        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 20 && !document.getElementById('bci-filter').disabled);
+        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 21 && !document.getElementById('bci-filter').disabled);
         assert.equal(await page.locator('#bci-list [data-select]:checked').count(), 0, 'clearing must survive pagination and filters');
+        assert.deepEqual(previewChunkSizes, [20, 1], 'filtering and paging must not regenerate frozen previews');
         await page.locator('#bci-select-filtered').click();
         await page.waitForFunction(() => document.getElementById('bci-selection').textContent.includes('已选 21 笔') && !document.getElementById('bci-filter').disabled);
-        assert.match(await page.locator('#bci-total').innerText(), /跨页所选 21 笔/);
+        assert.match(await page.locator('#bci-total').innerText(), /所选 21 笔/);
         await page.locator('#bci-preview').click();
         await page.waitForFunction(() => !document.getElementById('bci-filter').disabled);
         assert.deepEqual(previewChunkSizes, [20, 1, 20, 1]);
@@ -203,7 +222,7 @@ async function main() {
         assert.equal(preview.ledger.balances.get('24'), expected);
         assert.ok([...preview.ledger.charges.values()].every(count => count === 1));
         await page.screenshot({ path: path.join(directory, 'cross-page-settled.png'), fullPage: true });
-        console.log('many rows: cross-page selection, deselection, filtered select-all, 20 + 1 preview/confirmation and exactly-once demo funds passed');
+        console.log('many rows: all 21 actionable rows, explicit preview, selection across other filters/pages, 20 + 1 confirmation and exactly-once demo funds passed');
       } finally { await context.close(); await preview.stop(); }
     }
     {
@@ -222,16 +241,26 @@ async function main() {
         await page.locator('#bci-workspace').waitFor({ state: 'visible' });
         await page.locator('#bci-mappings select').selectOption('356'); await page.locator('#bci-match button[type=submit]').click();
         await page.waitForFunction(() => document.getElementById('bci-summary').textContent.includes('可补记 23') && !document.getElementById('bci-filter').disabled);
+        assert.equal(await page.locator('#bci-list tr').count(), 23);
+        await quoteSelected(page);
+        await page.locator('#bci-filter').selectOption('all');
+        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 20 && !document.getElementById('bci-filter').disabled);
         await page.locator('#bci-clear-selection').click(); await page.locator('#bci-select-all').check();
+        await page.locator('#bci-select-filtered').click();
+        await page.waitForFunction(() => !document.getElementById('bci-filter').disabled);
         assert.equal(await page.locator('#bci-group-preview tbody tr').count(), 2);
-        assert.match(await page.locator('#bci-selection').innerText(), /已选 21 笔/);
+        assert.match(await page.locator('#bci-selection').innerText(), /已选 23 笔/);
         await page.locator('#bci-next').click();
-        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 3 && !document.getElementById('bci-filter').disabled);
+        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 6 && !document.getElementById('bci-filter').disabled);
         const member = page.locator('#bci-list tr').filter({ hasText: '整组报价及归属核查通过' });
-        await member.locator('[data-select]').uncheck();
+        await member.first().locator('[data-select]').uncheck();
         assert.equal(await page.locator('#bci-group-preview').isVisible(), false);
-        assert.match(await page.locator('#bci-selection').innerText(), /已选 19 笔/);
-        await member.locator('[data-select]').check();
+        assert.match(await page.locator('#bci-selection').innerText(), /已选 21 笔/);
+        await member.first().locator('[data-select]').check();
+        const singles = page.locator('#bci-list tr').filter({ hasNotText: '整组报价及归属核查通过' });
+        await singles.nth(2).locator('[data-select]').uncheck();
+        await singles.nth(3).locator('[data-select]').uncheck();
+        assert.match(await page.locator('#bci-selection').innerText(), /已选 21 笔/);
         await page.locator('#bci-prev').click();
         await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 20 && !document.getElementById('bci-filter').disabled);
         assert.equal(await page.locator('#bci-list [data-select]').last().isChecked(), true);
@@ -266,6 +295,7 @@ async function main() {
         const batchId = preview.imports.store.batches()[0].id;
         await page.locator('#bci-batches').selectOption(batchId);
         await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 3 && !document.getElementById('bci-filter').disabled);
+        await quoteSelected(page);
         const row = preview.imports.store.rows(batchId).find(item => item.preview?.userId === '11');
         preview.imports.store.save(row.id, { preview: { ...row.preview, expiresAt: Date.now() - 1 } }, row.version);
         await page.locator('#bci-filter').selectOption('all');
@@ -321,6 +351,7 @@ async function main() {
         await page.goto(`http://127.0.0.1:${preview.port}/preview`); await page.locator('#br-import-tab').click();
         await page.locator('#bci-batches').selectOption(preview.imports.store.batches()[0].id);
         await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 3 && !document.getElementById('bci-filter').disabled);
+        await quoteSelected(page);
         await page.route('**/api/billing-imports/*/confirm', async route => {
           const response = await route.fetch(); assert.equal(response.status(), 200);
           await route.fulfill({ status: 502, contentType: 'application/json', body: JSON.stringify({ error: { message: '模拟回包丢失' } }) });
@@ -331,6 +362,115 @@ async function main() {
         assert.equal(preview.ledger.usageRecords.size, 3); assert.equal(preview.ledger.charges.size, 2);
         assert.equal(await page.locator('#bci-confirm').isEnabled(), false);
         console.log('lost HTTP response: completed usage and charges recovered from persisted receipts');
+      } finally { await context.close(); await preview.stop(); }
+    }
+    {
+      const preview = await startPreview({ port: 0 }), context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+      try {
+        const page = await context.newPage();
+        const request = preview.imports.recovery.request;
+        preview.imports.recovery.request = async (url, body, ...args) => {
+          if (url === '/imports/quote' && body.body.source.user_id === 11) throw new Error('模拟单条主站报价失败');
+          return request(url, body, ...args);
+        };
+        await page.goto(`http://127.0.0.1:${preview.port}/preview`); await page.locator('#br-import-tab').click();
+        await page.locator('#bci-batches').selectOption(preview.imports.store.batches()[0].id);
+        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 3 && !document.getElementById('bci-filter').disabled);
+        await page.locator('#bci-select-all').check(); await quoteSelected(page);
+        assert.equal(await page.locator('#bci-list tr').count(), 2);
+        assert.match(await page.locator('#bci-action-status').innerText(), /2 条可确认，1 条待核查.*模拟单条主站报价失败/);
+        assert.match(await page.locator('#bci-selection').innerText(), /已选 2 笔/);
+        await page.locator('#bci-acknowledge').check();
+        assert.equal(await page.locator('#bci-confirm').isEnabled(), true, 'hidden quote failures must not block ready rows');
+        await page.locator('#bci-confirm').click();
+        await page.waitForFunction(() => !document.getElementById('bci-filter').disabled);
+        assert.match(await page.locator('#bci-action-status').innerText(), /已核实 2 笔已补记使用记录/);
+        assert.equal(preview.ledger.usageRecords.size, 2);
+        assert.equal(preview.ledger.balances.has('11'), false);
+        await page.screenshot({ path: path.join(directory, 'quote-failure-mobile.png'), fullPage: true });
+        console.log('quote failure: hidden unquoted row deselected, ready usage and charges confirmed normally');
+      } finally { await context.close(); await preview.stop(); }
+    }
+    for (const [name, viewport] of [['all-148-desktop', { width: 1440, height: 1024 }], ['all-148-mobile', { width: 390, height: 844 }]]) {
+      const preview = await startPreview({ port: 0, includeMany: true, manyCount: 148 }), context = await browser.newContext({ viewport });
+      try {
+        const page = await context.newPage(), confirms = [], errors = [];
+        let quotes = 0, reads = 0;
+        page.on('pageerror', error => errors.push(error.message));
+        page.on('request', request => {
+          if (request.url().endsWith('/confirm') && request.method() === 'POST') confirms.push(request.postDataJSON());
+          if (request.url().endsWith('/preview') && request.method() === 'POST') quotes++;
+          if (request.url().includes('/api/billing-imports/') && request.method() === 'GET') reads++;
+        });
+        await page.goto(`http://127.0.0.1:${preview.port}/preview`); await page.locator('#br-import-tab').click();
+        await page.locator('#bci-file').setInputFiles({ name: `${name}.csv`, mimeType: 'text/csv', buffer: Buffer.from(makeManySample(148)) });
+        await page.locator('#bci-upload button[type=submit]').click();
+        await page.locator('#bci-workspace').waitFor({ state: 'visible' });
+        await page.locator('#bci-mappings select').selectOption('356'); await page.locator('#bci-match button[type=submit]').click();
+        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 148 && !document.getElementById('bci-filter').disabled);
+        assert.equal(quotes, 0); assert.equal(preview.ledger.usageRecords.size, 0);
+        assert.equal(await page.locator('#bci-next').isVisible(), false);
+        await page.locator('#bci-clear-selection').click();
+        const readsBefore = reads, start = Date.now();
+        await page.locator('#bci-select-all').check();
+        assert.equal(await page.locator('#bci-list [data-select]:checked').count(), 148);
+        const selectionMs = Date.now() - start;
+        assert.equal(reads, readsBefore, 'select-all must use the fully displayed list without paginated reads');
+        await page.locator('#bci-filter').selectOption('recorded');
+        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 3 && !document.getElementById('bci-filter').disabled);
+        const readsBeforeOpen = reads, openedAt = Date.now();
+        await page.locator('#bci-filter').selectOption('actionable');
+        await page.waitForFunction(() => document.querySelectorAll('#bci-list tr').length === 148 && !document.getElementById('bci-filter').disabled);
+        const listMs = Date.now() - openedAt;
+        assert.equal(reads - readsBeforeOpen, 1, 'all actionable rows must arrive in one read');
+        assert.equal(quotes, 0);
+        await quoteSelected(page); assert.equal(quotes, 8);
+        const batch = preview.imports.store.batches()[0];
+        const rows = preview.imports.store.rows(batch.id).filter(row => row.preview);
+        assert.equal(rows.length, 148);
+        assert.equal(preview.ledger.usageRecords.size, 0);
+        await page.evaluate(() => window.scrollTo(0, 0));
+        await page.screenshot({ path: path.join(directory, `${name}-preview.png`), fullPage: true });
+        await page.locator('#bci-acknowledge').check(); await page.locator('#bci-confirm').click();
+        await page.waitForFunction(() => !document.getElementById('bci-filter').disabled);
+        assert.deepEqual(confirms.map(body => body.rows.length), [20, 20, 20, 20, 20, 20, 20, 8]);
+        assert.equal(preview.ledger.usageRecords.size, 148); assert.equal(preview.ledger.charges.size, 148);
+        const expected = Number((100 - rows.reduce((sum, row) => sum + row.preview.usage.ActualCost, 0)).toFixed(8));
+        assert.equal(preview.ledger.balances.get('24'), expected);
+        assert.ok([...preview.ledger.charges.values()].every(count => count === 1));
+        assert.match(await page.locator('#bci-action-status').innerText(), /已核实 148 笔已补记使用记录/);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth), false);
+        assert.deepEqual(errors, []);
+        await page.evaluate(() => window.scrollTo(0, 0));
+        await page.screenshot({ path: path.join(directory, `${name}.png`), fullPage: true });
+        console.log(`${name}: 148 rows in one read (${listMs}ms), local select-all (${selectionMs}ms), 148 demo usages and exactly-once charges passed`);
+      } finally { await context.close(); await preview.stop(); }
+    }
+    {
+      const preview = await startPreview({ port: 0, includeMany: true }), context = await browser.newContext();
+      try {
+        const page = await context.newPage();
+        let confirms = 0;
+        page.on('request', request => { if (request.url().endsWith('/confirm') && request.method() === 'POST') confirms++; });
+        await page.goto(`http://127.0.0.1:${preview.port}/preview`); await page.locator('#br-import-tab').click();
+        const batchId = preview.imports.store.batches()[0].id;
+        await page.locator('#bci-batches').selectOption(batchId);
+        await page.waitForFunction(() => !document.getElementById('bci-filter').disabled);
+        await page.locator('#bci-mappings select').selectOption('356'); await page.locator('#bci-match button[type=submit]').click();
+        await quoteSelected(page);
+        await page.route('**/api/billing-imports/*/rows', async route => {
+          const response = await route.fetch(), payload = await response.json();
+          for (const row of [...payload.rows, ...payload.relatedRows]) if (row.status === 'settled') row.result.amount += 1;
+          await route.fulfill({ response, json: payload });
+        });
+        await page.locator('#bci-acknowledge').check(); await page.locator('#bci-confirm').click();
+        await page.waitForFunction(() => !document.getElementById('bci-filter').disabled);
+        assert.equal(confirms, 1, 'a mismatched receipt must stop before the next financial request');
+        assert.equal(preview.ledger.usageRecords.size, 20);
+        assert.equal(preview.imports.store.rows(batchId).filter(row => row.status === 'preview').length, 1);
+        assert.match(await page.locator('#bci-action-status').innerText(), /21 笔未确认完成.*未读取到完整结算回执/s);
+        assert.ok([...preview.ledger.charges.values()].every(count => count === 1));
+        console.log('receipt mismatch: HTTP success cannot continue the next chunk without verified persisted amounts');
       } finally { await context.close(); await preview.stop(); }
     }
     for (const [name, viewport] of [['group-desktop', { width: 1440, height: 1024 }], ['group-mobile', { width: 390, height: 844 }]]) {
@@ -347,6 +487,7 @@ async function main() {
         await page.locator('#bci-workspace').waitFor({ state: 'visible' });
         await page.locator('#bci-mappings select').selectOption('356');
         await page.locator('#bci-match button[type=submit]').click();
+        await quoteSelected(page);
         await page.waitForFunction(() => document.querySelectorAll('#bci-group-preview tbody tr').length === 2);
         assert.equal(await page.locator('#bci-list tr').count(), 5);
         const groupRows = page.locator('#bci-list tr').filter({ hasText: '用户 24' });

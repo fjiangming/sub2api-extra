@@ -32,11 +32,11 @@ const sample = `Time,API Key Name,Model,Input Tokens,Output Tokens,Cache Read To
 const groupSample = sample + `2026-10-22T09:30:00+08:00,demo-key,claude-opus-5-5,1200,4500,0,0,210000,0.11,Sync,按量
 2026-10-22T09:30:01+08:00,demo-key,claude-opus-5-5,1400,4700,0,0,210000,0.12,Sync,按量
 `;
-const manySample = (() => {
+function makeManySample(count = 21) {
   const rows = [];
   for (let index = 0; index < 3; index++) rows.push({ Time: '2026-10-22T09:00:10+08:00', Model: `preview-anchor-${index}`,
     'Input Tokens': '100', 'Output Tokens': String(200 + index), 'Duration (ms)': '10000', 'Billed Cost': '0.001' });
-  for (let index = 0; index < 21; index++) rows.push({
+  for (let index = 0; index < count; index++) rows.push({
     Time: new Date(Date.parse('2026-10-22T01:30:10Z') + index * 60000).toISOString(),
     Model: 'claude-opus-5-5', 'Input Tokens': '503', 'Output Tokens': '1934',
     'Duration (ms)': '10000', 'Billed Cost': '0.01'
@@ -46,7 +46,8 @@ const manySample = (() => {
     [name, sample.split('\n')[1].split(',')[index] || '']));
   return `${columns}\n${rows.map(row => names.map(name => row[name] ?? defaults[name] ?? '').map(value =>
     `"${String(value).replaceAll('"', '""')}"`).join(',')).join('\n')}`;
-})();
+}
+const manySample = makeManySample();
 
 async function portInUse(port) {
   return new Promise(resolve => {
@@ -57,7 +58,7 @@ async function portInUse(port) {
   });
 }
 
-async function startPreview({ port: requestedPort, includeGroups = false, includeMany = false } = {}) {
+async function startPreview({ port: requestedPort, includeGroups = false, includeMany = false, manyCount = 21 } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'billing-import-preview-'));
   const config = loadConfig({ NODE_ENV: 'test', OPERATIONS_CENTER_AUTH_MODE: 'local', OPERATIONS_CENTER_ADMIN_PASSWORD: crypto.randomBytes(24).toString('hex') });
   const auth = new AuthService(config);
@@ -79,7 +80,7 @@ async function startPreview({ port: requestedPort, includeGroups = false, includ
       account_id: '356', group_id: '15', model: `preview-anchor-${index}`, created_at: '2026-10-22T01:00:10Z',
       duration_ms: 10000, billing_dedup: true, actual_cost: 0.001, input_tokens: 100, output_tokens: 200 + index,
       cache_read_tokens: 0, cache_creation_tokens: 0 });
-    for (let index = 0; index < 21; index++) {
+    for (let index = 0; index < manyCount; index++) {
       const id = caseID(200 + index), start = new Date(Date.parse('2026-10-22T01:30:00Z') + index * 60000).toISOString();
       entries.set(id, entry(200 + index, 'claude-opus-5-5', 24, start));
       entries.get(id).updated_at = new Date(Date.parse(start) + 10000).toISOString();
@@ -169,7 +170,7 @@ async function startPreview({ port: requestedPort, includeGroups = false, includ
       native: { usages: 4, errors: errors.length, cases: entries.size },
       logs: { status: 'read', coverageComplete: false, first: '2026-10-22T01:22:00Z', last: '2026-10-22T01:24:05Z' } } }) };
   const imports = new BillingImportService({ store, source, recovery });
-  const demoCSV = includeMany ? manySample : includeGroups ? groupSample : sample;
+  const demoCSV = includeMany ? makeManySample(manyCount) : includeGroups ? groupSample : sample;
   const batch = await imports.import({ fileName: '演示账单.csv', csv: demoCSV });
   if (!includeMany) await imports.match(batch.id, { accountMappings: { 'demo-key': 356 } });
   const app = createApp({ config, auth, database: { configured: () => false }, billingRecovery: recovery, billingImports: imports,
@@ -206,4 +207,4 @@ if (require.main === module) startPreview({ includeGroups: true }).then(({ stop 
   process.once('SIGTERM', () => stop().then(() => process.exit(0)));
 }).catch(error => { console.error(error); process.exitCode = 1; });
 
-module.exports = { startPreview, sample, groupSample, manySample };
+module.exports = { startPreview, sample, groupSample, manySample, makeManySample };
