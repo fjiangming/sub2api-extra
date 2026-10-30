@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Sub2API 运营中心</title>
-  <link rel="stylesheet" href="/styles.css?v=20260930-2">
+  <link rel="stylesheet" href="/styles.css?v=20261030-1">
   <link rel="stylesheet" href="/user-profiles.css?v=20261013-1">
   <link rel="stylesheet" href="/user-messages.css?v=20261019-1">
   <link rel="stylesheet" href="/latency.css?v=20261020-1">
@@ -19,7 +19,7 @@
   <script src="/latency-ui.js?v=20261020-1" defer></script>
   <script src="/billing-recovery-ui.js?v=20261023-1" defer></script>
   <script src="/billing-import-ui.js?v=20261030-1" defer></script>
-  <script src="/app.js?v=20261022-1" defer></script>
+  <script src="/app.js?v=20261030-1" defer></script>
 </head>
 <body>
   <div id="login-view" class="login-view" hidden>
@@ -383,8 +383,9 @@
           </section>
 
           <section class="panel">
-            <div class="panel-heading"><div><h2>周期明细</h2><p>收支、余额消费与利润</p></div></div>
-            <div class="table-wrap"><table class="wide-table"><thead><tr><th>周期</th><th class="numeric">自动收入</th><th class="numeric">手工收入</th><th class="numeric">总收入</th><th class="numeric">支出</th><th class="numeric">利润</th><th class="numeric">利润率</th><th class="numeric">余额消费</th><th class="numeric">实际利润</th><th class="numeric">兑换笔数</th></tr></thead><tbody id="cost-periods"></tbody></table></div>
+            <div class="panel-heading"><div><h2>每日真实收入</h2><p id="cost-daily-profit-meta"></p></div></div>
+            <div id="cost-daily-profit-notices" class="alert-stack cost-daily-notices"></div>
+            <div class="table-wrap cost-daily-table" tabindex="0" role="region" aria-label="每日真实收入明细"><table class="wide-table"><thead><tr><th>日期</th><th class="numeric">主站消费</th><th class="numeric">供应商消费</th><th class="numeric">利润</th><th class="numeric">利润率</th><th class="numeric">主站请求数</th><th>数据状态</th><th>供应商明细</th></tr></thead><tbody id="cost-daily-profits"></tbody><tfoot id="cost-daily-profit-summary"></tfoot></table></div>
           </section>
 
           <section class="panel">

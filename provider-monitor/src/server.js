@@ -1032,6 +1032,13 @@ function createApplication(options = {}) {
       }))
     });
   });
+  app.get('/api/integrations/daily-costs', (req, res, next) => {
+    if (!secureTokenEqual(bearerToken(req), config.integrationToken)) {
+      return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
+    }
+    try { res.set('Cache-Control', 'no-store').json(grossProfit.dailyCosts(req.query)); }
+    catch (error) { next(error); }
+  });
   app.get('/api/integrations/latency-samples', (req, res, next) => {
     if (!secureTokenEqual(bearerToken(req), config.integrationToken)) {
       return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
@@ -1874,6 +1881,7 @@ function createApplication(options = {}) {
       days: req.query.days
     }
   )));
+  api.get('/daily-costs', (req, res) => res.set('Cache-Control', 'no-store').json(grossProfit.dailyCosts(req.query)));
   api.get('/gross-profit', (req, res) => res.json(grossProfit.report({
     dimension: req.query.dimension,
     granularity: req.query.granularity,

@@ -34,7 +34,9 @@ test('cost analysis exposes reporting plus editable income and expense ledgers',
   assert.match(script, /caveats\.hidden = state\.costCaveats\.length === 0/);
   assert.match(styles, /\.cost-caveats:not\(\[open\]\) \.cost-caveats-list \{ display: none; \}/);
   assert.match(html, /id="cost-provider-sync"/);
-  assert.match(html, /id="cost-periods"/);
+  assert.match(html, /id="cost-daily-profits"/);
+  assert.match(html, /id="cost-daily-profit-summary"/);
+  assert.doesNotMatch(html, /id="cost-periods"|<h2>周期明细<\/h2>/);
   assert.match(html, /<script src="\/cost-analysis-ui\.js\?v=[^"]+" defer><\/script>[\s\S]*<script src="\/app\.js\?v=[^"]+" defer><\/script>/);
   assert.match(script, /api\(`\/api\/cost-analysis\?\$\{search\}`\)/);
   assert.match(script, /api\(`\/api\/cost-analysis\/incomes\?\$\{search\}`\)/);
@@ -53,8 +55,9 @@ test('cost analysis exposes reporting plus editable income and expense ledgers',
   assert.match(script, /actual_cost · 不含 ID 1/);
   assert.match(script, /metricCard\('用户总余额'/);
   assert.match(script, /metricCard\('实际利润'/);
-  assert.match(html, /<th class="numeric">自动收入<\/th>/);
-  assert.match(html, /<th class="numeric">兑换笔数<\/th>/);
+  assert.match(html, /<th class="numeric">收入总额<\/th>/);
+  assert.match(html, /<th class="numeric">主站消费<\/th>/);
+  assert.match(html, /<th class="numeric">供应商消费<\/th>/);
   assert.match(html, /id="cost-auto-income-page"/);
   assert.match(html, /id="cost-auto-user-search"/);
   assert.match(html, /id="cost-auto-users"/);

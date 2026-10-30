@@ -1,6 +1,7 @@
 'use strict';
 
 const { AppError } = require('../errors');
+const Decimal = require('decimal.js');
 const {
   addUtcDays,
   dateInTimezone,
@@ -420,6 +421,90 @@ class CostAnalysisService {
     };
   }
 
+  async getDailyProfit(input = {}, { accessToken = null } = {}) {
+    const { range, currency } = parseReportInput(input, this.config);
+    const [site, supplier] = await Promise.all([
+      this.#dailyBalanceConsumption(range, currency),
+      currency === 'CNY' ? this.#supplierDailyCosts(range, currency, accessToken) :
+        { items: [], notice: '主站消费没有币种字段，每日真实收入仅适用于 CNY。' }
+    ]);
+    const siteByDate = new Map(site.rows.map((row) => [row.date, row]));
+    const supplierByDate = new Map(supplier.items.map((row) => [row.date, row]));
+    const items = [];
+    for (let date = range.start; date <= range.end; date = addUtcDays(date, 1)) {
+      const usage = siteByDate.get(date);
+      const upstream = supplierByDate.get(date);
+      const siteComplete = currency === 'CNY' && usage?.complete === true;
+      const supplierComplete = upstream?.complete === true;
+      const siteConsumption = siteComplete ? new Decimal(usage.site_consumption).toDecimalPlaces(8).toNumber() : null;
+      const supplierConsumption = supplierComplete ? upstream.cost : null;
+      const profit = siteComplete && supplierComplete
+        ? new Decimal(siteConsumption).minus(supplierConsumption).toDecimalPlaces(8).toNumber() : null;
+      items.push({ date, siteConsumption, supplierConsumption, profit,
+        margin: profit != null && siteConsumption > 0
+          ? new Decimal(profit).div(siteConsumption).times(100).toDecimalPlaces(2).toNumber() : null,
+        siteRequests: usage ? number(usage.site_requests) : null,
+        supplierRequests: upstream?.requests ?? null,
+        siteComplete, supplierComplete, complete: siteComplete && supplierComplete,
+        providers: upstream?.providers || [],
+        status: currency !== 'CNY' ? 'unsupported_currency' :
+          !siteComplete ? 'site_incomplete' : !supplierComplete ? 'supplier_incomplete' : 'complete'
+      });
+    }
+    const sum = (key) => items.every((item) => item[key] != null)
+      ? items.reduce((total, item) => total.plus(item[key]), new Decimal(0)).toDecimalPlaces(8).toNumber() : null;
+    const siteConsumption = sum('siteConsumption');
+    const profit = sum('profit');
+    return { range, currency, timezone: this.config.financeTimezone, generatedAt: new Date().toISOString(),
+      summary: { siteConsumption, supplierConsumption: sum('supplierConsumption'), profit,
+        margin: profit != null && siteConsumption > 0
+          ? new Decimal(profit).div(siteConsumption).times(100).toDecimalPlaces(2).toNumber() : null,
+        days: items.length, completeDays: items.filter((item) => item.complete).length },
+      items: items.reverse(), notices: [
+        ...(site.notice ? ['主站消费无法核验，请检查用量表、明细覆盖和所选币种。'] : []),
+        ...(supplier.notice ? [supplier.notice] : [])
+      ] };
+  }
+
+  async #supplierDailyCosts(range, currency, accessToken) {
+    try {
+      if (!this.providerMonitor?.configured()) throw new Error('not configured');
+      let token = accessToken;
+      if (!this.providerMonitor.integrationToken && !token && this.sub2api?.configured()) token = await this.sub2api.login();
+      const items = [];
+      // The supplier endpoint bounds each read to 366 days; every date is requested once.
+      for (let start = range.start; start <= range.end;) {
+        const end = addUtcDays(start, 365) < range.end ? addUtcDays(start, 365) : range.end;
+        const report = await this.providerMonitor.getDailyCosts({ from: start, to: end,
+          currency, timezone: this.config.financeTimezone }, token);
+        if (report?.source !== 'provider_cost_ledger' || report.timezone !== this.config.financeTimezone ||
+            report.currency !== currency || report.range?.start !== start || report.range?.end !== end ||
+            !Array.isArray(report.items)) throw new Error('invalid supplier report');
+        const seen = new Set();
+        for (const item of report.items) {
+          if (!/^\d{4}-\d{2}-\d{2}$/.test(item.date) || item.date < start || item.date > end || seen.has(item.date)) {
+            throw new Error('invalid supplier date');
+          }
+          seen.add(item.date);
+          const amount = (value) => (typeof value === 'number' || typeof value === 'string') &&
+            value !== '' && new Decimal(value).isFinite() && new Decimal(value).gte(0);
+          const providers = Array.isArray(item.providers) ? item.providers : [];
+          const ids = new Set(providers.map((provider) => provider.id));
+          const complete = item.complete === true && amount(item.cost) && providers.length > 0 &&
+            ids.size === providers.length && providers.every((provider) => provider.complete === true && amount(provider.cost)) &&
+            providers.reduce((total, provider) => total.plus(provider.cost), new Decimal(0))
+              .minus(item.cost).abs().lte('0.00000001');
+          items.push({ date: item.date, complete, cost: complete ? new Decimal(item.cost).toDecimalPlaces(8).toNumber() : null,
+            requests: item.requests, providers });
+        }
+        start = addUtcDays(end, 1);
+      }
+      return { items };
+    } catch {
+      return { items: [], notice: '供应商实际消费暂不可用，请核对供应商监控版本、连接、同步和币种汇率。' };
+    }
+  }
+
   async getReport(input = {}) {
     const { range, granularity, currency } = parseReportInput(input, this.config);
     await this.#requireAutomaticIncomeTables();
@@ -596,6 +681,8 @@ class CostAnalysisService {
         '用户总余额是当前未删除用户的 balance 合计并排除 ID 1；实际利润为利润减用户总余额，余额是当前快照且不随查询日期回溯。',
         '趋势图的实际利润按当期余额消费减支出计算；余额消费取 usage_logs.actual_cost，仅含 billing_type = 0 且 user_id <> 1 的记录，不叠加充值、手工收入或订阅消费，也不再次扣除当前余额。',
         '余额消费按资金时区归属日期，保留已删除用户的历史消费；使用全部请求与原生日汇总核验明细覆盖，周期内任一天不完整时不展示该周期的消费和实际利润。非 CNY 不计算余额消费利润。',
+        '每日真实收入固定按资金日展示：主站全部 usage_logs.actual_cost（排除 ID 1，含订阅）减供应商监控采购台账的实际消费；不扣手工支出或当前余额。利润率为该利润除以主站消费，消费为零时不计算。',
+        '供应商实际消费按历史充值倍率和配置汇率折算；同步未覆盖当日、结果截断、倍率或汇率未确认时，成本及利润显示待核验，不将缺失数据当零。',
         '自动收入直接依赖 Sub2API 当前兑换记录；源记录被删除后，历史报表会同步减少。'
       ]
     };
@@ -624,7 +711,9 @@ class CostAnalysisService {
         FROM retained_usage GROUP BY 1
       ), consumption AS (
         SELECT (created_at AT TIME ZONE $3)::date AS date,
-               COALESCE(SUM(actual_cost) FILTER (WHERE user_id <> 1 AND billing_type = 0), 0) AS amount
+               COALESCE(SUM(actual_cost) FILTER (WHERE user_id <> 1 AND billing_type = 0), 0) AS amount,
+               COALESCE(SUM(actual_cost) FILTER (WHERE user_id <> 1), 0) AS site_amount,
+               COUNT(*) FILTER (WHERE user_id <> 1) AS site_requests
         FROM retained_usage
         WHERE created_at >= $1::date::timestamp AT TIME ZONE $3
           AND created_at < $2::date::timestamp AT TIME ZONE $3
@@ -633,6 +722,8 @@ class CostAnalysisService {
         SELECT generate_series($1::date, $2::date - 1, INTERVAL '1 day')::date AS date
       )
       SELECT dates.date::text, COALESCE(consumption.amount, 0) AS balance_consumption,
+             COALESCE(consumption.site_amount, 0) AS site_consumption,
+             COALESCE(consumption.site_requests, 0) AS site_requests,
              BOOL_AND(d.bucket_date IS NOT NULL AND COALESCE(detail_counts.requests, 0) >= d.total_requests) AS complete
       FROM dates
       CROSS JOIN LATERAL generate_series(
@@ -643,7 +734,7 @@ class CostAnalysisService {
       LEFT JOIN usage_dashboard_daily d ON d.bucket_date = source_date::date
       LEFT JOIN detail_counts ON detail_counts.date = source_date::date
       LEFT JOIN consumption ON consumption.date = dates.date
-      GROUP BY dates.date, consumption.amount
+      GROUP BY dates.date, consumption.amount, consumption.site_amount, consumption.site_requests
       ORDER BY dates.date
     `, [range.start, range.endExclusive, this.config.financeTimezone,
       this.config.sub2apiTimezone || this.config.financeTimezone]);

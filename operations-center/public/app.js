@@ -786,15 +786,44 @@ async function openAutomaticIncomeRecords(userKey) {
   await loadAutomaticIncomeRecords();
 }
 
+function renderCostDailyProfit(report) {
+  const items = report.items || [];
+  const currency = report.currency || 'CNY';
+  const money = (value) => value == null ? '待核验' : formatMoney(value, currency, 8);
+  const labels = { complete: '已核验', site_incomplete: '主站待核验',
+    supplier_incomplete: '供应商待核验', unsupported_currency: '币种不支持' };
+  const summary = report.summary || {};
+  $('cost-daily-profit-meta').textContent = `${report.timezone || ''} · ${items.length} 天 · 已核验 ${summary.completeDays || 0} 天 · ${currency}`;
+  $('cost-daily-profit-notices').innerHTML = (report.notices || []).map((message) => alertHtml('warning', message)).join('');
+  $('cost-daily-profits').innerHTML = items.length ? items.map((row) => `
+    <tr>
+      <td><strong>${escapeHtml(row.date)}</strong></td>
+      <td class="numeric">${escapeHtml(money(row.siteConsumption))}</td>
+      <td class="numeric">${escapeHtml(money(row.supplierConsumption))}</td>
+      <td class="numeric ${row.profit < 0 ? 'negative-value' : ''}">${escapeHtml(money(row.profit))}</td>
+      <td class="numeric">${formatPercent(row.margin)}</td>
+      <td class="numeric">${row.siteRequests == null ? 'N/A' : formatInteger(row.siteRequests)}</td>
+      <td><span class="badge ${row.complete ? 'success' : 'warning'}">${labels[row.status] || '待核验'}</span></td>
+      <td>${row.providers?.length ? `<details class="cost-daily-suppliers"><summary title="查看供应商消费明细">${formatInteger(row.providers.length)} 家${icon('chevron-down')}</summary><ul>${row.providers.map((provider) => `
+        <li><strong>${escapeHtml(provider.name)}</strong><span>${escapeHtml(money(provider.cost))}</span>${!provider.complete ? `<small>${escapeHtml((provider.reasons || []).join('；') || '同步覆盖未核验')}</small>` : ''}</li>
+      `).join('')}</ul></details>` : '<span class="muted">暂无可核验数据</span>'}</td>
+    </tr>
+  `).join('') : emptyRow(8, '所选范围暂无每日收入数据');
+  $('cost-daily-profit-summary').innerHTML = items.length ? `
+    <tr><th>合计</th><td class="numeric">${escapeHtml(money(summary.siteConsumption))}</td><td class="numeric">${escapeHtml(money(summary.supplierConsumption))}</td><td class="numeric ${summary.profit < 0 ? 'negative-value' : ''}">${escapeHtml(money(summary.profit))}</td><td class="numeric">${formatPercent(summary.margin)}</td><td colspan="3" class="muted">${summary.completeDays === summary.days ? '全部日期已核验' : '包含待核验日期'}</td></tr>
+  ` : '';
+}
+
 async function loadCostAnalysis() {
   setPageMeta('正在汇总自动收入、手工收入与支出');
   const query = costAnalysisQuery();
   const search = new URLSearchParams(query);
-  const [report, incomes, expenses, providers] = await Promise.all([
+  const [report, incomes, expenses, providers, dailyProfit] = await Promise.all([
     api(`/api/cost-analysis?${search}`),
     api(`/api/cost-analysis/incomes?${search}`),
     api(`/api/cost-analysis/expenses?${search}`),
-    api('/api/cost-analysis/providers')
+    api('/api/cost-analysis/providers'),
+    api(`/api/cost-analysis/daily-profit?${search}`)
   ]);
 
   const averageAutomaticIncome = report.summary.averageTransaction == null
@@ -835,9 +864,7 @@ async function loadCostAnalysis() {
   $('cost-breakdown').innerHTML = report.breakdown.length ? report.breakdown.map((row) => `
     <tr><td><strong>${escapeHtml(row.name)}</strong></td><td>${escapeHtml(costKindLabel(row.kind))}</td><td class="numeric">${formatInteger(row.count)}</td><td class="numeric">${escapeHtml(formatMoney(row.amount, report.currency))}</td><td class="numeric">${formatPercent(row.percentage)}</td></tr>
   `).join('') : emptyRow(5, '所选范围暂无成本');
-  $('cost-periods').innerHTML = report.periods.length ? report.periods.map((period) => `
-    <tr><td><strong>${escapeHtml(period.label)}</strong><div class="muted">${escapeHtml(period.start)} 至 ${escapeHtml(period.end)}</div></td><td class="numeric">${escapeHtml(formatMoney(period.automaticRevenue, report.currency))}</td><td class="numeric">${escapeHtml(formatMoney(period.manualRevenue, report.currency))}</td><td class="numeric">${escapeHtml(formatMoney(period.revenue, report.currency))}</td><td class="numeric">${escapeHtml(formatMoney(period.expense, report.currency))}</td><td class="numeric ${period.profit < 0 ? 'negative-value' : ''}">${escapeHtml(formatMoney(period.profit, report.currency))}</td><td class="numeric">${formatPercent(period.margin)}</td><td class="numeric">${period.balanceConsumption == null ? 'N/A' : escapeHtml(formatMoney(period.balanceConsumption, report.currency, 8))}</td><td class="numeric ${period.consumptionProfit < 0 ? 'negative-value' : ''}">${period.consumptionProfit == null ? 'N/A' : escapeHtml(formatMoney(period.consumptionProfit, report.currency, 8))}</td><td class="numeric">${formatInteger(period.transactions)}</td></tr>
-  `).join('') : emptyRow(10);
+  renderCostDailyProfit(dailyProfit);
   renderCostProviders(providers);
   renderCostIncomes(incomes.items || [], report.currency, incomes.customItems || []);
   renderCostExpenses(expenses.items || [], report.currency, expenses.customItems || []);

@@ -26,7 +26,7 @@ function dependencies(config, auth) {
       getUsers: async () => ({}), getFinance: async () => ({})
     },
     costAnalysis: {
-      getReport: async () => ({}), getProviders: async () => ({ items: [] }),
+      getReport: async () => ({}), getDailyProfit: async () => ({}), getProviders: async () => ({ items: [] }),
       getAutomaticIncomeUsers: async () => ({ items: [] }),
       getAutomaticIncomeRecords: async () => ({ items: [] }),
       listExpenses: () => [], listCustomItems: () => [],
@@ -133,7 +133,13 @@ test('custom-menu token is exchanged for a local session and removed from the re
     }
   });
   t.after(() => auth.close());
-  const app = createApp(dependencies(config, auth));
+  const deps = dependencies(config, auth);
+  let dailyToken;
+  deps.costAnalysis.getDailyProfit = async (_query, { accessToken }) => {
+    dailyToken = accessToken;
+    return { items: [] };
+  };
+  const app = createApp(deps);
   const server = http.createServer(app);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
@@ -163,6 +169,11 @@ test('custom-menu token is exchanged for a local session and removed from the re
   const session = await me.json();
   assert.equal(session.user.name, 'sub2api-admin');
   assert.equal(session.authentication.source, 'sso');
+  const daily = await fetch(`${base}/api/cost-analysis/daily-profit`, {
+    headers: { authorization: `Session ${decodeURIComponent(sessionToken)}` }
+  });
+  assert.equal(daily.status, 200);
+  assert.equal(dailyToken, upstreamToken);
 
   const preview = await fetch(`${base}/api/retention/previews`, {
     method: 'POST',
@@ -290,6 +301,10 @@ test('cost analysis API exposes reports and guards income and expense mutations'
   const deps = dependencies(config, auth);
   const calls = [];
   deps.costAnalysis.getReport = async (query) => ({ currency: query.currency });
+  deps.costAnalysis.getDailyProfit = async (query, options) => {
+    calls.push({ operation: 'daily-profit', query, options });
+    return { currency: query.currency, items: [{ date: query.start }] };
+  };
   deps.costAnalysis.getAutomaticIncomeUsers = async (query) => {
     calls.push({ operation: 'automatic-users', query });
     return { items: [{ userId: '7' }], pagination: { page: Number(query.page) } };
@@ -339,6 +354,7 @@ test('cost analysis API exposes reports and guards income and expense mutations'
   const base = `http://127.0.0.1:${server.address().port}`;
 
   assert.equal((await fetch(`${base}/api/cost-analysis`)).status, 401);
+  assert.equal((await fetch(`${base}/api/cost-analysis/daily-profit`)).status, 401);
   assert.equal((await fetch(`${base}/api/cost-analysis/automatic-income/users`)).status, 401);
   assert.equal((await fetch(`${base}/api/cost-analysis/incomes`)).status, 401);
   const login = await fetch(`${base}/api/auth/login`, {
@@ -350,6 +366,12 @@ test('cost analysis API exposes reports and guards income and expense mutations'
   const report = await fetch(`${base}/api/cost-analysis?currency=CNY`, { headers: { cookie } });
   assert.equal(report.status, 200);
   assert.deepEqual(await report.json(), { currency: 'CNY' });
+  const daily = await fetch(`${base}/api/cost-analysis/daily-profit?start=2026-09-01&end=2026-09-30&currency=CNY&granularity=month`, { headers: { cookie } });
+  assert.equal(daily.status, 200);
+  assert.equal(daily.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(await daily.json(), { currency: 'CNY', items: [{ date: '2026-09-01' }] });
+  assert.equal(calls.find((call) => call.operation === 'daily-profit').query.granularity, 'month');
+  assert.deepEqual(calls.find((call) => call.operation === 'daily-profit').options, { accessToken: null });
   const automaticUsers = await fetch(`${base}/api/cost-analysis/automatic-income/users?start=2026-09-01&end=2026-09-30&page=2`, { headers: { cookie } });
   assert.equal(automaticUsers.status, 200);
   assert.deepEqual(await automaticUsers.json(), { items: [{ userId: '7' }], pagination: { page: 2 } });

@@ -440,3 +440,174 @@ test('gross profit HTTP endpoint is authenticated and validates query dimensions
   assert.equal(invalidMode.status, 400);
   assert.equal((await invalidMode.json()).error.code, 'VALIDATION_ERROR');
 });
+
+function syncCoverage(db, providerId, changes = {}) {
+  const state = { status: 'succeeded', from: '2026-08-15T16:00:00.000Z',
+    to: '2026-08-18T16:00:00.000Z', truncated: 0, ...changes };
+  db.prepare(`INSERT OR REPLACE INTO provider_request_log_sync_state
+    (connection_id, status, coverage_from, coverage_to, truncated, last_synced_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, '2026-08-19T00:00:00.000Z', '2026-08-19T00:00:00.000Z')`
+  ).run(providerId, state.status, state.from, state.to, state.truncated);
+}
+
+function dailySetup(t) {
+  const context = createTestContext({ PROVIDER_MONITOR_TIMEZONE: 'UTC' });
+  t.after(() => context.cleanup());
+  const { alpha, beta } = setupLedger(context);
+  for (const provider of [alpha, beta]) {
+    context.db.prepare("UPDATE provider_connections SET created_at = '2026-01-01T00:00:00.000Z' WHERE id = ?").run(provider.id);
+    syncCoverage(context.db, provider.id);
+  }
+  const service = new GrossProfitService({ db: context.db, config: context.config,
+    now: () => new Date('2026-08-19T00:00:00.000Z') });
+  return { ...context, alpha, beta, service,
+    input: { from: '2026-08-16', to: '2026-08-17', timezone: 'Asia/Shanghai' } };
+}
+
+test('daily supplier costs use cash costs and the requested finance timezone, retaining disabled historical suppliers', (t) => {
+  const { service, input } = dailySetup(t);
+  const report = service.dailyCosts(input);
+  assert.equal(report.source, 'provider_cost_ledger');
+  assert.equal(report.timezone, 'Asia/Shanghai');
+  assert.deepEqual(report.items.map((row) => [row.date, row.cost, row.requests, row.complete]), [
+    ['2026-08-16', 2, 1, true], ['2026-08-17', 10, 2, true]
+  ]);
+  assert.equal(report.items[0].providers.length, 2);
+  assert.equal(report.items[0].providers.find((provider) => provider.name === 'Beta Supplier').cost, 0);
+  assert.doesNotMatch(JSON.stringify(report), /secret-|baseUrl|apiKey|credentials/);
+  const utc = service.dailyCosts({ ...input, timezone: 'UTC' });
+  assert.equal(utc.items[0].cost, 12);
+  assert.equal(utc.items[1].cost, 0);
+});
+
+test('daily supplier costs apply confirmed recharge multipliers and configured currency conversion once', (t) => {
+  const { service, input, db } = dailySetup(t);
+  db.prepare("INSERT OR REPLACE INTO settings VALUES ('displayCurrency', ?, '2026-08-19')").run(JSON.stringify('CNY'));
+  db.prepare("INSERT OR REPLACE INTO settings VALUES ('currencyRates', ?, '2026-08-19')").run(JSON.stringify({ USD: 7, CNY: 1 }));
+  db.prepare('UPDATE provider_cost_ledger SET cash_cost = NULL').run();
+  const report = service.dailyCosts({ ...input, currency: 'CNY' });
+  assert.deepEqual(report.items.map((row) => row.cost), [14, 70]);
+  assert.equal(report.items[1].complete, true);
+  db.prepare("UPDATE provider_cost_ledger SET cash_currency = 'EUR' WHERE source_log_id = 'alpha-cost-17'").run();
+  const missing = service.dailyCosts({ ...input, currency: 'CNY' });
+  assert.equal(missing.items[0].cost, 14);
+  assert.equal(missing.items[1].cost, null);
+  assert.match(JSON.stringify(missing.items[1].providers), /缺少币种汇率/);
+});
+
+test('daily supplier costs exclude shadow and superseded duplicates while preserving all active supplier expense', (t) => {
+  const { service, input, db, alpha } = dailySetup(t);
+  setupAdministratorLedger({ db }, alpha);
+  for (const [id, accounting, comparable] of [
+    ['shadow', 'shadow', 1], ['old', 'superseded', 1], ['opening', 'active', 0]
+  ]) {
+    insertCost(db, { id, providerId: alpha.id, keyId: 'key-alpha',
+      occurredAt: '2026-08-16T17:00:00.000Z', cashCost: 100 });
+    db.prepare('UPDATE provider_cost_ledger SET accounting_status = ?, comparable = ? WHERE source_log_id = ?').run(accounting, comparable, id);
+  }
+  assert.equal(service.dailyCosts(input).items[1].cost, 11);
+});
+
+test('daily supplier costs distinguish unavailable, truncated and incomplete coverage from verified zero use', (t) => {
+  const { service, input, db, alpha } = dailySetup(t);
+  for (const changes of [
+    { status: 'failed' }, { truncated: 1 }, { from: '2026-08-16T17:00:00.000Z' },
+    { to: '2026-08-17T15:59:59.000Z' }
+  ]) {
+    syncCoverage(db, alpha.id, changes);
+    const report = service.dailyCosts(input);
+    assert.equal(report.items[1].cost, null);
+    assert.equal(report.items[1].complete, false);
+  }
+  syncCoverage(db, alpha.id);
+  assert.equal(service.dailyCosts(input).items[1].cost, 10);
+  db.prepare('UPDATE provider_connections SET enabled = 1').run();
+  const emptyDay = service.dailyCosts({ ...input, from: '2026-08-18', to: '2026-08-18' });
+  assert.equal(emptyDay.items[0].cost, 0);
+  assert.equal(emptyDay.items[0].complete, true);
+});
+
+test('daily supplier costs reject unknown values, unconfirmed multipliers and counter-only daily estimates', (t) => {
+  const { service, input, db } = dailySetup(t);
+  const updates = [
+    "cost = NULL, request_count = 0",
+    "cost = 8, recharge_source = 'default'",
+    "recharge_source = 'manual', source_type = 'usage_counter'",
+    "source_type = 'request_log', cash_cost = -1"
+  ];
+  for (const update of updates) {
+    db.prepare(`UPDATE provider_cost_ledger SET ${update} WHERE source_log_id = 'alpha-cost-17'`).run();
+    const report = service.dailyCosts(input);
+    assert.equal(report.items[1].cost, null);
+    assert.equal(report.items[1].complete, false);
+  }
+});
+
+test('daily supplier costs never assume a USD to CNY rate when only the display currency is configured', (t) => {
+  const { service, input, db } = dailySetup(t);
+  db.prepare("INSERT OR REPLACE INTO settings VALUES ('displayCurrency', ?, '2026-08-19')").run(JSON.stringify('CNY'));
+  const report = service.dailyCosts({ ...input, currency: 'CNY' });
+  assert.equal(report.items[0].cost, null);
+  assert.match(JSON.stringify(report.items[0].providers), /缺少币种汇率/);
+});
+
+test('daily supplier costs keep stale current-day coverage unverified and include newly enabled unsynchronized suppliers', (t) => {
+  const { service, input, db } = dailySetup(t);
+  const providers = new ProviderRepository(db, service.config);
+  const provider = createProvider(providers, 'New Supplier', 'daily-new');
+  db.prepare("UPDATE provider_connections SET enabled = 1, created_at = '2026-08-17T08:00:00.000Z' WHERE id = ?").run(provider.id);
+  const report = service.dailyCosts(input);
+  assert.equal(report.items[0].cost, 2);
+  assert.equal(report.items[1].cost, null);
+  assert.equal(report.items[1].providers.find((item) => item.id === provider.id).complete, false);
+  db.prepare('UPDATE provider_connections SET enabled = 1').run();
+  const today = service.dailyCosts({ ...input, from: '2026-08-19', to: '2026-08-19' });
+  assert.equal(today.items[0].cost, null);
+});
+
+test('daily supplier costs do not invent zero when no monitored suppliers can be verified and validate ranges', (t) => {
+  const context = createTestContext();
+  t.after(() => context.cleanup());
+  const service = new GrossProfitService({ db: context.db, config: context.config });
+  assert.equal(service.dailyCosts({ from: '2026-08-17', to: '2026-08-17' }).items[0].cost, null);
+  assert.throws(() => service.dailyCosts({ timezone: 'bad/timezone' }), { code: 'VALIDATION_ERROR' });
+  assert.throws(() => service.dailyCosts({ from: '2025-01-01', to: '2026-08-17' }), { code: 'VALIDATION_ERROR' });
+  assert.throws(() => service.dailyCosts({ from: '2026-02-30', to: '2026-03-01' }), { code: 'VALIDATION_ERROR' });
+});
+
+test('daily supplier costs require integration or administrator authentication and return no-store safe data', async (t) => {
+  const token = 'integration-daily-cost-token-0123456789abcdef';
+  const context = createTestContext({ PROVIDER_MONITOR_INTEGRATION_TOKEN: token });
+  setupLedger(context);
+  const app = createApplication({ config: context.config, db: context.db, startBackground: false });
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => {
+    await new Promise((resolve) => server.close(resolve));
+    await app.locals.close();
+    context.cleanup();
+  });
+  const query = '?from=2026-08-16&to=2026-08-17&timezone=Asia%2FShanghai';
+  assert.equal((await fetch(`${base}/api/daily-costs${query}`)).status, 401);
+  assert.equal((await fetch(`${base}/api/integrations/daily-costs${query}`)).status, 401);
+  assert.equal((await fetch(`${base}/api/integrations/daily-costs${query}`, {
+    headers: { authorization: 'Bearer wrong' }
+  })).status, 401);
+  const integration = await fetch(`${base}/api/integrations/daily-costs${query}`, {
+    headers: { authorization: `Bearer ${token}` }
+  });
+  assert.equal(integration.status, 200);
+  assert.equal(integration.headers.get('cache-control'), 'no-store');
+  const data = await integration.json();
+  assert.equal(data.items.length, 2);
+  assert.doesNotMatch(JSON.stringify(data), /secret-|baseUrl|apiKey|credentials/);
+  const login = await fetch(`${base}/api/auth/login`, { method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'test-password' }) });
+  const cookie = login.headers.get('set-cookie').split(';')[0];
+  const admin = await fetch(`${base}/api/daily-costs${query}`, { headers: { cookie } });
+  assert.equal(admin.status, 200);
+  assert.equal(admin.headers.get('cache-control'), 'no-store');
+  assert.deepEqual((await admin.json()).items, data.items);
+});

@@ -159,3 +159,125 @@ test('other currencies and missing usage tables leave consumption unavailable wh
   assert.equal(missing.periods[0].expense, 10);
   assert.match(missing.notices[0], /缺少用量明细/);
 });
+
+function dailyCosts(from, to, change = (item) => item) {
+  const items = [];
+  for (let date = from; date <= to;) {
+    items.push(change({ date, complete: true, cost: 2.5, requests: 2,
+      providers: [{ id: 'p1', name: 'Supplier', cost: 2.5, complete: true, reasons: [] }] }));
+    const next = new Date(`${date}T00:00:00Z`);
+    next.setUTCDate(next.getUTCDate() + 1);
+    date = next.toISOString().slice(0, 10);
+  }
+  return { range: { start: from, end: to }, source: 'provider_cost_ledger',
+    currency: 'CNY', timezone: 'Asia/Shanghai', items };
+}
+
+function withSuppliers(costs, getDailyCosts = async ({ from, to }) => dailyCosts(from, to)) {
+  costs.providerMonitor = { configured: () => true, integrationToken: 'integration', getDailyCosts };
+  return costs;
+}
+
+test('daily real profit uses all non-admin actual costs and upstream costs, independent of topups, manual ledgers and granularity', async () => {
+  const report = await withSuppliers(service()).getDailyProfit({
+    start: '2026-01-01', end: '2026-01-03', granularity: 'month'
+  });
+  assert.deepEqual(report.items.map((row) => [row.date, row.siteConsumption, row.supplierConsumption,
+    row.profit, row.margin, row.siteRequests, row.complete]), [
+    ['2026-01-03', 0, 2.5, -2.5, null, 0, true],
+    ['2026-01-02', 4, 2.5, 1.5, 37.5, 1, true],
+    ['2026-01-01', 1345.12500001, 2.5, 1342.62500001, 99.81, 6, true]
+  ]);
+  assert.equal(report.summary.siteConsumption, 1349.12500001);
+  assert.equal(report.summary.supplierConsumption, 7.5);
+  assert.equal(report.summary.profit, 1341.62500001);
+  assert.equal(report.summary.completeDays, 3);
+  assert.equal(report.currency, 'CNY');
+  assert.equal(report.timezone, 'Asia/Shanghai');
+});
+
+test('daily profit handles finance and usage timezones independently and refuses incomplete main-site days', async () => {
+  await aggregate('UTC');
+  const costs = withSuppliers(service({ sub2apiTimezone: 'UTC' }));
+  const input = { start: '2026-01-01', end: '2026-01-02' };
+  assert.equal((await costs.getDailyProfit(input)).items[1].siteConsumption, 1345.12500001);
+  await database.exec('DELETE FROM usage_logs WHERE id = 1');
+  const report = await costs.getDailyProfit(input);
+  assert.equal(report.items[1].siteConsumption, null);
+  assert.equal(report.items[1].profit, null);
+  assert.equal(report.items[1].supplierConsumption, 2.5);
+  assert.equal(report.items[1].status, 'site_incomplete');
+  assert.equal(report.items[0].profit, 1.5);
+  assert.equal(report.summary.profit, null);
+  assert.equal(report.summary.completeDays, 1);
+});
+
+test('daily profit keeps missing, duplicate, inconsistent and unsupported supplier data unknown', async () => {
+  const variants = [
+    (report) => ({ ...report, items: [] }),
+    (report) => ({ ...report, currency: 'USD' }),
+    (report) => ({ ...report, timezone: 'UTC' }),
+    (report) => ({ ...report, source: 'unknown' }),
+    (report) => ({ ...report, items: [...report.items, report.items[0]] }),
+    (report) => ({ ...report, items: report.items.map((item) => ({ ...item, complete: false })) }),
+    (report) => ({ ...report, items: report.items.map((item) => ({ ...item, cost: 3 })) }),
+    (report) => ({ ...report, items: report.items.map((item) => ({ ...item, cost: null })) }),
+    (report) => ({ ...report, items: report.items.map((item) => ({ ...item, providers: [] })) }),
+    (report) => ({ ...report, items: report.items.map((item) => ({ ...item,
+      providers: [{ ...item.providers[0], complete: false }] })) }),
+    (report) => ({ ...report, items: report.items.map((item) => ({ ...item,
+      providers: [item.providers[0], item.providers[0]] })) })
+  ];
+  for (const change of variants) {
+    const costs = withSuppliers(service(), async ({ from, to }) => change(dailyCosts(from, to)));
+    const report = await costs.getDailyProfit({ start: '2026-01-01', end: '2026-01-01' });
+    assert.equal(report.items[0].siteConsumption, 1345.12500001);
+    assert.equal(report.items[0].supplierConsumption, null);
+    assert.equal(report.items[0].profit, null);
+    assert.equal(report.summary.profit, null);
+  }
+});
+
+test('daily profit accepts verified zero cost and does not infer cost from an unconfigured or failed monitor', async () => {
+  const costs = withSuppliers(service(), async ({ from, to }) => dailyCosts(from, to,
+    (item) => ({ ...item, cost: 0, providers: [{ ...item.providers[0], cost: 0 }] })));
+  assert.equal((await costs.getDailyProfit({ start: '2026-01-02', end: '2026-01-02' })).items[0].profit, 4);
+  for (const configured of [false, true]) {
+    costs.providerMonitor = { configured: () => configured, integrationToken: 'integration',
+      getDailyCosts: async () => { throw new Error('monitor unavailable'); } };
+    const report = await costs.getDailyProfit({ start: '2026-01-02', end: '2026-01-02' });
+    assert.equal(report.items[0].profit, null);
+    assert.match(report.notices.join(), /供应商实际消费暂不可用/);
+  }
+});
+
+test('daily supplier queries split long ranges without overlapping and pass the finance timezone and SSO token', async () => {
+  const calls = [];
+  const costs = withSuppliers(service(), async (query, token) => {
+    calls.push({ query, token });
+    return dailyCosts(query.from, query.to);
+  });
+  costs.providerMonitor.integrationToken = null;
+  await costs.getDailyProfit({ start: '2025-01-01', end: '2026-01-02' }, { accessToken: 'browser-sso' });
+  assert.deepEqual(calls.map(({ query }) => [query.from, query.to]), [
+    ['2025-01-01', '2026-01-01'], ['2026-01-02', '2026-01-02']
+  ]);
+  assert.ok(calls.every(({ query, token }) => query.timezone === 'Asia/Shanghai' &&
+    query.currency === 'CNY' && token === 'browser-sso'));
+});
+
+test('daily profit handles missing usage tables and currencies without hiding unrelated financial data', async () => {
+  const costs = withSuppliers(service());
+  costs.inspector = { requireTables: async () => ['usage_logs'] };
+  const missing = await costs.getDailyProfit({ start: '2026-01-01', end: '2026-01-01' });
+  assert.equal(missing.items[0].siteConsumption, null);
+  assert.equal(missing.items[0].supplierConsumption, 2.5);
+  assert.equal(missing.items[0].profit, null);
+  assert.match(missing.notices.join(), /主站消费无法核验/);
+  let supplierCalls = 0;
+  costs.providerMonitor.getDailyCosts = async () => { supplierCalls += 1; };
+  const usd = await costs.getDailyProfit({ start: '2026-01-01', end: '2026-01-01', currency: 'USD' });
+  assert.equal(usd.items[0].status, 'unsupported_currency');
+  assert.equal(usd.items[0].profit, null);
+  assert.equal(supplierCalls, 0);
+});

@@ -532,7 +532,9 @@ HTTPS iframe 会同时设置普通 Cookie 和分区 Cookie，并在 URL Fragment
 
 如果 `SUB2API_BASE_URL` 使用 `host.docker.internal` 或内网域名，必须单独配置浏览器可访问的 `SUB2API_PUBLIC_URL`。需要允许其他前端来源时，在"设置与备份 -> 系统参数"中维护准确的浏览器 Origin。
 
-运营中心的成本分析需要供应商 ID、名称、适配器、启停状态和币种；慢请求页还会读取已同步的上游请求耗时和用量。两个服务都使用 Sub2API SSO 时可复用当前管理员会话；Provider Monitor 使用本地认证时，应在两个服务中配置相同的 `PROVIDER_MONITOR_INTEGRATION_TOKEN`。该 Token 至少 32 个字符，只授权 `GET /api/integrations/providers` 和 `GET /api/integrations/latency-samples` 两个只读接口。后者必须提供账号 ID 和最长 48 小时的时间窗口，只返回已映射上游 Key 的脱敏请求样本及同步覆盖，不返回凭据或请求正文，也不会发起模型探测。
+运营中心的成本分析需要供应商 ID、名称、适配器、启停状态和币种；每日真实收入还会读取已同步采购成本，慢请求页读取已同步的上游请求耗时和用量。两个服务都使用 Sub2API SSO 时可复用当前管理员会话；Provider Monitor 使用本地认证时，应在两个服务中配置相同的 `PROVIDER_MONITOR_INTEGRATION_TOKEN`。该 Token 至少 32 个字符，现有范围包含 `GET /api/integrations/providers`、`GET /api/integrations/latency-samples`、`GET /api/integrations/daily-costs` 只读接口，以及前文计费核查专用的有界账单日志刷新。请求样本接口必须提供账号 ID 和最长 48 小时的时间窗口，只返回已映射上游 Key 的脱敏请求样本及同步覆盖，不返回凭据或请求正文，也不会发起模型探测。
+
+每日成本接口接受 `from=YYYY-MM-DD`、`to=YYYY-MM-DD`、`timezone`、`currency`，每次最多 366 天，固定按日返回供应商拆分、请求数及同步核验状态，复用现有 `provider_cost_ledger` 的 `active AND comparable=1` 去重仲裁。金额取实际 `cash_cost`（或按已保存历史充值倍率折算），再按“系统设置”币种汇率转换，不默认外币与显示币种 1:1。日志同步必须成功、未截断并覆盖资金日（今日到当前时刻）；缺费用、未确认倍率、缺汇率、未同步或只有计数器估算时成本为 `null`，不以零成本推导利润。启用供应商和范围内仍有历史费用的停用供应商都会参与核验；监控未接入的上游不在覆盖内。此接口只读，不触发同步或计费，响应 `Cache-Control: no-store`，不返回供应商凭据。管理员 SSO 可调用同契约的 `GET /api/daily-costs`。运营中心与供应商监控需配套升级，无新增环境变量；运营中心主站消费排除 ID 1 并包含全部使用记录，利润为该消费减全部供应商实际费用，详细口径见运营中心文档。
 
 ### 运营中心供应商同步
 

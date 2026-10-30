@@ -238,7 +238,7 @@ class GrossProfitService {
     this.db.function('gross_profit_bucket', { deterministic: true }, bucketForTimestamp);
   }
 
-  #query(input = {}) {
+  #query(input = {}, timezone = this.config.timezone) {
     const dimension = String(input.dimension || 'provider').trim().toLowerCase();
     const granularity = String(input.granularity || 'day').trim().toLowerCase();
     const rawAccountingMode = String(
@@ -255,7 +255,7 @@ class GrossProfitService {
     if (!ACCOUNTING_MODES.has(accountingMode)) {
       throw new AppError('VALIDATION_ERROR', 'Unsupported gross profit accounting mode', { status: 400 });
     }
-    const today = dateInTimezone(this.now(), this.config.timezone);
+    const today = dateInTimezone(this.now(), timezone);
     const from = String(input.from || shiftDateKey(today, -29));
     const to = String(input.to || today);
     if (!validDateKey(from) || !validDateKey(to) || from > to) {
@@ -279,8 +279,8 @@ class GrossProfitService {
     if (currency && !/^[A-Z][A-Z0-9_-]{0,11}$/.test(currency)) {
       throw new AppError('VALIDATION_ERROR', 'Gross profit currency is invalid', { status: 400 });
     }
-    const fromAt = startOfDateInTimezone(from, this.config.timezone);
-    const toAt = startOfDateInTimezone(shiftDateKey(to, 1), this.config.timezone);
+    const fromAt = startOfDateInTimezone(from, timezone);
+    const toAt = startOfDateInTimezone(shiftDateKey(to, 1), timezone);
     return {
       dimension,
       granularity,
@@ -290,13 +290,13 @@ class GrossProfitService {
       toAt: toAt.toISOString(),
       connectionId,
       currency,
-      timezone: this.config.timezone,
+      timezone,
       accountingMode,
       administratorUserId: ADMINISTRATOR_USER_ID
     };
   }
 
-  #currencySettings(targetCurrency = null) {
+  #currencySettings(targetCurrency = null, strictRates = false) {
     const rows = this.db.prepare(`
       SELECT key, value_json FROM settings
       WHERE key IN ('displayCurrency', 'currencyRates')
@@ -305,7 +305,7 @@ class GrossProfitService {
       rows.map((row) => [row.key, parseJson(row.value_json, null)])
     );
     const displayCurrency = String(values.displayCurrency || 'USD').toUpperCase();
-    const rates = { USD: 1 };
+    const rates = strictRates ? {} : { USD: 1 };
     if (values.currencyRates && typeof values.currencyRates === 'object') {
       for (const [currency, value] of Object.entries(values.currencyRates)) {
         const rate = finite(value);
@@ -457,6 +457,13 @@ class GrossProfitService {
         SUM(CASE WHEN ledger.cost IS NOT NULL
           AND COALESCE(ledger.recharge_source, 'default') = 'default'
           THEN ledger.request_count ELSE 0 END) AS unconfirmed_requests,
+        SUM(CASE WHEN ledger.cost IS NULL OR
+          COALESCE(ledger.cash_cost, ledger.cost / ledger.recharge_multiplier) IS NULL
+          THEN 1 ELSE 0 END) AS missing_value_entries,
+        SUM(CASE WHEN ledger.cost < 0 OR ledger.cash_cost < 0 OR ledger.recharge_multiplier <= 0
+          THEN 1 ELSE 0 END) AS invalid_value_entries,
+        SUM(CASE WHEN COALESCE(ledger.recharge_source, 'default') = 'default' THEN 1 ELSE 0 END) AS unconfirmed_entries,
+        SUM(CASE WHEN ledger.source_type <> 'request_log' THEN 1 ELSE 0 END) AS counter_entries,
         MAX(COALESCE(ledger.precision_seconds, 0)) AS maximum_precision_seconds
       FROM ${source} ledger
       LEFT JOIN provider_connections connection ON connection.id = ledger.connection_id
@@ -509,6 +516,68 @@ class GrossProfitService {
       convertible: currency === settings.displayCurrency || finite(settings.rates[currency]) > 0
     }));
     return { providers, currencies };
+  }
+
+  dailyCosts(input = {}) {
+    const timezone = String(input.timezone || this.config.timezone);
+    try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(); }
+    catch { throw new AppError('VALIDATION_ERROR', 'Daily cost timezone is invalid', { status: 400 }); }
+    const query = this.#query({ from: input.from, to: input.to, currency: input.currency,
+      dimension: 'provider', granularity: 'day' }, timezone);
+    const settings = this.#currencySettings(query.currency, true);
+    const rows = this.#costRows(query);
+    const activeIds = new Set(rows.map((row) => row.connection_id));
+    const providers = this.db.prepare(`
+      SELECT p.id, p.name, p.enabled, p.created_at,
+             s.status, s.coverage_from, s.coverage_to, s.truncated, s.last_synced_at
+      FROM provider_connections p
+      LEFT JOIN provider_request_log_sync_state s ON s.connection_id = p.id
+      ORDER BY p.name, p.id
+    `).all().filter((provider) => provider.enabled || activeIds.has(provider.id));
+    const generatedAt = this.now().toISOString();
+    const items = this.#periods(query).map((period) => {
+      const periodRows = rows.filter((row) => row.period_key === period.periodKey);
+      const suppliers = providers.filter((provider) =>
+        provider.created_at < period.to || periodRows.some((row) => row.connection_id === provider.id)
+      ).map((provider) => {
+        const entries = periodRows.filter((row) => row.connection_id === provider.id);
+        const reasons = [];
+        let amount = 0;
+        let requests = 0;
+        for (const row of entries) {
+          const converted = this.#convert(row.amount, row.cash_currency, settings);
+          if (converted == null) reasons.push('缺少币种汇率');
+          else amount += converted;
+          requests += integer(row.request_count) + integer(row.missing_value_requests);
+          if (row.missing_value_entries > 0) reasons.push('部分请求缺少实际费用');
+          if (row.invalid_value_entries > 0) reasons.push('实际费用或充值倍率无效');
+          if (row.unconfirmed_entries > 0) reasons.push('充值倍率未确认');
+          if (row.counter_entries > 0) reasons.push('计数器增量无法核验逐日完整性');
+        }
+        // A saved amount alone cannot prove that all supplier requests were synchronized.
+        const coverageStart = entries.length ? period.from :
+          new Date(Math.max(Date.parse(period.from), Date.parse(provider.created_at))).toISOString();
+        const coverageEnd = new Date(Math.min(Date.parse(period.to), Date.parse(generatedAt))).toISOString();
+        if (provider.status !== 'succeeded' || provider.truncated ||
+            !(Date.parse(provider.coverage_from) <= Date.parse(coverageStart)) ||
+            !(Date.parse(provider.coverage_to) >= Date.parse(coverageEnd)) ||
+            Date.parse(period.from) > Date.parse(generatedAt)) {
+          reasons.push(provider.truncated ? '同步结果已截断' : '同步未覆盖完整日期');
+        }
+        return {
+          id: provider.id, name: provider.name, cost: reasons.length ? null : round(amount),
+          recordedCost: round(amount), requests, complete: reasons.length === 0,
+          reasons: [...new Set(reasons)], lastSyncedAt: provider.last_synced_at || null
+        };
+      });
+      const complete = suppliers.length > 0 && suppliers.every((supplier) => supplier.complete);
+      return { date: period.periodKey, complete,
+        cost: complete ? round(suppliers.reduce((sum, supplier) => sum + supplier.cost, 0)) : null,
+        requests: suppliers.reduce((sum, supplier) => sum + supplier.requests, 0),
+        providers: suppliers };
+    });
+    return { range: { start: query.from, end: query.to }, timezone,
+      currency: settings.currency, source: 'provider_cost_ledger', items, generatedAt };
   }
 
   report(input = {}) {

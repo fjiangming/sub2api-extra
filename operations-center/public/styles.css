@@ -343,6 +343,17 @@ input:focus, select:focus { border-color: var(--green); box-shadow: 0 0 0 3px rg
 .cost-caveats-chevron { flex: 0 0 auto; width: 17px; height: 17px; margin-left: auto; transition: transform 160ms ease; }
 .cost-caveats[open] .cost-caveats-chevron { transform: rotate(180deg); }
 .cost-caveats:not([open]) .cost-caveats-list { display: none; }
+.cost-daily-notices:not(:empty) { margin: 12px 16px; }
+.cost-daily-table { max-height: 640px; overflow: auto; }
+.cost-daily-table table { min-width: 1060px; }
+.cost-daily-table thead { position: sticky; top: 0; z-index: 1; }
+.cost-daily-table tfoot { font-weight: 600; background: #f4f7f5; }
+.cost-daily-suppliers { min-width: 180px; max-width: 280px; white-space: normal; }
+.cost-daily-suppliers summary { display: flex; align-items: center; gap: 8px; cursor: pointer; color: #176b4d; }
+.cost-daily-suppliers summary svg { width: 14px; height: 14px; }
+.cost-daily-suppliers ul { margin: 10px 0 0; padding: 0; list-style: none; }
+.cost-daily-suppliers li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; padding: 8px 0; border-top: 1px solid #edf0eb; overflow-wrap: anywhere; }
+.cost-daily-suppliers small { flex-basis: 100%; color: #7c5b24; }
 .cost-caveats-list { margin-top: 8px; }
 
 .table-wrap { width: 100%; overflow: auto; }

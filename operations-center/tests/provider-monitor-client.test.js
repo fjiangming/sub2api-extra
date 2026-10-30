@@ -45,3 +45,41 @@ test('provider monitor client exchanges a Sub2API token when no integration toke
     'Session provider-session'
   ]);
 });
+
+test('daily supplier costs use the read-only integration API with explicit dates, currency and timezone', async () => {
+  const calls = [];
+  const client = new ProviderMonitorClient({ providerMonitorBaseUrl: 'https://monitor.example',
+    providerMonitorIntegrationToken: 'integration', providerMonitorRequestTimeoutMs: 1000
+  }, async (url, options) => {
+    calls.push({ url, options });
+    return response(200, { source: 'provider_cost_ledger', items: [] });
+  });
+  const query = { from: '2026-01-01', to: '2026-01-02', currency: 'CNY', timezone: 'Asia/Shanghai' };
+  assert.equal((await client.getDailyCosts(query, 'browser-token')).source, 'provider_cost_ledger');
+  const url = new URL(calls[0].url);
+  assert.equal(url.pathname, '/api/integrations/daily-costs');
+  assert.deepEqual(Object.fromEntries(url.searchParams), query);
+  assert.equal(calls[0].options.headers.authorization, 'Bearer integration');
+  assert.equal(calls.length, 1);
+});
+
+test('daily supplier costs exchange SSO and reject missing configuration or invalid sessions', async () => {
+  const calls = [];
+  const config = { providerMonitorBaseUrl: 'https://monitor.example', providerMonitorRequestTimeoutMs: 1000 };
+  const client = new ProviderMonitorClient(config, async (url, options) => {
+    calls.push({ url, options });
+    return response(200, url.endsWith('/api/auth/sso') ? { sessionToken: 'monitor-session' } : { items: [] });
+  });
+  await client.getDailyCosts({ from: '2026-01-01' }, 'sub2api-sso');
+  assert.deepEqual(calls.map((call) => call.options.headers.authorization), [
+    'Bearer sub2api-sso', 'Session monitor-session'
+  ]);
+  assert.match(calls[1].url, /\/api\/daily-costs\?/);
+  await assert.rejects(client.getDailyCosts({}), { code: 'PROVIDER_MONITOR_AUTH_NOT_CONFIGURED' });
+  await assert.rejects(new ProviderMonitorClient({}).getDailyCosts({}), { code: 'PROVIDER_MONITOR_NOT_CONFIGURED' });
+  const invalid = new ProviderMonitorClient(config, async () => response(200, {}));
+  await assert.rejects(invalid.getDailyCosts({}, 'sso'), { code: 'PROVIDER_MONITOR_INVALID_RESPONSE' });
+  const oldMonitor = new ProviderMonitorClient(config, async () => response(404, {}));
+  await assert.rejects(oldMonitor.getDailyCosts({}, 'sso'), (error) =>
+    error.code === 'PROVIDER_MONITOR_REQUEST_FAILED' && error.details.upstreamStatus === 404);
+});

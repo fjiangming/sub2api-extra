@@ -1,5 +1,25 @@
 # 个性化功能维护台账
 
+## 2026-10-30：成本分析每日真实收入
+
+用户要求用当前日期范围的每日主站实际消费减各供应商实际消费，替换原周期明细。本轮仅本地实现和隔离验证，保留本文件既有未提交生产维护记录、其他工程与无关文件；不部署、不连接生产或执行资金写入。原计费核查、CSV 后台任务和主站原生资金事务不变。
+
+| 文件 | 改动与必须保留的约定 |
+| --- | --- |
+| `operations-center/src/services/cost-analysis-service.js` | 新增逐日利润只读报表；主站消费为所选资金日内全部 `usage_logs.actual_cost`，排除用户 ID 1，包含余额与订阅使用记录，不因删除用户抹除消费；与原有余额消费趋势分开。供应商成本来自已同步采购台账，数据或币种未核实时不把成本当零、不推断利润；不重复扣手工台账。 |
+| `operations-center/src/provider-monitor-client.js`、`src/app.js` | 复用既有集成 Token 或管理员 SSO，增加供应商每日消费读取与管理员每日利润 API，保留超时和认证边界。 |
+| `provider-monitor/src/services/gross-profit-service.js`、`src/server.js` | 复用原有采购台账的 active / comparable 仲裁、历史充值倍率与配置汇率，新增脱敏只读每日成本；按运营中心资金时区聚合，返回供应商拆分、同步覆盖和未确认金额状态，不调用模型或触发同步。新接口严格要求源 / 目标币种有确认汇率，不沿用显示币种变化时的 USD 默认 1；缺费用、负费用或未确认倍率不算已核验。原毛利接口行为保留。 |
+| `operations-center/public/index.html`、`public/app.js`、`public/styles.css` | 移除周期明细，固定逐日展示日期、主站消费、供应商消费、利润、利润率、请求数与核验状态，支持供应商拆分复核；粒度不改变每日列表。仅更新本次涉及的资源版本。 |
+| `operations-center/tests/cost-consumption.test.js`、`cost-analysis-ui.test.js`、`provider-monitor-client.test.js`、`server.test.js`、`frontend-layout.test.js`；`provider-monitor/tests/gross-profit.test.js` | 验证真实 SQL、日界线 / 时区、管理员排除、订阅与删除用户、供应商去重 / 倍率 / 汇率 / 缺失 / 截断覆盖、鉴权、逐日列表与手机展示；不操作真实余额。 |
+| `operations-center/data-preview/daily-profit-qa-20261030.cjs`（忽略的本地验收脚本与截图） | 隔离 PGlite 主站、SQLite 供应商监控、真实只读集成 HTTP 和浏览器端到端核验；只绑定本地临时端口，完成后关闭两个服务并清理临时数据库，不连接生产或发送推理。 |
+| `operations-center/README.md`、`docs/cost-analysis.md`、`docs/metrics.md`、`provider-monitor/README.md`、`CUSTOMIZATIONS.md` | 记录每日公式、真实采购成本、同步覆盖与同币种要求、兼容及配套更新范围。验证完成后补充结果。 |
+
+验证：运营中心完整 271 项、供应商监控完整 297 项测试通过；运营中心 npm run check 及本轮新增接口 / 服务文件 node --check 通过；git diff --check 通过。供应商监控原有 key-probe 恢复间隔测试首次全量偶发失败，单独 9 项及第二次完整 297 项均通过，未修改无关探测逻辑。1440px 桌面 / 390px 手机 Playwright 使用真实 PGlite SQL、SQLite 采购账本和新供应商 HTTP 接口验证管理员排除、订阅消费、历史倍率 / 汇率、亏损和零分母、按月查询仍保留日表、供应商详情、截断后利润待核验；无未捕获页面错误或整页横向溢出，手机表格内部滚动，说明和详情默认折叠。截图已复核，保存在忽略的 operations-center/data-preview/daily-profit-*.png；两个验收服务及临时数据库均已关闭 / 清理。
+
+边界：沿用主站 CNY 额度金额约定，列表仅 CNY；监控只能核验已配置供应商，未接入上游无法自动发现。今日日志未覆盖当前时刻或历史日期缺完整覆盖时仍为待核验，不把有一部分账本记录误认为全天完整。需要运营中心与供应商监控配套更新，沿用既有地址、Token / SSO、倍率与汇率配置，无新环境变量或数据库迁移。当前仅本地实现，未提交、推送、发布或部署，不代表生产已更新。
+
+用户随后明确授权提交 GitHub。本次只将本节每日真实收入实现、测试和文档提交并推送 extra main；推送前 fetch 核对远端，沿用原有 Actions 测试与 GHCR 镜像流程，构建 / 发布结果以本次提交 SHA 的 Actions 为准。此前独立生产维护台账、无关工程和文件保留本地，不纳入本次提交；本次不部署或操作生产资金。
+
 ## 2026-10-25：修复满血 AI HTML 审核 HTTP 400 与管理员诊断
 
 用户要求修复降智检测审核不可用，并随后授权提交 GitHub。本轮只提交降智检测及对应台账，保留运营中心、独立生产台账及其它无关未提交改动；推送至 main 后沿用现有 Actions 构建镜像，不部署，不改 Sub2API 源码、生产配置或历史记录。

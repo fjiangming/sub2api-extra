@@ -360,6 +360,11 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   }));
   api.get('/metrics/finance', asyncRoute(async (req, res) => res.json(await metrics.getFinance(req.query))));
   api.get('/cost-analysis', asyncRoute(async (req, res) => res.json(await costAnalysis.getReport(req.query))));
+  api.get('/cost-analysis/daily-profit', asyncRoute(async (req, res) => {
+    res.set('Cache-Control', 'no-store').json(await costAnalysis.getDailyProfit(req.query, {
+      accessToken: req.auth.upstreamAccessToken || null
+    }));
+  }));
   api.get('/cost-analysis/automatic-income/users', asyncRoute(async (req, res) => {
     res.json(await costAnalysis.getAutomaticIncomeUsers(req.query));
   }));
