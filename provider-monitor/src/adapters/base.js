@@ -11,6 +11,12 @@ function toFiniteNumber(value, fallback = null) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function summaryNumber(value) {
+  if (typeof value !== 'number' && (typeof value !== 'string' || !value.trim())) return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
 function isBillingTokenCount(value) {
   if (typeof value !== 'number' && !(typeof value === 'string' && /^\d+$/.test(value))) return false;
   const count = Number(value);
@@ -96,6 +102,7 @@ class ProviderAdapter {
       backupGroup: false,
       groupsDerivedFromKeys: false,
       usageHistory: false,
+      dailyUsageSummary: false,
       requestLogs: false,
       priceCatalog: false,
       rechargeQuote: false,
@@ -145,6 +152,10 @@ class ProviderAdapter {
 
   async getUsage() {
     return [];
+  }
+
+  async getDailyUsageSummary() {
+    throw new AppError('CAPABILITY_UNSUPPORTED', 'Provider does not support account daily usage summaries', { status: 404 });
   }
 
   async getRequestLogs() {
@@ -203,6 +214,7 @@ module.exports = {
   ProviderAdapter,
   joinUrl,
   toFiniteNumber,
+  summaryNumber,
   toIsoDate,
   unwrapEnvelope,
   extractItems

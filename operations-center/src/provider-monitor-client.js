@@ -57,10 +57,14 @@ class ProviderMonitorClient {
   }
 
   async getDailyCosts(query, accessToken = null) {
+    const read = await this.createDailyCostsReader(accessToken);
+    return read(query);
+  }
+
+  async createDailyCostsReader(accessToken = null) {
     if (!this.baseUrl) throw new AppError('PROVIDER_MONITOR_NOT_CONFIGURED', '未配置供应商监控服务地址', { status: 503 });
-    const search = new URLSearchParams(query);
     if (this.integrationToken) {
-      return this.#request(`/api/integrations/daily-costs?${search}`, {
+      return (query) => this.#request(`/api/integrations/daily-costs?${new URLSearchParams(query)}`, {
         headers: { authorization: `Bearer ${this.integrationToken}` }
       });
     }
@@ -69,7 +73,7 @@ class ProviderMonitorClient {
       method: 'POST', headers: { authorization: `Bearer ${accessToken}` }, body: '{}'
     });
     if (!session?.sessionToken) throw new AppError('PROVIDER_MONITOR_INVALID_RESPONSE', '供应商监控未返回有效会话', { status: 502 });
-    return this.#request(`/api/daily-costs?${search}`, {
+    return (query) => this.#request(`/api/daily-costs?${new URLSearchParams(query)}`, {
       headers: { authorization: `Session ${session.sessionToken}` }
     });
   }

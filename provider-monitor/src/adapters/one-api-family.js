@@ -4,6 +4,7 @@ const {
   joinUrl,
   isBillingTokenCount,
   toFiniteNumber,
+  summaryNumber,
   toIsoDate,
   unwrapEnvelope,
   extractItems
@@ -83,6 +84,7 @@ class OneApiFamilyAdapter extends ProviderAdapter {
       backupGroup: this.family.backupGroup,
       groupsDerivedFromKeys: ['one-hub', 'done-hub'].includes(this.type),
       usageHistory: true,
+      dailyUsageSummary: this.type === 'new-api',
       requestLogs: this.type === 'new-api',
       priceCatalog: ['new-api', 'veloera'].includes(this.type),
       rechargeQuote: true,
@@ -437,6 +439,31 @@ class OneApiFamilyAdapter extends ProviderAdapter {
       period: 'today',
       raw: this.safeRaw(data)
     }];
+  }
+
+  async getDailyUsageSummary({ fromAt, toAt }) {
+    if (this.type !== 'new-api') return super.getDailyUsageSummary();
+    const account = await this.getAccount();
+    if (!this.statusInfo) await this.probe();
+    const divisor = summaryNumber(this.statusInfo?.quota_per_unit);
+    if (!(divisor > 0)) {
+      throw new AppError('SCHEMA_MISMATCH', 'New API quota unit is missing', { status: 502 });
+    }
+    // New API includes both timestamp endpoints; exclude the following midnight.
+    const query = new URLSearchParams({ type: '2',
+      start_timestamp: String(Math.floor(Date.parse(fromAt) / 1000)),
+      end_timestamp: String(Math.floor(Date.parse(toAt) / 1000) - 1) });
+    const response = await this.http.requestJson(
+      joinUrl(this.connection.base_url, `/api/log/self/stat?${query}`),
+      { headers: this.headers(), retries: 0 }
+    );
+    const data = unwrapEnvelope(response.data);
+    const quota = summaryNumber(data?.quota?.Quota ?? data?.quota);
+    if (!data || typeof data !== 'object' || Array.isArray(data) ||
+        quota == null || !/^[1-9]\d*$/.test(account.remoteId)) {
+      throw new AppError('SCHEMA_MISMATCH', 'New API daily summary is missing consumed quota', { status: 502 });
+    }
+    return { amount: quota / divisor, requests: null, currency: 'USD', subjectId: account.remoteId, scope: 'account' };
   }
 
   async getRequestLogs(options = {}) {

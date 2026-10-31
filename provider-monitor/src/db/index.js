@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 33;
+const SCHEMA_VERSION = 34;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -2498,6 +2498,24 @@ function migrateBillingUsageCompletenessV33(db) {
   db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (33, ?)').run(nowIso());
 }
 
+function migrateDailyCostSummariesV34(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS provider_daily_cost_summaries (
+      connection_id TEXT NOT NULL REFERENCES provider_connections(id) ON DELETE CASCADE,
+      usage_date TEXT NOT NULL,
+      timezone TEXT NOT NULL,
+      config_key TEXT NOT NULL,
+      account_key TEXT NOT NULL,
+      amount REAL NOT NULL CHECK (amount >= 0),
+      currency TEXT NOT NULL,
+      requests INTEGER CHECK (requests IS NULL OR requests >= 0),
+      fetched_at TEXT NOT NULL,
+      PRIMARY KEY (connection_id, usage_date, timezone)
+    );
+  `);
+  db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (34, ?)').run(nowIso());
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -2537,6 +2555,7 @@ function createDatabase(databasePath) {
     migrateNotificationRoutingV31(db);
     migrateActiveProbeTtftAlertsV32(db);
     migrateBillingUsageCompletenessV33(db);
+    migrateDailyCostSummariesV34(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

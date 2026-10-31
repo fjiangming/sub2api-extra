@@ -3,6 +3,7 @@ const {
   joinUrl,
   isBillingTokenCount,
   toFiniteNumber,
+  summaryNumber,
   toIsoDate,
   unwrapEnvelope,
   extractItems
@@ -340,6 +341,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
       keyGroup: true,
       groupsDerivedFromKeys: true,
       usageHistory: true,
+      dailyUsageSummary: true,
       requestLogs: true,
       priceCatalog: true,
       rechargeQuote: true,
@@ -1115,6 +1117,24 @@ class Sub2ApiAdapter extends ProviderAdapter {
       period: 'today',
       raw: this.safeRaw(data)
     }];
+  }
+
+  async getDailyUsageSummary({ date, timezone }) {
+    if (usesApiKey(this.connection)) {
+      throw new AppError('DAILY_SUMMARY_ACCOUNT_REQUIRED', 'Account credentials are required for daily summaries', { status: 409 });
+    }
+    const account = await this.getAccount();
+    const query = new URLSearchParams({ start_date: date, end_date: date, timezone });
+    const response = await this.authenticatedRequest(`/api/v1/usage/stats?${query}`, { retries: 0 });
+    const data = unwrapEnvelope(response.data);
+    const amount = summaryNumber(data?.total_actual_cost);
+    const requests = summaryNumber(data?.total_requests);
+    if (!data || typeof data !== 'object' || Array.isArray(data) ||
+        amount == null || amount < 0 || !Number.isSafeInteger(requests) || requests < 0 ||
+        !/^[1-9]\d*$/.test(account.remoteId)) {
+      throw new AppError('SCHEMA_MISMATCH', 'Sub2API daily summary is missing actual cost or request count', { status: 502 });
+    }
+    return { amount, requests, currency: 'USD', subjectId: account.remoteId, scope: 'account' };
   }
 
   async getRequestLogs(options = {}) {

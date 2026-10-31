@@ -39,6 +39,7 @@ const { LatencySamplesService } = require('./services/latency-samples-service');
 const { KeyProbeService } = require('./services/key-probe-service');
 const { KeyTtftAlertService } = require('./services/key-ttft-alert-service');
 const { GrossProfitService } = require('./services/gross-profit-service');
+const { DailyCostService } = require('./services/daily-cost-service');
 const {
   RechargeLinkService,
   pageHeaders,
@@ -692,6 +693,7 @@ function createApplication(options = {}) {
   const keyProbes = new KeyProbeService({ db, config, sub2api, http });
   const keyTtftAlerts = new KeyTtftAlertService({ db, notifications });
   const grossProfit = new GrossProfitService({ db, config });
+  const dailyCosts = new DailyCostService({ db, config, providers, http, grossProfit });
   const mappings = new MappingService({ db, config, sub2api, http });
   const automation = new AutomationService({ db, config, sub2api, mappings, notifications });
   const analysis = new AnalysisService({ db, config });
@@ -1032,11 +1034,11 @@ function createApplication(options = {}) {
       }))
     });
   });
-  app.get('/api/integrations/daily-costs', (req, res, next) => {
+  app.get('/api/integrations/daily-costs', async (req, res, next) => {
     if (!secureTokenEqual(bearerToken(req), config.integrationToken)) {
       return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
     }
-    try { res.set('Cache-Control', 'no-store').json(grossProfit.dailyCosts(req.query)); }
+    try { res.set('Cache-Control', 'no-store').json(await dailyCosts.report(req.query)); }
     catch (error) { next(error); }
   });
   app.get('/api/integrations/latency-samples', (req, res, next) => {
@@ -1881,7 +1883,7 @@ function createApplication(options = {}) {
       days: req.query.days
     }
   )));
-  api.get('/daily-costs', (req, res) => res.set('Cache-Control', 'no-store').json(grossProfit.dailyCosts(req.query)));
+  api.get('/daily-costs', async (req, res) => res.set('Cache-Control', 'no-store').json(await dailyCosts.report(req.query)));
   api.get('/gross-profit', (req, res) => res.json(grossProfit.report({
     dimension: req.query.dimension,
     granularity: req.query.granularity,
@@ -2479,7 +2481,7 @@ function createApplication(options = {}) {
     config, db, providers, queries, notifications, alerts, automation, analysis,
     keyHealth, catalog, checkins, mappings, credentials, transfers, sub2api,
     metrics, auth, queue, sync, detection, backups, retention, rechargeLinks,
-    simulations, accountMonitor, keyProbes, keyTtftAlerts, grossProfit
+    simulations, accountMonitor, keyProbes, keyTtftAlerts, grossProfit, dailyCosts
   };
   app.locals.startBackground = startBackground;
   app.locals.close = close;

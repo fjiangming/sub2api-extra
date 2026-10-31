@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const { PGlite } = require('@electric-sql/pglite');
 const { SchemaInspector } = require('../src/schema-inspector');
 const { CostAnalysisService } = require('../src/services/cost-analysis-service');
+const { AppError } = require('../src/errors');
 
 let database;
 let inspector;
@@ -169,12 +170,13 @@ function dailyCosts(from, to, change = (item) => item) {
     next.setUTCDate(next.getUTCDate() + 1);
     date = next.toISOString().slice(0, 10);
   }
-  return { range: { start: from, end: to }, source: 'provider_cost_ledger',
+  return { range: { start: from, end: to }, source: 'upstream_daily_summary', scope: 'account',
     currency: 'CNY', timezone: 'Asia/Shanghai', items };
 }
 
 function withSuppliers(costs, getDailyCosts = async ({ from, to }) => dailyCosts(from, to)) {
-  costs.providerMonitor = { configured: () => true, integrationToken: 'integration', getDailyCosts };
+  costs.providerMonitor = { configured: () => true, integrationToken: 'integration', getDailyCosts,
+    async createDailyCostsReader(token) { return (query) => this.getDailyCosts(query, token); } };
   return costs;
 }
 
@@ -243,15 +245,15 @@ test('daily profit accepts verified zero cost and does not infer cost from an un
     (item) => ({ ...item, cost: 0, providers: [{ ...item.providers[0], cost: 0 }] })));
   assert.equal((await costs.getDailyProfit({ start: '2026-01-02', end: '2026-01-02' })).items[0].profit, 4);
   for (const configured of [false, true]) {
-    costs.providerMonitor = { configured: () => configured, integrationToken: 'integration',
-      getDailyCosts: async () => { throw new Error('monitor unavailable'); } };
+    costs.providerMonitor.configured = () => configured;
+    costs.providerMonitor.getDailyCosts = async () => { throw new Error('monitor unavailable'); };
     const report = await costs.getDailyProfit({ start: '2026-01-02', end: '2026-01-02' });
     assert.equal(report.items[0].profit, null);
     assert.match(report.notices.join(), /供应商实际消费暂不可用/);
   }
 });
 
-test('daily supplier queries split long ranges without overlapping and pass the finance timezone and SSO token', async () => {
+test('daily supplier queries read each finance day once across year boundaries and pass the SSO token', async () => {
   const calls = [];
   const costs = withSuppliers(service(), async (query, token) => {
     calls.push({ query, token });
@@ -259,11 +261,57 @@ test('daily supplier queries split long ranges without overlapping and pass the 
   });
   costs.providerMonitor.integrationToken = null;
   await costs.getDailyProfit({ start: '2025-01-01', end: '2026-01-02' }, { accessToken: 'browser-sso' });
-  assert.deepEqual(calls.map(({ query }) => [query.from, query.to]), [
-    ['2025-01-01', '2026-01-01'], ['2026-01-02', '2026-01-02']
-  ]);
+  assert.equal(calls.length, 367);
+  assert.equal(new Set(calls.map(({ query }) => query.from)).size, 367);
+  assert.equal(calls[0].query.from, '2025-01-01');
+  assert.equal(calls.at(-1).query.from, '2026-01-02');
+  assert.ok(calls.every(({ query }) => query.from === query.to));
   assert.ok(calls.every(({ query, token }) => query.timezone === 'Asia/Shanghai' &&
     query.currency === 'CNY' && token === 'browser-sso'));
+});
+
+test('one failed day retains all other supplier costs and marks only the missing day unknown', async () => {
+  const calls = [];
+  const costs = withSuppliers(service(), async ({ from, to }) => {
+    calls.push(from);
+    if (from === '2026-01-02') throw new AppError('PROVIDER_MONITOR_TIMEOUT', 'private upstream details');
+    return dailyCosts(from, to);
+  });
+  const report = await costs.getDailyProfit({ start: '2026-01-01', end: '2026-01-03' });
+  assert.deepEqual(calls, ['2026-01-01', '2026-01-02', '2026-01-03']);
+  assert.deepEqual(report.items.map((item) => [item.date, item.supplierConsumption]), [
+    ['2026-01-03', 2.5], ['2026-01-02', null], ['2026-01-01', 2.5]
+  ]);
+  assert.equal(report.summary.supplierConsumption, null);
+  assert.match(report.notices.join(), /2026-01-02 获取失败.*超时/);
+  assert.doesNotMatch(report.notices.join(), /private upstream details/);
+});
+
+test('explicit daily profit refresh bypasses upstream summary caches for every selected date', async () => {
+  const queries = [];
+  const costs = withSuppliers(service(), async (query) => { queries.push(query); return dailyCosts(query.from, query.to); });
+  await costs.getDailyProfit({ start: '2026-01-01', end: '2026-01-02', refresh: '1' });
+  assert.equal(queries.length, 2);
+  assert.ok(queries.every((query) => query.refresh === '1' && query.from === query.to));
+});
+
+test('consecutive failures and global authentication failures stop bounded daily reads while preserving successful days', async () => {
+  for (const [error, expectedCalls, skipped] of [
+    [new AppError('PROVIDER_MONITOR_TIMEOUT', 'timeout'), 4, '2026-01-05'],
+    [new AppError('PROVIDER_MONITOR_REQUEST_FAILED', 'auth', { details: { upstreamStatus: 401 } }), 2, '2026-01-03']
+  ]) {
+    let calls = 0;
+    const costs = withSuppliers(service(), async ({ from, to }) => {
+      calls += 1;
+      if (from !== '2026-01-01') throw error;
+      return dailyCosts(from, to);
+    });
+    const report = await costs.getDailyProfit({ start: '2026-01-01', end: '2026-01-05' });
+    assert.equal(calls, expectedCalls);
+    assert.equal(report.items.at(-1).supplierConsumption, 2.5);
+    assert.ok(report.items.slice(0, -1).every((item) => item.supplierConsumption === null && item.profit === null));
+    assert.ok(report.notices.some((notice) => notice.includes(`${skipped} 至 2026-01-05 暂停查询`)));
+  }
 });
 
 test('daily profit handles missing usage tables and currencies without hiding unrelated financial data', async () => {
@@ -280,4 +328,47 @@ test('daily profit handles missing usage tables and currencies without hiding un
   assert.equal(usd.items[0].status, 'unsupported_currency');
   assert.equal(usd.items[0].profit, null);
   assert.equal(supplierCalls, 0);
+});
+
+test('daily supplier failures identify missing exchange rates, versions, auth and connectivity without leaking upstream errors', async () => {
+  const unsafe = 'https://private.example/api?token=secret-api-key';
+  for (const [error, expected] of [
+    [new AppError('PROVIDER_MONITOR_REQUEST_FAILED', unsafe, { details: {
+      upstreamStatus: 400, upstreamCode: 'CURRENCY_RATE_MISSING' } }), /缺少 CNY 换算汇率.*设置与备份.*运行设置.*汇率（JSON）/],
+    [new AppError('PROVIDER_MONITOR_AUTH_NOT_CONFIGURED', unsafe), /认证未配置或未通过/],
+    [new AppError('PROVIDER_MONITOR_REQUEST_FAILED', unsafe, { details: { upstreamStatus: 401 } }), /认证未配置或未通过/],
+    [new AppError('PROVIDER_MONITOR_REQUEST_FAILED', unsafe, { details: { upstreamStatus: 403 } }), /认证未配置或未通过/],
+    [new AppError('PROVIDER_MONITOR_REQUEST_FAILED', unsafe, { details: { upstreamStatus: 404 } }), /HTTP 404.*配套更新/],
+    [new AppError('PROVIDER_MONITOR_INVALID_RESPONSE', unsafe), /数据格式不兼容/],
+    [new AppError('PROVIDER_MONITOR_TIMEOUT', unsafe), /请求供应商监控超时/],
+    [new AppError('PROVIDER_MONITOR_UNAVAILABLE', unsafe), /无法连接供应商监控/],
+    [new AppError('PROVIDER_MONITOR_REQUEST_FAILED', unsafe, { details: { upstreamStatus: 400 } }), /日期、时区或币种参数/],
+    [new AppError('PROVIDER_MONITOR_REQUEST_FAILED', unsafe, { details: { upstreamStatus: 502 } }), /接口异常（HTTP 502）/],
+    [new Error(unsafe), /未能取得有效的每日消费数据/]
+  ]) {
+    const costs = withSuppliers(service(), async () => { throw error; });
+    const report = await costs.getDailyProfit({ start: '2026-01-02', end: '2026-01-02' });
+    assert.match(report.notices.join(), expected);
+    assert.doesNotMatch(JSON.stringify(report), /private\.example|secret-api-key/);
+    assert.equal(report.items[0].siteConsumption, 4);
+    assert.equal(report.items[0].supplierConsumption, null);
+    assert.equal(report.items[0].profit, null);
+  }
+  const report = await service().getDailyProfit({ start: '2026-01-02', end: '2026-01-02' });
+  assert.match(report.notices.join(), /未配置供应商监控地址.*PROVIDER_MONITOR_BASE_URL/);
+});
+
+test('daily supplier HTML, old report contracts and duplicate dates are diagnosed as incompatible data', async () => {
+  for (const change of [
+    () => ({}),
+    (report) => ({ ...report, source: 'old-version' }),
+    (report) => ({ ...report, source: 'provider_cost_ledger' }),
+    (report) => ({ ...report, scope: 'key' }),
+    (report) => ({ ...report, items: [...report.items, report.items[0]] })
+  ]) {
+    const costs = withSuppliers(service(), async ({ from, to }) => change(dailyCosts(from, to)));
+    const report = await costs.getDailyProfit({ start: '2026-01-02', end: '2026-01-02' });
+    assert.match(report.notices.join(), /数据格式不兼容/);
+    assert.equal(report.items[0].profit, null);
+  }
 });

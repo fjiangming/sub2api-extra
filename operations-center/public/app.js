@@ -22,6 +22,7 @@ const state = {
   costCaveats: [],
   costNotices: [],
   costMainPageMeta: '',
+  costReportRequestId: 0,
   costAutomaticIncome: {
     active: false,
     query: null,
@@ -793,7 +794,7 @@ function renderCostDailyProfit(report) {
   const labels = { complete: '已核验', site_incomplete: '主站待核验',
     supplier_incomplete: '供应商待核验', unsupported_currency: '币种不支持' };
   const summary = report.summary || {};
-  $('cost-daily-profit-meta').textContent = `${report.timezone || ''} · ${items.length} 天 · 已核验 ${summary.completeDays || 0} 天 · ${currency}`;
+  $('cost-daily-profit-meta').textContent = `${report.timezone || ''} · ${items.length} 天 · 已核验 ${summary.completeDays || 0} 天 · ${currency} · 上游账号日汇总`;
   $('cost-daily-profit-notices').innerHTML = (report.notices || []).map((message) => alertHtml('warning', message)).join('');
   $('cost-daily-profits').innerHTML = items.length ? items.map((row) => `
     <tr>
@@ -805,7 +806,7 @@ function renderCostDailyProfit(report) {
       <td class="numeric">${row.siteRequests == null ? 'N/A' : formatInteger(row.siteRequests)}</td>
       <td><span class="badge ${row.complete ? 'success' : 'warning'}">${labels[row.status] || '待核验'}</span></td>
       <td>${row.providers?.length ? `<details class="cost-daily-suppliers"><summary title="查看供应商消费明细">${formatInteger(row.providers.length)} 家${icon('chevron-down')}</summary><ul>${row.providers.map((provider) => `
-        <li><strong>${escapeHtml(provider.name)}</strong><span>${escapeHtml(money(provider.cost))}</span>${!provider.complete ? `<small>${escapeHtml((provider.reasons || []).join('；') || '同步覆盖未核验')}</small>` : ''}</li>
+        <li><strong>${escapeHtml(provider.name)}</strong><span>${escapeHtml(money(provider.cost))}</span>${provider.lastSyncedAt ? `<small>账号汇总 · ${escapeHtml(formatDateTime(provider.lastSyncedAt, report.timezone))}</small>` : ''}${!provider.complete ? `<small>${escapeHtml((provider.reasons || []).join('；') || '上游汇总未核验')}</small>` : ''}</li>
       `).join('')}</ul></details>` : '<span class="muted">暂无可核验数据</span>'}</td>
     </tr>
   `).join('') : emptyRow(8, '所选范围暂无每日收入数据');
@@ -814,17 +815,25 @@ function renderCostDailyProfit(report) {
   ` : '';
 }
 
-async function loadCostAnalysis() {
+async function loadCostAnalysis({ refresh = false } = {}) {
+  const requestId = ++state.costReportRequestId;
   setPageMeta('正在汇总自动收入、手工收入与支出');
   const query = costAnalysisQuery();
   const search = new URLSearchParams(query);
-  const [report, incomes, expenses, providers, dailyProfit] = await Promise.all([
+  const dailySearch = new URLSearchParams(search);
+  if (refresh) dailySearch.set('refresh', '1');
+  const results = await Promise.all([
     api(`/api/cost-analysis?${search}`),
     api(`/api/cost-analysis/incomes?${search}`),
     api(`/api/cost-analysis/expenses?${search}`),
     api('/api/cost-analysis/providers'),
-    api(`/api/cost-analysis/daily-profit?${search}`)
-  ]);
+    api(`/api/cost-analysis/daily-profit?${dailySearch}`)
+  ]).catch((error) => {
+    if (requestId !== state.costReportRequestId) return null;
+    throw error;
+  });
+  if (!results || requestId !== state.costReportRequestId) return;
+  const [report, incomes, expenses, providers, dailyProfit] = results;
 
   const averageAutomaticIncome = report.summary.averageTransaction == null
     ? 'N/A'
@@ -1579,7 +1588,7 @@ async function loadCurrentView(options = {}) {
     finance: loadFinance,
     costs: state.costAutomaticIncome.active
       ? (state.costAutomaticIncome.selectedUserKey ? loadAutomaticIncomeRecords : loadAutomaticIncomeUsers)
-      : loadCostAnalysis,
+      : () => loadCostAnalysis(options),
     storage: () => loadStorage(options.refresh),
     retention: loadRetention,
     maintenance: loadMaintenance,

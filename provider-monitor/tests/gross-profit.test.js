@@ -9,6 +9,31 @@ const {
 } = require('../src/services/gross-profit-service');
 const { createApplication } = require('../src/server');
 
+test('timestamp buckets reuse formatters across large ledgers without losing quarter-hour zones or daylight-saving boundaries', (t) => {
+  const NativeFormatter = Intl.DateTimeFormat;
+  let constructions = 0;
+  t.mock.method(Intl, 'DateTimeFormat', function (...args) {
+    constructions += 1;
+    return new NativeFormatter(...args);
+  });
+  const cases = [
+    ['2026-10-31T10:14:59Z', 'Pacific/Chatham', '2026-10-31', '2026-10-01'],
+    ['2026-10-31T10:15:00Z', 'Pacific/Chatham', '2026-11-01', '2026-11-01'],
+    ['2026-11-01T02:29:59Z', 'America/St_Johns', '2026-10-31', '2026-10-01'],
+    ['2026-11-01T02:30:00Z', 'America/St_Johns', '2026-11-01', '2026-11-01'],
+    ['2026-11-01T04:29:59Z', 'America/St_Johns', '2026-11-01', '2026-11-01'],
+    ['2026-11-01T04:30:00Z', 'America/St_Johns', '2026-11-01', '2026-11-01']
+  ];
+  for (let index = 0; index < 500; index += 1) {
+    for (const [timestamp, timezone, day, month] of cases) {
+      assert.equal(bucketForTimestamp(timestamp, 'day', timezone), day);
+      assert.equal(bucketForTimestamp(timestamp, 'week', timezone), '2026-10-26');
+      assert.equal(bucketForTimestamp(timestamp, 'month', timezone), month);
+    }
+  }
+  assert.ok(constructions <= 2, `created ${constructions} formatters for repeated ledger rows`);
+});
+
 function createProvider(providers, name, suffix) {
   return providers.create({
     name,
@@ -600,8 +625,24 @@ test('daily supplier costs require integration or administrator authentication a
   assert.equal(integration.status, 200);
   assert.equal(integration.headers.get('cache-control'), 'no-store');
   const data = await integration.json();
+  assert.equal(data.source, 'upstream_daily_summary');
   assert.equal(data.items.length, 2);
   assert.doesNotMatch(JSON.stringify(data), /secret-|baseUrl|apiKey|credentials/);
+  const headers = { authorization: `Bearer ${token}` };
+  const directory = await fetch(`${base}/api/integrations/providers`, { headers });
+  assert.equal(directory.status, 200);
+  assert.equal((await directory.json()).items.length, 2);
+  const missingRate = await fetch(`${base}/api/integrations/daily-costs${query}&currency=CNY`, { headers });
+  assert.equal(missingRate.status, 400);
+  assert.equal((await missingRate.json()).error.code, 'CURRENCY_RATE_MISSING');
+  context.db.prepare("INSERT OR REPLACE INTO settings VALUES ('currencyRates', ?, '2026-10-31')").run(JSON.stringify({ USD: 1, CNY: 0.2 }));
+  const converted = await fetch(`${base}/api/integrations/daily-costs${query}&currency=CNY`, { headers });
+  assert.equal(converted.status, 200);
+  const convertedData = await converted.json();
+  assert.equal(convertedData.currency, 'CNY');
+  assert.ok(convertedData.items[1].providers.every((provider) => provider.cost === null &&
+    provider.reasons.some((reason) => reason.includes('暂不支持账号日汇总'))));
+  assert.equal(convertedData.items[1].cost, null);
   const login = await fetch(`${base}/api/auth/login`, { method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'admin', password: 'test-password' }) });

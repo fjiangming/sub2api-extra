@@ -52,10 +52,10 @@ test('daily supplier costs use the read-only integration API with explicit dates
     providerMonitorIntegrationToken: 'integration', providerMonitorRequestTimeoutMs: 1000
   }, async (url, options) => {
     calls.push({ url, options });
-    return response(200, { source: 'provider_cost_ledger', items: [] });
+    return response(200, { source: 'upstream_daily_summary', scope: 'account', items: [] });
   });
   const query = { from: '2026-01-01', to: '2026-01-02', currency: 'CNY', timezone: 'Asia/Shanghai' };
-  assert.equal((await client.getDailyCosts(query, 'browser-token')).source, 'provider_cost_ledger');
+  assert.equal((await client.getDailyCosts(query, 'browser-token')).source, 'upstream_daily_summary');
   const url = new URL(calls[0].url);
   assert.equal(url.pathname, '/api/integrations/daily-costs');
   assert.deepEqual(Object.fromEntries(url.searchParams), query);
@@ -82,4 +82,34 @@ test('daily supplier costs exchange SSO and reject missing configuration or inva
   const oldMonitor = new ProviderMonitorClient(config, async () => response(404, {}));
   await assert.rejects(oldMonitor.getDailyCosts({}, 'sso'), (error) =>
     error.code === 'PROVIDER_MONITOR_REQUEST_FAILED' && error.details.upstreamStatus === 404);
+});
+
+test('daily readers authenticate once for a month and keep administrator sessions scoped to each reader', async () => {
+  const requests = [];
+  let logins = 0;
+  const client = new ProviderMonitorClient({ providerMonitorBaseUrl: 'https://monitor.example',
+    providerMonitorRequestTimeoutMs: 1000
+  }, async (url, options) => {
+    requests.push({ url, authorization: options.headers.authorization });
+    if (url.endsWith('/api/auth/sso')) {
+      logins += 1;
+      return response(200, { sessionToken: `session-${logins}` });
+    }
+    return response(200, { items: [] });
+  });
+  const first = await client.createDailyCostsReader('administrator-a');
+  for (let day = 1; day <= 31; day += 1) {
+    const date = `2026-10-${String(day).padStart(2, '0')}`;
+    await first({ from: date, to: date, currency: 'CNY', timezone: 'Asia/Shanghai' });
+  }
+  assert.equal(logins, 1);
+  assert.equal(requests.length, 32);
+  assert.ok(requests.slice(1).every((request) => request.authorization === 'Session session-1'));
+  const second = await client.createDailyCostsReader('administrator-b');
+  await second({ from: '2026-10-31', to: '2026-10-31' });
+  assert.equal(logins, 2);
+  assert.equal(requests.at(-2).authorization, 'Bearer administrator-b');
+  assert.equal(requests.at(-1).authorization, 'Session session-2');
+  await first({ from: '2026-10-31', to: '2026-10-31' });
+  assert.equal(requests.at(-1).authorization, 'Session session-1');
 });

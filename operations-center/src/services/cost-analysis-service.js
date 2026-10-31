@@ -20,6 +20,32 @@ const AUTOMATIC_INCOME_FILTER_SQL = `
   AND $4 = 'CNY'
 `;
 
+function supplierCostFailure(error, currency) {
+  const status = error?.details?.upstreamStatus;
+  const code = error?.details?.upstreamCode || error?.code;
+  let reason = '未能取得有效的每日消费数据，请检查供应商监控服务和日志。';
+  if (code === 'CURRENCY_RATE_MISSING') {
+    reason = `供应商监控缺少 ${currency} 换算汇率，请在供应商监控的“设置与备份 → 运行设置 → 汇率（JSON）”中补全。`;
+  } else if (code === 'PROVIDER_MONITOR_NOT_CONFIGURED') {
+    reason = '未配置供应商监控地址，请检查运营中心的 PROVIDER_MONITOR_BASE_URL。';
+  } else if (code === 'PROVIDER_MONITOR_AUTH_NOT_CONFIGURED' || status === 401 || status === 403) {
+    reason = '供应商监控认证未配置或未通过，请核对两个服务的集成 Token，或重新通过管理员 SSO 登录。';
+  } else if (status === 404 || status === 405) {
+    reason = `供应商监控的每日消费接口不存在或不支持（HTTP ${status}），请配套更新供应商监控并检查反向代理路径。`;
+  } else if (code === 'PROVIDER_MONITOR_INVALID_DAILY_COSTS' || code === 'PROVIDER_MONITOR_INVALID_RESPONSE') {
+    reason = '供应商监控返回的数据格式不兼容，请核对两个服务的版本及反向代理目标。';
+  } else if (code === 'PROVIDER_MONITOR_TIMEOUT') {
+    reason = '请求供应商监控超时，请检查服务负载、连接和请求超时设置。';
+  } else if (code === 'PROVIDER_MONITOR_UNAVAILABLE') {
+    reason = '运营中心无法连接供应商监控，请检查服务地址、容器网络或反向代理。';
+  } else if (status === 400 || status === 422) {
+    reason = `供应商监控拒绝了日期、时区或币种参数（HTTP ${status}），请核对查询条件和服务版本。`;
+  } else if (Number.isInteger(status) && status >= 500 && status <= 599) {
+    reason = `供应商监控消费接口异常（HTTP ${status}），请检查监控服务及反向代理日志。`;
+  }
+  return `供应商实际消费暂不可用：${reason}`;
+}
+
 function amountFromMinor(value) {
   return number(value) / 100;
 }
@@ -425,7 +451,7 @@ class CostAnalysisService {
     const { range, currency } = parseReportInput(input, this.config);
     const [site, supplier] = await Promise.all([
       this.#dailyBalanceConsumption(range, currency),
-      currency === 'CNY' ? this.#supplierDailyCosts(range, currency, accessToken) :
+      currency === 'CNY' ? this.#supplierDailyCosts(range, currency, accessToken, input.refresh === '1' || input.refresh === true) :
         { items: [], notice: '主站消费没有币种字段，每日真实收入仅适用于 CNY。' }
     ]);
     const siteByDate = new Map(site.rows.map((row) => [row.date, row]));
@@ -456,6 +482,7 @@ class CostAnalysisService {
     const siteConsumption = sum('siteConsumption');
     const profit = sum('profit');
     return { range, currency, timezone: this.config.financeTimezone, generatedAt: new Date().toISOString(),
+      supplierSource: 'upstream_daily_summary', supplierScope: 'account',
       summary: { siteConsumption, supplierConsumption: sum('supplierConsumption'), profit,
         margin: profit != null && siteConsumption > 0
           ? new Decimal(profit).div(siteConsumption).times(100).toDecimalPlaces(2).toNumber() : null,
@@ -466,26 +493,25 @@ class CostAnalysisService {
       ] };
   }
 
-  async #supplierDailyCosts(range, currency, accessToken) {
+  async #supplierDailyCosts(range, currency, accessToken, refresh = false) {
+    const items = [];
+    const failures = [];
     try {
-      if (!this.providerMonitor?.configured()) throw new Error('not configured');
+      if (!this.providerMonitor?.configured()) throw new AppError('PROVIDER_MONITOR_NOT_CONFIGURED', 'not configured');
       let token = accessToken;
       if (!this.providerMonitor.integrationToken && !token && this.sub2api?.configured()) token = await this.sub2api.login();
-      const items = [];
-      // The supplier endpoint bounds each read to 366 days; every date is requested once.
-      for (let start = range.start; start <= range.end;) {
-        const end = addUtcDays(start, 365) < range.end ? addUtcDays(start, 365) : range.end;
-        const report = await this.providerMonitor.getDailyCosts({ from: start, to: end,
-          currency, timezone: this.config.financeTimezone }, token);
-        if (report?.source !== 'provider_cost_ledger' || report.timezone !== this.config.financeTimezone ||
-            report.currency !== currency || report.range?.start !== start || report.range?.end !== end ||
-            !Array.isArray(report.items)) throw new Error('invalid supplier report');
-        const seen = new Set();
-        for (const item of report.items) {
-          if (!/^\d{4}-\d{2}-\d{2}$/.test(item.date) || item.date < start || item.date > end || seen.has(item.date)) {
-            throw new Error('invalid supplier date');
+      const read = await this.providerMonitor.createDailyCostsReader(token);
+      let consecutiveFailures = 0;
+      for (let date = range.start; date <= range.end; date = addUtcDays(date, 1)) {
+        try {
+          const report = await read({ from: date, to: date, currency, timezone: this.config.financeTimezone,
+            ...(refresh ? { refresh: '1' } : {}) });
+          if (report?.source !== 'upstream_daily_summary' || report.scope !== 'account' || report.timezone !== this.config.financeTimezone ||
+              report.currency !== currency || report.range?.start !== date || report.range?.end !== date ||
+              !Array.isArray(report.items) || report.items.length !== 1 || report.items[0]?.date !== date) {
+            throw new AppError('PROVIDER_MONITOR_INVALID_DAILY_COSTS', 'invalid supplier report');
           }
-          seen.add(item.date);
+          const item = report.items[0];
           const amount = (value) => (typeof value === 'number' || typeof value === 'string') &&
             value !== '' && new Decimal(value).isFinite() && new Decimal(value).gte(0);
           const providers = Array.isArray(item.providers) ? item.providers : [];
@@ -496,12 +522,24 @@ class CostAnalysisService {
               .minus(item.cost).abs().lte('0.00000001');
           items.push({ date: item.date, complete, cost: complete ? new Decimal(item.cost).toDecimalPlaces(8).toNumber() : null,
             requests: item.requests, providers });
+          consecutiveFailures = 0;
+        } catch (error) {
+          failures.push({ date, notice: supplierCostFailure(error, currency) });
+          consecutiveFailures += 1;
+          const status = error?.details?.upstreamStatus;
+          const code = error?.details?.upstreamCode || error?.code;
+          const globalFailure = ['CURRENCY_RATE_MISSING', 'PROVIDER_MONITOR_AUTH_NOT_CONFIGURED',
+            'PROVIDER_MONITOR_NOT_CONFIGURED'].includes(code) || [400, 401, 403, 404, 405, 422].includes(status);
+          if (globalFailure || consecutiveFailures >= 3) {
+            if (date < range.end) failures.push({ notice: `${addUtcDays(date, 1)} 至 ${range.end} 暂停查询，请修复后刷新。` });
+            break;
+          }
         }
-        start = addUtcDays(end, 1);
       }
-      return { items };
-    } catch {
-      return { items: [], notice: '供应商实际消费暂不可用，请核对供应商监控版本、连接、同步和币种汇率。' };
+      return { items, notice: failures.length ? `${failures.filter((failure) => failure.date)
+        .map((failure) => failure.date).join('、')} 获取失败。${[...new Set(failures.map((failure) => failure.notice))].join(' ')}` : null };
+    } catch (error) {
+      return { items, notice: supplierCostFailure(error, currency) };
     }
   }
 

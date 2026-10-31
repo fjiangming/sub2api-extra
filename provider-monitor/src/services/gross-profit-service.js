@@ -9,6 +9,7 @@ const ADMINISTRATOR_USER_ID = '1';
 // Kept as an export alias for integrations that consumed the first implementation.
 const ADMINISTRATOR_ACCOUNT_ID = ADMINISTRATOR_USER_ID;
 const MAX_RETURNED_ENTITIES = 200;
+const DATE_FORMATTERS = new Map();
 
 const ACCOUNTING_MODE_ALIASES = {
   default: 'standard',
@@ -36,12 +37,18 @@ function round(value, digits = 8) {
 }
 
 function dateInTimezone(value, timezone) {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  }).formatToParts(value);
+  let formatter = DATE_FORMATTERS.get(timezone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    });
+    if (DATE_FORMATTERS.size >= 32) DATE_FORMATTERS.delete(DATE_FORMATTERS.keys().next().value);
+    DATE_FORMATTERS.set(timezone, formatter);
+  }
+  const parts = formatter.formatToParts(value);
   const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${map.year}-${map.month}-${map.day}`;
 }
@@ -518,13 +525,23 @@ class GrossProfitService {
     return { providers, currencies };
   }
 
-  dailyCosts(input = {}) {
+  dailyCostOptions(input = {}) {
     const timezone = String(input.timezone || this.config.timezone);
     try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(); }
     catch { throw new AppError('VALIDATION_ERROR', 'Daily cost timezone is invalid', { status: 400 }); }
     const query = this.#query({ from: input.from, to: input.to, currency: input.currency,
       dimension: 'provider', granularity: 'day' }, timezone);
     const settings = this.#currencySettings(query.currency, true);
+    return { query, settings, periods: this.#periods(query) };
+  }
+
+  convertCost(amount, sourceCurrency, settings) {
+    return this.#convert(amount, sourceCurrency, settings);
+  }
+
+  dailyCosts(input = {}) {
+    const { query, settings, periods } = this.dailyCostOptions(input);
+    const timezone = query.timezone;
     const rows = this.#costRows(query);
     const activeIds = new Set(rows.map((row) => row.connection_id));
     const providers = this.db.prepare(`
@@ -535,7 +552,7 @@ class GrossProfitService {
       ORDER BY p.name, p.id
     `).all().filter((provider) => provider.enabled || activeIds.has(provider.id));
     const generatedAt = this.now().toISOString();
-    const items = this.#periods(query).map((period) => {
+    const items = periods.map((period) => {
       const periodRows = rows.filter((row) => row.period_key === period.periodKey);
       const suppliers = providers.filter((provider) =>
         provider.created_at < period.to || periodRows.some((row) => row.connection_id === provider.id)

@@ -86,11 +86,12 @@ test('saved expense already covered by the report leaves filters unchanged', () 
   );
 });
 
-function costReportUi({ periods = [], notices = [], daily = {} }) {
+function costReportUi({ periods = [], notices = [], daily = {}, beforeFetch = async () => {} }) {
   const script = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   const definitions = script.slice(0, script.indexOf("$('login-form').addEventListener"));
   const nodes = new Map();
   let option;
+  const requests = [];
   nodes.set('cost-analysis-filter', { elements: {
     ...fields(), granularity: { value: 'day' }
   } });
@@ -110,15 +111,15 @@ function costReportUi({ periods = [], notices = [], daily = {} }) {
       return nodes.get(id);
     } },
     window: { echarts: { init: () => ({ setOption: (value) => { option = value; } }) } },
-    fetch: async (url) => ({
+    fetch: async (url) => (requests.push(url), await beforeFetch(url), {
       ok: true, status: 200, headers: { get: () => 'application/json' },
       json: async () => url.startsWith('/api/cost-analysis?') ? report :
         url.startsWith('/api/cost-analysis/daily-profit?') ?
-          { currency: 'CNY', timezone: 'Asia/Shanghai', items: [], ...daily } : { items: [], sync: {} }
+          { currency: 'CNY', timezone: 'Asia/Shanghai', items: [], ...(typeof daily === 'function' ? daily(url) : daily) } : { items: [], sync: {} }
     })
   });
   const ui = vm.runInContext(`${definitions}\n({ loadCostAnalysis, renderCostAnalysisNotices });`, context);
-  return { ...ui, nodes, chart: () => option };
+  return { ...ui, nodes, requests, chart: () => option };
 }
 
 function reportPeriod(overrides = {}) {
@@ -166,6 +167,40 @@ test('empty daily profit tables span all eight columns', async () => {
   assert.equal(ui.nodes.get('cost-daily-profit-summary').innerHTML, '');
 });
 
+test('manual cost analysis refresh requests a fresh upstream summary without changing other financial queries', async () => {
+  const ui = costReportUi({});
+  await ui.loadCostAnalysis({ refresh: true });
+  assert.match(ui.requests.find((url) => url.startsWith('/api/cost-analysis/daily-profit?')), /refresh=1/);
+  assert.ok(ui.requests.filter((url) => !url.startsWith('/api/cost-analysis/daily-profit?'))
+    .every((url) => !url.includes('refresh=')));
+});
+
+test('a delayed month query or its failure cannot overwrite the latest selected date range', async () => {
+  for (const failed of [false, true]) {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let first = true;
+    const ui = costReportUi({
+      beforeFetch: async (url) => {
+        if (!url.startsWith('/api/cost-analysis/daily-profit?') || !first) return;
+        first = false;
+        await gate;
+        if (failed) throw new Error('The earlier month query failed');
+      },
+      daily: (url) => ({ items: [{ date: new URLSearchParams(url.split('?')[1]).get('end'),
+        siteConsumption: 10, supplierConsumption: 2, profit: 8, margin: 80, complete: true, providers: [] }] })
+    });
+    const earlier = ui.loadCostAnalysis();
+    ui.nodes.get('cost-analysis-filter').elements.end.value = '2026-09-15';
+    await ui.loadCostAnalysis();
+    release();
+    await earlier;
+    const table = ui.nodes.get('cost-daily-profits').innerHTML;
+    assert.match(table, /2026-09-15/);
+    assert.doesNotMatch(table, /2026-09-30/);
+  }
+});
+
 test('daily profit renders actual supplier costs, losses, zero denominators and escaped supplier details', async () => {
   const ui = costReportUi({ daily: {
     items: [
@@ -173,7 +208,8 @@ test('daily profit renders actual supplier costs, losses, zero denominators and 
         margin: null, siteRequests: 0, complete: true, status: 'complete', providers: [] },
       { date: '2026-09-01', siteConsumption: 13.12500001, supplierConsumption: 10,
         profit: 3.12500001, margin: 23.81, siteRequests: 3, complete: true, status: 'complete',
-        providers: [{ name: '<img src=x onerror=alert(1)>', cost: 10, complete: true }] }
+        providers: [{ name: '<img src=x onerror=alert(1)>', cost: 10, complete: true,
+          lastSyncedAt: '2026-09-02T00:00:00Z' }] }
     ],
     summary: { days: 2, completeDays: 2, siteConsumption: 13.12500001,
       supplierConsumption: 12, profit: 1.12500001, margin: 8.57 }
@@ -189,6 +225,8 @@ test('daily profit renders actual supplier costs, losses, zero denominators and 
   assert.match(table, /N\/A/);
   assert.match(table, /<details class="cost-daily-suppliers">/);
   assert.match(table, /&lt;img/);
+  assert.match(table, /账号汇总/);
+  assert.match(ui.nodes.get('cost-daily-profit-meta').textContent, /上游账号日汇总/);
   assert.doesNotMatch(table, /<img|<details[^>]* open/);
   assert.match(ui.nodes.get('cost-daily-profit-summary').innerHTML, /1\.12500001 CNY/);
 });

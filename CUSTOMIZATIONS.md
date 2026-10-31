@@ -1,5 +1,28 @@
 # 个性化功能维护台账
 
+## 2026-10-31：上游账号每日消费汇总
+
+用户要求成本分析直接读取上游每日消费汇总，兼容 Sub2API 与 New API。本轮仅本地实现与隔离测试，保留已有未提交改动；不部署、不扣余额、不改生产账本。供应商账号日汇总与原 Key 明细账本分开，日报只使用一种来源，避免重复叠加。
+
+| 文件 | 本轮改动与必须保留的约定 |
+| --- | --- |
+| `provider-monitor/src/adapters/base.js`、`src/adapters/sub2api.js`、`src/adapters/one-api-family.js` | 增加账号日汇总能力及严格数值校验。Sub2API 使用用户身份和 `/api/v1/usage/stats` 的 `total_actual_cost`，不取标价；New API 使用 `/api/log/self/stat` 的消费 `quota / quota_per_unit`，验证真实额度单位，结束秒排除次日零点，不把 RPM / TPM 当全天总量。仅 API Key 的 Sub2API 及其他适配器明确不支持，不回退 Key 日志。 |
+| `provider-monitor/src/services/daily-cost-service.js`、`src/services/gross-profit-service.js`、`src/server.js` | 新服务接管集成与管理员每日成本接口，沿用原认证和参数 / 汇率校验，返回 `source=upstream_daily_summary`、`scope=account`。按资金日读取账号全部 Key 消费，原采购账本、毛利和计费核查不叠加或改写。覆盖完整且已确认的历史充值倍率、币种和汇率才折算现金成本；日内倍率变化、历史缺口、重复账号及无效金额保留待核验，只有有效零消费确认为零。一并保留原明细统计中有界复用时区日期格式器的性能修复。 |
+| `provider-monitor/src/db/index.js` | 版本 34 自动新增 `provider_daily_cost_summaries`，按供应商 / 日期 / 时区唯一覆盖保存原始汇总和账号 / 配置 HMAC，不存明文身份或凭据，不改旧采购台账。 |
+| `operations-center/src/services/cost-analysis-service.js`、`src/provider-monitor-client.js`、`public/app.js`、`public/index.html` | 只接受新账号汇总来源，按资金日逐日查询，一份报表只交换一次 SSO 会话、会话不跨用户缓存；单日失败保留成功日期，连续三次失败或全局错误有界停止，按错误码提示原因且不暴露上游错误。页面显示账号范围和汇总时间，刷新按钮传 `refresh=1`；以递增请求标识丢弃过期响应及错误，避免慢整月查询覆盖最新日期筛选。更新 app.js 资源版本。 |
+| `provider-monitor/tests/daily-cost.test.js`、`tests/database-migration.test.js`、`tests/gross-profit.test.js` | 新增两真实适配器契约、无 Key / 日志拉取、独立快照替换及持久化、跨午夜 / 夏令时、刷新失效、历史倍率 / 汇率、重复账号、凭据变更 / 安全轮换、失败预算 / 冷却 / 脱敏、迁移与真实 HTTP 鉴权测试，保留旧账本回归。 |
+| `operations-center/tests/cost-consumption.test.js`、`tests/provider-monitor-client.test.js`、`tests/cost-analysis-ui.test.js` | 验证新来源及账号范围、拒绝旧账本响应、日期筛选和强制刷新传递、供应商更新时间，以及旧日期请求晚到或失败不覆盖新结果。 |
+| `operations-center/README.md`、`docs/cost-analysis.md`、`docs/metrics.md`、`provider-monitor/README.md` | 记录上游端点、完整账号范围、凭据要求、时间边界、缓存 / 刷新、历史倍率及汇率、失败排查、v34 自动迁移和两服务配套更新。 |
+| `operations-center/data-preview/daily-summary-qa-20261031.cjs` 及截图（忽略的本地验收文件）、`CUSTOMIZATIONS.md` | 真实 PGlite 主站 SQL、SQLite 监控、两真实适配器与本地集成 HTTP 的桌面 / 手机验收，模拟上游响应，不使用真实凭据或公网请求；维护本轮实施与验证记录。 |
+
+读取与可靠性：当天缓存 60 秒、历史日期 1 小时，跨午夜重取前一日完整汇总；刷新绕过成功缓存，失败使旧快照失效，不用旧金额冒充成功。并发相同读取合并，供应商串行处理自身令牌轮换，沿用有界全局并发；单家最多 5 秒、整份监控请求约 8.5 秒读取预算、不自动重试，超时 / 限流 / 认证 / 验证码失败冷却 30 秒。失败保留其他供应商数据，缺失成本及利润不当零。返回脱敏原因，不返回地址、凭据、账号 HMAC 或原始上游错误；上游账号混有其他业务也会纳入，未接入供应商无法自动发现。
+
+验证：供应商监控完整 312 项、运营中心完整 279 项测试全部通过，共 591 项；运营中心 npm run check、本轮服务 / 适配器 / 迁移语法检查及 git diff --check 通过。1440px 桌面 / 390px 手机 Playwright 验证三日主站消费、两上游实际汇总、历史倍率与汇率、亏损及零分母、默认折叠明细 / 更新时间、刷新失败后待核验、最新日期请求优先；放入大额旧采购账本仍不重复计入，无未捕获页面错误或整页横向溢出，手机表格内部滚动。截图已复核，验收浏览器、两个本地服务和临时数据库均已关闭 / 清理。
+
+边界：本轮不连接生产，不变更生产配置、已保存凭据或资金；无需新增环境变量或依赖，沿用已有监控地址、Token / SSO、账号凭据、历史倍率和汇率，数据库自动迁移。上线需配套更新运营中心和供应商监控；本轮不部署，不代表真实供应商接口已全部完成现场验证。
+
+用户随后明确授权提交 GitHub，本次据此将账号日汇总改造、相关逐日查询 / SSO / 错误提示修复、测试、文档和本节台账提交并推送 extra main。推送前 fetch 确认本地与远端一致，沿用现有 Actions 测试门禁及 GHCR 镜像流程，构建 / 发布结果以本次 SHA 的 Actions 为准。订阅配置手册、独立生产维护记录及无关工程 / 文件保留本地，不纳入本次提交；不更新服务器或操作资金。
+
 ## 2026-10-30：成本分析每日真实收入
 
 用户要求用当前日期范围的每日主站实际消费减各供应商实际消费，替换原周期明细。本轮仅本地实现和隔离验证，保留本文件既有未提交生产维护记录、其他工程与无关文件；不部署、不连接生产或执行资金写入。原计费核查、CSV 后台任务和主站原生资金事务不变。

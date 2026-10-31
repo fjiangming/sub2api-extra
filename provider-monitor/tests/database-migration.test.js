@@ -178,6 +178,8 @@ test('schema migrations through v32 preserve mappings and add explicit alert rou
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 30').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 31').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 32').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 34').get());
+  assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_daily_cost_summaries'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());
   assert.ok(db.prepare('PRAGMA table_info(provider_connections)').all().some((column) => column.name === 'recharge_url'));
