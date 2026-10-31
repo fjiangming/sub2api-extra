@@ -60,6 +60,7 @@ test('daily costs read upstream account aggregates without keys or logs and neve
   const report = await f.service.report(query);
   assert.equal(report.source, 'upstream_daily_summary');
   assert.equal(report.scope, 'account');
+  assert.equal(report.providerFilter, 'scheduled_enabled');
   assert.equal(report.items[0].cost, 12);
   assert.equal(report.items[0].complete, true);
   assert.deepEqual(report.items[0].providers.map((provider) => provider.cost), [6, 6]);
@@ -82,6 +83,25 @@ test('daily costs read upstream account aggregates without keys or logs and neve
   const cached = await f.service.report(query);
   assert.ok(cached.items[0].providers.every((provider) => provider.cached));
   assert.equal(f.calls.length, 5);
+});
+
+test('disabled scheduled checks exclude suppliers even with cached summaries and historical ledger costs', async (t) => {
+  const f = fixture(t);
+  await f.service.report(query);
+  const id = f.states[0].provider.id;
+  f.db.prepare(`INSERT INTO provider_cost_ledger(connection_id,key_identity,source_log_id,cost,
+    cash_cost,cash_currency,recharge_multiplier,recharge_source,occurred_at,ingested_at,updated_at)
+    VALUES (?,'old-key','old-summary-cost',999,999,'USD',1,'manual','2026-10-29T00:00:00Z','2026-10-29','2026-10-29')`).run(id);
+  f.providers.update(id, { enabled: false });
+  f.calls.length = 0;
+  f.states[0].error = new Error('Disabled suppliers must not be read');
+  const report = await f.service.report({ ...query, refresh: true });
+  assert.equal(report.items[0].cost, 6);
+  assert.equal(report.items[0].providers.length, 1);
+  assert.equal(report.items[0].providers[0].id, f.states[1].provider.id);
+  assert.ok(f.calls.every(({ url }) => url.hostname === 'supplier-1.example'));
+  f.providers.update(f.states[1].provider.id, { enabled: false });
+  assert.equal((await f.service.report(query)).items[0].cost, null);
 });
 
 test('concurrent refreshes share reads and replace each daily snapshot instead of accumulating costs', async (t) => {

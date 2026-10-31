@@ -177,12 +177,8 @@ class DailyCostService {
     const generatedAt = this.now().toISOString();
     const deadline = Date.now() + 8500;
     const refresh = input.refresh === '1' || input.refresh === true;
-    const connections = this.db.prepare(`SELECT id, name FROM provider_connections p
-      WHERE enabled=1 OR EXISTS (SELECT 1 FROM provider_daily_cost_summaries s
-        WHERE s.connection_id=p.id AND s.usage_date>=? AND s.usage_date<=?)
-      OR EXISTS (SELECT 1 FROM provider_cost_ledger l WHERE l.connection_id=p.id
-        AND l.occurred_at>=? AND l.occurred_at<? AND l.accounting_status='active' AND l.comparable=1)
-      ORDER BY name, id`).all(query.from, query.to, query.fromAt, query.toAt);
+    const connections = this.db.prepare(`SELECT id, name FROM provider_connections
+      WHERE enabled=1 ORDER BY name, id`).all();
     const items = [];
     for (const period of periods) {
       const suppliers = await Promise.all(connections.map(async ({ id, name }) => {
@@ -218,7 +214,8 @@ class DailyCostService {
         providers: suppliers });
     }
     return { range: { start: query.from, end: query.to }, timezone: query.timezone,
-      currency: settings.currency, source: SOURCE, scope: 'account', items, generatedAt };
+      currency: settings.currency, source: SOURCE, scope: 'account',
+      providerFilter: 'scheduled_enabled', items, generatedAt };
   }
 }
 

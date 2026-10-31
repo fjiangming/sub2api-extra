@@ -135,6 +135,33 @@ function parseReportInput(input, config) {
   return { range, granularity, currency };
 }
 
+function dailyProfitReport(items, { range, currency, timezone, granularity = 'day', generatedAt = new Date().toISOString() }, notices = []) {
+  const sum = (rows, key) => rows.every(row => row[key] != null)
+    ? rows.reduce((total, row) => total.plus(row[key]), new Decimal(0)).toDecimalPlaces(8).toNumber() : null;
+  const totals = rows => {
+    const siteConsumption = sum(rows, 'siteConsumption');
+    const profit = sum(rows, 'profit');
+    return { siteConsumption, supplierConsumption: sum(rows, 'supplierConsumption'), profit,
+      margin: profit != null && siteConsumption > 0
+        ? new Decimal(profit).div(siteConsumption).times(100).toDecimalPlaces(2).toNumber() : null };
+  };
+  const buckets = new Map();
+  for (const row of items) {
+    const key = periodStart(row.date, granularity);
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(row);
+  }
+  const periods = createPeriods(range, granularity).map(period => ({
+    key: period.key, label: period.label, start: period.start, end: period.end,
+    ...totals(buckets.get(period.key) || []),
+    complete: (buckets.get(period.key) || []).every(row => row.complete)
+  }));
+  return { range, currency, timezone, granularity, generatedAt,
+    supplierSource: 'upstream_daily_summary', supplierScope: 'account', providerFilter: 'scheduled_enabled',
+    summary: { ...totals(items), days: items.length, completeDays: items.filter(row => row.complete).length },
+    periods, items: [...items].sort((a, b) => b.date.localeCompare(a.date)), notices: [...new Set(notices)] };
+}
+
 function parsePagination(input = {}) {
   const page = input.page == null || input.page === '' ? 1 : Number(input.page);
   const pageSize = input.pageSize == null || input.pageSize === '' ? 20 : Number(input.pageSize);
@@ -447,11 +474,11 @@ class CostAnalysisService {
     };
   }
 
-  async getDailyProfit(input = {}, { accessToken = null } = {}) {
-    const { range, currency } = parseReportInput(input, this.config);
+  async getDailyProfit(input = {}, { accessToken = null, supplierReader = null } = {}) {
+    const { range, currency, granularity } = parseReportInput(input, this.config);
     const [site, supplier] = await Promise.all([
       this.#dailyBalanceConsumption(range, currency),
-      currency === 'CNY' ? this.#supplierDailyCosts(range, currency, accessToken, input.refresh === '1' || input.refresh === true) :
+      currency === 'CNY' ? this.#supplierDailyCosts(range, currency, accessToken, input.refresh === '1' || input.refresh === true, supplierReader) :
         { items: [], notice: '主站消费没有币种字段，每日真实收入仅适用于 CNY。' }
     ]);
     const siteByDate = new Map(site.rows.map((row) => [row.date, row]));
@@ -477,36 +504,31 @@ class CostAnalysisService {
           !siteComplete ? 'site_incomplete' : !supplierComplete ? 'supplier_incomplete' : 'complete'
       });
     }
-    const sum = (key) => items.every((item) => item[key] != null)
-      ? items.reduce((total, item) => total.plus(item[key]), new Decimal(0)).toDecimalPlaces(8).toNumber() : null;
-    const siteConsumption = sum('siteConsumption');
-    const profit = sum('profit');
-    return { range, currency, timezone: this.config.financeTimezone, generatedAt: new Date().toISOString(),
-      supplierSource: 'upstream_daily_summary', supplierScope: 'account',
-      summary: { siteConsumption, supplierConsumption: sum('supplierConsumption'), profit,
-        margin: profit != null && siteConsumption > 0
-          ? new Decimal(profit).div(siteConsumption).times(100).toDecimalPlaces(2).toNumber() : null,
-        days: items.length, completeDays: items.filter((item) => item.complete).length },
-      items: items.reverse(), notices: [
+    return dailyProfitReport(items, { range, currency, granularity, timezone: this.config.financeTimezone }, [
         ...(site.notice ? ['主站消费无法核验，请检查用量表、明细覆盖和所选币种。'] : []),
         ...(supplier.notice ? [supplier.notice] : [])
-      ] };
+      ]);
   }
 
-  async #supplierDailyCosts(range, currency, accessToken, refresh = false) {
+  async createSupplierDailyCostsReader(accessToken = null) {
+    if (!this.providerMonitor?.configured()) throw new AppError('PROVIDER_MONITOR_NOT_CONFIGURED', 'not configured');
+    let token = accessToken;
+    if (!this.providerMonitor.integrationToken && !token && this.sub2api?.configured()) token = await this.sub2api.login();
+    return this.providerMonitor.createDailyCostsReader(token);
+  }
+
+  async #supplierDailyCosts(range, currency, accessToken, refresh = false, supplierReader = null) {
     const items = [];
     const failures = [];
     try {
-      if (!this.providerMonitor?.configured()) throw new AppError('PROVIDER_MONITOR_NOT_CONFIGURED', 'not configured');
-      let token = accessToken;
-      if (!this.providerMonitor.integrationToken && !token && this.sub2api?.configured()) token = await this.sub2api.login();
-      const read = await this.providerMonitor.createDailyCostsReader(token);
+      const read = supplierReader || await this.createSupplierDailyCostsReader(accessToken);
       let consecutiveFailures = 0;
       for (let date = range.start; date <= range.end; date = addUtcDays(date, 1)) {
         try {
           const report = await read({ from: date, to: date, currency, timezone: this.config.financeTimezone,
             ...(refresh ? { refresh: '1' } : {}) });
-          if (report?.source !== 'upstream_daily_summary' || report.scope !== 'account' || report.timezone !== this.config.financeTimezone ||
+          if (report?.source !== 'upstream_daily_summary' || report.scope !== 'account' ||
+              report.providerFilter !== 'scheduled_enabled' || report.timezone !== this.config.financeTimezone ||
               report.currency !== currency || report.range?.start !== date || report.range?.end !== date ||
               !Array.isArray(report.items) || report.items.length !== 1 || report.items[0]?.date !== date) {
             throw new AppError('PROVIDER_MONITOR_INVALID_DAILY_COSTS', 'invalid supplier report');
@@ -545,6 +567,7 @@ class CostAnalysisService {
 
   async getReport(input = {}) {
     const { range, granularity, currency } = parseReportInput(input, this.config);
+    const includeConsumption = input.include_consumption !== '0';
     await this.#requireAutomaticIncomeTables();
     const [automaticIncomeResult, balanceResult, consumptionResult] = await Promise.all([
       this.pool.query(`
@@ -562,7 +585,7 @@ class CostAnalysisService {
         WHERE id <> 1
           AND deleted_at IS NULL
       `),
-      this.#dailyBalanceConsumption(range, currency)
+      includeConsumption ? this.#dailyBalanceConsumption(range, currency) : Promise.resolve({ rows: [] })
     ]);
     const rows = automaticIncomeResult.rows;
 
@@ -704,7 +727,7 @@ class CostAnalysisService {
       periods,
       breakdown,
       incomeBreakdown,
-      notices: consumptionResult.notice ? [consumptionResult.notice] :
+      notices: !includeConsumption ? [] : consumptionResult.notice ? [consumptionResult.notice] :
         periods.some((period) => !period.consumptionComplete)
           ? ['部分日期的用量明细不完整或无法核验，余额消费与实际利润趋势留空；支出仍完整展示。'] : [],
       caveats: [
@@ -717,10 +740,9 @@ class CostAnalysisService {
         '支出按手工台账的发生日期归集；不同币种不会自动换算。',
         '利润为总收入减手工支出，不包含税费，也不扣除退款估算。',
         '用户总余额是当前未删除用户的 balance 合计并排除 ID 1；实际利润为利润减用户总余额，余额是当前快照且不随查询日期回溯。',
-        '趋势图的实际利润按当期余额消费减支出计算；余额消费取 usage_logs.actual_cost，仅含 billing_type = 0 且 user_id <> 1 的记录，不叠加充值、手工收入或订阅消费，也不再次扣除当前余额。',
-        '余额消费按资金时区归属日期，保留已删除用户的历史消费；使用全部请求与原生日汇总核验明细覆盖，周期内任一天不完整时不展示该周期的消费和实际利润。非 CNY 不计算余额消费利润。',
-        '每日真实收入固定按资金日展示：主站全部 usage_logs.actual_cost（排除 ID 1，含订阅）减供应商监控采购台账的实际消费；不扣手工支出或当前余额。利润率为该利润除以主站消费，消费为零时不计算。',
-        '供应商实际消费按历史充值倍率和配置汇率折算；同步未覆盖当日、结果截断、倍率或汇率未确认时，成本及利润显示待核验，不将缺失数据当零。',
+        '真实收入趋势与每日列表使用同一份数据：主站全部 usage_logs.actual_cost（排除 ID 1，包含订阅）减已启用定时检查供应商的账号日消费，不扣手工支出或当前余额；利润率以主站消费为分母。',
+        '按资金时区每天 01:00 归档前一日，当天实时查询；历史缺口在后台补算，历史归档保留统计时的供应商范围、倍率和汇率，需要调整时使用历史重算。',
+        '供应商汇总按完整历史充值倍率和配置汇率折算；缺失、异常或主站明细不完整时保持待核验，不以零成本推断利润；周期内任一天未知，趋势保留空缺。',
         '自动收入直接依赖 Sub2API 当前兑换记录；源记录被删除后，历史报表会同步减少。'
       ]
     };
@@ -854,6 +876,7 @@ module.exports = {
   CostAnalysisService,
   amountFromMinor,
   createPeriods,
+  dailyProfitReport,
   parseAutomaticIncomeInput,
   parseAutomaticIncomeUserKey,
   parseReportInput,

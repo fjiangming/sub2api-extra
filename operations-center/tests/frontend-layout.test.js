@@ -38,7 +38,9 @@ test('cost analysis exposes reporting plus editable income and expense ledgers',
   assert.match(html, /id="cost-daily-profit-summary"/);
   assert.doesNotMatch(html, /id="cost-periods"|<h2>周期明细<\/h2>/);
   assert.match(html, /<script src="\/cost-analysis-ui\.js\?v=[^"]+" defer><\/script>[\s\S]*<script src="\/app\.js\?v=[^"]+" defer><\/script>/);
-  assert.match(script, /api\(`\/api\/cost-analysis\?\$\{search\}`\)/);
+  assert.match(script, /api\(`\/api\/cost-analysis\?\$\{search\}&include_consumption=0`\)/);
+  assert.match(html, /<h2>真实收入趋势<\/h2>/);
+  assert.doesNotMatch(html, /余额消费与实际利润趋势/);
   assert.match(script, /api\(`\/api\/cost-analysis\/incomes\?\$\{search\}`\)/);
   assert.match(script, /api\('\/api\/cost-analysis\/providers\?refresh=true'\)/);
   assert.match(script, /\/api\/cost-analysis\/incomes/);

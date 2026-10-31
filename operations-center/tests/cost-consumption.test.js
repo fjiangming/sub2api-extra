@@ -170,7 +170,7 @@ function dailyCosts(from, to, change = (item) => item) {
     next.setUTCDate(next.getUTCDate() + 1);
     date = next.toISOString().slice(0, 10);
   }
-  return { range: { start: from, end: to }, source: 'upstream_daily_summary', scope: 'account',
+  return { range: { start: from, end: to }, source: 'upstream_daily_summary', scope: 'account', providerFilter: 'scheduled_enabled',
     currency: 'CNY', timezone: 'Asia/Shanghai', items };
 }
 
@@ -198,6 +198,25 @@ test('daily real profit uses all non-admin actual costs and upstream costs, inde
   assert.equal(report.timezone, 'Asia/Shanghai');
 });
 
+test('the lightweight financial report skips usage scans and real-income trends aggregate the exact daily rows', async () => {
+  const costs = withSuppliers(service());
+  const originalQuery = costs.pool.query.bind(costs.pool);
+  costs.pool = { query(sql, params) {
+    assert.doesNotMatch(sql, /FROM usage_logs/);
+    return originalQuery(sql, params);
+  } };
+  const finance = await costs.getReport({ start: '2026-01-01', end: '2026-01-03', include_consumption: '0' });
+  assert.equal(finance.summary.automaticRevenue, 1000);
+  assert.deepEqual(finance.notices, []);
+  costs.pool = database;
+  for (const granularity of ['day', 'week', 'month', 'year']) {
+    const report = await costs.getDailyProfit({ start: '2026-01-01', end: '2026-01-03', granularity });
+    assert.equal(report.periods.reduce((sum, row) => sum + row.supplierConsumption, 0), 7.5);
+    assert.equal(Number(report.periods.reduce((sum, row) => sum + row.profit, 0).toFixed(8)), report.summary.profit);
+    assert.equal(report.periods[0].margin, granularity === 'day' ? 99.81 : report.summary.margin);
+  }
+});
+
 test('daily profit handles finance and usage timezones independently and refuses incomplete main-site days', async () => {
   await aggregate('UTC');
   const costs = withSuppliers(service({ sub2apiTimezone: 'UTC' }));
@@ -220,6 +239,7 @@ test('daily profit keeps missing, duplicate, inconsistent and unsupported suppli
     (report) => ({ ...report, currency: 'USD' }),
     (report) => ({ ...report, timezone: 'UTC' }),
     (report) => ({ ...report, source: 'unknown' }),
+    (report) => ({ ...report, providerFilter: undefined }),
     (report) => ({ ...report, items: [...report.items, report.items[0]] }),
     (report) => ({ ...report, items: report.items.map((item) => ({ ...item, complete: false })) }),
     (report) => ({ ...report, items: report.items.map((item) => ({ ...item, cost: 3 })) }),

@@ -6,6 +6,7 @@ const { loadConfig, resolveDataDir } = require('./config');
 const { createDatabase } = require('./db');
 const { RuntimeSettingsStore } = require('./runtime-settings-store');
 const { CostLedgerStore } = require('./cost-ledger-store');
+const { DailyProfitStore } = require('./daily-profit-store');
 const { UserMessageStore } = require('./user-message-store');
 const { AuthService } = require('./auth');
 const { SchemaInspector } = require('./schema-inspector');
@@ -16,6 +17,7 @@ const { LatencyService } = require('./services/latency-service');
 const { MetricsService } = require('./services/metrics-service');
 const { UserProfilesService } = require('./services/user-profiles-service');
 const { CostAnalysisService } = require('./services/cost-analysis-service');
+const { DailyProfitService } = require('./services/daily-profit-service');
 const { UserMessagesService } = require('./services/user-messages-service');
 const { BillingRecoveryService } = require('./services/billing-recovery-service');
 const { BillingRecoveryStore } = require('./billing-recovery-store');
@@ -72,6 +74,9 @@ async function main() {
     providerMonitor,
     sub2api
   });
+  const dailyProfitStore = new DailyProfitStore(config.dataDir);
+  dailyProfitStore.initialize();
+  const dailyProfit = new DailyProfitService({ analysis: costAnalysis, store: dailyProfitStore, config });
   const storage = new StorageService(database.read, inspector, config);
   const retention = new RetentionService({
     readPool: database.read,
@@ -92,7 +97,7 @@ async function main() {
     sub2api
   });
   const app = createApp({
-    config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
+    config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, dailyProfit, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
   });
   const server = http.createServer(app);
   server.requestTimeout = 120000;
@@ -105,6 +110,7 @@ async function main() {
   });
   storage.start();
   scheduler.start();
+  dailyProfit.start();
   billingRecovery.start();
   console.info(`operations-center listening on http://${config.bindHost}:${config.port}`);
 
@@ -114,11 +120,13 @@ async function main() {
     stopping = true;
     console.info(`operations-center shutting down (${signal})`);
     scheduler.stop();
+    await dailyProfit.stop();
     await billingImports.stop();
     await billingRecovery.stop();
     storage.stop();
     auth.close();
     await new Promise((resolve) => server.close(resolve));
+    dailyProfitStore.close();
     billingRecoveryStore.close();
     telemetry.close();
     await database.close();

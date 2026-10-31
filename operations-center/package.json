@@ -5,7 +5,7 @@
   "description": "Stateless operations analytics and retention control plane for Sub2API",
   "main": "src/server.js",
   "scripts": {
-    "precheck": "node --check src/services/billing-import-groups.js && node --check src/services/billing-import-tasks.js",
+    "precheck": "node --check src/services/billing-import-groups.js && node --check src/services/billing-import-tasks.js && node --check src/daily-profit-store.js && node --check src/services/daily-profit-service.js && node --check src/services/cost-analysis-service.js",
     "start": "node --env-file=.env src/server.js",
     "dev": "node --env-file=.env --watch src/server.js",
     "preview:latency": "node scripts/latency-preview.cjs",

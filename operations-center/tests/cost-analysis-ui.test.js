@@ -86,7 +86,7 @@ test('saved expense already covered by the report leaves filters unchanged', () 
   );
 });
 
-function costReportUi({ periods = [], notices = [], daily = {}, beforeFetch = async () => {} }) {
+function costReportUi({ periods = [], notices = [], daily = {}, beforeFetch = async () => {}, timers = { setTimeout, clearTimeout } }) {
   const script = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   const definitions = script.slice(0, script.indexOf("$('login-form').addEventListener"));
   const nodes = new Map();
@@ -106,6 +106,7 @@ function costReportUi({ periods = [], notices = [], daily = {}, beforeFetch = as
   };
   const context = vm.createContext({
     URLSearchParams,
+    setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout,
     document: { getElementById(id) {
       if (!nodes.has(id)) nodes.set(id, { textContent: '', innerHTML: '' });
       return nodes.get(id);
@@ -119,7 +120,7 @@ function costReportUi({ periods = [], notices = [], daily = {}, beforeFetch = as
     })
   });
   const ui = vm.runInContext(`${definitions}\n({ loadCostAnalysis, renderCostAnalysisNotices });`, context);
-  return { ...ui, nodes, requests, chart: () => option };
+  return { ...ui, nodes, requests, state: vm.runInContext('state', context), chart: () => option };
 }
 
 function reportPeriod(overrides = {}) {
@@ -131,26 +132,29 @@ function reportPeriod(overrides = {}) {
   };
 }
 
-test('profit trend uses balance consumption and recorded expenses instead of topups or current balance', async () => {
-  const ui = costReportUi({ periods: [reportPeriod(), reportPeriod({
-    start: '2026-09-02', end: '2026-09-02', label: '09-02',
-    balanceConsumption: 4, expense: 6, consumptionProfit: -2
-  })] });
+test('profit trend uses the same main-site and supplier totals as the real-income daily list', async () => {
+  const ui = costReportUi({ periods: [reportPeriod()], daily: { periods: [
+    { label: '09-01', siteConsumption: 20.12500001, supplierConsumption: 10, profit: 10.12500001 },
+    { label: '09-02', siteConsumption: 4, supplierConsumption: 6, profit: -2 }
+  ] } });
   await ui.loadCostAnalysis();
   const option = JSON.parse(JSON.stringify(ui.chart()));
-  assert.deepEqual(option.legend.data, ['余额消费', '支出', '实际利润']);
+  assert.deepEqual(option.legend.data, ['主站消费', '供应商消费', '真实收入']);
   assert.equal(option.series.length, 3);
-  assert.deepEqual(option.series.map((series) => series.data), [[13.12500001, 4], [10, 6], [3.12500001, -2]]);
+  assert.deepEqual(option.series.map((series) => series.data), [[20.12500001, 4], [10, 6], [10.12500001, -2]]);
+  assert.match(ui.requests.find(url => url.startsWith('/api/cost-analysis?')), /include_consumption=0/);
 });
 
-test('unavailable consumption stays null in the chart while expenses remain visible', async () => {
-  const warning = '部分日期的用量明细不完整，余额消费与实际利润趋势留空。';
+test('unknown supplier costs leave real income unknown while main-site consumption remains visible', async () => {
+  const warning = '部分日期的用量明细不完整。';
   const ui = costReportUi({ periods: [reportPeriod({
     balanceConsumption: null, consumptionProfit: null, consumptionComplete: false
-  })], notices: [warning] });
+  })], notices: [warning], daily: { periods: [
+    { label: '09-01', siteConsumption: 13, supplierConsumption: null, profit: null }
+  ] } });
   await ui.loadCostAnalysis();
-  assert.equal(ui.chart().series[0].data[0], null);
-  assert.equal(ui.chart().series[1].data[0], 10);
+  assert.equal(ui.chart().series[0].data[0], 13);
+  assert.equal(ui.chart().series[1].data[0], null);
   assert.equal(ui.chart().series[2].data[0], null);
   const notices = ui.nodes.get('cost-analysis-operational-notices');
   assert.equal(notices.hidden, false);
@@ -165,6 +169,28 @@ test('empty daily profit tables span all eight columns', async () => {
   await ui.loadCostAnalysis();
   assert.match(ui.nodes.get('cost-daily-profits').innerHTML, /colspan="8"/);
   assert.equal(ui.nodes.get('cost-daily-profit-summary').innerHTML, '');
+});
+
+test('background polling updates both the archived list and trend without another manual-income query or forced rebuild', async () => {
+  const callbacks = [];
+  let reads = 0;
+  const ui = costReportUi({
+    timers: { setTimeout: callback => (callbacks.push(callback), callbacks.length), clearTimeout: () => {} },
+    daily: () => ++reads === 1 ? { archive: { pendingDays: 1, ready: true },
+      items: [{ date: '2026-09-01', status: 'pending_archive', profit: null, providers: [] }] } :
+      { archive: { pendingDays: 0, ready: true },
+        items: [{ date: '2026-09-01', siteConsumption: 10, supplierConsumption: 2, profit: 8,
+          complete: true, status: 'complete', mode: 'archived', providers: [] }] }
+  });
+  ui.state.currentView = 'costs'; ui.state.user = { name: 'admin' };
+  await ui.loadCostAnalysis({ refresh: true });
+  assert.match(ui.nodes.get('cost-daily-profits').innerHTML, /待统计/);
+  await callbacks.shift()();
+  assert.match(ui.nodes.get('cost-daily-profits').innerHTML, /已归档/);
+  assert.equal(ui.chart().series[2].data[0], 8);
+  assert.equal(ui.requests.filter(url => url.startsWith('/api/cost-analysis?')).length, 1);
+  assert.ok(!ui.requests.at(-1).includes('refresh='));
+  assert.equal(callbacks.length, 0);
 });
 
 test('manual cost analysis refresh requests a fresh upstream summary without changing other financial queries', async () => {

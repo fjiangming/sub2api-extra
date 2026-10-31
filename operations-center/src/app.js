@@ -136,7 +136,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, dailyProfit, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -361,7 +361,7 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.get('/metrics/finance', asyncRoute(async (req, res) => res.json(await metrics.getFinance(req.query))));
   api.get('/cost-analysis', asyncRoute(async (req, res) => res.json(await costAnalysis.getReport(req.query))));
   api.get('/cost-analysis/daily-profit', asyncRoute(async (req, res) => {
-    res.set('Cache-Control', 'no-store').json(await costAnalysis.getDailyProfit(req.query, {
+    res.set('Cache-Control', 'no-store').json(await (dailyProfit || costAnalysis).getDailyProfit(req.query, {
       accessToken: req.auth.upstreamAccessToken || null
     }));
   }));

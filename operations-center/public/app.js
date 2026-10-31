@@ -23,6 +23,7 @@ const state = {
   costNotices: [],
   costMainPageMeta: '',
   costReportRequestId: 0,
+  costProfitTimer: null,
   costAutomaticIncome: {
     active: false,
     query: null,
@@ -245,6 +246,8 @@ function badge(status) {
 }
 
 function showLogin(message = '') {
+  ++state.costReportRequestId;
+  clearTimeout(state.costProfitTimer);
   profilesUi.reset();
   messagesUi.reset();
   latencyUi.reset();
@@ -792,9 +795,10 @@ function renderCostDailyProfit(report) {
   const currency = report.currency || 'CNY';
   const money = (value) => value == null ? '待核验' : formatMoney(value, currency, 8);
   const labels = { complete: '已核验', site_incomplete: '主站待核验',
-    supplier_incomplete: '供应商待核验', unsupported_currency: '币种不支持' };
+    supplier_incomplete: '供应商待核验', unsupported_currency: '币种不支持',
+    pending_archive: '待统计', archive_failed: '统计失败', live_failed: '实时统计失败', future: '未发生' };
   const summary = report.summary || {};
-  $('cost-daily-profit-meta').textContent = `${report.timezone || ''} · ${items.length} 天 · 已核验 ${summary.completeDays || 0} 天 · ${currency} · 上游账号日汇总`;
+  $('cost-daily-profit-meta').textContent = `${report.timezone || ''} · ${items.length} 天 · 已核验 ${summary.completeDays || 0} 天 · ${currency} · 上游账号日汇总 · 历史归档 / 当日实时`;
   $('cost-daily-profit-notices').innerHTML = (report.notices || []).map((message) => alertHtml('warning', message)).join('');
   $('cost-daily-profits').innerHTML = items.length ? items.map((row) => `
     <tr>
@@ -804,7 +808,7 @@ function renderCostDailyProfit(report) {
       <td class="numeric ${row.profit < 0 ? 'negative-value' : ''}">${escapeHtml(money(row.profit))}</td>
       <td class="numeric">${formatPercent(row.margin)}</td>
       <td class="numeric">${row.siteRequests == null ? 'N/A' : formatInteger(row.siteRequests)}</td>
-      <td><span class="badge ${row.complete ? 'success' : 'warning'}">${labels[row.status] || '待核验'}</span></td>
+      <td title="${escapeHtml(row.computedAt ? formatDateTime(row.computedAt, report.timezone) : '')}"><span class="badge ${row.complete ? 'success' : 'warning'}">${row.complete && row.mode ? (row.mode === 'live' ? '今日实时' : '已归档') : labels[row.status] || '待核验'}</span>${row.archiveStatus ? `<small class="muted">${row.archiveStatus === 'retrying' ? '等待重试' : '等待统计 / 重算'}</small>` : ''}</td>
       <td>${row.providers?.length ? `<details class="cost-daily-suppliers"><summary title="查看供应商消费明细">${formatInteger(row.providers.length)} 家${icon('chevron-down')}</summary><ul>${row.providers.map((provider) => `
         <li><strong>${escapeHtml(provider.name)}</strong><span>${escapeHtml(money(provider.cost))}</span>${provider.lastSyncedAt ? `<small>账号汇总 · ${escapeHtml(formatDateTime(provider.lastSyncedAt, report.timezone))}</small>` : ''}${!provider.complete ? `<small>${escapeHtml((provider.reasons || []).join('；') || '上游汇总未核验')}</small>` : ''}</li>
       `).join('')}</ul></details>` : '<span class="muted">暂无可核验数据</span>'}</td>
@@ -815,15 +819,48 @@ function renderCostDailyProfit(report) {
   ` : '';
 }
 
+function renderCostProfitTrend(report) {
+  const periods = report.periods || [...(report.items || [])].reverse().map(row => ({ ...row, label: row.date.slice(5) }));
+  chart('cost-analysis-chart', {
+    legend: { top: 2, right: 10, data: ['主站消费', '供应商消费', '真实收入'] },
+    xAxis: { type: 'category', data: periods.map(period => period.label), axisLabel: { hideOverlap: true } },
+    yAxis: { type: 'value', splitLine: { lineStyle: { color: '#edf0eb' } } },
+    series: [
+      lineSeries('主站消费', periods.map(period => period.siteConsumption), '#176b4d'),
+      { name: '供应商消费', type: 'bar', data: periods.map(period => period.supplierConsumption), itemStyle: { color: '#b05a3c' }, barMaxWidth: 28 },
+      lineSeries('真实收入', periods.map(period => period.profit), '#2d5ea8')
+    ]
+  });
+}
+
+function pollCostDailyProfit(report, query, requestId, attempt = 0) {
+  clearTimeout(state.costProfitTimer);
+  if (!report.archive?.pendingDays || !report.archive.ready || attempt >= 120) return;
+  state.costProfitTimer = setTimeout(async () => {
+    if (requestId !== state.costReportRequestId || state.currentView !== 'costs' || state.costAutomaticIncome.active || !state.user) return;
+    try {
+      const next = await api(`/api/cost-analysis/daily-profit?${new URLSearchParams({ ...query, poll: '1' })}`);
+      if (requestId !== state.costReportRequestId || state.currentView !== 'costs' || !state.user) return;
+      renderCostDailyProfit(next);
+      renderCostProfitTrend(next);
+      refreshIcons();
+      pollCostDailyProfit(next, query, requestId, attempt + 1);
+    } catch {
+      if (requestId === state.costReportRequestId) pollCostDailyProfit(report, query, requestId, attempt + 1);
+    }
+  }, 5000);
+}
+
 async function loadCostAnalysis({ refresh = false } = {}) {
   const requestId = ++state.costReportRequestId;
+  clearTimeout(state.costProfitTimer);
   setPageMeta('正在汇总自动收入、手工收入与支出');
   const query = costAnalysisQuery();
   const search = new URLSearchParams(query);
   const dailySearch = new URLSearchParams(search);
   if (refresh) dailySearch.set('refresh', '1');
   const results = await Promise.all([
-    api(`/api/cost-analysis?${search}`),
+    api(`/api/cost-analysis?${search}&include_consumption=0`),
     api(`/api/cost-analysis/incomes?${search}`),
     api(`/api/cost-analysis/expenses?${search}`),
     api('/api/cost-analysis/providers'),
@@ -855,16 +892,7 @@ async function loadCostAnalysis({ refresh = false } = {}) {
   state.costNotices = report.notices || [];
   renderCostAnalysisNotices(providers);
 
-  chart('cost-analysis-chart', {
-    legend: { top: 2, right: 10, data: ['余额消费', '支出', '实际利润'] },
-    xAxis: { type: 'category', data: report.periods.map((period) => period.label), axisLabel: { hideOverlap: true } },
-    yAxis: { type: 'value', splitLine: { lineStyle: { color: '#edf0eb' } } },
-    series: [
-      lineSeries('余额消费', report.periods.map((period) => period.balanceConsumption), '#176b4d'),
-      { name: '支出', type: 'bar', data: report.periods.map((period) => period.expense), itemStyle: { color: '#b05a3c' }, barMaxWidth: 28 },
-      lineSeries('实际利润', report.periods.map((period) => period.consumptionProfit), '#2d5ea8')
-    ]
-  });
+  renderCostProfitTrend(dailyProfit);
 
   const incomeBreakdown = report.incomeBreakdown || [];
   $('cost-income-breakdown').innerHTML = incomeBreakdown.length ? incomeBreakdown.map((row) => `
@@ -874,6 +902,7 @@ async function loadCostAnalysis({ refresh = false } = {}) {
     <tr><td><strong>${escapeHtml(row.name)}</strong></td><td>${escapeHtml(costKindLabel(row.kind))}</td><td class="numeric">${formatInteger(row.count)}</td><td class="numeric">${escapeHtml(formatMoney(row.amount, report.currency))}</td><td class="numeric">${formatPercent(row.percentage)}</td></tr>
   `).join('') : emptyRow(5, '所选范围暂无成本');
   renderCostDailyProfit(dailyProfit);
+  pollCostDailyProfit(dailyProfit, query, requestId);
   renderCostProviders(providers);
   renderCostIncomes(incomes.items || [], report.currency, incomes.customItems || []);
   renderCostExpenses(expenses.items || [], report.currency, expenses.customItems || []);
@@ -1609,6 +1638,8 @@ async function loadCurrentView(options = {}) {
 }
 
 function navigate(view) {
+  ++state.costReportRequestId;
+  clearTimeout(state.costProfitTimer);
   if (!titles[view]) return;
   if (state.currentView === 'profiles') profilesUi.leave();
   if (state.currentView === 'messages') messagesUi.leave();
