@@ -675,7 +675,7 @@ async function loadAutomaticIncomeUsers() {
   });
   let data;
   try {
-    data = await api(`${window.CostAccountingUi ? '/api/cost-analysis/accounting/credits' : '/api/cost-analysis/automatic-income'}/users?${search}`);
+    data = await api(`${drilldown.query.archived ? '/api/cost-analysis/accounting/credits' : '/api/cost-analysis/automatic-income'}/users?${search}`);
   } catch (error) {
     if (requestId === drilldown.userRequestId) {
       $('cost-auto-users').innerHTML = emptyRow(6, error.message);
@@ -718,7 +718,8 @@ async function openAutomaticIncomeDrilldown() {
   const drilldown = state.costAutomaticIncome;
   const query = costAnalysisQuery();
   drilldown.active = true;
-  drilldown.query = { start: query.start, end: query.end, currency: query.currency };
+  drilldown.query = { start: query.start, end: query.end, currency: query.currency,
+    archived: Boolean(window.CostAccountingUi && accountingUi?.state.tab !== 'automatic') };
   drilldown.users = [];
   drilldown.userSearch = '';
   drilldown.userPage = 1;
@@ -747,7 +748,7 @@ async function loadAutomaticIncomeRecords() {
   });
   let data;
   try {
-    data = await api(`${window.CostAccountingUi ? '/api/cost-analysis/accounting/credits' : '/api/cost-analysis/automatic-income'}/users/${encodeURIComponent(drilldown.selectedUserKey)}/records?${search}`);
+    data = await api(`${drilldown.query.archived ? '/api/cost-analysis/accounting/credits' : '/api/cost-analysis/automatic-income'}/users/${encodeURIComponent(drilldown.selectedUserKey)}/records?${search}`);
   } catch (error) {
     if (requestId === drilldown.recordRequestId) {
       $('cost-auto-records').innerHTML = emptyRow(7, error.message);

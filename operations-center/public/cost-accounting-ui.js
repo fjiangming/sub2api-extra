@@ -14,18 +14,27 @@ const CostAccountingUi = (() => {
     if (!root) return null;
     const e = h.escapeHtml;
     const q = selector => root.querySelector(selector);
-    const state = { tab: 'business', report: null, request: 0, timer: null, page: 1, documents: [],
+    const state = { tab: 'automatic', report: null, request: 0, timer: null, page: 1, automaticPage: 1, documents: [],
       documentPage: 1, documentTotal: 0, search: '', pendingOnly: false, selectedKey: null, providers: [], active: false };
     const money = value => value == null ? '待核验' : h.formatMoney(value, '', 8);
+    const automaticMoney = value => value == null ? '暂不可用' : money(value);
     const pct = value => value == null ? '—' : h.formatPercent(value);
     const base = '/api/cost-analysis/accounting';
     const options = (values, selected) => Object.entries(values).map(([value, label]) => `<option value="${e(value)}"${value === selected ? ' selected' : ''}>${e(label)}</option>`).join('');
     root.innerHTML = `
       <div class="accounting-tabs" role="tablist" aria-label="成本分析视图">
-        ${[['business', '经营分析'], ['cash', '现金收支'], ['audit', '余额与核对']].map(([key, label]) => `<button type="button" id="accounting-tab-${key}" role="tab" aria-controls="accounting-${key}" aria-selected="${key === 'business'}" data-tab="${key}">${label}</button>`).join('')}
+        ${[['automatic', '自动统计'], ['business', '精细核算'], ['cash', '现金收支'], ['audit', '余额与核对']].map(([key, label]) => `<button type="button" id="accounting-tab-${key}" role="tab" aria-controls="accounting-${key}" aria-selected="${key === 'automatic'}" tabindex="${key === 'automatic' ? 0 : -1}" data-tab="${key}">${label}</button>`).join('')}
       </div>
       <div data-notice hidden></div>
-      <section id="accounting-business" role="tabpanel" aria-labelledby="accounting-tab-business">
+      <section id="accounting-automatic" role="tabpanel" aria-labelledby="accounting-tab-automatic">
+        <div class="accounting-metrics" data-automatic-metrics></div><div class="accounting-aux" data-automatic-meta></div>
+        <section class="accounting-section"><div class="panel-heading"><h2>消费与毛利趋势</h2><span class="muted" data-automatic-range></span></div><div id="accounting-automatic-chart" class="chart" role="img" aria-label="主站消费、供应商实际消费及消费毛利趋势"></div></section>
+        <section class="accounting-section"><div class="panel-heading"><h2>每日消费与毛利</h2><span class="muted" data-automatic-day-meta></span></div>
+          <div class="table-wrap"><table class="accounting-automatic-table"><thead><tr><th>日期</th><th class="numeric">主站消费</th><th class="numeric">供应商消费</th><th class="numeric">消费毛利</th><th class="numeric">毛利率</th><th class="numeric">主站请求数</th><th>数据状态</th><th>详情</th></tr></thead><tbody data-automatic-days></tbody><tfoot data-automatic-total></tfoot></table></div>
+          <div class="accounting-pager"><span data-automatic-day-page></span><div><button class="icon-button" type="button" data-automatic-day-step="-1" title="上一页" aria-label="上一页">${h.icon('chevron-left')}</button><button class="icon-button" type="button" data-automatic-day-step="1" title="下一页" aria-label="下一页">${h.icon('chevron-right')}</button></div></div>
+        </section>
+      </section>
+      <section id="accounting-business" role="tabpanel" aria-labelledby="accounting-tab-business" hidden>
         <div class="accounting-metrics" data-metrics></div><div class="accounting-aux" data-business-meta></div>
         <section class="accounting-section"><div class="panel-heading"><h2>经营趋势</h2><span class="muted" data-range></span></div><div id="accounting-chart" class="chart" role="img" aria-label="确认收入、供应商实际成本、运营费用及经营利润趋势"></div></section>
         <section class="accounting-section"><div class="panel-heading"><h2>每日经营明细</h2><span class="muted" data-day-meta></span></div>
@@ -48,6 +57,7 @@ const CostAccountingUi = (() => {
         <section class="accounting-section"><div class="panel-heading"><h2>用户期初余额</h2><button type="button" class="button secondary" data-command="opening">${h.icon('plus')}<span>补录期初</span></button></div><form class="accounting-search" data-user-search><label>搜索用户<input type="search" name="search" placeholder="用户 ID 或用户名"></label><button class="button secondary" type="submit">${h.icon('search')}<span>搜索</span></button></form><div class="table-wrap"><table><thead><tr><th>用户</th><th class="numeric">当前余额</th><th>期初状态</th><th>操作</th></tr></thead><tbody data-users></tbody></table></div><div class="accounting-pager"><span data-user-page></span><div><button class="icon-button" type="button" title="上一页" aria-label="上一页" data-user-step="-1">${h.icon('chevron-left')}</button><button class="icon-button" type="button" title="下一页" aria-label="下一页" data-user-step="1">${h.icon('chevron-right')}</button></div></div></section>
       </section>
       <details class="accounting-rules"><summary>统计口径与核算设置</summary><div class="accounting-aux accounting-policy" data-policy></div>
+        <p>自动统计直接读取非 ID 1 用户的主站实际消费与启用供应商账号日消费，消费毛利 = 主站消费 − 供应商实际消费，毛利率以主站消费为分母。充值额度及当前余额单独展示，不重复计入毛利；手工支出不与上游消费叠加。该口径包含赠送和订阅产生的主站计费额度，不等同现金实收利润。</p>
         <p>确认收入按付费额度的实收价值、订阅服务期间及其他已交付服务计算。付费与赠送额度按每日加权平均分配；充值收款不与消费收入相加。上游充值仅列现金支出，上游实际消费计成本。用户消费不含 ID 1，管理员产生的上游成本保留。历史记录及已删除用户的经营数据保留。</p>
         <p>金额缺失显示待核验；已核验日期小计不代表整期利润。上游余额按快照时已确认倍率与汇率折算，为当前估值。当前余额独立展示，不参与本期利润扣减。</p>
       </details>
@@ -64,14 +74,18 @@ const CostAccountingUi = (() => {
       if (!q('[data-dialog]').open) q('[data-dialog]').showModal();
       q('[data-dialog]').scrollTop = 0; h.refreshIcons();
     }
-    function changeTab(tab) {
+    async function changeTab(tab, { reload = true } = {}) {
+      const previous = state.tab;
       state.tab = tab;
-      ['business', 'cash', 'audit'].forEach(key => { q(`[data-tab="${key}"]`).setAttribute('aria-selected', String(tab === key)); q(`[data-tab="${key}"]`).tabIndex = tab === key ? 0 : -1; q(`#accounting-${key}`).hidden = key !== tab; });
-      if (tab === 'business') h.resizeCharts();
-      if (tab === 'cash') loadDocuments().catch(error => h.toast(error.message, 'error'));
+      ['automatic', 'business', 'cash', 'audit'].forEach(key => { q(`[data-tab="${key}"]`).setAttribute('aria-selected', String(tab === key)); q(`[data-tab="${key}"]`).tabIndex = tab === key ? 0 : -1; q(`#accounting-${key}`).hidden = key !== tab; });
+      if (!reload) return;
+      if (!state.report || (tab === 'automatic') !== (previous === 'automatic') || (tab === 'automatic') !== Boolean(state.report.automatic)) { q('[data-notice]').hidden = true; await load(); }
+      else if (tab === 'cash') await loadDocuments();
+      if (tab === 'business' || tab === 'automatic') h.resizeCharts();
     }
     function render() {
       const report = state.report; if (!report) return;
+      if (report.automatic) { renderAutomatic(); return; }
       const s = report.summary;
       q('[data-metrics]').innerHTML = metric('本期确认收入', s.revenue, '付费余额消费 / 订阅 / 已履约收入', 'revenue') + metric('供应商实际成本', s.supplierCost, '启用供应商账号日汇总', 'supplier') + metric('其他运营费用', s.fee, '按费用所属期间分摊', 'fee') + metric('本期经营利润', s.profit, `经营利润率 ${pct(s.margin)}`, 'profit');
       q('[data-business-meta]').innerHTML = `<span>用户消费额度 ${e(money(s.siteConsumption))}</span><span>服务毛利 ${e(money(s.grossProfit))}</span><button type="button" class="accounting-link" data-command="audit">${s.completeDays}/${s.days} 天已核验</button>`;
@@ -90,6 +104,34 @@ const CostAccountingUi = (() => {
       notice.className = 'accounting-notice'; notice.innerHTML = `<span>${report.archive?.pendingDays ? `${report.archive.pendingDays} 天日报等待后台统计。` : ''}${report.issueCount ? `${report.issueCount} 项待核验，完整利润暂不确定。` : s.completeDays !== s.days ? '部分日期尚无完整核算依据，请核对核算起点及来源。' : ''}</span><button class="accounting-link" type="button" data-command="audit">查看问题</button>`;
       renderDays(); renderUsers(); renderChart(); h.refreshIcons();
     }
+    function renderAutomatic() {
+      const report = state.report, s = report.summary;
+      q('[data-automatic-metrics]').innerHTML = metric('主站消费', s.siteConsumption, '用户实际消费 · 不含 ID 1', 'siteConsumption', automaticMoney) + metric('供应商实际消费', s.supplierConsumption, '启用供应商账号日汇总', 'supplierConsumption', automaticMoney) + metric('消费毛利', s.profit, '主站消费 − 供应商实际消费', 'profit', automaticMoney) + metric('消费毛利率', s.margin, `${s.completeDays}/${s.days} 天数据完整`, 'margin', pct);
+      renderAutomaticMeta();
+      q('[data-automatic-range]').textContent = `${report.range.start} 至 ${report.range.end} · CNY`;
+      q('[data-automatic-day-meta]').textContent = '历史归档 / 当日实时';
+      q('[data-policy]').innerHTML = '<span>自动统计按所选日期读取，无需核验期初或逐笔分类。</span>';
+      const notice = q('[data-notice]'); notice.hidden = s.completeDays === s.days && !report.archive?.pendingDays;
+      notice.className = 'accounting-notice'; notice.innerHTML = `<span>${report.archive?.pendingDays ? `${report.archive.pendingDays} 天历史数据正在后台统计或重试。` : ''}${s.completeDays !== s.days ? '部分消费数据暂不完整，对应日期的毛利留空。' : ''}</span>`;
+      renderAutomaticDays();
+      renderChart('accounting-automatic-chart', [['siteConsumption', '主站消费', '#176b4d'], ['supplierConsumption', '供应商消费', '#b05a3c'], ['profit', '消费毛利', '#2d5ea8']]);
+      h.refreshIcons();
+    }
+    function renderAutomaticMeta() {
+      const meta = state.automaticMeta?.summary;
+      const format = value => value == null && state.automaticMetaLoading ? '读取中' : automaticMoney(value);
+      q('[data-automatic-meta]').innerHTML = `<button type="button" class="accounting-link" data-command="credits">本期充值额度 ${e(format(meta?.automaticRevenue))} · 用户明细</button><button type="button" class="accounting-link" data-command="automatic-balance">当前用户余额 ${e(format(meta?.userBalance))}</button><span>${e(state.report.timezone)} · CNY</span>`;
+    }
+    function renderAutomaticDays() {
+      const report = state.report, size = 15, pages = Math.max(1, Math.ceil(report.items.length / size));
+      state.automaticPage = Math.max(1, Math.min(state.automaticPage, pages));
+      const labels = { complete: '数据完整', site_incomplete: '用量缺失', supplier_incomplete: '成本缺失', future: '未发生', pending_archive: '待统计', archive_failed: '统计失败', live_failed: '读取失败' };
+      q('[data-automatic-days]').innerHTML = report.items.slice((state.automaticPage - 1) * size, state.automaticPage * size).map(row => `<tr><td><strong>${e(row.date)}</strong></td>${['siteConsumption', 'supplierConsumption', 'profit'].map(key => `<td class="numeric${row[key] < 0 ? ' negative-value' : ''}">${e(automaticMoney(row[key]))}</td>`).join('')}<td class="numeric">${pct(row.margin)}</td><td class="numeric">${row.siteRequests == null ? '—' : e(row.siteRequests)}</td><td><span class="badge ${row.complete ? 'success' : 'warning'}">${e(labels[row.status] || '数据不完整')}</span><small>${row.mode === 'live' ? '今日实时' : row.mode === 'archived' ? '已归档' : '待统计'}${row.archiveStatus ? ' · 补算中' : ''}</small></td><td><button type="button" class="accounting-link" data-automatic-day="${e(row.date)}">详情</button></td></tr>`).join('') || '<tr><td colspan="8" class="empty-state">所选范围暂无数据</td></tr>';
+      const s = report.summary;
+      q('[data-automatic-total]').innerHTML = `<tr><th>期间合计</th>${['siteConsumption', 'supplierConsumption', 'profit'].map(key => `<td class="numeric">${e(automaticMoney(s[key]))}</td>`).join('')}<td class="numeric">${pct(s.margin)}</td><td colspan="3">${s.completeDays}/${s.days} 天数据完整</td></tr>`;
+      q('[data-automatic-day-page]').textContent = `第 ${state.automaticPage} / ${pages} 页 · ${report.items.length} 天`;
+      q('[data-automatic-day-step="-1"]').disabled = state.automaticPage <= 1; q('[data-automatic-day-step="1"]').disabled = state.automaticPage >= pages;
+    }
     function renderDays() {
       const report = state.report; const size = 15; const totalPages = Math.max(1, Math.ceil(report.items.length / size));
       state.page = Math.min(state.page, totalPages);
@@ -100,12 +142,12 @@ const CostAccountingUi = (() => {
       q('[data-day-page]').textContent = `第 ${state.page} / ${totalPages} 页 · ${report.items.length} 天`;
       q('[data-day-step="-1"]').disabled = state.page <= 1; q('[data-day-step="1"]').disabled = state.page >= totalPages;
     }
-    function renderChart() {
-      h.chart('accounting-chart', { legend: { type: 'scroll', top: 0, bottom: 'auto', left: 0, right: 0, data: ['确认收入', '供应商成本', '经营利润', '运营费用'], selected: { '运营费用': false } },
+    function renderChart(id = 'accounting-chart', fields = [['revenue', '确认收入', '#176b4d'], ['supplierCost', '供应商成本', '#b05a3c'], ['profit', '经营利润', '#2d5ea8'], ['fee', '运营费用', '#69716b']]) {
+      h.chart(id, { legend: { type: 'scroll', top: 0, bottom: 'auto', left: 0, right: 0, data: fields.map(field => field[1]), selected: { '运营费用': false } },
         grid: { left: 12, right: 12, top: 58, bottom: 16, containLabel: true },
-        tooltip: { trigger: 'axis', confine: true, valueFormatter: value => value == null ? '待核验' : money(value) },
+        tooltip: { trigger: 'axis', confine: true, valueFormatter: id === 'accounting-automatic-chart' ? automaticMoney : money },
         xAxis: { type: 'category', data: state.report.periods.map(period => period.label), axisLabel: { hideOverlap: true } },
-        yAxis: { type: 'value', name: 'CNY' }, series: [['revenue', '确认收入', '#176b4d'], ['supplierCost', '供应商成本', '#b05a3c'], ['profit', '经营利润', '#2d5ea8'], ['fee', '运营费用', '#69716b']].map(([key, name, color]) => ({ name, type: 'line', connectNulls: false, showSymbol: false, data: state.report.periods.map(period => period[key]), lineStyle: { color, width: 2 }, itemStyle: { color } })) });
+        yAxis: { type: 'value', name: 'CNY' }, series: fields.map(([key, name, color]) => ({ name, type: 'line', connectNulls: false, showSymbol: false, data: state.report.periods.map(period => period[key]), lineStyle: { color, width: 2 }, itemStyle: { color } })) });
     }
     function renderUsers() {
       const term = (q('[data-user-search]').elements.search.value || '').toLowerCase();
@@ -130,10 +172,21 @@ const CostAccountingUi = (() => {
       state.active = true; const request = ++state.request; clearTimeout(state.timer);
       state.polls = poll ? (state.polls || 0) + 1 : 0;
       const query = { ...h.query(), ...(refresh ? { refresh: '1' } : {}), ...(poll ? { poll: '1' } : {}) };
-      const report = await h.api(`${base}/report?${new URLSearchParams(query)}`).catch(error => { if (request === state.request) throw error; return null; });
+      const automatic = state.tab === 'automatic';
+      const endpoint = automatic ? '/api/cost-analysis/daily-profit' : `${base}/report`;
+      const metaKey = new URLSearchParams(h.query()).toString();
+      const reuseMetadata = poll && state.automaticMetaKey === metaKey;
+      const metadata = automatic ? reuseMetadata ? Promise.resolve(state.automaticMeta) : h.api(`/api/cost-analysis?${metaKey}&include_consumption=0`).catch(() => null) : Promise.resolve(null);
+      const report = await h.api(`${endpoint}?${new URLSearchParams(query)}`).catch(error => { if (request === state.request) throw error; return null; });
       if (!report || request !== state.request || !state.active) return;
+      report.automatic = automatic;
+      if (automatic) { if (!reuseMetadata) state.automaticMeta = null; state.automaticMetaLoading = !reuseMetadata; state.automaticMetaKey = metaKey; }
       state.report = report; render();
-      h.setPageMeta(`${report.range.start} 至 ${report.range.end} · ${report.summary.completeDays}/${report.summary.days} 天已核验 · ${report.timezone}`);
+      if (automatic) metadata.then(meta => {
+        if (request !== state.request || !state.active || !state.report.automatic) return;
+        state.automaticMeta = meta; state.automaticMetaLoading = false; renderAutomaticMeta();
+      });
+      h.setPageMeta(`${report.range.start} 至 ${report.range.end} · ${report.summary.completeDays}/${report.summary.days} 天${automatic ? '数据完整' : '已核验'} · ${report.timezone}`);
       if (state.tab === 'cash') await loadDocuments();
       if (report.archive?.pendingDays && report.archive.ready && h.isActive() && state.polls < 120) state.timer = setTimeout(() => { if (h.isActive()) load({ poll: true }).catch(error => h.toast(error.message, 'error')); }, 5000);
     }
@@ -211,22 +264,36 @@ const CostAccountingUi = (() => {
         + (row.issues?.length ? `<h3>待核对</h3>${row.issues.map(issue => `<p>${e(issue.message)}</p>`).join('')}` : '')
         + `<p class="muted">${row.mode === 'live' ? '今日实时' : '历史归档'} · ${row.computedAt ? e(h.formatDateTime(row.computedAt, state.report.timezone)) : '等待计算'}</p>`);
     }
+    function automaticDayDetail(date) {
+      const row = state.report.items.find(item => item.date === date);
+      drawer(`${date} · 消费与毛利`, table(['项目', '金额'], [['主站消费', automaticMoney(row.siteConsumption)], ['供应商实际消费', automaticMoney(row.supplierConsumption)], ['消费毛利', automaticMoney(row.profit)], ['毛利率', pct(row.margin)]])
+        + `<h3>供应商实际消费</h3>${table(['供应商', '实际消费', '数据状态'], (row.providers || []).map(provider => [e(provider.name), e(automaticMoney(provider.cost)), e(provider.complete ? '数据完整' : (provider.reasons || ['数据缺失']).join('；'))]))}`
+        + (state.report.notices?.length ? `<details><summary>数据说明</summary>${state.report.notices.map(notice => `<p>${e(notice)}</p>`).join('')}</details>` : '')
+        + `<p class="muted">${row.mode === 'live' ? '今日实时' : '历史归档'} · ${row.computedAt ? e(h.formatDateTime(row.computedAt, state.report.timezone)) : '等待统计'}</p>`);
+    }
     async function metricDetail(action) {
+      if (state.report?.automatic) {
+        const labels = { siteConsumption: '主站消费', supplierConsumption: '供应商实际消费', profit: '消费毛利', margin: '消费毛利率' };
+        if (labels[action]) drawer(labels[action], table(['日期', action === 'margin' ? '毛利率' : '金额', '详情'], state.report.items.map(row => [e(row.date), e(action === 'margin' ? pct(row.margin) : automaticMoney(row[action])), `<button type="button" class="accounting-link" data-automatic-day="${e(row.date)}">详情</button>`])));
+        return;
+      }
       if (['revenue', 'supplier', 'fee', 'profit'].includes(action)) {
         const key = { supplier: 'supplierCost' }[action] || action;
         drawer({ revenue: '确认收入明细', supplier: '供应商实际成本', fee: '运营费用分摊', profit: '经营利润明细' }[action], table(['日期', '金额', '详情'], state.report.items.map(row => [e(row.date), e(money(row[key])), `<button class="accounting-link" type="button" data-day="${e(row.date)}">详情</button>`]))); return;
       }
       if (action === 'balances') { drawer('上游账号预付余额', table(['供应商', '原始余额', 'CNY 估值', '快照 / 状态'], state.report.balances.providers.map(provider => [e(provider.name), e(`${provider.available ?? '—'} ${provider.currency || ''}`), e(money(provider.cashValue)), e(provider.complete ? h.formatDateTime(provider.capturedAt) : (provider.reasons || []).join('；'))]))); return; }
-      if (action === 'audit') { changeTab('audit'); return; }
-      if (['users', 'deleted'].includes(action)) { changeTab('audit'); q('[data-user-search]').elements.search.value = ''; renderUsers(); return; }
-      changeTab('cash');
+      if (action === 'audit') { await changeTab('audit'); return; }
+      if (['users', 'deleted'].includes(action)) { await changeTab('audit'); q('[data-user-search]').elements.search.value = ''; renderUsers(); return; }
+      await changeTab('cash');
     }
     root.addEventListener('click', event => {
       const button = event.target.closest('button'); if (!button) return;
       const run = async () => {
         if (button.hasAttribute('data-close')) { q('[data-dialog]').close(); return; }
-        if (button.dataset.tab) { changeTab(button.dataset.tab); return; }
+        if (button.dataset.tab) { await changeTab(button.dataset.tab); return; }
         if (button.dataset.metric) { await metricDetail(button.dataset.metric); return; }
+        if (button.dataset.automaticDay) { automaticDayDetail(button.dataset.automaticDay); return; }
+        if (button.dataset.automaticDayStep) { state.automaticPage += Number(button.dataset.automaticDayStep); renderAutomaticDays(); return; }
         if (button.dataset.day) { dayDetail(button.dataset.day); return; }
         if (button.dataset.dayStep) { state.page += Number(button.dataset.dayStep); renderDays(); return; }
         if (button.dataset.documentStep) { state.documentPage += Number(button.dataset.documentStep); await loadDocuments(); return; }
@@ -242,9 +309,10 @@ const CostAccountingUi = (() => {
           return;
         }
         if (button.dataset.command === 'credits') { leave(); await h.openCredits(); return; }
+        if (button.dataset.command === 'automatic-balance') { const s = state.automaticMeta?.summary; drawer('当前用户余额', table(['项目', '数值'], [['当前用户余额', automaticMoney(s?.userBalance)], ['现有用户数（不含 ID 1）', s?.balanceUsers ?? '暂不可用']])); return; }
         if (button.dataset.command === 'finance') { h.openFinance(); return; }
-        if (button.dataset.command === 'audit') { changeTab('audit'); return; }
-        if (button.dataset.command === 'pending') { q('[data-doc-search]').elements.pending.value = '1'; state.documentPage = 1; changeTab('cash'); return; }
+        if (button.dataset.command === 'audit') { await changeTab('audit'); return; }
+        if (button.dataset.command === 'pending') { q('[data-doc-search]').elements.pending.value = '1'; state.documentPage = 1; await changeTab('cash'); return; }
         if (button.dataset.command === 'opening') { openingForm(); return; }
         if (button.dataset.command === 'refresh') { await load({ refresh: true }); return; }
         if (button.dataset.command === 'policy') drawer('核算起点', `<form class="accounting-form" data-policy-form><label class="accounting-wide">起始日期<input name="startDate" type="date" value="${e(state.report.policy.startDate)}" required></label><label class="accounting-wide">变更原因<textarea name="reason" required maxlength="500"></textarea></label><p class="form-error accounting-wide" data-form-error role="alert" hidden></p><div class="form-actions accounting-wide"><button type="submit" class="button primary">保存并重新核算</button></div></form>`);
@@ -278,7 +346,7 @@ const CostAccountingUi = (() => {
           await h.api(`${base}${endpoint}`, { method: endpoint === '/documents' ? 'POST' : 'PUT', body: JSON.stringify(values) });
           if (!state.active || !h.isActive()) return;
           q('[data-dialog]').close(); h.toast('核算记录已保存', 'success');
-          if (form.matches('[data-entry-form]')) { h.focusDate(values.date); state.documentPage = 1; changeTab('cash'); }
+          if (form.matches('[data-entry-form]')) { h.focusDate(values.date); state.documentPage = 1; await changeTab('cash', { reload: false }); }
           await load();
         } finally { submit.disabled = false; }
       };
@@ -286,9 +354,9 @@ const CostAccountingUi = (() => {
     });
     root.querySelector('.accounting-tabs').addEventListener('keydown', event => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-      event.preventDefault(); const tabs = ['business', 'cash', 'audit'];
-      const index = event.key === 'Home' ? 0 : event.key === 'End' ? 2 : (tabs.indexOf(state.tab) + (event.key === 'ArrowRight' ? 1 : 2)) % 3;
-      changeTab(tabs[index]); q(`[data-tab="${tabs[index]}"]`).focus();
+      event.preventDefault(); const tabs = ['automatic', 'business', 'cash', 'audit'];
+      const index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (tabs.indexOf(state.tab) + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
+      changeTab(tabs[index]).catch(error => h.toast(error.message, 'error')); q(`[data-tab="${tabs[index]}"]`).focus();
     });
     async function ensureProviders() { const result = await h.api('/api/cost-analysis/providers'); state.providers = result.items || []; }
     document.getElementById('cost-accounting-add').addEventListener('click', () => ensureProviders().then(() => { if (state.active) entryForm(); }).catch(error => h.toast(error.message, 'error')));

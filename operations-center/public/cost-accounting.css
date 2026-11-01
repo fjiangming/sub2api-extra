@@ -1,5 +1,5 @@
 #cost-accounting-root { min-width: 0; }
-.accounting-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
+.accounting-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin-bottom: 18px; overflow-x: auto; }
 .accounting-tabs button { color: var(--muted); border: 0; border-bottom: 2px solid transparent; background: transparent; padding: 12px 0; white-space: nowrap; }
 .accounting-tabs button[aria-selected="true"] { color: var(--green); border-bottom-color: var(--green); font-weight: 600; }
 .accounting-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
@@ -16,6 +16,7 @@
 .accounting-section td small { display: block; color: var(--muted); margin-top: 4px; }
 .accounting-section tfoot { background: var(--surface-subtle); font-weight: 600; }
 .accounting-day-table { min-width: 1000px; }
+.accounting-automatic-table { min-width: 850px; }
 .accounting-ledger-table { min-width: 950px; }
 .accounting-search { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin-bottom: 12px; }
 .accounting-search label:first-child { min-width: min(230px, 100%); }
