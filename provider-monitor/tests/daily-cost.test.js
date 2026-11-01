@@ -292,4 +292,63 @@ test('daily summary HTTP keeps authentication and returns both real adapter aggr
   assert.equal(response.headers.get('cache-control'), 'no-store');
   assert.equal((await response.json()).items[0].cost, 12);
   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM provider_request_samples').get().n, 0);
+  const balanceUrl = url.replace(/daily-costs\?.*/, 'financial-balances');
+  assert.equal((await fetch(balanceUrl)).status, 401);
+  const balanceResponse = await fetch(balanceUrl, { headers: { authorization: `Bearer ${f.config.integrationToken}` } });
+  assert.equal(balanceResponse.status, 200); assert.equal(balanceResponse.headers.get('cache-control'), 'no-store');
+  assert.equal((await balanceResponse.json()).complete, false);
+});
+
+function accountSnapshot(f, provider, available, options = {}) {
+  const captured = options.at || f.service.now().toISOString();
+  const id = `${provider.id}:${options.remoteId || '7'}`;
+  f.db.prepare(`INSERT OR IGNORE INTO remote_accounts(id,connection_id,remote_id,display_name,first_seen_at,last_seen_at)
+    VALUES(?,?,?,'Synthetic account',?,?)`).run(id, provider.id, options.remoteId || '7', captured, captured);
+  f.db.prepare(`INSERT INTO balance_snapshots(connection_id,subject_type,subject_id,currency,available,unlimited,captured_at)
+    VALUES(?,'account',?,?,?,?,?)`).run(provider.id, id, options.currency || 'USD', available, options.unlimited ? 1 : 0, captured);
+}
+
+test('current balance estimates use only latest enabled account snapshots and verified rates, never key balances', t => {
+  const f = fixture(t);
+  accountSnapshot(f, f.states[0].provider, 100);
+  accountSnapshot(f, f.states[1].provider, 200);
+  f.db.prepare(`INSERT INTO balance_snapshots(connection_id,subject_type,subject_id,currency,available,captured_at)
+    VALUES(?,'key','key-1','USD',99999,?)`).run(f.states[0].provider.id, f.service.now().toISOString());
+  let report = f.service.balanceReport();
+  assert.equal(report.total, 150); assert.equal(report.complete, true); assert.equal(f.calls.length, 0);
+  assert.doesNotMatch(JSON.stringify(report), /synthetic-|subject_id|remote_id|credential/);
+  f.advance(3600001);
+  assert.equal(f.service.balanceReport().total, null);
+  accountSnapshot(f, f.states[0].provider, 80);
+  f.providers.update(f.states[1].provider.id, { enabled: false });
+  report = f.service.balanceReport(); assert.equal(report.items.length, 1); assert.equal(report.total, 40);
+  accountSnapshot(f, f.states[0].provider, 50, { remoteId: '8', at: new Date(f.service.now().getTime() + 1).toISOString() });
+  f.advance(1);
+  report = f.service.balanceReport(); assert.equal(report.items.length, 1); assert.equal(report.total, 25);
+  f.db.prepare('DELETE FROM provider_recharge_rate_history').run();
+  assert.equal(f.service.balanceReport().total, null);
+});
+
+test('duplicate upstream account identities and unlimited or missing balances stay unknown', t => {
+  const f = fixture(t, [{ type: 'sub2api' }, { type: 'sub2api' }]);
+  for (const state of f.states) accountSnapshot(f, state.provider, 100);
+  f.db.prepare("UPDATE provider_connections SET account_dedupe_key='different-credential',base_url=? WHERE id=?")
+    .run(f.providers.get(f.states[0].provider.id).base_url, f.states[1].provider.id);
+  assert.equal(f.service.balanceReport().total, null);
+  assert.match(f.service.balanceReport().items[1].reasons.join(), /重复/);
+  f.providers.update(f.states[1].provider.id, { enabled: false });
+  accountSnapshot(f, f.states[0].provider, 100, { unlimited: true });
+  assert.equal(f.service.balanceReport().total, null);
+  f.providers.update(f.states[0].provider.id, { enabled: false });
+  assert.equal(f.service.balanceReport().total, null);
+});
+
+test('equivalent target currency conversion across rate history is accepted while real cost changes stay unknown', async t => {
+  const f = fixture(t, [{ type: 'sub2api' }]); const id = f.states[0].provider.id;
+  f.db.prepare("UPDATE provider_recharge_rate_history SET valid_to='2026-10-29T04:00:00.000Z' WHERE connection_id=?").run(id);
+  f.db.prepare(`INSERT INTO provider_recharge_rate_history(connection_id,multiplier,source,status,paid_currency,balance_currency,valid_from,observed_at)
+    VALUES(?,2,'manual','manual','CNY','USD','2026-10-29T04:00:00.000Z','2026-10-29T04:00:00.000Z')`).run(id);
+  assert.equal((await f.service.report(query)).items[0].cost, 6);
+  f.db.prepare("UPDATE provider_recharge_rate_history SET multiplier=4 WHERE paid_currency='CNY'").run();
+  assert.equal((await f.service.report(query)).items[0].cost, null);
 });

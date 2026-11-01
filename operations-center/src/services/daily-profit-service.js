@@ -41,6 +41,7 @@ class DailyProfitService {
   localNow() { return DateTime.fromJSDate(this.now(), { zone: this.config.financeTimezone }); }
 
   ready(accessToken) {
+    if (this.analysis.accounting && this.analysis.pool?.configured?.() !== false) return true;
     return this.analysis.pool?.configured?.() !== false && this.analysis.providerMonitor?.configured() && Boolean(
       this.analysis.providerMonitor.integrationToken || accessToken || this.analysis.sub2api?.configured());
   }
@@ -118,11 +119,15 @@ class DailyProfitService {
         const job = this.store.claim(this.scope());
         if (!job) break;
         try {
-          supplierReader ??= await this.supplierReader(accessToken);
+          try { supplierReader ??= await this.supplierReader(accessToken); }
+          catch (error) { if (!this.analysis.accounting) throw error; }
           const report = await this.analysis.getDailyProfit({ start: job.date, end: job.date, currency: 'CNY', refresh: '1' }, { accessToken, supplierReader });
           const row = report.items[0];
           if (!row || row.date !== job.date) throw new Error('Invalid calculated day');
-          this.store.finish(job, { row, notices: report.notices }, row.complete ? null : 'DAILY_PROFIT_INCOMPLETE');
+          this.store.finish(job, { row, notices: report.notices }, row.complete &&
+            (!this.analysis.accounting || row.accountingSource?.complete) ? null : 'DAILY_PROFIT_INCOMPLETE');
+          try { this.analysis.accounting?.rebuildArchived(); }
+          catch { this.logger.warn('accounting derived report rebuild failed'); }
         } catch {
           this.store.finish(job, { row: pendingRow(job.date, 'archive_failed'),
             notices: ['历史日报统计失败，稍后自动重试。'] }, 'DAILY_PROFIT_FAILED');
@@ -132,7 +137,7 @@ class DailyProfitService {
     try { await this.running; } finally { this.running = null; }
   }
 
-  async getDailyProfit(input = {}, { accessToken = null } = {}) {
+  async getDailyProfit(input = {}, { accessToken = null, refreshRange = null } = {}) {
     const { range, currency, granularity } = parseReportInput(input, this.config);
     const local = this.localNow();
     const today = local.toISODate();
@@ -162,7 +167,8 @@ class DailyProfitService {
         continue;
       }
       const snapshot = snapshots.get(date);
-      if (!snapshot || force) {
+      if (!snapshot || (force && (!refreshRange || (date >= refreshRange.start && date <= refreshRange.end))) ||
+          (input.accounting === '1' && (!snapshot.row.accountingSource?.complete || snapshot.row.accountingSource.version !== 2))) {
         const dueAt = date === local.minus({ days: 1 }).toISODate() && local.hour < 1
           ? local.startOf('day').plus({ hours: 1 }).toMillis() : this.now().getTime();
         queued.push({ date, dueAt });

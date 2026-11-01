@@ -113,3 +113,19 @@ test('daily readers authenticate once for a month and keep administrator session
   await first({ from: '2026-10-31', to: '2026-10-31' });
   assert.equal(requests.at(-1).authorization, 'Session session-1');
 });
+
+test('financial balance snapshot clients use integration auth or admin SSO without upstream sync writes', async () => {
+  for (const integrationToken of ['synthetic-integration', null]) {
+    const calls = [];
+    const client = new ProviderMonitorClient({ providerMonitorBaseUrl: 'https://monitor.example', providerMonitorIntegrationToken: integrationToken, providerMonitorRequestTimeoutMs: 1000 }, async (url, options) => {
+      calls.push({ url, options });
+      return response(200, url.endsWith('/api/auth/sso') ? { sessionToken: 'scoped-admin' } : { currency: 'CNY', total: 100, complete: true, items: [] });
+    });
+    assert.equal((await client.getFinancialBalances('synthetic-sso')).total, 100);
+    assert.equal(calls.at(-1).options.headers.authorization, integrationToken ? 'Bearer synthetic-integration' : 'Session scoped-admin');
+    assert.match(calls.at(-1).url, /financial-balances$/);
+    assert.equal(calls.filter(call => call.options.method === 'POST').length, integrationToken ? 0 : 1);
+  }
+  await assert.rejects(new ProviderMonitorClient({}).getFinancialBalances(), { code: 'PROVIDER_MONITOR_NOT_CONFIGURED' });
+  await assert.rejects(new ProviderMonitorClient({ providerMonitorBaseUrl: 'https://monitor.example' }).getFinancialBalances(), { code: 'PROVIDER_MONITOR_AUTH_NOT_CONFIGURED' });
+});

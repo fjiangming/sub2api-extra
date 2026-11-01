@@ -136,7 +136,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, dailyProfit, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, dailyProfit, accounting, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -359,6 +359,22 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
     res.json(await profiles.getUser(req.params.userId, req.query));
   }));
   api.get('/metrics/finance', asyncRoute(async (req, res) => res.json(await metrics.getFinance(req.query))));
+  if (accounting) {
+    api.use('/cost-analysis/accounting', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+    api.get('/cost-analysis/accounting/report', asyncRoute(async (req, res) => res.json(await accounting.getReport(req.query, { accessToken: req.auth.upstreamAccessToken || null }))));
+    api.get('/cost-analysis/accounting/documents', (req, res) => res.json(accounting.listDocuments(req.query)));
+    api.get('/cost-analysis/accounting/credits/users', asyncRoute(async (req, res) => res.json(await accounting.creditUsers(req.query))));
+    api.get('/cost-analysis/accounting/credits/users/:userKey/records', asyncRoute(async (req, res) => res.json(await accounting.creditUsers(req.query, req.params.userKey))));
+    api.get('/cost-analysis/accounting/documents/:key', (req, res) => {
+      const item = accounting.effectiveDocuments().find(document => document.key === req.params.key);
+      if (!item) throw new AppError('ACCOUNTING_NOT_FOUND', '记录不存在', { status: 404 });
+      res.json({ item, history: accounting.store.history(item.key) });
+    });
+    api.post('/cost-analysis/accounting/documents', csrf, asyncRoute(async (req, res) => res.status(201).json(await accounting.create(req.body, req.auth.actor))));
+    api.put('/cost-analysis/accounting/documents/:key', csrf, (req, res) => res.json(accounting.classify(req.params.key, req.body, req.auth.actor)));
+    api.put('/cost-analysis/accounting/policy', csrf, (req, res) => res.json(accounting.configure(req.body, req.auth.actor)));
+    api.put('/cost-analysis/accounting/opening', csrf, (req, res) => res.json(accounting.opening(req.body, req.auth.actor)));
+  }
   api.get('/cost-analysis', asyncRoute(async (req, res) => res.json(await costAnalysis.getReport(req.query))));
   api.get('/cost-analysis/daily-profit', asyncRoute(async (req, res) => {
     res.set('Cache-Control', 'no-store').json(await (dailyProfit || costAnalysis).getDailyProfit(req.query, {

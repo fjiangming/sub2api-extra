@@ -246,6 +246,7 @@ function badge(status) {
 }
 
 function showLogin(message = '') {
+  if (window.CostAccountingUi && typeof accountingUi !== 'undefined') accountingUi?.leave();
   ++state.costReportRequestId;
   clearTimeout(state.costProfitTimer);
   profilesUi.reset();
@@ -635,7 +636,7 @@ function showAutomaticIncomeUsers() {
   drilldown.recordRequestId += 1;
   $('cost-auto-records-view').hidden = true;
   $('cost-auto-users-view').hidden = false;
-  $('page-title').textContent = '自动收入复核';
+  $('page-title').textContent = window.CostAccountingUi ? '自动额度入账复核' : '自动收入复核';
   const query = drilldown.query;
   setPageMeta(`${query.start} 至 ${query.end} · ${query.currency}`);
   window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
@@ -656,6 +657,7 @@ function closeAutomaticIncomeDrilldown({ restoreHeader = true } = {}) {
   if (restoreHeader) {
     $('page-title').textContent = titles.costs;
     setPageMeta(state.costMainPageMeta || '自动收入、手工收入与支出');
+    if (window.CostAccountingUi) accountingUi?.load().catch(error => toast(error.message, 'error'));
   }
 }
 
@@ -673,7 +675,7 @@ async function loadAutomaticIncomeUsers() {
   });
   let data;
   try {
-    data = await api(`/api/cost-analysis/automatic-income/users?${search}`);
+    data = await api(`${window.CostAccountingUi ? '/api/cost-analysis/accounting/credits' : '/api/cost-analysis/automatic-income'}/users?${search}`);
   } catch (error) {
     if (requestId === drilldown.userRequestId) {
       $('cost-auto-users').innerHTML = emptyRow(6, error.message);
@@ -705,9 +707,9 @@ async function loadAutomaticIncomeUsers() {
         <td class="numeric"><button class="button secondary compact" type="button" data-cost-auto-user-detail data-user-key="${escapeHtml(user.userKey)}"><span>详情</span>${icon('chevron-right')}</button></td>
       </tr>
     `;
-  }).join('') : emptyRow(6, drilldown.userSearch ? '没有匹配的兑换用户' : '所选范围暂无自动收入');
+  }).join('') : emptyRow(6, drilldown.userSearch ? '没有匹配的兑换用户' : '所选范围暂无额度入账记录');
   setAutomaticIncomePagination('cost-auto-users', data.pagination);
-  $('page-title').textContent = '自动收入复核';
+  $('page-title').textContent = window.CostAccountingUi ? '自动额度入账复核' : '自动收入复核';
   setPageMeta(`${data.range.start} 至 ${data.range.end} · ${data.currency} · ${formatInteger(data.summary.users)} 个用户归属`);
   refreshIcons();
 }
@@ -745,7 +747,7 @@ async function loadAutomaticIncomeRecords() {
   });
   let data;
   try {
-    data = await api(`/api/cost-analysis/automatic-income/users/${encodeURIComponent(drilldown.selectedUserKey)}/records?${search}`);
+    data = await api(`${window.CostAccountingUi ? '/api/cost-analysis/accounting/credits' : '/api/cost-analysis/automatic-income'}/users/${encodeURIComponent(drilldown.selectedUserKey)}/records?${search}`);
   } catch (error) {
     if (requestId === drilldown.recordRequestId) {
       $('cost-auto-records').innerHTML = emptyRow(7, error.message);
@@ -852,6 +854,7 @@ function pollCostDailyProfit(report, query, requestId, attempt = 0) {
 }
 
 async function loadCostAnalysis({ refresh = false } = {}) {
+  if (window.CostAccountingUi && accountingUi) return accountingUi.load({ refresh });
   const requestId = ++state.costReportRequestId;
   clearTimeout(state.costProfitTimer);
   setPageMeta('正在汇总自动收入、手工收入与支出');
@@ -1638,6 +1641,7 @@ async function loadCurrentView(options = {}) {
 }
 
 function navigate(view) {
+  if (window.CostAccountingUi && accountingUi) accountingUi.leave();
   ++state.costReportRequestId;
   clearTimeout(state.costProfitTimer);
   if (!titles[view]) return;
@@ -1752,6 +1756,19 @@ $('usage-filter').addEventListener('submit', (event) => { event.preventDefault()
 $('users-filter').addEventListener('submit', (event) => { event.preventDefault(); loadUsers().catch((error) => toast(error.message, 'error')); });
 $('finance-filter').addEventListener('submit', (event) => { event.preventDefault(); loadFinance().catch((error) => toast(error.message, 'error')); });
 $('cost-analysis-filter').addEventListener('submit', (event) => { event.preventDefault(); loadCostAnalysis().catch((error) => toast(error.message, 'error')); });
+$('cost-range-preset').addEventListener('change', (event) => {
+  if (event.target.value === 'custom') return;
+  const zone = accountingUi?.state.report?.timezone || 'Asia/Shanghai';
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: zone }).format(new Date());
+  const form = $('cost-analysis-filter');
+  const first = `${today.slice(0, 7)}-01`;
+  form.elements.end.value = event.target.value === 'previous' ? addDays(first, -1) : today;
+  form.elements.start.value = event.target.value === 'year' ? `${today.slice(0, 4)}-01-01` : `${form.elements.end.value.slice(0, 7)}-01`;
+  loadCostAnalysis().catch(error => toast(error.message, 'error'));
+});
+$('cost-analysis-filter').addEventListener('change', event => {
+  if (['start', 'end'].includes(event.target.name)) $('cost-range-preset').value = 'custom';
+});
 $('cost-analysis-metrics').addEventListener('click', (event) => {
   if (!event.target.closest('[data-cost-auto-income-open]')) return;
   openAutomaticIncomeDrilldown().catch((error) => toast(error.message, 'error'));
@@ -1874,6 +1891,25 @@ const latencyUi = window.LatencyUi.create({
 const billingUi = window.BillingRecoveryUi.create({
   api, escapeHtml, icon, refreshIcons, toast, setPageMeta,
   isActive: () => state.currentView === 'billing' && Boolean(state.user)
+});
+
+const accountingUi = window.CostAccountingUi?.create({
+  api, escapeHtml, icon, refreshIcons, toast, setPageMeta, chart, formatMoney, formatPercent, formatDateTime,
+  query: costAnalysisQuery, isActive: () => state.currentView === 'costs' && Boolean(state.user) && !state.costAutomaticIncome.active,
+  focusDate: date => {
+    const form = $('cost-analysis-filter');
+    if (date < form.elements.start.value || date > form.elements.end.value) {
+      form.elements.start.value = date; form.elements.end.value = date; $('cost-range-preset').value = 'custom';
+    }
+  },
+  resizeCharts: () => { for (const item of state.charts.values()) item.resize(); },
+  openCredits: openAutomaticIncomeDrilldown,
+  openFinance: () => {
+    const query = costAnalysisQuery();
+    $('finance-filter').elements.start.value = query.start;
+    $('finance-filter').elements.end.value = query.end;
+    navigate('finance');
+  }
 });
 
 initialize();

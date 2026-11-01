@@ -1,5 +1,23 @@
 # 个性化功能维护台账
 
+## 2026-11-01：成本分析经营核算实现
+
+用户明确要求开发成本分析改版。本轮继续已有未提交实现，在既有 operations-center 中增加经营分析、现金收支、余额与核对及记账抽屉；保留自动额度用户与兑换记录下钻，不直接修改主站余额或使用记录，不连接生产、不部署。保留全部无关变更，包括订阅手册、诊断记录、其他项目和图标。
+
+涉及文件：`operations-center/src/accounting-store.js`、`src/services/accounting-source.js`、`src/services/accounting-service.js`、`src/app.js`、`src/server.js`、`src/provider-monitor-client.js`、`src/services/cost-analysis-service.js`、`src/services/daily-profit-service.js`；`public/cost-accounting-ui.js`、`public/cost-accounting.css`、`public/app.js`、`public/index.html`；`provider-monitor/src/server.js`、`src/services/daily-cost-service.js`。独立 accounting.sqlite 保存源记录、分类、期初、规则、结果及审计，原账本保留；主站只读，供应商余额只读已有监控快照。优惠充值采用每日加权实收分摊，费用按自然日归属，缺来源 / 成本时不输出完整利润，核算不再减去当前余额。
+
+测试与工具：新增 `operations-center/tests/accounting.test.js`，使用真实 SQLite、PGlite SQL、管理员 HTTP 会话及 CSRF 验证核算、持久化和接口；更新 `tests/frontend-layout.test.js`、`tests/provider-monitor-client.test.js`、`provider-monitor/tests/daily-cost.test.js`。新增 `operations-center/scripts/accounting-preview.cjs` 及 `scripts/accounting-browser-check.cjs`，提供隔离示例和桌面 / 手机浏览器验收；`operations-center/package.json` 增加对应命令及语法检查，无新生产依赖。趋势图明确顶部滚动图例及绘图区留白，避免日期标签重叠；抽屉截图按可见视口检查。
+
+防重补强：线下兑换直接确认收款与手工关联收款双向互斥，UUID 重试幂等；后续同步发现对应线上支付时，早先手工凭证转为待核验，分类为关联已有业务后才恢复完整核算。旧手工收入分类为赠送时携带零实收价值，避免迁移后额度池错误未知。消费分配保留八位金额并守恒，订阅终止退款停止后续分摊，退款关联原收款且累计不超实收；负向兑换与退款不能重复减核算额度。
+
+文档：新增 `operations-center/docs/cost-accounting.md` 作为新版权威操作、迁移和核算说明；更新 `operations-center/docs/cost-analysis-redesign.md` 实施状态、`docs/cost-analysis.md` 旧版兼容说明、`docs/metrics.md` 指标口径及两服务 README，保留原有 CMD Token、内部地址 / 域名和故障排查说明。
+
+验证：运营中心完整 319 项、供应商监控完整 316 项全部通过，共 635 项；新增核算测试 27 项包括跨月继承、按实收消费、赠送、订阅、未付费用及年费分摊、退款、防重、已删除用户、来源变化、成本缺失、旧账迁移和真实只读 SQL。运营中心 npm run check、本轮供应商模块 node --check、git diff --check 通过。1440px / 390px / 320px Playwright 流程覆盖趋势非空及图例留白、31 天分页合计、额度用户分页 / 搜索 / 兑换下钻、默认 CNY、新增即展示及筛选外自动切日、期初保存即时刷新、HTML 转义、上游异常后利润未知；无脚本错误或整页横向溢出，截图已复核。浏览器验收用临时数据库、模拟用户和供应商，验收进程已关闭。
+
+边界：需两服务配套更新并保留数据卷，无新环境变量。首次需核验旧分类与用户期初；未同步且已清理的历史无法恢复，缺少精确历史时点快照不展示历史期初 / 期末，当前余额仅独立展示。初始赠送、邀请返利等缺兑换来源时需凭证补录；自动订阅仍需核验真实服务期；混合赠送池不声称能逐笔还原赠送消耗。上游余额是当前倍率折算估值，过期 / 缺汇率时未知。本轮不提交 / 推送、不更新服务器，既有无关改动原样保留；本地预览只用示例数据。
+
+用户随后明确授权提交 GitHub。本次将上述经营核算实现、配套供应商余额接口和等价折算修复、测试、文档及本节维护记录提交并推送 extra main。推送前 fetch 确认本地与远端一致；独立生产诊断 / 维护记录、订阅手册、其他项目与无关图标继续保留本地，不纳入提交。沿用已有 Actions 测试门禁及 GHCR 镜像发布流程，构建 / 发布状态以本次 SHA 的 Actions 为准；不部署服务器，不变更生产资金或配置。
+
 ## 2026-11-01：成本分析页面改版规划
 
 用户要求重新规划设计成本分析页面。本轮新增 `operations-center/docs/cost-analysis-redesign.md` 规划稿，并在当前会话的可视化目录制作示例数据交互稿，明确这不是已上线功能。方案将页面划分为经营分析、现金收支、余额与核对，区分确认收入、消费额度、现金收付和预付 / 预收存量；定义费用所属期间、收入分类关联、历史数据待分类、缺失数据待核验和受影响日期重算，保留用户 / 兑换记录下钻、默认当月按日及凌晨一点归档设计。

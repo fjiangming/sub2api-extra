@@ -493,7 +493,9 @@ class CostAnalysisService {
       const supplierConsumption = supplierComplete ? upstream.cost : null;
       const profit = siteComplete && supplierComplete
         ? new Decimal(siteConsumption).minus(supplierConsumption).toDecimalPlaces(8).toNumber() : null;
+      const accountingSource = this.accounting ? await this.accounting.collectDay(date) : undefined;
       items.push({ date, siteConsumption, supplierConsumption, profit,
+        ...(accountingSource ? { accountingSource } : {}),
         margin: profit != null && siteConsumption > 0
           ? new Decimal(profit).div(siteConsumption).times(100).toDecimalPlaces(2).toNumber() : null,
         siteRequests: usage ? number(usage.site_requests) : null,

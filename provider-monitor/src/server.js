@@ -1041,6 +1041,10 @@ function createApplication(options = {}) {
     try { res.set('Cache-Control', 'no-store').json(await dailyCosts.report(req.query)); }
     catch (error) { next(error); }
   });
+  app.get('/api/integrations/financial-balances', (req, res, next) => {
+    if (!secureTokenEqual(bearerToken(req), config.integrationToken)) return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
+    try { res.set('Cache-Control', 'no-store').json(dailyCosts.balanceReport()); } catch (error) { next(error); }
+  });
   app.get('/api/integrations/latency-samples', (req, res, next) => {
     if (!secureTokenEqual(bearerToken(req), config.integrationToken)) {
       return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
@@ -1518,6 +1522,7 @@ function createApplication(options = {}) {
       WHERE ${clauses.join(' AND ')} ORDER BY p.name, r.subject_type, r.currency
     `).all(...params).map((row) => ({ ...row, unlimited: Boolean(row.unlimited), raw: parseJson(row.raw_json, {}), raw_json: undefined, row_number: undefined })) });
   });
+  api.get('/financial-balances', (req, res) => res.set('Cache-Control', 'no-store').json(dailyCosts.balanceReport()));
   api.get('/balances/history', (req, res) => res.json({ items: queries.history({
     connectionId: req.query.connectionId,
     currency: req.query.currency,

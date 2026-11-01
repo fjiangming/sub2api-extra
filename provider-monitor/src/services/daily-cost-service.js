@@ -166,7 +166,9 @@ class DailyCostService {
       covered = Math.max(covered, Math.min(end, Date.parse(row.valid_to || new Date(end).toISOString())));
     }
     if (covered < end || contexts.size === 0) return { cost: null, reasons: ['该日缺少完整的已确认充值倍率历史'] };
-    if (contexts.size !== 1) return { cost: null, reasons: ['当日充值倍率发生变化，日汇总无法按单一倍率折算'] };
+    const coefficients = [...contexts.values()].map(context => this.grossProfit.convertCost(1 / context.multiplier, context.cashCurrency, settings));
+    if (coefficients.some(value => value == null)) return { cost: null, reasons: ['缺少币种汇率'] };
+    if (coefficients.some(value => Math.abs(value - coefficients[0]) > Math.max(1, Math.abs(coefficients[0])) * 1e-12)) return { cost: null, reasons: ['当日充值倍率发生变化，日汇总无法按单一倍率折算'] };
     const context = [...contexts.values()][0];
     const cost = this.grossProfit.convertCost(snapshot.amount / context.multiplier, context.cashCurrency, settings);
     return { cost: cost == null ? null : round(cost), reasons: cost == null ? ['缺少币种汇率'] : [] };
@@ -216,6 +218,42 @@ class DailyCostService {
     return { range: { start: query.from, end: query.to }, timezone: query.timezone,
       currency: settings.currency, source: SOURCE, scope: 'account',
       providerFilter: 'scheduled_enabled', items, generatedAt };
+  }
+
+  balanceReport() {
+    const date = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(this.now());
+    const { settings } = this.grossProfit.dailyCostOptions({ from: date, to: date, currency: 'CNY', timezone: 'Asia/Shanghai' });
+    const rows = this.db.prepare(`WITH ranked AS (
+      SELECT s.*, MAX(captured_at) OVER (PARTITION BY connection_id) AS latest,
+        ROW_NUMBER() OVER (PARTITION BY connection_id,currency ORDER BY captured_at DESC,id DESC) AS n
+      FROM balance_snapshots s WHERE subject_type='account')
+      SELECT p.id AS provider_id,p.name,r.available,r.currency,a.remote_id,r.unlimited,r.captured_at
+      FROM provider_connections p LEFT JOIN ranked r ON r.connection_id=p.id AND r.n=1 AND r.captured_at=r.latest
+      LEFT JOIN remote_accounts a ON a.id=r.subject_id AND a.connection_id=p.id
+      WHERE p.enabled=1 ORDER BY p.id,r.currency`).all();
+    const identities = new Set();
+    const items = rows.map(row => {
+      const connection = this.providers.get(row.provider_id, { forAdapter: true });
+      const identity = this.#hash([connection.adapter_type, new URL(connection.base_url).origin, row.remote_id, row.currency]);
+      let cost = null, reasons = [];
+      if (identities.has(identity)) reasons = ['重复配置的上游账号'];
+      else if (!row.remote_id || row.available == null || !Number.isFinite(row.available) || row.unlimited || !Number.isFinite(Date.parse(row.captured_at))) reasons = ['没有可折算的账号余额快照'];
+      else if (connection.remote_user_id && String(connection.remote_user_id) !== String(row.remote_id)) reasons = ['余额快照与当前账号不一致，等待监控刷新'];
+      else if (this.now().getTime() - Date.parse(row.captured_at) > 3600000 || this.now().getTime() < Date.parse(row.captured_at)) reasons = ['余额快照超出有效时间，等待监控刷新'];
+      else {
+        const at = new Date(Date.parse(row.captured_at) - 1).toISOString();
+        const converted = this.#cashCost(connection, { amount: row.available, currency: row.currency, fetched_at: row.captured_at },
+          { from: at, to: row.captured_at }, settings);
+        cost = converted.cost; reasons = converted.reasons;
+      }
+      identities.add(identity);
+      return { id: String(row.provider_id), name: row.name, available: row.available, currency: row.currency,
+        cashValue: cost, capturedAt: row.captured_at, complete: cost != null, reasons };
+    });
+    const complete = items.length > 0 && items.every(item => item.complete);
+    return { currency: 'CNY', basis: 'current_rate_estimate', providerFilter: 'scheduled_enabled',
+      complete, total: complete ? round(items.reduce((sum, item) => sum + item.cashValue, 0)) : null,
+      items, generatedAt: this.now().toISOString() };
   }
 }
 
