@@ -10,6 +10,7 @@ const { localDate } = require('./accounting-source');
 const { AccountingService } = require('./accounting-service');
 const { parseAutomaticIncomeInput, parseAutomaticIncomeUserKey, createPeriods } = require('./cost-analysis-service');
 
+const CUMULATIVE_START_DATE = '2026-10-01';
 const number = value => new Decimal(value).toDecimalPlaces(8).toNumber();
 const validAmount = value => { try { return value != null && value !== '' && new Decimal(value).isFinite() && new Decimal(value).gte(0); } catch { return false; } };
 const validCredit = value => { try { return value != null && value !== '' && new Decimal(value).isFinite(); } catch { return false; } };
@@ -395,15 +396,17 @@ class CashFlowService {
   }
 
   cumulative(rows, source, balance) {
-    const counted = rows.filter(row => row.counted), amounts = totals(counted);
-    const income = source.complete ? amounts.income : null, expense = this.unresolvedRefunds(rows).length ? null : amounts.expense;
+    const range = { start: CUMULATIVE_START_DATE, end: dateInTimezone(this.config.financeTimezone, this.now()) };
+    const counted = rows.filter(row => row.counted && row.date >= range.start && row.date <= range.end), amounts = totals(counted);
+    const unresolved = this.unresolvedRefunds(rows, range).length;
+    const income = source.complete ? amounts.income : null, expense = unresolved ? null : amounts.expense;
     return { currency: 'CNY', income, expense, userBalance: balance.userBalance,
       net: income != null && expense != null && balance.userBalance != null ? number(new Decimal(income).minus(expense).minus(balance.userBalance)) : null,
       capturedAt: this.now().toISOString(), balanceCapturedAt: balance.capturedAt, recordCount: counted.length,
-      missingRates: 0, from: counted.map(row => row.date).sort()[0] || null,
+      missingRates: 0, from: range.start, to: range.end,
       originals: [{ currency: 'CNY', ...amounts }],
       notices: [!source.complete ? source.message : null,
-        balance.userBalance == null ? '当前用户余额暂不可用' : null, this.unresolvedRefunds(rows).length ? '实际现金退款金额缺失' : null].filter(Boolean) };
+        balance.userBalance == null ? '当前用户余额暂不可用' : null, unresolved ? '实际现金退款金额缺失' : null].filter(Boolean) };
   }
 
   publicRow(row) {

@@ -53,6 +53,10 @@ async function main() {
       const preview = await startPreview(), context = await browser.newContext({ viewport, colorScheme });
       try {
         preview.accounting.configure({ startDate: preview.today, reason: 'Automatic reporting has no accounting start' }, 'example');
+        for (const [direction, amount] of [['income', '999'], ['expense', '777']]) preview.store.putCash({
+          key: `cash:before-cutoff-${direction}`, source: 'manual', direction, date: '2026-09-30',
+          name: `Before cutoff ${direction}`, amount, currency: 'CNY', active: true
+        }, 'example', 'Isolated cutoff example');
         const page = await context.newPage(), errors = [], paths = []; page.on('pageerror', error => errors.push(error.message)); page.on('request', request => paths.push(new URL(request.url()).pathname));
         await page.goto(`http://127.0.0.1:${preview.port}/preview`); await waitFor(page, () => accountingUi.state.report?.automatic);
         assert.equal(await page.locator('.accounting-tabs [role=tab]').count(), 2); assert.equal(await page.locator('.accounting-rules').evaluate(node => node.open), false);
@@ -89,6 +93,7 @@ async function main() {
         assert.equal(await page.locator('[data-entry-form] [name=name]').evaluate(node => node.required), true); await closeDrawer(page);
         await page.locator('[data-provider-entry=alpha]').click(); await page.waitForSelector('[data-entry-form]'); assert.equal(await page.locator('[data-entry-form] [name=currency]').count(), 0); assert.match(await page.locator('[data-entry-form]').innerText(), /人民币元/); assert.equal(await page.locator('[data-entry-form] [name=providerId]').inputValue(), 'alpha');
         const oldDate = addUtcDays(preview.start, -5);
+        const expenseCountsInCumulative = oldDate >= '2026-10-01';
         await page.locator('[data-entry-form] [name=date]').fill(oldDate); await page.locator('[data-entry-form] [name=amount]').fill('125'); await page.locator('[data-entry-form] [type=submit]').click();
         await waitFor(page, date => accountingUi.state.tab === 'cash' && accountingUi.state.report?.range.start === date && accountingUi.state.report.items.some(row => row.amount === 125), oldDate);
         assert.equal(await page.evaluate(() => accountingUi.state.report.items[0].name), 'Sub2API 示例上游 付款');
@@ -97,14 +102,15 @@ async function main() {
         assert.deepEqual(await page.locator('[data-cash-history] [data-metric]').evaluateAll(nodes => nodes.map(node => node.dataset.metric)), ['historyIncome', 'historyExpense', 'userBalance', 'cumulative']);
         const metricRows = await page.evaluate(() => ({ period: document.querySelector('[data-cash-metrics]').getBoundingClientRect().bottom,
           history: document.querySelector('[data-cash-history]').getBoundingClientRect().top }));
-        assert(metricRows.history > metricRows.period, 'All-history cards have their own second row');
-        assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -81);
+        assert(metricRows.history > metricRows.period, 'Cumulative cards have their own second row');
+        assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), expenseCountsInCumulative ? -81 : 44);
+        for (const key of ['historyIncome', 'historyExpense', 'cumulative']) assert.match(await page.locator(`[data-metric=${key}]`).innerText(), /2026-10-01 起/);
         await checkChart(page, '#accounting-cash-chart'); await checkLayout(page);
-        await page.locator('[data-metric=cumulative]').click(); assert.match(await page.locator('[data-drawer]').innerText(), /全历史累计入账/); assert.match(await page.locator('[data-drawer]').innerText(), /11,790/); await closeDrawer(page);
-        for (const key of ['historyIncome', 'historyExpense']) { await page.locator(`[data-metric=${key}]`).click(); assert.match(await page.locator('[data-drawer]').innerText(), /全历史累计支出/); await closeDrawer(page); }
+        await page.locator('[data-metric=cumulative]').click(); assert.match(await page.locator('[data-drawer]').innerText(), /累计入账/); assert.match(await page.locator('[data-drawer]').innerText(), /2026-10-01（含当天）/); assert.match(await page.locator('[data-drawer]').innerText(), /11,790/); await closeDrawer(page);
+        for (const key of ['historyIncome', 'historyExpense']) { await page.locator(`[data-metric=${key}]`).click(); assert.match(await page.locator('[data-drawer]').innerText(), /累计支出/); assert.match(await page.locator('[data-drawer]').innerText(), /2026-10-01（含当天）/); await closeDrawer(page); }
         await page.locator('[data-metric=userBalance]').click(); await page.waitForSelector('[data-balance-page]'); assert.match(await page.locator('[data-drawer]').innerText(), /不含 ID 1/); await closeDrawer(page);
         await page.locator('[data-record]').click(); await page.locator('[data-command=edit]').click(); await page.waitForSelector('[data-entry-form]'); await page.locator('[data-entry-form] [name=amount]').fill('150'); await page.locator('[data-entry-form] [type=submit]').click();
-        await waitFor(page, () => accountingUi.state.report?.items[0]?.amount === 150 && !document.querySelector('[data-dialog]').open); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -106);
+        await waitFor(page, () => accountingUi.state.report?.items[0]?.amount === 150 && !document.querySelector('[data-dialog]').open); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), expenseCountsInCumulative ? -106 : 44);
         assert.equal(await page.evaluate(() => accountingUi.state.report.items[0].name), 'Sub2API 示例上游 付款');
         await page.locator('[data-record]').click(); page.once('dialog', dialog => dialog.accept()); await page.locator('[data-command=delete]').click(); await waitFor(page, () => accountingUi.state.report?.summary.expense === 0 && !document.querySelector('[data-dialog]').open); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), 44);
 
@@ -134,6 +140,13 @@ async function main() {
         assert.match(await page.locator('[data-drawer]').innerText(), /金额（元）/); await page.locator('[data-command=edit]').click(); await page.waitForSelector('[data-entry-form]'); assert.equal(await page.locator('[data-entry-form] [name=amount]').inputValue(), '5'); assert.equal(await page.locator('[data-entry-form] [name=currency]').count(), 0); await closeDrawer(page);
         assert.deepEqual(preview.store.cashRecord(historical.key), historical);
         await checkChart(page, '#accounting-cash-chart'); await checkLayout(page); await page.evaluate(() => { document.getElementById('toast-region').replaceChildren(); scrollTo(0, 0); }); await page.screenshot({ path: path.join(directory, `${name}-cash.png`), fullPage: true });
+
+        await page.locator('#cost-analysis-filter [name=start]').fill('2026-09-30'); await page.locator('#cost-analysis-filter [name=end]').fill('2026-09-30'); await page.locator('#cost-analysis-filter [type=submit]').click();
+        await waitFor(page, () => accountingUi.state.report?.range.start === '2026-09-30');
+        assert.deepEqual(await page.evaluate(() => { const r = accountingUi.state.report; return [r.summary.income, r.summary.expense, r.cumulative.income, r.cumulative.expense, r.cumulative.net]; }), [999, 777, 12214, 365, 59]);
+        assert.equal(await page.locator('[data-cash-rows] tr').count(), 2); await checkLayout(page);
+        await page.locator('#cost-analysis-filter [name=start]').fill(preview.start); await page.locator('#cost-analysis-filter [name=end]').fill(preview.today); await page.locator('#cost-analysis-filter [type=submit]').click();
+        await waitFor(page, () => accountingUi.state.report?.summary.income === 12214);
 
         if (name === 'desktop') {
           await page.locator('#cost-accounting-add').click(); await page.waitForSelector('[data-entry-form]');

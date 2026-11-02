@@ -36,7 +36,7 @@ const CostAccountingUi = (() => {
           <p class="muted accounting-filter-total" data-filter-total></p><div class="table-wrap"><table class="accounting-cash-table"><thead><tr><th>日期</th><th>项目</th><th>收支</th><th>来源</th><th>供应商 / 用户</th><th class="numeric">金额（元）</th><th>统计状态</th><th>操作</th></tr></thead><tbody data-cash-rows></tbody></table></div>${pager('cash')}
         </section>
       </section>
-      <details class="accounting-rules"><summary>统计范围与数据来源</summary><p>消费毛利 = 主站实际消费 − 启用定时检查的供应商账号实际消费。主站消费不含 ID 1；包含余额、赠送与订阅产生的用量，充值额度和余额独立展示。供应商充值只计现金支出，不重复扣入消费毛利。</p><p>自动收入恢复已使用余额兑换的入账口径，按使用日期统计正负额度；排除 ID 1，以及并发、订阅、邀请等非金额兑换，已有有效排除事实沿用。关联支付订单不重复相加；未关联兑换的已付款订单按实收补充。额度可能含赠送、优惠，不等同渠道实收。手工收付按实际日期统计，所有金额统一按人民币原数值计算，历史 USD 100 计为人民币 100 元。</p><p>第一行按所选期间统计，列表搜索只筛记录。第二行展示全历史收入、支出、当前用户余额和累计净结余，不受日期和粒度影响。累计净结余 = 全历史累计入账 − 全历史累计支出 − 当前用户余额；余额排除 ID 1 及已删除用户。历史来源或余额缺失时保留未知，源站同步前已清理的数据无法恢复。</p><p>历史日报每日 01:00 自动归档，今天实时统计；缺失来源自动重试，未知不当零。消费毛利、净现金流和累计净结余均不表示经营净利润。</p></details>
+      <details class="accounting-rules"><summary>统计范围与数据来源</summary><p>消费毛利 = 主站实际消费 − 启用定时检查的供应商账号实际消费。主站消费不含 ID 1；包含余额、赠送与订阅产生的用量，充值额度和余额独立展示。供应商充值只计现金支出，不重复扣入消费毛利。</p><p>自动收入恢复已使用余额兑换的入账口径，按使用日期统计正负额度；排除 ID 1，以及并发、订阅、邀请等非金额兑换，已有有效排除事实沿用。关联支付订单不重复相加；未关联兑换的已付款订单按实收补充。额度可能含赠送、优惠，不等同渠道实收。手工收付按实际日期统计，所有金额统一按人民币原数值计算，历史 USD 100 计为人民币 100 元。</p><p>第一行按所选期间统计，列表搜索只筛记录。第二行的历史收入、历史支出与累计净结余从资金时区 2026-10-01（含当天）累计至今，不受日期和粒度影响。累计净结余 = 该日起累计入账 − 该日起累计支出 − 当前用户余额；余额排除 ID 1 及已删除用户。历史来源或余额缺失时保留未知，源站同步前已清理的数据无法恢复。</p><p>历史日报每日 01:00 自动归档，今天实时统计；缺失来源自动重试，未知不当零。消费毛利、净现金流和累计净结余均不表示经营净利润。</p></details>
       <dialog class="accounting-dialog" data-dialog aria-labelledby="accounting-drawer-title"><header class="accounting-drawer-header"><h2 id="accounting-drawer-title"></h2><button type="button" class="icon-button" data-close title="关闭" aria-label="关闭">${h.icon('x')}</button></header><div class="accounting-drawer-body" data-drawer></div></dialog>`;
 
     function fitMetrics() {
@@ -98,7 +98,8 @@ const CostAccountingUi = (() => {
       q('[data-cash-range]').textContent = `${r.range.start} 至 ${r.range.end} · 人民币（元）`;
       q('[data-cash-metrics]').innerHTML = metric('本期收入', s.income, '人民币', 'income') + metric('本期支出', s.expense, '人民币', 'expense') + metric('净现金流', s.net, '收入 − 支出 · 人民币', 'net');
       const c = r.cumulative;
-      q('[data-cash-history]').innerHTML = metric('历史收入', c.income, '全历史 · 人民币', 'historyIncome') + metric('历史支出', c.expense, '全历史 · 人民币', 'historyExpense') + metric('当前用户余额', c.userBalance, '不含 ID 1 及已删除用户', 'userBalance') + metric('累计净结余', c.net, '全历史 · 不随筛选变化', 'cumulative');
+      const since = `${c.from} 起`;
+      q('[data-cash-history]').innerHTML = metric('历史收入', c.income, `${since} · 人民币`, 'historyIncome') + metric('历史支出', c.expense, `${since} · 人民币`, 'historyExpense') + metric('当前用户余额', c.userBalance, '不含 ID 1 及已删除用户', 'userBalance') + metric('累计净结余', c.net, `${since} · 不随筛选变化`, 'cumulative');
       q('[data-cash-meta]').textContent = `自动收入 ${r.source.complete ? money(s.automatic) : '暂不可用'} · 手工收入 ${money(s.manual)} 元 · ${r.recordCount} 条期间记录`;
       const notices = [...new Set([...r.notices, ...c.notices])];
       q('[data-notice]').hidden = !notices.length; q('[data-notice]').textContent = notices.join('；');
@@ -151,7 +152,7 @@ const CostAccountingUi = (() => {
     }
     function cumulativeDetail() {
       const c = state.report.cumulative;
-      drawer('累计净结余 · 全历史', table(['组成', '金额（元）'], [['全历史累计入账', money(c.income)], ['全历史累计支出', money(c.expense)], ['当前用户余额（不含 ID 1）', money(c.userBalance)], ['累计净结余', `<strong>${e(money(c.net))}</strong>`]]) + `<p class="muted">${e(c.from || '暂无历史收支')} 至今 · ${e(h.formatDateTime(c.capturedAt))}</p><p class="muted">余额快照 ${e(c.balanceCapturedAt ? h.formatDateTime(c.balanceCapturedAt) : '暂不可用')}</p>${c.notices.map(text => `<p class="accounting-notice">${e(text)}</p>`).join('')}`);
+      drawer('累计净结余', table(['组成', '金额（元）'], [['累计入账', money(c.income)], ['累计支出', money(c.expense)], ['当前用户余额（不含 ID 1）', money(c.userBalance)], ['累计净结余', `<strong>${e(money(c.net))}</strong>`]]) + `<p class="muted">${e(c.from)}（含当天）至 ${e(c.to)} · ${e(h.formatDateTime(c.capturedAt))}</p><p class="muted">余额快照 ${e(c.balanceCapturedAt ? h.formatDateTime(c.balanceCapturedAt) : '暂不可用')}</p>${c.notices.map(text => `<p class="accounting-notice">${e(text)}</p>`).join('')}`);
     }
     async function ensureProviders() { try { state.providers = (await h.api('/api/cost-analysis/providers')).items || []; } catch { /* Custom cash entries remain available. */ } }
     async function entryForm(item = null, providerId = '') {

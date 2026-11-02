@@ -95,7 +95,7 @@ test('incomplete or unavailable redemption scans cannot advertise complete autom
   const failed = await f.service.getReport({ ...f.query, refresh: '1' }); assert.equal(failed.summary.income, null); assert.equal(failed.known.income, 4001);
 });
 
-test('cumulative uses all history and excludes ID 1 and deleted balances regardless of every report filter', async t => {
+test('cumulative uses its fixed range and excludes ID 1 and deleted balances regardless of every report filter', async t => {
   const f = fixture(t); await f.service.save(entry(), 'admin');
   for (const query of [f.query, { start: '2026-11-01', end: '2026-11-02', currency: 'USD', search: 'absent', origin: 'manual', direction: 'income', granularity: 'year' }]) {
     const r = await f.service.getReport(query);
@@ -104,6 +104,56 @@ test('cumulative uses all history and excludes ID 1 and deleted balances regardl
   assert(f.source.queries.some(sql => sql.includes('WHERE u.id<>1 AND u.deleted_at IS NULL')));
   assert.equal((await f.service.getBalances()).pagination.total, 1);
   assert.equal((await f.service.getReport({ start: '2026-11-01', end: '2026-11-02' })).summary.income, 0);
+});
+
+test('cumulative starts on October 1 in the finance timezone after deduplication while earlier reports remain intact', async t => {
+  const f = fixture(t);
+  f.source.payments = [payment({ paid_at: '2026-09-30T15:59:59.999Z', amount: '500', redeem_ids: [] }),
+    payment({ id: '2', paid_at: '2026-09-30T16:00:00Z', redeem_ids: [] }),
+    payment({ id: '3', paid_at: '2026-09-29T04:00:00Z', amount: '80', redeem_ids: ['3'] }),
+    payment({ id: '4', amount: '40', redeem_ids: ['4'] })];
+  f.source.credits = [credit({ value: '600', used_at: '2026-09-30T15:59:59.999Z' }),
+    credit({ id: '2', type: 'admin_balance', value: '20', used_at: '2026-09-30T16:00:00Z' }),
+    credit({ id: '3', value: '50', used_at: '2026-10-01T00:00:00+08:00' }),
+    credit({ id: '4', value: '30', used_at: '2026-09-30T23:00:00+08:00' }),
+    credit({ id: '5', type: 'admin_balance', value: '-5' })];
+  f.ledger.snapshot = () => ({
+    entries: [{ id: 'old-expense', name: 'Old fee', date: '2026-09-30', amountMinor: 6000, currency: 'CNY' },
+      { id: 'new-expense', name: 'New fee', date: '2026-10-01', amountMinor: 1500, currency: 'CNY' }],
+    incomes: [{ id: 'old-income', name: 'Old receipt', date: '2026-09-30', amountMinor: 700, currency: 'CNY' },
+      { id: 'new-income', name: 'New receipt', date: '2026-10-01', amountMinor: 200, currency: 'CNY' }]
+  });
+  await f.service.save(entry({ direction: 'income', amount: 11, date: '2026-09-30' }), 'admin');
+  const oldExpense = await f.service.save(entry({ amount: 50, date: '2026-09-30' }), 'admin');
+  await f.service.save(entry({ direction: 'income', amount: 13, date: '2026-10-01' }), 'admin');
+  await f.service.save(entry({ amount: 10, date: '2026-10-01' }), 'admin');
+  for (const query of [f.query, { start: '2026-09-01', end: '2026-09-30' },
+    { start: '2026-11-01', end: '2026-11-02', granularity: 'year', search: 'absent', direction: 'expense', origin: 'manual', page: 3 }]) {
+    const r = await f.service.getReport(query), c = r.cumulative;
+    assert.deepEqual([c.from, c.to, c.income, c.expense, c.userBalance, c.net, c.recordCount], ['2026-10-01', '2026-11-02', 180, 25, 60, 95, 8]);
+    assert.deepEqual(c.originals, [{ currency: 'CNY', income: 180, expense: 25, net: 155 }]);
+    if (query.end === '2026-09-30') { assert.equal(r.summary.income, 1148); assert.equal(r.summary.expense, 110); }
+  }
+  await f.service.save(entry({ amount: 500, date: '2026-09-30' }), 'admin', oldExpense.key);
+  assert.equal((await f.service.getReport(f.query)).cumulative.net, 95);
+  f.store.close(); f.store.initialize();
+  assert.equal((await f.service.getReport(f.query)).cumulative.net, 95);
+  assert.equal(f.service.detail(oldExpense.key).item.amount, 500);
+});
+
+test('cumulative checks refunds by refund date even if the original receipt predates October 1', async t => {
+  const f = fixture(t);
+  f.source.payments = [payment({ paid_at: '2026-09-29T00:00:00+08:00', refund_at: '2026-09-30T15:59:59.999Z', refund_quantity: '20', redeem_ids: [] })];
+  let r = await f.service.getReport(f.query);
+  assert.equal(r.cumulative.income, 0); assert.equal(r.cumulative.expense, 0); assert.equal(r.cumulative.net, -60); assert.deepEqual(r.cumulative.notices, []);
+  assert.equal((await f.service.getReport({ start: '2026-09-01', end: '2026-09-30' })).summary.net, null);
+  f.source.payments[0].refund_at = '2026-09-30T16:00:00Z';
+  r = await f.service.getReport({ ...f.query, refresh: '1' });
+  assert.equal(r.cumulative.income, 0); assert.equal(r.cumulative.expense, null); assert.equal(r.cumulative.net, null);
+  assert(r.cumulative.notices.includes('实际现金退款金额缺失'));
+  await f.service.save(entry({ amount: 15, date: '2026-10-01', sourceRef: 'refund:1' }), 'admin');
+  r = await f.service.getReport({ start: '2026-11-01', end: '2026-11-02' });
+  assert.equal(r.cumulative.income, 0); assert.equal(r.cumulative.expense, 15); assert.equal(r.cumulative.net, -75);
 });
 
 test('actual paid balance and subscription orders count once without needing redeemed credits', async t => {
