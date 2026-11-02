@@ -46,6 +46,12 @@ function positiveNumber(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function validateRefreshInterval(value) {
+  if (!Number.isInteger(value) || value < 1 || value > 1440) {
+    throw new AppError('PROVIDER_INTERVAL_INVALID', 'Refresh interval must be an integer from 1 to 1440 minutes', { status: 400 });
+  }
+}
+
 function validateBalanceThresholds(warningThreshold, secondaryWarningThreshold) {
   for (const threshold of [warningThreshold, secondaryWarningThreshold]) {
     if (threshold != null && (!Number.isFinite(Number(threshold)) || Number(threshold) < 0)) {
@@ -168,6 +174,8 @@ class ProviderRepository {
   constructor(db, config) {
     this.db = db;
     this.config = config;
+    this.credentialRefreshes = new Map();
+    this.credentialStates = new Map();
   }
 
   #credentialInfo(connection) {
@@ -232,11 +240,91 @@ class ProviderRepository {
     return decryptJson(row.payload, this.config.secret);
   }
 
+  #credentialSnapshot(connection) {
+    const credentials = this.getCredentials(connection);
+    const key = JSON.stringify(credentials);
+    const previous = this.credentialStates.get(connection.id);
+    // Only our completed automatic rotations may be adopted by an existing read.
+    const epoch = previous ? previous.epoch + Number(previous.key !== key) : 0;
+    this.credentialStates.set(connection.id, { key, epoch });
+    return { credentials, epoch };
+  }
+
+  adapterContext(connection, http) {
+    const scope = (row) => JSON.stringify([row.adapter_type, row.base_url, row.auth_mode, row.credential_id,
+      row.remote_user_id, row.account_dedupe_key, row.type_config_json]);
+    const expectedScope = scope(connection);
+    const initial = this.#credentialSnapshot(connection);
+    let credentials = initial.credentials;
+    const currentConnection = () => {
+      const current = this.get(connection.id, { forAdapter: true });
+      if (scope(current) !== expectedScope) {
+        throw new AppError('CONFIG_CHANGED', 'Provider changed during upstream read', { status: 409 });
+      }
+      return current;
+    };
+    const readCurrent = () => {
+      const current = currentConnection();
+      const snapshot = this.#credentialSnapshot(current);
+      if (snapshot.epoch !== initial.epoch) {
+        throw new AppError('CONFIG_CHANGED', 'Provider credentials changed during upstream read', { status: 409 });
+      }
+      return { current, credentials: snapshot.credentials };
+    };
+    return {
+      connection, credentials, http, config: this.config,
+      verifyCredentials: () => readCurrent().current,
+      getCredentials: () => {
+        credentials = readCurrent().credentials;
+        return credentials;
+      },
+      withCredentialsRefresh: (operation) => {
+        const previous = this.credentialRefreshes.get(connection.id) || Promise.resolve();
+        const pending = previous.catch(() => {}).then(operation).finally(() => {
+          if (this.credentialRefreshes.get(connection.id) === pending) this.credentialRefreshes.delete(connection.id);
+        });
+        this.credentialRefreshes.set(connection.id, pending);
+        return pending;
+      },
+      onCredentialsUpdated: async (updated) => {
+        const saved = readCurrent();
+        if (JSON.stringify(saved.credentials) !== JSON.stringify(credentials)) {
+          throw new AppError('CONFIG_CHANGED', 'Provider session changed during token refresh', { status: 409 });
+        }
+        this.updateCredentials(saved.current, updated);
+        this.credentialStates.set(connection.id, { key: JSON.stringify(updated), epoch: initial.epoch });
+        credentials = updated;
+      }
+    };
+  }
+
+  upsertAccount(connectionId, account, capturedAt) {
+    const existing = this.db.prepare(`
+      SELECT id FROM remote_accounts WHERE connection_id = ? AND remote_id = ?
+    `).get(connectionId, String(account.remoteId));
+    const id = existing?.id || crypto.randomUUID();
+    this.db.prepare(`
+      INSERT INTO remote_accounts(
+        id, connection_id, remote_id, display_name, user_group, status,
+        metadata_json, first_seen_at, last_seen_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(connection_id, remote_id) DO UPDATE SET
+        display_name = excluded.display_name, user_group = excluded.user_group,
+        status = excluded.status, metadata_json = excluded.metadata_json,
+        last_seen_at = excluded.last_seen_at
+    `).run(id, connectionId, String(account.remoteId), account.displayName || String(account.remoteId),
+      account.userGroup || null, account.status || 'unknown', stringifyJson(account.metadata || {}), capturedAt, capturedAt);
+    return id;
+  }
+
   create(input) {
     const id = crypto.randomUUID();
     const credentialId = crypto.randomUUID();
     const now = nowIso();
-    const refreshMinutes = input.refreshIntervalMinutes || this.config.defaultRefreshMinutes;
+    const refreshMinutes = input.refreshIntervalMinutes ?? this.config.defaultRefreshMinutes;
+    const balanceRefreshMinutes = input.balanceRefreshIntervalMinutes ?? 1;
+    validateRefreshInterval(balanceRefreshMinutes);
+    validateRefreshInterval(refreshMinutes);
     const nextCheckAt = input.enabled === false
       ? null
       : new Date(Date.now() + refreshMinutes * 60000).toISOString();
@@ -257,10 +345,10 @@ class ProviderRepository {
       this.db.prepare(`
         INSERT INTO provider_connections(
           id, name, adapter_type, base_url, auth_mode, credential_id, remote_user_id,
-          enabled, refresh_interval_minutes, warning_threshold, secondary_warning_threshold, threshold_currency,
+          enabled, refresh_interval_minutes, balance_refresh_interval_minutes, warning_threshold, secondary_warning_threshold, threshold_currency,
           recharge_url, type_config_json, tags_json, note, account_dedupe_key, next_check_at,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
         input.name,
@@ -271,6 +359,7 @@ class ProviderRepository {
         input.remoteUserId || null,
         booleanValue(input.enabled),
         refreshMinutes,
+        balanceRefreshMinutes,
         input.warningThreshold ?? null,
         input.secondaryWarningThreshold ?? null,
         input.thresholdCurrency || 'USD',
@@ -309,9 +398,19 @@ class ProviderRepository {
     const existing = this.get(id, { forAdapter: true });
     const now = nowIso();
     const refreshMinutes = input.refreshIntervalMinutes ?? existing.refresh_interval_minutes;
+    const balanceRefreshMinutes = input.balanceRefreshIntervalMinutes ?? existing.balance_refresh_interval_minutes;
+    validateRefreshInterval(balanceRefreshMinutes);
+    validateRefreshInterval(refreshMinutes);
     const enabled = input.enabled == null ? existing.enabled : booleanValue(input.enabled);
     const nextCheckAt = enabled
-      ? existing.next_check_at || new Date().toISOString()
+      ? refreshMinutes !== existing.refresh_interval_minutes ? now : existing.next_check_at || now
+      : null;
+    const balanceSettingsChanged = ['balanceRefreshIntervalMinutes', 'credentials', 'baseUrl', 'adapterType',
+      'authMode', 'remoteUserId', 'typeConfig', 'warningThreshold', 'secondaryWarningThreshold', 'thresholdCurrency']
+      .some((key) => Object.hasOwn(input, key));
+    const nextBalanceCheckAt = enabled
+      ? balanceSettingsChanged || !existing.enabled
+        ? now : existing.next_balance_check_at
       : null;
     const warningThreshold = input.warningThreshold === undefined
       ? existing.warning_threshold
@@ -336,9 +435,9 @@ class ProviderRepository {
       this.db.prepare(`
         UPDATE provider_connections SET
           name = ?, adapter_type = ?, base_url = ?, auth_mode = ?, remote_user_id = ?,
-          enabled = ?, refresh_interval_minutes = ?, warning_threshold = ?, secondary_warning_threshold = ?,
+          enabled = ?, refresh_interval_minutes = ?, balance_refresh_interval_minutes = ?, warning_threshold = ?, secondary_warning_threshold = ?,
           threshold_currency = ?, recharge_url = ?, type_config_json = ?, tags_json = ?, note = ?,
-          account_dedupe_key = ?, next_check_at = ?, updated_at = ?
+          account_dedupe_key = ?, next_check_at = ?, next_balance_check_at = ?, balance_failure_count = ?, updated_at = ?
         WHERE id = ?
       `).run(
         input.name ?? existing.name,
@@ -348,6 +447,7 @@ class ProviderRepository {
         input.remoteUserId === undefined ? existing.remote_user_id : input.remoteUserId || null,
         enabled,
         refreshMinutes,
+        balanceRefreshMinutes,
         warningThreshold,
         secondaryWarningThreshold,
         input.thresholdCurrency ?? existing.threshold_currency,
@@ -359,6 +459,8 @@ class ProviderRepository {
           ? existing.account_dedupe_key
           : input.accountDedupeKey || null,
         nextCheckAt,
+        nextBalanceCheckAt,
+        balanceSettingsChanged ? 0 : existing.balance_failure_count,
         now,
         id
       );

@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const SCHEMA_VERSION = 34;
+const SCHEMA_VERSION = 35;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -2516,6 +2516,22 @@ function migrateDailyCostSummariesV34(db) {
   db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (34, ?)').run(nowIso());
 }
 
+function migrateBalanceChecksV35(db) {
+  const columns = new Set(db.prepare('PRAGMA table_info(provider_connections)').all().map((row) => row.name));
+  for (const [name, type] of [
+    ['balance_refresh_interval_minutes', 'INTEGER NOT NULL DEFAULT 1'],
+    ['next_balance_check_at', 'TEXT'],
+    ['last_balance_check_at', 'TEXT'],
+    ['last_balance_success_at', 'TEXT'],
+    ['balance_error_code', 'TEXT'],
+    ['balance_error_message', 'TEXT'],
+    ['balance_failure_count', 'INTEGER NOT NULL DEFAULT 0']
+  ]) {
+    if (!columns.has(name)) db.exec(`ALTER TABLE provider_connections ADD COLUMN ${name} ${type}`);
+  }
+  db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (35, ?)').run(nowIso());
+}
+
 function createDatabase(databasePath) {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new Database(databasePath);
@@ -2556,6 +2572,7 @@ function createDatabase(databasePath) {
     migrateActiveProbeTtftAlertsV32(db);
     migrateBillingUsageCompletenessV33(db);
     migrateDailyCostSummariesV34(db);
+    migrateBalanceChecksV35(db);
     db.prepare(
       'INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)'
     ).run(SCHEMA_VERSION, nowIso());

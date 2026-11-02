@@ -70,16 +70,14 @@ class DailyCostService {
     const previous = this.providerLocks.get(connection.id) || Promise.resolve();
     const operation = previous.catch(() => {}).then(() => this.#limited(async () => {
       const current = this.providers.get(connection.id, { forAdapter: true });
-      const credentials = this.providers.getCredentials(current);
       const scopeKey = this.#hash(this.#scope(current));
-      let credentialKey = this.#hash(credentials);
       const providerDeadline = Math.min(deadline, Date.now() + 5000);
       const verifyConfig = () => {
         const latest = this.providers.get(connection.id, { forAdapter: true });
-        if (this.#hash(this.#scope(latest)) !== scopeKey ||
-            this.#hash(this.providers.getCredentials(latest)) !== credentialKey) {
+        if (this.#hash(this.#scope(latest)) !== scopeKey) {
           throw new AppError('CONFIG_CHANGED', 'Provider changed during daily summary read', { status: 409 });
         }
+        adapterContext.verifyCredentials();
         return latest;
       };
       const http = { requestJson: (url, options = {}) => {
@@ -88,12 +86,8 @@ class DailyCostService {
         return this.http.requestJson(url, { ...options, retries: 0,
           timeoutMs: Math.min(remaining, this.config.queryTimeoutMs || 15000) });
       } };
-      const adapter = createAdapter(current.adapter_type, { connection: current, credentials, config: this.config, http,
-        onCredentialsUpdated: async (updated) => {
-          verifyConfig();
-          this.providers.updateCredentials(current, updated);
-          credentialKey = this.#hash(updated);
-        } });
+      const adapterContext = this.providers.adapterContext(current, http);
+      const adapter = createAdapter(current.adapter_type, adapterContext);
       const summary = await adapter.getDailyUsageSummary({ date: period.periodKey,
         fromAt: period.from, toAt: period.to, timezone });
       if (Date.now() > providerDeadline) throw new AppError('TIMEOUT', 'Daily summary read budget exceeded', { status: 504 });

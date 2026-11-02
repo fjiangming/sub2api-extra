@@ -84,6 +84,8 @@ class ProviderAdapter {
     this.http = context.http;
     this.config = context.config;
     this.onCredentialsUpdated = context.onCredentialsUpdated || (async () => {});
+    this.getCredentials = context.getCredentials || null;
+    this.withCredentialsRefresh = context.withCredentialsRefresh || ((operation) => operation());
   }
 
   get type() {

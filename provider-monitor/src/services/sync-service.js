@@ -10,6 +10,7 @@ const {
   rebuildProviderCostRollups
 } = require('./accounting-context');
 const { recordProviderUsageCounters } = require('./provider-counter-accounting');
+const { BalanceMonitorService } = require('./balance-monitor-service');
 
 function monitoredRemoteKeyIds(connection) {
   const supportsSelection =
@@ -43,13 +44,14 @@ function schemaComponent(value, previous) {
 }
 
 class SyncService {
-  constructor({ db, config, providers, http, metrics, analysis, onCompleted }) {
+  constructor({ db, config, providers, http, metrics, analysis, balances, onCompleted }) {
     this.db = db;
     this.config = config;
     this.providers = providers;
     this.http = http;
     this.metrics = metrics;
     this.analysis = analysis;
+    this.balances = balances || new BalanceMonitorService({ db, config, providers, http });
     this.onCompleted = onCompleted || (async () => {});
     this.inFlight = new Map();
   }
@@ -112,9 +114,7 @@ class SyncService {
       const operation = (async () => {
         const connection = this.providers.get(connectionId, { forAdapter: true });
         if (!connection.enabled) return { status: 'disabled' };
-        const adapter = createAdapter(connection.adapter_type, { connection,
-          credentials: this.providers.getCredentials(connection), http: this.http, config: this.config,
-          onCredentialsUpdated: async credentials => this.providers.updateCredentials(connection, credentials) });
+        const adapter = createAdapter(connection.adapter_type, this.providers.adapterContext(connection, this.http));
         const keys = due.map(row => ({ remoteId: row.remote_id, name: row.name, metadata: parseJson(row.metadata_json, {}) }));
         const warnings = [];
         const result = await this.#optional('getRequestLogs', () => adapter.getRequestLogs({
@@ -134,6 +134,7 @@ class SyncService {
   }
 
   #nextCheckAt(connection) {
+    connection = this.providers.get(connection.id, { forAdapter: true });
     const baseDelay = connection.refresh_interval_minutes * 60000;
     const configured = Number(connection.type_config_json?.refreshJitterPercent ?? 0.2);
     const jitterPercent = Math.min(0.2, Math.max(0, Number.isFinite(configured) ? configured : 0.2));
@@ -205,7 +206,6 @@ class SyncService {
   async #run(connectionId, options = {}) {
     const connection = this.providers.get(connectionId, { forAdapter: true });
     if (!options.manual) this.#assertCircuitClosed(connection);
-    const credentials = this.providers.getCredentials(connection);
     const runId = crypto.randomUUID();
     const startedAt = nowIso();
     const started = Date.now();
@@ -216,16 +216,10 @@ class SyncService {
     `).run(runId, options.jobType || 'provider_sync', connectionId, startedAt);
 
     try {
-      const adapter = createAdapter(connection.adapter_type, {
-        connection,
-        credentials,
-        http: this.http,
-        config: this.config,
-        onCredentialsUpdated: async (nextCredentials) => {
-          this.providers.updateCredentials(connection, nextCredentials);
-        }
-      });
+      const adapterContext = this.providers.adapterContext(connection, this.http);
+      const adapter = createAdapter(connection.adapter_type, adapterContext);
       const warnings = [];
+      const { account, balances } = await this.balances.run(connectionId, { manual: true });
       let probe;
       try {
         probe = await adapter.probe();
@@ -239,8 +233,6 @@ class SyncService {
           capabilities: adapter.capabilities()
         };
       }
-      const account = await adapter.getAccount();
-      const balances = await adapter.getAccountBalances(account);
       const groupsResult = await this.#optional('listGroups', () => adapter.listGroups(), warnings);
       const keysResult = await this.#optional('listKeys', () => adapter.listKeys(), warnings);
       const usageResult = await this.#optional('getUsage', () => adapter.getUsage(), warnings);
@@ -502,11 +494,11 @@ class SyncService {
 
   #persist(connection, data) {
     const transaction = this.db.transaction(() => {
-      const accountId = this.#upsertAccount(connection.id, data.account, data.capturedAt);
+      const accountId = this.providers.upsertAccount(connection.id, data.account, data.capturedAt);
       this.#upsertGroups(connection.id, data.groups, data.capturedAt, data.groupsComplete);
       this.#upsertKeys(connection.id, accountId, data.keys, data.capturedAt, data.keysComplete);
       if (data.keysComplete) this.#replaceKeyGroupRelations(connection.id, data.keys);
-      this.#insertSnapshots(connection.id, accountId, data.balances, data.groups, data.keys, data.capturedAt);
+      this.#insertSnapshots(connection.id, accountId, [], data.groups, data.keys, data.capturedAt);
       this.#insertUsage(connection.id, accountId, data.usage || [], data.capturedAt);
       if (data.recharge) this.providers.recordRecharge(connection.id, data.recharge, data.capturedAt);
       const requestLogCount = this.#insertRequestLogs(
@@ -564,34 +556,6 @@ class SyncService {
       };
     });
     return transaction();
-  }
-
-  #upsertAccount(connectionId, account, capturedAt) {
-    const existing = this.db.prepare(`
-      SELECT id FROM remote_accounts WHERE connection_id = ? AND remote_id = ?
-    `).get(connectionId, String(account.remoteId));
-    const id = existing?.id || crypto.randomUUID();
-    this.db.prepare(`
-      INSERT INTO remote_accounts(
-        id, connection_id, remote_id, display_name, user_group, status,
-        metadata_json, first_seen_at, last_seen_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(connection_id, remote_id) DO UPDATE SET
-        display_name = excluded.display_name, user_group = excluded.user_group,
-        status = excluded.status, metadata_json = excluded.metadata_json,
-        last_seen_at = excluded.last_seen_at
-    `).run(
-      id,
-      connectionId,
-      String(account.remoteId),
-      account.displayName || String(account.remoteId),
-      account.userGroup || null,
-      account.status || 'unknown',
-      stringifyJson(account.metadata || {}),
-      capturedAt,
-      capturedAt
-    );
-    return id;
   }
 
   #recordDynamicRouteRates(connectionId, result, config, capturedAt) {

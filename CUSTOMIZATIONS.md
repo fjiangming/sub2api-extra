@@ -1,5 +1,21 @@
 # 个性化功能维护台账
 
+## 2026-11-02：供应商余额独立检查与逐家刷新周期
+
+用户要求将余额检查从资产 / 日志同步中独立，并支持每家配置刷新时间。本轮只修改供应商监控；保留正在开发的运营中心现金收支、规划、订阅手册和其他无关变更，不连接生产、不提交 / 推送或部署，不执行充值、支付或扣款。
+
+涉及源码：`provider-monitor/src/services/balance-monitor-service.js`（新增）、`src/services/sync-service.js`、`src/repositories/provider-repository.js`、`src/db/index.js`、`src/server.js`、`src/services/alert-service.js`、`src/services/automation-service.js`、`src/services/query-service.js`、`src/services/transfer-service.js`；`src/adapters/base.js`、`src/adapters/sub2api.js`、`src/services/daily-cost-service.js`、`src/services/catalog-service.js`、`src/services/checkin-service.js`、`src/services/recharge-link-service.js`；`public/app.js`、`public/index.html`。新增余额检查服务，独立每 5 秒扫描到期连接、有界并发、同供应商单飞，不占用资产队列；默认每分钟读取账号余额，成功即保存和评估余额告警 / 自动化，不等待分组、Key、日志、映射比较。全量同步先完成余额步骤，后续不再覆盖账户余额，保留原资产 / 采购 / 用量核算流程。
+
+两类周期分别按供应商配置 1–1440 分钟；余额默认 1 分钟且无随机延迟，资产保留原值与原有随机延迟。schema v35 自动新增余额周期、排期、最后成功、错误和失败计数字段，不覆盖旧阈值、资产周期或凭据。周期和连接配置变化立即重新排期，停用停止定时检查，失败保留旧真实余额并单独标错 / 退避；限流至少 5 分钟，手动刷新可重试。新增管理员与 CSRF 保护的独立余额刷新接口，编辑页 / 供应商卡片分别展示周期和更新时间，卡片与总览支持刷新余额；复制、导入导出和备份延续周期，旧导入不重置已有余额周期。历史条数受限时保留最新样本，避免分钟级采样后预测误读旧余额。
+
+已保存 Sub2API 会话通过同一仓库上下文协调续期，读取最新凭据并核对后原子保存，覆盖余额、全量 / 定向日志、日报、目录、签到、充值中转及使用已保存凭据的探测 / 验证 / Key 发现。凭据或连接在请求期间改变时不保存旧余额或覆盖新 Token；不承诺上游撤销后仍能自动恢复。
+
+测试：新增 `provider-monitor/tests/balance-monitor.test.js`，更新 `tests/sync.test.js`、`tests/server.test.js`、`tests/database-migration.test.js`、`tests/frontend-behavior.test.js`。覆盖独立读取、即时两级提醒、慢同步 / 队列占满不阻塞余额、旧结果不覆盖、逐家周期与停用、退避与恢复、Token 并发续期、配置变更隔离、导入导出 / 复制、真实 HTTP 鉴权和 CSRF、旧库迁移和最新历史样本。新增 `provider-monitor/scripts/balance-monitor-preview.cjs` 与 `scripts/balance-monitor-browser-check.cjs`，使用隔离 SQLite、示例供应商和模拟 HTTP 提供本地预览及桌面 / 手机验收，不读取真实凭据或访问上游。更新 `provider-monitor/README.md` 调度与配置说明，并纠正原文中“内置规则每小时重复提醒”与既有代码不符的描述，提醒去重行为本轮不变。
+
+验证：供应商监控最终完整 329 项测试全部通过，111 个 JS / CJS 文件语法检查、相关 diff --check 通过。Playwright 使用本机 Chrome 在 1440px、390px、320px 验证两种周期独立编辑、无效值拦截、保存 / 刷新后保留、卡片与总览直接刷新余额及布局，无页面脚本错误或整页横向溢出；截图在忽略的 `provider-monitor/data-preview/balance-monitor-qa/`，已复核桌面和手机截图。仅本地隔离数据库与模拟 HTTP，未读生产凭据、调用收费模型或写入真实资金；预览为示例服务，不代表已经部署。未改运营中心源码，本轮不将其他会话正在进行的运营中心测试计入验证结果。
+
+用户随后要求核对影响，并在不需要手动配置时提交 GitHub。本次确认 v35 自动迁移和默认一分钟余额检查无需新增环境变量、手工建表或重设阈值 / 通知通道；原资产周期保留。余额查询频率提高，显式“连续命中”及已启用低余额 / 恢复自动化随真实快照更快触发，原去重与动作限制保持；不产生模型调用或直接扣款。仅将上述供应商监控实现、测试、预览工具、README 与本节记录提交并推送 extra main；运营中心开发、设计文档、独立生产记录和其他无关变更保留本地。沿用此前通过的 329 项完整回归及页面验收，推送前核对远端和暂存内容；Actions / 镜像发布状态以本次提交 SHA 为准，本次不部署服务器。
+
 ## 2026-11-01：新版待核验排查与自动统计入口
 
 用户要求连接服务器排查大量待核验，并希望恢复打开即可查看的统计体验。本轮使用已授权的 SSH，只读检查镜像、主站 PostgreSQL 和运营中心 SQLite；SQLite 使用 readonly / query_only，主站 SQL 使用 READ ONLY 事务，凭据仅在进程内使用，不输出或写入文件。通过既有集成客户端正常读取当日供应商日汇总与余额，监控按原逻辑维护缓存；没有部署、重启、修改生产配置 / 分类 / 期初或用户资金。

@@ -149,6 +149,8 @@ test('New API sync persists account balance, key quota and key groups', async (t
   `).get(provider.id).count, 1);
   assert.ok(requestLogStarts.some((start) => start > requestLogStarts[0]));
   context.db.prepare("UPDATE provider_connections SET last_error_code = 'REMOTE_SERVER_ERROR' WHERE id = ?").run(provider.id);
+  assert.equal(queries.summary().accounts[0].status, 'healthy');
+  context.db.prepare("UPDATE provider_connections SET balance_error_code = 'TIMEOUT' WHERE id = ?").run(provider.id);
   assert.equal(queries.summary().accounts[0].status, 'error');
 });
 

@@ -586,7 +586,7 @@ function renderOverview() {
     <td class="numeric">${formatMoney(item.used, item.currency)}</td>
     <td>${escapeHtml(item.currency)}</td>
     <td title="${escapeHtml(formatDate(item.capturedAt))}">${timeAgo(item.capturedAt)}</td>
-    <td class="actions-cell"><button class="icon-button small" data-action="sync-provider" data-id="${item.connectionId}" title="立即同步" aria-label="立即同步"><i data-lucide="refresh-cw"></i></button></td>
+    <td class="actions-cell"><button class="icon-button small" data-action="refresh-balance" data-id="${item.connectionId}" title="刷新余额" aria-label="刷新余额"><i data-lucide="refresh-cw"></i></button></td>
   </tr>`).join('');
   const budgetRows = (summary.budgets || []).map((item) => `<tr><td class="primary-cell"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.providerName)}</small></td><td>${badge(item.status)}</td><td>${badge(item.subjectType === 'team' ? 'active' : 'unknown', item.subjectType === 'team' ? 'Team' : 'Key')}</td><td class="numeric">${item.unlimited ? '不限额' : formatMoney(item.available, item.currency)}</td><td class="numeric">${formatMoney(item.used, item.currency)}</td><td class="numeric">${formatMoney(item.total, item.currency)}</td><td>${timeAgo(item.capturedAt)}</td></tr>`).join('');
   const activeAlerts = summary.counts.activeAlerts || 0;
@@ -607,6 +607,7 @@ function renderOverview() {
 
 function providerStatus(provider) {
   if (!provider.enabled) return ['disabled', '已停用'];
+  if (provider.balance_error_code) return ['failed', '余额检查失败'];
   if (provider.last_error_code) return ['failed', '同步失败'];
   if (!provider.last_success_at) return ['unknown', '待同步'];
   const stale = Date.now() - Date.parse(provider.last_success_at) > 3600000;
@@ -625,8 +626,8 @@ function renderProviders() {
       : '';
     return `<article class="provider-item">
       <div class="provider-item-header"><span class="provider-icon"><i data-lucide="server"></i></span><div><h3>${escapeHtml(provider.name)}</h3><div class="url" title="${escapeHtml(provider.base_url)}">${escapeHtml(provider.base_url)}</div></div>${badge(status, statusLabel)}</div>
-      <div class="provider-meta"><div><span>适配器</span><strong>${escapeHtml(provider.adapter_type)}</strong></div><div><span>刷新间隔</span><strong>${provider.refresh_interval_minutes} 分钟</strong></div><div><span>最近成功</span><strong>${timeAgo(provider.last_success_at)}</strong></div><div><span>密钥能力</span><strong>${provider.capabilities?.listKeys ? '可查询' : provider.last_success_at ? '不支持' : '待探测'}</strong></div></div>
-      <div class="provider-actions"><button class="button small" data-action="sync-provider" data-id="${provider.id}"><i data-lucide="refresh-cw"></i><span>同步</span></button><button class="button small" data-action="provider-assets" data-id="${provider.id}"><i data-lucide="database"></i><span>资产</span></button><span class="action-spacer"></span>${rechargeAction}<button class="icon-button small" data-action="provider-checkin" data-id="${provider.id}" title="签到" aria-label="签到"><i data-lucide="calendar-check"></i></button>${catalogAction}<button class="icon-button small" data-action="rotate-credential" data-id="${provider.id}" title="轮换凭据" aria-label="轮换凭据"><i data-lucide="rotate-cw"></i></button><button class="icon-button small" data-action="clone-provider" data-id="${provider.id}" title="复制连接（不含凭据）" aria-label="复制连接（不含凭据）"><i data-lucide="copy"></i></button><button class="icon-button small" data-action="edit-provider" data-id="${provider.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-provider" data-id="${provider.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></div>
+      <div class="provider-meta"><div><span>余额检查</span><strong>${provider.balance_refresh_interval_minutes || 1} 分钟</strong></div><div><span>资产同步</span><strong>${provider.refresh_interval_minutes} 分钟</strong></div><div><span>余额更新</span><strong title="${escapeHtml(provider.balance_error_message || '')}">${provider.balance_error_code ? '检查失败' : timeAgo(provider.last_balance_success_at)}</strong></div><div><span>资产更新</span><strong>${timeAgo(provider.last_success_at)}</strong></div><div><span>适配器</span><strong>${escapeHtml(provider.adapter_type)}</strong></div><div><span>密钥能力</span><strong>${provider.capabilities?.listKeys ? '可查询' : provider.last_success_at ? '不支持' : '待探测'}</strong></div></div>
+      <div class="provider-actions"><button class="button small" data-action="sync-provider" data-id="${provider.id}"><i data-lucide="refresh-cw"></i><span>同步</span></button><button class="button small" data-action="provider-assets" data-id="${provider.id}"><i data-lucide="database"></i><span>资产</span></button><span class="action-spacer"></span><button class="icon-button small" data-action="refresh-balance" data-id="${provider.id}" title="刷新余额" aria-label="刷新余额"><i data-lucide="wallet"></i></button>${rechargeAction}<button class="icon-button small" data-action="provider-checkin" data-id="${provider.id}" title="签到" aria-label="签到"><i data-lucide="calendar-check"></i></button>${catalogAction}<button class="icon-button small" data-action="rotate-credential" data-id="${provider.id}" title="轮换凭据" aria-label="轮换凭据"><i data-lucide="rotate-cw"></i></button><button class="icon-button small" data-action="clone-provider" data-id="${provider.id}" title="复制连接（不含凭据）" aria-label="复制连接（不含凭据）"><i data-lucide="copy"></i></button><button class="icon-button small" data-action="edit-provider" data-id="${provider.id}" title="编辑" aria-label="编辑"><i data-lucide="pencil"></i></button><button class="icon-button small" data-action="delete-provider" data-id="${provider.id}" title="删除" aria-label="删除"><i data-lucide="trash-2"></i></button></div>
     </article>`;
   }).join('');
   $('#main-content').innerHTML = items ? `<div class="provider-grid">${items}</div>` : emptyState('server-cog', '暂无供应商', '添加第一个供应商连接');
@@ -3898,6 +3899,7 @@ function openProviderDialog(provider = null) {
   form.elements.authMode.value = provider?.auth_mode || ADAPTER_AUTH_MODES[provider?.adapter_type || 'sub2api'];
   form.elements.remoteUserId.value = provider?.remote_user_id || '';
   form.elements.refreshIntervalMinutes.value = provider?.refresh_interval_minutes || 15;
+  form.elements.balanceRefreshIntervalMinutes.value = provider?.balance_refresh_interval_minutes || 1;
   form.elements.warningThreshold.value = provider?.warning_threshold ?? '';
   form.elements.secondaryWarningThreshold.value = provider?.secondary_warning_threshold ?? '';
   form.elements.thresholdCurrency.value = provider?.threshold_currency || 'USD';
@@ -4001,6 +4003,7 @@ function providerPayload(form) {
     baseUrl: normalizeProviderBaseUrl(form.elements.baseUrl.value), authMode: form.elements.authMode.value,
     credentials, remoteUserId: form.elements.remoteUserId.value.trim() || null,
     enabled: form.elements.enabled.checked, refreshIntervalMinutes: Number(form.elements.refreshIntervalMinutes.value || 15),
+    balanceRefreshIntervalMinutes: Number(form.elements.balanceRefreshIntervalMinutes?.value || 1),
     ...balanceThresholds,
     thresholdCurrency: form.elements.thresholdCurrency.value.trim() || 'USD',
     rechargeMultiplier: form.elements.rechargeMultiplier.value === '' ? null : Number(form.elements.rechargeMultiplier.value),
@@ -4610,6 +4613,7 @@ async function handleAction(button) {
     if (action === 'delete-provider' && confirm('删除该供应商及其历史快照？')) { await api(`/api/providers/${id}`, { method: 'DELETE' }); toast('供应商已删除'); navigate('providers'); }
     if (action === 'clone-provider') { await api(`/api/providers/${id}/clone`, { method: 'POST', body: {} }); toast('已复制连接，凭据为空且默认停用'); navigate('providers'); }
     if (action === 'sync-provider') { await api(`/api/providers/${id}/sync`, { method: 'POST' }); toast('同步任务已加入队列'); setTimeout(() => navigate(state.view), 1200); }
+    if (action === 'refresh-balance') { await api(`/api/providers/${id}/balance/refresh`, { method: 'POST' }); toast('余额已更新'); await navigate(state.view); }
     if (action === 'open-recharge') {
       await ensureReauth();
       const result = await api(`/api/providers/${id}/recharge-link`, { method: 'POST', body: {} });

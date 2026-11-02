@@ -1230,6 +1230,7 @@ test('Sub2API provider validation keeps the edited provider identity and separat
       remoteUserId: { value: '' },
       enabled: { checked: true },
       refreshIntervalMinutes: { value: '15' },
+      balanceRefreshIntervalMinutes: { value: '3' },
       warningThreshold: { value: '' },
       secondaryWarningThreshold: { value: '' },
       thresholdCurrency: { value: 'USD' },

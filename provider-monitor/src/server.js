@@ -22,6 +22,7 @@ const { NotificationService } = require('./services/notification-service');
 const { AlertService } = require('./services/alert-service');
 const { AutomationService } = require('./services/automation-service');
 const { SyncService } = require('./services/sync-service');
+const { BalanceMonitorService } = require('./services/balance-monitor-service');
 const { AnalysisService } = require('./services/analysis-service');
 const { KeyHealthService } = require('./services/key-health-service');
 const { CatalogService } = require('./services/catalog-service');
@@ -59,6 +60,7 @@ const providerSchema = z.object({
   remoteUserId: z.union([z.string(), z.number()]).optional().nullable(),
   enabled: z.boolean().optional(),
   refreshIntervalMinutes: z.number().int().min(1).max(1440).optional(),
+  balanceRefreshIntervalMinutes: z.number().int().min(1).max(1440).optional(),
   warningThreshold: z.number().nonnegative().optional().nullable(),
   secondaryWarningThreshold: z.number().nonnegative().optional().nullable(),
   thresholdCurrency: z.string().trim().min(1).max(12).optional(),
@@ -715,6 +717,12 @@ function createApplication(options = {}) {
     concurrency: config.globalConcurrency,
     perConnectionConcurrency: config.perProviderConcurrency
   });
+  const balances = new BalanceMonitorService({ db, config, providers, http,
+    onCompleted: async ({ connectionId }) => {
+      await alerts.evaluateConnection(connectionId, { balancesOnly: true });
+      await automation.evaluateConnection(connectionId, { balancesOnly: true });
+    }
+  });
   const sync = new SyncService({
     db,
     config,
@@ -722,6 +730,7 @@ function createApplication(options = {}) {
     http,
     metrics,
     analysis,
+    balances,
     onCompleted: async ({ connectionId }) => {
       if (mappings.list({ connectionId }).length > 0) {
         await mappings.refreshComparisons({ connectionId, force: true }).catch(() => null);
@@ -1192,8 +1201,11 @@ function createApplication(options = {}) {
       account_dedupe_key: existing?.account_dedupe_key || null,
       type_config_json: {}
     };
-    const mayPersistRefreshedSession = existing && Object.keys(submittedCredentials).length === 0;
-    const adapter = createAdapter('sub2api', {
+    const mayPersistRefreshedSession = existing && Object.keys(submittedCredentials).length === 0 &&
+      existing.base_url === discoveryConnection.base_url;
+    const adapter = createAdapter('sub2api', mayPersistRefreshedSession ? {
+      ...providers.adapterContext(existing, http), connection: discoveryConnection
+    } : {
       connection: discoveryConnection,
       credentials,
       http,
@@ -1247,7 +1259,6 @@ function createApplication(options = {}) {
       input.adapterType,
       input.authMode
     );
-    const mayPersistRefreshedSession = existing && Object.keys(submittedCredentials).length === 0;
     const fakeConnection = {
       id: existing?.id || crypto.randomUUID(),
       name: input.name,
@@ -1258,7 +1269,12 @@ function createApplication(options = {}) {
       account_dedupe_key: input.accountDedupeKey || null,
       type_config_json: input.typeConfig || {}
     };
-    const adapter = createAdapter(input.adapterType, {
+    const mayPersistRefreshedSession = existing && Object.keys(submittedCredentials).length === 0 &&
+      existing.adapter_type === fakeConnection.adapter_type && existing.base_url === fakeConnection.base_url &&
+      existing.auth_mode === fakeConnection.auth_mode;
+    const adapter = createAdapter(input.adapterType, mayPersistRefreshedSession ? {
+      ...providers.adapterContext(existing, http), connection: fakeConnection
+    } : {
       connection: fakeConnection,
       credentials,
       http,
@@ -1277,13 +1293,7 @@ function createApplication(options = {}) {
   api.get('/providers/:id', (req, res) => res.json(providers.get(req.params.id)));
   api.post('/providers/:id/probe', asyncRoute(async (req, res) => {
     const connection = providers.get(req.params.id, { forAdapter: true });
-    const adapter = createAdapter(connection.adapter_type, {
-      connection,
-      credentials: providers.getCredentials(connection),
-      http,
-      config,
-      onCredentialsUpdated: async (next) => providers.updateCredentials(connection, next)
-    });
+    const adapter = createAdapter(connection.adapter_type, providers.adapterContext(connection, http));
     const probe = await adapter.probe();
     audit(db, req, 'provider.probe', 'provider', connection.id, { probe });
     res.json(probe);
@@ -1298,7 +1308,8 @@ function createApplication(options = {}) {
       connection.auth_mode
     );
     const mayPersistRefreshedSession = Object.keys(submittedCredentials).length === 0;
-    const adapter = createAdapter(connection.adapter_type, {
+    const adapter = createAdapter(connection.adapter_type, mayPersistRefreshedSession
+      ? providers.adapterContext(connection, http) : {
       connection,
       credentials: candidate,
       http,
@@ -1330,6 +1341,7 @@ function createApplication(options = {}) {
       remoteUserId: null,
       enabled: false,
       refreshIntervalMinutes: source.refresh_interval_minutes,
+      balanceRefreshIntervalMinutes: source.balance_refresh_interval_minutes,
       warningThreshold: source.warning_threshold,
       secondaryWarningThreshold: source.secondary_warning_threshold,
       thresholdCurrency: source.threshold_currency,
@@ -1385,6 +1397,11 @@ function createApplication(options = {}) {
     audit(db, req, 'provider.delete', 'provider', req.params.id);
     res.status(204).end();
   });
+  api.post('/providers/:id/balance/refresh', asyncRoute(async (req, res) => {
+    const result = await balances.run(req.params.id, { manual: true });
+    audit(db, req, 'provider.balance.refresh', 'provider', req.params.id, { status: result.status });
+    res.json({ status: result.status, capturedAt: result.capturedAt });
+  }));
   api.post('/providers/:id/sync', asyncRoute(async (req, res) => {
     providers.get(req.params.id);
     if (req.query.wait === 'true') {
@@ -2404,6 +2421,7 @@ function createApplication(options = {}) {
   const startBackground = () => {
     if (backgroundStarted) return;
     backgroundStarted = true;
+    balances.start();
     queue.start();
     enqueueSub2ApiRefresh();
     queue.enqueue('scheduled_automation', { priority: -1 });
@@ -2478,6 +2496,7 @@ function createApplication(options = {}) {
   const close = async () => {
     for (const task of cronTasks) task.stop();
     await queue.stop();
+    await balances.stop();
     auth.close();
     db.close();
   };
@@ -2485,7 +2504,7 @@ function createApplication(options = {}) {
   app.locals.services = {
     config, db, providers, queries, notifications, alerts, automation, analysis,
     keyHealth, catalog, checkins, mappings, credentials, transfers, sub2api,
-    metrics, auth, queue, sync, detection, backups, retention, rechargeLinks,
+    metrics, auth, queue, sync, balances, detection, backups, retention, rechargeLinks,
     simulations, accountMonitor, keyProbes, keyTtftAlerts, grossProfit, dailyCosts
   };
   app.locals.startBackground = startBackground;

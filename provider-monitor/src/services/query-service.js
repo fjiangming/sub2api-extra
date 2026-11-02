@@ -63,8 +63,8 @@ function normalizeNameFilterTerms(value) {
 }
 
 function balanceStatus(row, config) {
-  if (!row.last_success_at) return 'unknown';
-  if (row.last_error_code) return 'error';
+  if (row.last_balance_check_at ? row.balance_error_code : row.last_error_code) return 'error';
+  if (!(row.last_balance_success_at || row.last_success_at)) return 'unknown';
   if (Date.now() - Date.parse(row.captured_at) > config.staleAfterMinutes * 60000) {
     return 'stale';
   }
@@ -106,6 +106,7 @@ class QueryService {
       SELECT p.id AS connection_id, p.name, p.adapter_type, p.base_url,
         p.account_dedupe_key, p.warning_threshold, p.secondary_warning_threshold, p.threshold_currency,
         p.last_sync_at, p.last_success_at, p.last_error_code, p.last_error_message,
+        p.last_balance_check_at, p.last_balance_success_at, p.balance_error_code, p.balance_error_message,
         r.subject_id, r.currency, r.available, r.total, r.used, r.frozen,
         r.unlimited, r.captured_at
       FROM provider_connections p
@@ -129,9 +130,9 @@ class QueryService {
         frozen: nullableNumber(row.frozen),
         unlimited: Boolean(row.unlimited),
         capturedAt: row.captured_at,
-        lastSuccessAt: row.last_success_at,
-        lastErrorCode: row.last_error_code,
-        lastErrorMessage: row.last_error_message,
+        lastSuccessAt: row.last_balance_success_at || row.last_success_at,
+        lastErrorCode: row.last_balance_check_at ? row.balance_error_code : row.last_error_code,
+        lastErrorMessage: row.last_balance_check_at ? row.balance_error_message : row.last_error_message,
         status: balanceStatus(row, this.config)
       };
       const key = `${row.account_dedupe_key || row.connection_id}:${item.currency}`;
@@ -436,11 +437,12 @@ class QueryService {
         SELECT connection_id, subject_type, subject_id, currency, available, total, used,
           unlimited, captured_at, granularity FROM balance_aggregates
       )
-      SELECT connection_id, subject_id, currency, available, total, used, unlimited,
-        captured_at, granularity FROM combined
-      WHERE ${clauses.join(' AND ')}
-      ORDER BY captured_at ASC
-      LIMIT 20000
+      SELECT * FROM (
+        SELECT connection_id, subject_id, currency, available, total, used, unlimited,
+          captured_at, granularity FROM combined
+        WHERE ${clauses.join(' AND ')}
+        ORDER BY captured_at DESC LIMIT 20000
+      ) ORDER BY captured_at ASC
     `).all(...params).map((row) => ({ ...row, unlimited: Boolean(row.unlimited) }));
   }
 

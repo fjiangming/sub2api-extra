@@ -6,6 +6,38 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { createDatabase, nowIso } = require('../src/db');
 
+test('v35 adds independent balance schedules while retaining legacy intervals, thresholds, and credentials', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-balance-migration-'));
+  const databasePath = path.join(directory, 'legacy.db');
+  let db = createDatabase(databasePath);
+  t.after(() => { if (db.open) db.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const now = nowIso();
+  db.prepare("INSERT INTO encrypted_credentials(id, payload, created_at) VALUES ('credential', 'keep-encrypted', ?)").run(now);
+  db.prepare(`INSERT INTO provider_connections(id, name, adapter_type, base_url, auth_mode,
+    credential_id, refresh_interval_minutes, warning_threshold, secondary_warning_threshold, created_at, updated_at)
+    VALUES ('legacy', 'Legacy supplier', 'custom', 'https://legacy.example', 'api_key',
+      'credential', 45, 100, 20, ?, ?)`).run(now, now);
+  for (const name of ['balance_refresh_interval_minutes', 'next_balance_check_at', 'last_balance_check_at',
+    'last_balance_success_at', 'balance_error_code', 'balance_error_message', 'balance_failure_count']) {
+    db.exec(`ALTER TABLE provider_connections DROP COLUMN ${name}`);
+  }
+  db.prepare('DELETE FROM schema_migrations WHERE version = 35').run();
+  db.close();
+  db = createDatabase(databasePath);
+  const migrated = db.prepare("SELECT * FROM provider_connections WHERE id = 'legacy'").get();
+  assert.equal(migrated.balance_refresh_interval_minutes, 1);
+  assert.equal(migrated.refresh_interval_minutes, 45);
+  assert.equal(migrated.warning_threshold, 100);
+  assert.equal(migrated.secondary_warning_threshold, 20);
+  assert.equal(migrated.next_balance_check_at, null);
+  assert.equal(db.prepare("SELECT payload FROM encrypted_credentials WHERE id = 'credential'").get().payload, 'keep-encrypted');
+  db.prepare("UPDATE provider_connections SET balance_refresh_interval_minutes = 7 WHERE id = 'legacy'").run();
+  db.close();
+  db = createDatabase(databasePath);
+  assert.equal(db.prepare("SELECT balance_refresh_interval_minutes value FROM provider_connections WHERE id = 'legacy'").get().value, 7);
+  assert.deepEqual(db.pragma('foreign_key_check'), []);
+});
+
 test('schema migrations through v32 preserve mappings and add explicit alert routing', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-monitor-migration-'));
   const databasePath = path.join(directory, 'migration.db');
@@ -179,6 +211,7 @@ test('schema migrations through v32 preserve mappings and add explicit alert rou
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 31').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 32').get());
   assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 34').get());
+  assert.ok(db.prepare('SELECT 1 FROM schema_migrations WHERE version = 35').get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='provider_daily_cost_summaries'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_recharge_rates'").get());
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'provider_dynamic_route_rates'").get());

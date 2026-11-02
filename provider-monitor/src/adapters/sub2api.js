@@ -620,6 +620,14 @@ class Sub2ApiAdapter extends ProviderAdapter {
   }
 
   async getAccessToken(forceRefresh = false) {
+    const rejectedToken = forceRefresh ? this.credentials.accessToken : null;
+    return this.withCredentialsRefresh(async () => {
+      if (this.getCredentials) this.credentials = this.getCredentials();
+      return this.resolveAccessToken(forceRefresh && this.credentials.accessToken === rejectedToken);
+    });
+  }
+
+  async resolveAccessToken(forceRefresh = false) {
     const token = this.credentials.accessToken;
     const expiry =
       Number(this.credentials.tokenExpiresAt) ||

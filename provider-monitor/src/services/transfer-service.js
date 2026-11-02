@@ -513,6 +513,7 @@ class TransferService {
         remoteUserId: provider.remote_user_id,
         enabled: provider.enabled,
         refreshIntervalMinutes: provider.refresh_interval_minutes,
+        balanceRefreshIntervalMinutes: provider.balance_refresh_interval_minutes,
         warningThreshold: provider.warning_threshold,
         secondaryWarningThreshold: provider.secondary_warning_threshold,
         thresholdCurrency: provider.threshold_currency,
@@ -802,6 +803,9 @@ class TransferService {
       remoteUserId: firstValue(row.remoteUserId, row.remote_user_id, row.userId, row.user_id, null),
       enabled: row.enabled == null ? true : !['false', '0', 0, false].includes(row.enabled),
       refreshIntervalMinutes: Number(firstValue(row.refreshIntervalMinutes, row.refresh_interval_minutes, this.config.defaultRefreshMinutes)),
+      ...(['balanceRefreshIntervalMinutes', 'balance_refresh_interval_minutes'].some((key) => Object.hasOwn(row, key))
+        ? { balanceRefreshIntervalMinutes: Number(firstValue(row.balanceRefreshIntervalMinutes, row.balance_refresh_interval_minutes)) }
+        : {}),
       warningThreshold: firstValue(row.warningThreshold, row.warning_threshold, null) == null ? null : Number(firstValue(row.warningThreshold, row.warning_threshold)),
       secondaryWarningThreshold: firstValue(row.secondaryWarningThreshold, row.secondary_warning_threshold, null) == null
         ? null
@@ -839,6 +843,9 @@ class TransferService {
       const errors = [];
       if (!provider.baseUrl || !/^https?:\/\//i.test(provider.baseUrl)) errors.push('invalid_base_url');
       if (!supported.has(provider.adapterType)) errors.push('unsupported_adapter');
+      for (const interval of [provider.refreshIntervalMinutes, provider.balanceRefreshIntervalMinutes ?? 1]) {
+        if (!Number.isInteger(interval) || interval < 1 || interval > 1440) errors.push('invalid_refresh_interval');
+      }
       const existingCredentials = match ? this.providers.getCredentials(match.id) : {};
       const missingCredentials = !hasUsableProviderCredentials(provider, {
         ...existingCredentials,

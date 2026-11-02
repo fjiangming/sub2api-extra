@@ -21,13 +21,7 @@ class CatalogService {
 
   async sync(connectionId) {
     const connection = this.providers.get(connectionId, { forAdapter: true });
-    const adapter = createAdapter(connection.adapter_type, {
-      connection,
-      credentials: this.providers.getCredentials(connection),
-      http: this.http,
-      config: this.config,
-      onCredentialsUpdated: async (credentials) => this.providers.updateCredentials(connection, credentials)
-    });
+    const adapter = createAdapter(connection.adapter_type, this.providers.adapterContext(connection, this.http));
     if (!adapter.capabilities().priceCatalog) {
       throw new AppError('CAPABILITY_UNSUPPORTED', `${connection.name} does not support price catalog synchronization`, {
         status: 409

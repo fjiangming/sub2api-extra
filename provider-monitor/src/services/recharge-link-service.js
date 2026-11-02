@@ -148,13 +148,7 @@ class RechargeLinkService {
   }
 
   #adapter(connection) {
-    return createAdapter(connection.adapter_type, {
-      connection,
-      credentials: this.providers.getCredentials(connection),
-      http: this.http,
-      config: this.config,
-      onCredentialsUpdated: async (next) => this.providers.updateCredentials(connection, next)
-    });
+    return createAdapter(connection.adapter_type, this.providers.adapterContext(connection, this.http));
   }
 
   #direct(connection, reason = null) {

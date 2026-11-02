@@ -187,7 +187,7 @@ class AutomationService {
     });
   }
 
-  async evaluateConnection(connectionId) {
+  async evaluateConnection(connectionId, options = {}) {
     const rules = this.db.prepare(`
       SELECT * FROM automation_rules
       WHERE enabled = 1 AND trigger_type != 'scheduled'
@@ -195,6 +195,7 @@ class AutomationService {
     `).all(connectionId);
     const actions = [];
     for (const rule of rules) {
+      if (options.balancesOnly && !['low_balance', 'balance_recovered'].includes(rule.trigger_type)) continue;
       const config = parseJson(rule.config_json, {});
       const safety = this.#safetyState(rule, connectionId, config);
       if (!safety.allowed || !this.#matches(connectionId, rule.trigger_type, config)) continue;

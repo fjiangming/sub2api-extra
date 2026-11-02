@@ -125,13 +125,36 @@ test('HTTP API enforces login and CSRF while serving the operational frontend', 
       name: 'Manual recharge supplier', adapterType: 'custom', baseUrl: 'https://supplier.example',
       authMode: 'api_key', credentials: { apiKey: 'secret' }, enabled: false,
       warningThreshold: 20, secondaryWarningThreshold: 5, thresholdCurrency: 'USD',
-      rechargeUrl: 'https://supplier.example/account/recharge'
+      rechargeUrl: 'https://supplier.example/account/recharge',
+      balanceRefreshIntervalMinutes: 3, refreshIntervalMinutes: 45
     })
   });
   assert.equal(createProvider.status, 201);
   const createdProvider = (await createProvider.json()).provider;
   assert.equal(createdProvider.rechargeUrl, 'https://supplier.example/account/recharge');
   assert.equal(createdProvider.secondary_warning_threshold, 5);
+  assert.equal(createdProvider.balance_refresh_interval_minutes, 3);
+  assert.equal(createdProvider.refresh_interval_minutes, 45);
+  const cloneResponse = await fetch(`${base}/api/providers/${createdProvider.id}/clone`, {
+    method: 'POST', headers: { Cookie: cookie, 'X-CSRF-Token': session.csrfToken }
+  });
+  assert.equal(cloneResponse.status, 201);
+  assert.equal((await cloneResponse.json()).balance_refresh_interval_minutes, 3);
+  for (const interval of [0, 1.5, 1441]) {
+    const invalidInterval = await fetch(`${base}/api/providers/${createdProvider.id}`, {
+      method: 'PUT',
+      headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
+      body: JSON.stringify({ balanceRefreshIntervalMinutes: interval })
+    });
+    assert.equal(invalidInterval.status, 400);
+  }
+  const updatedInterval = await fetch(`${base}/api/providers/${createdProvider.id}`, {
+    method: 'PUT',
+    headers: { Cookie: cookie, 'Content-Type': 'application/json', 'X-CSRF-Token': session.csrfToken },
+    body: JSON.stringify({ balanceRefreshIntervalMinutes: 1 })
+  });
+  assert.equal(updatedInterval.status, 200);
+  assert.equal((await updatedInterval.json()).balance_refresh_interval_minutes, 1);
 
   const createMultiKeyProvider = await fetch(`${base}/api/providers`, {
     method: 'POST',

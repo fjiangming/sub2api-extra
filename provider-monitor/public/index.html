@@ -79,7 +79,8 @@
         <label><span>远端用户 ID</span><input name="remoteUserId"></label>
         <label><span>一级余额阈值</span><input name="warningThreshold" type="number" min="0" step="0.01"></label>
         <label><span>二级余额阈值</span><input name="secondaryWarningThreshold" type="number" min="0" step="0.01"></label>
-        <label><span>刷新间隔（分钟）</span><input name="refreshIntervalMinutes" type="number" min="1" max="1440" value="15"></label>
+        <label><span>余额检查间隔（分钟）</span><input name="balanceRefreshIntervalMinutes" type="number" min="1" max="1440" step="1" value="1" required></label>
+        <label><span>资产同步间隔（分钟）</span><input name="refreshIntervalMinutes" type="number" min="1" max="1440" step="1" value="15" required></label>
         <label><span>币种</span><input name="thresholdCurrency" value="USD" maxlength="12"></label>
         <label><span>充值倍率（支付 1 = 余额）</span><input name="rechargeMultiplier" type="number" min="0.000001" step="0.0001" placeholder="自动获取"></label>
         <label class="span-2"><span>充值链接</span><input name="rechargeUrl" type="url" maxlength="2048" placeholder="https://supplier.example/account/recharge"></label>

@@ -221,7 +221,7 @@ class AlertService {
     for (const provider of providers) await this.evaluateConnection(provider.id);
   }
 
-  async evaluateConnection(connectionId) {
+  async evaluateConnection(connectionId, options = {}) {
     const provider = this.db.prepare('SELECT * FROM provider_connections WHERE id = ?').get(connectionId);
     if (!provider) return [];
     const rules = this.db.prepare(`
@@ -272,6 +272,8 @@ class AlertService {
       }
     }
     for (const rule of rules) {
+      if (options.balancesOnly && !(['runway_below', 'stale_data'].includes(rule.rule_type) ||
+          (rule.rule_type === 'low_balance' && rule.scope === 'account'))) continue;
       if (rule.rule_type === 'rate_mismatch') {
         for (const evaluation of this.#evaluateRateMismatch(provider, rule)) {
           events.push(await this.#applyEvaluation(provider, rule, evaluation));
@@ -470,8 +472,9 @@ class AlertService {
     }
     if (rule.rule_type === 'stale_data') {
       const minutes = rule.threshold ?? this.config.staleAfterMinutes;
-      const ageMinutes = provider.last_success_at
-        ? (Date.now() - Date.parse(provider.last_success_at)) / 60000
+      const lastSuccessAt = provider.last_balance_success_at || provider.last_success_at;
+      const ageMinutes = lastSuccessAt
+        ? (Date.now() - Date.parse(lastSuccessAt)) / 60000
         : Number.POSITIVE_INFINITY;
       const matched = ageMinutes >= minutes;
       return {
@@ -480,7 +483,7 @@ class AlertService {
         subjectId: provider.id,
         severity: config.severity || 'warning',
         message: matched ? `${provider.name} 已连续 ${minutes} 分钟未成功更新余额。` : '',
-        details: { lastSuccessAt: provider.last_success_at, ageMinutes }
+        details: { lastSuccessAt, ageMinutes }
       };
     }
     if (rule.rule_type === 'sync_failed') {

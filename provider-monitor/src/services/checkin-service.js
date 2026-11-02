@@ -20,10 +20,7 @@ class CheckInService {
 
   async run(connectionId, options = {}) {
     const connection = this.providers.get(connectionId, { forAdapter: true });
-    const adapter = createAdapter(connection.adapter_type, {
-      connection, credentials: this.providers.getCredentials(connection), http: this.http, config: this.config,
-      onCredentialsUpdated: async (credentials) => this.providers.updateCredentials(connection, credentials)
-    });
+    const adapter = createAdapter(connection.adapter_type, this.providers.adapterContext(connection, this.http));
     const beforeBalance = this.db.prepare(`
       SELECT available FROM balance_snapshots WHERE connection_id = ? AND subject_type = 'account'
       ORDER BY captured_at DESC, id DESC LIMIT 1
