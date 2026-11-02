@@ -30,11 +30,33 @@ class AccountingStore {
       id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, key TEXT NOT NULL,
       actor TEXT NOT NULL, reason TEXT NOT NULL, before_value TEXT, after_value TEXT, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS accounting_results (
-      scope TEXT NOT NULL, date TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(scope,date));`);
+      scope TEXT NOT NULL, date TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(scope,date));
+      CREATE TABLE IF NOT EXISTS cash_records (
+      scope TEXT NOT NULL, key TEXT NOT NULL, source TEXT NOT NULL, date TEXT NOT NULL, payload TEXT NOT NULL,
+      PRIMARY KEY(scope,key));
+      CREATE INDEX IF NOT EXISTS cash_records_date ON cash_records(scope,date);
+      CREATE TABLE IF NOT EXISTS cash_requests (
+      scope TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, key TEXT NOT NULL,
+      PRIMARY KEY(scope,request_id));`);
   }
 
   documents() { return this.db.prepare('SELECT payload FROM accounting_documents WHERE scope=?').all(this.scope).map(row => JSON.parse(row.payload)); }
   document(key) { const row = this.db.prepare('SELECT payload FROM accounting_documents WHERE scope=? AND key=?').get(this.scope, key); return row ? JSON.parse(row.payload) : null; }
+  cashRecords() { return this.db.prepare('SELECT payload FROM cash_records WHERE scope=?').all(this.scope).map(row => JSON.parse(row.payload)); }
+  cashRecord(key) { const row = this.db.prepare('SELECT payload FROM cash_records WHERE scope=? AND key=?').get(this.scope, key); return row ? JSON.parse(row.payload) : null; }
+  saveCashSync(value) {
+    this.db.prepare(`INSERT INTO accounting_settings(scope,key,payload) VALUES (?,'cash:sync',?)
+      ON CONFLICT(scope,key) DO UPDATE SET payload=excluded.payload`).run(this.scope, JSON.stringify(value));
+  }
+  putCash(record, actor = null, reason = '现金记录更新') {
+    const previous = this.cashRecord(record.key);
+    if (JSON.stringify(previous) === JSON.stringify(record)) return previous;
+    this.db.prepare(`INSERT INTO cash_records(scope,key,source,date,payload) VALUES (?,?,?,?,?)
+      ON CONFLICT(scope,key) DO UPDATE SET source=excluded.source,date=excluded.date,payload=excluded.payload`)
+      .run(this.scope, record.key, record.source, record.date, JSON.stringify(record));
+    if (actor || previous) this.audit(`cash:${record.key}`, previous, record, actor || 'source-sync', reason);
+    return record;
+  }
   decisions() { return Object.fromEntries(this.db.prepare('SELECT key,payload FROM accounting_decisions WHERE scope=?').all(this.scope).map(row => [row.key, JSON.parse(row.payload)])); }
   setting(key, fallback = null) { const row = this.db.prepare('SELECT payload FROM accounting_settings WHERE scope=? AND key=?').get(this.scope, key); return row ? JSON.parse(row.payload) : fallback; }
 

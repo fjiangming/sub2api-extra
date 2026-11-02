@@ -159,6 +159,7 @@ function dailyProfitReport(items, { range, currency, timezone, granularity = 'da
   return { range, currency, timezone, granularity, generatedAt,
     supplierSource: 'upstream_daily_summary', supplierScope: 'account', providerFilter: 'scheduled_enabled',
     summary: { ...totals(items), days: items.length, completeDays: items.filter(row => row.complete).length },
+    completeSubtotal: totals(items.filter(row => row.complete)),
     periods, items: [...items].sort((a, b) => b.date.localeCompare(a.date)), notices: [...new Set(notices)] };
 }
 

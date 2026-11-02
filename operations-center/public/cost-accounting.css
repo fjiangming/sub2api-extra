@@ -5,7 +5,7 @@
 .accounting-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .accounting-metric { background: var(--surface); text-align: left; border: 1px solid var(--line); border-radius: 5px; padding: 15px; display: grid; gap: 9px; align-content: start; min-width: 0; }
 .accounting-metric span, .accounting-metric small { color: var(--muted); font-size: 12px; font-weight: 400; }
-.accounting-metric strong { font-size: 23px; font-weight: 650; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.accounting-metric strong { font-size: 23px; font-weight: 650; white-space: nowrap; min-width: 0; font-variant-numeric: tabular-nums; }
 .accounting-metric:last-child { border-top: 3px solid var(--green); padding-top: 13px; }
 .accounting-aux { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 20px; margin: 12px 0 18px; color: var(--muted); font-size: 12px; }
 .accounting-section { border-top: 1px solid var(--line); padding-top: 18px; margin-top: 20px; min-width: 0; }
@@ -17,10 +17,18 @@
 .accounting-section tfoot { background: var(--surface-subtle); font-weight: 600; }
 .accounting-day-table { min-width: 1000px; }
 .accounting-automatic-table { min-width: 850px; }
-.accounting-ledger-table { min-width: 950px; }
+.accounting-cash-table { min-width: 880px; }
+.accounting-cash-toolbar { display: flex; align-items: end; flex-wrap: wrap; gap: 12px 20px; margin-bottom: 14px; }
+.accounting-subtabs { display: flex; gap: 20px; }
+.accounting-subtabs button { border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); padding: 8px 0; }
+.accounting-subtabs button[aria-selected="true"] { color: var(--green); border-bottom-color: var(--green); }
+.accounting-detail-heading { align-items: center; flex-wrap: wrap; gap: 10px; }
+.accounting-saved { background: var(--green-soft); }
+.accounting-filter-total { font-size: 12px; }
 .accounting-search { display: flex; gap: 10px; align-items: end; flex-wrap: wrap; margin-bottom: 12px; }
 .accounting-search label:first-child { min-width: min(230px, 100%); }
 .accounting-search input { min-width: 0; }
+.accounting-search label { min-width: 0; max-width: 100%; }
 .accounting-link { background: transparent; border: 0; padding: 4px 0; color: var(--green); text-align: left; }
 .accounting-rules { margin-top: 20px; padding: 14px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
 .accounting-rules summary { cursor: pointer; width: fit-content; }
@@ -36,10 +44,16 @@
 .accounting-drawer-header h2 { margin: 0; font-size: 17px; }
 .accounting-drawer-body { padding: 20px; }
 .accounting-drawer-body h3 { font-size: 14px; margin: 18px 0 12px; }
+.accounting-drawer-body td { overflow-wrap: anywhere; }
+.accounting-drawer-body td small { display: block; color: var(--muted); margin-top: 5px; }
 .accounting-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .accounting-form .accounting-wide { grid-column: 1 / -1; }
 .accounting-form .form-actions { margin: 4px 0 0; }
 .accounting-form textarea { width: 100%; min-height: 70px; font: inherit; padding: 8px; border: 1px solid var(--line-strong); border-radius: 4px; resize: vertical; }
+.accounting-direction { border: 0; padding: 0; margin: 0; display: flex; gap: 20px; }
+.accounting-direction legend { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.accounting-direction label { display: flex; flex-direction: row; gap: 6px; align-items: center; }
+.accounting-direction input { width: 16px; min-height: 16px; margin: 0; }
 .accounting-form .checkbox-field { display: flex; flex-direction: row; gap: 8px; align-items: center; }
 .accounting-form .checkbox-field input { min-height: 20px; width: 18px; }
 .accounting-audit { overflow-wrap: anywhere; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 12px; }

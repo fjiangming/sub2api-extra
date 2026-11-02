@@ -636,7 +636,7 @@ function showAutomaticIncomeUsers() {
   drilldown.recordRequestId += 1;
   $('cost-auto-records-view').hidden = true;
   $('cost-auto-users-view').hidden = false;
-  $('page-title').textContent = window.CostAccountingUi ? '自动额度入账复核' : '自动收入复核';
+  $('page-title').textContent = window.CostAccountingUi ? '充值额度明细' : '自动收入复核';
   const query = drilldown.query;
   setPageMeta(`${query.start} 至 ${query.end} · ${query.currency}`);
   window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
@@ -709,7 +709,7 @@ async function loadAutomaticIncomeUsers() {
     `;
   }).join('') : emptyRow(6, drilldown.userSearch ? '没有匹配的兑换用户' : '所选范围暂无额度入账记录');
   setAutomaticIncomePagination('cost-auto-users', data.pagination);
-  $('page-title').textContent = window.CostAccountingUi ? '自动额度入账复核' : '自动收入复核';
+  $('page-title').textContent = window.CostAccountingUi ? '充值额度明细' : '自动收入复核';
   setPageMeta(`${data.range.start} 至 ${data.range.end} · ${data.currency} · ${formatInteger(data.summary.users)} 个用户归属`);
   refreshIcons();
 }
@@ -719,7 +719,7 @@ async function openAutomaticIncomeDrilldown() {
   const query = costAnalysisQuery();
   drilldown.active = true;
   drilldown.query = { start: query.start, end: query.end, currency: query.currency,
-    archived: Boolean(window.CostAccountingUi && accountingUi?.state.tab !== 'automatic') };
+    archived: false };
   drilldown.users = [];
   drilldown.userSearch = '';
   drilldown.userPage = 1;

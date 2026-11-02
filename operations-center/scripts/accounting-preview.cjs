@@ -15,6 +15,7 @@ const { CostLedgerStore } = require('../src/cost-ledger-store');
 const { AccountingStore } = require('../src/accounting-store');
 const { DailyProfitStore } = require('../src/daily-profit-store');
 const { AccountingService } = require('../src/services/accounting-service');
+const { CashFlowService } = require('../src/services/cash-flow-service');
 const { CostAnalysisService } = require('../src/services/cost-analysis-service');
 const { DailyProfitService } = require('../src/services/daily-profit-service');
 const { dateInTimezone, addUtcDays } = require('../src/services/metrics-service');
@@ -46,7 +47,7 @@ async function startPreview({ port = 0 } = {}) {
   const analysis = new CostAnalysisService({ pool: database, inspector, config, store: ledger, providerMonitor: monitor });
   const daily = new DailyProfitService({ analysis, store: dailyStore, config });
   const accounting = new AccountingService({ pool: database, inspector, config, store, ledger, analysis, dailyProfit: daily });
-  analysis.accounting = accounting;
+  const cashFlow = new CashFlowService({ pool: database, inspector, config, store, ledger, analysis, accounting });
   accounting.configure({ startDate: start, reason: 'Isolated local example' }, 'example');
   await database.exec(`CREATE TABLE users(id bigint PRIMARY KEY,balance numeric,created_at timestamptz,deleted_at timestamptz,email text,username text);
     CREATE TABLE redeem_codes(id bigint,used_by bigint,type text,status text,value numeric,used_at timestamptz,code text,notes text,created_at timestamptz);
@@ -76,11 +77,13 @@ async function startPreview({ port = 0 } = {}) {
   await analysis.getProviders({ refresh: true });
   dailyStore.enqueueDays(daily.scope(), Array.from({ length: 30 }, (_, index) => ({ date: addUtcDays(start, index) })));
   await daily.drain({ limit: 30 });
+  await accounting.collectDay(start);
   await accounting.collectDay(today);
   for (const document of store.documents().filter(item => item.origin === 'redeem' && !item.payments.length)) accounting.classify(document.key, { kind: 'gift', amount: 0, currency: 'CNY', reason: 'Synthetic gift evidence' }, 'example');
   accounting.classify('payment:2', { kind: 'subscription', amount: 199, currency: 'CNY', serviceStart: start, serviceEnd: today, reason: 'Synthetic service agreement' }, 'example');
   accounting.create({ kind: 'fee', name: '年度域名费用', date: start, amount: 365, currency: 'CNY', serviceStart: start, serviceEnd: addUtcDays(start, 364), category: 'domain', reason: 'Synthetic invoice' }, 'example');
-  const app = createApp({ config, auth, database: { ping: async () => ({ database: 'local-example' }), configured: () => true }, inspector, accounting, costAnalysis: analysis, dailyProfit: daily,
+  await cashFlow.sync();
+  const app = createApp({ config, auth, database: { ping: async () => ({ database: 'local-example' }), configured: () => true }, inspector, accounting, cashFlow, costAnalysis: analysis, dailyProfit: daily,
     settings: { getStatus: () => ({ setupRequired: false }) } });
   const outer = express();
   outer.get('/preview', async (req, res, next) => {
@@ -89,8 +92,9 @@ async function startPreview({ port = 0 } = {}) {
   outer.use(app);
   const server = outer.listen(port, '127.0.0.1'); await new Promise((resolve, reject) => { server.once('listening', resolve); server.once('error', reject); });
   daily.start();
-  return { port: server.address().port, start, today, accounting, controls, database, store, daily,
-    async close() { await daily.stop(); await new Promise(resolve => server.close(resolve)); auth.close(); dailyStore.close(); store.close(); await database.close(); fs.rmSync(directory, { recursive: true, force: true }); } };
+  cashFlow.start();
+  return { port: server.address().port, start, today, accounting, cashFlow, config, ledger, controls, database, store, daily,
+    async close() { await daily.stop(); await cashFlow.stop(); await new Promise(resolve => server.close(resolve)); auth.close(); dailyStore.close(); store.close(); await database.close(); fs.rmSync(directory, { recursive: true, force: true }); } };
 }
 
 if (require.main === module) startPreview({ port: Number(process.env.PORT || 19881) }).then(preview => {

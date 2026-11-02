@@ -9,6 +9,7 @@ const { CostLedgerStore } = require('./cost-ledger-store');
 const { DailyProfitStore } = require('./daily-profit-store');
 const { AccountingStore } = require('./accounting-store');
 const { AccountingService } = require('./services/accounting-service');
+const { CashFlowService } = require('./services/cash-flow-service');
 const { UserMessageStore } = require('./user-message-store');
 const { AuthService } = require('./auth');
 const { SchemaInspector } = require('./schema-inspector');
@@ -83,7 +84,8 @@ async function main() {
   accountingStore.initialize();
   const accounting = new AccountingService({ pool: database.read, inspector, config,
     store: accountingStore, ledger: costStore, analysis: costAnalysis, dailyProfit });
-  costAnalysis.accounting = accounting;
+  const cashFlow = new CashFlowService({ pool: database.read, inspector, config, store: accountingStore,
+    ledger: costStore, analysis: costAnalysis, accounting });
   const storage = new StorageService(database.read, inspector, config);
   const retention = new RetentionService({
     readPool: database.read,
@@ -104,7 +106,7 @@ async function main() {
     sub2api
   });
   const app = createApp({
-    config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, dailyProfit, accounting, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
+    config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
   });
   const server = http.createServer(app);
   server.requestTimeout = 120000;
@@ -118,6 +120,7 @@ async function main() {
   storage.start();
   scheduler.start();
   dailyProfit.start();
+  cashFlow.start();
   billingRecovery.start();
   console.info(`operations-center listening on http://${config.bindHost}:${config.port}`);
 
@@ -128,6 +131,7 @@ async function main() {
     console.info(`operations-center shutting down (${signal})`);
     scheduler.stop();
     await dailyProfit.stop();
+    await cashFlow.stop();
     await billingImports.stop();
     await billingRecovery.stop();
     storage.stop();

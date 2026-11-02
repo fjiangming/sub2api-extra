@@ -1,365 +1,234 @@
 'use strict';
 
 const CostAccountingUi = (() => {
-  const kinds = { customer_receipt: '客户充值收款', subscription: '订阅服务', service_income: '其他经营收入',
-    fee: '运营费用', provider_prepayment: '供应商充值', gift: '赠送额度', correction: '余额纠错',
-    excluded: '排除测试 / 非经营记录', refund_unconsumed: '未消费余额退款', refund_service: '已消费服务退款',
-    refund_subscription: '订阅终止退款',
-    transfer: '转账 / 提款', reference: '关联已有业务', funding: '已关联收款额度' };
-  const categories = { infrastructure: '服务器 / 带宽 / 存储', domain: '域名 / 证书 / 软件', payment: '支付手续费', marketing: '推广 / 佣金', labor: '人工 / 外包', other: '其他' };
-  const statusLabels = { complete: '已核验', source_pending: '来源待统计', income_pending: '收入待核验', fee_pending: '费用待分类', supplier_pending: '成本待核验', before_start: '核算起点之前', future: '未发生' };
-
   function create(h) {
     const root = document.getElementById('cost-accounting-root');
     if (!root) return null;
-    const e = h.escapeHtml;
-    const q = selector => root.querySelector(selector);
-    const state = { tab: 'automatic', report: null, request: 0, timer: null, page: 1, automaticPage: 1, documents: [],
-      documentPage: 1, documentTotal: 0, search: '', pendingOnly: false, selectedKey: null, providers: [], active: false };
-    const money = value => value == null ? '待核验' : h.formatMoney(value, '', 8);
-    const automaticMoney = value => value == null ? '暂不可用' : money(value);
-    const pct = value => value == null ? '—' : h.formatPercent(value);
-    const base = '/api/cost-analysis/accounting';
-    const options = (values, selected) => Object.entries(values).map(([value, label]) => `<option value="${e(value)}"${value === selected ? ' selected' : ''}>${e(label)}</option>`).join('');
+    const e = h.escapeHtml, q = selector => root.querySelector(selector), base = '/api/cost-analysis/cash';
+    const state = { tab: 'automatic', report: null, active: false, request: 0, automaticPage: 1, cashPage: 1,
+      currency: 'CNY', providers: [], search: '', direction: 'all', origin: 'all', dialogRequest: 0 };
+    const money = value => value == null ? '暂不可用' : h.formatMoney(value, '', 8);
+    const pct = value => value == null ? '-' : h.formatPercent(value);
+    const option = (key, label, selected) => `<option value="${e(key)}"${key === selected ? ' selected' : ''}>${e(label)}</option>`;
+    const button = (attr, value, label = '详情') => `<button type="button" class="accounting-link" ${attr}="${e(value)}">${label}</button>`;
+    const table = (headers, rows) => `<div class="table-wrap"><table><thead><tr>${headers.map(label => `<th>${label}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map(row => `<tr>${row.map(value => `<td>${value}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${headers.length}" class="empty-state">暂无记录</td></tr>`}</tbody></table></div>`;
+    const pager = name => `<div class="accounting-pager"><span data-${name}-page></span><div>${[-1, 1].map(step => `<button type="button" class="icon-button" data-${name}-step="${step}" title="${step < 0 ? '上一页' : '下一页'}" aria-label="${step < 0 ? '上一页' : '下一页'}">${h.icon(step < 0 ? 'chevron-left' : 'chevron-right')}</button>`).join('')}</div></div>`;
+    const metric = (title, value, hint, action, format = money) => `<button type="button" class="accounting-metric" data-metric="${e(action)}"><span>${e(title)}</span><strong class="${value < 0 ? 'negative-value' : ''}" title="${e(format(value))}">${e(format(value))}</strong><small>${e(hint)}</small></button>`;
     root.innerHTML = `
       <div class="accounting-tabs" role="tablist" aria-label="成本分析视图">
-        ${[['automatic', '自动统计'], ['business', '精细核算'], ['cash', '现金收支'], ['audit', '余额与核对']].map(([key, label]) => `<button type="button" id="accounting-tab-${key}" role="tab" aria-controls="accounting-${key}" aria-selected="${key === 'automatic'}" tabindex="${key === 'automatic' ? 0 : -1}" data-tab="${key}">${label}</button>`).join('')}
-      </div>
-      <div data-notice hidden></div>
+        ${[['automatic', '消费毛利'], ['cash', '现金收支']].map(([key, label]) => `<button type="button" id="accounting-tab-${key}" role="tab" aria-controls="accounting-${key}" aria-selected="${key === 'automatic'}" tabindex="${key === 'automatic' ? 0 : -1}" data-tab="${key}">${label}</button>`).join('')}
+      </div><div data-notice class="accounting-notice" role="status" hidden></div>
       <section id="accounting-automatic" role="tabpanel" aria-labelledby="accounting-tab-automatic">
         <div class="accounting-metrics" data-automatic-metrics></div><div class="accounting-aux" data-automatic-meta></div>
-        <section class="accounting-section"><div class="panel-heading"><h2>消费与毛利趋势</h2><span class="muted" data-automatic-range></span></div><div id="accounting-automatic-chart" class="chart" role="img" aria-label="主站消费、供应商实际消费及消费毛利趋势"></div></section>
-        <section class="accounting-section"><div class="panel-heading"><h2>每日消费与毛利</h2><span class="muted" data-automatic-day-meta></span></div>
-          <div class="table-wrap"><table class="accounting-automatic-table"><thead><tr><th>日期</th><th class="numeric">主站消费</th><th class="numeric">供应商消费</th><th class="numeric">消费毛利</th><th class="numeric">毛利率</th><th class="numeric">主站请求数</th><th>数据状态</th><th>详情</th></tr></thead><tbody data-automatic-days></tbody><tfoot data-automatic-total></tfoot></table></div>
-          <div class="accounting-pager"><span data-automatic-day-page></span><div><button class="icon-button" type="button" data-automatic-day-step="-1" title="上一页" aria-label="上一页">${h.icon('chevron-left')}</button><button class="icon-button" type="button" data-automatic-day-step="1" title="下一页" aria-label="下一页">${h.icon('chevron-right')}</button></div></div>
-        </section>
-      </section>
-      <section id="accounting-business" role="tabpanel" aria-labelledby="accounting-tab-business" hidden>
-        <div class="accounting-metrics" data-metrics></div><div class="accounting-aux" data-business-meta></div>
-        <section class="accounting-section"><div class="panel-heading"><h2>经营趋势</h2><span class="muted" data-range></span></div><div id="accounting-chart" class="chart" role="img" aria-label="确认收入、供应商实际成本、运营费用及经营利润趋势"></div></section>
-        <section class="accounting-section"><div class="panel-heading"><h2>每日经营明细</h2><span class="muted" data-day-meta></span></div>
-          <div class="table-wrap"><table class="accounting-day-table"><thead><tr><th>日期</th><th class="numeric">用户消费额度</th><th class="numeric">确认收入</th><th class="numeric">供应商成本</th><th class="numeric">运营费用</th><th class="numeric">经营利润</th><th class="numeric">利润率</th><th>数据状态</th><th>详情</th></tr></thead><tbody data-days></tbody><tfoot data-total></tfoot></table></div>
-          <div class="accounting-pager"><span data-day-page></span><div><button class="icon-button" type="button" data-day-step="-1" title="上一页" aria-label="上一页">${h.icon('chevron-left')}</button><button class="icon-button" type="button" data-day-step="1" title="下一页" aria-label="下一页">${h.icon('chevron-right')}</button></div></div>
+        <section class="accounting-section"><div class="panel-heading"><h2>消费与毛利趋势</h2><span class="muted" data-automatic-range></span></div><div id="accounting-automatic-chart" class="chart" role="img" aria-label="主站消费、供应商消费及消费毛利趋势"></div></section>
+        <section class="accounting-section"><div class="panel-heading accounting-detail-heading"><div class="accounting-subtabs" role="tablist" aria-label="消费明细">${[['days', '每日明细'], ['providers', '供应商汇总']].map(([key, label]) => `<button type="button" id="cost-detail-tab-${key}" role="tab" aria-controls="cost-detail-${key}" aria-selected="${key === 'days'}" tabindex="${key === 'days' ? 0 : -1}" data-detail-tab="${key}">${label}</button>`).join('')}</div><span class="muted" data-automatic-day-meta></span></div>
+          <div id="cost-detail-days" role="tabpanel" aria-labelledby="cost-detail-tab-days"><div class="table-wrap"><table class="accounting-automatic-table"><thead><tr><th>日期</th><th class="numeric">主站消费</th><th class="numeric">供应商消费</th><th class="numeric">消费毛利</th><th class="numeric">毛利率</th><th class="numeric">请求数</th><th>数据状态</th><th>操作</th></tr></thead><tbody data-automatic-days></tbody><tfoot data-automatic-total></tfoot></table></div>${pager('automatic-day')}</div>
+          <div id="cost-detail-providers" role="tabpanel" aria-labelledby="cost-detail-tab-providers" hidden><div data-provider-summary></div></div>
         </section>
       </section>
       <section id="accounting-cash" role="tabpanel" aria-labelledby="accounting-tab-cash" hidden>
+        <div class="accounting-cash-toolbar"><label>现金币种<select data-cash-currency><option>CNY</option></select></label><span class="muted" data-cash-range></span></div>
         <div class="accounting-metrics" data-cash-metrics></div><div class="accounting-aux" data-cash-meta></div>
-        <section class="accounting-section"><div class="panel-heading"><h2>收支与额度台账</h2><button type="button" class="button secondary" data-command="finance">${h.icon('external-link')}<span>收款与入账</span></button></div>
-          <form class="accounting-search" data-doc-search><label>搜索记录<input name="search" type="search" placeholder="名称、用户 ID、记录 ID"></label><label>业务类型<select name="kind"><option value="">全部</option>${options(kinds)}</select></label><label>状态<select name="pending"><option value="">全部</option><option value="1">待核验</option></select></label><button class="button primary" type="submit">${h.icon('search')}<span>查询</span></button></form>
-          <div class="table-wrap"><table class="accounting-ledger-table"><thead><tr><th>日期</th><th>项目 / 来源</th><th>业务类型</th><th>用户 / 供应商</th><th class="numeric">原币金额</th><th class="numeric">CNY 金额</th><th>状态</th><th>操作</th></tr></thead><tbody data-documents></tbody></table></div>
-          <div class="accounting-pager"><span data-document-page></span><div><button type="button" class="icon-button" title="上一页" aria-label="上一页" data-document-step="-1">${h.icon('chevron-left')}</button><button type="button" class="icon-button" title="下一页" aria-label="下一页" data-document-step="1">${h.icon('chevron-right')}</button></div></div>
+        <section class="accounting-section"><div class="panel-heading"><h2>现金收支趋势</h2></div><div id="accounting-cash-chart" class="chart" role="img" aria-label="现金收入、支出与净现金流趋势"></div></section>
+        <section class="accounting-section"><div class="panel-heading"><h2>收支记录</h2><button type="button" class="button secondary" data-command="add">${h.icon('plus')}<span>记一笔</span></button></div>
+          <form class="accounting-search" data-cash-search><label>搜索<input name="search" type="search" maxlength="100" placeholder="项目、供应商、单号"></label><label>收支<select name="direction"><option value="all">全部</option><option value="income">收入</option><option value="expense">支出</option></select></label><label>来源<select name="origin"><option value="all">全部来源</option><option value="automatic">自动收款</option><option value="manual">手工 / 历史</option></select></label><button type="submit" class="icon-button" title="搜索" aria-label="搜索">${h.icon('search')}</button></form>
+          <p class="muted accounting-filter-total" data-filter-total></p><div class="table-wrap"><table class="accounting-cash-table"><thead><tr><th>日期</th><th>项目</th><th>收支</th><th>来源</th><th>供应商 / 用户</th><th class="numeric">原币金额</th><th>统计状态</th><th>操作</th></tr></thead><tbody data-cash-rows></tbody></table></div>${pager('cash')}
         </section>
       </section>
-      <section id="accounting-audit" role="tabpanel" aria-labelledby="accounting-tab-audit" hidden>
-        <div class="accounting-metrics" data-balance-metrics></div><div class="accounting-aux" data-balance-meta></div>
-        <section class="accounting-section"><div class="panel-heading"><h2>待核对事项</h2><button type="button" class="button secondary" data-command="pending">${h.icon('list-filter')}<span>全部待分类记录</span></button></div><div data-issues></div></section>
-        <section class="accounting-section"><div class="panel-heading"><h2>期间余额核对</h2></div><div data-balance-history></div></section>
-        <section class="accounting-section"><div class="panel-heading"><h2>用户期初余额</h2><button type="button" class="button secondary" data-command="opening">${h.icon('plus')}<span>补录期初</span></button></div><form class="accounting-search" data-user-search><label>搜索用户<input type="search" name="search" placeholder="用户 ID 或用户名"></label><button class="button secondary" type="submit">${h.icon('search')}<span>搜索</span></button></form><div class="table-wrap"><table><thead><tr><th>用户</th><th class="numeric">当前余额</th><th>期初状态</th><th>操作</th></tr></thead><tbody data-users></tbody></table></div><div class="accounting-pager"><span data-user-page></span><div><button class="icon-button" type="button" title="上一页" aria-label="上一页" data-user-step="-1">${h.icon('chevron-left')}</button><button class="icon-button" type="button" title="下一页" aria-label="下一页" data-user-step="1">${h.icon('chevron-right')}</button></div></div></section>
-      </section>
-      <details class="accounting-rules"><summary>统计口径与核算设置</summary><div class="accounting-aux accounting-policy" data-policy></div>
-        <p>自动统计直接读取非 ID 1 用户的主站实际消费与启用供应商账号日消费，消费毛利 = 主站消费 − 供应商实际消费，毛利率以主站消费为分母。充值额度及当前余额单独展示，不重复计入毛利；手工支出不与上游消费叠加。该口径包含赠送和订阅产生的主站计费额度，不等同现金实收利润。</p>
-        <p>确认收入按付费额度的实收价值、订阅服务期间及其他已交付服务计算。付费与赠送额度按每日加权平均分配；充值收款不与消费收入相加。上游充值仅列现金支出，上游实际消费计成本。用户消费不含 ID 1，管理员产生的上游成本保留。历史记录及已删除用户的经营数据保留。</p>
-        <p>金额缺失显示待核验；已核验日期小计不代表整期利润。上游余额按快照时已确认倍率与汇率折算，为当前估值。当前余额独立展示，不参与本期利润扣减。</p>
-      </details>
-      <dialog class="accounting-dialog" data-dialog aria-labelledby="accounting-drawer-title"><div class="accounting-drawer-header"><h2 id="accounting-drawer-title"></h2><button type="button" class="icon-button" data-close title="关闭" aria-label="关闭">${h.icon('x')}</button></div><div class="accounting-drawer-body" data-drawer></div></dialog>`;
+      <details class="accounting-rules"><summary>统计范围与数据来源</summary><p>消费毛利 = 主站实际消费 − 启用定时检查的供应商账号实际消费。主站消费不含 ID 1；包含余额、赠送与订阅产生的用量，充值额度和余额独立展示。供应商充值只计现金支出，不重复扣入消费毛利。</p><p>现金收支按实际收付款日、原币种汇总。自动收入来自已付款订单的实收金额，兑换额度不再重复计钱；线下收付可直接记账。前三张卡片按所选期间统计，列表搜索只筛记录。</p><p>累计净结余 = 全历史累计入账 − 全历史累计支出 − 当前用户余额。固定 CNY，不受日期、粒度和现金币种影响；余额排除 ID 1 及已删除用户。外币使用发生日的现金汇率；历史来源、汇率或余额缺失时保留未知。已同步收支及旧日报保留，源站同步前已清理的数据无法恢复。</p><p>历史日报每日 01:00 自动归档，今天实时统计；缺失来源自动重试，未知不当零。消费毛利、净现金流和累计净结余均不表示经营净利润。</p></details>
+      <dialog class="accounting-dialog" data-dialog aria-labelledby="accounting-drawer-title"><header class="accounting-drawer-header"><h2 id="accounting-drawer-title"></h2><button type="button" class="icon-button" data-close title="关闭" aria-label="关闭">${h.icon('x')}</button></header><div class="accounting-drawer-body" data-drawer></div></dialog>`;
 
-    function metric(label, value, hint, action, formatter = money) {
-      return `<button type="button" class="accounting-metric" data-metric="${action}"><span>${label}</span><strong class="${value != null && value < 0 ? 'negative-value' : ''}">${e(formatter(value))}</strong><small>${e(hint)}</small></button>`;
+    function fitMetrics() {
+      root.querySelectorAll('.accounting-metric strong').forEach(node => {
+        node.style.fontSize = ''; let size = parseFloat(getComputedStyle(node).fontSize);
+        while (node.scrollWidth > node.clientWidth && size > 10) { size--; node.style.fontSize = `${size}px`; }
+      });
     }
-    function table(headers, rows) {
-      return `<div class="table-wrap"><table><thead><tr>${headers.map(header => `<th>${e(header)}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map(row => `<tr>${row.map(cell => `<td>${cell}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${headers.length}" class="empty-state">暂无数据</td></tr>`}</tbody></table></div>`;
-    }
+    new ResizeObserver(fitMetrics).observe(root);
+    function readyIcons() { h.refreshIcons(); requestAnimationFrame(fitMetrics); }
     function drawer(title, body) {
-      q('#accounting-drawer-title').textContent = title; q('[data-drawer]').innerHTML = body;
-      if (!q('[data-dialog]').open) q('[data-dialog]').showModal();
-      q('[data-dialog]').scrollTop = 0; h.refreshIcons();
+      ++state.dialogRequest; q('#accounting-drawer-title').textContent = title; q('[data-drawer]').innerHTML = body;
+      if (!q('[data-dialog]').open) q('[data-dialog]').showModal(); readyIcons();
     }
-    async function changeTab(tab, { reload = true } = {}) {
-      const previous = state.tab;
-      state.tab = tab;
-      ['automatic', 'business', 'cash', 'audit'].forEach(key => { q(`[data-tab="${key}"]`).setAttribute('aria-selected', String(tab === key)); q(`[data-tab="${key}"]`).tabIndex = tab === key ? 0 : -1; q(`#accounting-${key}`).hidden = key !== tab; });
-      if (!reload) return;
-      if (!state.report || (tab === 'automatic') !== (previous === 'automatic') || (tab === 'automatic') !== Boolean(state.report.automatic)) { q('[data-notice]').hidden = true; await load(); }
-      else if (tab === 'cash') await loadDocuments();
-      if (tab === 'business' || tab === 'automatic') h.resizeCharts();
+    function pageState(name, p) {
+      q(`[data-${name}-page]`).textContent = `第 ${p.page} / ${Math.max(1, p.totalPages)} 页 · ${p.total} ${name === 'balance' ? '位用户' : name === 'automatic-day' ? '天' : '条'}`;
+      q(`[data-${name}-step="-1"]`).disabled = p.page <= 1; q(`[data-${name}-step="1"]`).disabled = p.page >= p.totalPages;
     }
-    function render() {
-      const report = state.report; if (!report) return;
-      if (report.automatic) { renderAutomatic(); return; }
-      const s = report.summary;
-      q('[data-metrics]').innerHTML = metric('本期确认收入', s.revenue, '付费余额消费 / 订阅 / 已履约收入', 'revenue') + metric('供应商实际成本', s.supplierCost, '启用供应商账号日汇总', 'supplier') + metric('其他运营费用', s.fee, '按费用所属期间分摊', 'fee') + metric('本期经营利润', s.profit, `经营利润率 ${pct(s.margin)}`, 'profit');
-      q('[data-business-meta]').innerHTML = `<span>用户消费额度 ${e(money(s.siteConsumption))}</span><span>服务毛利 ${e(money(s.grossProfit))}</span><button type="button" class="accounting-link" data-command="audit">${s.completeDays}/${s.days} 天已核验</button>`;
-      q('[data-range]').textContent = `${report.range.start} 至 ${report.range.end} · CNY`;
-      q('[data-day-meta]').textContent = `${report.timezone} · 历史归档 / 当日实时`;
-      const c = report.cash;
-      q('[data-cash-metrics]').innerHTML = metric('确认实收', c.receipts, c.complete ? '同笔收款仅计一次' : `有 ${c.pending} 条记录待核验`, 'receipts') + metric('实际退款', c.refunds, '按实际退款金额核对', 'refunds') + metric('现金支出', c.payments, '含上游充值及实际付款', 'payments') + metric('净现金流', c.net, '实收 − 退款 − 现金支出', 'cash');
-      q('[data-cash-meta]').innerHTML = `<button type="button" class="accounting-link" data-command="credits">自动额度入账 ${e(money(c.credit))} · 用户复核</button><span>${c.pending} 条待核验</span>`;
-      const b = report.balances;
-      q('[data-balance-metrics]').innerHTML = metric('当前用户余额', b.userBalance, '现有用户 · 不含 ID 1', 'users') + metric('当前上游预付余额', b.providerBalance, '账号余额折算估值', 'balances') + metric('删除账户残留余额', b.deletedBalance, '独立核对履约 / 退款', 'deleted') + metric('待核对事项', report.issueCount, '查看来源、分类与覆盖缺口', 'audit', value => String(value));
-      q('[data-balance-meta]').textContent = `当前快照 ${b.capturedAt ? h.formatDateTime(b.capturedAt, report.timezone) : '不可用'} · 不随日期筛选回溯`;
-      q('[data-issues]').innerHTML = report.issues.length ? report.issues.map((issue, index) => `<div class="accounting-issue"><div><strong>${e(issue.message)}</strong><small>${e([issue.date, issue.userName || issue.userId, issue.documentKey].filter(Boolean).join(' · '))}</small></div><button type="button" class="button secondary" data-issue="${index}">核对</button></div>`).join('') : '<p class="muted">所选核算范围暂无待核对事项</p>';
-      q('[data-balance-history]').innerHTML = '<p class="muted">没有完整的历史时点快照，暂不展示历史期初 / 期末余额。</p>';
-      q('[data-policy]').innerHTML = `<span>核算起点 ${e(report.policy.startDate)}</span><span>每日加权平均 · 规则 v${report.policy.version}</span><button type="button" class="accounting-link" data-command="policy">修改起点</button><button type="button" class="accounting-link" data-command="refresh">重算所选范围</button>`;
-      const notice = q('[data-notice]'); notice.hidden = !report.issueCount && !report.archive?.pendingDays && s.completeDays === s.days;
-      notice.className = 'accounting-notice'; notice.innerHTML = `<span>${report.archive?.pendingDays ? `${report.archive.pendingDays} 天日报等待后台统计。` : ''}${report.issueCount ? `${report.issueCount} 项待核验，完整利润暂不确定。` : s.completeDays !== s.days ? '部分日期尚无完整核算依据，请核对核算起点及来源。' : ''}</span><button class="accounting-link" type="button" data-command="audit">查看问题</button>`;
-      renderDays(); renderUsers(); renderChart(); h.refreshIcons();
+    function renderChart(id, periods, fields, currency) {
+      h.chart(id, { legend: { type: 'scroll', top: 0, bottom: 'auto', left: 0, right: 0, data: fields.map(field => field[1]) },
+        grid: { left: 12, right: 12, top: 58, bottom: 16, containLabel: true }, tooltip: { trigger: 'axis', confine: true, valueFormatter: money },
+        xAxis: { type: 'category', data: periods.map(row => row.label), axisLabel: { hideOverlap: true } }, yAxis: { type: 'value', name: currency },
+        series: fields.map(([key, name, color]) => ({ name, type: 'line', showSymbol: false, connectNulls: false, data: periods.map(row => row[key]), lineStyle: { color, width: 2 }, itemStyle: { color } })) });
     }
     function renderAutomatic() {
-      const report = state.report, s = report.summary;
-      q('[data-automatic-metrics]').innerHTML = metric('主站消费', s.siteConsumption, '用户实际消费 · 不含 ID 1', 'siteConsumption', automaticMoney) + metric('供应商实际消费', s.supplierConsumption, '启用供应商账号日汇总', 'supplierConsumption', automaticMoney) + metric('消费毛利', s.profit, '主站消费 − 供应商实际消费', 'profit', automaticMoney) + metric('消费毛利率', s.margin, `${s.completeDays}/${s.days} 天数据完整`, 'margin', pct);
-      renderAutomaticMeta();
-      q('[data-automatic-range]').textContent = `${report.range.start} 至 ${report.range.end} · CNY`;
-      q('[data-automatic-day-meta]').textContent = '历史归档 / 当日实时';
-      q('[data-policy]').innerHTML = '<span>自动统计按所选日期读取，无需核验期初或逐笔分类。</span>';
-      const notice = q('[data-notice]'); notice.hidden = s.completeDays === s.days && !report.archive?.pendingDays;
-      notice.className = 'accounting-notice'; notice.innerHTML = `<span>${report.archive?.pendingDays ? `${report.archive.pendingDays} 天历史数据正在后台统计或重试。` : ''}${s.completeDays !== s.days ? '部分消费数据暂不完整，对应日期的毛利留空。' : ''}</span>`;
-      renderAutomaticDays();
-      renderChart('accounting-automatic-chart', [['siteConsumption', '主站消费', '#176b4d'], ['supplierConsumption', '供应商消费', '#b05a3c'], ['profit', '消费毛利', '#2d5ea8']]);
-      h.refreshIcons();
+      const r = state.report, s = r.summary;
+      q('[data-automatic-metrics]').innerHTML = metric('主站消费', s.siteConsumption, '用户实际消费 · 不含 ID 1', 'siteConsumption') + metric('供应商实际消费', s.supplierConsumption, '启用供应商账号日汇总', 'supplierConsumption') + metric('消费毛利', s.profit, '主站消费 − 供应商实际消费', 'profit') + metric('消费毛利率', s.margin, `${s.completeDays}/${s.days} 天数据完整`, 'margin', pct);
+      q('[data-automatic-range]').textContent = `${r.range.start} 至 ${r.range.end} · CNY`; q('[data-automatic-day-meta]').textContent = '历史归档 / 当日实时';
+      const notice = q('[data-notice]'); notice.hidden = s.completeDays === s.days && !r.archive?.pendingDays;
+      notice.textContent = `${r.archive?.pendingDays ? `${r.archive.pendingDays} 天历史数据正在后台同步或重试。` : ''}${s.completeDays !== s.days ? `数据完整 ${s.completeDays}/${s.days} 天，完整日期毛利小计 ${money(r.completeSubtotal?.profit)} CNY。缺失日期留空。` : ''}`;
+      renderMeta(); renderAutomaticDays(); renderProviders();
+      renderChart('accounting-automatic-chart', r.periods, [['siteConsumption', '主站消费', '#176b4d'], ['supplierConsumption', '供应商消费', '#b05a3c'], ['profit', '消费毛利', '#2d5ea8']], 'CNY'); readyIcons();
     }
-    function renderAutomaticMeta() {
-      const meta = state.automaticMeta?.summary;
-      const format = value => value == null && state.automaticMetaLoading ? '读取中' : automaticMoney(value);
-      q('[data-automatic-meta]').innerHTML = `<button type="button" class="accounting-link" data-command="credits">本期充值额度 ${e(format(meta?.automaticRevenue))} · 用户明细</button><button type="button" class="accounting-link" data-command="automatic-balance">当前用户余额 ${e(format(meta?.userBalance))}</button><span>${e(state.report.timezone)} · CNY</span>`;
+    function renderMeta() {
+      const value = (source, amount) => source === undefined ? '读取中' : money(amount);
+      q('[data-automatic-meta]').innerHTML = button('data-command', 'credits', `本期充值额度 ${e(value(state.credits, state.credits?.complete ? state.credits.summary.totalIncome : null))}`) + button('data-command', 'balance', `当前用户余额 ${e(value(state.balances, state.balances?.userBalance))}`) + button('data-command', 'upstream', `当前上游余额 ${e(value(state.upstream, state.upstream?.total))}`) + '<span>CNY · 余额为当前快照</span>'; readyIcons();
     }
     function renderAutomaticDays() {
-      const report = state.report, size = 15, pages = Math.max(1, Math.ceil(report.items.length / size));
-      state.automaticPage = Math.max(1, Math.min(state.automaticPage, pages));
-      const labels = { complete: '数据完整', site_incomplete: '用量缺失', supplier_incomplete: '成本缺失', future: '未发生', pending_archive: '待统计', archive_failed: '统计失败', live_failed: '读取失败' };
-      q('[data-automatic-days]').innerHTML = report.items.slice((state.automaticPage - 1) * size, state.automaticPage * size).map(row => `<tr><td><strong>${e(row.date)}</strong></td>${['siteConsumption', 'supplierConsumption', 'profit'].map(key => `<td class="numeric${row[key] < 0 ? ' negative-value' : ''}">${e(automaticMoney(row[key]))}</td>`).join('')}<td class="numeric">${pct(row.margin)}</td><td class="numeric">${row.siteRequests == null ? '—' : e(row.siteRequests)}</td><td><span class="badge ${row.complete ? 'success' : 'warning'}">${e(labels[row.status] || '数据不完整')}</span><small>${row.mode === 'live' ? '今日实时' : row.mode === 'archived' ? '已归档' : '待统计'}${row.archiveStatus ? ' · 补算中' : ''}</small></td><td><button type="button" class="accounting-link" data-automatic-day="${e(row.date)}">详情</button></td></tr>`).join('') || '<tr><td colspan="8" class="empty-state">所选范围暂无数据</td></tr>';
-      const s = report.summary;
-      q('[data-automatic-total]').innerHTML = `<tr><th>期间合计</th>${['siteConsumption', 'supplierConsumption', 'profit'].map(key => `<td class="numeric">${e(automaticMoney(s[key]))}</td>`).join('')}<td class="numeric">${pct(s.margin)}</td><td colspan="3">${s.completeDays}/${s.days} 天数据完整</td></tr>`;
-      q('[data-automatic-day-page]').textContent = `第 ${state.automaticPage} / ${pages} 页 · ${report.items.length} 天`;
-      q('[data-automatic-day-step="-1"]').disabled = state.automaticPage <= 1; q('[data-automatic-day-step="1"]').disabled = state.automaticPage >= pages;
+      const r = state.report, size = 15, pages = Math.max(1, Math.ceil(r.items.length / size)); state.automaticPage = Math.max(1, Math.min(state.automaticPage, pages));
+      const labels = { complete: '数据完整', site_incomplete: '用量缺失', supplier_incomplete: '成本缺失', future: '未发生', pending_archive: '同步中', archive_failed: '自动重试', live_failed: '自动重试' };
+      q('[data-automatic-days]').innerHTML = r.items.slice((state.automaticPage - 1) * size, state.automaticPage * size).map(row => `<tr><td><strong>${e(row.date)}</strong></td>${['siteConsumption', 'supplierConsumption', 'profit'].map(key => `<td class="numeric${row[key] < 0 ? ' negative-value' : ''}">${e(money(row[key]))}</td>`).join('')}<td class="numeric">${e(pct(row.margin))}</td><td class="numeric">${e(row.siteRequests ?? '-')}</td><td><span class="badge ${row.complete ? 'success' : 'warning'}">${e(labels[row.status] || '数据缺失')}</span><small>${row.mode === 'live' ? '今日实时' : row.mode === 'archived' ? '已归档' : '等待同步'}${row.archiveStatus ? ' · 自动更新中' : ''}</small></td><td>${button('data-day', row.date)}</td></tr>`).join('');
+      const total = (label, values, hint) => `<tr><th>${label}</th>${['siteConsumption', 'supplierConsumption', 'profit'].map(key => `<td class="numeric">${e(money(values?.[key]))}</td>`).join('')}<td class="numeric">${e(pct(values?.margin))}</td><td colspan="3">${hint}</td></tr>`;
+      q('[data-automatic-total]').innerHTML = total('期间合计', r.summary, `${r.summary.completeDays}/${r.summary.days} 天完整`) + (r.summary.completeDays < r.summary.days ? total('完整日期小计', r.completeSubtotal, `仅 ${r.summary.completeDays} 天`) : '');
+      pageState('automatic-day', { page: state.automaticPage, totalPages: pages, total: r.items.length }); readyIcons();
     }
-    function renderDays() {
-      const report = state.report; const size = 15; const totalPages = Math.max(1, Math.ceil(report.items.length / size));
-      state.page = Math.min(state.page, totalPages);
-      const rows = report.items.slice((state.page - 1) * size, state.page * size);
-      q('[data-days]').innerHTML = rows.map(row => `<tr><td><strong>${e(row.date)}</strong></td>${['siteConsumption', 'revenue', 'supplierCost', 'fee', 'profit'].map(key => `<td class="numeric${row[key] < 0 ? ' negative-value' : ''}">${e(money(row[key]))}</td>`).join('')}<td class="numeric">${pct(row.margin)}</td><td><span class="badge ${row.complete ? 'success' : 'warning'}">${e(statusLabels[row.status] || '待核验')}</span><small>${row.mode === 'live' ? '今日实时' : row.mode === 'archived' ? '已归档' : '待统计'}${row.archiveStatus ? ' · 补算中' : ''}</small></td><td><button class="accounting-link" type="button" data-day="${e(row.date)}">详情</button></td></tr>`).join('');
-      const s = report.summary;
-      q('[data-total]').innerHTML = `<tr><th>期间合计</th>${['siteConsumption', 'revenue', 'supplierCost', 'fee', 'profit'].map(key => `<td class="numeric">${e(money(s[key]))}</td>`).join('')}<td class="numeric">${pct(s.margin)}</td><td colspan="2">${s.completeDays}/${s.days} 天已核验</td></tr>${s.completeDays !== s.days && s.completeDays ? `<tr><th>已核验日期小计</th>${['siteConsumption', 'revenue', 'supplierCost', 'fee', 'profit'].map(key => `<td class="numeric">${e(money(report.verifiedSubtotal[key]))}</td>`).join('')}<td class="numeric">${pct(report.verifiedSubtotal.margin)}</td><td colspan="2">仅 ${s.completeDays} 天</td></tr>` : ''}`;
-      q('[data-day-page]').textContent = `第 ${state.page} / ${totalPages} 页 · ${report.items.length} 天`;
-      q('[data-day-step="-1"]').disabled = state.page <= 1; q('[data-day-step="1"]').disabled = state.page >= totalPages;
+    function providerRows() {
+      const groups = new Map(), missingScope = state.report.items.some(row => !row.supplierComplete && !row.providers?.length && row.status !== 'future');
+      for (const day of state.report.items) for (const provider of day.providers || []) {
+        if (!groups.has(provider.id)) groups.set(provider.id, { id: provider.id, name: provider.name, days: [], known: 0 });
+        const group = groups.get(provider.id); group.days.push({ date: day.date, ...provider }); if (provider.cost != null) group.known += Number(provider.cost);
+      }
+      return [...groups.values()].map(row => ({ ...row, complete: !missingScope && row.days.every(day => day.complete && day.cost != null) }));
     }
-    function renderChart(id = 'accounting-chart', fields = [['revenue', '确认收入', '#176b4d'], ['supplierCost', '供应商成本', '#b05a3c'], ['profit', '经营利润', '#2d5ea8'], ['fee', '运营费用', '#69716b']]) {
-      h.chart(id, { legend: { type: 'scroll', top: 0, bottom: 'auto', left: 0, right: 0, data: fields.map(field => field[1]), selected: { '运营费用': false } },
-        grid: { left: 12, right: 12, top: 58, bottom: 16, containLabel: true },
-        tooltip: { trigger: 'axis', confine: true, valueFormatter: id === 'accounting-automatic-chart' ? automaticMoney : money },
-        xAxis: { type: 'category', data: state.report.periods.map(period => period.label), axisLabel: { hideOverlap: true } },
-        yAxis: { type: 'value', name: 'CNY' }, series: fields.map(([key, name, color]) => ({ name, type: 'line', connectNulls: false, showSymbol: false, data: state.report.periods.map(period => period[key]), lineStyle: { color, width: 2 }, itemStyle: { color } })) });
+    function renderProviders() {
+      q('[data-provider-summary]').innerHTML = table(['供应商', '实际消费 CNY', '完整 / 纳入天数', '操作'], providerRows().map(row => [e(row.name), `${e(money(row.complete ? row.known : null))}${!row.complete ? `<small>已取得 ${e(money(row.known))}</small>` : ''}`, `${row.days.filter(day => day.complete).length} / ${row.days.length}`, `${button('data-provider', row.id)} · ${button('data-provider-entry', row.id, '记支出')}`])); readyIcons();
     }
-    function renderUsers() {
-      const term = (q('[data-user-search]').elements.search.value || '').toLowerCase();
-      const users = state.report.balances.users.filter(user => `${user.name} ${user.id}`.toLowerCase().includes(term));
-      const size = 20, pages = Math.max(1, Math.ceil(users.length / size)); state.userPage = Math.max(1, Math.min(pages, state.userPage || 1));
-      q('[data-users]').innerHTML = users.slice((state.userPage - 1) * size, state.userPage * size).map(user => `<tr><td>${e(user.name)}<small class="muted">ID ${e(user.id)}${user.deleted ? ' · 已删除' : ''}</small></td><td class="numeric">${e(money(user.balance))}</td><td>${user.opening?.asOf === state.report.policy.startDate ? '已确认' : '待确认 / 新用户零期初'}</td><td><button type="button" class="accounting-link" data-opening="${e(user.id)}">核对期初</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">没有匹配用户</td></tr>';
-      q('[data-user-page]').textContent = `第 ${state.userPage} / ${pages} 页 · ${users.length} 位用户`;
-      q('[data-user-step="-1"]').disabled = state.userPage <= 1; q('[data-user-step="1"]').disabled = state.userPage >= pages;
+    function renderCash() {
+      const r = state.report, s = r.summary;
+      q('[data-cash-currency]').innerHTML = [...new Set([...r.currencies, state.currency])].map(key => option(key, key, state.currency)).join(''); q('[data-cash-range]').textContent = `${r.range.start} 至 ${r.range.end} · ${r.currency}`;
+      q('[data-cash-metrics]').innerHTML = metric('本期现金收入', s.income, r.currency, 'income') + metric('本期现金支出', s.expense, r.currency, 'expense') + metric('净现金流', s.net, `收入 − 支出 · ${r.currency}`, 'net') + metric('累计净结余', r.cumulative.net, '全历史 · CNY · 不随筛选变化', 'cumulative');
+      q('[data-cash-meta]').textContent = `自动收款 ${r.source.complete ? money(s.automatic) : '暂不可用'} · 手工收入 ${money(s.manual)} ${r.currency} · ${r.recordCount} 条期间记录`;
+      q('[data-notice]').hidden = !r.notices.length; q('[data-notice]').textContent = r.notices.join('；');
+      const form = q('[data-cash-search]'); form.elements.search.value = state.search; form.elements.direction.value = state.direction; form.elements.origin.value = state.origin;
+      q('[data-filter-total]').textContent = `列表筛选 ${r.pagination.total} 条 · 收入 ${money(r.filteredSummary.income)} / 支出 ${money(r.filteredSummary.expense)} ${r.currency}`;
+      q('[data-cash-rows]').innerHTML = r.items.length ? r.items.map(row => `<tr${row.key === state.savedKey ? ' class="accounting-saved"' : ''}><td>${e(row.date)}</td><td><strong>${e(row.name)}</strong><small>${e(row.sourceRef || row.key)}</small></td><td>${row.direction === 'income' ? '收入' : '支出'}</td><td>${row.source === 'automatic' ? '自动收款' : row.legacy ? '历史记录' : '手工记录'}</td><td>${e(row.providerName || (row.userId ? `用户 #${row.userId}` : '-'))}</td><td class="numeric">${e(money(row.amount))} ${e(row.currency)}</td><td>${row.counted ? '已统计' : e(row.mergeReason)}</td><td>${button('data-record', row.key)}</td></tr>`).join('') : '<tr><td colspan="8" class="empty-state">所选范围暂无收支记录</td></tr>';
+      state.cashPage = r.pagination.page; pageState('cash', r.pagination);
+      renderChart('accounting-cash-chart', r.periods, [['income', '现金收入', '#176b4d'], ['expense', '现金支出', '#b05a3c'], ['net', '净现金流', '#2d5ea8']], r.currency); readyIcons();
+      if (state.locateSaved) { q('.accounting-saved')?.scrollIntoView({ block: 'nearest' }); state.locateSaved = false; }
     }
-    async function loadDocuments() {
-      const request = state.documentRequest = (state.documentRequest || 0) + 1;
-      const form = q('[data-doc-search]');
-      const params = new URLSearchParams({ ...h.query(), page: state.documentPage, pageSize: 20, search: form.elements.search.value, kind: form.elements.kind.value, pending: form.elements.pending.value });
-      const result = await h.api(`${base}/documents?${params}`);
-      if (request !== state.documentRequest || !state.active) return;
-      state.documents = result.items; state.documentTotal = result.pagination.total;
-      q('[data-documents]').innerHTML = result.items.map(item => `<tr><td>${e(item.date)}</td><td>${e(item.name)}<small>${e(item.key)}</small></td><td>${e(kinds[item.kind] || '待分类')}</td><td>${e(item.userId || item.providerId || '—')}</td><td class="numeric">${item.amount == null ? '—' : e(`${item.amount} ${item.currency || '待核对'}`)}</td><td class="numeric">${e(money(item.cash))}</td><td><span class="badge ${item.pending ? 'warning' : 'success'}">${item.pending ? '待核验' : '已确认'}</span></td><td><button type="button" class="accounting-link" data-document="${e(item.key)}">详情 / 分类</button></td></tr>`).join('') || '<tr><td colspan="8" class="empty-state">所选范围暂无记录</td></tr>';
-      const p = result.pagination; q('[data-document-page]').textContent = `第 ${p.page} / ${Math.max(1, p.totalPages)} 页 · ${p.total} 条`;
-      q('[data-document-step="-1"]').disabled = p.page <= 1; q('[data-document-step="1"]').disabled = p.page >= p.totalPages;
+    function schedule(delay = 60000) {
+      clearTimeout(state.timer); if (!state.active || !h.isActive() || document.hidden) return;
+      state.timer = setTimeout(() => { if (!state.active || !h.isActive()) return; if (q('[data-dialog]').open) { schedule(); return; } load({ poll: delay < 60000 }).catch(() => schedule()); }, delay);
     }
     async function load({ refresh = false, poll = false } = {}) {
-      state.active = true; const request = ++state.request; clearTimeout(state.timer);
-      state.polls = poll ? (state.polls || 0) + 1 : 0;
+      state.active = true; clearTimeout(state.timer); const request = ++state.request, automatic = state.tab === 'automatic';
+      if (poll && Date.now() - (state.liveRefreshedAt || 0) >= 60000) poll = false;
+      if (automatic && !poll) state.liveRefreshedAt = Date.now();
       const query = { ...h.query(), ...(refresh ? { refresh: '1' } : {}), ...(poll ? { poll: '1' } : {}) };
-      const automatic = state.tab === 'automatic';
-      const endpoint = automatic ? '/api/cost-analysis/daily-profit' : `${base}/report`;
-      const metaKey = new URLSearchParams(h.query()).toString();
-      const reuseMetadata = poll && state.automaticMetaKey === metaKey;
-      const metadata = automatic ? reuseMetadata ? Promise.resolve(state.automaticMeta) : h.api(`/api/cost-analysis?${metaKey}&include_consumption=0`).catch(() => null) : Promise.resolve(null);
-      const report = await h.api(`${endpoint}?${new URLSearchParams(query)}`).catch(error => { if (request === state.request) throw error; return null; });
-      if (!report || request !== state.request || !state.active) return;
-      report.automatic = automatic;
-      if (automatic) { if (!reuseMetadata) state.automaticMeta = null; state.automaticMetaLoading = !reuseMetadata; state.automaticMetaKey = metaKey; }
-      state.report = report; render();
-      if (automatic) metadata.then(meta => {
-        if (request !== state.request || !state.active || !state.report.automatic) return;
-        state.automaticMeta = meta; state.automaticMetaLoading = false; renderAutomaticMeta();
-      });
-      h.setPageMeta(`${report.range.start} 至 ${report.range.end} · ${report.summary.completeDays}/${report.summary.days} 天${automatic ? '数据完整' : '已核验'} · ${report.timezone}`);
-      if (state.tab === 'cash') await loadDocuments();
-      if (report.archive?.pendingDays && report.archive.ready && h.isActive() && state.polls < 120) state.timer = setTimeout(() => { if (h.isActive()) load({ poll: true }).catch(error => h.toast(error.message, 'error')); }, 5000);
+      const auxKey = new URLSearchParams(h.query()).toString();
+      if (automatic && (!poll || state.auxKey !== auxKey || Date.now() - (state.auxAt || 0) >= 60000)) {
+        state.auxKey = auxKey; state.auxAt = Date.now();
+        state.credits = undefined; state.balances = undefined; state.upstream = undefined; renderMeta();
+        const aux = (key, url) => h.api(url).catch(() => null).then(value => { if (state.active && request === state.request && state.tab === 'automatic') { state[key] = value; renderMeta(); } });
+        aux('credits', `/api/cost-analysis/automatic-income/users?${new URLSearchParams(query)}&pageSize=1`);
+        aux('balances', `${base}/balances?pageSize=1${refresh ? '&refresh=1' : ''}`); aux('upstream', `${base}/provider-balances${refresh ? '?refresh=1' : ''}`);
+      }
+      const params = automatic ? query : { ...query, currency: state.currency, page: state.cashPage, pageSize: 20, search: state.search, direction: state.direction, origin: state.origin };
+      try {
+        const report = await h.api(`${automatic ? '/api/cost-analysis/daily-profit' : `${base}/report`}?${new URLSearchParams(params)}`);
+        if (request !== state.request || !state.active || automatic !== (state.tab === 'automatic')) return;
+        state.report = { ...report, automatic }; automatic ? renderAutomatic() : renderCash();
+        h.setPageMeta(`${report.range.start} 至 ${report.range.end} · ${automatic ? `${report.summary.completeDays}/${report.summary.days} 天完整 · ` : ''}${report.timezone}`); schedule(automatic && report.archive?.pendingDays && report.archive.ready ? 5000 : 60000);
+      } catch (error) { if (request !== state.request || !state.active) return; q('[data-notice]').hidden = false; q('[data-notice]').textContent = `${error.message}，稍后自动重试`; schedule(); throw error; }
     }
-    function leave() { state.active = false; ++state.request; ++state.documentRequest; clearTimeout(state.timer); if (q('[data-dialog]').open) q('[data-dialog]').close(); }
-    async function editDocument(key) {
-      const request = state.editRequest = (state.editRequest || 0) + 1;
-      await ensureProviders();
-      const result = await h.api(`${base}/documents/${encodeURIComponent(key)}`);
-      if (!state.active || request !== state.editRequest) return;
-      entryForm(result.item, result.history);
+    function leave() { state.active = false; ++state.request; ++state.dialogRequest; clearTimeout(state.timer); if (q('[data-dialog]').open) q('[data-dialog]').close(); }
+    async function changeTab(tab) {
+      if (!['automatic', 'cash'].includes(tab)) return; state.tab = tab; state.report = null;
+      for (const key of ['automatic', 'cash']) { q(`[data-tab="${key}"]`).setAttribute('aria-selected', String(key === tab)); q(`[data-tab="${key}"]`).tabIndex = key === tab ? 0 : -1; q(`#accounting-${key}`).hidden = key !== tab; }
+      q('[data-notice]').hidden = true; await load(); h.resizeCharts();
     }
-    function entryForm(item = null, history = []) {
-      state.selectedKey = item?.key || null;
-      const date = item?.date || h.query().end;
-      let defaultKind = item?.kind || (item?.origin === 'redeem' ? 'customer_receipt' : item?.origin === 'refund' ? 'refund_unconsumed' : item?.origin === 'legacy_expense' ? 'fee' : 'fee');
-      if (defaultKind === 'funding') defaultKind = '';
-      const allowed = item?.origin === 'payment' ? ['customer_receipt', 'subscription', 'gift', 'excluded'] : item?.origin === 'redeem' ? ['customer_receipt', 'gift', 'correction', 'excluded'] : item?.origin === 'refund' ? ['refund_unconsumed', 'refund_service', 'refund_subscription', 'excluded', 'reference'] : Object.keys(kinds).filter(kind => kind !== 'funding');
-      if (item?.origin === 'redeem' && item.payments?.length) allowed.splice(allowed.indexOf('customer_receipt'), 1);
-      const providerOptions = state.providers.map(provider => `<option value="${e(provider.id)}"${provider.id === item?.providerId ? ' selected' : ''}>${e(provider.name)}</option>`).join('');
-      const immutable = item && ['payment', 'redeem', 'refund'].includes(item.origin);
-      state.entryRequestId = crypto.randomUUID();
-      drawer(item ? `${item.name} · 核对` : '记一笔', `${item ? `<p class="muted">${e(item.key)}${item.userId ? ` · 用户 ${e(item.userId)}` : ''}${item.quantity != null ? ` · 原始额度 ${e(item.quantity)}` : ''}</p>` : ''}<form class="accounting-form" data-entry-form>
-        <label class="accounting-wide">业务类型<select name="kind" required><option value="">请选择业务类型</option>${options(Object.fromEntries(allowed.map(key => [key, kinds[key]])), defaultKind)}</select></label>
-        <label class="accounting-wide">项目名称<input name="name" maxlength="120" value="${e(item?.name || '')}" required${item ? ' readonly' : ''}></label>
-        <label>发生 / 付款日期<input name="date" type="date" value="${e(date)}" required${immutable ? ' readonly' : ''}></label>
-        <label>实际现金金额<input name="amount" type="number" min="0" max="1000000000000" step="0.01" value="${e(item?.amount ?? '')}"></label>
-        <label>币种<input name="currency" maxlength="12" value="${e(item?.currency || 'CNY')}" required></label>
-        <label>1 单位原币兑换 CNY<input name="rate" type="number" min="0.00000001" max="100000000" step="0.00000001" value="${e(item?.rate || 1)}" required></label>
-        <label data-field="user">用户 ID<input name="userId" inputmode="numeric" value="${e(item?.userId || '')}"${immutable && item?.userId ? ' readonly' : ''}></label>
-        <label data-field="quantity">额度数量（非现金）<input name="quantity" type="number" step="0.00000001" value="${e(item?.quantity ?? '')}"${item?.origin === 'redeem' ? ' readonly' : ''}></label>
-        <label data-field="correction" class="accounting-wide">待确认实收价值调整（CNY，可为负）<input name="cashAdjustment" type="number" step="0.00000001" value="${e(item?.cashAdjustment || 0)}"></label>
-        <label class="accounting-wide" data-field="provider">供应商<select name="providerId"><option value="">请选择</option>${providerOptions}</select></label>
-        <label class="accounting-wide" data-field="category">费用分类<select name="category">${options(categories, item?.category || 'other')}</select></label>
-        <label data-field="period">所属 / 服务开始日期<input name="serviceStart" type="date" value="${e(item?.serviceStart || item?.completedAt || date)}"></label>
-        <label data-field="period">所属 / 服务结束日期<input name="serviceEnd" type="date" value="${e(item?.serviceEnd || date)}"></label>
-        <label class="accounting-wide" data-field="link">关联来源 ID<input name="linkedKey" value="${e(item?.linkedKey || '')}" placeholder="redeem:123 或 payment:123"></label>
-        <label class="accounting-wide" data-field="original">原收款记录 ID<input name="relatedKey" value="${e(item?.relatedKey || item?.linkedPayment || '')}" placeholder="payment:123 或 manual:…"></label>
-        <label data-field="cancel">停止提供服务日期<input name="cancelDate" type="date" value="${e(item?.cancelDate || date)}"></label>
-        <label data-field="cancel">其中已履约退款（CNY）<input name="refundEarned" type="number" min="0" step="0.00000001" value="${e(item?.refundEarned ?? 0)}"></label>
-        <label class="checkbox-field accounting-wide"><input type="checkbox" name="paid"${item?.paid !== false ? ' checked' : ''}>已实际收款 / 付款</label>
-        <label class="accounting-wide">凭证 / 分类原因<textarea name="reason" maxlength="500" required>${e(item?.reason || '')}</textarea></label>
-        <p class="form-error accounting-wide" data-form-error role="alert" hidden></p>
-        <div class="form-actions accounting-wide"><button type="submit" class="button primary">${h.icon('save')}<span>保存核算</span></button><button type="button" class="button secondary" data-close>取消</button></div>
-      </form>${item?.payments?.length ? `<h3>关联线上收款</h3>${item.payments.map(payment => `<p><button type="button" class="accounting-link" data-document="payment:${e(payment.id)}">核对支付订单 #${e(payment.id)}</button></p>`).join('')}` : ''}${history.length ? `<h3>变更审计</h3>${history.map(record => `<details class="accounting-audit"><summary>${e(h.formatDateTime(record.created_at))} · ${e(record.actor)} · ${e(record.reason)}</summary><pre>${e(JSON.stringify({ before: record.before_value, after: record.after_value }, null, 2))}</pre></details>`).join('')}` : ''}`);
-      updateFields();
+    function dayDetail(date) {
+      const row = state.report.items.find(row => row.date === date); if (!row) return;
+      drawer(`${date} · 消费与毛利`, table(['项目', 'CNY'], [['主站消费', money(row.siteConsumption)], ['供应商消费', money(row.supplierConsumption)], ['消费毛利', money(row.profit)], ['毛利率', pct(row.margin)]]) + `<h3>供应商账号消费</h3>${table(['供应商', 'CNY', '数据状态'], (row.providers || []).map(provider => [e(provider.name), money(provider.cost), e(provider.complete ? '数据完整' : (provider.reasons || ['自动重试']).join('；'))]))}<p class="muted">${row.mode === 'live' ? '今日实时' : '历史归档'} · ${e(row.computedAt ? h.formatDateTime(row.computedAt) : '等待同步')}</p>${state.report.notices?.length ? `<details><summary>来源状态</summary>${state.report.notices.map(text => `<p>${e(text)}</p>`).join('')}</details>` : ''}`);
+    }
+    async function balanceDetail(page = 1, search = '') {
+      const request = ++state.dialogRequest, value = await h.api(`${base}/balances?${new URLSearchParams({ page, search, pageSize: 20 })}`);
+      if (!state.active || request !== state.dialogRequest) return; state.balancePage = value.pagination.page; state.balanceSearch = search;
+      drawer('当前用户余额', `<p>合计 ${e(money(value.userBalance))} CNY</p><p class="muted">不含 ID 1 和已删除用户 · ${e(h.formatDateTime(value.capturedAt))}</p><form class="accounting-search" data-balance-search><label>搜索用户<input type="search" name="search" maxlength="100" value="${e(search)}" placeholder="用户 ID、名称、邮箱"></label><button type="submit" class="icon-button" title="搜索" aria-label="搜索">${h.icon('search')}</button></form>${table(['用户', '当前余额 CNY'], value.items.map(user => [`${e(user.name)}<small>ID ${e(user.id)} · ${e(user.email)}</small>`, money(user.balance)]))}${pager('balance')}`); pageState('balance', value.pagination);
+    }
+    function cumulativeDetail() {
+      const c = state.report.cumulative;
+      drawer('累计净结余 · 全历史', table(['组成', 'CNY'], [['全历史累计入账', money(c.income)], ['全历史累计支出', money(c.expense)], ['当前用户余额（不含 ID 1）', money(c.userBalance)], ['累计净结余', `<strong>${e(money(c.net))}</strong>`]]) + `<p class="muted">${e(c.from || '暂无历史收支')} 至今 · ${e(h.formatDateTime(c.capturedAt))}</p><p class="muted">余额快照 ${e(c.balanceCapturedAt ? h.formatDateTime(c.balanceCapturedAt) : '暂不可用')}</p>${c.notices.map(text => `<p class="accounting-notice">${e(text)}</p>`).join('')}<h3>全历史原币收支</h3>${table(['币种', '累计入账', '累计支出'], c.originals.map(row => [e(row.currency), money(row.income), money(row.expense)]))}`);
+    }
+    async function ensureProviders() { try { state.providers = (await h.api('/api/cost-analysis/providers')).items || []; } catch { /* Custom cash entries remain available. */ } }
+    async function entryForm(item = null, providerId = '') {
+      const request = ++state.dialogRequest; await ensureProviders(); if (!state.active || request !== state.dialogRequest) return;
+      state.selectedKey = item?.key || null; state.entryRequestId = crypto.randomUUID(); const provider = state.providers.find(row => row.id === providerId);
+      const today = new Date().toLocaleDateString('sv-SE', { timeZone: state.report?.timezone || 'Asia/Shanghai' });
+      const defaultDate = h.query().end > today ? today : h.query().end;
+      const providers = [...state.providers]; if (item?.providerId && !providers.some(row => row.id === item.providerId)) providers.push({ id: item.providerId, name: item.providerName || item.providerId });
+      drawer(item ? '修改收支记录' : '记一笔', `<form class="accounting-form" data-entry-form>
+        <fieldset class="accounting-direction accounting-wide"><legend>收支</legend>${[['income', '收入'], ['expense', '支出']].map(([key, label]) => `<label><input type="radio" name="direction" value="${key}"${key === (item?.direction || 'expense') ? ' checked' : ''}>${label}</label>`).join('')}</fieldset>
+        <label class="accounting-wide" data-expense-type>支出类型<select name="category">${option('custom', '自定义支出', item?.category || (provider ? 'provider' : 'custom'))}${option('provider', '供应商付款', item?.category || (provider ? 'provider' : 'custom'))}</select></label>
+        <label class="accounting-wide" data-provider-field>供应商<select name="providerId"><option value="">请选择</option>${providers.map(row => option(row.id, row.name, item?.providerId || providerId)).join('')}</select></label>
+        <label class="accounting-wide">项目<input name="name" required maxlength="120" value="${e(item?.name || (provider ? `${provider.name} 充值` : ''))}"></label>
+        <label>实际收付日期<input name="date" type="date" required max="${e(today)}" value="${e(item?.date || defaultDate)}"></label><label>金额<input name="amount" type="number" required min="0.01" max="1000000000000" step="0.01" value="${e(item?.amount ?? '')}"></label>
+        <label>币种<input name="currency" list="cash-currencies" required maxlength="12" pattern="[A-Za-z][A-Za-z0-9_-]*" value="${e(item?.currency || 'CNY')}"><datalist id="cash-currencies"><option value="CNY"><option value="USD"><option value="EUR"><option value="HKD"></datalist></label>
+        <label>来源单号（选填）<input name="sourceRef" maxlength="120" value="${e(item?.sourceRef || '')}"></label><label class="accounting-wide">备注（选填）<textarea name="note" maxlength="500">${e(item?.note || '')}</textarea></label>
+        <p class="form-error accounting-wide" data-form-error role="alert" hidden></p><div class="form-actions accounting-wide"><button type="submit" class="button primary">${h.icon('save')}<span>保存</span></button><button type="button" class="button secondary" data-close>取消</button></div></form>`); updateFields();
     }
     function updateFields() {
       const form = q('[data-entry-form]'); if (!form) return;
-      const kind = form.elements.kind.value;
-      root.querySelectorAll('[data-field="period"]').forEach(node => { node.hidden = !['fee', 'service_income', 'subscription'].includes(kind); });
-      q('[data-field="provider"]').hidden = kind !== 'provider_prepayment';
-      q('[data-field="category"]').hidden = kind !== 'fee';
-      q('[data-field="correction"]').hidden = kind !== 'correction';
-      q('[data-field="link"]').hidden = !['customer_receipt', 'reference', 'refund_unconsumed'].includes(kind);
-      q('[data-field="original"]').hidden = !kind.startsWith('refund_');
-      root.querySelectorAll('[data-field="cancel"]').forEach(node => { node.hidden = kind !== 'refund_subscription'; });
-      const quantity = ['gift', 'correction', 'refund_unconsumed'].includes(kind);
-      q('[data-field="quantity"]').hidden = !quantity && !state.selectedKey?.startsWith('redeem:');
-      q('[data-field="user"]').hidden = !quantity && !['customer_receipt', 'subscription'].includes(kind);
-      form.elements.serviceStart.required = ['fee', 'service_income', 'subscription'].includes(kind);
-      form.elements.serviceEnd.required = form.elements.serviceStart.required;
-      form.elements.cancelDate.required = kind === 'refund_subscription';
-      form.elements.refundEarned.required = kind === 'refund_subscription';
+      const expense = form.elements.direction.value === 'expense', provider = expense && form.elements.category.value === 'provider';
+      q('[data-expense-type]').hidden = !expense; q('[data-provider-field]').hidden = !provider; form.elements.providerId.required = provider;
     }
-    function openingForm(userId = '') {
-      const user = state.report?.balances.users.find(user => user.id === userId); const opening = user?.opening;
-      drawer('确认用户期初余额', `<p class="muted">核算时点 ${e(state.report.policy.startDate)} 00:00 · ${e(state.report.timezone)}</p><form class="accounting-form" data-opening-form><label class="accounting-wide">用户 ID<input name="userId" inputmode="numeric" value="${e(userId)}" required></label><label>期初额度总量<input name="quantity" type="number" step="0.00000001" min="0" value="${e(opening?.quantity ?? '')}" required></label><label>其中待确认的实收价值（CNY）<input name="cashValue" type="number" step="0.00000001" min="0" value="${e(opening?.cashValue ?? '')}" required></label><label class="accounting-wide">核对依据<textarea name="reason" maxlength="500" required>${e(opening?.reason || '')}</textarea></label><p class="form-error accounting-wide" data-form-error role="alert" hidden></p><div class="form-actions accounting-wide"><button type="submit" class="button primary">${h.icon('save')}<span>保存期初</span></button></div></form>`);
+    async function recordDetail(key) {
+      const request = ++state.dialogRequest, value = await h.api(`${base}/records/${encodeURIComponent(key)}`);
+      if (!state.active || request !== state.dialogRequest) return; state.selectedItem = value.item; const row = value.item;
+      drawer(row.name, table(['项目', '内容'], [['日期', e(row.date)], ['收支', row.direction === 'income' ? '收入' : '支出'], ['原币金额', `${e(money(row.amount))} ${e(row.currency)}`], ['来源', row.source === 'automatic' ? '主站已付款订单' : row.legacy ? '历史收支' : '手工记账'], ['供应商 / 用户', e(row.providerName || row.userId || '-')], ['来源单号', e(row.sourceRef || row.key)], ['统计状态', row.counted ? '已统计' : e(row.mergeReason)], ['备注', e(row.note || '-')]]) + (row.editable ? `<div class="form-actions"><button type="button" class="button secondary" data-command="edit">${h.icon('pencil')}<span>修改</span></button><button type="button" class="button danger" data-command="delete">${h.icon('trash-2')}<span>删除</span></button></div>` : '') + (value.history.length ? `<details class="accounting-audit"><summary>变更历史</summary>${value.history.map(row => `<p>${e(h.formatDateTime(row.created_at))} · ${e(row.actor)} · ${e(row.reason)}</p><pre>${e(JSON.stringify({ before: row.before_value, after: row.after_value }, null, 2))}</pre>`).join('')}</details>` : ''));
     }
-    function dayDetail(date) {
-      const row = state.report.items.find(item => item.date === date);
-      drawer(`${date} · 经营明细`, table(['项目', '金额'], [['用户消费额度', money(row.siteConsumption)], ['付费余额消费收入', money(row.balanceRevenue)], ['订阅收入分摊', money(row.subscriptionRevenue)], ['其他已履约收入 / 退款', money(row.otherRevenue)], ['确认收入', money(row.revenue)], ['供应商实际成本', money(row.supplierCost)], ['其他运营费用', money(row.fee)], ['经营利润', money(row.profit)], ['利润率', pct(row.margin)]])
-        + `<h3>供应商实际成本</h3>${table(['供应商', '成本', '核验'], row.providers.map(provider => [e(provider.name), e(money(provider.cost)), e(provider.complete ? '已核验' : (provider.reasons || ['待核验']).join('；'))]))}`
-        + `<h3>付费余额消费</h3>${table(['用户', '消费额度', '确认收入'], (row.users || []).map(user => [e(user.name), money(user.consumption), money(user.revenue)]))}`
-        + `<h3>收入与费用分摊</h3>${table(['项目', '类型', '所属期间', '本日金额', '来源'], (row.allocations || []).map(item => [e(item.name), e(kinds[item.kind]), e(`${item.start} 至 ${item.end}`), money(item.amount), `<button type="button" class="accounting-link" data-document="${e(item.documentKey)}">核对</button>`]))}`
-        + (row.issues?.length ? `<h3>待核对</h3>${row.issues.map(issue => `<p>${e(issue.message)}</p>`).join('')}` : '')
-        + `<p class="muted">${row.mode === 'live' ? '今日实时' : '历史归档'} · ${row.computedAt ? e(h.formatDateTime(row.computedAt, state.report.timezone)) : '等待计算'}</p>`);
-    }
-    function automaticDayDetail(date) {
-      const row = state.report.items.find(item => item.date === date);
-      drawer(`${date} · 消费与毛利`, table(['项目', '金额'], [['主站消费', automaticMoney(row.siteConsumption)], ['供应商实际消费', automaticMoney(row.supplierConsumption)], ['消费毛利', automaticMoney(row.profit)], ['毛利率', pct(row.margin)]])
-        + `<h3>供应商实际消费</h3>${table(['供应商', '实际消费', '数据状态'], (row.providers || []).map(provider => [e(provider.name), e(automaticMoney(provider.cost)), e(provider.complete ? '数据完整' : (provider.reasons || ['数据缺失']).join('；'))]))}`
-        + (state.report.notices?.length ? `<details><summary>数据说明</summary>${state.report.notices.map(notice => `<p>${e(notice)}</p>`).join('')}</details>` : '')
-        + `<p class="muted">${row.mode === 'live' ? '今日实时' : '历史归档'} · ${row.computedAt ? e(h.formatDateTime(row.computedAt, state.report.timezone)) : '等待统计'}</p>`);
-    }
-    async function metricDetail(action) {
-      if (state.report?.automatic) {
-        const labels = { siteConsumption: '主站消费', supplierConsumption: '供应商实际消费', profit: '消费毛利', margin: '消费毛利率' };
-        if (labels[action]) drawer(labels[action], table(['日期', action === 'margin' ? '毛利率' : '金额', '详情'], state.report.items.map(row => [e(row.date), e(action === 'margin' ? pct(row.margin) : automaticMoney(row[action])), `<button type="button" class="accounting-link" data-automatic-day="${e(row.date)}">详情</button>`])));
-        return;
-      }
-      if (['revenue', 'supplier', 'fee', 'profit'].includes(action)) {
-        const key = { supplier: 'supplierCost' }[action] || action;
-        drawer({ revenue: '确认收入明细', supplier: '供应商实际成本', fee: '运营费用分摊', profit: '经营利润明细' }[action], table(['日期', '金额', '详情'], state.report.items.map(row => [e(row.date), e(money(row[key])), `<button class="accounting-link" type="button" data-day="${e(row.date)}">详情</button>`]))); return;
-      }
-      if (action === 'balances') { drawer('上游账号预付余额', table(['供应商', '原始余额', 'CNY 估值', '快照 / 状态'], state.report.balances.providers.map(provider => [e(provider.name), e(`${provider.available ?? '—'} ${provider.currency || ''}`), e(money(provider.cashValue)), e(provider.complete ? h.formatDateTime(provider.capturedAt) : (provider.reasons || []).join('；'))]))); return; }
-      if (action === 'audit') { await changeTab('audit'); return; }
-      if (['users', 'deleted'].includes(action)) { await changeTab('audit'); q('[data-user-search]').elements.search.value = ''; renderUsers(); return; }
-      await changeTab('cash');
+    async function command(action) {
+      if (action === 'add') return entryForm(); if (action === 'credits') { leave(); return h.openCredits(); } if (action === 'balance') return balanceDetail();
+      if (action === 'upstream') { const u = state.upstream; drawer('当前上游余额', `${table(['供应商', '原币余额', 'CNY 估值', '快照 / 状态'], (u?.items || []).map(row => [e(row.name), e(`${row.available ?? '-'} ${row.currency || ''}`), money(row.cashValue), e(row.complete ? h.formatDateTime(row.capturedAt) : (row.reasons || ['来源缺失']).join('；'))]))}<p class="muted">${u ? e(h.formatDateTime(u.capturedAt)) : '上游余额暂不可用，后台将自动重试'}</p>`); return; }
+      if (action === 'edit') return entryForm(state.selectedItem);
+      if (action === 'delete') { if (!window.confirm('删除这条收支记录？删除后将更新统计，变更历史仍会保留。')) return; await h.api(`${base}/records/${encodeURIComponent(state.selectedItem.key)}`, { method: 'DELETE' }); q('[data-dialog]').close(); h.toast('收支记录已删除', 'success'); await load(); }
     }
     root.addEventListener('click', event => {
-      const button = event.target.closest('button'); if (!button) return;
+      const node = event.target.closest('button'); if (!node) return;
       const run = async () => {
-        if (button.hasAttribute('data-close')) { q('[data-dialog]').close(); return; }
-        if (button.dataset.tab) { await changeTab(button.dataset.tab); return; }
-        if (button.dataset.metric) { await metricDetail(button.dataset.metric); return; }
-        if (button.dataset.automaticDay) { automaticDayDetail(button.dataset.automaticDay); return; }
-        if (button.dataset.automaticDayStep) { state.automaticPage += Number(button.dataset.automaticDayStep); renderAutomaticDays(); return; }
-        if (button.dataset.day) { dayDetail(button.dataset.day); return; }
-        if (button.dataset.dayStep) { state.page += Number(button.dataset.dayStep); renderDays(); return; }
-        if (button.dataset.documentStep) { state.documentPage += Number(button.dataset.documentStep); await loadDocuments(); return; }
-        if (button.dataset.userStep) { state.userPage = (state.userPage || 1) + Number(button.dataset.userStep); renderUsers(); return; }
-        if (button.dataset.document) { await editDocument(button.dataset.document); return; }
-        if (button.hasAttribute('data-opening')) { openingForm(button.dataset.opening); return; }
-        if (button.hasAttribute('data-issue')) {
-          const issue = state.report.issues[Number(button.dataset.issue)];
-          if (issue.type === 'opening') openingForm(issue.userId);
-          else if (issue.documentKey) await editDocument(issue.documentKey);
-          else if (issue.type === 'subscription') { await ensureProviders(); entryForm({ name: `用户 ${issue.userId} 订阅`, date: issue.date, userId: issue.userId, kind: 'subscription', amount: 0 }); state.selectedKey = null; q('[data-entry-form]').elements.name.readOnly = false; }
-          else dayDetail(issue.date && state.report.items.some(row => row.date === issue.date) ? issue.date : state.report.items[0].date);
-          return;
+        if (node.hasAttribute('data-close')) { ++state.dialogRequest; q('[data-dialog]').close(); return; }
+        if (node.dataset.tab) return changeTab(node.dataset.tab);
+        if (node.dataset.detailTab) { for (const key of ['days', 'providers']) { const active = key === node.dataset.detailTab; q(`[data-detail-tab="${key}"]`).setAttribute('aria-selected', String(active)); q(`[data-detail-tab="${key}"]`).tabIndex = active ? 0 : -1; q(`#cost-detail-${key}`).hidden = !active; } return; }
+        if (node.dataset.command) return command(node.dataset.command); if (node.dataset.day) return dayDetail(node.dataset.day);
+        if (node.dataset.automaticDayStep) { state.automaticPage += Number(node.dataset.automaticDayStep); return renderAutomaticDays(); }
+        if (node.dataset.cashStep) { state.cashPage += Number(node.dataset.cashStep); return load(); }
+        if (node.dataset.balanceStep) return balanceDetail(state.balancePage + Number(node.dataset.balanceStep), state.balanceSearch);
+        if (node.dataset.record) return recordDetail(node.dataset.record); if (node.dataset.providerEntry) return entryForm(null, node.dataset.providerEntry);
+        if (node.dataset.provider) { const row = providerRows().find(row => row.id === node.dataset.provider); if (row) drawer(row.name, table(['日期', '实际消费 CNY', '数据状态', '操作'], row.days.map(day => [e(day.date), money(day.cost), e(day.complete ? '数据完整' : (day.reasons || ['自动重试']).join('；')), button('data-day', day.date)]))); return; }
+        if (node.dataset.metric && state.report) { const key = node.dataset.metric;
+          if (state.tab === 'cash') { if (key === 'cumulative') return cumulativeDetail(); state.direction = key === 'net' ? 'all' : key; state.cashPage = 1; return load(); }
+          const label = { siteConsumption: '主站消费', supplierConsumption: '供应商消费', profit: '消费毛利', margin: '消费毛利率' }[key];
+          return drawer(label, table(['日期', key === 'margin' ? '毛利率' : 'CNY', '操作'], state.report.items.map(row => [e(row.date), e(key === 'margin' ? pct(row[key]) : money(row[key])), button('data-day', row.date)])));
         }
-        if (button.dataset.command === 'credits') { leave(); await h.openCredits(); return; }
-        if (button.dataset.command === 'automatic-balance') { const s = state.automaticMeta?.summary; drawer('当前用户余额', table(['项目', '数值'], [['当前用户余额', automaticMoney(s?.userBalance)], ['现有用户数（不含 ID 1）', s?.balanceUsers ?? '暂不可用']])); return; }
-        if (button.dataset.command === 'finance') { h.openFinance(); return; }
-        if (button.dataset.command === 'audit') { await changeTab('audit'); return; }
-        if (button.dataset.command === 'pending') { q('[data-doc-search]').elements.pending.value = '1'; state.documentPage = 1; await changeTab('cash'); return; }
-        if (button.dataset.command === 'opening') { openingForm(); return; }
-        if (button.dataset.command === 'refresh') { await load({ refresh: true }); return; }
-        if (button.dataset.command === 'policy') drawer('核算起点', `<form class="accounting-form" data-policy-form><label class="accounting-wide">起始日期<input name="startDate" type="date" value="${e(state.report.policy.startDate)}" required></label><label class="accounting-wide">变更原因<textarea name="reason" required maxlength="500"></textarea></label><p class="form-error accounting-wide" data-form-error role="alert" hidden></p><div class="form-actions accounting-wide"><button type="submit" class="button primary">保存并重新核算</button></div></form>`);
-      };
-      run().catch(error => h.toast(error.message, 'error'));
+      }; run().catch(error => h.toast(error.message, 'error'));
     });
-    root.addEventListener('change', event => { if (event.target.name === 'kind') updateFields(); });
+    root.addEventListener('change', event => { if (event.target.matches('[data-cash-currency]')) { state.currency = event.target.value; state.cashPage = 1; load().catch(error => h.toast(error.message, 'error')); } else if (['direction', 'category'].includes(event.target.name)) updateFields(); });
     root.addEventListener('submit', event => {
       event.preventDefault(); const form = event.target;
-      if (form.matches('[data-doc-search]')) { state.documentPage = 1; loadDocuments().catch(error => h.toast(error.message, 'error')); return; }
-      if (form.matches('[data-user-search]')) { state.userPage = 1; renderUsers(); return; }
+      if (form.matches('[data-cash-search]')) { Object.assign(state, Object.fromEntries(new FormData(form)), { cashPage: 1 }); load().catch(error => h.toast(error.message, 'error')); return; }
+      if (form.matches('[data-balance-search]')) { balanceDetail(1, form.elements.search.value).catch(error => h.toast(error.message, 'error')); return; }
+      if (!form.matches('[data-entry-form]') || state.saving) return;
       const run = async () => {
-        const values = Object.fromEntries(new FormData(form));
-        let endpoint;
-        if (form.matches('[data-opening-form]')) { endpoint = '/opening'; values.quantity = Number(values.quantity); values.cashValue = Number(values.cashValue); }
-        else if (form.matches('[data-policy-form]')) endpoint = '/policy';
-        else if (form.matches('[data-entry-form]')) {
-          endpoint = state.selectedKey ? `/documents/${encodeURIComponent(state.selectedKey)}` : '/documents';
-          values.paid = form.elements.paid.checked;
-          for (const key of ['amount', 'quantity', 'rate', 'cashAdjustment', 'refundEarned']) { if (values[key] === '') delete values[key]; else values[key] = Number(values[key]); }
-          values.currency = values.currency.trim().toUpperCase();
-          if (!state.selectedKey) values.requestId = state.entryRequestId;
-          for (const key of ['userId', 'providerId', 'linkedKey', 'relatedKey']) if (!values[key]) delete values[key];
-          if (!['fee', 'subscription', 'service_income'].includes(values.kind)) { delete values.serviceStart; delete values.serviceEnd; }
-          if (!['customer_receipt', 'reference', 'refund_unconsumed'].includes(values.kind)) delete values.linkedKey;
-          if (!values.kind.startsWith('refund_')) delete values.relatedKey;
-          if (values.kind !== 'refund_subscription') { delete values.cancelDate; delete values.refundEarned; }
-        } else return;
-        const submit = form.querySelector('[type="submit"]'); submit.disabled = true;
+        state.saving = true; const submit = form.querySelector('[type="submit"]'); submit.disabled = true;
+        const values = Object.fromEntries(new FormData(form)); values.amount = Number(values.amount); values.currency = values.currency.trim().toUpperCase();
+        if (!state.selectedKey) values.requestId = state.entryRequestId; const selectedKey = state.selectedKey;
         try {
-          await h.api(`${base}${endpoint}`, { method: endpoint === '/documents' ? 'POST' : 'PUT', body: JSON.stringify(values) });
+          q('[data-form-error]').hidden = true;
+          const result = await h.api(`${base}/records${selectedKey ? `/${encodeURIComponent(selectedKey)}` : ''}`, { method: selectedKey ? 'PUT' : 'POST', body: JSON.stringify(values) });
           if (!state.active || !h.isActive()) return;
-          q('[data-dialog]').close(); h.toast('核算记录已保存', 'success');
-          if (form.matches('[data-entry-form]')) { h.focusDate(values.date); state.documentPage = 1; await changeTab('cash', { reload: false }); }
-          await load();
-        } finally { submit.disabled = false; }
-      };
-      run().catch(error => { const node = form.querySelector('[data-form-error]'); if (node) { node.textContent = error.message; node.hidden = false; } else h.toast(error.message, 'error'); });
+          h.focusDate(result.date); state.currency = result.currency; state.search = result.key; state.direction = 'all'; state.origin = 'all'; state.cashPage = 1; state.savedKey = result.key; state.locateSaved = true;
+          q('[data-dialog]').close(); h.toast('收支记录已保存', 'success'); if (state.tab !== 'cash') await changeTab('cash'); else await load();
+        } catch (error) { const node = form.querySelector('[data-form-error]'); if (node?.isConnected) { node.textContent = error.message; node.hidden = false; } else h.toast(error.message, 'error'); }
+        finally { state.saving = false; submit.disabled = false; }
+      }; run();
     });
-    root.querySelector('.accounting-tabs').addEventListener('keydown', event => {
-      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-      event.preventDefault(); const tabs = ['automatic', 'business', 'cash', 'audit'];
-      const index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (tabs.indexOf(state.tab) + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
-      changeTab(tabs[index]).catch(error => h.toast(error.message, 'error')); q(`[data-tab="${tabs[index]}"]`).focus();
+    root.addEventListener('keydown', event => {
+      const tab = event.target.closest('[role="tab"]'); if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault(); const tabs = [...tab.parentElement.querySelectorAll('[role="tab"]')], index = tabs.indexOf(tab);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length; tabs[next].click(); tabs[next].focus();
     });
-    async function ensureProviders() { const result = await h.api('/api/cost-analysis/providers'); state.providers = result.items || []; }
-    document.getElementById('cost-accounting-add').addEventListener('click', () => ensureProviders().then(() => { if (state.active) entryForm(); }).catch(error => h.toast(error.message, 'error')));
+    q('[data-dialog]').addEventListener('cancel', () => { ++state.dialogRequest; });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) clearTimeout(state.timer); else if (state.active && h.isActive()) schedule(1000); });
+    document.getElementById('cost-accounting-add').addEventListener('click', () => { if (state.active) entryForm().catch(error => h.toast(error.message, 'error')); });
     return { load, leave, state };
   }
   return { create };

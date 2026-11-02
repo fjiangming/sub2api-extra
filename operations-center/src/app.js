@@ -136,7 +136,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, dailyProfit, accounting, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -375,6 +375,16 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
     api.put('/cost-analysis/accounting/policy', csrf, (req, res) => res.json(accounting.configure(req.body, req.auth.actor)));
     api.put('/cost-analysis/accounting/opening', csrf, (req, res) => res.json(accounting.opening(req.body, req.auth.actor)));
   }
+  if (cashFlow) {
+    api.use('/cost-analysis/cash', (_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
+    api.get('/cost-analysis/cash/report', asyncRoute(async (req, res) => res.json(await cashFlow.getReport(req.query))));
+    api.get('/cost-analysis/cash/balances', asyncRoute(async (req, res) => res.json(await cashFlow.getBalances(req.query))));
+    api.get('/cost-analysis/cash/provider-balances', asyncRoute(async (req, res) => res.json(await cashFlow.providerBalances({ accessToken: req.auth.upstreamAccessToken || null, refresh: req.query.refresh === '1' }))));
+    api.get('/cost-analysis/cash/records/:key', (req, res) => res.json(cashFlow.detail(req.params.key)));
+    api.post('/cost-analysis/cash/records', csrf, asyncRoute(async (req, res) => res.status(201).json(await cashFlow.save(req.body, req.auth.actor))));
+    api.put('/cost-analysis/cash/records/:key', csrf, asyncRoute(async (req, res) => res.json(await cashFlow.save(req.body, req.auth.actor, req.params.key))));
+    api.delete('/cost-analysis/cash/records/:key', csrf, (req, res) => { cashFlow.remove(req.params.key, req.auth.actor); res.status(204).end(); });
+  }
   api.get('/cost-analysis', asyncRoute(async (req, res) => res.json(await costAnalysis.getReport(req.query))));
   api.get('/cost-analysis/daily-profit', asyncRoute(async (req, res) => {
     res.set('Cache-Control', 'no-store').json(await (dailyProfit || costAnalysis).getDailyProfit(req.query, {
@@ -382,10 +392,10 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
     }));
   }));
   api.get('/cost-analysis/automatic-income/users', asyncRoute(async (req, res) => {
-    res.json(await costAnalysis.getAutomaticIncomeUsers(req.query));
+    res.set('Cache-Control', 'no-store').json(await (cashFlow ? cashFlow.creditUsers(req.query) : costAnalysis.getAutomaticIncomeUsers(req.query)));
   }));
   api.get('/cost-analysis/automatic-income/users/:userKey/records', asyncRoute(async (req, res) => {
-    res.json(await costAnalysis.getAutomaticIncomeRecords(req.params.userKey, req.query));
+    res.set('Cache-Control', 'no-store').json(await (cashFlow ? cashFlow.creditUsers(req.query, req.params.userKey) : costAnalysis.getAutomaticIncomeRecords(req.params.userKey, req.query)));
   }));
   api.get('/cost-analysis/providers', asyncRoute(async (req, res) => res.json(await costAnalysis.getProviders({
     refresh: req.query.refresh === 'true',

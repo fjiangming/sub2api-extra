@@ -45,6 +45,25 @@ const automaticCleanupTargets = z.preprocess((value) => {
   return [...new Set(source.split(',').map((item) => item.trim()).filter(Boolean))];
 }, z.array(z.enum(cleanupTargetIds)).min(1));
 
+const cashRateDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => {
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value && !value.startsWith('0000');
+});
+const cashExchangeRates = z.preprocess(value => {
+  if (value == null || value === '') return [];
+  if (typeof value !== 'string') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}, z.array(z.object({ currency: z.string().regex(/^[A-Z][A-Z0-9_-]{0,11}$/),
+  rate: z.number().finite().positive().max(1e8), from: cashRateDate,
+  to: cashRateDate.default('9999-12-31') }).strict()).max(300).superRefine((rules, ctx) => {
+  rules.forEach((rule, index) => {
+    if (rule.from > rule.to || (rule.currency === 'CNY' && rule.rate !== 1) ||
+        rules.slice(0, index).some(other => other.currency === rule.currency && other.from <= rule.to && rule.from <= other.to)) {
+      ctx.addIssue({ code: 'custom', message: '现金汇率日期不能颠倒或重叠，CNY 汇率必须为 1' });
+    }
+  });
+}));
+
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   OPERATIONS_CENTER_BIND_HOST: z.string().default('127.0.0.1'),
@@ -79,6 +98,7 @@ const schema = z.object({
   SUB2API_DATABASE_SSL: z.enum(['disable', 'require', 'verify-full']).default('disable'),
   SUB2API_TIMEZONE: z.string().trim().min(1).max(100).default('Asia/Shanghai'),
   FINANCE_TIMEZONE: z.string().trim().min(1).max(100).default('Asia/Shanghai'),
+  FINANCE_CASH_EXCHANGE_RATES: cashExchangeRates,
   SUB2API_BASE_URL: optionalUrl,
   SUB2API_PUBLIC_URL: optionalUrl,
   OPERATIONS_CENTER_USER_MESSAGES_ENABLED: boolFromEnv.default(false),
@@ -281,6 +301,7 @@ function loadConfig(env = process.env, runtime = {}) {
     databaseSsl: value.SUB2API_DATABASE_SSL,
     sub2apiTimezone: value.SUB2API_TIMEZONE,
     financeTimezone: value.FINANCE_TIMEZONE,
+    financeCashExchangeRates: value.FINANCE_CASH_EXCHANGE_RATES,
     sub2apiBaseUrl: value.SUB2API_BASE_URL?.replace(/\/$/, '') || null,
     sub2apiPublicUrl: value.SUB2API_PUBLIC_URL?.replace(/\/$/, '') ||
       value.SUB2API_BASE_URL?.replace(/\/$/, '') || null,
