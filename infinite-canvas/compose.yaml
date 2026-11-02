@@ -1,0 +1,21 @@
+services:
+  infinite-canvas:
+    profiles: [infinite-canvas]
+    image: ${INFINITE_CANVAS_IMAGE:-ghcr.io/fjiangming/infinite-canvas:latest}
+    container_name: ${INFINITE_CANVAS_CONTAINER_NAME:-sub2api-infinite-canvas}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${INFINITE_CANVAS_PORT:-9877}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"

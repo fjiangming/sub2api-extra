@@ -10,3 +10,4 @@ include:
   - ./recharge-center/compose.yaml
   - ./video-adapter/compose.yaml
   - ./usage-leaderboard/compose.yaml
+  - ./infinite-canvas/compose.yaml

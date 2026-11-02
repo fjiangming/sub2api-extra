@@ -1,5 +1,21 @@
 # 个性化功能维护台账
 
+## 2026-11-02：Infinite Canvas 独立镜像与子服务部署
+
+用户明确授权为自己的 `fjiangming/infinite-canvas` fork 创建镜像，并在现有服务器 Extra 目录部署、配置 `canvas.fo2.us.ci` 独立域名，纳入根目录统一拉取更新。本轮使用独立工作树维护配置，不提交或覆盖原工作区的错误分析、现金统计、生产维护等无关改动。
+
+源码仓库配置：根 `docker-compose.yml` 增加 `infinite-canvas/compose.yaml`；`compose.services.env` 支持列表增加模块，默认已启用项保留。新增 `infinite-canvas/compose.yaml`，使用 `ghcr.io/fjiangming/infinite-canvas:latest`、loopback 9877 → 3000、健康检查和轮转日志，无数据库或数据卷；新增 `infinite-canvas/docs/nginx.conf.example` 与模块 README，根 README 登记镜像和更新方式。
+
+fork 发行：只调整 `.github/workflows/docker-image.yml`、`docker-compose.yml`、README，并新增部署说明和该 fork 的 CUSTOMIZATIONS。main / 版本标签 / 手动构建，镜像名称随仓库，default branch 发布 latest、保留短提交和完整 SHA 标签；两种原生架构成功后再合并并校验清单，原画布业务、浏览器存储、API 调用和作者信息不变。
+
+生产接入：保留原 Compose 项目及五个已部署模块，在根 include 与原 profile 列表追加画布；根目录原无 `.env`，建立指向 `compose.services.env` 的相对软链接，使普通 `docker compose pull` 也启用画布。现有 Nginx 为 Cloudflare HTTPS 入口后的 80 端口站点，独立新增 canvas 配置并仅平滑重载；不占用已由其他服务使用的 443。画布入口清除未使用的主站登录查询参数、关闭访问日志；固定 `/v1/` / `/v1beta/` 转发到现有主站 9000，用户自行配置个人 API Key，保留原生计费，不接 SSO、不建立用户作品数据库。
+
+主站入口：核对已部署主站版本支持设置部分更新，通过原生管理员 API 仅追加 custom_menu_items，新增用户可见“无限画布” → `https://canvas.fo2.us.ci/canvas`，ID `83171c9fee9a4214`；主站自动将该域名纳入 frame-src。前后比较原 9 个菜单及全部其他返回设置，均保持一致。管理员凭据只在原容器进程内使用，没有写入画布、仓库或部署环境文件。
+
+部署于北京时间 11-02 至 11-03 完成：fork 提交 `7676c01526119080f5a373aff3c3cd861cc422e2` 的 Actions `41474449809` 成功，amd64 / arm64 清单与匿名拉取确认；镜像索引 `sha256:1cce2c09ad541a1f7b4edcbf4ec3d0732cdcd262ec4cd1fc59658a6e1b02a52d`，服务器实际运行版本标签一致且健康。Compose 前后结构比较原五模块及资源不变，默认 `.env` 与显式 env-file 完全一致，根 pull 预演覆盖六模块；原有 14 个容器 ID、三个 Nginx 站点文件校验和不变，nginx -t 与平滑重载成功。
+
+公网 HTTPS 页面、config.js、JS / CSS / 图标资源正常；含模拟登录参数的入口 302 到无查询地址；无 Key 的 `/v1/models` 返回主站 JSON 401。独立 Playwright Chrome 验证 1440×900 / 390×844 新建画布、添加文本节点、刷新后 IndexedDB 数据保留，无本域资源失败或未捕获脚本异常，桌面编辑与主站来源 iframe 实际加载成功并已复核截图。原版手机项目编辑侧栏 / 工具栏拥挤，此次保留上游界面并记录限制，不宣称手机布局完善；未调用收费模型。验收截图和临时脚本在本机 `sub2api-canvas-deploy-20261102`；生产原配置及菜单受保护备份位于 `/root/sub2api-deploy/backups/infinite-canvas-20261102`。
+
 ## 2026-11-02：现金历史累计固定从 10 月 1 日开始
 
 用户要求成本分析现金收支中的历史收入、历史支出、累计净结余仅统计 2026-10-01 之后的数据。本轮按资金时区 2026-10-01（含当天）至今实现；当前用户余额仍取现值，排除 ID 1 和已删除用户。仅修改现有运营中心的累计汇总，不改原收支、防重、消费毛利、主站余额或资金；此前记录保留可查，本期卡片 / 趋势 / 列表仍按页面日期。无新增配置、依赖或数据库迁移，不连接生产、提交 / 推送或部署；保留正在进行的错误分析源码 / 文档、所有独立维护台账与无关文件。

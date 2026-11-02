@@ -13,6 +13,7 @@ Sub2API 的可插拔扩展服务集合。每个功能作为独立模块运行，
 | **支付宝自动充值中心** | `ghcr.io/fjiangming/sub2api-extra:recharge-center-latest` | `9874` | [README](recharge-center/README.md) |
 | **视频适配与资金结算** | 本地构建；CI 发布标签 `video-adapter-latest` | `9875` | [README](video-adapter/README.md) |
 | **用户用量排行** | 本地构建；CI 发布标签 `usage-leaderboard-latest` | `9876` | [README](usage-leaderboard/README.md) |
+| **无限画布** | `ghcr.io/fjiangming/infinite-canvas:latest` | `9877` | [README](infinite-canvas/README.md) |
 
 > 💡 后续新增的功能模块会持续补充到此表中。
 
@@ -51,13 +52,15 @@ sub2api-extra/
 ├── video-adapter/
 │   ├── compose.yaml
 │   └── .env
-└── usage-leaderboard/
-    ├── compose.yaml
-    └── .env                      # 只读数据库与主站地址，不需要数据目录
+├── usage-leaderboard/
+│   ├── compose.yaml
+│   └── .env                      # 只读数据库与主站地址，不需要数据目录
+└── infinite-canvas/
+    └── compose.yaml              # 静态画布，无数据库或数据目录
 ```
 
 ```bash
-mkdir -p sub2api-extra/account-manager sub2api-extra/provider-monitor sub2api-extra/operations-center sub2api-extra/degradation-detector sub2api-extra/recharge-center/secrets sub2api-extra/video-adapter sub2api-extra/usage-leaderboard
+mkdir -p sub2api-extra/account-manager sub2api-extra/provider-monitor sub2api-extra/operations-center sub2api-extra/degradation-detector sub2api-extra/recharge-center/secrets sub2api-extra/video-adapter sub2api-extra/usage-leaderboard sub2api-extra/infinite-canvas
 cd sub2api-extra
 ```
 
@@ -76,6 +79,7 @@ include:
   - ./recharge-center/compose.yaml
   - ./video-adapter/compose.yaml
   - ./usage-leaderboard/compose.yaml
+  - ./infinite-canvas/compose.yaml
 ```
 
 #### `compose.services.env`（选择要启用的服务）
@@ -100,6 +104,10 @@ docker compose --env-file compose.services.env --profile usage-leaderboard up -d
 ```
 
 该模块已加入根 Compose 和镜像 CI，`usage-leaderboard-latest` 镜像已发布。累计榜仅累计主站现存用量记录，已清理的历史明细不计入。
+
+### 无限画布
+
+`infinite-canvas` 使用独立 fork 的镜像和构建流水线，根 Compose 已登记。启用时在原 `COMPOSE_PROFILES` 后追加 `infinite-canvas`，保留既有服务；统一 `pull` 会读取 `ghcr.io/fjiangming/infinite-canvas:latest`，随后执行 `up -d --no-build` 才会应用更新。当前为浏览器本地工作区，用户填写自己的 Sub2API API Key，不接 SSO 或云端作品存储。独立域名、现有 Nginx、无参数日志和根目录直接更新方式见[模块部署说明](infinite-canvas/README.md)。
 
 #### `account-manager/compose.yaml`
 
