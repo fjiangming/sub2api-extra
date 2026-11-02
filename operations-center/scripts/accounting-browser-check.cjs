@@ -33,7 +33,7 @@ async function checkLayout(page) {
     controls: [...document.querySelectorAll('#cost-accounting-root button, #cost-accounting-root input, #cost-accounting-root select')].filter(node => node.getBoundingClientRect().width && !node.closest('.table-wrap')).filter(node => node.getBoundingClientRect().right > innerWidth + 1).map(node => node.outerHTML) }));
   assert.equal(result.overflow, false); assert(!result.metrics.some(row => row.overflow), JSON.stringify(result.metrics)); assert.deepEqual(result.controls, []);
 }
-async function closeDrawer(page) { await page.locator('[data-dialog] [data-close]').click(); }
+async function closeDrawer(page) { await page.locator('[data-dialog] .accounting-drawer-header [data-close]').click(); }
 async function credits(page) {
   await page.locator('[data-command=credits]').click(); await page.waitForSelector('#cost-auto-users [data-cost-auto-user-detail]');
   assert.equal(await page.locator('#cost-auto-users tr').count(), 20);
@@ -79,10 +79,19 @@ async function main() {
         release(); await waitFor(page, () => accountingUi.state.balances === null); assert.match(await page.locator('[data-automatic-metrics]').innerText(), /3,766.5/); await page.unroute('**/api/cost-analysis/cash/balances?*', failAux);
 
         await page.locator('[data-detail-tab=providers]').click(); assert.equal(await page.locator('[data-provider-summary] tbody tr').count(), 2);
-        await page.locator('[data-provider-entry=alpha]').click(); await page.waitForSelector('[data-entry-form]'); assert.equal(await page.locator('[data-entry-form] [name=currency]').inputValue(), 'CNY'); assert.equal(await page.locator('[data-entry-form] [name=providerId]').inputValue(), 'alpha');
+        await page.locator('#cost-accounting-add').click(); await page.waitForSelector('[data-entry-form]');
+        assert.equal(await page.locator('[data-entry-form] [name=direction]:checked').inputValue(), 'expense');
+        assert.equal(await page.locator('[data-entry-form] [name=category]').inputValue(), 'provider');
+        assert.equal(await page.locator('[data-provider-field]').isVisible(), true); assert.equal(await page.locator('[data-entry-form] [name=providerId]').inputValue(), '');
+        assert.equal(await page.locator('[data-entry-name]').isVisible(), false); assert.equal(await page.locator('[data-entry-form] [name=name]').isDisabled(), true);
+        await page.locator('[data-entry-form] [name=category]').selectOption('custom'); assert.equal(await page.locator('[data-entry-name]').isVisible(), false);
+        await page.locator('[data-entry-form] [name=direction][value=income]').check(); assert.equal(await page.locator('[data-entry-name]').isVisible(), true);
+        assert.equal(await page.locator('[data-entry-form] [name=name]').evaluate(node => node.required), true); await closeDrawer(page);
+        await page.locator('[data-provider-entry=alpha]').click(); await page.waitForSelector('[data-entry-form]'); assert.equal(await page.locator('[data-entry-form] [name=currency]').count(), 0); assert.match(await page.locator('[data-entry-form]').innerText(), /人民币元/); assert.equal(await page.locator('[data-entry-form] [name=providerId]').inputValue(), 'alpha');
         const oldDate = addUtcDays(preview.start, -5);
         await page.locator('[data-entry-form] [name=date]').fill(oldDate); await page.locator('[data-entry-form] [name=amount]').fill('125'); await page.locator('[data-entry-form] [type=submit]').click();
         await waitFor(page, date => accountingUi.state.tab === 'cash' && accountingUi.state.report?.range.start === date && accountingUi.state.report.items.some(row => row.amount === 125), oldDate);
+        assert.equal(await page.evaluate(() => accountingUi.state.report.items[0].name), 'Sub2API 示例上游 付款');
         assert.equal(await page.locator('[data-cash-rows] tr').count(), 1); assert.equal(await page.locator('[data-cash-metrics] [data-metric]').count(), 4);
         assert.deepEqual(await page.locator('[data-cash-metrics] [data-metric]').evaluateAll(nodes => nodes.map(node => node.dataset.metric)), ['income', 'expense', 'net', 'cumulative']);
         assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -2081);
@@ -90,19 +99,35 @@ async function main() {
         await page.locator('[data-metric=cumulative]').click(); assert.match(await page.locator('[data-drawer]').innerText(), /全历史累计入账/); assert.match(await page.locator('[data-drawer]').innerText(), /11,790/); await closeDrawer(page);
         await page.locator('[data-record]').click(); await page.locator('[data-command=edit]').click(); await page.waitForSelector('[data-entry-form]'); await page.locator('[data-entry-form] [name=amount]').fill('150'); await page.locator('[data-entry-form] [type=submit]').click();
         await waitFor(page, () => accountingUi.state.report?.items[0]?.amount === 150 && !document.querySelector('[data-dialog]').open); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -2106);
+        assert.equal(await page.evaluate(() => accountingUi.state.report.items[0].name), 'Sub2API 示例上游 付款');
         await page.locator('[data-record]').click(); page.once('dialog', dialog => dialog.accept()); await page.locator('[data-command=delete]').click(); await waitFor(page, () => accountingUi.state.report?.summary.expense === 0 && !document.querySelector('[data-dialog]').open); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -1956);
 
         await page.locator('#cost-analysis-filter [name=start]').fill(preview.start); await page.locator('#cost-analysis-filter [name=end]').fill(preview.today); await page.locator('[data-cash-search] [name=search]').fill(''); await page.locator('[data-cash-search] [type=submit]').click();
         await waitFor(page, () => accountingUi.state.report?.summary.income === 10199); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -1956);
         await page.locator('[data-record="payment:1"]').click(); await waitFor(page, () => accountingUi.state.selectedItem?.key === 'payment:1' && document.querySelector('[data-dialog]').open); assert.equal(await page.locator('[data-command=edit]').count(), 0); assert.equal(await page.locator('[data-command=delete]').count(), 0); await closeDrawer(page);
         preview.config.financeCashExchangeRates = [{ currency: 'USD', rate: 7.2, from: '2000-01-01', to: '9999-12-31' }];
-        await page.locator('#cost-accounting-add').click(); await page.waitForSelector('[data-entry-form]'); await page.locator('[data-entry-form] [name=direction][value=income]').check(); await page.locator('[data-entry-form] [name=name]').fill('Offline USD receipt'); await page.locator('[data-entry-form] [name=amount]').fill('10'); await page.locator('[data-entry-form] [name=currency]').fill('USD'); await page.locator('[data-entry-form] [type=submit]').click();
-        await waitFor(page, () => accountingUi.state.report?.currency === 'USD' && accountingUi.state.report.summary.income === 10); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -1884);
-        await page.locator('[data-cash-currency]').selectOption('CNY'); await waitFor(page, () => accountingUi.state.report?.currency === 'CNY'); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -1884);
-        await page.locator('[data-cash-search] [name=search]').fill(''); await page.locator('[data-cash-search] [type=submit]').click(); await waitFor(page, () => accountingUi.state.report?.pagination.total === 3);
+        await preview.database.query(`UPDATE payment_orders SET provider_snapshot='{"currency":"USD"}' WHERE id=1`);
+        await preview.cashFlow.sync({ force: true });
+        const historical = { key: 'cash:historical-usd', source: 'manual', direction: 'income', date: preview.today, name: 'Historical receipt', amount: '5', currency: 'USD', rate: 7.2, active: true };
+        preview.store.putCash(historical, 'example', 'Existing historical receipt');
+        await page.locator('#cost-accounting-add').click(); await page.waitForSelector('[data-entry-form]'); await page.locator('[data-entry-form] [name=direction][value=income]').check(); await page.locator('[data-entry-form] [name=name]').fill('Offline receipt'); await page.locator('[data-entry-form] [name=amount]').fill('10'); await page.locator('[data-entry-form] [type=submit]').click();
+        await waitFor(page, () => accountingUi.state.report?.currency === 'CNY' && accountingUi.state.report.summary.income === 10214); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -1941);
+        assert.equal(await page.locator('[data-cash-currency]').count(), 0);
+        await page.locator('[data-cash-search] [name=search]').fill(''); await page.locator('[data-cash-search] [type=submit]').click(); await waitFor(page, () => accountingUi.state.report?.pagination.total === 5);
+        assert.match(await page.locator('[data-cash-range]').innerText(), /人民币/); assert.doesNotMatch(await page.locator('#accounting-cash').innerText(), /USD|原币/);
+        await page.locator('[data-record="cash:historical-usd"]').click(); await waitFor(page, () => accountingUi.state.selectedItem?.key === 'cash:historical-usd' && document.querySelector('[data-dialog]').open);
+        assert.match(await page.locator('[data-drawer]').innerText(), /金额（元）/); await page.locator('[data-command=edit]').click(); await page.waitForSelector('[data-entry-form]'); assert.equal(await page.locator('[data-entry-form] [name=amount]').inputValue(), '5'); assert.equal(await page.locator('[data-entry-form] [name=currency]').count(), 0); await closeDrawer(page);
+        assert.deepEqual(preview.store.cashRecord(historical.key), historical);
         await checkChart(page, '#accounting-cash-chart'); await checkLayout(page); await page.evaluate(() => { document.getElementById('toast-region').replaceChildren(); scrollTo(0, 0); }); await page.screenshot({ path: path.join(directory, `${name}-cash.png`), fullPage: true });
 
         if (name === 'desktop') {
+          await page.locator('#cost-accounting-add').click(); await page.waitForSelector('[data-entry-form]');
+          await page.locator('[data-entry-form] [name=category]').selectOption('custom'); await page.locator('[data-entry-form] [name=amount]').fill('3');
+          await page.locator('[data-entry-form] [name=note]').fill('Example custom payment'); await page.locator('[data-entry-form] [type=submit]').click();
+          await waitFor(page, () => accountingUi.state.report?.items[0]?.name === '自定义支出' && !document.querySelector('[data-dialog]').open);
+          assert.equal(await page.evaluate(() => accountingUi.state.report.items[0].amount), 3);
+          await page.locator('[data-record]').click(); page.once('dialog', dialog => dialog.accept()); await page.locator('[data-command=delete]').click();
+          await waitFor(page, () => accountingUi.state.report?.cumulative.net === -1941 && !document.querySelector('[data-dialog]').open);
           // A superseded slow response cannot overwrite a newer view.
           let unblock, handled; const pending = new Promise(resolve => { unblock = resolve; }), finished = new Promise(resolve => { handled = resolve; });
           const slow = async route => { await pending; try { await route.fulfill({ status: 500, json: { error: { message: 'Superseded response' } } }); } finally { handled(); } };

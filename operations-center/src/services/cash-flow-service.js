@@ -66,13 +66,6 @@ class CashFlowService {
     await this.running;
   }
 
-  rate(currency, date, previous = null) {
-    if (currency === 'CNY') return 1;
-    if (previous && validAmount(previous) && new Decimal(previous).gt(0)) return number(previous);
-    const rule = (this.config.financeCashExchangeRates || []).find(rule => rule.currency === currency && rule.from <= date && date <= rule.to);
-    return rule?.rate || null;
-  }
-
   async sync({ force = false } = {}) {
     this.scope();
     if (this.running) return this.running;
@@ -156,7 +149,7 @@ class CashFlowService {
       name: row.order_type === 'subscription' ? `订阅付款 #${row.id}` : `余额充值付款 #${row.id}`,
       category: 'custom', providerId: '', sourceRef: row.order_number || key, note: '',
       aliases: [...new Set([key, row.order_number, ...(row.redeem_ids || []).map(id => `redeem:${id}`), ...(previous?.aliases || [])].filter(Boolean))],
-      rate: this.rate(currency, date, unchanged ? previous.rate : decision?.rate), active,
+      rate: (unchanged ? previous.rate : decision?.rate) ?? null, active,
       paidAt: row.paid_at instanceof Date ? row.paid_at.toISOString() : row.paid_at,
       refundDate: localDate(row.refund_at, this.config.financeTimezone),
       refundQuantity: validAmount(row.refund_quantity) ? String(row.refund_quantity) : '0' });
@@ -180,7 +173,7 @@ class CashFlowService {
       if (!validAmount(amount)) return;
       rows.push({ key: document.key, source, direction, date: decision?.date || document.date,
         name: document.name, amount: String(amount), currency,
-        rate: this.rate(currency, decision?.date || document.date, decision?.rate),
+        rate: decision?.rate ?? null,
         providerId: decision?.providerId || document.providerId || '', category: (decision?.kind || document.kind) === 'provider_prepayment' || document.providerId ? 'provider' : 'custom',
         sourceRef: decision?.linkedKey || document.linkedKey || '', note: document.note || document.reason || '',
         userId: document.userId || null, active: true, legacy: true, aliases: document.payments?.map(payment => `payment:${payment.id}`) || [] });
@@ -219,7 +212,7 @@ class CashFlowService {
   rows() {
     this.scope();
     const audit = this.store.db.prepare('SELECT MAX(id) AS id FROM accounting_audit WHERE scope=?').get(this.scopeKey).id;
-    const cacheKey = `${audit}:${JSON.stringify(this.config.financeCashExchangeRates || [])}`;
+    const cacheKey = String(audit);
     if (this.rowsCache?.key === cacheKey && this.rowsCache.ledger === this.ledger.state && this.rowsCache.until > Date.now()) return this.rowsCache.rows;
     const records = new Map(this.legacyRows().map(row => [row.key, row]));
     const decisions = this.store.decisions(), excluded = new Set(), documents = new Map(this.store.documents().map(document => [document.key, document]));
@@ -240,7 +233,7 @@ class CashFlowService {
     }
     const today = dateInTimezone(this.config.financeTimezone, this.now());
     const rows = [...records.values()].filter(row => row.active !== false && row.date <= today && row.userId !== '1')
-      .map(row => ({ ...row, amount: number(row.amount), rate: this.rate(row.currency, row.date, row.rate), counted: true }));
+      .map(row => ({ ...row, amount: number(row.amount), counted: true }));
     const automaticAliases = new Set(rows.filter(row => row.source === 'automatic').flatMap(row => row.aliases || [row.key, row.sourceRef]).map(value => value.toLowerCase()));
     const linked = new Set();
     for (const row of rows) {
@@ -254,7 +247,8 @@ class CashFlowService {
         if (linked.has(reference)) { row.counted = false; row.mergeReason = '来源单号已统计'; }
         else linked.add(reference);
       }
-      row.cnyAmount = row.rate ? number(new Decimal(row.amount).times(row.rate)) : null;
+      // Cash amounts are treated as RMB at face value; source currency remains archived.
+      row.cnyAmount = row.amount;
     }
     rows.sort((left, right) => right.date.localeCompare(left.date) || (right.createdAt || '').localeCompare(left.createdAt || '') || right.key.localeCompare(left.key));
     this.rowsCache = { key: cacheKey, ledger: this.ledger.state, until: Date.now() + 30000, rows };
@@ -339,15 +333,14 @@ class CashFlowService {
 
   async getReport(input = {}) {
     const today = dateInTimezone(this.config.financeTimezone, this.now());
-    const query = parseAutomaticIncomeInput({ start: today.slice(0, 7) + '-01', end: today, ...input }, this.config);
+    const query = parseAutomaticIncomeInput({ start: today.slice(0, 7) + '-01', end: today, ...input, currency: 'CNY' }, this.config);
     if (!['all', 'income', 'expense'].includes(input.direction || 'all') || !['all', 'automatic', 'manual'].includes(input.origin || 'all')) throw new AppError('CASH_FILTER_INVALID', '收支或来源筛选无效', { status: 400 });
     await this.sync({ force: input.refresh === '1' });
     const source = this.sourceStatus(), rows = this.rows();
-    const selected = rows.filter(row => row.date >= query.range.start && row.date <= query.range.end && row.currency === query.currency);
-    const unknownCurrency = rows.some(row => row.currency === 'UNKNOWN' && row.date >= query.range.start && row.date <= query.range.end);
-    const unresolved = this.unresolvedRefunds(rows, query.range, query.currency);
-    const complete = source.complete && !unknownCurrency && !unresolved.length;
-    const known = totals(selected), summary = { ...known, income: source.complete && !unknownCurrency ? known.income : null,
+    const selected = rows.filter(row => row.date >= query.range.start && row.date <= query.range.end);
+    const unresolved = this.unresolvedRefunds(rows, query.range);
+    const complete = source.complete && !unresolved.length;
+    const known = totals(selected), summary = { ...known, income: source.complete ? known.income : null,
       expense: unresolved.length ? null : known.expense, net: complete ? known.net : null, complete,
       automatic: totals(selected.filter(row => row.source === 'automatic')).income, manual: totals(selected.filter(row => row.source !== 'automatic')).income };
     const filtered = selected.filter(row => (input.direction == null || input.direction === 'all' || row.direction === input.direction) &&
@@ -355,45 +348,44 @@ class CashFlowService {
       `${row.name} ${row.providerId} ${this.ledger.providers().items.find(provider => provider.id === row.providerId)?.name || ''} ${row.key} ${row.sourceRef} ${row.note}`.toLowerCase().includes(query.search.toLowerCase()));
     const periods = createPeriods(query.range, query.granularity).map(period => ({ key: period.key, label: period.label,
       ...totals(selected.filter(row => row.date >= period.start && row.date <= period.end)),
-      ...(!source.complete || rows.some(row => row.currency === 'UNKNOWN' && row.date >= period.start && row.date <= period.end) ? { income: null, net: null } : {}),
-      ...(this.unresolvedRefunds(rows, period, query.currency).length ? { expense: null, net: null } : {}) }));
+      ...(!source.complete ? { income: null, net: null } : {}),
+      ...(this.unresolvedRefunds(rows, period).length ? { expense: null, net: null } : {}) }));
     let balance;
     try { balance = await this.balances({ refresh: input.refresh === '1' }); } catch { balance = { userBalance: null, capturedAt: null }; }
     const cumulative = this.cumulative(rows, source, balance);
     const page = Math.min(query.page, Math.max(1, Math.ceil(filtered.length / query.pageSize)));
     return { range: query.range, currency: query.currency, timezone: this.config.financeTimezone, granularity: query.granularity,
       generatedAt: this.now().toISOString(), summary, known, cumulative, source, periods,
-      currencies: [...new Set(['CNY', ...rows.map(row => row.currency).filter(currency => currency !== 'UNKNOWN')])].sort(),
+      currencies: ['CNY'],
       items: filtered.slice((page - 1) * query.pageSize, page * query.pageSize).map(row => this.publicRow(row)),
       pagination: { page, pageSize: query.pageSize, total: filtered.length, totalPages: Math.ceil(filtered.length / query.pageSize) },
       filteredSummary: totals(filtered), recordCount: selected.length,
-      notices: [source.message, unknownCurrency ? '部分历史支付缺少币种信息' : null, unresolved.length ? '存在退额度记录，尚无实际现金退款金额；未按额度估算现金' : null].filter(Boolean) };
+      notices: [source.message, unresolved.length ? '存在退额度记录，尚无实际现金退款金额；未按额度估算现金' : null].filter(Boolean) };
   }
 
-  unresolvedRefunds(rows, range = null, currency = null) {
+  unresolvedRefunds(rows, range = null) {
     return rows.filter(row => row.source === 'automatic' && row.refundDate && new Decimal(row.refundQuantity || 0).gt(0) &&
       row.refundDate <= dateInTimezone(this.config.financeTimezone, this.now()) &&
-      (!currency || row.currency === currency || row.currency === 'UNKNOWN') &&
       (!range || (row.refundDate >= (range.start || range.key) && row.refundDate <= (range.end || range.key))) &&
       !rows.some(other => other.counted && other.direction === 'expense' && [other.sourceRef?.toLowerCase(), other.key].includes(`refund:${row.key.slice(8)}`)));
   }
 
   cumulative(rows, source, balance) {
-    const counted = rows.filter(row => row.counted), missingRates = counted.filter(row => row.cnyAmount == null);
-    const sum = direction => counted.filter(row => row.direction === direction).some(row => row.cnyAmount == null) ? null : number(counted.filter(row => row.direction === direction).reduce((total, row) => total.plus(row.cnyAmount), new Decimal(0)));
-    const income = source.complete ? sum('income') : null, expense = this.unresolvedRefunds(rows).length ? null : sum('expense');
+    const counted = rows.filter(row => row.counted), amounts = totals(counted);
+    const income = source.complete ? amounts.income : null, expense = this.unresolvedRefunds(rows).length ? null : amounts.expense;
     return { currency: 'CNY', income, expense, userBalance: balance.userBalance,
       net: income != null && expense != null && balance.userBalance != null ? number(new Decimal(income).minus(expense).minus(balance.userBalance)) : null,
       capturedAt: this.now().toISOString(), balanceCapturedAt: balance.capturedAt, recordCount: counted.length,
-      missingRates: missingRates.length, from: counted.map(row => row.date).sort()[0] || null,
-      originals: [...new Set(counted.map(row => row.currency))].sort().map(currency => ({ currency, ...totals(counted.filter(row => row.currency === currency)) })),
-      notices: [!source.complete ? source.message : null, missingRates.length ? '部分历史现金缺少对应日期的 CNY 汇率' : null,
+      missingRates: 0, from: counted.map(row => row.date).sort()[0] || null,
+      originals: [{ currency: 'CNY', ...amounts }],
+      notices: [!source.complete ? source.message : null,
         balance.userBalance == null ? '当前用户余额暂不可用' : null, this.unresolvedRefunds(rows).length ? '实际现金退款金额缺失' : null].filter(Boolean) };
   }
 
   publicRow(row) {
     const { aliases, refundQuantity, paidAt, ...value } = row;
-    return { ...value, editable: row.source !== 'automatic', providerName: this.ledger.providers().items.find(provider => provider.id === row.providerId)?.name || row.providerId || null };
+    return { ...value, amount: number(row.amount), currency: 'CNY', rate: 1, cnyAmount: number(row.amount),
+      editable: row.source !== 'automatic', providerName: this.ledger.providers().items.find(provider => provider.id === row.providerId)?.name || row.providerId || null };
   }
 
   detail(key) {
@@ -409,21 +401,24 @@ class CashFlowService {
     if (!date.isValid || date.toISODate() !== value.date || value.date.startsWith('0000') || value.date > dateInTimezone(this.config.financeTimezone, this.now())) throw new AppError('CASH_DATE_INVALID', '发生日期须为今天或以前的有效日期', { status: 400 });
     if (value.direction !== 'expense' || value.category !== 'provider') { value.providerId = ''; value.category = 'custom'; }
     else if (value.providerId !== existing?.providerId && !this.ledger.providers().items.some(provider => provider.id === value.providerId)) throw new AppError('CASH_PROVIDER_INVALID', '请选择供应商目录中的供应商，或改记自定义支出', { status: 400 });
-    return value;
+    return { ...value, currency: 'CNY' };
   }
 
   async save(input, actor, key = null) {
     this.scope();
     const value = this.normalize(input, key ? this.rows().find(row => row.key === key) : null);
-    const fingerprint = crypto.createHash('sha256').update(JSON.stringify({ ...value, requestId: undefined })).digest('hex');
+    const fingerprintFor = fields => crypto.createHash('sha256').update(JSON.stringify({ ...fields, requestId: undefined })).digest('hex');
+    const fingerprint = fingerprintFor(value);
     if (!key && !value.requestId) throw new AppError('CASH_REQUEST_REQUIRED', '请提供本次记账请求 ID', { status: 400 });
     await this.sync();
     return this.store.db.transaction(() => {
       if (!key) {
         const request = this.store.db.prepare('SELECT * FROM cash_requests WHERE scope=? AND request_id=?').get(this.scopeKey, value.requestId);
         if (request) {
-          if (request.fingerprint !== fingerprint) throw new AppError('CASH_REQUEST_CONFLICT', '同一次请求不能更换记账内容', { status: 409 });
           const previous = this.store.cashRecord(request.key);
+          const previousFingerprints = [input.currency, previous?.currency].filter(Boolean)
+            .map(currency => fingerprintFor({ ...value, currency: String(currency).trim().toUpperCase() }));
+          if (request.fingerprint !== fingerprint && !previousFingerprints.includes(request.fingerprint)) throw new AppError('CASH_REQUEST_CONFLICT', '同一次请求不能更换记账内容', { status: 409 });
           if (!previous?.active) throw new AppError('CASH_ALREADY_DELETED', '该次请求对应的记录已删除', { status: 409 });
           return this.publicRow(previous);
         }
@@ -435,8 +430,7 @@ class CashFlowService {
           (value.direction === 'income' && (row.aliases || [row.key]).some(alias => alias.toLowerCase() === value.sourceRef.toLowerCase()))))) throw new AppError('CASH_DUPLICATE_SOURCE', '该来源单号已有记录，请查看原记录，避免重复入账', { status: 409 });
       if (value.sourceRef && !this.sourceStatus().complete) throw new AppError('CASH_SYNC_PENDING', '自动收款尚未同步完成，来源单号将在同步完成后校验', { status: 409 });
       const now = this.now().toISOString(), { requestId, ...fields } = value;
-      const rate = this.rate(value.currency, value.date, existing?.currency === value.currency && existing.date === value.date ? existing.rate : null);
-      const record = { ...fields, key: key || `cash:${requestId}`, source: 'manual', amount: String(value.amount), rate,
+      const record = { ...fields, key: key || `cash:${requestId}`, source: 'manual', amount: String(value.amount), rate: 1,
         active: true, createdAt: existing?.createdAt || now, updatedAt: now, actor: String(actor || 'administrator') };
       this.store.putCash(record, actor || 'administrator', key ? '修改现金收支记录' : '新增现金收支记录');
       if (!key) this.store.db.prepare('INSERT INTO cash_requests(scope,request_id,fingerprint,key) VALUES (?,?,?,?)').run(this.scopeKey, requestId, fingerprint, record.key);

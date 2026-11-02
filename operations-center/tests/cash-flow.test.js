@@ -91,20 +91,50 @@ test('late automatic match suppresses manual duplicate without deleting either r
   assert.equal(r.items.find(row => row.key === manual.key).counted, false);
 });
 
-test('original currencies stay separate while cumulative uses dated cash FX rather than upstream recharge rates', async t => {
+test('all cash is RMB at face value across currency queries, periods, details and cumulative totals', async t => {
   const f = fixture(t, { financeCashExchangeRates: [{ currency: 'USD', rate: 7.2, from: '2026-01-01', to: '2026-12-31' }] });
-  await f.service.save(entry({ amount: 2, currency: 'USD', category: 'provider', providerId: 'upstream' }), 'admin');
-  const cny = await f.service.getReport(f.query), usd = await f.service.getReport({ ...f.query, currency: 'USD' });
-  assert.equal(cny.summary.expense, 0); assert.equal(usd.summary.expense, 2); assert.equal(usd.cumulative.expense, 14.4); assert.equal(usd.cumulative.net, 25.6);
-  assert.deepEqual(cny.cumulative, usd.cumulative);
-  assert.equal(usd.items[0].providerName, 'Supplier');
+  const original = { key: 'cash:historical-usd', source: 'manual', direction: 'expense', date: '2026-10-02',
+    name: 'Historical supplier', amount: '2', currency: 'USD', rate: 7.2, active: true, providerId: 'upstream' };
+  f.store.putCash(original);
+  const saved = await f.service.save(entry({ amount: 3, currency: 'USD', category: 'provider', providerId: 'upstream' }), 'admin');
+  assert.equal(saved.currency, 'CNY'); assert.equal(saved.amount, 3); assert.equal(saved.rate, 1);
+  for (const currency of ['CNY', 'USD', 'EUR', 'RMB']) for (const granularity of ['day', 'week', 'month', 'year']) {
+    const r = await f.service.getReport({ ...f.query, currency, granularity });
+    assert.equal(r.currency, 'CNY'); assert.deepEqual(r.currencies, ['CNY']);
+    assert.equal(r.summary.income, 100); assert.equal(r.summary.expense, 5); assert.equal(r.summary.net, 95);
+    assert.equal(r.cumulative.expense, 5); assert.equal(r.cumulative.net, 35); assert.equal(r.items.length, 3);
+    assert(r.items.every(row => row.currency === 'CNY' && row.rate === 1 && row.cnyAmount === row.amount));
+    assert.equal(r.periods.reduce((sum, row) => sum + row.income, 0), r.summary.income);
+    assert.equal(r.periods.reduce((sum, row) => sum + row.expense, 0), r.summary.expense);
+  }
+  const detail = f.service.detail(original.key).item;
+  assert.equal(detail.currency, 'CNY'); assert.equal(detail.amount, 2); assert.equal(detail.providerName, 'Supplier');
+  assert.deepEqual(f.store.cashRecord(original.key), original);
 });
 
-test('missing historical FX and currency keep cumulative unknown while original cash flow is still available', async t => {
+test('missing currency and historical FX do not block RMB cash totals', async t => {
   const f = fixture(t); await f.service.save(entry({ currency: 'USD', amount: 2 }), 'admin');
-  let r = await f.service.getReport({ ...f.query, currency: 'USD' }); assert.equal(r.summary.net, -2); assert.equal(r.cumulative.net, null); assert.equal(r.cumulative.expense, null);
+  let r = await f.service.getReport({ ...f.query, currency: 'USD' }); assert.equal(r.summary.net, 98); assert.equal(r.cumulative.net, 38); assert.equal(r.cumulative.expense, 2);
   f.source.payments.push(payment({ id: '2', currency: null })); await f.service.sync({ force: true });
-  r = await f.service.getReport(f.query); assert.equal(r.summary.income, null); assert.equal(r.cumulative.income, null); assert.equal(r.cumulative.net, null);
+  r = await f.service.getReport(f.query); assert.equal(r.summary.income, 200); assert.equal(r.cumulative.income, 200); assert.equal(r.cumulative.net, 138);
+  assert.equal(r.cumulative.missingRates, 0); assert.deepEqual(r.notices, []);
+  assert.equal(f.store.cashRecord('payment:2').currency, 'UNKNOWN');
+});
+
+test('legacy USD requests remain idempotent after switching to RMB without rewriting source records', async t => {
+  const f = fixture(t), input = entry({ currency: 'USD', amount: 2 });
+  const oldValue = { ...f.service.normalize(input), currency: 'USD' }, { requestId, ...fields } = oldValue;
+  const original = { ...fields, key: `cash:${requestId}`, source: 'manual', amount: '2', rate: 7.2, active: true };
+  f.store.putCash(original);
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify({ ...oldValue, requestId: undefined })).digest('hex');
+  f.store.db.prepare('INSERT INTO cash_requests(scope,request_id,fingerprint,key) VALUES (?,?,?,?)').run(f.store.scope, requestId, fingerprint, original.key);
+  for (const currency of ['USD', 'CNY', undefined]) {
+    const result = await f.service.save({ ...input, currency }, 'admin');
+    assert.equal(result.key, original.key); assert.equal(result.currency, 'CNY'); assert.equal(result.amount, 2);
+  }
+  await assert.rejects(f.service.save({ ...input, amount: 3 }, 'admin'), { code: 'CASH_REQUEST_CONFLICT' });
+  assert.deepEqual(f.store.cashRecord(original.key), original);
+  assert.equal((await f.service.getReport(f.query)).summary.expense, 2);
 });
 
 test('source/balance failure never becomes zero or hides known manual records', async t => {
@@ -138,6 +168,21 @@ test('legacy JSON cash survives with original IDs, exclusions, unpaid facts, and
   f.service.remove('legacy-expense:old', 'admin'); assert.equal((await f.service.getReport(f.query)).summary.expense, 0);
 });
 
+test('mixed-currency legacy JSON and archived sources keep their IDs and RMB face values after restart', async t => {
+  const f = fixture(t, { financeCashExchangeRates: [{ currency: 'USD', rate: 7.2, from: '2026-01-01', to: '2026-12-31' }] });
+  const snapshot = { entries: [{ id: 'usd-cost', date: '2026-10-02', name: 'Supplier', amountMinor: 2000, currency: 'USD', providerId: 'upstream' }],
+    incomes: [{ id: 'eur-receipt', date: '2026-10-02', name: 'Offline', amountMinor: 5000, currency: 'EUR' }] };
+  f.ledger.snapshot = () => snapshot;
+  f.source.payments = [payment({ currency: 'USD' })];
+  let r = await f.service.getReport(f.query);
+  assert.equal(r.summary.income, 150); assert.equal(r.summary.expense, 20); assert.equal(r.cumulative.net, 70);
+  assert(r.items.some(row => row.key === 'legacy-income:eur-receipt' && row.amount === 50 && row.currency === 'CNY'));
+  f.source.payments = []; f.store.close(); f.store.initialize(); await f.service.sync({ force: true });
+  r = await f.service.getReport({ ...f.query, search: 'absent', currency: 'USD' });
+  assert.equal(r.items.length, 0); assert.equal(r.summary.net, 130); assert.equal(r.cumulative.net, 70);
+  assert.equal(f.store.cashRecord('payment:1').currency, 'USD'); assert.equal(snapshot.entries[0].currency, 'USD');
+});
+
 test('cleared user foreign keys or deleted redemption links retain archived identities and duplicate protection', async t => {
   const f = fixture(t); f.source.credits = [{ id: '1', user_id: '2', type: 'balance', value: '120', used_at: '2026-10-02T00:00:00+08:00', code: 'synthetic', notes: '' }];
   await f.service.sync(); f.source.payments = [payment({ user_id: null, redeem_ids: [], currency: null })];
@@ -168,11 +213,12 @@ test('refund request, pending, failed and failed fulfillment statuses retain the
   assert.equal((await f.service.getReport(f.query)).summary.income, 300);
 });
 
-test('previous confirmed currency and actual FX survive an incomplete source snapshot', async t => {
+test('previous currency evidence is retained while its amount is counted as RMB', async t => {
   const f = fixture(t); f.source.payments = [payment({ currency: null })];
   f.store.importDocuments([{ key: 'payment:1', origin: 'payment', date: '2026-10-02', userId: '2', amount: '100', currency: null, kind: 'customer_receipt', name: 'Old paid order' }]);
   f.accounting.classify('payment:1', { kind: 'customer_receipt', amount: 100, currency: 'USD', rate: 7.2, reason: 'Existing actual currency evidence' }, 'admin');
-  const r = await f.service.getReport({ ...f.query, currency: 'USD' }); assert.equal(r.summary.income, 100); assert.equal(r.cumulative.income, 720); assert.equal(r.cumulative.net, 660);
+  const r = await f.service.getReport({ ...f.query, currency: 'USD' }); assert.equal(r.summary.income, 100); assert.equal(r.cumulative.income, 100); assert.equal(r.cumulative.net, 40);
+  assert.equal(f.store.cashRecord('payment:1').currency, 'USD'); assert.equal(f.store.cashRecord('payment:1').rate, 7.2);
 });
 
 test('archived quota refunds remain unknown without actual cash and removed suppliers keep their past payments editable', async t => {
@@ -185,12 +231,12 @@ test('archived quota refunds remain unknown without actual cash and removed supp
   const r = await f.service.getReport(f.query); assert.equal(r.summary.net, null); assert.equal(r.cumulative.net, null); assert.equal(r.known.expense, 15);
 });
 
-test('quota refunds are not inferred as cash and are isolated to their original currency', async t => {
+test('quota refunds affect unified RMB cash flow until an actual cash refund is recorded', async t => {
   const f = fixture(t); f.source.payments.push(payment({ id: '2', currency: 'USD', amount: '5', refund_at: '2026-10-03T00:00:00+08:00', refund_quantity: '999' }));
-  const cny = await f.service.getReport(f.query); assert.equal(cny.summary.net, 100); assert.equal(cny.cumulative.net, null);
+  const cny = await f.service.getReport(f.query); assert.equal(cny.summary.income, 105); assert.equal(cny.summary.net, null); assert.equal(cny.cumulative.net, null);
   assert.equal((await f.service.getReport({ ...f.query, currency: 'USD' })).summary.net, null);
   await f.service.save(entry({ currency: 'USD', amount: 1, sourceRef: 'refund:2', date: '2026-10-03' }), 'admin');
-  const usd = await f.service.getReport({ ...f.query, currency: 'USD' }); assert.equal(usd.summary.net, 4);
+  const usd = await f.service.getReport({ ...f.query, currency: 'USD' }); assert.equal(usd.summary.net, 104); assert.equal(usd.cumulative.net, 44);
 });
 
 test('full history sync is bounded, resumable, single flight, and does not call the supplier', async t => {
