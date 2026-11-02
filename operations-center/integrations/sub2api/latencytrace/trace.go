@@ -22,20 +22,31 @@ import (
 )
 
 type Attributes struct {
-	AccountID         string `json:"accountId,omitempty"`
-	UserID            string `json:"userId,omitempty"`
-	Model             string `json:"model,omitempty"`
-	Effort            string `json:"effort,omitempty"`
-	Host              string `json:"host,omitempty"`
-	UpstreamRequestID string `json:"upstreamRequestId,omitempty"`
-	UsageRequestID    string `json:"usageRequestId,omitempty"`
-	Bytes             *int64 `json:"bytes,omitempty"`
-	Reused            *bool  `json:"reused,omitempty"`
-	Protocol          string `json:"protocol,omitempty"`
-	StatusCode        int    `json:"statusCode,omitempty"`
-	ErrorCode         string `json:"errorCode,omitempty"`
-	Outcome           string `json:"outcome,omitempty"`
-	DroppedEvents     int    `json:"droppedEvents,omitempty"`
+	AccountID            string `json:"accountId,omitempty"`
+	UserID               string `json:"userId,omitempty"`
+	APIKeyID             string `json:"apiKeyId,omitempty"`
+	GroupID              string `json:"groupId,omitempty"`
+	Model                string `json:"model,omitempty"`
+	Effort               string `json:"effort,omitempty"`
+	Host                 string `json:"host,omitempty"`
+	UpstreamRequestID    string `json:"upstreamRequestId,omitempty"`
+	UsageRequestID       string `json:"usageRequestId,omitempty"`
+	Bytes                *int64 `json:"bytes,omitempty"`
+	Reused               *bool  `json:"reused,omitempty"`
+	Protocol             string `json:"protocol,omitempty"`
+	StatusCode           int    `json:"statusCode,omitempty"`
+	ErrorCode            string `json:"errorCode,omitempty"`
+	Outcome              string `json:"outcome,omitempty"`
+	DroppedEvents        int    `json:"droppedEvents,omitempty"`
+	ResultVersion        int    `json:"resultVersion,omitempty"`
+	WireStatusCode       int    `json:"wireStatusCode,omitempty"`
+	DownstreamComplete   *bool  `json:"downstreamComplete,omitempty"`
+	TerminalSeen         *bool  `json:"terminalSeen,omitempty"`
+	ErrorWritten         *bool  `json:"errorWritten,omitempty"`
+	ClientDisconnected   *bool  `json:"clientDisconnected,omitempty"`
+	OutputStarted        *bool  `json:"outputStarted,omitempty"`
+	UpstreamAttemptCount *int   `json:"upstreamAttemptCount,omitempty"`
+	DeliveryKind         string `json:"deliveryKind,omitempty"`
 }
 
 type Event struct {
@@ -209,6 +220,10 @@ func (t *Trace) Record(attempt, name string, attrs Attributes) {
 	now := time.Now()
 	if name == "request_end" {
 		attrs.DroppedEvents = t.dropped
+		if attrs.ResultVersion == 1 {
+			attempts := t.attempts
+			attrs.UpstreamAttemptCount = &attempts
+		}
 	}
 	row := Event{t.ID, attempt, t.sequence, name, now.UTC().Format(time.RFC3339Nano), float64(now.Sub(t.started).Microseconds()) / 1000, attrs}
 	t.sequence++

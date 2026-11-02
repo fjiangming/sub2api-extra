@@ -129,3 +129,19 @@ test('financial balance snapshot clients use integration auth or admin SSO witho
   await assert.rejects(new ProviderMonitorClient({}).getFinancialBalances(), { code: 'PROVIDER_MONITOR_NOT_CONFIGURED' });
   await assert.rejects(new ProviderMonitorClient({ providerMonitorBaseUrl: 'https://monitor.example' }).getFinancialBalances(), { code: 'PROVIDER_MONITOR_AUTH_NOT_CONFIGURED' });
 });
+
+test('error mappings use integration or administrator-scoped SSO and pass the bounded historical interval', async () => {
+  for (const integrationToken of ['synthetic-integration', null]) {
+    const calls = [], query = { from: '2026-11-01', to: '2026-11-04' };
+    const client = new ProviderMonitorClient({ providerMonitorBaseUrl: 'https://monitor.example',
+      providerMonitorIntegrationToken: integrationToken, providerMonitorRequestTimeoutMs: 1000 }, async (url, options) => {
+      calls.push({ url, options });
+      return response(200, url.endsWith('/api/auth/sso') ? { sessionToken: 'error-admin-session' } : { items: [], source: 'verified_mapping_history' });
+    });
+    await client.getRequestErrorMappings(query, 'admin-sso');
+    assert.equal(calls.at(-1).options.headers.authorization, integrationToken ? 'Bearer synthetic-integration' : 'Session error-admin-session');
+    assert.deepEqual(Object.fromEntries(new URL(calls.at(-1).url).searchParams), query);
+    assert.equal(calls.filter(c => c.options.method === 'POST').length, integrationToken ? 0 : 1);
+  }
+  await assert.rejects(new ProviderMonitorClient({}).getRequestErrorMappings({}), { code: 'PROVIDER_MONITOR_NOT_CONFIGURED' });
+});

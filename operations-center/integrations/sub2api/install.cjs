@@ -48,6 +48,8 @@ edit('backend/internal/handler/gateway_helper.go', (source) => {
 for (const [from, to] of [
   ['latencytrace/trace.go', 'backend/internal/pkg/latencytrace/trace.go'],
   ['latencytrace/trace_test.go', 'backend/internal/pkg/latencytrace/trace_test.go'],
+  ['latencytrace/delivery.go', 'backend/internal/pkg/latencytrace/delivery.go'],
+  ['latencytrace/delivery_test.go', 'backend/internal/pkg/latencytrace/delivery_test.go'],
   ['latency_middleware.go', 'backend/internal/server/middleware/latency_middleware.go'],
   ['latency_middleware_test.go', 'backend/internal/server/middleware/latency_middleware_test.go']
 ]) {

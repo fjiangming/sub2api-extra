@@ -16,8 +16,8 @@ import (
 )
 
 func TestLatencyTraceLiveEventsAndUsageAlias(t *testing.T) {
-	started := make(chan latencytrace.Event, 4)
-	ended := make(chan latencytrace.Event, 4)
+	started := make(chan latencytrace.Event, 16)
+	ended := make(chan latencytrace.Event, 16)
 	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var batch struct {
 			Events []latencytrace.Event `json:"events"`
@@ -51,6 +51,28 @@ func TestLatencyTraceLiveEventsAndUsageAlias(t *testing.T) {
 	})
 	router.POST("/v1/panic", func(c *gin.Context) { panic("test") })
 	router.POST("/v1/cancelled", func(c *gin.Context) { c.Status(200) })
+	router.POST("/v1/messages", func(c *gin.Context) {
+		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), ctxkey.UserID, int64(42)))
+		if c.Query("mode") == "recovered" {
+			for i, status := range []int{502, 200} {
+				_, attempt := latencytrace.BeginAttempt(c.Request, int64(356+i))
+				attempt.Headers(&http.Response{StatusCode: status, Header: http.Header{}}, nil)
+				body := attempt.WrapBody(io.NopCloser(strings.NewReader("{}")))
+				io.Copy(io.Discard, body)
+				body.Close()
+			}
+		}
+		c.Header("Content-Type", "text/event-stream")
+		body := "data: {\"type\":\"content_block_delta\"}\n\n"
+		switch c.Query("mode") {
+		case "recovered":
+			body += "data: {\"type\":\"message_stop\"}\n\n"
+		case "error":
+			body += "data: {\"type\":\"error\",\"error\":{\"type\":\"api_error\"}}\n\n"
+		}
+		c.Writer.WriteString(body)
+		c.Writer.Flush()
+	})
 	recorder := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
@@ -96,6 +118,31 @@ func TestLatencyTraceLiveEventsAndUsageAlias(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("panic end was not exported")
+	}
+	for _, mode := range []string{"recovered", "error", "truncated"} {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/messages?mode="+mode, nil))
+		if response.Code != 200 || !strings.Contains(response.Body.String(), "content_block_delta") {
+			t.Fatal("downstream bytes or HTTP status changed")
+		}
+		select {
+		case event := <-ended:
+			a := event.Attributes
+			if a.ResultVersion != 1 || a.WireStatusCode != 200 || a.UserID != "42" {
+				t.Fatal("final evidence or root identity lost", a)
+			}
+			if mode == "recovered" && (!*a.DownstreamComplete || a.UpstreamAttemptCount == nil || *a.UpstreamAttemptCount != 2 || a.Outcome != "completed") {
+				t.Fatal("recovery evidence missing", a)
+			}
+			if mode == "error" && (!*a.ErrorWritten || a.DeliveryKind != "sse_error" || a.Outcome != "error") {
+				t.Fatal("HTTP 200 stream failure lost", a)
+			}
+			if mode == "truncated" && (a.DeliveryKind != "incomplete_close" || *a.ErrorWritten || a.Outcome != "error") {
+				t.Fatal("abnormal downstream termination lost", a)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("final response was not exported", mode)
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

@@ -69,3 +69,35 @@ test('historical mappings only expose samples from the interval when the account
   assert.deepEqual(result.items.map((row) => row.request_id).sort(), ['valid-after', 'valid-before']);
   assert.equal(result.mappings.every((row) => row.scope === 'history'), true);
 });
+
+test('error mappings expose historical identities across replacement and deletion through authenticated read-only routes', async t => {
+  const token = 'error-mappings-test-token-0123456789abcdef';
+  const context = createTestContext({ PROVIDER_MONITOR_INTEGRATION_TOKEN: token });
+  const provider = new ProviderRepository(context.db, context.config).create({ name: 'Old Vendor', adapterType: 'custom',
+    baseUrl: 'https://private-provider.example', authMode: 'api_key', credentials: { apiKey: 'PRIVATE-KEY' }, enabled: true });
+  const at = '2026-11-01T00:00:00.000Z', change = '2026-11-02T00:00:00.000Z';
+  for (const key of ['old', 'new']) context.db.prepare(`INSERT INTO remote_keys
+    (id, connection_id, remote_id, name, masked_key, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, 'PRIVATE-MASK', ?, ?)`)
+    .run(key, provider.id, key, key, at, at);
+  context.db.prepare(`INSERT INTO sub2api_mappings (id, connection_id, key_id, account_id, created_at, updated_at)
+    VALUES ('historical-error-map', ?, 'old', 356, ?, ?)`).run(provider.id, at, at);
+  context.db.prepare("UPDATE sub2api_mappings SET key_id = 'new', updated_at = ? WHERE id = 'historical-error-map'").run(change);
+  const query = { from: '2026-11-01', to: '2026-11-03' }, service = new LatencySamplesService(context.db);
+  assert.deepEqual(service.requestErrorMappings(query).items.map(m => m.keyId), ['old', 'new']);
+  assert.equal(service.requestErrorMappings({ from: '2026-11-01', to: '2026-11-02' }).items[0].validTo, change);
+  assert.throws(() => service.requestErrorMappings({ from: '2026-02-30', to: '2026-03-02' }), /valid dates/);
+  assert.throws(() => service.requestErrorMappings({ from: '2026-01-01', to: '2026-11-03' }), /33 days/);
+  const app = createApplication({ config: context.config, db: context.db, startBackground: false });
+  const server = app.listen(0, '127.0.0.1'); await new Promise(resolve => server.once('listening', resolve));
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); await app.locals.close(); context.cleanup(); });
+  const base = `http://127.0.0.1:${server.address().port}`, path = '/api/integrations/request-error-mappings';
+  assert.equal((await fetch(`${base}${path}?${new URLSearchParams(query)}`)).status, 401);
+  assert.equal((await fetch(`${base}/api/request-error-mappings?${new URLSearchParams(query)}`)).status, 401);
+  const response = await fetch(`${base}${path}?${new URLSearchParams(query)}`, { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'no-store');
+  const payload = await response.text(); assert.equal(JSON.parse(payload).items.length, 2);
+  for (const secret of ['PRIVATE-KEY', 'PRIVATE-MASK', 'private-provider.example', 'config_json']) assert(!payload.includes(secret));
+  context.db.prepare('DELETE FROM provider_connections WHERE id = ?').run(provider.id);
+  const retained = service.requestErrorMappings(query).items;
+  assert.equal(retained.length, 2); assert(retained.every(m => m.providerId === provider.id && m.providerName === null));
+});

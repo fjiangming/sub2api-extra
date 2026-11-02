@@ -107,6 +107,18 @@ class ProviderMonitorClient {
     });
   }
 
+  async getRequestErrorMappings(query, accessToken = null) {
+    if (!this.baseUrl) throw new AppError('PROVIDER_MONITOR_NOT_CONFIGURED', '未配置供应商监控服务地址', { status: 503 });
+    const search = new URLSearchParams(query);
+    if (this.integrationToken) return this.#request(`/api/integrations/request-error-mappings?${search}`, {
+      headers: { authorization: `Bearer ${this.integrationToken}` }
+    });
+    if (!accessToken) throw new AppError('PROVIDER_MONITOR_AUTH_NOT_CONFIGURED', '供应商映射需要管理员 SSO 或服务间 Token', { status: 409 });
+    const session = await this.#request('/api/auth/sso', { method: 'POST', headers: { authorization: `Bearer ${accessToken}` }, body: '{}' });
+    if (!session?.sessionToken) throw new AppError('PROVIDER_MONITOR_INVALID_RESPONSE', '供应商监控未返回有效会话', { status: 502 });
+    return this.#request(`/api/request-error-mappings?${search}`, { headers: { authorization: `Session ${session.sessionToken}` } });
+  }
+
   async refreshBillingSamples(query, accessToken = null) {
     if (!this.baseUrl) throw new AppError('PROVIDER_MONITOR_NOT_CONFIGURED', '未配置供应商监控服务地址', { status: 503 });
     if (this.integrationToken) {

@@ -17,6 +17,7 @@ const { Sub2ApiClient } = require('./sub2api-client');
 const { ProviderMonitorClient } = require('./provider-monitor-client');
 const { LatencyTelemetryStore } = require('./latency-telemetry-store');
 const { LatencyService } = require('./services/latency-service');
+const { RequestErrorsService } = require('./services/request-errors-service');
 const { MetricsService } = require('./services/metrics-service');
 const { UserProfilesService } = require('./services/user-profiles-service');
 const { CostAnalysisService } = require('./services/cost-analysis-service');
@@ -69,6 +70,7 @@ async function main() {
   const metrics = new MetricsService(database.read, inspector, config);
   const profiles = new UserProfilesService(database.read, inspector, config);
   const latency = new LatencyService({ pool: database.read, inspector, config, providerMonitor, telemetry });
+  const requestErrors = new RequestErrorsService({ pool: database.read, inspector, config, providerMonitor, telemetry });
   const costAnalysis = new CostAnalysisService({
     pool: database.read,
     inspector,
@@ -106,7 +108,7 @@ async function main() {
     sub2api
   });
   const app = createApp({
-    config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
+    config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
   });
   const server = http.createServer(app);
   server.requestTimeout = 120000;

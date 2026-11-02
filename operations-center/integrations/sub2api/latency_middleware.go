@@ -29,7 +29,8 @@ func LatencyTrace() gin.HandlerFunc {
 		if c.Request.Body != nil {
 			c.Request.Body = &latencyRequestBody{ReadCloser: c.Request.Body, trace: trace, length: c.Request.ContentLength}
 		}
-		c.Writer = &latencyResponseWriter{ResponseWriter: c.Writer, trace: trace}
+		writer := &latencyResponseWriter{ResponseWriter: c.Writer, trace: trace, delivery: latencytrace.NewDeliveryObserver(c.Request.URL.Path)}
+		c.Writer = writer
 		defer func() {
 			panicValue := recover()
 			attrs := latencytrace.Attributes{StatusCode: c.Writer.Status(), Outcome: "completed"}
@@ -47,8 +48,30 @@ func LatencyTrace() gin.HandlerFunc {
 			} else if c.Writer.Status() >= 400 {
 				attrs.Outcome = "error"
 			}
+			result := writer.delivery.Finish(c.Writer.Status(), c.Writer.Written(), c.Request.Context().Err() != nil, panicValue != nil)
+			result.StatusCode, result.Outcome = attrs.StatusCode, attrs.Outcome
+			if attrs.ErrorCode != "" {
+				result.ErrorCode = attrs.ErrorCode
+			}
+			if *result.ErrorWritten || result.DeliveryKind == "incomplete_close" {
+				result.Outcome = "error"
+			}
+			attrs = result
 			if userID, ok := c.Request.Context().Value(ctxkey.UserID).(int64); ok && userID > 0 {
 				attrs.UserID = strconv.FormatInt(userID, 10)
+			}
+			apiKey, ok := GetAPIKeyFromContext(c)
+			if !ok || apiKey == nil {
+				apiKey, _ = GetOpsFallbackAPIKey(c)
+			}
+			if apiKey != nil {
+				attrs.APIKeyID = strconv.FormatInt(apiKey.ID, 10)
+				if apiKey.GroupID != nil {
+					attrs.GroupID = strconv.FormatInt(*apiKey.GroupID, 10)
+				}
+				if apiKey.User != nil {
+					attrs.UserID = strconv.FormatInt(apiKey.User.ID, 10)
+				}
 			}
 			if clientID, _ := c.Request.Context().Value(ctxkey.ClientRequestID).(string); strings.TrimSpace(clientID) != "" {
 				attrs.UsageRequestID = "client:" + strings.TrimSpace(clientID)
@@ -83,6 +106,7 @@ func (b *latencyRequestBody) Read(p []byte) (int, error) {
 type latencyResponseWriter struct {
 	gin.ResponseWriter
 	trace        *latencytrace.Trace
+	delivery     *latencytrace.DeliveryObserver
 	write, flush sync.Once
 }
 
@@ -90,6 +114,10 @@ func (w *latencyResponseWriter) Write(p []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(p)
 	if n > 0 {
 		w.write.Do(func() { w.trace.Record("", "downstream_write", latencytrace.Attributes{}) })
+		w.delivery.Write(p[:n], w.Header().Get("Content-Type"))
+	}
+	if err != nil {
+		w.delivery.WriteFailed()
 	}
 	return n, err
 }

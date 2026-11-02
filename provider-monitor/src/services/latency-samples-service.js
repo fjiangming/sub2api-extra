@@ -14,6 +14,27 @@ const querySchema = z.object({
 class LatencySamplesService {
   constructor(db) { this.db = db; }
 
+  requestErrorMappings(input) {
+    const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
+    const parsed = z.object({ from: date, to: date }).safeParse(input);
+    const { from, to } = parsed.success ? parsed.data : {};
+    const start = Date.parse(from), end = Date.parse(to);
+    if (!parsed.success || !Number.isFinite(start) || !Number.isFinite(end) || start >= end ||
+      new Date(start).toISOString().slice(0, 10) !== from || new Date(end).toISOString().slice(0, 10) !== to || end - start > 33 * 86400000) {
+      throw new AppError('INVALID_REQUEST', 'Mapping window must contain valid dates within 33 days', { status: 400 });
+    }
+    const rows = this.db.prepare(`SELECT CAST(h.account_id AS TEXT) AS accountId,
+      h.connection_id AS providerId, h.key_id AS keyId, p.name AS providerName, k.name AS keyName,
+      h.valid_from AS validFrom, h.valid_to AS validTo, 'history' AS scope
+      FROM sub2api_mapping_history h LEFT JOIN provider_connections p ON p.id = h.connection_id
+      LEFT JOIN remote_keys k ON k.id = h.key_id AND k.connection_id = h.connection_id
+      WHERE h.enabled = 1 AND h.account_id IS NOT NULL AND h.key_id IS NOT NULL
+        AND h.valid_from < ? AND (h.valid_to IS NULL OR h.valid_to > ?)
+      ORDER BY h.account_id, h.valid_from, h.id LIMIT 10001`)
+      .all(`${to}T00:00:00.000Z`, `${from}T00:00:00.000Z`);
+    return { items: rows.slice(0, 10000), truncated: rows.length > 10000, source: 'verified_mapping_history' };
+  }
+
   query(input) {
     const parsed = querySchema.safeParse(input);
     if (!parsed.success) throw new AppError('INVALID_REQUEST', 'Invalid latency sample query', { status: 400 });

@@ -136,7 +136,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, latency, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -320,6 +320,11 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.post('/billing-recovery/:id/settle', csrf, asyncRoute(async (req, res) => res.json(await billingRecovery.settle(req.params.id, req.body, req.auth.upstreamAccessToken))));
 
   api.get('/overview', asyncRoute(async (_req, res) => res.json(await metrics.getOverview())));
+  if (requestErrors) {
+    api.get('/request-errors/options', (_req, res) => res.json(requestErrors.options()));
+    api.get('/request-errors/report', asyncRoute(async (req, res) => res.json(await requestErrors.report(req.query, req.auth.upstreamAccessToken))));
+    api.get('/request-errors/requests/:id', asyncRoute(async (req, res) => res.json(await requestErrors.detail(req.params.id, req.query, req.auth.upstreamAccessToken))));
+  }
   api.get('/latency/options', asyncRoute(async (_req, res) => res.json(await latency.options())));
   api.get('/latency/requests', asyncRoute(async (req, res) => res.json(await latency.report(req.query))));
   api.get('/latency/requests/:id', asyncRoute(async (req, res) => res.json(await latency.detail(req.params.id, req.auth.upstreamAccessToken))));

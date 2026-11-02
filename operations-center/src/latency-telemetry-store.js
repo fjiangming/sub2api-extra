@@ -11,12 +11,22 @@ const number = z.number().finite().nonnegative();
 const attrs = z.object({
   accountId: z.string().regex(/^[1-9]\d{0,18}$/).optional(),
   userId: z.string().regex(/^[1-9]\d{0,18}$/).optional(),
+  apiKeyId: z.string().regex(/^[1-9]\d{0,18}$/).optional(),
+  groupId: z.string().regex(/^[1-9]\d{0,18}$/).optional(),
   model: z.string().max(120).optional(), effort: z.string().max(24).optional(),
   host: id.optional(), upstreamRequestId: id.optional(), usageRequestId: id.optional(),
   bytes: number.optional(), reused: z.boolean().optional(), protocol: z.string().max(16).optional(),
   statusCode: z.number().int().min(100).max(599).optional(),
   droppedEvents: z.number().int().nonnegative().optional(),
   errorCode: z.string().regex(/^[A-Z0-9_.-]{1,64}$/i).optional(),
+  resultVersion: z.literal(1).optional(), wireStatusCode: z.number().int().min(100).max(599).optional(),
+  upstreamStatusCode: z.number().int().min(100).max(599).optional(),
+  downstreamComplete: z.boolean().optional(), terminalSeen: z.boolean().optional(), errorWritten: z.boolean().optional(),
+  clientDisconnected: z.boolean().optional(), outputStarted: z.boolean().optional(),
+  upstreamAttemptCount: z.number().int().min(0).max(10000).optional(), retryExhausted: z.boolean().optional(),
+  deliveryKind: z.enum(['http_error', 'body_error', 'sse_error', 'response_failed', 'incomplete_close', 'complete']).optional(),
+  failureStage: z.string().regex(/^[a-zA-Z0-9_.-]{1,64}$/).optional(),
+  errorOwner: z.enum(['client', 'provider', 'platform']).optional(),
   outcome: z.enum(['completed', 'error', 'cancelled']).optional()
 }).strict();
 const EVENT_NAMES = ['request_start', 'body_read', 'prepare_start', 'prepare_end', 'queue_start', 'queue_end',
@@ -78,6 +88,7 @@ class LatencyTelemetryStore {
       keep_until INTEGER NOT NULL, outcome TEXT NOT NULL, metadata TEXT NOT NULL,
       events TEXT NOT NULL, dropped INTEGER NOT NULL DEFAULT 0);
       CREATE INDEX IF NOT EXISTS trace_updated ON traces(updated_at DESC);
+      CREATE INDEX IF NOT EXISTS trace_request_day ON traces(started_at);
       CREATE INDEX IF NOT EXISTS trace_retention ON traces(keep_until);
       CREATE TABLE IF NOT EXISTS trace_links (request_id TEXT NOT NULL, trace_id TEXT NOT NULL,
         PRIMARY KEY(request_id, trace_id));
@@ -181,7 +192,9 @@ class LatencyTelemetryStore {
       const outcome = end ? end.attributes.outcome || 'completed' : previous?.outcome || 'active';
       const slow = (end?.elapsedMs >= 300000) || ordered.some((row) => row.name === 'first_semantic' && row.elapsedMs >=
         (['high', 'xhigh', 'max'].includes(metadata.effort) ? 180000 : 60000));
-      const retainDays = slow || outcome === 'error' || outcome === 'cancelled' || !end ? 30 : 7;
+      const failedAttempt = ordered.some(row => row.name === 'response_headers' && row.attributes.statusCode >= 400 ||
+        row.name === 'attempt_end' && row.attributes.outcome === 'error');
+      const retainDays = slow || failedAttempt || outcome === 'error' || outcome === 'cancelled' || !end ? 30 : 7;
       this.db.prepare(`INSERT OR REPLACE INTO traces
         (request_id, started_at, updated_at, keep_until, outcome, metadata, events, dropped)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -232,6 +245,28 @@ class LatencyTelemetryStore {
     if (!this.db || !requestIds.length) return [];
     return this.db.prepare(`SELECT DISTINCT t.* FROM traces t JOIN trace_links l ON l.trace_id = t.request_id
       WHERE l.request_id IN (${requestIds.map(() => '?').join(',')}) LIMIT 10`).all(...requestIds).map((row) => this.decode(row));
+  }
+
+  requestErrorTraces(requestIds) {
+    if (!this.db || !requestIds.length) return [];
+    const result = [];
+    const relevant = new Set(['request_start', 'request_end', 'attempt_start', 'attempt_end', 'response_headers', 'downstream_write']);
+    for (let offset = 0; offset < requestIds.length; offset += 500) {
+      const ids = requestIds.slice(offset, offset + 500);
+      const rows = this.db.prepare(`SELECT * FROM traces WHERE request_id IN (${ids.map(() => '?').join(',')})`).all(...ids);
+      for (const row of rows) {
+        const trace = this.decode(row);
+        trace.events = trace.events.filter(e => relevant.has(e.name)); delete trace.proxy;
+        result.push(trace);
+      }
+    }
+    return result;
+  }
+
+  requestErrorRootIds(from, to, limit = 10000) {
+    if (!this.db) return { ids: [], truncated: false };
+    const rows = this.db.prepare('SELECT request_id FROM traces WHERE started_at >= ? AND started_at < ? ORDER BY started_at, request_id LIMIT ?').all(from, to, limit + 1);
+    return { ids: rows.slice(0, limit).map(row => row.request_id), truncated: rows.length > limit };
   }
 
   recent() {

@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/user-profiles.css?v=20261013-1">
   <link rel="stylesheet" href="/user-messages.css?v=20261019-1">
   <link rel="stylesheet" href="/latency.css?v=20261020-1">
+  <link rel="stylesheet" href="/request-errors.css?v=20261102-1">
   <link rel="stylesheet" href="/billing-recovery.css?v=20261029-2">
   <link rel="stylesheet" href="/cost-accounting.css?v=20261102-2">
   <script src="/vendor/echarts.js" defer></script>
@@ -19,9 +20,10 @@
   <script src="/vendor/dompurify.js" defer></script>
   <script src="/user-messages-ui.js?v=20261019-1" defer></script>
   <script src="/latency-ui.js?v=20261020-1" defer></script>
+  <script src="/request-errors-ui.js?v=20261102-1" defer></script>
   <script src="/billing-recovery-ui.js?v=20261023-1" defer></script>
   <script src="/billing-import-ui.js?v=20261030-1" defer></script>
-  <script src="/app.js?v=20261102-1" defer></script>
+  <script src="/app.js?v=20261102-2" defer></script>
 </head>
 <body>
   <div id="login-view" class="login-view" hidden>
@@ -50,6 +52,7 @@
         <button class="module-tab active" data-view="overview" role="tab" aria-selected="true" aria-controls="content" tabindex="0"><i data-lucide="layout-dashboard"></i><span>运营概览</span></button>
         <button class="module-tab" data-view="usage" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="activity"></i><span>用量分析</span></button>
         <button class="module-tab" data-view="latency" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="timer"></i><span>慢请求</span></button>
+        <button class="module-tab" data-view="errors" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="scan-line"></i><span>错误分析</span></button>
         <button class="module-tab" data-view="users" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="users"></i><span>用户分析</span></button>
         <button class="module-tab" data-view="profiles" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="contact-round"></i><span>用户画像</span></button>
         <button class="module-tab" data-view="messages" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="mail"></i><span>用户消息</span></button>
@@ -160,6 +163,43 @@
             <header class="lt-dialog-heading"><div><h2 id="lt-detail-title">请求诊断</h2><p id="lt-detail-id"></p></div><div class="lt-toolbar"><button id="lt-detail-export" class="icon-button" type="button" title="导出诊断 JSON" aria-label="导出诊断 JSON"><i data-lucide="download"></i></button><button id="lt-detail-close" class="icon-button" type="button" title="关闭详情" aria-label="关闭详情"><i data-lucide="x"></i></button></div></header>
             <div id="lt-detail-body"></div>
           </dialog>
+        </section>
+
+        <section id="view-errors" class="view" aria-labelledby="page-title">
+          <form id="ra-filter" class="filter-bar">
+            <label>开始日期<input name="start" type="date" required></label><label>结束日期<input name="end" type="date" required></label>
+            <label>分组<select name="groupId"><option value="">全部分组</option></select></label>
+            <label>供应商<select name="providerId"><option value="">全部供应商</option></select></label>
+            <button class="button primary" type="submit"><i data-lucide="search"></i>查询</button>
+            <div id="ra-presets" class="ra-segments" role="group" aria-label="快捷日期"><button type="button" data-preset="today" aria-pressed="true">今天</button><button type="button" data-preset="yesterday">昨天</button><button type="button" data-preset="week">近 7 天</button></div>
+          </form>
+          <div id="ra-notices" class="alert-stack" aria-live="polite"></div><p id="ra-status" role="status" hidden></p>
+          <div id="ra-data" hidden>
+            <div id="ra-metrics" class="ra-metrics" aria-label="期间概要"></div>
+            <details id="ra-daily" class="ra-section"><summary>每日概览</summary><div id="ra-days"></div></details>
+            <section class="ra-section" aria-labelledby="ra-title">
+              <div class="ra-heading"><div><h2 id="ra-title"></h2><p id="ra-day-meta" class="muted"></p></div><label>分析日期<select id="ra-day"></select></label></div>
+              <div id="ra-views" class="ra-segments" role="tablist" aria-label="分析维度">
+                <button id="ra-tab-types" type="button" role="tab" data-view="types" aria-controls="ra-panel" aria-selected="true">下游失败类型</button>
+                <button id="ra-tab-groups" type="button" role="tab" data-view="groups" aria-controls="ra-panel" aria-selected="false">分组 / 供应商 Key</button>
+                <button id="ra-tab-users" type="button" role="tab" data-view="users" aria-controls="ra-panel" aria-selected="false">按用户</button>
+                <button id="ra-tab-requests" type="button" role="tab" data-view="requests" aria-controls="ra-panel" aria-selected="false">请求明细</button>
+              </div>
+              <form id="ra-local" class="ra-local">
+                <label>用户 / 请求 ID<input name="search" maxlength="128" placeholder="搜索用户 / 请求 ID"></label>
+                <label>下游结果<select name="outcome"><option value="failed">下游最终失败</option><option value="all">全部结果</option><option value="recovered">重试恢复 · 下游未报错</option><option value="http">HTTP 失败</option><option value="stream">流式失败 · 含 HTTP 200</option><option value="disconnected">客户端断开</option><option value="unknown">待判定</option><option value="unlinked">待关联错误记录</option></select></label>
+                <label>下游失败类型<select name="failureType"><option value="all">全部失败类型</option></select></label>
+                <label>错误来源<select name="cause"><option value="all">全部来源</option></select></label>
+                <button class="icon-button" type="submit" aria-label="应用明细筛选" title="应用明细筛选"><i data-lucide="search"></i></button>
+                <button id="ra-clear" class="icon-button" type="button" aria-label="清除明细筛选" title="清除明细筛选"><i data-lucide="filter-x"></i></button>
+              </form>
+              <div id="ra-scope" class="ra-scope" hidden></div><div id="ra-selected" class="ra-selected" role="status"></div>
+              <div id="ra-panel" role="tabpanel" aria-labelledby="ra-tab-types"></div><div id="ra-pagination" class="ra-pagination"></div><p id="ra-note" class="ra-note"></p>
+            </section>
+            <details id="ra-comparison" class="ra-section"><summary>错误原因与下游结果 · 同日全结果</summary><div id="ra-matrix"></div></details>
+            <details class="ra-section"><summary>统计口径</summary><div class="ra-definitions"><p>下游结果按可信主站请求去重。内部自动重试不增加请求数，客户端重新请求单独统计。HTTP 200、已解决标记和用量存在均不单独证明成功；缺结束证据保留待判定。</p><p>失败类型互斥，重试情况独立统计；HTTP 200 后的流错误与已证实的提前断流计入失败。仅缺正常结束事件不能证明断流。类型占比以同日同范围的全部确认失败为分母。</p><p>Key 行展示接触过该 Key 的请求最终结果，跨 Key 请求可能出现在多行；分组与用户独立去重，Key 行不可直接相加。供应商筛选仅计算该供应商实际失败尝试。</p><p>缺可信请求身份的日志单列待关联，不混入去重请求合计。下游返回表示网关写出，不保证网络另一端实际完整接收。</p></div></details>
+          </div>
+          <dialog id="ra-dialog" class="ra-dialog" aria-labelledby="ra-dialog-title"><header><h2 id="ra-dialog-title"></h2><button id="ra-close" type="button" class="icon-button" aria-label="关闭详情"><i data-lucide="x"></i></button></header><div id="ra-dialog-body"></div></dialog>
         </section>
 
         <section id="view-users" class="view" aria-labelledby="page-title">

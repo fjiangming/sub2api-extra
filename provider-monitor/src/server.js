@@ -1062,6 +1062,10 @@ function createApplication(options = {}) {
       res.set('Cache-Control', 'no-store').json(latencySamples.query(req.query));
     } catch (error) { next(error); }
   });
+  app.get('/api/integrations/request-error-mappings', (req, res, next) => {
+    if (!secureTokenEqual(bearerToken(req), config.integrationToken)) return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
+    try { res.set('Cache-Control', 'no-store').json(latencySamples.requestErrorMappings(req.query)); } catch (error) { next(error); }
+  });
   app.post('/api/integrations/billing-samples/refresh', asyncRoute(async (req, res) => {
     if (!secureTokenEqual(bearerToken(req), config.integrationToken)) {
       throw new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 });
@@ -2160,6 +2164,7 @@ function createApplication(options = {}) {
     res.json(result);
   }));
   api.get('/latency-samples', (req, res) => res.json(latencySamples.query(req.query)));
+  api.get('/request-error-mappings', (req, res) => res.set('Cache-Control', 'no-store').json(latencySamples.requestErrorMappings(req.query)));
   api.post('/billing-samples/refresh', asyncRoute(async (req, res) => {
     latencySamples.query(req.body || {});
     res.set('Cache-Control', 'no-store').json(await sync.refreshBillingSamples(req.body));

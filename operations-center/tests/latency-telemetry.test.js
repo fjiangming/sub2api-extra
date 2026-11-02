@@ -34,6 +34,22 @@ test('stage events survive restart, deduplicate and link retries to upstream req
   assert.equal(store.find(['client:client-request-1'])[0].requestId, 'root-1');
 });
 
+test('error analysis reads only direct roots including admin traffic and preserves whitelisted final-response evidence', t => {
+  const { store, event } = setup(t);
+  store.ingest({ type: 'events', events: [event(0, 'request_start'), event(1, 'request_end', { attributes: {
+    resultVersion: 1, userId: '1', apiKeyId: '3', groupId: '4', wireStatusCode: 200, errorWritten: true,
+    downstreamComplete: false, terminalSeen: false, deliveryKind: 'sse_error', outputStarted: true,
+    clientDisconnected: false, upstreamAttemptCount: 1, errorCode: 'stream_timeout', errorOwner: 'platform',
+    failureStage: 'network', usageRequestId: 'client:reused-id', outcome: 'error'
+  } })] });
+  assert.equal(store.requestErrorTraces(['client:reused-id']).length, 0);
+  const trace = store.requestErrorTraces(['root-1'])[0];
+  assert.equal(trace.metadata.apiKeyId, '3'); assert.equal(trace.events.at(-1).attributes.deliveryKind, 'sse_error');
+  const roots = store.requestErrorRootIds(Date.parse('2026-10-19'), Date.parse('2026-10-21'), 1);
+  assert.deepEqual(roots, { ids: ['root-1'], truncated: false });
+  assert.equal(store.requestErrorRootIds(Date.parse('2026-10-19'), Date.parse('2026-10-21'), 0).truncated, true);
+});
+
 test('strict ingestion rejects secrets and full bodies, and retains the terminal event at the event cap', (t) => {
   const { store, event } = setup(t);
   assert.throws(() => store.ingest({ type: 'events', events: [event(0, 'request_start', { attributes: { authorization: 'secret' } })] }), /格式无效/);
@@ -56,6 +72,15 @@ test('completed ordinary traces expire after seven days; unknown active requests
   store.ingest({ type: 'events', events: [event(0, 'request_start')] });
   advance(31 * 60000);
   assert.equal(store.recent()[0].outcome, 'unknown');
+});
+
+test('recovered requests retain their failed-attempt evidence for thirty days', t => {
+  const { store, event, advance } = setup(t);
+  store.ingest({ type: 'events', events: [event(0, 'request_start'),
+    event(1, 'response_headers', { attemptId: '1', attributes: { statusCode: 502 } }),
+    event(2, 'request_end', { attributes: { outcome: 'completed' } })] });
+  advance(8 * 86400000); store.prune(); assert.equal(store.requestErrorTraces(['root-1']).length, 1);
+  advance(23 * 86400000); store.prune(); assert.equal(store.requestErrorTraces(['root-1']).length, 0);
 });
 
 test('low space rejects telemetry without deleting existing traces', (t) => {

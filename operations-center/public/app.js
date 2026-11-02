@@ -45,6 +45,7 @@ const titles = {
   overview: '运营概览',
   usage: '用量分析',
   latency: '慢请求',
+  errors: '错误分析',
   users: '用户分析',
   profiles: '用户画像',
   messages: '用户消息',
@@ -252,6 +253,7 @@ function showLogin(message = '') {
   profilesUi.reset();
   messagesUi.reset();
   latencyUi.reset();
+  requestErrorsUi.reset();
   billingUi.reset();
   if (state.runPoller) clearInterval(state.runPoller);
   state.runPoller = null;
@@ -1614,6 +1616,7 @@ async function loadCurrentView(options = {}) {
     overview: loadOverview,
     usage: loadUsage,
     latency: () => latencyUi.load(options),
+    errors: () => requestErrorsUi.load(options),
     users: loadUsers,
     profiles: () => profilesUi.load(options),
     messages: () => messagesUi.load(),
@@ -1649,6 +1652,7 @@ function navigate(view) {
   if (state.currentView === 'profiles') profilesUi.leave();
   if (state.currentView === 'messages') messagesUi.leave();
   if (state.currentView === 'latency') latencyUi.leave();
+  if (state.currentView === 'errors') requestErrorsUi.leave();
   if (state.currentView === 'billing') billingUi.leave();
   if (state.costAutomaticIncome.active) closeAutomaticIncomeDrilldown({ restoreHeader: false });
   state.currentView = view;
@@ -1887,6 +1891,11 @@ const messagesUi = window.UserMessagesUi.create({
 const latencyUi = window.LatencyUi.create({
   api, escapeHtml, icon, refreshIcons, toast, setPageMeta,
   isActive: () => state.currentView === 'latency' && Boolean(state.user)
+});
+
+const requestErrorsUi = window.RequestErrorsUi.create({
+  api, escapeHtml, icon, refreshIcons, toast, setPageMeta,
+  isActive: () => state.currentView === 'errors' && Boolean(state.user)
 });
 
 const billingUi = window.BillingRecoveryUi.create({

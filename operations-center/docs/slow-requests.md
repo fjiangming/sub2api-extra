@@ -60,7 +60,7 @@ node operations-center/integrations/sub2api/install.cjs E:\path\to\sub2api --che
 node operations-center/integrations/sub2api/install.cjs E:\path\to\sub2api --apply
 ```
 
-工具会在所有锚点和目标文件状态通过后写入 8 个文件（含两份测试）并运行 gofmt，拒绝覆盖已有本地改动或重复安装。部署时必须基于实际运行版本及其自定义改动合并；此前生产二进制存在 `vcs.modified=true`，不能直接用本地原版构建覆盖它。先保留当前二进制/镜像与启动配置，验证合并构建，再按维护窗口更新应用。
+工具会在所有锚点和目标文件状态通过后写入 10 个文件（含三份测试）并运行 gofmt，拒绝覆盖已有本地改动或重复安装。部署时必须基于实际运行版本及其自定义改动合并；此前生产二进制存在 `vcs.modified=true`，不能直接用本地原版构建覆盖它。先保留当前二进制/镜像与启动配置，验证合并构建，再按维护窗口更新应用。
 
 应用进程新增环境变量：
 
@@ -73,6 +73,8 @@ LATENCY_RESOURCE_HOST=gateway-01
 未配置 URL 时插桩为空操作。启用后生成服务端根 ID 并由 `X-Request-ID` 返回；结束事件关联 Sub2API 用量表实际使用的 `client:<id>` / `local:<id>` 标识，每次 HTTP 尝试有独立 attemptId，并关联上游响应中的 `x-request-id` / `request-id`。自定义上游标识头仍需配置账号自身的 `upstream_request_id_header`，由用量表提供关联。采集请求体读取、前置处理起点/首次 HTTP 调用前的结束点、实际等待区间、请求改写完成、连接获取、DNS/TCP/TLS、请求写入完成、响应头首字节、完整 SSE、语义/可见内容、尝试结束和请求结束。工具不记录正文，只读取已有内存请求体的模型及 `reasoning.effort` / `reasoning_effort` 字段作为元数据；过长字段省略，避免整批事件被拒绝。
 
 支持 OpenAI Responses、Chat Completions 和 Anthropic SSE 的常见文本/工具/推理增量；`response.created`、`in_progress` 和心跳不计为语义输出。SSE 单事件缓冲上限 32 KiB，超大或未识别事件不会臆造语义计时。HTTPtrace 回调并发安全，单请求事件数与 4,096 条导出队列均有上限；HTTP 导出由独立 goroutine 批量执行，2 秒超时、不重试，失败/溢出丢弃并计数，不阻塞业务。单请求丢弃数随结束事件返回，全局丢弃计数每 30 秒至多记录一次到应用日志。
+
+错误分析配套模板额外观察实际下游写出：按标准协议识别正常结束、HTTP 错误、SSE / response.failed、完整观察后的提前断流及客户端断开，结束事件增加 `resultVersion=1` 和准确尝试总数 / 用户 Key / 分组 ID。观察发生在原 Write 之后，不缓冲转发、不重试、不改响应内容；解析缓冲各有 32 KiB 上限，未知协议、解析超限和缺证据不认定恢复。错误 / 断开 / 已失败后恢复的尝试链保留 30 天，普通完成仍为 7 天，容量不足可更早淘汰。仅升级接收端无法补齐历史终止事实；主站合并后才有新证据。验证可运行 `npm run check:request-error-telemetry -- E:\path\to\sub2api`，通过临时 Go overlay 编译真实主站 middleware，原主站目录不变。[完整错误分析口径](request-error-analysis-plan.md)。
 
 复用连接没有新 DNS/TLS 事件，界面不填零；连接获取与其子阶段重叠不求和。`wrote_request` 不等于上游程序读完，Flush 返回不等于客户端已收到。首版没有浏览器/终端客户端计时、WebSocket 帧计时、供应商内部队列、非标准 SSE 解码或绕过共享 HTTP 上游实现的调用路径；这些阶段保留缺失，不能以成功调用接口代替计时证据。断连后轨迹仍保留已有事件；30 分钟未收到新事件的未结束轨迹标记“状态未确认”，不一直声称仍在运行。
 
