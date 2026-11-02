@@ -12,6 +12,7 @@ const { parseAutomaticIncomeInput, parseAutomaticIncomeUserKey, createPeriods } 
 
 const number = value => new Decimal(value).toDecimalPlaces(8).toNumber();
 const validAmount = value => { try { return value != null && value !== '' && new Decimal(value).isFinite() && new Decimal(value).gte(0); } catch { return false; } };
+const validCredit = value => { try { return value != null && value !== '' && new Decimal(value).isFinite(); } catch { return false; } };
 const totals = rows => {
   const sum = direction => number(rows.filter(row => row.counted !== false && row.direction === direction).reduce((sum, row) => sum.plus(row.amount), new Decimal(0)));
   const income = sum('income'), expense = sum('expense');
@@ -70,12 +71,13 @@ class CashFlowService {
     this.scope();
     if (this.running) return this.running;
     const status = this.store.setting('cash:sync', {});
-    if (!force && status.complete && !status.cursor && !status.creditCursor && Date.parse(status.completedAt) + 60000 > this.now().getTime() && !this.error) return;
+    if (!force && status.complete && status.creditsComplete && !status.cursor && !status.creditCursor && Date.parse(status.completedAt) + 60000 > this.now().getTime() && !this.error) return;
     const scope = this.scopeKey;
     this.running = (async () => {
       try {
         const schema = await this.inspector.inspect();
         if (!schema.tables.payment_orders?.exists) throw new Error('payment source missing');
+        if (!schema.tables.redeem_codes?.exists) throw new Error('redemption source missing');
         let cursor = status.cursor || '0', finished = false;
         for (let page = 0; page < 4; page++) {
           const { rows } = await this.pool.query(`SELECT p.id::text AS id,p.user_id::text AS user_id,p.paid_at,
@@ -125,7 +127,7 @@ class CashFlowService {
           this.continuation.unref?.();
         }
       } catch {
-        this.error = '自动收款来源暂不可用，后台将自动重试';
+        this.error = '自动入账来源暂不可用，后台将自动重试';
       }
     })();
     try { await this.running; } finally { this.running = null; }
@@ -224,6 +226,23 @@ class CashFlowService {
         if (document.origin === 'redeem' && decision.kind === 'excluded') for (const payment of document.payments || []) excluded.add(`payment:${payment.id}`);
       }
     }
+    const today = dateInTimezone(this.config.financeTimezone, this.now());
+    const redemptionKeys = new Set(), redeemedPayments = new Set();
+    for (const credit of documents.values()) {
+      if (credit.origin !== 'redeem' || !['balance', 'admin_balance'].includes(credit.redeemType) || !credit.date || !validCredit(credit.quantity)) continue;
+      const decision = decisions[credit.key], validDecision = decision && (!decision.sourceHash || !this.accounting || decision.sourceHash === this.accounting.sourceHash(credit));
+      const paymentKeys = (credit.payments || []).map(payment => `payment:${payment.id}`);
+      if (credit.userId !== '1' && credit.date <= today) {
+        redemptionKeys.add(credit.key);
+        for (const key of paymentKeys) redeemedPayments.add(key);
+      }
+      records.set(credit.key, { key: credit.key, source: 'automatic', basis: 'redeem', direction: 'income',
+        date: credit.date, name: `${credit.redeemType === 'admin_balance' ? '管理员余额入账' : '余额兑换'} #${credit.key.slice(7)}`,
+        amount: credit.quantity, currency: 'CNY', rate: 1, userId: credit.userId || null,
+        category: 'custom', providerId: '', sourceRef: credit.key, note: credit.note || '',
+        active: !excluded.has(credit.key) && !paymentKeys.some(key => excluded.has(key)) && !(validDecision && decision.paid === false),
+        aliases: [credit.key, credit.code, ...paymentKeys].filter(Boolean) });
+    }
     for (const record of this.store.cashRecords()) {
       const old = documents.get(record.key), decision = decisions[record.key];
       const matchesOld = !old || (validAmount(old.amount) && new Decimal(old.amount).eq(record.amount) && old.date === record.date &&
@@ -231,16 +250,20 @@ class CashFlowService {
       records.set(record.key, { ...record, ...(record.source === 'automatic' && matchesOld && excluded.has(record.key) ? { active: false } : {}),
         rate: record.rate || (matchesOld && decision?.rate) || null });
     }
-    const today = dateInTimezone(this.config.financeTimezone, this.now());
     const rows = [...records.values()].filter(row => row.active !== false && row.date <= today && row.userId !== '1')
       .map(row => ({ ...row, amount: number(row.amount), counted: true }));
+    // Excluded redemptions must also suppress linked orders so a late payment cannot restore excluded income.
+    for (const row of rows) if (row.source === 'automatic' && row.basis !== 'redeem' &&
+        (redeemedPayments.has(row.key) || (row.aliases || []).some(alias => redemptionKeys.has(alias)))) {
+      row.counted = false; row.mergeReason = '已关联已使用余额兑换，不重复入账';
+    }
     const automaticAliases = new Set(rows.filter(row => row.source === 'automatic').flatMap(row => row.aliases || [row.key, row.sourceRef]).map(value => value.toLowerCase()));
     const linked = new Set();
     for (const row of rows) {
       const reference = row.sourceRef?.toLowerCase();
       if (row.source !== 'automatic' && row.direction === 'income' && (automaticAliases.has(row.key.toLowerCase()) ||
           (reference && automaticAliases.has(reference)) || (row.aliases || []).some(alias => automaticAliases.has(alias.toLowerCase())))) {
-        row.counted = false; row.mergeReason = '已由线上付款统计';
+        row.counted = false; row.mergeReason = '已由自动入账统计';
       } else if (reference && row.source !== 'automatic' && rows.some(other => other.key.toLowerCase() === reference && other.direction === row.direction && other.key !== row.key)) {
         row.counted = false; row.mergeReason = '已由关联原记录统计';
       } else if (reference && row.source !== 'automatic') {
@@ -257,8 +280,9 @@ class CashFlowService {
 
   sourceStatus() {
     const status = this.store.setting('cash:sync', {});
-    return { complete: Boolean(status.complete) && !this.error, syncing: Boolean(status.cursor) || !status.complete,
-      capturedAt: status.completedAt || null, message: this.error || (!status.complete ? '全历史收款正在自动同步' : null) };
+    const complete = Boolean(status.complete && status.creditsComplete);
+    return { complete: complete && !this.error, syncing: Boolean(status.cursor || status.creditCursor) || !complete,
+      capturedAt: status.completedAt || null, message: this.error || (!complete ? '全历史入账正在自动同步' : null) };
   }
 
   async balances({ refresh = false } = {}) {
@@ -425,10 +449,10 @@ class CashFlowService {
       }
       const rows = this.rows(), existing = key && rows.find(row => row.key === key);
       if (key && !existing) throw new AppError('CASH_NOT_FOUND', '收支记录不存在', { status: 404 });
-      if (existing?.source === 'automatic') throw new AppError('CASH_SOURCE_IMMUTABLE', '自动收款以主站订单为准，只能查看', { status: 400 });
+      if (existing?.source === 'automatic') throw new AppError('CASH_SOURCE_IMMUTABLE', '自动入账以主站来源记录为准，只能查看', { status: 400 });
       if (value.sourceRef && rows.some(row => row.key !== key && ((row.sourceRef?.toLowerCase() === value.sourceRef.toLowerCase()) ||
           (value.direction === 'income' && (row.aliases || [row.key]).some(alias => alias.toLowerCase() === value.sourceRef.toLowerCase()))))) throw new AppError('CASH_DUPLICATE_SOURCE', '该来源单号已有记录，请查看原记录，避免重复入账', { status: 409 });
-      if (value.sourceRef && !this.sourceStatus().complete) throw new AppError('CASH_SYNC_PENDING', '自动收款尚未同步完成，来源单号将在同步完成后校验', { status: 409 });
+      if (value.sourceRef && !this.sourceStatus().complete) throw new AppError('CASH_SYNC_PENDING', '自动入账尚未同步完成，来源单号将在同步完成后校验', { status: 409 });
       const now = this.now().toISOString(), { requestId, ...fields } = value;
       const record = { ...fields, key: key || `cash:${requestId}`, source: 'manual', amount: String(value.amount), rate: 1,
         active: true, createdAt: existing?.createdAt || now, updatedAt: now, actor: String(actor || 'administrator') };
@@ -443,7 +467,7 @@ class CashFlowService {
     this.scope();
     const row = this.rows().find(row => row.key === key);
     if (!row) throw new AppError('CASH_NOT_FOUND', '收支记录不存在', { status: 404 });
-    if (row.source === 'automatic') throw new AppError('CASH_SOURCE_IMMUTABLE', '自动收款以主站订单为准，只能查看', { status: 400 });
+    if (row.source === 'automatic') throw new AppError('CASH_SOURCE_IMMUTABLE', '自动入账以主站来源记录为准，只能查看', { status: 400 });
     this.store.db.transaction(() => this.store.putCash({ ...row, source: 'manual', active: false, updatedAt: this.now().toISOString() }, actor || 'administrator', '删除现金收支记录，原值保留在审计中'))();
     this.rowsCache = null;
   }

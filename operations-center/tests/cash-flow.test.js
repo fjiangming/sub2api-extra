@@ -14,6 +14,7 @@ const { startPreview } = require('../scripts/accounting-preview.cjs');
 
 const payment = extra => ({ id: '1', user_id: '2', paid_at: '2026-10-01T23:30:00Z', amount: '100', currency: 'CNY',
   order_type: 'balance', status: 'COMPLETED', refund_quantity: '0', redeem_ids: ['1'], ...extra });
+const credit = extra => ({ id: '1', user_id: '2', type: 'balance', value: '120', used_at: '2026-10-02T01:00:00+08:00', code: 'example-redeem', notes: '', ...extra });
 const entry = extra => ({ direction: 'expense', category: 'custom', name: 'Server', date: '2026-10-02', amount: 10, requestId: crypto.randomUUID(), ...extra });
 function fixture(t, extra = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cash-test-'));
@@ -33,8 +34,66 @@ function fixture(t, extra = {}) {
   const accounting = new AccountingService({ config, store, ledger });
   const service = new CashFlowService({ pool, inspector, config, store, ledger, accounting, now: () => new Date('2026-11-02T04:00:00Z') });
   t.after(async () => { await service.stop(); store.close(); fs.rmSync(directory, { recursive: true, force: true }); });
-  return { service, store, config, ledger, accounting, source, directory, query: { start: '2026-10-01', end: '2026-10-31' } };
+  return { service, store, config, ledger, accounting, source, inspector, directory, query: { start: '2026-10-01', end: '2026-10-31' } };
 }
+
+test('used balance redemptions restore automatic income without paid orders and exclude nonmonetary types and admin', async t => {
+  const f = fixture(t); f.source.payments = [payment({ status: 'CANCELLED', paid_at: null })];
+  f.source.credits = [credit({ value: '100' }), credit({ id: '2', type: 'admin_balance', value: '20' }),
+    credit({ id: '3', type: 'admin_balance', value: '-5', used_at: '2026-10-03T01:00:00+08:00' }),
+    credit({ id: '4', type: 'admin_concurrency', value: '9999' }), credit({ id: '5', type: 'subscription', value: '9999' }),
+    credit({ id: '6', type: 'invitation', value: '9999' }), credit({ id: '7', user_id: '1', value: '9999' }), credit({ id: '8', used_at: null })];
+  const r = await f.service.getReport(f.query);
+  assert.equal(r.summary.income, 115); assert.equal(r.summary.automatic, 115); assert.equal(r.cumulative.income, 115); assert.equal(r.cumulative.net, 55);
+  assert.equal(r.items.length, 3); assert(r.items.every(row => row.basis === 'redeem' && !row.editable));
+  assert.equal(r.periods.find(row => row.key === '2026-10-02').income, 120); assert.equal(r.periods.find(row => row.key === '2026-10-03').income, -5);
+  assert(f.source.queries.some(sql => sql.includes("r.status='used'") && sql.includes("r.type IN ('balance','admin_balance')")));
+  assert.throws(() => f.service.remove('redeem:1', 'admin'), { code: 'CASH_SOURCE_IMMUTABLE' });
+});
+
+test('linked orders use redemption value and date once while unlinked actual subscription payments remain income', async t => {
+  const f = fixture(t); f.source.payments = [payment({ paid_at: '2026-09-30T01:00:00+08:00' }), payment({ id: '2', order_type: 'subscription', amount: '199', redeem_ids: [] })];
+  f.source.credits = [credit()];
+  const r = await f.service.getReport(f.query);
+  assert.equal(r.summary.income, 319); assert.equal(r.cumulative.income, 319);
+  assert.equal(r.items.find(row => row.key === 'redeem:1').amount, 120);
+  const earlier = await f.service.getReport({ start: '2026-09-01', end: '2026-09-30' });
+  assert.equal(earlier.summary.income, 0); assert.equal(earlier.items[0].counted, false);
+  assert.match(earlier.items[0].mergeReason, /兑换/);
+  for (const sourceRef of ['payment:1', 'redeem:1', 'example-redeem']) await assert.rejects(f.service.save(entry({ direction: 'income', sourceRef }), 'admin'), { code: 'CASH_DUPLICATE_SOURCE' });
+});
+
+test('late redemptions and orders replace one manual income contribution and archived links survive restart', async t => {
+  const f = fixture(t); f.source.payments = [];
+  const manual = await f.service.save(entry({ direction: 'income', amount: 120, sourceRef: 'redeem:1' }), 'admin');
+  f.source.credits = [credit()]; await f.service.sync({ force: true });
+  let r = await f.service.getReport(f.query); assert.equal(r.summary.income, 120); assert.equal(r.items.find(row => row.key === manual.key).counted, false);
+  f.source.payments = [payment()]; await f.service.sync({ force: true });
+  r = await f.service.getReport(f.query); assert.equal(r.summary.income, 120); assert.equal(r.items.filter(row => row.counted).length, 1);
+  f.source.payments = []; f.source.credits = []; f.store.close(); f.store.initialize(); await f.service.sync({ force: true });
+  r = await f.service.getReport(f.query); assert.equal(r.summary.income, 120); assert.equal(r.cumulative.income, 120);
+});
+
+test('known redemption exclusions persist but source changes revoke stale exclusion facts', async t => {
+  const f = fixture(t); f.source.payments = []; f.source.credits = [credit()]; await f.service.sync();
+  f.accounting.classify('redeem:1', { kind: 'excluded', currency: 'CNY', reason: 'Existing test credit exclusion' }, 'admin');
+  assert.equal((await f.service.getReport(f.query)).summary.income, 0);
+  f.source.payments = [payment()];
+  await f.service.sync({ force: true });
+  const excluded = await f.service.getReport(f.query);
+  assert.equal(excluded.summary.income, 0); assert.equal(excluded.items.find(row => row.key === 'payment:1').counted, false);
+  f.source.credits[0].value = '140'; await f.service.sync({ force: true });
+  assert.equal((await f.service.getReport(f.query)).summary.income, 140);
+});
+
+test('incomplete or unavailable redemption scans cannot advertise complete automatic income', async t => {
+  const f = fixture(t); f.source.payments = [];
+  f.source.credits = Array.from({ length: 4001 }, (_, index) => credit({ id: String(index + 1), value: '1', code: `example-${index}` }));
+  await f.service.sync(); assert.equal(f.store.documents().length, 4000); assert.equal(f.service.sourceStatus().complete, false);
+  const r = await f.service.getReport(f.query); assert.equal(r.summary.income, 4001); assert.equal(r.source.complete, true);
+  f.inspector.inspect = async () => ({ tables: { payment_orders: { exists: true }, redeem_codes: { exists: false } } });
+  const failed = await f.service.getReport({ ...f.query, refresh: '1' }); assert.equal(failed.summary.income, null); assert.equal(failed.known.income, 4001);
+});
 
 test('cumulative uses all history and excludes ID 1 and deleted balances regardless of every report filter', async t => {
   const f = fixture(t); await f.service.save(entry(), 'admin');
@@ -150,7 +209,7 @@ test('paid order and credit snapshots survive source deletion, restart and curre
   await f.service.sync(); f.source.payments = []; f.source.credits = []; f.source.users = [{ id: '1', balance: '999999' }];
   await f.service.sync({ force: true });
   f.store.close(); f.store.initialize();
-  const r = await f.service.getReport(f.query); assert.equal(r.cumulative.income, 100); assert.equal(r.cumulative.userBalance, 0);
+  const r = await f.service.getReport(f.query); assert.equal(r.cumulative.income, 120); assert.equal(r.cumulative.userBalance, 0);
   const credits = await f.service.creditUsers(f.query); assert.equal(credits.summary.totalIncome, 120); assert.equal(credits.items[0].missing, true);
   assert.equal((await f.service.creditUsers(f.query, '2')).items[0].code, 'synthetic');
 });
@@ -187,7 +246,7 @@ test('cleared user foreign keys or deleted redemption links retain archived iden
   const f = fixture(t); f.source.credits = [{ id: '1', user_id: '2', type: 'balance', value: '120', used_at: '2026-10-02T00:00:00+08:00', code: 'synthetic', notes: '' }];
   await f.service.sync(); f.source.payments = [payment({ user_id: null, redeem_ids: [], currency: null })];
   f.source.credits[0].user_id = null; f.source.users = []; await f.service.sync({ force: true });
-  const r = await f.service.getReport(f.query); assert.equal(r.summary.income, 100); assert.equal(r.items[0].userId, '2');
+  const r = await f.service.getReport(f.query); assert.equal(r.summary.income, 120); assert.equal(r.items[0].userId, '2');
   assert.equal((await f.service.creditUsers(f.query)).items[0].userId, '2');
   await assert.rejects(f.service.save(entry({ direction: 'income', sourceRef: 'redeem:1' }), 'admin'), { code: 'CASH_DUPLICATE_SOURCE' });
 });
@@ -279,9 +338,28 @@ test('real PostgreSQL and authenticated HTTP support cash CRUD, readonly automat
   const edited = await fetch(`${url}/records/${saved.key}`, { method: 'PUT', headers, body: JSON.stringify(entry({ date: p.today, amount: 25 })) }); assert.equal(edited.status, 200);
   const detail = await (await fetch(`${url}/records/${saved.key}`, { headers })).json(); assert.equal(detail.item.amount, 25); assert.equal(detail.history.length, 2);
   assert.equal((await fetch(`${url}/records/payment:1`, { method: 'DELETE', headers })).status, 400);
-  const r = await p.cashFlow.getReport({ start: p.start, end: p.today }); assert.equal(r.summary.income, 10199); assert.equal(r.cumulative.userBalance, 11790);
+  const r = await p.cashFlow.getReport({ start: p.start, end: p.today }); assert.equal(r.summary.income, 12199); assert.equal(r.cumulative.userBalance, 11790);
   await p.database.exec('DELETE FROM users WHERE id=2; DELETE FROM redeem_codes WHERE id=1; DELETE FROM payment_orders WHERE id=1;');
   await p.cashFlow.sync({ force: true }); const credits = await p.cashFlow.creditUsers({ start: p.start, end: p.today });
-  assert.equal(credits.items.find(row => row.userId === '2').totalIncome, 12000); assert.equal((await p.cashFlow.getReport({ start: p.start, end: p.today })).summary.income, 10199);
+  assert.equal(credits.items.find(row => row.userId === '2').totalIncome, 12000); assert.equal((await p.cashFlow.getReport({ start: p.start, end: p.today })).summary.income, 12199);
   assert.equal((await fetch(`${url}/records/${saved.key}`, { method: 'DELETE', headers })).status, 204);
+});
+
+test('real redemption SQL excludes unused and nonmonetary codes while preserving offline, signed and deleted-user income', async t => {
+  const p = await startPreview(); t.after(() => p.close());
+  await p.database.query(`INSERT INTO redeem_codes(id,used_by,type,status,value,used_at,code,notes,created_at) VALUES
+    (1001,2,'balance','used',100,$1::date,'offline-100','',$1::date),
+    (1002,3,'admin_balance','used',25,$1::date,'offline-admin-25','',$1::date),
+    (1003,3,'admin_balance','used',-5,$1::date,'offline-adjustment-5','',$1::date),
+    (1004,3,'admin_concurrency','used',9999,$1::date,'not-money','',$1::date),
+    (1005,3,'balance','unused',9999,$1::date,'not-used','',$1::date),
+    (1006,1,'balance','used',9999,$1::date,'system-admin','',$1::date),
+    (1007,NULL,'balance','used',7,$1::date,'deleted-customer','',$1::date)`, [p.today]);
+  let r = await p.cashFlow.getReport({ start: p.start, end: p.today, refresh: '1' });
+  assert.equal(r.summary.income, 12326); assert.equal(r.summary.automatic, 12326);
+  assert(!r.items.some(row => ['redeem:1004', 'redeem:1005', 'redeem:1006'].includes(row.key)));
+  assert.equal(r.items.find(row => row.key === 'redeem:1003').amount, -5);
+  await p.database.exec('DELETE FROM redeem_codes WHERE id=1001; UPDATE redeem_codes SET used_by=NULL WHERE id=1002;');
+  r = await p.cashFlow.getReport({ start: p.start, end: p.today, refresh: '1' });
+  assert.equal(r.summary.income, 12326); assert.equal(r.items.find(row => row.key === 'redeem:1002').userId, '3');
 });

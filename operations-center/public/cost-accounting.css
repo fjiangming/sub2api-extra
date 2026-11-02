@@ -3,6 +3,8 @@
 .accounting-tabs button { color: var(--muted); border: 0; border-bottom: 2px solid transparent; background: transparent; padding: 12px 0; white-space: nowrap; }
 .accounting-tabs button[aria-selected="true"] { color: var(--green); border-bottom-color: var(--green); font-weight: 600; }
 .accounting-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.accounting-cash-period { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.accounting-cash-history { margin-top: 12px; }
 .accounting-metric { background: var(--surface); text-align: left; border: 1px solid var(--line); border-radius: 5px; padding: 15px; display: grid; gap: 9px; align-content: start; min-width: 0; }
 .accounting-metric span, .accounting-metric small { color: var(--muted); font-size: 12px; font-weight: 400; }
 .accounting-metric strong { font-size: 23px; font-weight: 650; white-space: nowrap; min-width: 0; font-variant-numeric: tabular-nums; }
@@ -63,6 +65,7 @@
 .accounting-policy { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
 @media (max-width: 760px) {
   .accounting-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .accounting-cash-period [data-metric="net"] { grid-column: 1 / -1; }
   .accounting-metric { padding: 12px; }
   .accounting-metric strong { font-size: 20px; }
   .accounting-tabs { gap: 20px; }

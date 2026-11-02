@@ -92,18 +92,27 @@ async function main() {
         await page.locator('[data-entry-form] [name=date]').fill(oldDate); await page.locator('[data-entry-form] [name=amount]').fill('125'); await page.locator('[data-entry-form] [type=submit]').click();
         await waitFor(page, date => accountingUi.state.tab === 'cash' && accountingUi.state.report?.range.start === date && accountingUi.state.report.items.some(row => row.amount === 125), oldDate);
         assert.equal(await page.evaluate(() => accountingUi.state.report.items[0].name), 'Sub2API 示例上游 付款');
-        assert.equal(await page.locator('[data-cash-rows] tr').count(), 1); assert.equal(await page.locator('[data-cash-metrics] [data-metric]').count(), 4);
-        assert.deepEqual(await page.locator('[data-cash-metrics] [data-metric]').evaluateAll(nodes => nodes.map(node => node.dataset.metric)), ['income', 'expense', 'net', 'cumulative']);
-        assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -2081);
+        assert.equal(await page.locator('[data-cash-rows] tr').count(), 1); assert.equal(await page.locator('[data-cash-metrics] [data-metric]').count(), 3);
+        assert.deepEqual(await page.locator('[data-cash-metrics] [data-metric]').evaluateAll(nodes => nodes.map(node => node.dataset.metric)), ['income', 'expense', 'net']);
+        assert.deepEqual(await page.locator('[data-cash-history] [data-metric]').evaluateAll(nodes => nodes.map(node => node.dataset.metric)), ['historyIncome', 'historyExpense', 'userBalance', 'cumulative']);
+        const metricRows = await page.evaluate(() => ({ period: document.querySelector('[data-cash-metrics]').getBoundingClientRect().bottom,
+          history: document.querySelector('[data-cash-history]').getBoundingClientRect().top }));
+        assert(metricRows.history > metricRows.period, 'All-history cards have their own second row');
+        assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -81);
         await checkChart(page, '#accounting-cash-chart'); await checkLayout(page);
         await page.locator('[data-metric=cumulative]').click(); assert.match(await page.locator('[data-drawer]').innerText(), /全历史累计入账/); assert.match(await page.locator('[data-drawer]').innerText(), /11,790/); await closeDrawer(page);
+        for (const key of ['historyIncome', 'historyExpense']) { await page.locator(`[data-metric=${key}]`).click(); assert.match(await page.locator('[data-drawer]').innerText(), /全历史累计支出/); await closeDrawer(page); }
+        await page.locator('[data-metric=userBalance]').click(); await page.waitForSelector('[data-balance-page]'); assert.match(await page.locator('[data-drawer]').innerText(), /不含 ID 1/); await closeDrawer(page);
         await page.locator('[data-record]').click(); await page.locator('[data-command=edit]').click(); await page.waitForSelector('[data-entry-form]'); await page.locator('[data-entry-form] [name=amount]').fill('150'); await page.locator('[data-entry-form] [type=submit]').click();
-        await waitFor(page, () => accountingUi.state.report?.items[0]?.amount === 150 && !document.querySelector('[data-dialog]').open); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -2106);
+        await waitFor(page, () => accountingUi.state.report?.items[0]?.amount === 150 && !document.querySelector('[data-dialog]').open); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -106);
         assert.equal(await page.evaluate(() => accountingUi.state.report.items[0].name), 'Sub2API 示例上游 付款');
-        await page.locator('[data-record]').click(); page.once('dialog', dialog => dialog.accept()); await page.locator('[data-command=delete]').click(); await waitFor(page, () => accountingUi.state.report?.summary.expense === 0 && !document.querySelector('[data-dialog]').open); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -1956);
+        await page.locator('[data-record]').click(); page.once('dialog', dialog => dialog.accept()); await page.locator('[data-command=delete]').click(); await waitFor(page, () => accountingUi.state.report?.summary.expense === 0 && !document.querySelector('[data-dialog]').open); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), 44);
 
         await page.locator('#cost-analysis-filter [name=start]').fill(preview.start); await page.locator('#cost-analysis-filter [name=end]').fill(preview.today); await page.locator('[data-cash-search] [name=search]').fill(''); await page.locator('[data-cash-search] [type=submit]').click();
-        await waitFor(page, () => accountingUi.state.report?.summary.income === 10199); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -1956);
+        await waitFor(page, () => accountingUi.state.report?.summary.income === 12199); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), 44);
+        assert.equal(await page.evaluate(() => accountingUi.state.report.items.find(row => row.key === 'payment:1').counted), false);
+        await page.locator('[data-record="redeem:1"]').click(); await waitFor(page, () => accountingUi.state.selectedItem?.key === 'redeem:1' && document.querySelector('[data-dialog]').open);
+        assert.match(await page.locator('[data-drawer]').innerText(), /已使用余额兑换记录/); assert.equal(await page.locator('[data-command=edit]').count(), 0); await closeDrawer(page);
         await page.locator('[data-record="payment:1"]').click(); await waitFor(page, () => accountingUi.state.selectedItem?.key === 'payment:1' && document.querySelector('[data-dialog]').open); assert.equal(await page.locator('[data-command=edit]').count(), 0); assert.equal(await page.locator('[data-command=delete]').count(), 0); await closeDrawer(page);
         preview.config.financeCashExchangeRates = [{ currency: 'USD', rate: 7.2, from: '2000-01-01', to: '9999-12-31' }];
         await preview.database.query(`UPDATE payment_orders SET provider_snapshot='{"currency":"USD"}' WHERE id=1`);
@@ -111,9 +120,15 @@ async function main() {
         const historical = { key: 'cash:historical-usd', source: 'manual', direction: 'income', date: preview.today, name: 'Historical receipt', amount: '5', currency: 'USD', rate: 7.2, active: true };
         preview.store.putCash(historical, 'example', 'Existing historical receipt');
         await page.locator('#cost-accounting-add').click(); await page.waitForSelector('[data-entry-form]'); await page.locator('[data-entry-form] [name=direction][value=income]').check(); await page.locator('[data-entry-form] [name=name]').fill('Offline receipt'); await page.locator('[data-entry-form] [name=amount]').fill('10'); await page.locator('[data-entry-form] [type=submit]').click();
-        await waitFor(page, () => accountingUi.state.report?.currency === 'CNY' && accountingUi.state.report.summary.income === 10214); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), -1941);
+        await waitFor(page, () => accountingUi.state.report?.currency === 'CNY' && accountingUi.state.report.summary.income === 12214); assert.equal(await page.evaluate(() => accountingUi.state.report.cumulative.net), 59);
         assert.equal(await page.locator('[data-cash-currency]').count(), 0);
-        await page.locator('[data-cash-search] [name=search]').fill(''); await page.locator('[data-cash-search] [type=submit]').click(); await waitFor(page, () => accountingUi.state.report?.pagination.total === 5);
+        await page.locator('[data-cash-search] [name=search]').fill(''); await page.locator('[data-cash-search] [type=submit]').click(); await waitFor(page, () => accountingUi.state.report?.pagination.total === 6);
+        const history = await page.evaluate(() => accountingUi.state.report.cumulative);
+        assert.deepEqual([history.income, history.expense, history.userBalance, history.net], [12214, 365, 11790, 59]);
+        await page.locator('[data-cash-search] [name=search]').fill('no-match'); await page.locator('[data-cash-search] [type=submit]').click();
+        await waitFor(page, () => accountingUi.state.report?.pagination.total === 0);
+        assert.deepEqual(await page.evaluate(() => { const c = accountingUi.state.report.cumulative; return [c.income, c.expense, c.userBalance, c.net]; }), [12214, 365, 11790, 59]);
+        await page.locator('[data-cash-search] [name=search]').fill(''); await page.locator('[data-cash-search] [type=submit]').click(); await waitFor(page, () => accountingUi.state.report?.pagination.total === 6);
         assert.match(await page.locator('[data-cash-range]').innerText(), /人民币/); assert.doesNotMatch(await page.locator('#accounting-cash').innerText(), /USD|原币/);
         await page.locator('[data-record="cash:historical-usd"]').click(); await waitFor(page, () => accountingUi.state.selectedItem?.key === 'cash:historical-usd' && document.querySelector('[data-dialog]').open);
         assert.match(await page.locator('[data-drawer]').innerText(), /金额（元）/); await page.locator('[data-command=edit]').click(); await page.waitForSelector('[data-entry-form]'); assert.equal(await page.locator('[data-entry-form] [name=amount]').inputValue(), '5'); assert.equal(await page.locator('[data-entry-form] [name=currency]').count(), 0); await closeDrawer(page);
@@ -127,7 +142,7 @@ async function main() {
           await waitFor(page, () => accountingUi.state.report?.items[0]?.name === '自定义支出' && !document.querySelector('[data-dialog]').open);
           assert.equal(await page.evaluate(() => accountingUi.state.report.items[0].amount), 3);
           await page.locator('[data-record]').click(); page.once('dialog', dialog => dialog.accept()); await page.locator('[data-command=delete]').click();
-          await waitFor(page, () => accountingUi.state.report?.cumulative.net === -1941 && !document.querySelector('[data-dialog]').open);
+          await waitFor(page, () => accountingUi.state.report?.cumulative.net === 59 && !document.querySelector('[data-dialog]').open);
           // A superseded slow response cannot overwrite a newer view.
           let unblock, handled; const pending = new Promise(resolve => { unblock = resolve; }), finished = new Promise(resolve => { handled = resolve; });
           const slow = async route => { await pending; try { await route.fulfill({ status: 500, json: { error: { message: 'Superseded response' } } }); } finally { handled(); } };
