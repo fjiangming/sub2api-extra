@@ -1,5 +1,21 @@
 # 个性化功能维护台账
 
+## 2026-11-03：主站同域 Canvas 子目录
+
+用户明确要求服务器增加 `https://aihub.fo2.us.ci/canvas`，使画布入口与主站同域。本轮保留独立域名、原服务和另一个对话已经发布的画布浅色主题 / 顶部简化，不复用曾撤销的外观改动。
+
+画布 fork 在其最新 `2b207f1` 基础上增加子目录能力：Vite 相对资源、可由 Nginx 定位替换的 HTML base、React Router basename，以及 logo / 本地插件的前缀解析；子目录首页直接展示画布库，独立根域名首页不变。源码、CHANGELOG、待验收清单及部署说明记录在该 fork 的 CUSTOMIZATIONS。模型地址和个人 Key 不随 UI 路由改写。
+
+Extra 新增 `infinite-canvas/docs/nginx-subpath.conf.example`：仅在既有 aihub server 引入 `/canvas` 和 `/canvas/`，去前缀后反代原 9877 容器，仅对 HTML base 做替换，不改写主站根 assets、API、monitor 或其他路由。画布路径关闭访问日志、清理主站自动附加的登录参数，并移除传给画布容器的 Cookie / Authorization；frame-ancestors 允许同源及原有受信主站别名 `aihubdirect.fo2.us.ci`、`epoint2api.fjmooo.cn`。根 Compose 和统一拉取方式保持既有配置。模块 README 记录同域入口、主站 API Base URL、独立域名数据需导出导入，以及回滚方法。
+
+部署前将原 Nginx 站点、根 Compose / env、镜像 ID 和 15 个容器身份备份到 `/root/sub2api-deploy/backups/canvas-subpath-20261103`，目录 0700、文件 0600。生产只在 `/etc/nginx/conf.d/migrated-services.conf` 的 aihub server 增加一条片段 include，片段为 `/etc/nginx/snippets/infinite-canvas-main.conf`；原独立域名配置不变。Nginx 重载完成后需等待新 worker 接管再验证，首次即时探测命中旧页面时脚本自动恢复原配置，补充有界等待后检查通过。
+
+主站原生管理员 API 仅更新既有菜单 `83171c9fee9a4214` 的 URL 为 `https://aihub.fo2.us.ci/canvas/`；原 9 个其他菜单、该菜单的其他字段和全部其他返回设置前后相同，公共设置接口也已确认新地址。既有账务服务内凭据只在原容器进程内使用，原设置保存在受保护备份中，没有写入画布或仓库。
+
+画布首次子目录构建 `b3e2bd7` 的 Actions `41572545400` 成功；后续修复 Agent 连接片段清理时的重复前缀，`e36a126` 的 Actions `41573555093` 也成功。已用独立 Playwright Chrome 在 1440×900 / 390×844 验证入口补斜杠、相对资源、创建文本节点、项目深链接刷新保存、配置页、本地插件清单及同域 `/v1/models` JSON 401，无脚本异常或画布路径资源错误。主站 CSP 下的 iframe 能读取父页面 origin，确认不再跨域；模拟主站登录参数被清理，原独立域名也能创建项目。验收脚本和截图位于本机 `sub2api-canvas-subpath-20261103`；未调用收费模型。
+
+最终验收：生产运行 `e36a126ee44c513ab1866d0d2f51fd78a3d42e9c` 且 healthy；Agent 引导片段清理保留挂载前缀，同域 GET `/v1/models` 和 POST `/v1/responses` 均能读取 JSON 401，没有 CORS 错误或收费模型调用。主站 6 项根 assets 正常，原 14 个其他容器 ID、既有 Compose / env 与其他站点配置不变，根目录 `docker compose pull` 仍包含画布。最终片段经 `nginx -t` 和平滑重载，公网返回 200、正确 HTML base 及受信 frame-ancestors。片段示例与模块 README 同步至生产模块目录，源码配置与本节台账一并提交至 Extra main，保留独立备份和验收材料。
+
 ## 2026-11-02：Infinite Canvas 独立镜像与子服务部署
 
 用户明确授权为自己的 `fjiangming/infinite-canvas` fork 创建镜像，并在现有服务器 Extra 目录部署、配置 `canvas.fo2.us.ci` 独立域名，纳入根目录统一拉取更新。本轮使用独立工作树维护配置，不提交或覆盖原工作区的错误分析、现金统计、生产维护等无关改动。

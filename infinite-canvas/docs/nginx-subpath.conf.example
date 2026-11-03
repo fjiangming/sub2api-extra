@@ -1,0 +1,32 @@
+# Include inside the existing server block for aihub.fo2.us.ci.
+location = /canvas {
+    access_log off;
+    return 302 https://aihub.fo2.us.ci/canvas/;
+}
+
+location ^~ /canvas/ {
+    access_log off;
+    error_log /var/log/nginx/infinite-canvas-main.error.log crit;
+
+    if ($args ~* "(^|&)(token|access_token|user_id)=") {
+        return 302 https://aihub.fo2.us.ci$uri;
+    }
+
+    proxy_pass http://127.0.0.1:9877/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header Authorization "";
+    proxy_set_header Cookie "";
+    proxy_set_header Referer "";
+    proxy_set_header Accept-Encoding "";
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header Connection "";
+
+    sub_filter '<base data-canvas-base href="/"' '<base data-canvas-base href="/canvas/"';
+    sub_filter_once on;
+
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Content-Security-Policy "frame-ancestors 'self' https://aihubdirect.fo2.us.ci https://epoint2api.fjmooo.cn" always;
+    add_header Cache-Control "no-store" always;
+}

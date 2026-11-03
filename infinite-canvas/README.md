@@ -26,11 +26,25 @@ docker compose --env-file compose.services.env up -d --no-build --no-deps infini
 
 当前仍没有按主站账号隔离的浏览器数据，也不会自动跨设备同步；同一浏览器切换主站账号仍会使用原工作区。可选 WebDAV 保持上游行为。
 
+## 主站同域子目录
+
+入口为 `https://aihub.fo2.us.ci/canvas/`，无尾斜杠的 `/canvas` 会补齐。画布与主站使用相同 origin；渠道的 API Base URL 填 `https://aihub.fo2.us.ci`，Key 仍使用用户自己的 Sub2API API Key。不要把 UI 的 `/canvas/` 前缀填进模型接口地址。
+
+将[子目录 Nginx 片段](docs/nginx-subpath.conf.example)安装到 `/etc/nginx/snippets/infinite-canvas-main.conf`，仅在现有 `server_name aihub.fo2.us.ci;` 所在 server 增加 `include /etc/nginx/snippets/infinite-canvas-main.conf;`，检查配置后平滑重载。需要使用带子目录支持的新 fork 镜像；反代去除 URL 前缀并把 HTML 的 base 改成 `/canvas/`，同一容器仍支持原独立域名。页面资源、配置页、项目深链接和本地插件均位于前缀下，主站 API 继续走原 `/v1/`。
+
+原菜单通过主站管理员 API 保留 ID、标签、图标、排序和可见性，仅将原独立域名入口改为同域地址。入口会清除附加的登录参数，不建立新的登录或作品同步。
+
+浏览器按 origin 隔离存储，所以原 `canvas.fo2.us.ci` 的作品和个人配置不会自动出现在主站域名下；从原站导出后在新入口导入即可。原站继续可用。回滚时先将菜单切回原独立域名，移除 aihub 的片段 include 并重载 Nginx，再按需要回滚画布镜像。
+
+本次同域部署的原站点、菜单和容器身份备份在 `/root/sub2api-deploy/backups/canvas-subpath-20261103`，权限同首次部署备份，禁止公开。
+
 ## 当前部署结果
 
 已在 `/root/sub2api-extra` 部署 `sub2api-infinite-canvas`，独立入口为 [无限画布](https://canvas.fo2.us.ci/canvas)。主站自定义菜单已追加用户可见“无限画布”，复用现有菜单功能和 iframe 白名单，不需要修改主站源码；原有菜单、主站设置和其他容器保持原状。
 
-发布来源为 fork 提交 `7676c01526119080f5a373aff3c3cd861cc422e2`，对应 [镜像构建](https://github.com/fjiangming/infinite-canvas/actions/runs/41474449809) 已成功。已验证容器健康、公网页面及静态资源、无 Key 的 API 鉴权、入口参数清理、桌面画布操作 / 刷新保存和内嵌加载。手机能加载及保存，但原版编辑侧栏和工具栏较拥挤，建议电脑使用。没有使用真实 Key 调用收费模型，实际模型能力需按用户分组配置。
+主站菜单现已切换为[同域入口](https://aihub.fo2.us.ci/canvas/)。子目录支持在原浅色主题版本之上发布，保留原独立域名；当前使用方式和模型接口地址见上一节。
+
+首次发布来源为 fork 提交 `7676c01526119080f5a373aff3c3cd861cc422e2`，对应 [镜像构建](https://github.com/fjiangming/infinite-canvas/actions/runs/41474449809) 已成功。同域子目录版本为 `e36a126ee44c513ab1866d0d2f51fd78a3d42e9c`，对应[镜像构建](https://github.com/fjiangming/infinite-canvas/actions/runs/41573555093)已成功。已验证容器健康、公网页面及静态资源、无 Key 的 API 鉴权、入口参数清理、桌面画布操作 / 刷新保存和内嵌加载。手机能加载及保存，但原版编辑侧栏和工具栏较拥挤，建议电脑使用。没有使用真实 Key 调用收费模型，实际模型能力需按用户分组配置。
 
 原生产配置及菜单备份位于 `/root/sub2api-deploy/backups/infinite-canvas-20261102`；其中包含敏感原配置，保持目录权限 0700、文件 0600，不对外分发。
 
