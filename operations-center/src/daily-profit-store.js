@@ -27,16 +27,23 @@ class DailyProfitStore {
       PRIMARY KEY(scope,date));
       CREATE INDEX IF NOT EXISTS daily_profit_due ON daily_profit_jobs(scope,next_attempt_at,lease_until);
       CREATE TABLE IF NOT EXISTS daily_profit_metadata (
-      scope TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(scope,key));`);
+      scope TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(scope,key));
+      CREATE TABLE IF NOT EXISTS daily_profit_attempts (
+      scope TEXT NOT NULL, date TEXT NOT NULL, error_code TEXT, notices TEXT NOT NULL,
+      attempted_at TEXT NOT NULL, PRIMARY KEY(scope,date));`);
   }
 
   list(scope, start, end) {
-    return this.db.prepare('SELECT * FROM daily_profit_snapshots WHERE scope=? AND date>=? AND date<=?')
-      .all(scope, start, end).map(row => ({ ...JSON.parse(row.payload), computedAt: row.computed_at }));
+    return this.db.prepare(`SELECT s.*,a.error_code,a.notices,a.attempted_at FROM daily_profit_snapshots s
+      LEFT JOIN daily_profit_attempts a ON a.scope=s.scope AND a.date=s.date
+      WHERE s.scope=? AND s.date>=? AND s.date<=?`)
+      .all(scope, start, end).map(row => ({ ...JSON.parse(row.payload), computedAt: row.computed_at,
+        lastAttempt: row.attempted_at ? { at: row.attempted_at, errorCode: row.error_code,
+          notices: JSON.parse(row.notices) } : null }));
   }
 
   jobs(scope, start, end) {
-    return this.db.prepare('SELECT date,attempts,last_error FROM daily_profit_jobs WHERE scope=? AND date>=? AND date<=?')
+    return this.db.prepare('SELECT date,attempts,last_error,next_attempt_at FROM daily_profit_jobs WHERE scope=? AND date>=? AND date<=?')
       .all(scope, start, end);
   }
 
@@ -69,9 +76,16 @@ class DailyProfitStore {
     return this.db.transaction(() => {
       const current = this.db.prepare('SELECT * FROM daily_profit_jobs WHERE scope=? AND date=?').get(job.scope, job.date);
       if (!current || current.generation !== job.generation || current.lease_token !== job.lease_token) return false;
-      if (payload) this.db.prepare(`INSERT INTO daily_profit_snapshots(scope,date,payload,computed_at) VALUES (?,?,?,?)
+      const at = new Date(this.now()).toISOString();
+      this.db.prepare(`INSERT INTO daily_profit_attempts(scope,date,error_code,notices,attempted_at) VALUES(?,?,?,?,?)
+        ON CONFLICT(scope,date) DO UPDATE SET error_code=excluded.error_code,notices=excluded.notices,
+        attempted_at=excluded.attempted_at`).run(job.scope, job.date, errorCode, JSON.stringify(payload?.notices || []), at);
+      const existing = this.db.prepare('SELECT payload FROM daily_profit_snapshots WHERE scope=? AND date=?').get(job.scope, job.date);
+      const preserve = existing && JSON.parse(existing.payload).row?.complete === true &&
+        (errorCode || payload?.row?.complete !== true);
+      if (payload && !preserve) this.db.prepare(`INSERT INTO daily_profit_snapshots(scope,date,payload,computed_at) VALUES (?,?,?,?)
         ON CONFLICT(scope,date) DO UPDATE SET payload=excluded.payload,computed_at=excluded.computed_at`)
-        .run(job.scope, job.date, JSON.stringify(payload), new Date(this.now()).toISOString());
+        .run(job.scope, job.date, JSON.stringify(payload), at);
       if (!errorCode) this.db.prepare('DELETE FROM daily_profit_jobs WHERE scope=? AND date=?').run(job.scope, job.date);
       else this.db.prepare(`UPDATE daily_profit_jobs SET attempts=attempts+1,next_attempt_at=?,lease_until=0,
         lease_token=NULL,last_error=? WHERE scope=? AND date=?`)

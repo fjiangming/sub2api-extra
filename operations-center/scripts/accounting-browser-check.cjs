@@ -51,13 +51,14 @@ async function main() {
   try {
     for (const [name, viewport, colorScheme] of [['desktop', { width: 1440, height: 1000 }, 'light'], ['mobile', { width: 390, height: 844 }, 'light'], ['narrow', { width: 320, height: 740 }, 'light'], ['dark', { width: 1440, height: 1000 }, 'dark']]) {
       const preview = await startPreview(), context = await browser.newContext({ viewport, colorScheme });
+      let page;
       try {
         preview.accounting.configure({ startDate: preview.today, reason: 'Automatic reporting has no accounting start' }, 'example');
         for (const [direction, amount] of [['income', '999'], ['expense', '777']]) preview.store.putCash({
           key: `cash:before-cutoff-${direction}`, source: 'manual', direction, date: '2026-09-30',
           name: `Before cutoff ${direction}`, amount, currency: 'CNY', active: true
         }, 'example', 'Isolated cutoff example');
-        const page = await context.newPage(), errors = [], paths = []; page.on('pageerror', error => errors.push(error.message)); page.on('request', request => paths.push(new URL(request.url()).pathname));
+        page = await context.newPage(); const errors = [], paths = []; page.on('pageerror', error => errors.push(error.message)); page.on('request', request => paths.push(new URL(request.url()).pathname));
         await page.goto(`http://127.0.0.1:${preview.port}/preview`); await waitFor(page, () => accountingUi.state.report?.automatic);
         assert.equal(await page.locator('.accounting-tabs [role=tab]').count(), 2); assert.equal(await page.locator('.accounting-rules').evaluate(node => node.open), false);
         assert.equal(await page.locator('#cost-analysis-filter [name=granularity]').inputValue(), 'day');
@@ -92,7 +93,8 @@ async function main() {
         await page.locator('[data-entry-form] [name=direction][value=income]').check(); assert.equal(await page.locator('[data-entry-name]').isVisible(), true);
         assert.equal(await page.locator('[data-entry-form] [name=name]').evaluate(node => node.required), true); await closeDrawer(page);
         await page.locator('[data-provider-entry=alpha]').click(); await page.waitForSelector('[data-entry-form]'); assert.equal(await page.locator('[data-entry-form] [name=currency]').count(), 0); assert.match(await page.locator('[data-entry-form]').innerText(), /人民币元/); assert.equal(await page.locator('[data-entry-form] [name=providerId]').inputValue(), 'alpha');
-        const oldDate = addUtcDays(preview.start, -5);
+        let oldDate = addUtcDays(preview.start, -5);
+        if (oldDate === '2026-09-30') oldDate = addUtcDays(oldDate, -1);
         const expenseCountsInCumulative = oldDate >= '2026-10-01';
         await page.locator('[data-entry-form] [name=date]').fill(oldDate); await page.locator('[data-entry-form] [name=amount]').fill('125'); await page.locator('[data-entry-form] [type=submit]').click();
         await waitFor(page, date => accountingUi.state.tab === 'cash' && accountingUi.state.report?.range.start === date && accountingUi.state.report.items.some(row => row.amount === 125), oldDate);
@@ -164,7 +166,7 @@ async function main() {
           await page.waitForTimeout(100); assert.equal(await page.evaluate(() => accountingUi.state.report.automatic), true);
           preview.controls.supplierUnavailable = true;
           await page.locator('#cost-analysis-filter [name=start]').fill(preview.today); await page.locator('#cost-analysis-filter [name=end]').fill(preview.today); await page.locator('#cost-analysis-filter [type=submit]').click();
-          await waitFor(page, today => accountingUi.state.report.range.start === today, preview.today);
+          await waitFor(page, today => accountingUi.state.report.range.start === today && !accountingUi.state.report.items[0].liveRefreshing, preview.today);
           assert.equal(await page.evaluate(() => accountingUi.state.report.summary.profit), null); assert.equal(await page.evaluate(() => accountingUi.state.report.items[0].providers[0].cost), 12);
           assert.doesNotMatch(await page.locator('#cost-accounting-root').innerText(), /待核验|保存核算|补录期初|核算起点/);
           await page.screenshot({ path: path.join(directory, 'desktop-missing-source.png'), fullPage: true });
@@ -172,8 +174,66 @@ async function main() {
           await page.evaluate(() => { accountingUi.state.liveRefreshedAt = Date.now() - 61000; return accountingUi.load({ poll: true }); });
           assert.equal(await page.evaluate(() => accountingUi.state.report.summary.profit), 121.5);
           assert(preview.controls.supplierCalls > calls, 'Archive polling cannot freeze current-day live data for more than a minute');
+
+          await page.locator('#cost-analysis-filter [name=start]').fill(preview.start); await page.locator('#cost-analysis-filter [type=submit]').click();
+          await waitFor(page, () => accountingUi.state.report?.summary.completeDays === 31);
+          await page.locator('[data-detail-tab=days]').click();
+          const archived = preview.daily.store.list(preview.daily.scope(), preview.start, addUtcDays(preview.today, -1));
+          const beforeLive = preview.controls.supplierCalls;
+          preview.daily.lastLive = null; preview.controls.supplierUnavailable = true;
+          let releaseLive, liveStarted, liveDone;
+          const liveGate = new Promise(resolve => { releaseLive = resolve; }), intercepted = new Promise(resolve => { liveStarted = resolve; });
+          const continued = new Promise(resolve => { liveDone = resolve; });
+          const holdLive = async route => {
+            if (new URL(route.request().url()).searchParams.get('live') === '0') return route.continue();
+            liveStarted(); await liveGate;
+            try { await route.continue(); } finally { liveDone(); }
+          };
+          await page.route('**/api/cost-analysis/daily-profit?*', holdLive);
+          try {
+            await page.evaluate(() => { accountingUi.load({ refresh: true }).catch(() => {}); });
+            await intercepted;
+            await waitFor(page, () => accountingUi.state.report?.items[0].status === 'live_pending');
+            assert.equal(await page.evaluate(() => accountingUi.state.report.summary.completeDays), 30);
+            assert.match(await page.locator('#page-meta').innerText(), /30\/31 天完整/);
+            assert.equal(await page.evaluate(() => accountingUi.state.report.completeSubtotal.profit), 3645);
+            assert.equal(preview.controls.supplierCalls, beforeLive, 'Archived rendering does not start an upstream history query');
+            assert.equal(preview.daily.store.jobs(preview.daily.scope(), preview.start, preview.today).length, 0);
+            await checkLayout(page);
+            await page.evaluate(() => { document.getElementById('toast-region').replaceChildren(); scrollTo(0, 0); });
+            await page.screenshot({ path: path.join(directory, 'desktop-history-live-loading.png'), fullPage: true });
+            await page.locator(`[data-day="${addUtcDays(preview.today, -1)}"]`).click();
+            assert.match(await page.locator('[data-drawer]').innerText(), /历史归档/);
+            assert.equal(await page.locator('[data-drawer] details').count(), 0);
+            releaseLive();
+            await waitFor(page, () => !accountingUi.state.report.items[0].liveRefreshing);
+            assert.equal(await page.evaluate(() => accountingUi.state.report.items[0].profit), null);
+            assert.equal(await page.evaluate(() => accountingUi.state.report.completeSubtotal.profit), 3645);
+            assert.equal(await page.locator('[data-drawer] details').count(), 0, 'Today failures cannot appear in a historical day drawer');
+            assert.deepEqual(preview.daily.store.list(preview.daily.scope(), preview.start, addUtcDays(preview.today, -1)), archived);
+            assert.equal(preview.controls.supplierCalls, beforeLive + 1);
+            await closeDrawer(page);
+            await page.locator(`[data-day="${preview.today}"]`).click();
+            assert.match(await page.locator('[data-drawer]').innerText(), /上游连接暂不可用/);
+            await closeDrawer(page);
+            await page.evaluate(() => { document.getElementById('toast-region').replaceChildren(); scrollTo(0, 0); });
+            await page.screenshot({ path: path.join(directory, 'desktop-history-live-timeout.png'), fullPage: true });
+          } finally { releaseLive(); await continued; await page.unroute('**/api/cost-analysis/daily-profit?*', holdLive); preview.controls.supplierUnavailable = false; }
+
+          const historyOnlyCalls = preview.controls.supplierCalls;
+          await page.locator('#cost-analysis-filter [name=end]').fill(addUtcDays(preview.today, -1)); await page.locator('#cost-analysis-filter [type=submit]').click();
+          await waitFor(page, today => accountingUi.state.report?.range.end < today && accountingUi.state.report.summary.completeDays === 30, preview.today);
+          await page.evaluate(() => accountingUi.load({ refresh: true }));
+          assert.equal(preview.controls.supplierCalls, historyOnlyCalls, 'Ordinary refresh only reads complete historical archives');
         }
         assert.deepEqual(errors, []); console.log(`${name}: automatic consumption, supplier drilldown, credit/balance pagination, cash CRUD, cumulative filters, charts and layout passed`);
+      } catch (error) {
+        if (page) {
+          await page.screenshot({ path: path.join(directory, `${name}-failure.png`), fullPage: true });
+          console.error(await page.evaluate(() => ({ tab: accountingUi.state.tab, range: accountingUi.state.report?.range,
+            summary: accountingUi.state.report?.summary, notice: document.querySelector('[data-notice]')?.textContent })));
+        }
+        throw error;
       } finally { await context.close(); await preview.close(); }
     }
     console.log(`Screenshots: ${directory}`);

@@ -76,7 +76,7 @@ const CostAccountingUi = (() => {
     }
     function renderAutomaticDays() {
       const r = state.report, size = 15, pages = Math.max(1, Math.ceil(r.items.length / size)); state.automaticPage = Math.max(1, Math.min(state.automaticPage, pages));
-      const labels = { complete: '数据完整', site_incomplete: '用量缺失', supplier_incomplete: '成本缺失', future: '未发生', pending_archive: '同步中', archive_failed: '自动重试', live_failed: '自动重试' };
+      const labels = { complete: '数据完整', site_incomplete: '用量缺失', supplier_incomplete: '成本缺失', future: '未发生', pending_archive: '同步中', archive_failed: '自动重试', live_failed: '自动重试', live_pending: '实时查询中' };
       q('[data-automatic-days]').innerHTML = r.items.slice((state.automaticPage - 1) * size, state.automaticPage * size).map(row => `<tr><td><strong>${e(row.date)}</strong></td>${['siteConsumption', 'supplierConsumption', 'profit'].map(key => `<td class="numeric${row[key] < 0 ? ' negative-value' : ''}">${e(money(row[key]))}</td>`).join('')}<td class="numeric">${e(pct(row.margin))}</td><td class="numeric">${e(row.siteRequests ?? '-')}</td><td><span class="badge ${row.complete ? 'success' : 'warning'}">${e(labels[row.status] || '数据缺失')}</span><small>${row.mode === 'live' ? '今日实时' : row.mode === 'archived' ? '已归档' : '等待同步'}${row.archiveStatus ? ' · 自动更新中' : ''}</small></td><td>${button('data-day', row.date)}</td></tr>`).join('');
       const total = (label, values, hint) => `<tr><th>${label}</th>${['siteConsumption', 'supplierConsumption', 'profit'].map(key => `<td class="numeric">${e(money(values?.[key]))}</td>`).join('')}<td class="numeric">${e(pct(values?.margin))}</td><td colspan="3">${hint}</td></tr>`;
       q('[data-automatic-total]').innerHTML = total('期间合计', r.summary, `${r.summary.completeDays}/${r.summary.days} 天完整`) + (r.summary.completeDays < r.summary.days ? total('完整日期小计', r.completeSubtotal, `仅 ${r.summary.completeDays} 天`) : '');
@@ -127,12 +127,24 @@ const CostAccountingUi = (() => {
         aux('credits', `/api/cost-analysis/automatic-income/users?${new URLSearchParams(query)}&pageSize=1`);
         aux('balances', `${base}/balances?pageSize=1${refresh ? '&refresh=1' : ''}`); aux('upstream', `${base}/provider-balances${refresh ? '?refresh=1' : ''}`);
       }
-      const params = automatic ? query : { ...query, currency: 'CNY', page: state.cashPage, pageSize: 20, search: state.search, direction: state.direction, origin: state.origin };
-      try {
-        const report = await h.api(`${automatic ? '/api/cost-analysis/daily-profit' : `${base}/report`}?${new URLSearchParams(params)}`);
-        if (request !== state.request || !state.active || automatic !== (state.tab === 'automatic')) return;
+      const params = automatic ? { ...query, live: '0' } : { ...query, currency: 'CNY', page: state.cashPage, pageSize: 20, search: state.search, direction: state.direction, origin: state.origin };
+      const showReport = report => {
         state.report = { ...report, automatic }; automatic ? renderAutomatic() : renderCash();
-        h.setPageMeta(`${report.range.start} 至 ${report.range.end} · ${automatic ? `${report.summary.completeDays}/${report.summary.days} 天完整 · ` : ''}${report.timezone}`); schedule(automatic && report.archive?.pendingDays && report.archive.ready ? 5000 : 60000);
+        h.setPageMeta(`${report.range.start} 至 ${report.range.end} · ${automatic ? `${report.summary.completeDays}/${report.summary.days} 天完整 · ` : ''}${report.timezone}`);
+      };
+      try {
+        let report = await h.api(`${automatic ? '/api/cost-analysis/daily-profit' : `${base}/report`}?${new URLSearchParams(params)}`);
+        if (request !== state.request || !state.active || automatic !== (state.tab === 'automatic')) return;
+        showReport(report);
+        if (automatic && report.live?.included && !poll) {
+          // Render archived dates before waiting for the independent current-day read.
+          report = await h.api(`/api/cost-analysis/daily-profit?${new URLSearchParams(query)}`);
+          if (request !== state.request || !state.active || state.tab !== 'automatic') return;
+          showReport(report);
+          const day = q('[data-open-day]')?.dataset.openDay;
+          if (q('[data-dialog]').open && day) dayDetail(day);
+        }
+        schedule(automatic && report.archive?.pendingDays && report.archive.ready ? 5000 : 60000);
       } catch (error) { if (request !== state.request || !state.active) return; q('[data-notice]').hidden = false; q('[data-notice]').textContent = `${error.message}，稍后自动重试`; schedule(); throw error; }
     }
     function leave() { state.active = false; ++state.request; ++state.dialogRequest; clearTimeout(state.timer); if (q('[data-dialog]').open) q('[data-dialog]').close(); }
@@ -143,7 +155,8 @@ const CostAccountingUi = (() => {
     }
     function dayDetail(date) {
       const row = state.report.items.find(row => row.date === date); if (!row) return;
-      drawer(`${date} · 消费与毛利`, table(['项目', 'CNY'], [['主站消费', money(row.siteConsumption)], ['供应商消费', money(row.supplierConsumption)], ['消费毛利', money(row.profit)], ['毛利率', pct(row.margin)]]) + `<h3>供应商账号消费</h3>${table(['供应商', 'CNY', '数据状态'], (row.providers || []).map(provider => [e(provider.name), money(provider.cost), e(provider.complete ? '数据完整' : (provider.reasons || ['自动重试']).join('；'))]))}<p class="muted">${row.mode === 'live' ? '今日实时' : '历史归档'} · ${e(row.computedAt ? h.formatDateTime(row.computedAt) : '等待同步')}</p>${state.report.notices?.length ? `<details><summary>来源状态</summary>${state.report.notices.map(text => `<p>${e(text)}</p>`).join('')}</details>` : ''}`);
+      const notices = [...new Set([...(row.notices || []), ...(row.lastAttempt?.errorCode ? row.lastAttempt.notices : [])])];
+      drawer(`${date} · 消费与毛利`, `<div data-open-day="${e(date)}">${table(['项目', 'CNY'], [['主站消费', money(row.siteConsumption)], ['供应商消费', money(row.supplierConsumption)], ['消费毛利', money(row.profit)], ['毛利率', pct(row.margin)]])}</div><h3>供应商账号消费</h3>${table(['供应商', 'CNY', '数据状态'], (row.providers || []).map(provider => [e(provider.name), money(provider.cost), e(provider.complete ? '数据完整' : (provider.reasons || ['自动重试']).join('；'))]))}<p class="muted">${row.mode === 'live' ? '今日实时' : '历史归档'} · ${e(row.computedAt ? h.formatDateTime(row.computedAt) : '等待同步')}</p>${row.complete && row.lastAttempt?.errorCode ? '<p class="muted">更新失败，保留最后一次完整归档，后台自动重试。</p>' : ''}${notices.length ? `<details><summary>来源状态</summary>${notices.map(text => `<p>${e(text)}</p>`).join('')}</details>` : ''}`);
     }
     async function balanceDetail(page = 1, search = '') {
       const request = ++state.dialogRequest, value = await h.api(`${base}/balances?${new URLSearchParams({ page, search, pageSize: 20 })}`);

@@ -128,23 +128,29 @@ test('the 01:00 finance-day job persists once, catches downtime and never archiv
   assert.equal(f.schedules[0].task.stopped, true);
 });
 
-test('refresh queues replacement without blocking, does not add amounts, and failure is retried after restart', async t => {
+test('refresh reads saved history, explicit recalculation replaces it and failed updates retain the complete snapshot', async t => {
   const f = fixture(t);
   const query = { start: '2026-10-30', end: '2026-10-30' };
   await f.service.getDailyProfit(query);
   await f.service.drain();
   f.cost(8);
-  const pending = await f.service.getDailyProfit({ ...query, refresh: '1' });
+  const refreshed = await f.service.getDailyProfit({ ...query, refresh: '1' });
+  assert.equal(refreshed.archive.pendingDays, 0);
+  assert.equal(refreshed.items[0].supplierConsumption, 2);
+  const pending = await f.service.getDailyProfit({ ...query, recalculate: '1' });
   assert.equal(f.calls.length, 1);
   assert.equal(pending.items[0].supplierConsumption, 2);
   assert.equal(pending.items[0].archiveStatus, 'pending');
   await f.service.drain();
   assert.equal((await f.service.getDailyProfit(query)).items[0].supplierConsumption, 8);
   f.fail();
-  await f.service.getDailyProfit({ ...query, refresh: '1' });
+  await f.service.getDailyProfit({ ...query, recalculate: '1' });
   await f.service.drain();
   const failed = await f.service.getDailyProfit(query);
-  assert.equal(failed.items[0].profit, null);
+  assert.equal(failed.items[0].supplierConsumption, 8);
+  assert.equal(failed.items[0].computedAt, pending.items[0].computedAt);
+  assert.equal(failed.items[0].complete, true);
+  assert.equal(failed.items[0].lastAttempt.errorCode, 'DAILY_PROFIT_FAILED');
   assert.equal(failed.items[0].archiveStatus, 'retrying');
   assert.doesNotMatch(JSON.stringify(failed), /private diagnostics/);
   const before = f.calls.length;
@@ -247,4 +253,133 @@ test('daily archive HTTP requires administrator auth and returns archived histor
   assert.equal(saved.items[0].mode, 'archived');
   assert.equal(saved.items[0].profit, 8.12500001);
   assert.equal(f.calls.length, 1);
+});
+
+test('archived results render independently of a stalled live read and today is never stored as history', async t => {
+  const f = fixture(t);
+  const query = { start: '2026-10-30', end: '2026-10-31' };
+  await f.service.getDailyProfit({ start: query.start, end: query.start });
+  await f.service.drain();
+  f.service.calculationTimeoutMs = 55;
+  const original = f.analysis.getDailyProfit;
+  f.analysis.getDailyProfit = async input => {
+    if (input.start === '2026-10-31') return new Promise(() => {});
+    return original(input);
+  };
+  const live = f.service.getDailyProfit(query);
+  const saved = await f.service.getDailyProfit({ ...query, live: '0', refresh: '1' });
+  assert.equal(saved.items.find(row => row.date === '2026-10-30').complete, true);
+  assert.equal(saved.items.find(row => row.date === '2026-10-31').status, 'live_pending');
+  assert.equal(saved.archive.pendingDays, 0);
+  const failed = await live;
+  assert.equal(failed.items[0].status, 'live_failed');
+  assert.equal(failed.completeSubtotal.profit, 8.12500001);
+  assert.equal(f.service.live.size, 0);
+  assert.equal(f.store.list(f.service.scope(), '2026-10-31', '2026-10-31').length, 0);
+  assert.equal(failed.items[1].notices.length, 0);
+  assert.equal(failed.items[0].notices.length, 1);
+  f.analysis.getDailyProfit = original;
+  assert.equal((await f.service.getDailyProfit(query)).summary.completeDays, 2);
+});
+
+test('old failed snapshots without jobs resume automatically and completed days never refresh upstream on page refresh', async t => {
+  const f = fixture(t);
+  const date = '2026-10-30', scope = f.service.scope();
+  await f.service.getDailyProfit({ start: date, end: date });
+  f.cost(null);
+  await f.service.drain();
+  f.store.db.prepare('DELETE FROM daily_profit_jobs WHERE scope=? AND date=?').run(scope, date);
+  const incomplete = await f.service.getDailyProfit({ start: date, end: date });
+  assert.equal(incomplete.archive.pendingDays, 1);
+  f.cost(2);
+  await f.service.drain();
+  const calls = f.calls.length;
+  const row = (await f.service.getDailyProfit({ start: date, end: date, refresh: '1' })).items[0];
+  await f.service.drain();
+  assert.equal(f.calls.length, calls);
+  assert.equal(row.complete, true);
+  assert.equal(row.lastAttempt.errorCode, null);
+});
+
+test('failed partial recalculations preserve full archived amounts, timestamps and isolated diagnostics after restart', async t => {
+  const f = fixture(t), date = '2026-10-30', query = { start: date, end: date };
+  await f.service.getDailyProfit(query);
+  await f.service.drain();
+  const original = (await f.service.getDailyProfit(query)).items[0];
+  f.time('2026-10-31T04:05:00Z');
+  await f.service.getDailyProfit({ ...query, recalculate: '1' });
+  f.cost(null);
+  await f.service.drain();
+  f.store.close(); f.store.initialize();
+  const saved = (await f.service.getDailyProfit(query)).items[0];
+  assert.equal(saved.complete, true);
+  assert.equal(saved.profit, original.profit);
+  assert.equal(saved.computedAt, original.computedAt);
+  assert.equal(saved.lastAttempt.at, '2026-10-31T04:05:00.000Z');
+  assert.equal(saved.lastAttempt.errorCode, 'DAILY_PROFIT_INCOMPLETE');
+  assert.equal(saved.archiveStatus, 'retrying');
+  assert.equal(saved.nextAttemptAt, '2026-10-31T04:06:00.000Z');
+});
+
+test('a timed-out archive job releases the worker and late results cannot overwrite a successful retry', async t => {
+  const f = fixture(t), scope = f.service.scope();
+  f.service.calculationTimeoutMs = 50;
+  let resume;
+  const pending = new Promise(resolve => { resume = resolve; });
+  const original = f.analysis.getDailyProfit;
+  f.analysis.getDailyProfit = async (input, options) => {
+    if (input.start === '2026-10-30') await pending;
+    return original(input, options);
+  };
+  await f.service.getDailyProfit({ start: '2026-10-29', end: '2026-10-30' });
+  await f.service.drain();
+  const rows = await f.service.getDailyProfit({ start: '2026-10-29', end: '2026-10-30' });
+  assert.equal(rows.items[0].lastAttempt.errorCode, 'DAILY_PROFIT_TIMEOUT');
+  assert.equal(rows.items[1].complete, true);
+  assert.equal(f.service.running, null);
+  f.time('2026-10-31T04:02:00Z');
+  f.analysis.getDailyProfit = original;
+  f.cost(4);
+  await f.service.drain();
+  const saved = f.store.list(scope, '2026-10-30', '2026-10-30');
+  resume();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.store.list(scope, '2026-10-30', '2026-10-30'), saved);
+  assert.equal(saved[0].row.supplierConsumption, 4);
+});
+
+test('stalled supplier session creation is bounded and a cached live poll expires after one minute', async t => {
+  const f = fixture(t);
+  f.service.calculationTimeoutMs = 45;
+  f.analysis.createSupplierDailyCostsReader = () => new Promise(() => {});
+  const query = { start: '2026-10-31', end: '2026-10-31' };
+  assert.equal((await f.service.getDailyProfit(query)).items[0].status, 'live_failed');
+  assert.equal(f.calls.length, 0);
+  f.analysis.createSupplierDailyCostsReader = async () => null;
+  assert.equal((await f.service.getDailyProfit(query)).items[0].complete, true);
+  const before = f.calls.length;
+  for (const seconds of [5, 15, 30, 45, 59]) {
+    f.time(`2026-10-31T04:00:${String(seconds).padStart(2, '0')}Z`);
+    await f.service.getDailyProfit({ ...query, poll: '1' });
+  }
+  assert.equal(f.calls.length, before);
+  f.time('2026-10-31T04:01:01Z');
+  await f.service.getDailyProfit({ ...query, poll: '1' });
+  assert.equal(f.calls.length, before + 1);
+});
+
+test('a data source change during calculation cannot archive a result under the previous scope', async t => {
+  const f = fixture(t), date = '2026-10-30', scope = f.service.scope();
+  await f.service.getDailyProfit({ start: date, end: date });
+  const original = f.analysis.getDailyProfit;
+  f.analysis.getDailyProfit = async (input, options) => {
+    const report = await original(input, options);
+    f.config.databaseUrl = 'postgres://readonly:synthetic@other.example:5432/sub2api';
+    return report;
+  };
+  await f.service.drain({ limit: 1 });
+  const row = f.store.list(scope, date, date)[0];
+  assert.equal(row.row.complete, false);
+  assert.equal(row.lastAttempt.errorCode, 'DAILY_PROFIT_FAILED');
+  assert.equal(f.store.list(f.service.scope(), date, date).length, 0);
 });

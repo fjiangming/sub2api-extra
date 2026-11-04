@@ -260,6 +260,95 @@ test('provider time budgets isolate slow suppliers without retries or exhausting
   assert.equal(f.calls.filter(({ url }) => url.hostname === 'supplier-0.example').length, 1);
 });
 
+test('a never-settling upstream read releases its slot, preserves other suppliers and recovers after cooldown', async t => {
+  const f = fixture(t);
+  f.config.globalConcurrency = 1;
+  f.service.providerTimeoutMs = 45;
+  f.service.reportTimeoutMs = 1000;
+  let wall = Date.now();
+  t.mock.method(Date, 'now', () => wall);
+  f.states[0].beforeResponse = () => new Promise(() => {});
+  const started = performance.now();
+  const report = await f.service.report(query);
+  assert(performance.now() - started < 700);
+  assert.equal(report.items[0].cost, null);
+  assert.match(report.items[0].providers[0].reasons.join(), /超时/);
+  assert.equal(report.items[0].providers[1].cost, 6);
+  assert.equal(f.service.active, 0);
+  assert.equal(f.service.waiters.length, 0);
+  assert.equal(f.service.inFlight.size, 0);
+  assert.equal(f.service.providerLocks.size, 0);
+  f.states[0].beforeResponse = null;
+  wall += 31000;
+  assert.equal((await f.service.report({ ...query, refresh: '1' })).items[0].cost, 12);
+});
+
+test('the report deadline covers a stuck provider lock and queued slots without blocking the next request', async t => {
+  const f = fixture(t);
+  f.service.reportTimeoutMs = 1000;
+  f.service.providerTimeoutMs = 300;
+  f.service.providerLocks.set(f.states[0].provider.id, new Promise(() => {}));
+  const report = await f.service.report(query);
+  assert.match(report.items[0].providers[0].reasons.join(), /超时/);
+  assert.equal(report.items[0].providers[1].cost, 6);
+  assert.equal(f.service.providerLocks.size, 0);
+  f.providers.updateCredentials(f.states[0].provider.id, { accessToken: 'recovered-access' });
+  assert.equal((await f.service.report(query)).items[0].cost, 12);
+
+  f.config.globalConcurrency = 1;
+  f.service.reportTimeoutMs = 50;
+  f.service.providerTimeoutMs = 500;
+  f.states[0].beforeResponse = () => new Promise(() => {});
+  const exhausted = await f.service.report({ ...query, refresh: true });
+  assert.ok(exhausted.items[0].providers.every(p => p.cost === null));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.service.active, 0);
+  assert.equal(f.service.waiters.length, 0);
+});
+
+test('late timed-out reads cannot replace a newer snapshot or save a rotated credential', async t => {
+  const f = fixture(t, [{ type: 'sub2api' }]), id = f.states[0].provider.id;
+  f.service.providerTimeoutMs = 300;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  f.states[0].beforeResponse = url => url.pathname.endsWith('/stats') ? gate : undefined;
+  assert.equal((await f.service.report(query)).items[0].cost, null);
+  f.providers.updateCredentials(id, { accessToken: 'new-session' });
+  f.states[0].beforeResponse = null;
+  f.states[0].amount = 30;
+  assert.equal((await f.service.report(query)).items[0].cost, 15);
+  const saved = f.db.prepare('SELECT * FROM provider_daily_cost_summaries').get();
+  release();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.db.prepare('SELECT * FROM provider_daily_cost_summaries').get(), saved);
+
+  f.providers.updateCredentials(id, { accessToken: 'expired', refreshToken: 'old-refresh', tokenExpiresAt: Date.now() - 1000 });
+  let releaseRefresh;
+  const refreshGate = new Promise(resolve => { releaseRefresh = resolve; });
+  f.states[0].beforeResponse = url => url.pathname.endsWith('/auth/refresh') ? refreshGate : undefined;
+  assert.equal((await f.service.report({ ...query, refresh: true })).items[0].cost, null);
+  f.providers.updateCredentials(id, { accessToken: 'replacement-session' });
+  releaseRefresh();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.providers.getCredentials(id).accessToken, 'replacement-session');
+  f.states[0].beforeResponse = null;
+  assert.equal((await f.service.report(query)).items[0].cost, 15);
+});
+
+test('waiting on shared credential coordination is bounded and expired work cannot start HTTP later', async t => {
+  const f = fixture(t, [{ type: 'sub2api' }]), id = f.states[0].provider.id;
+  f.service.providerTimeoutMs = 300;
+  let release;
+  f.providers.credentialRefreshes.set(id, new Promise(resolve => { release = resolve; }));
+  assert.equal((await f.service.report(query)).items[0].cost, null);
+  assert.equal(f.calls.length, 0);
+  release();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.calls.length, 0);
+  f.providers.updateCredentials(id, { accessToken: 'another-session' });
+  assert.equal((await f.service.report(query)).items[0].cost, 6);
+});
+
 test('token refresh persists safely and configuration changes during reads cannot save the wrong account snapshot', async (t) => {
   const f = fixture(t, [{ type: 'sub2api' }]);
   const id = f.states[0].provider.id;

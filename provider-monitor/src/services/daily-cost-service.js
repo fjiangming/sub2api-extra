@@ -2,6 +2,7 @@ const { createHmac } = require('crypto');
 const { AppError } = require('../errors');
 const { createAdapter } = require('../adapters/registry');
 const { GrossProfitService } = require('./gross-profit-service');
+const { RequestBudget } = require('../http/request-budget');
 
 const SOURCE = 'upstream_daily_summary';
 const FAILURE_MESSAGES = {
@@ -27,7 +28,8 @@ function failureMessage(error) {
 }
 
 class DailyCostService {
-  constructor({ db, config, providers, http, grossProfit, now = () => new Date() }) {
+  constructor({ db, config, providers, http, grossProfit, now = () => new Date(),
+    providerTimeoutMs = 5000, reportTimeoutMs = 8500 }) {
     this.db = db;
     this.config = config;
     this.providers = providers;
@@ -39,6 +41,8 @@ class DailyCostService {
     this.failures = new Map();
     this.active = 0;
     this.waiters = [];
+    this.providerTimeoutMs = providerTimeoutMs;
+    this.reportTimeoutMs = reportTimeoutMs;
   }
 
   #hash(value) {
@@ -54,25 +58,49 @@ class DailyCostService {
     return this.#hash([this.#scope(connection), this.providers.getCredentials(connection)]);
   }
 
-  async #limited(operation) {
+  #release() {
+    const next = this.waiters.shift();
+    if (next) { next.granted = true; next.resolve(); }
+    else this.active -= 1;
+  }
+
+  async #limited(operation, budget) {
     const limit = Math.max(1, Math.min(this.config.globalConcurrency || 5, 10));
-    if (this.active >= limit) await new Promise((resolve) => this.waiters.push(resolve));
-    else this.active += 1;
-    try { return await operation(); }
+    let ticket, acquired = false;
+    try {
+      budget.check();
+      if (this.active >= limit) {
+        await budget.wait(new Promise(resolve => { ticket = { resolve }; this.waiters.push(ticket); }));
+      } else this.active += 1;
+      acquired = true;
+      budget.check();
+      return await operation();
+    }
     finally {
-      const next = this.waiters.shift();
-      if (next) next();
-      else this.active -= 1;
+      if (acquired || ticket?.granted) this.#release();
+      else if (ticket) this.waiters.splice(this.waiters.indexOf(ticket), 1);
     }
   }
 
-  async #load(connection, period, timezone, deadline) {
+  async #load(connection, period, timezone, reportBudget) {
+    const queue = new RequestBudget(reportBudget.deadline - Date.now(), { signal: reportBudget.signal });
     const previous = this.providerLocks.get(connection.id) || Promise.resolve();
-    const operation = previous.catch(() => {}).then(() => this.#limited(async () => {
+    const operation = (async () => {
+      await queue.wait(previous.catch(() => {}));
+      return this.#limited(() => this.#read(connection, period, timezone, queue), queue);
+    })().finally(() => queue.dispose());
+    this.providerLocks.set(connection.id, operation);
+    try { return await operation; }
+    finally { if (this.providerLocks.get(connection.id) === operation) this.providerLocks.delete(connection.id); }
+  }
+
+  async #read(connection, period, timezone, queue) {
+    const budget = new RequestBudget(Math.min(queue.deadline - Date.now(), this.providerTimeoutMs), { signal: queue.signal });
+    try {
       const current = this.providers.get(connection.id, { forAdapter: true });
       const scopeKey = this.#hash(this.#scope(current));
-      const providerDeadline = Math.min(deadline, Date.now() + 5000);
       const verifyConfig = () => {
+        budget.check();
         const latest = this.providers.get(connection.id, { forAdapter: true });
         if (this.#hash(this.#scope(latest)) !== scopeKey) {
           throw new AppError('CONFIG_CHANGED', 'Provider changed during daily summary read', { status: 409 });
@@ -80,17 +108,19 @@ class DailyCostService {
         adapterContext.verifyCredentials();
         return latest;
       };
-      const http = { requestJson: (url, options = {}) => {
-        const remaining = providerDeadline - Date.now();
-        if (remaining <= 0) throw new AppError('TIMEOUT', 'Daily summary read budget exceeded', { status: 504 });
-        return this.http.requestJson(url, { ...options, retries: 0,
-          timeoutMs: Math.min(remaining, this.config.queryTimeoutMs || 15000) });
+      const http = { signal: budget.signal, requestJson: (url, options = {}) => {
+        budget.check();
+        return budget.run(() => this.http.requestJson(url, { ...options, retries: 0, signal: budget.signal,
+          timeoutMs: Math.max(1, Math.min(budget.deadline - Date.now(), this.config.queryTimeoutMs || 15000)) }));
       } };
       const adapterContext = this.providers.adapterContext(current, http);
+      const refresh = adapterContext.withCredentialsRefresh;
+      const saveCredentials = adapterContext.onCredentialsUpdated;
+      adapterContext.withCredentialsRefresh = operation => refresh(() => budget.run(operation));
+      adapterContext.onCredentialsUpdated = updated => { budget.check(); return saveCredentials(updated); };
       const adapter = createAdapter(current.adapter_type, adapterContext);
-      const summary = await adapter.getDailyUsageSummary({ date: period.periodKey,
-        fromAt: period.from, toAt: period.to, timezone });
-      if (Date.now() > providerDeadline) throw new AppError('TIMEOUT', 'Daily summary read budget exceeded', { status: 504 });
+      const summary = await budget.run(() => adapter.getDailyUsageSummary({ date: period.periodKey,
+        fromAt: period.from, toAt: period.to, timezone }));
       const latest = verifyConfig();
       if (summary.scope !== 'account' || typeof summary.amount !== 'number' ||
           !Number.isFinite(summary.amount) || summary.amount < 0 || !summary.subjectId ||
@@ -110,13 +140,11 @@ class DailyCostService {
         config_key=excluded.config_key, account_key=excluded.account_key, amount=excluded.amount,
         currency=excluded.currency, requests=excluded.requests, fetched_at=excluded.fetched_at`).run(row);
       return { ...row, cached: false };
-    }));
-    this.providerLocks.set(connection.id, operation);
-    try { return await operation; }
-    finally { if (this.providerLocks.get(connection.id) === operation) this.providerLocks.delete(connection.id); }
+    } finally { budget.dispose(); }
   }
 
-  async #snapshot(connection, period, timezone, deadline, refresh) {
+  async #snapshot(connection, period, timezone, budget, refresh) {
+    budget.check();
     const configKey = this.#configKey(connection);
     const cached = this.db.prepare(`SELECT * FROM provider_daily_cost_summaries
       WHERE connection_id=? AND usage_date=? AND timezone=?`).get(connection.id, period.periodKey, timezone);
@@ -129,7 +157,7 @@ class DailyCostService {
     if (failure?.configKey === configKey && failure.until > Date.now()) throw failure.error;
     const key = JSON.stringify([connection.id, period.periodKey, timezone, configKey]);
     if (!this.inFlight.has(key)) {
-      const operation = this.#load(connection, period, timezone, deadline).catch((error) => {
+      const operation = this.#load(connection, period, timezone, budget).catch((error) => {
         this.db.prepare(`UPDATE provider_daily_cost_summaries SET config_key=''
           WHERE connection_id=? AND usage_date=? AND timezone=? AND config_key=?`)
           .run(connection.id, period.periodKey, timezone, configKey);
@@ -140,7 +168,7 @@ class DailyCostService {
       }).finally(() => this.inFlight.delete(key));
       this.inFlight.set(key, operation);
     }
-    return this.inFlight.get(key);
+    return budget.wait(this.inFlight.get(key));
   }
 
   #cashCost(connection, snapshot, period, settings) {
@@ -171,47 +199,49 @@ class DailyCostService {
   async report(input = {}) {
     const { query, settings, periods } = this.grossProfit.dailyCostOptions(input);
     const generatedAt = this.now().toISOString();
-    const deadline = Date.now() + 8500;
+    const budget = new RequestBudget(this.reportTimeoutMs);
     const refresh = input.refresh === '1' || input.refresh === true;
     const connections = this.db.prepare(`SELECT id, name FROM provider_connections
       WHERE enabled=1 ORDER BY name, id`).all();
     const items = [];
-    for (const period of periods) {
-      const suppliers = await Promise.all(connections.map(async ({ id, name }) => {
-        const base = { id, name, scope: 'account', source: SOURCE, cost: null, recordedCost: null,
-          requests: null, complete: false, reasons: [], lastSyncedAt: null };
-        try {
-          if (Date.parse(period.from) >= Date.parse(generatedAt)) return { ...base, reasons: ['该资金日尚未发生'] };
-          const connection = this.providers.get(id, { forAdapter: true });
-          const snapshot = await this.#snapshot(connection, period, query.timezone, deadline, refresh);
-          const valuation = this.#cashCost(connection, snapshot, period, settings);
-          return { ...base, ...valuation, recordedCost: valuation.cost, complete: valuation.cost != null,
-            requests: snapshot.requests, lastSyncedAt: snapshot.fetched_at, cached: snapshot.cached,
-            upstreamCost: snapshot.amount, upstreamCurrency: snapshot.currency, accountKey: snapshot.account_key };
-        } catch (error) { return { ...base, reasons: [failureMessage(error)] }; }
-      }));
-      const accounts = new Map();
-      for (const supplier of suppliers) {
-        const previous = accounts.get(supplier.accountKey);
-        if (supplier.accountKey && previous) {
-          for (const duplicate of [previous, supplier]) {
-            duplicate.cost = null;
-            duplicate.complete = false;
-            duplicate.reasons = ['同一上游账号重复配置，请合并供应商后刷新'];
-          }
-        } else if (supplier.accountKey) accounts.set(supplier.accountKey, supplier);
+    try {
+      for (const period of periods) {
+        const suppliers = await Promise.all(connections.map(async ({ id, name }) => {
+          const base = { id, name, scope: 'account', source: SOURCE, cost: null, recordedCost: null,
+            requests: null, complete: false, reasons: [], lastSyncedAt: null };
+          try {
+            if (Date.parse(period.from) >= Date.parse(generatedAt)) return { ...base, reasons: ['该资金日尚未发生'] };
+            const connection = this.providers.get(id, { forAdapter: true });
+            const snapshot = await this.#snapshot(connection, period, query.timezone, budget, refresh);
+            const valuation = this.#cashCost(connection, snapshot, period, settings);
+            return { ...base, ...valuation, recordedCost: valuation.cost, complete: valuation.cost != null,
+              requests: snapshot.requests, lastSyncedAt: snapshot.fetched_at, cached: snapshot.cached,
+              upstreamCost: snapshot.amount, upstreamCurrency: snapshot.currency, accountKey: snapshot.account_key };
+          } catch (error) { return { ...base, reasons: [failureMessage(error)] }; }
+        }));
+        const accounts = new Map();
+        for (const supplier of suppliers) {
+          const previous = accounts.get(supplier.accountKey);
+          if (supplier.accountKey && previous) {
+            for (const duplicate of [previous, supplier]) {
+              duplicate.cost = null;
+              duplicate.complete = false;
+              duplicate.reasons = ['同一上游账号重复配置，请合并供应商后刷新'];
+            }
+          } else if (supplier.accountKey) accounts.set(supplier.accountKey, supplier);
+        }
+        for (const supplier of suppliers) delete supplier.accountKey;
+        const complete = suppliers.length > 0 && suppliers.every((supplier) => supplier.complete);
+        items.push({ date: period.periodKey, complete,
+          cost: complete ? round(suppliers.reduce((sum, supplier) => sum + supplier.cost, 0)) : null,
+          requests: suppliers.length && suppliers.every((supplier) => supplier.requests != null)
+            ? suppliers.reduce((sum, supplier) => sum + supplier.requests, 0) : null,
+          providers: suppliers });
       }
-      for (const supplier of suppliers) delete supplier.accountKey;
-      const complete = suppliers.length > 0 && suppliers.every((supplier) => supplier.complete);
-      items.push({ date: period.periodKey, complete,
-        cost: complete ? round(suppliers.reduce((sum, supplier) => sum + supplier.cost, 0)) : null,
-        requests: suppliers.length && suppliers.every((supplier) => supplier.requests != null)
-          ? suppliers.reduce((sum, supplier) => sum + supplier.requests, 0) : null,
-        providers: suppliers });
-    }
-    return { range: { start: query.from, end: query.to }, timezone: query.timezone,
-      currency: settings.currency, source: SOURCE, scope: 'account',
-      providerFilter: 'scheduled_enabled', items, generatedAt };
+      return { range: { start: query.from, end: query.to }, timezone: query.timezone,
+        currency: settings.currency, source: SOURCE, scope: 'account',
+        providerFilter: 'scheduled_enabled', items, generatedAt };
+    } finally { budget.dispose(); }
   }
 
   balanceReport() {

@@ -11,6 +11,29 @@ function response(status, payload) {
   });
 }
 
+test('monitor timeouts cover hanging fetches, response bodies and caller cancellation without trapping later reads', async () => {
+  let mode = 'headers';
+  const signals = [];
+  const client = new ProviderMonitorClient({ providerMonitorBaseUrl: 'http://monitor.example',
+    providerMonitorIntegrationToken: 'synthetic', providerMonitorRequestTimeoutMs: 45 }, async (_, options) => {
+    signals.push(options.signal);
+    if (mode === 'headers') return new Promise(() => {});
+    if (mode === 'body') return { ok: true, text: () => new Promise(() => {}) };
+    return response(200, { source: 'upstream_daily_summary', items: [] });
+  });
+  const read = await client.createDailyCostsReader();
+  await assert.rejects(read({ from: '2026-10-30' }), { code: 'PROVIDER_MONITOR_TIMEOUT' });
+  assert.equal(signals[0].aborted, true);
+  mode = 'body';
+  await assert.rejects(read({ from: '2026-10-30' }), { code: 'PROVIDER_MONITOR_TIMEOUT' });
+  const abort = new AbortController();
+  const pending = read({}, { signal: abort.signal });
+  abort.abort();
+  await assert.rejects(pending, { code: 'PROVIDER_MONITOR_TIMEOUT' });
+  mode = 'healthy';
+  assert.equal((await read({ from: '2026-10-30' })).source, 'upstream_daily_summary');
+});
+
 test('provider monitor integration token reads and normalizes the safe provider list', async () => {
   const requests = [];
   const client = new ProviderMonitorClient({

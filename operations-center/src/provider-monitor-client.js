@@ -72,19 +72,21 @@ class ProviderMonitorClient {
     return this.#request('/api/financial-balances', { headers: { authorization: `Session ${session.sessionToken}` } });
   }
 
-  async createDailyCostsReader(accessToken = null) {
+  async createDailyCostsReader(accessToken = null, { signal } = {}) {
     if (!this.baseUrl) throw new AppError('PROVIDER_MONITOR_NOT_CONFIGURED', '未配置供应商监控服务地址', { status: 503 });
     if (this.integrationToken) {
-      return (query) => this.#request(`/api/integrations/daily-costs?${new URLSearchParams(query)}`, {
+      return (query, options = {}) => this.#request(`/api/integrations/daily-costs?${new URLSearchParams(query)}`, {
+        signal: options.signal,
         headers: { authorization: `Bearer ${this.integrationToken}` }
       });
     }
     if (!accessToken) throw new AppError('PROVIDER_MONITOR_AUTH_NOT_CONFIGURED', '供应商消费需要管理员 SSO 或服务间 Token', { status: 409 });
     const session = await this.#request('/api/auth/sso', {
-      method: 'POST', headers: { authorization: `Bearer ${accessToken}` }, body: '{}'
+      method: 'POST', headers: { authorization: `Bearer ${accessToken}` }, body: '{}', signal
     });
     if (!session?.sessionToken) throw new AppError('PROVIDER_MONITOR_INVALID_RESPONSE', '供应商监控未返回有效会话', { status: 502 });
-    return (query) => this.#request(`/api/daily-costs?${new URLSearchParams(query)}`, {
+    return (query, options = {}) => this.#request(`/api/daily-costs?${new URLSearchParams(query)}`, {
+      signal: options.signal,
       headers: { authorization: `Session ${session.sessionToken}` }
     });
   }
@@ -136,34 +138,46 @@ class ProviderMonitorClient {
 
   async #request(endpoint, options = {}) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    let rejectDeadline;
+    const deadline = new Promise((_, reject) => { rejectDeadline = reject; });
+    const abort = () => {
+      controller.abort();
+      rejectDeadline(new AppError('PROVIDER_MONITOR_TIMEOUT', '供应商监控请求超时', { status: 504 }));
+    };
+    const timeout = setTimeout(abort, this.timeoutMs);
+    options.signal?.addEventListener('abort', abort, { once: true });
     try {
-      const response = await this.fetch(`${this.baseUrl}${endpoint}`, {
-        ...options,
-        headers: {
-          accept: 'application/json',
-          'content-type': 'application/json',
-          ...(options.headers || {})
-        },
-        signal: controller.signal
-      });
-      const text = await response.text();
-      let payload = {};
-      try { payload = text ? JSON.parse(text) : {}; } catch { payload = {}; }
-      if (!response.ok) {
-        throw new AppError(
-          'PROVIDER_MONITOR_REQUEST_FAILED',
-          payload?.error?.message || payload?.message || `供应商监控返回 ${response.status}`,
-          {
-            status: response.status === 401 || response.status === 403 ? 409 : 502,
-            details: {
-              upstreamStatus: response.status,
-              upstreamCode: payload?.error?.code || payload?.code || null
+      if (options.signal?.aborted) abort();
+      const request = (async () => {
+        if (controller.signal.aborted) throw new AppError('PROVIDER_MONITOR_TIMEOUT', '供应商监控请求超时', { status: 504 });
+        const response = await this.fetch(`${this.baseUrl}${endpoint}`, {
+          ...options,
+          headers: {
+            accept: 'application/json',
+            'content-type': 'application/json',
+            ...(options.headers || {})
+          },
+          signal: controller.signal
+        });
+        const text = await response.text();
+        let payload = {};
+        try { payload = text ? JSON.parse(text) : {}; } catch { payload = {}; }
+        if (!response.ok) {
+          throw new AppError(
+            'PROVIDER_MONITOR_REQUEST_FAILED',
+            payload?.error?.message || payload?.message || `供应商监控返回 ${response.status}`,
+            {
+              status: response.status === 401 || response.status === 403 ? 409 : 502,
+              details: {
+                upstreamStatus: response.status,
+                upstreamCode: payload?.error?.code || payload?.code || null
+              }
             }
-          }
-        );
-      }
-      return payload;
+          );
+        }
+        return payload;
+      })();
+      return await Promise.race([request, deadline]);
     } catch (error) {
       if (error instanceof AppError) throw error;
       if (error.name === 'AbortError') {
@@ -172,6 +186,7 @@ class ProviderMonitorClient {
       throw new AppError('PROVIDER_MONITOR_UNAVAILABLE', '无法连接供应商监控服务', { status: 503 });
     } finally {
       clearTimeout(timeout);
+      options.signal?.removeEventListener('abort', abort);
     }
   }
 }

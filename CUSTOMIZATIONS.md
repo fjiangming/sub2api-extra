@@ -16,6 +16,30 @@ Extra 新增 `infinite-canvas/docs/nginx-subpath.conf.example`：仅在既有 ai
 
 最终验收：生产运行 `e36a126ee44c513ab1866d0d2f51fd78a3d42e9c` 且 healthy；Agent 引导片段清理保留挂载前缀，同域 GET `/v1/models` 和 POST `/v1/responses` 均能读取 JSON 401，没有 CORS 错误或收费模型调用。主站 6 项根 assets 正常，原 14 个其他容器 ID、既有 Compose / env 与其他站点配置不变，根目录 `docker compose pull` 仍包含画布。最终片段经 `nginx -t` 和平滑重载，公网返回 200、正确 HTML base 及受信 frame-ancestors。片段示例与模块 README 同步至生产模块目录，源码配置与本节台账一并提交至 Extra main，保留独立备份和验收材料。
 
+## 2026-11-04：成本分析历史读库、今日实时与端到端超时修复
+
+用户在生产只读排查后要求按“历史存库、今日实时”改造并修复超时。本轮在既有运营中心及供应商监控实现；不重建数据卷，不修改主站余额或计费记录，不连接生产执行补算、不提交 / 推送或部署。本地保留生产诊断证据、原有独立维护记录及其他无关文件。
+
+| 文件 | 改动与保留要求 |
+| --- | --- |
+| `operations-center/src/daily-profit-store.js` | 在原 daily-profit.sqlite 非破坏性增加 daily_profit_attempts；完整快照与最近尝试独立保存。失败 / 不完整重算保留最后完整金额及 computedAt，事务性保存失败状态和退避排期；成功后按原作用域 / 日期唯一替换，租约和 generation 防重保留。旧库无需手工迁移。 |
+| `operations-center/src/services/daily-profit-service.js` | 普通查询 / 刷新只读完整历史，缺失及旧失败快照自动入队，01:00 归档和漏跑补排保留；维护重算使用显式 recalculate=1，旧 accounting 刷新兼容。live=0 只读历史和今日内存快照，正常请求合并今日实时计算；短轮询缓存最多 60 秒，不因轮询延长。单日期限覆盖读取器创建和计算，超时取消、让出工作器并退避；迟到结果及数据源变更不可写入旧归档。按日返回 notices / lastAttempt / archiveStatus / nextAttemptAt。 |
+| `operations-center/src/provider-monitor-client.js`、`src/services/cost-analysis-service.js` | 监控请求的 headers / body 共用强制期限，兼容不响应 abort 的底层请求；每日读取器、SSO 创建和日查询传递取消信号。保留既有认证和错误脱敏，供应商失败原因按日期归属，不把今日故障混入历史详情。 |
+| `operations-center/public/cost-accounting-ui.js`、`public/index.html` | 先读取 live=0 展示历史，再独立更新今天，页头天数与当前展示同步；旧响应 / 离页隔离，历史补算仍按原节奏轮询、今日每分钟刷新。打开中的单日详情跟随实时结果更新，仅展示该日来源和最近尝试，保留完整归档时说明最近更新失败。更新静态资源版本，原现金收支逻辑保持。 |
+| `provider-monitor/src/http/request-budget.js`（新增）、`src/http/client.js` | 可取消的统一请求期限，覆盖 DNS、所有重试与退避、重定向、响应体及 SSE 回调；不等待 dispatcher.close，按请求销毁连接并异步收尾。忽略 abort 的调用也会按时返回，晚到操作不继续发请求或回调。共享报告信号支持多供应商，所有监听器和计时器正常移除。 |
+| `provider-monitor/src/services/daily-cost-service.js` | 整份日汇总 8.5 秒、单供应商执行 5 秒的强制预算；供应商串行锁、凭据协调、并发排队同受整体期限限制。可取消排队票据，超时释放逻辑占用，不让单家永久堵住后续请求；保存缓存 / 凭据前检查期限和配置，保留单飞、认证冷却、启用筛选、账号日汇总及折算契约。 |
+| `operations-center/tests/daily-profit.test.js`、`tests/provider-monitor-client.test.js` | 历史与挂起的今日读取隔离、旧失败自动续算、刷新不重算、保留完整快照及重启后诊断、超时让出 worker、迟到响应隔离、会话创建期限、持续短轮询过期、数据源切换和监控 headers / body / 主动取消恢复。 |
+| `provider-monitor/tests/daily-cost.test.js`、`tests/http-timeouts.test.js`（新增） | 永不返回的上游、卡住的供应商锁 / 凭据协调、队列耗尽 / 释放、单家隔离、冷却后恢复、超时后的旧结果 / 轮换凭据不可覆盖；真实 HTTP 测试覆盖不返回 headers、半段 body、重定向到挂起端点、30 秒 Retry-After 和下一次正常请求，另覆盖 DNS 及无界清理。 |
+| `operations-center/scripts/accounting-browser-check.cjs` | 四视口实际页面流程；拦截今日实时请求但放行历史读库，证明历史列表 / 详情可用、今日失败不污染归档和日级提示、普通刷新不发历史上游请求。调整实时结果等待条件，避开动态日期与固定 09-30 示例账碰撞，失败时保存截图和状态。保留现金 CRUD、用户分页、累计过滤、图表像素及布局检查。 |
+| `operations-center/README.md`、`docs/cost-accounting.md`、`docs/cost-analysis.md`、`docs/cost-analysis-automatic-plan.md`、`docs/metrics.md`、`provider-monitor/README.md` | 同步现行归档 / 实时 / 刷新口径、自动恢复、最后完整结果保留、端到端期限、维护参数和升级说明；这次需要两个服务配套更新，无新增必填配置或依赖。 |
+| `CUSTOMIZATIONS.md` | 登记本轮改造、实际验证及未部署边界；其他已有记录保留。 |
+
+验证：完整运营中心 370 项、供应商监控 337 项测试通过；持续轮询缓存的最后修复另跑相关日报 / 消费 / 监控客户端 42 项全部通过，页头状态同步后另跑前端 / 布局 20 项通过。npm run check、供应商新增及修改 JS 语法检查、diff --check 通过。Playwright 1440px、390px、320px、系统深色四组流程通过，无未捕获页面异常或整页横向溢出；已复核桌面、手机及“今日失败但历史正常”截图，使用真实本地 SQLite、PGlite 和模拟上游，不代表生产金额。材料位于本机临时 sub2api-profit-timeout-qa。浏览器检查的前两次发现并修正测试中的 09-30 日期碰撞及子页可见性 / 拦截清理等待，未因此修改现金业务逻辑。
+
+隔离预览为 http://127.0.0.1:19888/preview，使用临时数据目录和模拟来源；原有其他预览保留。尚未部署或补写生产历史，升级须保留原完整卷并同时更新运营中心和供应商监控；旧失败日期将按持久队列自动重试，来源已被清理的历史不能凭空恢复。没有运行 Docker / Linux CI 或宣称线上超时已恢复。
+
+用户随后明确要求提交 GitHub。本次仅提交并推送上述历史 / 实时统计、超时修复、测试、配套文档及本节维护记录；先快进同步远端画布子目录提交，合并维护台账时保留双方内容。沿用此前已通过的完整测试与四视口浏览器验收，提交前核对暂存内容和 diff --check。独立生产诊断台账、订阅手册及其他无关文件继续保留本地。沿用现有 Actions 测试和 GHCR 镜像发布流程，构建 / 发布状态以本次 SHA 为准，不部署服务器或改写生产历史。
+
 ## 2026-11-02：Infinite Canvas 独立镜像与子服务部署
 
 用户明确授权为自己的 `fjiangming/infinite-canvas` fork 创建镜像，并在现有服务器 Extra 目录部署、配置 `canvas.fo2.us.ci` 独立域名，纳入根目录统一拉取更新。本轮使用独立工作树维护配置，不提交或覆盖原工作区的错误分析、现金统计、生产维护等无关改动。

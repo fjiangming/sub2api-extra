@@ -475,11 +475,11 @@ class CostAnalysisService {
     };
   }
 
-  async getDailyProfit(input = {}, { accessToken = null, supplierReader = null } = {}) {
+  async getDailyProfit(input = {}, { accessToken = null, supplierReader = null, signal = null } = {}) {
     const { range, currency, granularity } = parseReportInput(input, this.config);
     const [site, supplier] = await Promise.all([
       this.#dailyBalanceConsumption(range, currency),
-      currency === 'CNY' ? this.#supplierDailyCosts(range, currency, accessToken, input.refresh === '1' || input.refresh === true, supplierReader) :
+      currency === 'CNY' ? this.#supplierDailyCosts(range, currency, accessToken, input.refresh === '1' || input.refresh === true, supplierReader, signal) :
         { items: [], notice: '主站消费没有币种字段，每日真实收入仅适用于 CNY。' }
     ]);
     const siteByDate = new Map(site.rows.map((row) => [row.date, row]));
@@ -503,6 +503,8 @@ class CostAnalysisService {
         supplierRequests: upstream?.requests ?? null,
         siteComplete, supplierComplete, complete: siteComplete && supplierComplete,
         providers: upstream?.providers || [],
+        notices: [...(site.notice ? ['主站消费无法核验，请检查用量表、明细覆盖和所选币种。'] : []),
+          ...(supplier.failures || []).filter(failure => failure.date === date || !failure.date).map(failure => failure.notice)],
         status: currency !== 'CNY' ? 'unsupported_currency' :
           !siteComplete ? 'site_incomplete' : !supplierComplete ? 'supplier_incomplete' : 'complete'
       });
@@ -513,23 +515,25 @@ class CostAnalysisService {
       ]);
   }
 
-  async createSupplierDailyCostsReader(accessToken = null) {
+  async createSupplierDailyCostsReader(accessToken = null, { signal } = {}) {
     if (!this.providerMonitor?.configured()) throw new AppError('PROVIDER_MONITOR_NOT_CONFIGURED', 'not configured');
     let token = accessToken;
     if (!this.providerMonitor.integrationToken && !token && this.sub2api?.configured()) token = await this.sub2api.login();
-    return this.providerMonitor.createDailyCostsReader(token);
+    signal?.throwIfAborted();
+    return this.providerMonitor.createDailyCostsReader(token, { signal });
   }
 
-  async #supplierDailyCosts(range, currency, accessToken, refresh = false, supplierReader = null) {
+  async #supplierDailyCosts(range, currency, accessToken, refresh = false, supplierReader = null, signal = null) {
     const items = [];
     const failures = [];
     try {
-      const read = supplierReader || await this.createSupplierDailyCostsReader(accessToken);
+      const read = supplierReader || await this.createSupplierDailyCostsReader(accessToken, { signal });
       let consecutiveFailures = 0;
       for (let date = range.start; date <= range.end; date = addUtcDays(date, 1)) {
         try {
+          signal?.throwIfAborted();
           const report = await read({ from: date, to: date, currency, timezone: this.config.financeTimezone,
-            ...(refresh ? { refresh: '1' } : {}) });
+            ...(refresh ? { refresh: '1' } : {}) }, { signal });
           if (report?.source !== 'upstream_daily_summary' || report.scope !== 'account' ||
               report.providerFilter !== 'scheduled_enabled' || report.timezone !== this.config.financeTimezone ||
               report.currency !== currency || report.range?.start !== date || report.range?.end !== date ||
@@ -561,10 +565,10 @@ class CostAnalysisService {
           }
         }
       }
-      return { items, notice: failures.length ? `${failures.filter((failure) => failure.date)
+      return { items, failures, notice: failures.length ? `${failures.filter((failure) => failure.date)
         .map((failure) => failure.date).join('、')} 获取失败。${[...new Set(failures.map((failure) => failure.notice))].join(' ')}` : null };
     } catch (error) {
-      return { items, notice: supplierCostFailure(error, currency) };
+      return { items, failures: [{ notice: supplierCostFailure(error, currency) }], notice: supplierCostFailure(error, currency) };
     }
   }
 

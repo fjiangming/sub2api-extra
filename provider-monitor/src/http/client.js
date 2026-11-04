@@ -1,6 +1,8 @@
 const { AppError } = require('../errors');
 const { resolveSafeUrl } = require('../security/ssrf-guard');
 const { createPinnedDispatcher } = require('./pinned-dispatcher');
+const { RequestBudget } = require('./request-budget');
+const { setTimeout: delay } = require('node:timers/promises');
 
 const SAFE_CUSTOM_HEADERS = new Set([
   'accept',
@@ -17,10 +19,6 @@ const SAFE_CUSTOM_HEADERS = new Set([
   'rix-api-user',
   'neo-api-user'
 ]);
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function parseRetryAfter(value) {
   if (!value) return null;
@@ -192,43 +190,47 @@ function classifyHttpError(status, body, headers) {
 }
 
 class HttpClient {
-  constructor(config) {
+  constructor(config, { resolve = resolveSafeUrl, dispatcher = createPinnedDispatcher, fetchImpl = globalThis.fetch } = {}) {
     this.config = config;
+    this.resolve = resolve;
+    this.dispatcher = dispatcher;
+    this.fetch = fetchImpl;
   }
 
   async requestJson(input, options = {}) {
     const retries = Number.isFinite(options.retries) ? options.retries : 2;
     let attempt = 0;
     let lastError;
-
-    while (attempt <= retries) {
-      try {
-        return await this.#requestOnce(input, options);
-      } catch (error) {
-        lastError = error;
-        if (!error.retryable || attempt >= retries) throw error;
-        const retryAfterMs = Math.min(
-          error.details?.retryAfterMs ?? 250 * 2 ** attempt,
-          30000
-        );
-        const jitter = Math.floor(Math.random() * 200);
-        await sleep(retryAfterMs + jitter);
-        attempt += 1;
+    const budget = new RequestBudget(options.timeoutMs || this.config.queryTimeoutMs, { signal: options.signal });
+    try {
+      while (attempt <= retries) {
+        try {
+          return await this.#requestOnce(input, options, budget);
+        } catch (error) {
+          budget.check();
+          lastError = error;
+          if (!error.retryable || attempt >= retries) throw error;
+          const retryAfterMs = Math.min(
+            error.details?.retryAfterMs ?? 250 * 2 ** attempt,
+            30000
+          );
+          const jitter = Math.floor(Math.random() * 200);
+          await budget.run(() => delay(retryAfterMs + jitter, undefined, { signal: budget.signal }));
+          attempt += 1;
+        }
       }
-    }
-    throw lastError;
+      throw lastError;
+    } finally { budget.dispose(); }
   }
 
   async requestSse(input, options = {}) {
-    const resolution = await resolveSafeUrl(input, this.config);
-    const dispatcher = createPinnedDispatcher(resolution);
-    const controller = new AbortController();
-    const timeout = setTimeout(
-      () => controller.abort(),
-      options.timeoutMs || this.config.queryTimeoutMs
-    );
+    const budget = new RequestBudget(options.timeoutMs || this.config.queryTimeoutMs, { signal: options.signal });
+    let dispatcher;
     try {
-      const response = await fetch(resolution.url, {
+      const resolution = await budget.run(() => this.resolve(input, this.config));
+      budget.check();
+      dispatcher = this.dispatcher(resolution);
+      const response = await budget.run(() => this.fetch(resolution.url, {
         method: options.method || 'GET',
         headers: sanitizeHeaders(options.headers),
         body: options.body == null
@@ -237,31 +239,31 @@ class HttpClient {
             ? options.body
             : JSON.stringify(options.body),
         redirect: 'manual',
-        signal: controller.signal,
+        signal: budget.signal,
         dispatcher
-      });
+      }));
       if ([301, 302, 303, 307, 308].includes(response.status)) {
-        await response.body?.cancel();
+        await budget.run(() => response.body?.cancel());
         throw new AppError('REDIRECT_NOT_ALLOWED', 'Provider streaming endpoint returned a redirect', {
           status: 502,
           details: { remoteStatus: response.status }
         });
       }
       if (!response.ok) {
-        const rawText = await readLimitedBody(
+        const rawText = await budget.run(() => readLimitedBody(
           response,
           Math.min(options.maxResponseBytes || this.config.maxResponseBytes, 1024 * 1024)
-        );
+        ));
         let body = null;
         try {
           body = rawText ? JSON.parse(rawText) : null;
         } catch {}
         throw classifyHttpError(response.status, body, response.headers);
       }
-      const stream = await readSseBody(response, {
+      const stream = await budget.run(() => readSseBody(response, {
         maxResponseBytes: options.maxResponseBytes || this.config.maxResponseBytes,
-        onEvent: options.onEvent
-      });
+        onEvent: event => budget.run(() => options.onEvent?.(event))
+      }));
       return {
         status: response.status,
         headers: response.headers,
@@ -270,7 +272,7 @@ class HttpClient {
       };
     } catch (error) {
       if (error instanceof AppError) throw error;
-      if (error?.name === 'AbortError' || controller.signal.aborted) {
+      if (error?.name === 'AbortError' || budget.signal.aborted) {
         throw new AppError('TIMEOUT', 'Provider streaming request timed out', {
           status: 504,
           retryable: true,
@@ -283,26 +285,24 @@ class HttpClient {
         cause: error
       });
     } finally {
-      clearTimeout(timeout);
-      await dispatcher.close();
+      budget.dispose();
+      // Each request owns its agent; socket cleanup must never hold a read lock.
+      dispatcher?.destroy().catch(() => {});
     }
   }
 
-  async #requestOnce(input, options) {
+  async #requestOnce(input, options, budget) {
     let currentUrl = input;
     const maxRedirects = options.maxRedirects ?? 3;
     let redirects = 0;
 
     while (true) {
-      const resolution = await resolveSafeUrl(currentUrl, this.config);
-      const dispatcher = createPinnedDispatcher(resolution);
-      const controller = new AbortController();
-      const timeout = setTimeout(
-        () => controller.abort(),
-        options.timeoutMs || this.config.queryTimeoutMs
-      );
+      let dispatcher;
       try {
-        const response = await fetch(resolution.url, {
+        const resolution = await budget.run(() => this.resolve(currentUrl, this.config));
+        budget.check();
+        dispatcher = this.dispatcher(resolution);
+        const response = await budget.run(() => this.fetch(resolution.url, {
           method: options.method || 'GET',
           headers: sanitizeHeaders(options.headers),
           body:
@@ -312,12 +312,12 @@ class HttpClient {
                 ? options.body
                 : JSON.stringify(options.body),
           redirect: 'manual',
-          signal: controller.signal,
+          signal: budget.signal,
           dispatcher
-        });
+        }));
 
         if ([301, 302, 303, 307, 308].includes(response.status)) {
-          await response.body?.cancel();
+          await budget.run(() => response.body?.cancel());
           if (redirects >= maxRedirects) {
             throw new AppError('TOO_MANY_REDIRECTS', 'Provider returned too many redirects', {
               status: 502
@@ -334,10 +334,10 @@ class HttpClient {
           continue;
         }
 
-        const rawText = await readLimitedBody(
+        const rawText = await budget.run(() => readLimitedBody(
           response,
           options.maxResponseBytes || this.config.maxResponseBytes
-        );
+        ));
         let body = null;
         if (rawText) {
           try {
@@ -364,7 +364,7 @@ class HttpClient {
         };
       } catch (error) {
         if (error instanceof AppError) throw error;
-        if (error.name === 'AbortError' || controller.signal.aborted) {
+        if (error.name === 'AbortError' || budget.signal.aborted) {
           throw new AppError('TIMEOUT', 'Provider request timed out', {
             status: 504,
             retryable: true,
@@ -377,8 +377,7 @@ class HttpClient {
           cause: error
         });
       } finally {
-        clearTimeout(timeout);
-        await dispatcher.close();
+        dispatcher?.destroy().catch(() => {});
       }
     }
   }
