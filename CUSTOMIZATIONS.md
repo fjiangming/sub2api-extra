@@ -1,5 +1,25 @@
 # 个性化功能维护台账
 
+## 2026-11-06：充值中心管理员大额充值 Bark 提醒
+
+用户要求在只有管理员可见的到账审核页面配置单笔大额充值提醒，固定使用 iOS Bark，参考供应商监控通知实现。本轮仅修改充值中心；实现和凭据独立，不调用或修改供应商监控、运营中心及其通知通道，不改变对账规则、主站余额或兑换记录契约。部署仍未执行；本次 GitHub 提交和推送由用户在验收后明确授权。既有无关工作继续保留。
+
+| 文件 | 改动与保留要求 |
+| --- | --- |
+| `recharge-center/src/large-recharge-alert-service.js`（新增） | 实现默认关闭的开关、精确分值阈值、Bark Device Key AES-256-GCM 加密设置、掩码返回、保留 / 清除 / 更新 Key 和审计；固定官方 HTTPS 地址、时效性级别和分组，禁止自定义目标及凭据复用。完成订单严格大于阈值才唯一入队，后台租约领取、重启恢复、最多三次有限退避；发送期限覆盖响应体，64 KiB 上限，校验 HTTP / JSON 成功，不保存上游原始错误。正文完整下单邮箱只取加密订单快照并校验格式、长度及控制字符；失败不影响已完成充值。 |
+| `recharge-center/src/db.js` | 版本 12 增量创建 `large_recharge_alerts` 持久队列表和索引；按订单唯一，保留原订单、兑换与审计数据。设置复用本服务现有 metadata 表并独立加密，无额外数据库或数据卷。 |
+| `recharge-center/src/order-service.js`、`src/server.js` | 在既有兑换结果核验通过后的订单完成事务内入队；注入独立通知服务及后台生命周期，关闭时取消请求。排队异常记录安全审计码，不把提醒失败变为入账失败，不增加充值网络等待或再次发额度。 |
+| `recharge-center/src/app.js` | 新增管理员配置 GET / PUT 和测试 POST；沿用认证、本站 Origin、CSRF 和更新限流，测试每来源 IP 15 分钟最多 5 次；严格字段白名单，普通用户和官方模式不可用，公共配置不暴露 Key。 |
+| `recharge-center/public/index.html`、`public/app.js`、`public/styles.css` | 审核页增加未套卡片的提醒设置区域，提供开关、金额、密码型 Key、清除、保存、测试与最近投递状态。沿用现有颜色、图标、按钮、深色及响应式约定；自动订单轮询不覆盖未保存输入，离开会话清除 Key，过期异步响应不写入新会话。 |
+| `recharge-center/tests/large-recharge-alert.test.js`、`tests/large-recharge-alert-http.test.js`（新增） | 覆盖阈值上下界与等值、完成入账口径、自动账务收入 / 支出隔离、未核验结果、配置损坏、加密及脱敏、文本注入、并发去重、重启恢复、有限重试、响应限额 / 超时，以及管理员、来源、CSRF、字段白名单和测试限流。 |
+| `recharge-center/tests/database.test.js` | 更新版本及表断言；旧库迁移夹具删除新增队列表，核验升级确实重新建表且历史金额不变。 |
+| `recharge-center/scripts/large-recharge-preview.cjs`、`scripts/large-recharge-browser-check.cjs`（新增） | 临时账本、模拟主站与 Bark 的 loopback 本地预览；Playwright 验证桌面、手机、窄屏和深色的保存、测试、重载持久化、无密钥回显、未保存修改保留、错误反馈、清除 / 退出、普通用户隔离及布局，截图留在系统临时目录。不会连接生产、发送真实推送或暴露实际密钥。 |
+| `recharge-center/package.json` | `check` 纳入新通知模块和两个预览 / 浏览器脚本语法检查，不增加生产依赖。 |
+| `recharge-center/README.md`、`docs/deployment-configuration.md`、`docs/security.md`、`docs/large-recharge-bark-guide.md`（新增） | 记录页面配置、iPhone Key 取得及各项含义、单笔实付严格大于口径、仅个人码模式、持久化与升级、故障排查、隐私及外部推送可能重复的边界；无新增必填 env，不替代原异常邮件通道。 |
+| `CUSTOMIZATIONS.md` | 登记本轮实现范围、验证及未部署边界，保留既有记录。 |
+
+验证于 11-07 完成：充值中心完整 156 项测试通过；加强旧库迁移夹具后定向 3 项、修复保存时会话过期的按钮复位后前端 6 项通过，`npm run check` 和 `git diff --check` 通过。Playwright 1440px、390px、320px 和系统深色四组页面流程通过，另验证保存时会话过期会清除未保存 Key、重新登录后按钮恢复；无未捕获页面异常或整页横向溢出。已复核桌面、窄屏及深色截图，材料位于本机临时 `sub2api-large-recharge-qa`。隔离预览为 http://127.0.0.1:19894/preview，临时账本和模拟主站 / Bark；默认模拟管理员，切换“到账审核”查看配置。没有运行 Docker / Linux CI、发送真实推送、实际付款、生产访问或部署。网络超时 / 重启在 Bark 接受后发生时可能出现重复通知，但通知不会再次触发充值。
+
 ## 2026-11-06：每日明细供应商消费手动刷新
 
 用户要求在成本分析“每日明细 → 详情”的供应商账号消费列表最右侧增加刷新按钮，能够只重新读取所选供应商在该日的实际消费。本轮仅修改现有运营中心与供应商监控的读取 / 归档能力，不直接扣余额、不改主站计费记录、不增加配置或数据库迁移，不部署或提交 GitHub。

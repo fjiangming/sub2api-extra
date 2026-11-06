@@ -34,6 +34,12 @@ const confirmSchema = z.object({
 const rejectSchema = z.object({
   reason: z.enum(['trade_not_found', 'amount_mismatch', 'payment_outside_window', 'duplicate_payment', 'payment_reversed', 'other'])
 });
+const largeRechargeAlertSchema = z.object({
+  enabled: z.boolean(),
+  threshold: z.union([z.string().max(30), z.number().finite()]),
+  deviceKey: z.string().max(256).optional(),
+  clearDeviceKey: z.boolean().optional()
+}).strict();
 const listenerHeartbeatSchema = z.object({
   collectorId: z.string().min(3).max(64),
   version: z.string().trim().min(1).max(80).optional(),
@@ -127,7 +133,7 @@ function limiter(limit, code, message) {
 }
 
 function createApp({
-  config, db, auth, orders, qr, officialPayments, listener, qrProvisioning, accountLogPoller
+  config, db, auth, orders, qr, officialPayments, listener, qrProvisioning, accountLogPoller, largeRechargeAlerts
 }) {
   const app = express();
   const officialMode = config.paymentMode === 'sub2api_official';
@@ -226,6 +232,7 @@ function createApp({
   const qrLimiter = limiter(60, 'QR_RATE_LIMITED', '二维码读取过于频繁，请稍后再试');
   const relayLimiter = limiter(120, 'PAYMENT_RELAY_RATE_LIMITED', '付款入口访问过于频繁，请稍后再试');
   const reviewLimiter = limiter(30, 'REVIEW_RATE_LIMITED', '审核操作过于频繁，请稍后再试');
+  const barkTestLimiter = limiter(5, 'BARK_TEST_RATE_LIMITED', '测试提醒过于频繁，请稍后再试');
   const listenerLimiter = limiter(600, 'LISTENER_RATE_LIMITED', '监听器请求过于频繁');
   const qrProvisionerLimiter = limiter(600, 'QR_PROVISIONER_RATE_LIMITED', '收钱码生成代理请求过于频繁');
 
@@ -419,6 +426,15 @@ function createApp({
   const adminApi = express.Router();
   adminApi.use(nonOfficialOnly);
   adminApi.use(admin);
+  adminApi.get('/large-recharge-alert', (_req, res) => res.json(largeRechargeAlerts.settings()));
+  adminApi.put('/large-recharge-alert', reviewLimiter, csrf, (req, res) => {
+    const input = parse(largeRechargeAlertSchema, req.body);
+    res.json(largeRechargeAlerts.save(input, req.auth.user, requestAuditContext(req)));
+  });
+  adminApi.post('/large-recharge-alert/test', csrf, barkTestLimiter, asyncRoute(async (req, res) => {
+    parse(z.object({}).strict(), req.body || {});
+    res.json(await largeRechargeAlerts.test(req.auth.user, requestAuditContext(req)));
+  }));
   adminApi.get('/orders', (req, res) => res.json(orders.listForAdmin(req.query)));
   adminApi.get('/orders/:id', (req, res) => res.json(orders.getForAdmin(req.params.id)));
   adminApi.post('/orders/:id/confirm', reviewLimiter, csrf, asyncRoute(async (req, res) => {

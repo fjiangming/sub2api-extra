@@ -37,6 +37,9 @@ const state = {
   adminPageSize: 20,
   adminTotal: 0,
   adminOrders: [],
+  largeRechargeSettings: null,
+  largeRechargeBusy: false,
+  largeRechargeDirty: false,
   settledOrder: null,
   theme: initialTheme,
   embedded: embeddedMode,
@@ -176,6 +179,13 @@ async function api(path, options = {}) {
 
 function clearSession() {
   state.session = null;
+  state.largeRechargeSettings = null;
+  state.largeRechargeBusy = false;
+  state.largeRechargeDirty = false;
+  $('large-recharge-device-key').value = '';
+  setButtonLoading($('large-recharge-save'), false);
+  setButtonLoading($('large-recharge-test'), false);
+  $('large-recharge-fields').disabled = true;
   state.checkout = null;
   state.dailyOrderLimit = null;
   state.creatingOrder = false;
@@ -822,7 +832,108 @@ function switchView(view) {
     : '通过支付宝为当前账户充值';
   document.body.classList.remove('mobile-sidebar-open');
   $('mobile-sidebar-backdrop').hidden = true;
-  if (view === 'admin') loadAdminOrders().catch((error) => toast(error.message, 'error'));
+  if (view === 'admin') {
+    loadAdminOrders().catch((error) => toast(error.message, 'error'));
+    if (!state.largeRechargeSettings && !state.largeRechargeBusy) loadLargeRechargeSettings();
+  }
+}
+
+function renderLargeRechargeSettings(settings) {
+  state.largeRechargeSettings = settings;
+  state.largeRechargeDirty = false;
+  $('large-recharge-enabled').checked = settings.enabled;
+  $('large-recharge-threshold').value = settings.threshold;
+  $('large-recharge-device-key').value = '';
+  $('large-recharge-device-key').placeholder = settings.bark.configured
+    ? '已保存，留空保留原 Device Key' : '填写 iPhone Bark 中的 Device Key';
+  $('large-recharge-clear-key').checked = false;
+  const delivery = settings.lastDelivery;
+  const labels = { pending: '等待发送', sending: '发送中', sent: '已发送', failed: '发送失败' };
+  $('large-recharge-status').textContent = delivery
+    ? `最近提醒：${labels[delivery.status] || delivery.status}${delivery.errorCode ? ` · ${delivery.errorCode}` : ''}`
+    : settings.bark.configured ? 'Device Key 已保存' : '尚未配置 Device Key';
+  updateLargeRechargeControls();
+}
+
+function updateLargeRechargeControls() {
+  $('large-recharge-fields').disabled = state.largeRechargeBusy || !state.largeRechargeSettings || !isManualAdmin();
+  $('large-recharge-test').disabled = state.largeRechargeBusy || state.largeRechargeDirty || !state.largeRechargeSettings?.bark?.configured;
+}
+
+async function loadLargeRechargeSettings() {
+  if (!isManualAdmin()) return;
+  const session = state.session;
+  state.largeRechargeBusy = true;
+  updateLargeRechargeControls();
+  setError('large-recharge-error');
+  try {
+    const settings = await api('/api/admin/large-recharge-alert');
+    if (state.session !== session) return;
+    renderLargeRechargeSettings(settings);
+  } catch (error) {
+    if (state.session === session) setError('large-recharge-error', error.message);
+  } finally {
+    if (state.session === session) {
+      state.largeRechargeBusy = false;
+      updateLargeRechargeControls();
+    }
+  }
+}
+
+async function saveLargeRechargeSettings(event) {
+  event.preventDefault();
+  if (!isManualAdmin() || state.largeRechargeBusy) return;
+  const session = state.session;
+  const button = $('large-recharge-save');
+  const input = { enabled: $('large-recharge-enabled').checked,
+    threshold: $('large-recharge-threshold').value,
+    deviceKey: $('large-recharge-device-key').value.trim(),
+    clearDeviceKey: $('large-recharge-clear-key').checked };
+  state.largeRechargeBusy = true;
+  setError('large-recharge-error');
+  setButtonLoading(button, true, '保存中');
+  updateLargeRechargeControls();
+  try {
+    const settings = await api('/api/admin/large-recharge-alert', {
+      method: 'PUT', mutation: true, body: JSON.stringify(input)
+    });
+    if (state.session !== session) return;
+    renderLargeRechargeSettings(settings);
+    toast('大额充值提醒配置已保存', 'success');
+  } catch (error) {
+    if (state.session === session) setError('large-recharge-error', error.message);
+  } finally {
+    if (state.session === session) {
+      state.largeRechargeBusy = false;
+      setButtonLoading(button, false);
+      updateLargeRechargeControls();
+    }
+  }
+}
+
+async function testLargeRechargeSettings() {
+  if (!isManualAdmin() || state.largeRechargeBusy || state.largeRechargeDirty) return;
+  const session = state.session;
+  const button = $('large-recharge-test');
+  state.largeRechargeBusy = true;
+  setError('large-recharge-error');
+  setButtonLoading(button, true, '发送中');
+  updateLargeRechargeControls();
+  try {
+    await api('/api/admin/large-recharge-alert/test', { method: 'POST', mutation: true, body: '{}' });
+    if (state.session === session) {
+      $('large-recharge-status').textContent = '测试提醒已发送';
+      toast('Bark 测试提醒已发送', 'success');
+    }
+  } catch (error) {
+    if (state.session === session) setError('large-recharge-error', error.message);
+  } finally {
+    if (state.session === session) {
+      state.largeRechargeBusy = false;
+      setButtonLoading(button, false);
+      updateLargeRechargeControls();
+    }
+  }
 }
 
 async function loadAdminSummary() {
@@ -1053,6 +1164,7 @@ function bindEvents() {
     setButtonLoading(button, true);
     try {
       await loadAdminOrders();
+      if (!state.largeRechargeDirty) await loadLargeRechargeSettings();
     } catch (error) {
       toast(error.message, 'error');
     } finally {
@@ -1060,6 +1172,13 @@ function bindEvents() {
     }
   });
   $('admin-orders').addEventListener('click', (event) => handleAdminAction(event).catch((error) => toast(error.message, 'error')));
+  $('large-recharge-form').addEventListener('submit', saveLargeRechargeSettings);
+  $('large-recharge-form').addEventListener('input', () => {
+    state.largeRechargeDirty = true;
+    updateLargeRechargeControls();
+    $('large-recharge-status').textContent = '配置尚未保存';
+  });
+  $('large-recharge-test').addEventListener('click', testLargeRechargeSettings);
   $('admin-previous').addEventListener('click', () => { state.adminPage -= 1; loadAdminOrders().catch(() => {}); });
   $('admin-next').addEventListener('click', () => { state.adminPage += 1; loadAdminOrders().catch(() => {}); });
   $('review-confirm-form').addEventListener('submit', confirmReview);

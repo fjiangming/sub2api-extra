@@ -66,6 +66,7 @@ test('legacy ledgers preserve historical amounts while migrating to exact-amount
     ALTER TABLE recharge_orders DROP COLUMN alipay_paid_at;
     ALTER TABLE recharge_orders DROP COLUMN payment_match_until;
     ALTER TABLE recharge_orders DROP COLUMN user_email_ciphertext;
+    DROP TABLE large_recharge_alerts;
     DELETE FROM schema_migrations WHERE version >= 2;
   `);
   initial.close();
@@ -78,7 +79,8 @@ test('legacy ledgers preserve historical amounts while migrating to exact-amount
   assert.ok(columns.includes('alipay_paid_at'));
   assert.equal(columns.includes('cent_fingerprint'), false);
   assert.equal(columns.includes('base_amount_minor'), false);
-  assert.equal(reopened.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version, 11);
+  assert.equal(reopened.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version, 12);
+  assert.ok(reopened.prepare("SELECT name FROM sqlite_master WHERE name = 'large_recharge_alerts'").get());
   assert.ok(columns.includes('user_email_ciphertext'));
   assert.ok(columns.includes('payment_match_until'));
   assert.ok(columns.includes('payment_qr_ciphertext'));

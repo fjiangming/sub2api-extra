@@ -110,11 +110,12 @@ function publicOrder(row, options = {}) {
 }
 
 class OrderService {
-  constructor({ db, config, sub2api, alerts = null, dailyOrderLimit = null, clock = () => new Date() }) {
+  constructor({ db, config, sub2api, alerts = null, largeRechargeAlerts = null, dailyOrderLimit = null, clock = () => new Date() }) {
     this.db = db;
     this.config = config;
     this.sub2api = sub2api;
     this.alerts = alerts;
+    this.largeRechargeAlerts = largeRechargeAlerts;
     this.clock = clock;
     this.dailyOrderLimit = dailyOrderLimit || new DailyOrderLimit({ db, clock });
     this.insertAudit = db.prepare(`
@@ -1234,7 +1235,15 @@ class OrderService {
           creditAmount: credit,
           redeemCodeSuffix: redeemCode.slice(-6)
         });
-        return this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(row.id);
+        const result = this.db.prepare('SELECT * FROM recharge_orders WHERE id = ?').get(row.id);
+        try {
+          this.largeRechargeAlerts?.enqueueCompleted(result);
+        } catch (error) {
+          this.#audit(row.id, { type: 'system', id: 'bark' }, 'LARGE_RECHARGE_ALERT_QUEUE_FAILED', request, {
+            code: error?.code || 'LARGE_RECHARGE_ALERT_QUEUE_FAILED'
+          });
+        }
+        return result;
       })();
       return this.#publicOrder(completed, { admin: true });
     } catch (error) {

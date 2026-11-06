@@ -348,6 +348,34 @@
             </button>
           </div>
           <div class="admin-metrics" id="admin-metrics"></div>
+          <section class="large-recharge-settings" aria-labelledby="large-recharge-title">
+            <div class="large-recharge-heading">
+              <h2 id="large-recharge-title"><i data-lucide="bell-ring"></i>大额充值提醒</h2>
+              <span class="large-recharge-channel"><i data-lucide="smartphone"></i>iOS Bark</span>
+            </div>
+            <form id="large-recharge-form" autocomplete="off">
+              <fieldset id="large-recharge-fields" disabled>
+                <label class="large-recharge-toggle"><input id="large-recharge-enabled" type="checkbox" role="switch"><span>启用提醒</span></label>
+                <div class="large-recharge-grid">
+                  <label class="field-label" for="large-recharge-threshold">单笔充值大于（元）
+                    <input id="large-recharge-threshold" class="input" type="text" inputmode="decimal" maxlength="10" value="1000.00" required>
+                  </label>
+                  <label class="field-label" for="large-recharge-device-key">Bark Device Key
+                    <input id="large-recharge-device-key" class="input" type="password" autocomplete="new-password" spellcheck="false" maxlength="256" placeholder="填写 iPhone Bark 中的 Device Key">
+                  </label>
+                </div>
+                <div class="large-recharge-footer">
+                  <label class="check-row"><input id="large-recharge-clear-key" type="checkbox"><span>清除已保存的 Device Key</span></label>
+                  <div class="large-recharge-actions">
+                    <button id="large-recharge-test" class="button secondary compact" type="button" disabled><i data-lucide="send"></i><span data-button-label>测试提醒</span></button>
+                    <button id="large-recharge-save" class="button primary compact" type="submit"><i data-lucide="save"></i><span data-button-label>保存</span></button>
+                  </div>
+                </div>
+              </fieldset>
+              <p id="large-recharge-status" class="large-recharge-status" role="status">正在读取配置...</p>
+              <p id="large-recharge-error" class="form-error" role="alert" hidden></p>
+            </form>
+          </section>
           <section class="card admin-orders-card">
             <div class="card-header table-toolbar">
               <div><h2>充值订单</h2><p>按状态筛选并核对到账信息</p></div>

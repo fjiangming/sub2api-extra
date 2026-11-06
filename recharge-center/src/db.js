@@ -5,7 +5,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { hmacHex, safeEqual, sealText } = require('./security');
 
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 const ORDER_STATUSES = [
   'awaiting_payment',
   'payment_reported',
@@ -189,6 +189,23 @@ CREATE INDEX IF NOT EXISTS audit_events_order_time
 CREATE INDEX IF NOT EXISTS audit_events_type_time
   ON audit_events(event_type, occurred_at DESC);
 
+CREATE TABLE IF NOT EXISTS large_recharge_alerts (
+  id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL UNIQUE REFERENCES recharge_orders(id) ON DELETE RESTRICT,
+  amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+  threshold_minor INTEGER NOT NULL CHECK (threshold_minor > 0),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  next_attempt_at TEXT NOT NULL,
+  lease_until TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  sent_at TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS large_recharge_alerts_status_time
+  ON large_recharge_alerts(status, updated_at DESC);
+
 CREATE TRIGGER IF NOT EXISTS audit_events_prevent_update
 BEFORE UPDATE ON audit_events
 BEGIN
@@ -330,6 +347,25 @@ function migrate(db, secret) {
     db.exec('ALTER TABLE recharge_orders ADD COLUMN user_email_ciphertext TEXT');
   }
   db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(11, appliedAt);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS large_recharge_alerts (
+      id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL UNIQUE REFERENCES recharge_orders(id) ON DELETE RESTRICT,
+      amount_minor INTEGER NOT NULL CHECK (amount_minor > 0),
+      threshold_minor INTEGER NOT NULL CHECK (threshold_minor > 0),
+      status TEXT NOT NULL CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+      next_attempt_at TEXT NOT NULL,
+      lease_until TEXT,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      sent_at TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS large_recharge_alerts_status_time
+      ON large_recharge_alerts(status, updated_at DESC);
+  `);
+  db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(12, appliedAt);
 }
 
 function nowIso() {

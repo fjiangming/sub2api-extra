@@ -12,6 +12,7 @@ const { ListenerService } = require('./listener-service');
 const { QrProvisioningService } = require('./qr-provisioning-service');
 const { AlipayAccountLogClient } = require('./alipay-accountlog-client');
 const { AlipayAccountLogPoller } = require('./alipay-accountlog-poller');
+const { LargeRechargeAlertService } = require('./large-recharge-alert-service');
 const { createApp } = require('./app');
 
 function createRuntime(env = process.env, options = {}) {
@@ -25,7 +26,9 @@ function createRuntime(env = process.env, options = {}) {
     transport: options.notificationTransport
   });
   const auth = new AuthService(config, sub2api);
-  const orders = new OrderService({ db, config, sub2api, alerts: notifications, clock: options.clock });
+  const largeRechargeAlerts = new LargeRechargeAlertService({ db, config,
+    fetch: options.barkFetch, clock: options.clock });
+  const orders = new OrderService({ db, config, sub2api, alerts: notifications, largeRechargeAlerts, clock: options.clock });
   const listener = new ListenerService({ db, config, clock: options.clock });
   const qrProvisioning = new QrProvisioningService({ db, config, alerts: notifications, clock: options.clock });
   const officialPayments = config.paymentMode === 'sub2api_official'
@@ -46,8 +49,9 @@ function createRuntime(env = process.env, options = {}) {
       }))
     : null;
   accountLogPoller?.start?.();
+  if (config.env !== 'test') largeRechargeAlerts.start();
   const app = createApp({
-    config, db, auth, orders, qr, officialPayments, listener, qrProvisioning, accountLogPoller
+    config, db, auth, orders, qr, officialPayments, listener, qrProvisioning, accountLogPoller, largeRechargeAlerts
   });
   return {
     app,
@@ -62,7 +66,9 @@ function createRuntime(env = process.env, options = {}) {
     officialPayments,
     accountLogClient,
     accountLogPoller,
+    largeRechargeAlerts,
     close() {
+      largeRechargeAlerts.close();
       officialPayments?.close();
       accountLogPoller?.close?.();
       notifications.close?.();
