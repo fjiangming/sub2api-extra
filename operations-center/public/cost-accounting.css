@@ -32,6 +32,9 @@
 .accounting-search input { min-width: 0; }
 .accounting-search label { min-width: 0; max-width: 100%; }
 .accounting-link { background: transparent; border: 0; padding: 4px 0; color: var(--green); text-align: left; }
+.cost-provider-refresh { color: var(--green); }
+.cost-provider-refresh.is-loading svg { animation: cost-provider-refresh-spin 800ms linear infinite; }
+@keyframes cost-provider-refresh-spin { to { transform: rotate(360deg); } }
 .accounting-rules { margin-top: 20px; padding: 14px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
 .accounting-rules summary { cursor: pointer; width: fit-content; }
 .accounting-rules p { line-height: 1.7; max-width: 1000px; }

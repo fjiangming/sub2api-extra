@@ -162,6 +162,55 @@ test('refresh reads saved history, explicit recalculation replaces it and failed
   assert.equal((await f.service.getDailyProfit(query)).items[0].supplierConsumption, 1);
 });
 
+test('manual provider refresh reads one upstream account and atomically updates its archived day', async t => {
+  const f = fixture(t);
+  const date = '2026-10-30', scope = f.service.scope();
+  await f.service.getDailyProfit({ start: date, end: date });
+  await f.service.drain();
+  const before = f.store.list(scope, date, date)[0];
+  let refreshed;
+  f.analysis.getSupplierDailyCost = async (requestedDate, providerId) => {
+    refreshed = { requestedDate, providerId };
+    return { date: requestedDate, provider: {
+      id: providerId, name: 'Enabled supplier', cost: 7, complete: true, requests: 9, reasons: []
+    } };
+  };
+  const result = await f.service.refreshProvider({ date, providerId: 'p1' });
+  assert.deepEqual(refreshed, { requestedDate: date, providerId: 'p1' });
+  assert.equal(result.mode, 'archived');
+  assert.equal(result.provider.cost, 7);
+  assert.equal(result.row.supplierConsumption, 7);
+  assert.equal(result.row.profit, 3.12500001);
+  assert.equal(result.row.supplierRequests, 9);
+  assert.equal(result.row.complete, true);
+  assert.equal(f.store.jobs(scope, date, date).length, 0);
+  const saved = f.store.list(scope, date, date)[0];
+  assert.equal(saved.row.supplierConsumption, 7);
+  assert.equal(saved.computedAt, before.computedAt);
+});
+
+test('an incomplete manual provider refresh preserves the last complete archive and schedules a retry', async t => {
+  const f = fixture(t);
+  const date = '2026-10-30', scope = f.service.scope();
+  await f.service.getDailyProfit({ start: date, end: date });
+  await f.service.drain();
+  const before = f.store.list(scope, date, date)[0];
+  f.analysis.getSupplierDailyCost = async (requestedDate, providerId) => ({
+    date: requestedDate,
+    provider: { id: providerId, name: 'Enabled supplier', cost: null, complete: false, reasons: ['上游连接暂不可用'] }
+  });
+  const result = await f.service.refreshProvider({ date, providerId: 'p1' });
+  assert.equal(result.provider.complete, false);
+  assert.equal(result.row.supplierConsumption, before.row.supplierConsumption);
+  assert.equal(result.row.complete, true);
+  assert.equal(result.lastAttempt.errorCode, 'DAILY_PROFIT_INCOMPLETE');
+  assert.equal(result.computedAt, before.computedAt);
+  assert.equal(f.store.jobs(scope, date, date).length, 1);
+  const saved = f.store.list(scope, date, date)[0];
+  assert.equal(saved.row.supplierConsumption, before.row.supplierConsumption);
+  assert.equal(saved.computedAt, before.computedAt);
+});
+
 test('partial dates preserve successful amounts and gaps propagate to every trend granularity', async t => {
   const f = fixture(t);
   const query = { start: '2026-10-29', end: '2026-10-30' };
@@ -253,6 +302,44 @@ test('daily archive HTTP requires administrator auth and returns archived histor
   assert.equal(saved.items[0].mode, 'archived');
   assert.equal(saved.items[0].profit, 8.12500001);
   assert.equal(f.calls.length, 1);
+});
+
+test('manual provider refresh endpoint requires CSRF and returns the refreshed archived row', async t => {
+  const { createApp } = require('../src/app');
+  const { AuthService } = require('../src/auth');
+  const f = fixture(t);
+  const date = '2026-10-30';
+  await f.service.getDailyProfit({ start: date, end: date });
+  await f.service.drain();
+  f.analysis.getSupplierDailyCost = async (requestedDate, providerId) => ({
+    date: requestedDate,
+    provider: { id: providerId, name: 'Enabled supplier', cost: 7, complete: true, requests: 9, reasons: [] }
+  });
+  Object.assign(f.config, { env: 'test', trustProxy: false, authMode: 'local', adminUser: 'admin',
+    adminPassword: 'synthetic-password-for-test', sessionTtlMinutes: 30, cookieSecure: false });
+  const auth = new AuthService(f.config);
+  const server = createApp({ config: f.config, auth, costAnalysis: f.analysis, dailyProfit: f.service,
+    settings: { getStatus: () => ({ setupRequired: false }) } }).listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); auth.close(); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const login = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: f.config.adminPassword }) });
+  const session = await login.json();
+  const headers = { authorization: `Session ${session.sessionToken}`, 'x-csrf-token': session.csrfToken,
+    'content-type': 'application/json' };
+  const missingCsrf = await fetch(`${base}/api/cost-analysis/daily-profit/provider-refresh`, {
+    method: 'POST', headers: { authorization: headers.authorization, 'content-type': 'application/json' },
+    body: JSON.stringify({ date, providerId: 'p1' })
+  });
+  assert.equal(missingCsrf.status, 403);
+  const response = await fetch(`${base}/api/cost-analysis/daily-profit/provider-refresh`, {
+    method: 'POST', headers, body: JSON.stringify({ date, providerId: 'p1' })
+  });
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.row.supplierConsumption, 7);
+  assert.equal(payload.provider.cost, 7);
 });
 
 test('archived results render independently of a stalled live read and today is never stored as history', async t => {

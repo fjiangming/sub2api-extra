@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const cron = require('node-cron');
 const { DateTime } = require('luxon');
+const Decimal = require('decimal.js');
 const { addUtcDays } = require('./metrics-service');
 const { parseReportInput, dailyProfitReport } = require('./cost-analysis-service');
 const { AppError } = require('../errors');
@@ -164,6 +165,76 @@ class DailyProfitService {
     })();
     try { return await Promise.race([operation, timeout]); }
     finally { clearTimeout(timer); }
+  }
+
+  async refreshProvider({ date, providerId }, { accessToken = null } = {}) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date)) ||
+        DateTime.fromISO(String(date), { zone: 'UTC' }).toISODate() !== String(date)) {
+      throw new AppError('INVALID_DATE', '统计日期无效', { status: 400 });
+    }
+    const id = String(providerId || '').trim();
+    if (!id || id.length > 200) throw new AppError('INVALID_PROVIDER', '供应商账号无效', { status: 400 });
+    const today = this.localNow().toISODate();
+    if (date > today) throw new AppError('INVALID_DATE', '不能刷新未来日期的消费', { status: 400 });
+    if (date === today) {
+      const report = await this.calculateDay(date, accessToken);
+      this.lastLive = { key: `${this.scope()}:${today}`, report, at: this.now().getTime() };
+      const row = report.items[0];
+      const provider = row?.providers?.find((item) => String(item.id) === id);
+      if (!provider) throw new AppError('PROVIDER_NOT_FOUND', '供应商账号不存在或未启用定时检查', { status: 404 });
+      return { date, mode: 'live', row, provider };
+    }
+    const scope = this.scope();
+    const snapshot = this.store.list(scope, date, date)[0];
+    if (!snapshot?.row || snapshot.row.date !== date) {
+      throw new AppError('DAILY_PROFIT_NOT_ARCHIVED', '该日期尚未形成历史归档，请等待自动统计后重试', { status: 409 });
+    }
+    const controller = new AbortController();
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new AppError('DAILY_PROFIT_TIMEOUT', '供应商消费刷新超时，请稍后重试', { status: 504 });
+        controller.abort(error);
+        reject(error);
+      }, this.calculationTimeoutMs);
+    });
+    const operation = this.analysis.getSupplierDailyCost(date, id, accessToken, { signal: controller.signal });
+    try {
+      const result = await Promise.race([operation, timeout]);
+      controller.signal.throwIfAborted();
+      const providers = [...(snapshot.row.providers || [])];
+      const index = providers.findIndex((item) => String(item.id) === id);
+      if (index < 0) providers.push(result.provider);
+      else providers[index] = result.provider;
+      const siteComplete = snapshot.row.siteComplete === true && snapshot.row.siteConsumption != null;
+      const supplierComplete = providers.length > 0 && providers.every((item) => item.complete === true && item.cost != null);
+      const supplierConsumption = supplierComplete
+        ? new Decimal(providers.reduce((sum, item) => sum.plus(item.cost), new Decimal(0))).toDecimalPlaces(8).toNumber() : null;
+      const siteConsumption = siteComplete ? new Decimal(snapshot.row.siteConsumption).toDecimalPlaces(8).toNumber() : null;
+      const profit = siteComplete && supplierComplete
+        ? new Decimal(siteConsumption).minus(supplierConsumption).toDecimalPlaces(8).toNumber() : null;
+      const row = {
+        ...snapshot.row,
+        providers,
+        siteConsumption,
+        supplierConsumption,
+        profit,
+        margin: profit != null && siteConsumption > 0
+          ? new Decimal(profit).div(siteConsumption).times(100).toDecimalPlaces(2).toNumber() : null,
+        supplierRequests: providers.every((item) => item.requests != null)
+          ? providers.reduce((sum, item) => sum + Number(item.requests), 0) : null,
+        supplierComplete,
+        complete: siteComplete && supplierComplete,
+        status: !siteComplete ? 'site_incomplete' : !supplierComplete ? 'supplier_incomplete' : 'complete',
+        notices: supplierComplete ? [] : ['部分供应商消费仍待核验。']
+      };
+      const saved = this.store.saveManualSnapshot(scope, date, { row, notices: row.notices });
+      try { this.analysis.accounting?.rebuildArchived(); }
+      catch { this.logger.warn('accounting derived report rebuild failed'); }
+      return { ...saved, date, mode: 'archived', row: saved.row, provider: result.provider };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async getDailyProfit(input = {}, { accessToken = null, refreshRange = null } = {}) {

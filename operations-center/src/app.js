@@ -19,6 +19,11 @@ const loginSchema = z.object({
   path: ['username']
 });
 
+const dailyProfitProviderRefreshSchema = z.object({
+  date: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/),
+  providerId: z.string().trim().min(1).max(200)
+});
+
 const previewSchema = z.object({
   targets: z.array(z.string()).max(20).optional()
 });
@@ -393,6 +398,13 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.get('/cost-analysis', asyncRoute(async (req, res) => res.json(await costAnalysis.getReport(req.query))));
   api.get('/cost-analysis/daily-profit', asyncRoute(async (req, res) => {
     res.set('Cache-Control', 'no-store').json(await (dailyProfit || costAnalysis).getDailyProfit(req.query, {
+      accessToken: req.auth.upstreamAccessToken || null
+    }));
+  }));
+  api.post('/cost-analysis/daily-profit/provider-refresh', csrf, asyncRoute(async (req, res) => {
+    if (!dailyProfit?.refreshProvider) throw new AppError('DAILY_PROFIT_REFRESH_UNAVAILABLE', '每日供应商刷新暂不可用', { status: 503 });
+    const input = parse(dailyProfitProviderRefreshSchema, req.body || {});
+    res.set('Cache-Control', 'no-store').json(await dailyProfit.refreshProvider(input, {
       accessToken: req.auth.upstreamAccessToken || null
     }));
   }));

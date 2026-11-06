@@ -523,6 +523,22 @@ class CostAnalysisService {
     return this.providerMonitor.createDailyCostsReader(token, { signal });
   }
 
+  async getSupplierDailyCost(date, providerId, accessToken = null, { signal } = {}) {
+    const read = await this.createSupplierDailyCostsReader(accessToken, { signal });
+    signal?.throwIfAborted();
+    const report = await read({ from: date, to: date, currency: 'CNY',
+      timezone: this.config.financeTimezone, connectionId: providerId, refresh: '1' }, { signal });
+    if (report?.source !== 'upstream_daily_summary' || report.scope !== 'account' ||
+        report.providerFilter !== 'scheduled_enabled' || report.timezone !== this.config.financeTimezone ||
+        report.currency !== 'CNY' || report.range?.start !== date || report.range?.end !== date ||
+        !Array.isArray(report.items) || report.items.length !== 1 || report.items[0]?.date !== date) {
+      throw new AppError('PROVIDER_MONITOR_INVALID_DAILY_COSTS', 'invalid supplier report', { status: 502 });
+    }
+    const provider = (report.items[0].providers || []).find((item) => String(item.id) === String(providerId));
+    if (!provider) throw new AppError('PROVIDER_NOT_FOUND', '供应商账号不存在或未启用定时检查', { status: 404 });
+    return { date, provider };
+  }
+
   async #supplierDailyCosts(range, currency, accessToken, refresh = false, supplierReader = null, signal = null) {
     const items = [];
     const failures = [];

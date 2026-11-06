@@ -11,6 +11,7 @@ const CostAccountingUi = (() => {
     const pct = value => value == null ? '-' : h.formatPercent(value);
     const option = (key, label, selected) => `<option value="${e(key)}"${key === selected ? ' selected' : ''}>${e(label)}</option>`;
     const button = (attr, value, label = '详情') => `<button type="button" class="accounting-link" ${attr}="${e(value)}">${label}</button>`;
+    const iconButton = (attr, value, iconName, title, extra = '') => `<button type="button" class="icon-button ${extra}" ${attr}="${e(value)}" title="${e(title)}" aria-label="${e(title)}">${h.icon(iconName)}</button>`;
     const table = (headers, rows) => `<div class="table-wrap"><table><thead><tr>${headers.map(label => `<th>${label}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map(row => `<tr>${row.map(value => `<td>${value}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${headers.length}" class="empty-state">暂无记录</td></tr>`}</tbody></table></div>`;
     const pager = name => `<div class="accounting-pager"><span data-${name}-page></span><div>${[-1, 1].map(step => `<button type="button" class="icon-button" data-${name}-step="${step}" title="${step < 0 ? '上一页' : '下一页'}" aria-label="${step < 0 ? '上一页' : '下一页'}">${h.icon(step < 0 ? 'chevron-left' : 'chevron-right')}</button>`).join('')}</div></div>`;
     const metric = (title, value, hint, action, format = money) => `<button type="button" class="accounting-metric" data-metric="${e(action)}"><span>${e(title)}</span><strong class="${value < 0 ? 'negative-value' : ''}" title="${e(format(value))}">${e(format(value))}</strong><small>${e(hint)}</small></button>`;
@@ -156,7 +157,24 @@ const CostAccountingUi = (() => {
     function dayDetail(date) {
       const row = state.report.items.find(row => row.date === date); if (!row) return;
       const notices = [...new Set([...(row.notices || []), ...(row.lastAttempt?.errorCode ? row.lastAttempt.notices : [])])];
-      drawer(`${date} · 消费与毛利`, `<div data-open-day="${e(date)}">${table(['项目', 'CNY'], [['主站消费', money(row.siteConsumption)], ['供应商消费', money(row.supplierConsumption)], ['消费毛利', money(row.profit)], ['毛利率', pct(row.margin)]])}</div><h3>供应商账号消费</h3>${table(['供应商', 'CNY', '数据状态'], (row.providers || []).map(provider => [e(provider.name), money(provider.cost), e(provider.complete ? '数据完整' : (provider.reasons || ['自动重试']).join('；'))]))}<p class="muted">${row.mode === 'live' ? '今日实时' : '历史归档'} · ${e(row.computedAt ? h.formatDateTime(row.computedAt) : '等待同步')}</p>${row.complete && row.lastAttempt?.errorCode ? '<p class="muted">更新失败，保留最后一次完整归档，后台自动重试。</p>' : ''}${notices.length ? `<details><summary>来源状态</summary>${notices.map(text => `<p>${e(text)}</p>`).join('')}</details>` : ''}`);
+      drawer(`${date} · 消费与毛利`, `<div data-open-day="${e(date)}">${table(['项目', 'CNY'], [['主站消费', money(row.siteConsumption)], ['供应商消费', money(row.supplierConsumption)], ['消费毛利', money(row.profit)], ['毛利率', pct(row.margin)]])}<h3>供应商账号消费</h3>${table(['供应商', 'CNY', '数据状态', '操作'], (row.providers || []).map(provider => [e(provider.name), money(provider.cost), e(provider.complete ? '数据完整' : (provider.reasons || ['自动重试']).join('；')), iconButton('data-provider-refresh', provider.id, 'refresh-cw', `刷新 ${provider.name} 消费`, `cost-provider-refresh" data-provider-date="${e(date)}`)]))}<p class="muted">${row.mode === 'live' ? '今日实时' : '历史归档'} · ${e(row.computedAt ? h.formatDateTime(row.computedAt) : '等待同步')}</p>${row.complete && row.lastAttempt?.errorCode ? '<p class="muted">更新失败，保留最后一次完整归档，后台自动重试。</p>' : ''}${notices.length ? `<details><summary>来源状态</summary>${notices.map(text => `<p>${e(text)}</p>`).join('')}</details>` : ''}</div>`);
+    }
+    async function refreshProvider(date, providerId, node) {
+      if (state.providerRefresh) return;
+      state.providerRefresh = true;
+      node.disabled = true; node.setAttribute('aria-busy', 'true'); node.classList.add('is-loading');
+      try {
+        await h.api('/api/cost-analysis/daily-profit/provider-refresh', {
+          method: 'POST', body: JSON.stringify({ date, providerId })
+        });
+        if (!state.active || !h.isActive()) return;
+        h.toast('供应商消费已刷新', 'success');
+        await load({ poll: true });
+        if (state.active && q('[data-dialog]').open) dayDetail(date);
+      } finally {
+        state.providerRefresh = false;
+        if (node.isConnected) { node.disabled = false; node.removeAttribute('aria-busy'); node.classList.remove('is-loading'); }
+      }
     }
     async function balanceDetail(page = 1, search = '') {
       const request = ++state.dialogRequest, value = await h.api(`${base}/balances?${new URLSearchParams({ page, search, pageSize: 20 })}`);
@@ -207,6 +225,7 @@ const CostAccountingUi = (() => {
         if (node.dataset.tab) return changeTab(node.dataset.tab);
         if (node.dataset.detailTab) { for (const key of ['days', 'providers']) { const active = key === node.dataset.detailTab; q(`[data-detail-tab="${key}"]`).setAttribute('aria-selected', String(active)); q(`[data-detail-tab="${key}"]`).tabIndex = active ? 0 : -1; q(`#cost-detail-${key}`).hidden = !active; } return; }
         if (node.dataset.command) return command(node.dataset.command); if (node.dataset.day) return dayDetail(node.dataset.day);
+        if (node.dataset.providerRefresh) return refreshProvider(node.dataset.providerDate, node.dataset.providerRefresh, node);
         if (node.dataset.automaticDayStep) { state.automaticPage += Number(node.dataset.automaticDayStep); return renderAutomaticDays(); }
         if (node.dataset.cashStep) { state.cashPage += Number(node.dataset.cashStep); return load(); }
         if (node.dataset.balanceStep) return balanceDetail(state.balancePage + Number(node.dataset.balanceStep), state.balanceSearch);

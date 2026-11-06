@@ -68,7 +68,45 @@ async function main() {
         await checkChart(page, '#accounting-automatic-chart'); assert.equal(await page.locator('[data-automatic-days] tr').count(), 15);
         await page.locator('[data-automatic-day-step="1"]').click(); assert.match(await page.locator('[data-automatic-day-page]').innerText(), /2 \/ 3/); await page.locator('[data-automatic-day-step="-1"]').click();
         await checkLayout(page); await page.evaluate(() => scrollTo(0, 0)); await page.screenshot({ path: path.join(directory, `${name}-automatic.png`), fullPage: true });
-        await page.locator('[data-metric=profit]').click(); await page.locator('[data-dialog] [data-day]').first().click(); assert.match(await page.locator('[data-drawer]').innerText(), /供应商账号消费/); await closeDrawer(page);
+        const historicalDate = preview.start;
+        await page.locator('[data-metric=profit]').click();
+        await page.locator(`[data-dialog] [data-day="${historicalDate}"]`).click();
+        assert.match(await page.locator('[data-drawer]').innerText(), /供应商账号消费/);
+        const providerRefresh = page.locator(`[data-dialog] [data-provider-refresh="alpha"][data-provider-date="${historicalDate}"]`);
+        assert.equal(await providerRefresh.count(), 1);
+        let releaseProviderRefresh;
+        const providerRefreshGate = new Promise(resolve => { releaseProviderRefresh = resolve; });
+        let providerRefreshBody;
+        const holdProviderRefresh = async route => {
+          providerRefreshBody = route.request().postDataJSON();
+          await providerRefreshGate;
+          await route.continue();
+        };
+        await page.route('**/api/cost-analysis/daily-profit/provider-refresh', holdProviderRefresh);
+        try {
+          const request = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === '/api/cost-analysis/daily-profit/provider-refresh');
+          const response = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/cost-analysis/daily-profit/provider-refresh');
+          await providerRefresh.click();
+          await waitFor(page, date => {
+            const node = document.querySelector(`[data-dialog] [data-provider-refresh="alpha"][data-provider-date="${date}"]`);
+            return node?.disabled === true && node.getAttribute('aria-busy') === 'true' && node.classList.contains('is-loading');
+          }, historicalDate);
+          releaseProviderRefresh();
+          const [refreshRequest, refreshResponse] = await Promise.all([request, response]);
+          assert.equal(refreshResponse.status(), 200);
+          assert.deepEqual(providerRefreshBody, { date: historicalDate, providerId: 'alpha' });
+          assert.deepEqual(refreshRequest.postDataJSON(), { date: historicalDate, providerId: 'alpha' });
+          await waitFor(page, date => {
+            const dialog = document.querySelector('[data-dialog]');
+            return Boolean(dialog?.open && dialog.querySelector(`[data-open-day="${date}"]`) && !dialog.querySelector('[data-provider-refresh].is-loading'));
+          }, historicalDate);
+          assert.equal(await page.locator('[data-dialog]').isVisible(), true);
+          assert.match(await page.locator('[data-drawer]').innerText(), /供应商账号消费/);
+        } finally {
+          releaseProviderRefresh();
+          await page.unroute('**/api/cost-analysis/daily-profit/provider-refresh', holdProviderRefresh);
+        }
+        await closeDrawer(page);
         await waitFor(page, () => accountingUi.state.balances?.userBalance === 11790);
         await page.locator('[data-command=balance]').click(); await page.waitForSelector('[data-balance-page]'); assert.match(await page.locator('[data-drawer]').innerText(), /不含 ID 1/);
         await page.locator('[data-balance-step="1"]').click(); await waitFor(page, () => document.querySelector('[data-balance-page]').textContent.includes('2 / 2'));

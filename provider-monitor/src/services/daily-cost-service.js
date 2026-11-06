@@ -202,7 +202,8 @@ class DailyCostService {
     const budget = new RequestBudget(this.reportTimeoutMs);
     const refresh = input.refresh === '1' || input.refresh === true;
     const connections = this.db.prepare(`SELECT id, name FROM provider_connections
-      WHERE enabled=1 ORDER BY name, id`).all();
+      WHERE enabled=1 AND (? IS NULL OR id=?) ORDER BY name, id`)
+      .all(query.connectionId, query.connectionId);
     const items = [];
     try {
       for (const period of periods) {

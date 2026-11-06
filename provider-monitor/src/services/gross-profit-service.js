@@ -530,6 +530,7 @@ class GrossProfitService {
     try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(); }
     catch { throw new AppError('VALIDATION_ERROR', 'Daily cost timezone is invalid', { status: 400 }); }
     const query = this.#query({ from: input.from, to: input.to, currency: input.currency,
+      connectionId: input.connectionId || input.connection_id,
       dimension: 'provider', granularity: 'day' }, timezone);
     const settings = this.#currencySettings(query.currency, true);
     return { query, settings, periods: this.#periods(query) };

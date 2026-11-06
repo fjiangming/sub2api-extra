@@ -85,6 +85,17 @@ test('daily costs read upstream account aggregates without keys or logs and neve
   assert.equal(f.calls.length, 5);
 });
 
+test('a provider-scoped daily refresh reads and returns only the selected enabled supplier', async (t) => {
+  const f = fixture(t);
+  const id = f.states[0].provider.id;
+  const report = await f.service.report({ ...query, connectionId: id, refresh: true });
+  assert.equal(report.items.length, 1);
+  assert.equal(report.items[0].providers.length, 1);
+  assert.equal(report.items[0].providers[0].id, id);
+  assert.equal(report.items[0].cost, 6);
+  assert.ok(f.calls.every(({ url }) => url.hostname === 'supplier-0.example'));
+});
+
 test('disabled scheduled checks exclude suppliers even with cached summaries and historical ledger costs', async (t) => {
   const f = fixture(t);
   await f.service.report(query);

@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const Database = require('better-sqlite3');
+const { AppError } = require('./errors');
 
 class DailyProfitStore {
   constructor(directory, { now = () => Date.now() } = {}) {
@@ -91,6 +92,45 @@ class DailyProfitStore {
         lease_token=NULL,last_error=? WHERE scope=? AND date=?`)
         .run(this.now() + Math.min(3600000, 60000 * 2 ** Math.min(job.attempts, 6)), errorCode, job.scope, job.date);
       return true;
+    })();
+  }
+
+  saveManualSnapshot(scope, date, payload) {
+    return this.db.transaction(() => {
+      const existing = this.db.prepare('SELECT payload,computed_at FROM daily_profit_snapshots WHERE scope=? AND date=?').get(scope, date);
+      if (!existing) throw new AppError('DAILY_PROFIT_NOT_ARCHIVED', '该日期尚未形成历史归档，请稍后重试', { status: 409 });
+      const job = this.db.prepare('SELECT * FROM daily_profit_jobs WHERE scope=? AND date=?').get(scope, date);
+      if (job?.lease_until > this.now()) {
+        throw new AppError('DAILY_PROFIT_BUSY', '该日期正在后台统计，请稍后重试', { status: 409 });
+      }
+      const at = new Date(this.now()).toISOString();
+      const errorCode = payload?.row?.complete === true ? null : 'DAILY_PROFIT_INCOMPLETE';
+      const existingPayload = JSON.parse(existing.payload);
+      const preserve = existingPayload.row?.complete === true && errorCode;
+      if (!preserve) {
+        this.db.prepare(`INSERT INTO daily_profit_snapshots(scope,date,payload,computed_at) VALUES (?,?,?,?)
+          ON CONFLICT(scope,date) DO UPDATE SET payload=excluded.payload,computed_at=excluded.computed_at`)
+          .run(scope, date, JSON.stringify(payload), at);
+      }
+      this.db.prepare(`INSERT INTO daily_profit_attempts(scope,date,error_code,notices,attempted_at) VALUES(?,?,?,?,?)
+        ON CONFLICT(scope,date) DO UPDATE SET error_code=excluded.error_code,notices=excluded.notices,
+        attempted_at=excluded.attempted_at`)
+        .run(scope, date, errorCode, JSON.stringify(payload?.notices || []), at);
+      if (!errorCode) {
+        this.db.prepare('DELETE FROM daily_profit_jobs WHERE scope=? AND date=?').run(scope, date);
+      } else if (job) {
+        this.db.prepare(`UPDATE daily_profit_jobs SET generation=generation+1,attempts=0,next_attempt_at=?,
+          lease_until=0,lease_token=NULL,last_error=? WHERE scope=? AND date=?`)
+          .run(this.now(), errorCode, scope, date);
+      } else {
+        this.db.prepare(`INSERT INTO daily_profit_jobs(scope,date,next_attempt_at,last_error) VALUES (?,?,?,?)`)
+          .run(scope, date, this.now(), errorCode);
+      }
+      return {
+        ...(preserve ? existingPayload : payload),
+        computedAt: preserve ? existing.computed_at : at,
+        lastAttempt: { at, errorCode, notices: payload?.notices || [] }
+      };
     })();
   }
 
