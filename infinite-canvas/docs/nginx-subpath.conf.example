@@ -1,7 +1,7 @@
-# Include inside the existing server block for aihub.fo2.us.ci.
+# Include inside the existing or additional main-site server blocks.
 location = /canvas {
     access_log off;
-    return 302 https://aihub.fo2.us.ci/canvas/;
+    return 302 https://$host/canvas/;
 }
 
 location ^~ /canvas/ {
@@ -9,7 +9,7 @@ location ^~ /canvas/ {
     error_log /var/log/nginx/infinite-canvas-main.error.log crit;
 
     if ($args ~* "(^|&)(token|access_token|user_id)=") {
-        return 302 https://aihub.fo2.us.ci$uri;
+        return 302 https://$host$uri;
     }
 
     proxy_pass http://127.0.0.1:9877/;
@@ -27,6 +27,6 @@ location ^~ /canvas/ {
 
     add_header Referrer-Policy "no-referrer" always;
     add_header X-Content-Type-Options "nosniff" always;
-    add_header Content-Security-Policy "frame-ancestors 'self' https://aihubdirect.fo2.us.ci https://epoint2api.fjmooo.cn" always;
+    add_header Content-Security-Policy "frame-ancestors 'self' https://aihub.fo2.us.ci https://aihubdirect.fo2.us.ci https://epoint2api.fjmooo.cn https://yunhop.cc https://www.yunhop.cc" always;
     add_header Cache-Control "no-store" always;
 }

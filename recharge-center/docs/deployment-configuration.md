@@ -1,5 +1,7 @@
 # 充值中心部署与配置手册
 
+多域名部署可保留原 `RECHARGE_CENTER_PUBLIC_URL`，通过可选 `RECHARGE_CENTER_PUBLIC_URLS` 追加充值中心根地址；通过 `SUB2API_PUBLIC_URLS` 追加允许嵌入页面的主站根地址。列表使用逗号分隔，生产环境仅接受 HTTPS，不支持通配符、账号、路径或参数；原单域名自动保留。认证、CSRF、订单、账本和内部 `SUB2API_BASE_URL` 不变。详细 DNS、证书与加密回源方案见 `operations-center/docs/multi-domain-deployment.md`。
+
 本文从一个尚未配置的 `sub2api-extra` 目录开始，说明个人支付宝二维码放在哪里、每个参数从哪里取得，以及如何验证配置。本文只涉及 `recharge-center`，不需要修改 Provider Monitor、运营中心或其他扩展服务。
 
 ## 1. 先选择正确模式

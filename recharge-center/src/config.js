@@ -2,6 +2,7 @@
 
 const path = require('path');
 const { z } = require('zod');
+const { publicOrigins } = require('./public-origins');
 
 const boolFromEnv = z.preprocess((value) => {
   if (typeof value === 'boolean') return value;
@@ -125,6 +126,7 @@ const schema = z.object({
   RECHARGE_CENTER_DATABASE: optionalString,
   RECHARGE_CENTER_SECRET: z.string().min(32).max(1024),
   RECHARGE_CENTER_PUBLIC_URL: optionalUrl,
+  RECHARGE_CENTER_PUBLIC_URLS: optionalString,
   RECHARGE_CENTER_TRUST_PROXY: boolFromEnv.default(false),
   RECHARGE_CENTER_COOKIE_SECURE: boolFromEnv.optional(),
   RECHARGE_CENTER_PASSWORD_LOGIN_ENABLED: boolFromEnv.optional(),
@@ -175,6 +177,7 @@ const schema = z.object({
   RECHARGE_CENTER_AUTO_MODE_VERIFIED: boolFromEnv.default(false),
   SUB2API_BASE_URL: z.string().url(),
   SUB2API_PUBLIC_URL: optionalUrl,
+  SUB2API_PUBLIC_URLS: optionalString,
   SUB2API_ADMIN_API_KEY: optionalString,
   SUB2API_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).default(10000),
   SUB2API_FORWARD_CLIENT_FINGERPRINT: boolFromEnv.default(true),
@@ -550,6 +553,7 @@ function loadConfig(env = process.env, options = {}) {
     secret: value.RECHARGE_CENTER_SECRET,
     publicUrl,
     publicOrigin: publicUrl ? new URL(publicUrl).origin : null,
+    publicOrigins: publicOrigins(publicUrl, value.RECHARGE_CENTER_PUBLIC_URLS, 'RECHARGE_CENTER_PUBLIC_URLS', value.NODE_ENV === 'production'),
     trustProxy: value.RECHARGE_CENTER_TRUST_PROXY,
     cookieSecure: value.RECHARGE_CENTER_COOKIE_SECURE ?? value.NODE_ENV === 'production',
     passwordLoginEnabled: value.RECHARGE_CENTER_PASSWORD_LOGIN_ENABLED ?? value.NODE_ENV !== 'production',
@@ -604,6 +608,7 @@ function loadConfig(env = process.env, options = {}) {
     sub2apiBaseUrl,
     sub2apiPublicUrl,
     sub2apiOrigin: new URL(sub2apiPublicUrl).origin,
+    sub2apiPublicOrigins: publicOrigins(sub2apiPublicUrl, value.SUB2API_PUBLIC_URLS, 'SUB2API_PUBLIC_URLS', value.NODE_ENV === 'production'),
     sub2apiRequestTimeoutMs: value.SUB2API_REQUEST_TIMEOUT_MS,
     sub2apiAdminApiKey: value.SUB2API_ADMIN_API_KEY || null,
     forwardClientFingerprint: value.SUB2API_FORWARD_CLIENT_FINGERPRINT,

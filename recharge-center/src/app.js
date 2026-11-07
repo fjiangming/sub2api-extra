@@ -179,7 +179,7 @@ function createApp({
         objectSrc: ["'none'"],
         baseUri: ["'none'"],
         formAction: ["'self'"],
-        frameAncestors: ["'self'", config.sub2apiOrigin]
+        frameAncestors: ["'self'", ...(config.sub2apiPublicOrigins || [config.sub2apiOrigin])]
       }
     },
     crossOriginEmbedderPolicy: false,
@@ -201,7 +201,7 @@ function createApp({
     if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) || !config.publicOrigin ||
         req.path.startsWith('/api/listener/')) return next();
     const origin = String(req.get('origin') || '');
-    if (!origin || origin !== config.publicOrigin) {
+    if (!origin || !(config.publicOrigins || [config.publicOrigin]).includes(origin)) {
       return next(new AppError('ORIGIN_REJECTED', '请求来源校验失败', { status: 403 }));
     }
     return next();

@@ -48,7 +48,7 @@ function createApp({ config, database, inspector, auth, leaderboard, settings = 
       directives: {
         defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'"], styleSrcAttr: ["'unsafe-inline'"],
         imgSrc: ["'self'", 'data:', 'https:', 'http:'], connectSrc: ["'self'"], objectSrc: ["'none'"], baseUri: ["'none'"],
-        frameAncestors: ["'self'", new URL(config.sub2apiPublicUrl).origin],
+        frameAncestors: ["'self'", ...(config.sub2apiPublicOrigins || [new URL(config.sub2apiPublicUrl).origin])],
         upgradeInsecureRequests: config.env === 'production' ? [] : null
       }
     }

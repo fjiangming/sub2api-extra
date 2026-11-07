@@ -135,8 +135,8 @@ function bearerToken(req) {
 
 function frameAncestorSources(config) {
   const sources = new Set(["'self'"]);
-  if (config.sub2apiPublicUrl) {
-    try { sources.add(new URL(config.sub2apiPublicUrl).origin); } catch {}
+  for (const value of config.sub2apiPublicOrigins || [config.sub2apiPublicUrl]) {
+    try { sources.add(new URL(value).origin); } catch {}
   }
   return [...sources];
 }

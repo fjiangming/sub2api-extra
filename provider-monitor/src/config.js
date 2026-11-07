@@ -1,4 +1,5 @@
 const path = require('path');
+const { publicOrigins } = require('./public-origins');
 
 function parseBoolean(value, fallback = false) {
   if (value == null || value === '') return fallback;
@@ -57,6 +58,8 @@ function loadConfig(env = process.env) {
     authMode: env.PROVIDER_MONITOR_AUTH_MODE || 'sub2api',
     sub2apiBaseUrl,
     sub2apiPublicUrl: normalizeUrl(env.SUB2API_PUBLIC_URL, sub2apiBaseUrl),
+    sub2apiPublicOrigins: publicOrigins(normalizeUrl(env.SUB2API_PUBLIC_URL, sub2apiBaseUrl),
+      env.SUB2API_PUBLIC_URLS, 'SUB2API_PUBLIC_URLS', (env.NODE_ENV || 'development') === 'production'),
     adminEmail: String(env.ADMIN_EMAIL || ''),
     adminPassword: String(env.ADMIN_PASSWORD || ''),
     sub2apiAdminToken: String(env.SUB2API_ADMIN_TOKEN || ''),

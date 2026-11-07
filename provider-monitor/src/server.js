@@ -649,7 +649,7 @@ function auditLogList(db, query) {
 
 function frameAncestorSources(config) {
   const sources = new Set(["'self'"]);
-  for (const value of [config.sub2apiPublicUrl, ...(config.allowedOrigins || [])]) {
+  for (const value of [...(config.sub2apiPublicOrigins || [config.sub2apiPublicUrl]), ...(config.allowedOrigins || [])]) {
     if (value === '*') {
       sources.add('*');
       continue;

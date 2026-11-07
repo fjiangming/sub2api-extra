@@ -2,6 +2,7 @@
 
 const path = require('node:path');
 const { z } = require('zod');
+const { publicOrigins } = require('./public-origins');
 
 const optionalString = z.preprocess((value) => value === '' ? undefined : value, z.string().trim().optional());
 const boolean = z.enum(['true', 'false']).transform((value) => value === 'true');
@@ -19,6 +20,7 @@ const schema = z.object({
   USAGE_LEADERBOARD_SETTINGS_DIR: optionalString,
   SUB2API_BASE_URL: z.string().trim().default('http://127.0.0.1:8080'),
   SUB2API_PUBLIC_URL: optionalString,
+  SUB2API_PUBLIC_URLS: optionalString,
   SUB2API_TIMEZONE: z.string().trim().default('Asia/Shanghai'),
   SUB2API_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30000).default(10000),
   SUB2API_FORWARD_CLIENT_FINGERPRINT: boolean.default(false),
@@ -78,6 +80,7 @@ function loadConfig(env = process.env) {
     settingsDir,
     sub2apiBaseUrl,
     sub2apiPublicUrl,
+    sub2apiPublicOrigins: publicOrigins(sub2apiPublicUrl, value.SUB2API_PUBLIC_URLS, 'SUB2API_PUBLIC_URLS', value.NODE_ENV === 'production'),
     timezone: value.SUB2API_TIMEZONE,
     upstreamTimeoutMs: value.SUB2API_REQUEST_TIMEOUT_MS,
     forwardClientFingerprint: value.SUB2API_FORWARD_CLIENT_FINGERPRINT,

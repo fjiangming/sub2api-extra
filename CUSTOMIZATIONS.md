@@ -1,5 +1,30 @@
 # 个性化功能维护台账
 
+## 2026-11-07：新旧域名并存与 yunhop.cc 加密回源准备
+
+用户授权兼容除 3X-UI、订阅管理和 Xray 节点之外的现有服务，并为 yunhop.cc 新增独立证书和 Nginx 8443 加密回源准备。用户随后明确保留当前 Cloudflare HTTP 回源，不修改 Cloudflare，仅将本轮代码推送到 extra main，应用镜像由用户自行更新。保留旧域名、原容器数据、计费合同和 fork 镜像通道，不修改排除服务的配置或资金数据。既有无关工作文件保持。
+
+- `recharge-center/src/public-origins.js`、`operations-center/src/public-origins.js`、`provider-monitor/src/public-origins.js`、`usage-leaderboard/src/public-origins.js`：独立镜像内提供同样的显式浏览器 Origin 列表解析；去重、拒绝通配符、账号、路径、参数和非 HTTP(S) 地址，生产别名仅允许 HTTPS。服务端 API 基址和持久凭据不使用这些别名。
+- 上述四个服务的 `src/config.js`：新增可选 `SUB2API_PUBLIC_URLS`，旧单地址继续有效；充值中心另支持 `RECHARGE_CENTER_PUBLIC_URLS`。
+- `recharge-center/src/app.js`、`operations-center/src/app.js`、`provider-monitor/src/server.js`、`usage-leaderboard/src/app.js`：嵌入白名单同时包含旧主站及显式新主站；充值请求来源精确匹配合法别名，原认证、CSRF、Cookie 和权限保持。供应商监控的跨域 API 配置继续单独管理。
+- `recharge-center/src/qr-service.js`：付款中转二维码接受显式充值域名列表，保留原订单路径、查询参数及凭据校验。
+- 四个服务的 `.env.example` 及 `recharge-center/docs/deployment-configuration.md`：说明可选主站别名及充值别名；最小配置模板保持原必填项，旧标准地址、付款链接、内网 API 地址和认证凭据继续有效。
+- 四个服务的 `tests/multi-domain.test.js`（新增）：共 13 项回归，覆盖来源解析、旧新 iframe CSP、充值双域 SSO、无 / null / 外域来源拒绝、CSRF 不放宽、host-only Cookie，以及二维码域名与订单路径约束；监控 iframe 别名不扩大跨域 API 授权。
+- `infinite-canvas/docs/nginx.conf.example`、`nginx-subpath.conf.example`：画布 CSP 加入新主站，清除登录参数和子路径跳转保留当前 Host。画布业务无需重建，按域隔离的浏览器历史不会自动迁移。
+- `operations-center/integrations/multi-domain/yunhop-services.conf`、`yunhop-tls.conf`、`yunhop-proxy.conf`（新增）：12 个明确新主机名同时支持原 80 HTTP 回源和独立 8443 TLS，共用相同路由，HTTP 入口直接代理，避免 Cloudflare HTTP 回源发生整站跳转循环；保留流式请求、WebSocket、主站维护与防取消配置、监控 / 画布子路径；`port_in_redirect off` 及明确的 HTTPS 子路径跳转防止公开跳转暴露源站端口或降级为 HTTP。
+- `operations-center/integrations/multi-domain/install-nginx.py`、`operations-center/docs/multi-domain-deployment.md`（新增）：根用户互斥、证书配对 / CA 校验、完整候选 Nginx 校验、私有备份和原子替换 / 失败回滚；记录 DNS、源站端口规则、严格回源和镜像发布 / 回滚步骤，不在脚本或文档中保存私钥。
+- `operations-center/integrations/multi-domain/install-app-env.py`（新增）：四份 `.env` 白名单候选 / 备份、完整 Compose 结构比对、保持属主权限的原子写入、并发修改保护和失败回滚；拒绝覆盖已有不同别名，不输出环境秘密，不在环境准备阶段重启容器。
+
+验证：充值中心 160 项、运营中心 376 项、供应商监控 341 项、排行榜 81 项完整测试全部通过，共 958 项。充值 / 运营 / 排行榜 `npm run check`、监控变更文件 `node --check` 和 `git diff --check` 通过。本轮无前端视觉改动，没有真实付款、付费模型请求或资金写入。
+
+北京时间 11-07 已安装用户在 Cloudflare 创建的 Origin 证书，SAN 为 yunhop.cc / *.yunhop.cc，有效至 2041-11-03；核对配对、官方 Origin RSA CA 签名和主机名。私钥仅位于服务器 `/etc/nginx/ssl/yunhop.cc/origin.key`（目录 0700，文件 0600），此前生成的无用私钥和 CSR 已删除。Nginx 安装成功，原始配置备份 `/root/sub2api-deploy/backups/yunhop-domain-20261107-203355-411132/before/`，最终禁止跳转暴露端口的配置备份 `/root/sub2api-deploy/backups/yunhop-domain-20261107-203549-931904/`。12 个新 Host 及主站画布 / 监控子路径的实际 SNI + CA 验证、普通 HTTPS 跳转均通过，旧主站 / 画布 / 运营 / 充值检查 200。15 个容器身份 / 启动时间、Nginx master、Xray 443、排除服务配置与证书散列均未改变。
+
+环境工具已在真实生产 Compose 上预演，通过后仅追加四份 `.env` 的主站别名及充值专用别名，前后完整结构比较符合预期，文件仍为 root / 0600，15 个容器均未重启。候选备份 `/root/sub2api-deploy/backups/yunhop-app-env-20261107-204456-438825/`；实际安装和原配置备份 `/root/sub2api-deploy/backups/yunhop-app-env-20261107-204600-493551/`。别名只随新容器启动生效，旧进程尚不支持新增变量。
+
+用户已授权本轮相关代码提交 / 推送，仍沿用现有 Actions / GHCR 发布，不修改发行工作流；四个生产应用镜像由用户自行更新，本轮不 pull 或重建容器。Cloudflare 配置和当前回源方式保持，部署说明将 8443 源站规则和 Full (strict) 明确为未来操作；新域名当前尚未完成边缘业务验收，源站 TLS 成功不能冒充边缘切换完成。主站菜单保留原绝对地址。新域名 HTTP 回源兼容修正、现有入口与双协议源站验证结果在本节追加。
+
+按用户最终回源安排，修正先前只做 HTTPS 跳转的新域名 80 入口，使 80 和 8443 共享同一 Nginx server 及业务规则；`/monitor` 跳转显式保持浏览器 HTTPS 地址。完整候选与生产 `nginx -t` 均通过，平滑重载，备份 `/root/sub2api-deploy/backups/yunhop-domain-20261107-220441-826433/`。34 项真实源站 HTTP / TLS 检查全部通过，覆盖 12 主机名、监控 / 画布子路径及无端口泄漏的重定向。现有 10 个公网入口全部 200；15 个容器身份 / 启动时间、Nginx master、排除服务配置散列均不变。yunhop.cc 公网当时仍为 Cloudflare 525，Cloudflare 未调整，不将它作为已完成验收的新业务入口；新应用由用户待镜像发布成功后自行更新。部署文档补充限定四服务的拉取、完整 revision 核对及更新命令。
+
 ## 2026-11-07：结果页仅显示已配置分组的检测类型
 
 用户要求降智检测或模型检测未配置任何分组时隐藏对应结果页签。本轮仅调整降智检测服务及本台账；以主站当前授权分组与管理员已启用的对应检测分组交集为准，不以历史条数或筛选结果判断。用户验收后明确授权提交 GitHub，本次据此提交并推送；保留其他模块和无关本地文件，不部署服务器。

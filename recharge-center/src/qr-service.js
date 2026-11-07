@@ -87,7 +87,7 @@ class QrService {
     let payload;
     if (payment?.relayUrl && this.config.accountLogStaticMode) {
       const relay = new URL(payment.relayUrl);
-      if (relay.origin !== this.config.publicOrigin || relay.username || relay.password || relay.search || relay.hash ||
+      if (!(this.config.publicOrigins || [this.config.publicOrigin]).includes(relay.origin) || relay.username || relay.password || relay.search || relay.hash ||
           !/^\/pay\/RC-\d{6}-[A-F0-9]{32}$/.test(relay.pathname)) {
         throw new AppError('PAYMENT_QR_UNAVAILABLE', '订单付款中转地址无效', { status: 503 });
       }

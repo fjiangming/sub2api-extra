@@ -15,12 +15,12 @@ server {
 
     add_header Referrer-Policy "no-referrer" always;
     add_header X-Content-Type-Options "nosniff" always;
-    add_header Content-Security-Policy "frame-ancestors 'self' https://aihub.fo2.us.ci https://aihubdirect.fo2.us.ci https://epoint2api.fjmooo.cn" always;
+    add_header Content-Security-Policy "frame-ancestors 'self' https://aihub.fo2.us.ci https://aihubdirect.fo2.us.ci https://epoint2api.fjmooo.cn https://yunhop.cc https://www.yunhop.cc" always;
     add_header Cache-Control "no-store" always;
 
     # Sub2API menu credentials are unused by this browser-only application.
     if ($infinite_canvas_login_query) {
-        return 302 https://canvas.fo2.us.ci$uri;
+        return 302 https://$host$uri;
     }
 
     # Fixed Sub2API target; the caller supplies their own model API key.

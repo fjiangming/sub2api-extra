@@ -2,6 +2,7 @@
 
 const path = require('path');
 const { z } = require('zod');
+const { publicOrigins } = require('./public-origins');
 
 const boolFromEnv = z.preprocess((value) => {
   if (typeof value === 'boolean') return value;
@@ -101,6 +102,7 @@ const schema = z.object({
   FINANCE_CASH_EXCHANGE_RATES: cashExchangeRates,
   SUB2API_BASE_URL: optionalUrl,
   SUB2API_PUBLIC_URL: optionalUrl,
+  SUB2API_PUBLIC_URLS: optionalString,
   OPERATIONS_CENTER_USER_MESSAGES_ENABLED: boolFromEnv.default(false),
   LATENCY_TELEMETRY_TOKEN: optionalIntegrationToken,
   LATENCY_TELEMETRY_DIRECTORY: optionalString,
@@ -305,6 +307,8 @@ function loadConfig(env = process.env, runtime = {}) {
     sub2apiBaseUrl: value.SUB2API_BASE_URL?.replace(/\/$/, '') || null,
     sub2apiPublicUrl: value.SUB2API_PUBLIC_URL?.replace(/\/$/, '') ||
       value.SUB2API_BASE_URL?.replace(/\/$/, '') || null,
+    sub2apiPublicOrigins: publicOrigins(value.SUB2API_PUBLIC_URL || value.SUB2API_BASE_URL,
+      value.SUB2API_PUBLIC_URLS, 'SUB2API_PUBLIC_URLS', value.NODE_ENV === 'production'),
     sub2apiAdminToken: value.SUB2API_ADMIN_TOKEN || null,
     userMessagesEnabled: value.OPERATIONS_CENTER_USER_MESSAGES_ENABLED,
     latencyTelemetry: {
