@@ -8,8 +8,7 @@ function installModelRoutes(app, runtime, { requireAuth, requireAdmin, requireCs
   const missing = () => new AppError('MODEL_RESULT_NOT_FOUND', '模型检测结果不存在、未启用或无权访问', { status: 404 });
   const readableGroups = async req => {
     await runtime.auth.refreshUser(req.auth);
-    const enabled = new Map(runtime.modelStore.enabledGroups().map(group => [group.group_id, group]));
-    return (await discoverGroups(req, runtime)).filter(group => enabled.get(String(group.id))?.platform === group.platform);
+    return runtime.modelStore.visibleGroups(await discoverGroups(req, runtime));
   };
   const requireGroup = async (req, admin = false) => {
     const groups = admin ? await discoverGroups(req, runtime) : await readableGroups(req);

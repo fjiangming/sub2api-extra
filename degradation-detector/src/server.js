@@ -806,7 +806,8 @@ function createApp(config, overrides = {}) {
     try {
       setNoStore(res);
       await runtime.auth.refreshUser(req.auth);
-      const groups = await availableGroups(req, runtime);
+      const discovered = await discoverGroups(req, runtime);
+      const groups = platformGroups(discovered, runtime);
       const cacheSnapshot = groups.length ? await runtime.groupMetrics.getRates(
         runtime.store.listEnabledMonitors(config.serviceOwnerId).map((monitor) => monitor.group_id)
       ) : null;
@@ -822,6 +823,7 @@ function createApp(config, overrides = {}) {
       const settings = runtime.store.getServiceSettings();
       res.json({
         groups: payload,
+        detection_tabs: { iq: groups.length > 0, model: runtime.modelStore.visibleGroups(discovered).length > 0 },
         platforms: platformIds.map((platform) => ({
           id: platform,
           label: runtime.store.getPlatformTest(platform)?.label || platform

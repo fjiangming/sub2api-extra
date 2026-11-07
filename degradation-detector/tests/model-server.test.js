@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { createApp } = require('../src/server');
 const { defaultModelPlatform } = require('../src/model-config');
-const { defaultTests, listen, testConfig } = require('./helpers');
+const { defaultTests, listen, seedRuntime, testConfig } = require('./helpers');
 
 test('model admin APIs enforce live role, CSRF, group scope, encryption, atomic saves and read-only results', async t => {
   let admin = true; let visible = true;
@@ -27,6 +27,8 @@ test('model admin APIs enforce live role, CSRF, group scope, encryption, atomic 
   const get = (url, who = u) => fetch(http.baseUrl + url, { headers: headers(who) });
   const send = (url, body, who = a, csrf = true, method = 'POST') => fetch(http.baseUrl + url, { method, headers: headers(who, csrf), body: JSON.stringify(body) });
   assert.equal((await (await get('/api/model-results')).json()).groups.length, 0);
+  const tabs = async (who = u) => (await (await get('/api/results', who)).json()).detection_tabs;
+  assert.deepEqual(await tabs(), { iq: false, model: false });
   assert.equal((await get('/admin/model-config.js')).status, 403);
   assert.equal((await get('/admin/model-config.css')).status, 403);
   assert.equal((await fetch(http.baseUrl + '/api/model-results')).status, 401);
@@ -47,6 +49,7 @@ test('model admin APIs enforce live role, CSRF, group scope, encryption, atomic 
   assert.equal(configuration.platforms[0].groups[0].model_detection.key_configured, true);
   assert.doesNotMatch(JSON.stringify(configuration), /sk-only|cct-dedicated|key_cipher|key_context|key_fingerprint/);
   assert.equal(runtime.store.listEnabledMonitors(runtime.config.serviceOwnerId).length, 0, 'IQ remains disabled while model detection works');
+  assert.deepEqual(await tabs(), { iq: false, model: true }, 'enabled groups show a tab before any history exists');
   const results = await (await get('/api/model-results')).json();
   assert.deepEqual(results.groups.map(group => group.id), ['1']);
   assert.equal(Object.keys(results.groups[0].channels).length, 2);
@@ -77,6 +80,8 @@ test('model admin APIs enforce live role, CSRF, group scope, encryption, atomic 
   visible = false;
   assert.equal((await get(`/api/model-results/${queued[0].id}`)).status, 404);
   assert.equal((await (await get('/api/model-results')).json()).groups.length, 0);
+  assert.deepEqual(await tabs(), { iq: false, model: false }, 'other users enabled groups do not reveal a tab');
+  assert.deepEqual(await tabs(a), { iq: false, model: true });
   visible = true;
 
   const oldClient = { schedule_mode: 'daily', schedule_times: ['10:00'], schedule_interval_minutes: 60, platforms: [{ id: 'openai', enabled: false, test: defaultTests.openai, groups: allGroups.map(group => ({ id: group.id, enabled: false })) }] };
@@ -91,6 +96,16 @@ test('model admin APIs enforce live role, CSRF, group scope, encryption, atomic 
   assert.equal(runtime.modelStore.platform('openai').target_url, 'https://relay.example.com');
   assert.equal((await send('/api/admin/groups/1/model-runs/bazaarlink', { ids: [queued[0].id] }, a, true, 'DELETE')).status, 200);
   assert.equal(runtime.modelStore.run(queued[1].id).status, 'completed', 'other channel history is preserved');
+  seedRuntime(runtime, allGroups);
+  assert.deepEqual(await tabs(), { iq: true, model: true });
+  visible = false;
+  assert.deepEqual(await tabs(), { iq: false, model: false }, 'revoked group access hides both types');
+  visible = true;
+  runtime.modelStore.db.prepare('UPDATE model_groups SET enabled=0 WHERE group_id=?').run('1');
+  assert.deepEqual(await tabs(), { iq: true, model: false }, 'model history cannot keep a disabled type visible');
+  assert.deepEqual(await tabs(a), { iq: true, model: true }, 'another authorized enabled group still counts');
+  runtime.store.setMonitorEnabled(runtime.config.serviceOwnerId, '1', false);
+  assert.deepEqual(await tabs(), { iq: false, model: false });
   admin = false;
   assert.equal((await get('/api/admin/config', a)).status, 403);
   assert.equal((await send('/api/admin/groups/1/model-runs', {})).status, 403);

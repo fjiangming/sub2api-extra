@@ -181,8 +181,93 @@ async function main() {
     await admin.locator('#confirm-accept').click();
     await admin.waitForFunction(() => document.querySelectorAll('#model-admin-history-list .model-admin-history-row').length === 0);
     assert(preview.runtime.modelStore.counts('8', 'bazaarlink').total > 0, 'other channel must survive a clear');
+
+    const iqGroups = preview.runtime.store.listMonitors(preview.runtime.config.serviceOwnerId);
+    const modelGroups = preview.runtime.modelStore.groups();
+    const setEnabled = (iq, model) => preview.runtime.store.db.transaction(() => {
+      for (const group of iqGroups) preview.runtime.store.setMonitorEnabled(group.user_id, group.group_id, iq && Boolean(group.enabled));
+      const update = preview.runtime.store.db.prepare('UPDATE model_groups SET enabled=? WHERE group_id=?');
+      for (const group of modelGroups) update.run(model && group.enabled ? 1 : 0, group.group_id);
+    })();
+    const assertTabs = async (iq, model, selected) => {
+      await page.waitForFunction(({ iq, model, selected }) => {
+        const $ = id => document.getElementById(id);
+        return $('iq-tab').hidden === !iq && $('model-tab').hidden === !model
+          && $('iq-pane').hidden === (selected !== 'iq') && $('model-pane').hidden === (selected !== 'model')
+          && $('detection-empty').hidden === Boolean(selected);
+      }, { iq, model, selected });
+      assert.equal(await page.locator('.result-tabs').isVisible(), iq || model);
+      for (const name of ['iq', 'model']) {
+        assert.equal(await page.locator(`#${name}-tab`).getAttribute('aria-selected'), String(name === selected));
+        assert.equal(await page.locator(`#${name}-tab`).getAttribute('tabindex'), name === selected ? '0' : '-1');
+      }
+    };
+    await page.locator('#model-dialog-close').click();
+    await assertTabs(true, true, 'model');
+    setEnabled(false, true);
+    await page.evaluate(() => refresh());
+    await assertTabs(false, true, 'model');
+    await page.goto(`${preview.baseUrl}/results`);
+    await assertTabs(false, true, 'model');
+    await page.locator('#model-grid .model-card').first().waitFor();
+    assert.match(await page.locator('#model-grid').innerText(), /尚无检测结果/);
+    await fit(page); await shot(page, 'model-only');
+    await page.locator('[data-model-open="8"][data-model-channel="bazaarlink"]').click();
+    await page.locator('#model-detail .items-table').waitFor();
+    setEnabled(true, false);
+    await page.evaluate(() => refresh());
+    await assertTabs(true, false, 'iq');
+    assert.equal(await page.locator('#model-dialog').evaluate(el => el.open), false);
+    await page.goto(`${preview.baseUrl}/results#model`);
+    await assertTabs(true, false, 'iq');
+    await page.locator('#iq-tab').focus();
+    for (const key of ['ArrowRight', 'ArrowLeft', 'End', 'Home']) {
+      await page.keyboard.press(key);
+      await assertTabs(true, false, 'iq');
+      assert.equal(await page.locator('#iq-tab').evaluate(el => el === document.activeElement), true);
+    }
+    await fit(page); await shot(page, 'iq-only');
+    setEnabled(true, true);
+    await page.evaluate(() => refresh());
+    await assertTabs(true, true, 'iq');
+    await page.keyboard.press('End');
+    await assertTabs(true, true, 'model');
+    const originalPlatform = preview.runtime.modelStore.platform('openai');
+    const restrictedPlatform = structuredClone(originalPlatform);
+    restrictedPlatform.channels.cctest.enabled = false;
+    const updatePlatform = preview.runtime.store.db.prepare('UPDATE model_platforms SET config_json=? WHERE platform=?');
+    updatePlatform.run(JSON.stringify(restrictedPlatform), 'openai');
+    await page.locator('#model-refresh').click();
+    await page.waitForFunction(() => !document.getElementById('model-refresh').classList.contains('busy'));
+    await page.locator('#model-platform-filter').selectOption('openai');
+    await page.locator('#model-channel-filter').selectOption('cctest');
+    await page.locator('#model-grid .empty-list').waitFor();
+    await assertTabs(true, true, 'model');
+    await page.route('**/api/results', route => route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":{"message":"Temporary failure"}}' }));
+    await page.evaluate(() => refresh().catch(() => {}));
+    await assertTabs(true, true, 'model');
+    await page.unroute('**/api/results');
+    updatePlatform.run(JSON.stringify(originalPlatform), 'openai');
+    await page.locator('#iq-tab').click();
+    await page.locator('#group-grid .detect-button').first().click();
+    await page.frameLocator('#result-detail iframe').locator('svg').waitFor();
+    setEnabled(false, true);
+    await page.evaluate(() => refresh());
+    await assertTabs(false, true, 'model');
+    assert.equal(await page.locator('#result-dialog').evaluate(el => el.open), false);
+    setEnabled(false, false);
+    await page.evaluate(() => refresh());
+    await assertTabs(false, false, null);
+    await page.goto(`${preview.baseUrl}/results#model`);
+    await assertTabs(false, false, null);
+    assert.equal(await page.locator('#page-title').innerText(), '检测结果');
+    await fit(page); await shot(page, 'no-configured-groups');
+    setEnabled(false, true);
+    await page.locator('#refresh-button').click();
+    await assertTabs(false, true, 'model');
+    setEnabled(true, true);
     assert.deepEqual(errors, []); assert.deepEqual(external, []); assert.equal(preview.outboundCalls, 0);
-    console.log(JSON.stringify({ status: 'PASS', checks: 'Independent model config and schedules, per-group models, manual and platform runs, all 8 probe items, all 11 scores and 6 audit rounds, batch/all history deletion, original IQ preview and source, live read-only boundaries, mobile 390/320, dark mode, escaping and zero paid calls', screenshots: directory, pageErrors: errors, externalRequests: external }, null, 2));
+    console.log(JSON.stringify({ status: 'PASS', checks: 'Independent model config and schedules, per-group models, manual and platform runs, all 8 probe items, all 11 scores and 6 audit rounds, batch/all history deletion, original IQ preview and source, live read-only boundaries, permission-scoped tabs for both/one/neither type, automatic fallback and dialog cleanup, keyboard navigation, filtered-empty and no-history groups, request failures, mobile 390/320, dark mode, escaping and zero paid calls', screenshots: directory, pageErrors: errors, externalRequests: external }, null, 2));
   } catch (error) {
     for (const [index, context] of browser.contexts().entries()) {
       const page = context.pages()[0];

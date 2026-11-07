@@ -51,6 +51,10 @@ class ModelStore {
   group(id) { return this.db.prepare('SELECT * FROM model_groups WHERE group_id=?').get(String(id)); }
   groups() { return this.db.prepare('SELECT * FROM model_groups ORDER BY group_id').all(); }
   enabledGroups() { return this.groups().filter(group => group.enabled && this.platform(group.platform).enabled); }
+  visibleGroups(groups) {
+    const enabled = new Map(this.enabledGroups().map(group => [group.group_id, group.platform]));
+    return groups.filter(group => enabled.get(String(group.id)) === group.platform);
+  }
   nextAt(from = Date.now()) {
     const schedule = this.schedule();
     return schedule.enabled ? nextScheduledRunAt({ mode: schedule.mode, times: schedule.times, intervalMinutes: schedule.interval_minutes }, from, this.store.config.scheduleTimezone) : null;

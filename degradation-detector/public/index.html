@@ -33,7 +33,7 @@
         <span class="page-mark" aria-hidden="true"><i data-lucide="brain-circuit"></i></span>
         <div class="page-heading">
           <div class="page-heading-row">
-            <h1 id="page-title">降智检测</h1>
+            <h1 id="page-title">检测结果</h1>
             <p id="capability-note" class="capability-note" role="note">
               <i data-lucide="info" aria-hidden="true"></i>
               <span>疑似降智 ≠ 不可用：多数日常任务仍可胜任，本检测主要为对模型能力上限要求较高的用户提供参考。</span>
@@ -52,11 +52,12 @@
       </div>
     </header>
 
-    <nav class="result-tabs" role="tablist" aria-label="检测类型">
-      <button id="iq-tab" role="tab" aria-selected="true" aria-controls="iq-pane" type="button"><i data-lucide="brain-circuit"></i>降智检测<span id="iq-tab-count"></span></button>
-      <button id="model-tab" role="tab" aria-selected="false" aria-controls="model-pane" tabindex="-1" type="button"><i data-lucide="scan-search"></i>模型检测</button>
+    <nav class="result-tabs" role="tablist" aria-label="检测类型" hidden>
+      <button id="iq-tab" role="tab" aria-selected="false" aria-controls="iq-pane" tabindex="-1" type="button" hidden><i data-lucide="brain-circuit"></i>降智检测<span id="iq-tab-count"></span></button>
+      <button id="model-tab" role="tab" aria-selected="false" aria-controls="model-pane" tabindex="-1" type="button" hidden><i data-lucide="scan-search"></i>模型检测</button>
     </nav>
-    <section id="iq-pane" role="tabpanel" aria-labelledby="iq-tab">
+    <div id="detection-empty" class="empty-list" role="status" tabindex="-1" hidden><i data-lucide="folder-search"></i><p>暂无可查看的检测分组</p></div>
+    <section id="iq-pane" role="tabpanel" aria-labelledby="iq-tab" hidden>
       <section class="toolbar" aria-label="分组筛选">
       <div class="select-control">
         <i data-lucide="list-filter"></i>

@@ -3,7 +3,7 @@
   const $ = id => document.getElementById(id);
   const ui = window.ModelResultRenderer;
   const { html, badge, icon, duration } = ui;
-  const state = { view: 'iq', ready: false, data: null, platform: '', channel: '', busy: false, groupId: '', selectedChannel: '', history: [], cursor: null, selectedId: null, ticket: 0, detail: null, opener: null };
+  const state = { view: location.hash === '#model' ? 'model' : 'iq', ready: false, available: { iq: false, model: false }, data: null, platform: '', channel: '', busy: false, groupId: '', selectedChannel: '', history: [], cursor: null, selectedId: null, ticket: 0, detail: null, opener: null };
   const names = { bazaarlink: 'Bazaarlink Probe', cctest: 'CCTest' };
   const date = timestamp => timestamp ? ui.formatDate(timestamp * 1000) : '尚无记录';
   const group = () => state.data?.groups.find(item => item.id === state.groupId);
@@ -24,6 +24,10 @@
       $('model-platform-filter').value = state.data.platforms.some(item => item.id === selected) ? selected : '';
       state.platform = $('model-platform-filter').value;
       renderGroups();
+      if (!state.data.groups.length) {
+        state.available.model = false;
+        setView(state.view, false, false);
+      }
       if ($('model-dialog').open) {
         if (!group()?.channels[state.selectedChannel]) $('model-dialog').close();
         else {
@@ -53,15 +57,28 @@
     }).join('') || '<div class="empty-list"><i data-lucide="folder-search"></i><p>当前筛选下暂无已启用的模型检测分组。</p></div>';
     refreshIcons();
   }
-  function setView(view, focus = false) {
+  function setView(view, focus = false, reload = true) {
+    if (!state.available[view]) view = state.available.iq ? 'iq' : state.available.model ? 'model' : null;
     state.view = view;
+    const iq = view === 'iq';
     const model = view === 'model';
-    for (const [id, hidden] of [['iq-pane', model], ['model-pane', !model], ['page-meta', model], ['model-meta', !model], ['capability-note', model], ['refresh-button', model], ['model-refresh', !model]]) $(id).hidden = hidden;
-    $('page-title').textContent = model ? '模型检测' : '降智检测';
-    document.querySelector('.page-mark').innerHTML = icon(model ? 'scan-search' : 'brain-circuit');
-    for (const name of ['iq', 'model']) { const tab = $(`${name}-tab`); tab.setAttribute('aria-selected', String(name === view)); tab.tabIndex = name === view ? 0 : -1; if (focus && name === view) tab.focus(); }
+    const tabs = document.querySelector('.result-tabs');
+    for (const [id, hidden] of [['iq-pane', !iq], ['model-pane', !model], ['page-meta', !iq], ['model-meta', !model], ['capability-note', !iq], ['refresh-button', model], ['model-refresh', !model], ['detection-empty', Boolean(view)]]) $(id).hidden = hidden;
+    $('page-title').textContent = model ? '模型检测' : iq ? '降智检测' : '检测结果';
+    document.querySelector('.page-mark').innerHTML = icon(model ? 'scan-search' : iq ? 'brain-circuit' : 'folder-search');
+    const focusedTab = document.activeElement?.closest('.result-tabs button');
+    tabs.hidden = !state.available.iq && !state.available.model;
+    for (const name of ['iq', 'model']) {
+      const tab = $(`${name}-tab`);
+      tab.hidden = !state.available[name];
+      tab.setAttribute('aria-selected', String(name === view));
+      tab.tabIndex = name === view ? 0 : -1;
+    }
+    if (!state.available.iq && $('result-dialog').open) $('result-dialog').close();
+    if (!state.available.model && $('model-dialog').open) $('model-dialog').close();
+    if (focus || focusedTab?.hidden) (view ? $(`${view}-tab`) : $('detection-empty')).focus();
     refreshIcons();
-    if (model) load();
+    if (model && reload) load();
   }
   function renderTabs() {
     $('model-channel-tabs').innerHTML = Object.entries(group().channels).map(([key, entry]) => {
@@ -139,10 +156,22 @@
   $('model-dialog').addEventListener('click', event => { if (event.target !== $('model-dialog')) return; const b = event.target.getBoundingClientRect(); if (event.clientX < b.left || event.clientX > b.right || event.clientY < b.top || event.clientY > b.bottom) event.target.close(); });
   $('iq-tab').addEventListener('click', () => setView('iq'));
   $('model-tab').addEventListener('click', () => setView('model'));
-  document.querySelector('.result-tabs').addEventListener('keydown', event => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) { event.preventDefault(); setView(event.key === 'Home' ? 'iq' : event.key === 'End' ? 'model' : state.view === 'model' ? 'iq' : 'model', true); } });
+  document.querySelector('.result-tabs').addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    const available = ['iq', 'model'].filter(name => state.available[name]);
+    if (!available.length) return;
+    event.preventDefault();
+    const index = available.indexOf(state.view);
+    setView(available[event.key === 'Home' ? 0 : event.key === 'End' ? available.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + available.length) % available.length], true);
+  });
   $('model-platform-filter').addEventListener('change', event => { state.platform = event.target.value; renderGroups(); });
   $('model-channel-filter').addEventListener('change', event => { state.channel = event.target.value; renderGroups(); });
   $('model-refresh').addEventListener('click', load);
-  document.addEventListener('detector:refreshed', event => { state.ready = true; $('iq-tab-count').textContent = `${event.detail.groups} 个分组`; if (state.view === 'model') load(); });
-  if (location.hash === '#model') setView('model');
+  document.addEventListener('detector:refreshed', event => {
+    state.ready = true;
+    state.available = event.detail.tabs || { iq: event.detail.groups > 0, model: true };
+    $('iq-tab-count').textContent = `${event.detail.groups} 个分组`;
+    if (!state.available.model) { state.data = null; $('model-grid').replaceChildren(); }
+    setView(state.view);
+  });
 })();
