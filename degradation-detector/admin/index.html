@@ -7,7 +7,11 @@
   <title>降智检测配置</title>
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/admin/config.css">
+  <link rel="stylesheet" href="/model-results.css">
+  <link rel="stylesheet" href="/admin/model-config.css">
   <script src="/vendor/lucide/lucide.min.js" defer></script>
+  <script src="/model-result-renderer.js" defer></script>
+  <script src="/admin/model-config.js" defer></script>
   <script src="/admin/config.js" defer></script>
 </head>
 <body>
@@ -47,7 +51,7 @@
       <section class="schedule-band" aria-labelledby="schedule-title">
         <div class="section-heading">
           <span class="section-icon"><i data-lucide="clock-3"></i></span>
-          <div><h2 id="schedule-title">自动检测计划</h2><p id="schedule-next">Asia/Shanghai</p></div>
+          <div><h2 id="schedule-title">降智检测计划</h2><p id="schedule-next">Asia/Shanghai</p></div>
         </div>
         <div class="schedule-editor">
           <div class="schedule-mode-switch" role="radiogroup" aria-label="自动检测计划类型">
@@ -80,6 +84,19 @@
         </div>
       </section>
 
+      <section class="schedule-band" aria-labelledby="model-plan-title">
+        <div class="section-heading"><span class="section-icon"><i data-lucide="scan-search"></i></span><div><h2 id="model-plan-title">模型检测计划</h2><p>独立计划 · Asia/Shanghai</p></div></div>
+        <div class="schedule-editor">
+          <label class="model-check model-plan-toggle"><input id="model-schedule-enabled" type="checkbox"><span>启用自动模型检测</span></label>
+          <div class="schedule-mode-switch" role="radiogroup" aria-label="模型检测计划类型">
+            <label><input id="model-schedule-daily" name="model-schedule-mode" type="radio" value="daily" checked><span><i data-lucide="calendar-clock"></i>固定时间</span></label>
+            <label><input id="model-schedule-mode-interval" name="model-schedule-mode" type="radio" value="interval"><span><i data-lucide="timer-reset"></i>间隔执行</span></label>
+          </div>
+          <div id="model-schedule-daily-fields" class="schedule-fields"><span class="schedule-field-label">每日执行</span><div id="model-schedule-times" class="schedule-times"></div><button id="model-schedule-add" class="icon-button schedule-time-add" type="button" title="添加模型检测时间" aria-label="添加模型检测时间"><i data-lucide="plus"></i></button></div>
+          <div id="model-schedule-interval-fields" class="schedule-fields" hidden><span class="schedule-field-label">每隔</span><label class="interval-field"><input id="model-schedule-interval" type="number" min="1" max="43200" value="360" required aria-label="模型检测间隔分钟"><span>分钟</span></label></div>
+        </div>
+      </section>
+
       <details class="storage-band">
         <summary>
           <span class="section-icon"><i data-lucide="database"></i></span>
@@ -93,6 +110,7 @@
           <label class="field"><span>每组作品保留数量（份）</span><input id="storage-artifact-count" type="number" min="60" max="2000" required></label>
         </div>
         <p class="storage-note">自动清理保留累计统计，并保护最近 60 条历史；清理后的详细内容不可查看或复核。管理员清空历史会同时清空累计统计。</p>
+        <p class="storage-note">模型检测按分组和渠道分别保留历史，详细响应使用相同保留上限；与降智检测分别清理。</p>
         <p id="storage-maintenance" class="storage-note"></p>
       </details>
 
@@ -169,6 +187,13 @@
         <i data-lucide="chevrons-down"></i><span>加载更早记录</span>
       </button>
     </footer>
+  </dialog>
+
+  <dialog id="model-admin-history-dialog" class="yzai-pelican-modal model-modal" aria-labelledby="model-admin-history-title">
+    <header class="yzai-pelican-head"><div class="dialog-copy"><h2 id="model-admin-history-title">模型检测历史</h2><p id="model-admin-history-meta" class="yzai-pelican-sub"></p></div><div class="dialog-actions"><button id="model-admin-history-refresh" class="icon-button" type="button" title="刷新模型历史" aria-label="刷新模型历史"><i data-lucide="refresh-cw"></i></button><button id="model-admin-history-close" class="icon-button" type="button" title="关闭模型历史" aria-label="关闭模型历史"><i data-lucide="x"></i></button></div></header>
+    <div class="model-admin-toolbar"><select id="model-admin-channel" aria-label="模型历史检测渠道"><option value="bazaarlink">Bazaarlink Probe</option><option value="cctest">CCTest</option></select><label class="model-check"><input id="model-admin-select-all" type="checkbox"><span>全选当前列表</span></label><span id="model-admin-selection"></span><button id="model-admin-delete-selected" class="button danger" type="button"><i data-lucide="trash-2"></i>删除选中</button><button id="model-admin-clear-all" class="button danger" type="button"><i data-lucide="list-x"></i>清空该渠道</button></div>
+    <div class="yzai-pelican-body model-body"><nav id="model-admin-history-list" class="yzai-pelican-history" aria-label="模型检测历史"></nav><section id="model-admin-detail" class="yzai-pelican-detail" aria-live="polite"></section></div>
+    <footer class="model-admin-history-footer"><button id="model-admin-history-more" class="button" type="button" hidden><i data-lucide="chevrons-down"></i>加载更早记录</button></footer>
   </dialog>
 
   <dialog id="review-dialog" class="review-modal" aria-labelledby="review-title">

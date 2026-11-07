@@ -7,7 +7,10 @@
   "scripts": {
     "start": "node --env-file=.env src/server.js",
     "dev": "node --env-file=.env --watch src/server.js",
-    "test": "node --test --test-concurrency=1 tests/*.test.js"
+    "test": "node --test --test-concurrency=1 tests/*.test.js",
+    "check": "node scripts/check.cjs",
+    "preview:model": "node scripts/model-preview.cjs",
+    "test:model-ui": "node scripts/model-browser-check.cjs"
   },
   "engines": {
     "node": ">=20.18.1"

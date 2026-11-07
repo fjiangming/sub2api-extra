@@ -6,6 +6,7 @@ const { load: loadHtml } = require('cheerio');
 const safeRegex = require('safe-regex2');
 const { z } = require('zod');
 const { normalizeVisualReview } = require('./visual-config');
+const { modelGroupSchema, modelPlatformSchema, modelScheduleSchema } = require('./model-config');
 
 const apiTypes = [
   'responses',
@@ -339,6 +340,7 @@ const groupSelectionSchema = z.object({
   id: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,99}$/),
   enabled: z.boolean(),
   key: z.string().max(8192).optional(),
+  model_detection: modelGroupSchema.optional(),
   test: testSchema.optional()
 }).strict();
 
@@ -346,6 +348,7 @@ const platformSelectionSchema = z.object({
   id: z.string().trim().toLowerCase().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/),
   enabled: z.boolean(),
   test: testSchema,
+  model_detection: modelPlatformSchema.optional(),
   groups: z.array(groupSelectionSchema).max(2000)
 }).strict();
 
@@ -372,6 +375,7 @@ const adminConfigurationSchema = z.object({
   schedule_times: z.array(dailyTimeSchema).min(1).max(24),
   schedule_interval_minutes: z.coerce.number().int().min(1).max(43200),
   storage_policy: storagePolicySchema.optional(),
+  model_schedule: modelScheduleSchema.optional(),
   platforms: z.array(platformSelectionSchema).max(64)
 }).strict().superRefine((value, context) => {
   const platforms = new Set();

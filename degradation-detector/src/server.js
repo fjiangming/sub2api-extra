@@ -15,6 +15,10 @@ const { GroupMetrics, publicGroupCacheStats } = require('./group-metrics');
 const { sanitizeReviewDiagnostic } = require('./review-http');
 const { Scheduler } = require('./scheduler');
 const { MaintenanceService } = require('./maintenance');
+const { ModelStore } = require('./model-store');
+const { ModelDetection } = require('./model-detection');
+const { defaultModelPlatform, modelGroupContext, publicModelPlatform } = require('./model-config');
+const { installModelRoutes } = require('./model-routes');
 const { Store, publicRun, publicValidationResult } = require('./store');
 const { Sub2ApiClient } = require('./sub2api-client');
 const { publicVisualSettings, storeVisualTest } = require('./visual-config');
@@ -153,7 +157,8 @@ function versionFrontendAssets(html, version) {
     .replaceAll('href="/styles.css"', `href="/styles.css?v=${version}"`)
     .replaceAll('src="/app.js"', `src="/app.js?v=${version}"`)
     .replaceAll('href="/admin/config.css"', `href="/admin/config.css?v=${version}"`)
-    .replaceAll('src="/admin/config.js"', `src="/admin/config.js?v=${version}"`);
+    .replaceAll('src="/admin/config.js"', `src="/admin/config.js?v=${version}"`)
+    .replace(/(href|src)="(\/(?:model-results\.(?:js|css)|model-result-renderer\.js|admin\/model-config\.(?:js|css)))"/g, `$1="$2?v=${version}"`);
 }
 
 function normalizePreviewAncestors(values) {
@@ -331,6 +336,7 @@ async function adminConfigurationPayload(req, runtime) {
         label: test.label || id,
         enabled: Boolean(stored?.enabled && stored?.test),
         test: publicTest(test),
+        model_detection: publicModelPlatform(runtime.modelStore.platform(id) || defaultModelPlatform(id)),
         groups: groups
           .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
           .map((group) => {
@@ -346,7 +352,15 @@ async function adminConfigurationPayload(req, runtime) {
               key_configured: keyConfigured,
               test: publicTest(groupTest),
               history_count: historyCounts.get(String(group.id)) || 0,
-              history_archived: archiveCounts.get(String(group.id)) || 0
+              history_archived: archiveCounts.get(String(group.id)) || 0,
+              model_detection: (() => {
+                const modelGroup = runtime.modelStore.group(group.id);
+                let configured = false;
+                if (modelGroup?.key_cipher) {
+                  try { runtime.vault.decrypt(modelGroupContext(group.id), modelGroup.key_cipher); configured = true; } catch {}
+                }
+                return { enabled: Boolean(modelGroup?.enabled), key_configured: configured, models: modelGroup ? JSON.parse(modelGroup.models_json) : {} };
+              })()
             };
           })
       };
@@ -362,6 +376,7 @@ async function adminConfigurationPayload(req, runtime) {
     maintenance_last_run_at: settings.maintenance_last_run_at == null ? null : settings.maintenance_last_run_at / 1000,
     maintenance_last_result: settings.maintenance_last_result,
     updated_at: settings.updated_at / 1000,
+    model_schedule: runtime.modelStore.schedule(),
     platforms
   };
 }
@@ -445,17 +460,21 @@ async function saveAdminConfiguration(req, runtime) {
     }
   }
 
-  runtime.store.saveAdminConfiguration({
-    scheduleMode: submitted.schedule_mode,
-    scheduleTimes: submitted.schedule_times,
-    scheduleIntervalMinutes: submitted.schedule_interval_minutes,
-    scheduleTimezone: runtime.config.scheduleTimezone,
-    storagePolicy: submitted.storage_policy,
-    updatedBy: String(req.auth.user.id),
-    serviceOwnerId: runtime.config.serviceOwnerId,
-    platforms: submitted.platforms,
-    groups: configuredGroups
-  });
+  const modelInput = runtime.modelDetection.prepareConfiguration(submitted, discovered);
+  runtime.store.db.transaction(() => {
+    runtime.store.saveAdminConfiguration({
+      scheduleMode: submitted.schedule_mode,
+      scheduleTimes: submitted.schedule_times,
+      scheduleIntervalMinutes: submitted.schedule_interval_minutes,
+      scheduleTimezone: runtime.config.scheduleTimezone,
+      storagePolicy: submitted.storage_policy,
+      updatedBy: String(req.auth.user.id),
+      serviceOwnerId: runtime.config.serviceOwnerId,
+      platforms: submitted.platforms,
+      groups: configuredGroups
+    });
+    if (modelInput) runtime.modelStore.save(modelInput);
+  })();
   return adminConfigurationPayload(req, runtime);
 }
 
@@ -523,6 +542,8 @@ function createRuntime(config, overrides = {}) {
   const store = overrides.store || new Store(config);
   store.prepareServiceOwnership?.(config.serviceOwnerId);
   const vault = overrides.vault || new CredentialVault(config);
+  const modelStore = overrides.modelStore || new ModelStore(store);
+  const modelDetection = overrides.modelDetection || new ModelDetection({ config, store, modelStore, vault, ...overrides.modelDependencies });
   const sub2api = overrides.sub2api || new Sub2ApiClient(config, overrides.fetchImpl);
   const auth = overrides.auth || new AuthService(config, sub2api);
   const groupMetrics = overrides.groupMetrics || new GroupMetrics(config);
@@ -533,10 +554,10 @@ function createRuntime(config, overrides = {}) {
     vault
   });
   const maintenance = overrides.maintenance || new MaintenanceService({
-    config, store, isIdle: () => scheduler.active?.size === 0 && scheduler.queue?.length === 0
+    config, store, modelStore, isIdle: () => scheduler.active?.size === 0 && scheduler.queue?.length === 0 && modelDetection.active.size === 0
   });
-  const scheduler = overrides.scheduler || new Scheduler({ config, store, runner, maintenance });
-  return { config, store, vault, sub2api, auth, groupMetrics, runner, scheduler, maintenance };
+  const scheduler = overrides.scheduler || new Scheduler({ config, store, runner, maintenance, modelDetection });
+  return { config, store, vault, sub2api, auth, groupMetrics, runner, scheduler, maintenance, modelStore, modelDetection };
 }
 
 function createApp(config, overrides = {}) {
@@ -577,6 +598,7 @@ function createApp(config, overrides = {}) {
   const requireAuth = runtime.auth.middleware();
   const requireAdmin = runtime.auth.adminMiddleware();
   const requireCsrf = runtime.auth.csrfMiddleware();
+  installModelRoutes(app, runtime, { requireAuth, requireAdmin, requireCsrf, runLimiter, historyLimiter, discoverGroups, setNoStore });
 
   app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
@@ -586,7 +608,9 @@ function createApp(config, overrides = {}) {
     path.join(publicRoot, 'app.js'),
     path.join(publicRoot, 'styles.css'),
     path.join(adminRoot, 'app.js'),
-    path.join(adminRoot, 'styles.css')
+    path.join(adminRoot, 'styles.css'),
+    ...['model-results.js', 'model-results.css', 'model-result-renderer.js'].map(file => path.join(publicRoot, file)),
+    ...['model-config.js', 'model-config.css'].map(file => path.join(adminRoot, file))
   ]);
   const publicIndexHtml = versionFrontendAssets(
     fs.readFileSync(path.join(publicRoot, 'index.html'), 'utf8'),
@@ -647,6 +671,8 @@ function createApp(config, overrides = {}) {
   );
   app.get('/admin/config.js', requireAuth, requireAdmin, sendAdminFile('app.js'));
   app.get('/admin/config.css', requireAuth, requireAdmin, sendAdminFile('styles.css'));
+  app.get('/admin/model-config.js', requireAuth, requireAdmin, sendAdminFile('model-config.js'));
+  app.get('/admin/model-config.css', requireAuth, requireAdmin, sendAdminFile('model-config.css'));
 
   app.get('/api/previews/:token', requireAuth, async (req, res, next) => {
     try {

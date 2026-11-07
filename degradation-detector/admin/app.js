@@ -104,6 +104,8 @@ function showView(name) {
 }
 
 function showError(message) {
+  document.querySelectorAll('input[type="password"]').forEach(input => { input.value = ''; });
+  window.ModelConfig?.reset();
   $('error-message').textContent = message || '页面暂时不可用';
   showView('error');
   refreshIcons();
@@ -277,6 +279,7 @@ function groupHtml(group, platformIndex, groupIndex) {
           <i data-lucide="history"></i><span>历史</span><b data-history-count>${Number(group.history_count) || 0}</b>
         </button>
       </div>
+      ${window.ModelConfig.groupHtml(group)}
     </div>`;
 }
 
@@ -478,13 +481,14 @@ function platformPanelHtml(platform, index) {
         <label class="platform-status">
           <input type="checkbox" data-platform-enabled ${platform.enabled ? 'checked' : ''}>
           <span class="switch-track" aria-hidden="true"><span></span></span>
-          <span>启用平台</span>
+          <span>启用降智检测</span>
         </label>
       </header>
       <div class="platform-content">
         <section class="test-config">
           <h4 class="subsection-title">平台默认检测配置</h4>
           ${testEditorHtml({ ...test, label: test.label || platform.label || platform.id })}
+          ${window.ModelConfig.platformHtml(platform)}
         </section>
         <section class="groups-config">
           <header class="groups-head"><h4 class="subsection-title">自动检测分组</h4><span class="selected-count"></span></header>
@@ -617,6 +621,7 @@ function updatePlatform(index) {
     if (row.dataset.selected === 'true') selected += 1;
   });
   panel.querySelector('.selected-count').textContent = `${selected} 个已启用`;
+  window.ModelConfig.updatePanel(panel);
   const tab = document.querySelector(`.platform-tab[data-platform-index="${index}"]`);
   tab.dataset.enabled = String(enabled);
   refreshIcons();
@@ -746,6 +751,7 @@ function bindPanel(panel) {
     control.addEventListener('change', markDirty);
   });
   updatePlatform(index);
+  window.ModelConfig.bindPanel(panel);
 }
 
 function render() {
@@ -754,6 +760,7 @@ function render() {
     state.activePlatform = platforms[0]?.id || '';
   }
   renderSchedule();
+  window.ModelConfig.renderSchedule();
   const storage = state.data.storage_policy || { enabled: true, history_days: 90, history_per_group: 2000, artifact_per_group: 60 };
   $('storage-enabled').checked = storage.enabled;
   $('storage-history-days').value = String(storage.history_days);
@@ -873,9 +880,10 @@ function collectPlatform(panel) {
     key: enabled && row.querySelector('[data-group-toggle]').checked
       ? row.querySelector('[data-group-key]').value.trim()
       : '',
-    ...(original.groups[groupIndex].test ? { test: original.groups[groupIndex].test } : {})
+    ...(original.groups[groupIndex].test ? { test: original.groups[groupIndex].test } : {}),
+    model_detection: window.ModelConfig.collectGroup(row)
   }));
-  return { id: original.id, enabled, test, groups };
+  return { id: original.id, enabled, test, groups, model_detection: window.ModelConfig.collectPlatform(panel) };
 }
 
 function collect() {
@@ -890,6 +898,7 @@ function collect() {
     schedule_mode: scheduleMode,
     schedule_times: scheduleTimes,
     schedule_interval_minutes: intervalMinutes,
+    model_schedule: window.ModelConfig.collectSchedule(),
     storage_policy: {
       enabled: $('storage-enabled').checked,
       history_days: Number($('storage-history-days').value),
@@ -1344,4 +1353,5 @@ window.addEventListener('beforeunload', (event) => {
   event.returnValue = '';
 });
 
+window.ModelConfig.connect({ state, api, markDirty, toast, refreshIcons, showError, confirmDeletion });
 initialize();

@@ -4,11 +4,12 @@ const { AppError } = require('./errors');
 const { publicRun } = require('./store');
 
 class Scheduler {
-  constructor({ config, store, runner, maintenance }) {
+  constructor({ config, store, runner, maintenance, modelDetection }) {
     this.config = config;
     this.store = store;
     this.runner = runner;
     this.maintenance = maintenance;
+    this.modelDetection = modelDetection;
     this.queue = [];
     this.active = new Map();
     this.queuedMonitors = new Set();
@@ -24,6 +25,7 @@ class Scheduler {
     this.timer.unref?.();
     setTimeout(() => this.tick().catch(() => {}), 250).unref?.();
     this.maintenance?.start();
+    this.modelDetection?.start();
   }
 
   async close() {
@@ -31,6 +33,7 @@ class Scheduler {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.queue.length = 0;
+    await this.modelDetection?.close();
     await Promise.allSettled([...this.active.values()]);
     await this.maintenance?.close();
   }

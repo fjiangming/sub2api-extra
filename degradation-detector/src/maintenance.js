@@ -5,9 +5,10 @@ const path = require('path');
 const { setImmediate: yieldToRequests } = require('node:timers/promises');
 
 class MaintenanceService {
-  constructor({ config, store, isIdle = () => true }) {
+  constructor({ config, store, modelStore, isIdle = () => true }) {
     this.config = config;
     this.store = store;
+    this.modelStore = modelStore;
     this.isIdle = isIdle;
     this.timer = null;
     this.active = null;
@@ -130,8 +131,10 @@ class MaintenanceService {
       this.roundPending = false;
     }
     const orphans = await this.sweepOrphans(timestamp);
+    const modelResult = await this.modelStore?.maintain(policy, timestamp);
     filesRemoved += orphans.removed;
     pending ||= orphans.pending;
+    pending ||= Boolean(modelResult?.pending);
     let compacted = false;
     if (this.isIdle()) {
       try {
@@ -140,10 +143,10 @@ class MaintenanceService {
         console.error(JSON.stringify({ event: 'maintenance_compaction_failed', code: error.code || 'UNKNOWN' }));
       }
     }
-    const result = { archived, files_removed: filesRemoved, compacted, pending };
+    const result = { archived, files_removed: filesRemoved, compacted, pending, ...(modelResult ? { model_archived: modelResult.archived } : {}) };
     this.store.recordMaintenance(result, timestamp);
     this.nextRunAt = timestamp + (pending ? 60000 : 3600000);
-    if (archived || filesRemoved || compacted) console.log(JSON.stringify({ event: 'maintenance_completed', ...result }));
+    if (archived || modelResult?.archived || filesRemoved || compacted) console.log(JSON.stringify({ event: 'maintenance_completed', ...result }));
     return result;
   }
 

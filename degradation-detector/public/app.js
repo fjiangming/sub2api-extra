@@ -450,6 +450,7 @@ async function refresh() {
     renderPlatformFilter();
     renderPageMeta();
     renderGroups();
+    document.dispatchEvent(new CustomEvent('detector:refreshed', { detail: { groups: state.data.groups.length } }));
     if ($('result-dialog').open && activeGroup()) renderDialog(false);
   } finally {
     state.refreshBusy = false;

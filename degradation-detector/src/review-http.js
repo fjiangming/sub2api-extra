@@ -113,7 +113,7 @@ async function resolveReviewAddress(url, signal, lookup = dns.lookup) {
   }
 }
 
-async function requestReviewJson(value, { method, body, apiKey, signal, taskKey }, dependencies = {}) {
+async function requestReviewJson(value, { method, body, apiKey, signal, taskKey, maxResponseBytes = 256 * 1024, secrets = [] }, dependencies = {}) {
   const url = reviewUrl(value);
   const address = await resolveReviewAddress(url, signal, dependencies.lookup);
   const raw = body == null ? null : Buffer.from(JSON.stringify(body));
@@ -130,7 +130,7 @@ async function requestReviewJson(value, { method, body, apiKey, signal, taskKey 
         accept: 'application/json',
         ...(raw ? { 'content-type': 'application/json', 'content-length': raw.length } : {}),
         ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-        ...(method === 'POST' ? { 'Idempotency-Key': taskKey } : {})
+        ...(method === 'POST' && taskKey ? { 'Idempotency-Key': taskKey } : {})
       },
       lookup: (_hostname, _options, callback) => callback(null, address.address, address.family)
     }, async (response) => {
@@ -138,14 +138,17 @@ async function requestReviewJson(value, { method, body, apiKey, signal, taskKey 
         // Redirects never receive credentials or trigger an additional POST.
         if (![200, 201, 202].includes(response.statusCode)) {
           const diagnostic = response.statusCode >= 400 ? await responseDiagnostic(response, apiKey) : undefined;
-          throw new ReviewError('REVIEW_HTTP_ERROR', { httpStatus: response.statusCode, diagnostic });
+          const error = new ReviewError('REVIEW_HTTP_ERROR', { httpStatus: response.statusCode, diagnostic: sanitizeReviewDiagnostic(diagnostic, secrets) });
+          const retryAfter = Number(response.headers['retry-after']);
+          if (Number.isFinite(retryAfter) && retryAfter > 0) error.retryAfterSeconds = Math.min(86400, Math.ceil(retryAfter));
+          throw error;
         }
-        if (Number(response.headers['content-length'] || 0) > 256 * 1024) throw new ReviewError('REVIEW_RESPONSE_TOO_LARGE');
+        if (Number(response.headers['content-length'] || 0) > maxResponseBytes) throw new ReviewError('REVIEW_RESPONSE_TOO_LARGE');
         const chunks = [];
         let length = 0;
         for await (const chunk of response) {
           length += chunk.length;
-          if (length > 256 * 1024) throw new ReviewError('REVIEW_RESPONSE_TOO_LARGE');
+          if (length > maxResponseBytes) throw new ReviewError('REVIEW_RESPONSE_TOO_LARGE');
           chunks.push(chunk);
         }
         let result;

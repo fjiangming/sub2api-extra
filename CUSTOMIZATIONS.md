@@ -1,5 +1,27 @@
 # 个性化功能维护台账
 
+## 2026-11-07：降智检测增加独立模型身份检测
+
+用户确认沿用现有管理员设置页和最终双页签结果 Demo，要求正式实现。本轮只修改 `degradation-detector` 及本台账，不修改 Sub2API 主站、计费契约或其他服务。降智检测与模型检测配置在同一管理页，专用凭据、计划、任务、历史和结论独立；普通结果页保持只读。实现与验证完成后，用户明确授权提交 GitHub，本次据此提交并推送；不部署、不使用真实 Key 或付费检测验证，保留无关未跟踪文件。
+
+| 文件 | 改动与后续保留要求 |
+| --- | --- |
+| `degradation-detector/src/model-config.js`（新增）、`src/config.js` | 独立平台 / 渠道 / 分组模型覆盖与计划 schema，默认关闭，支持 Bazaarlink Probe、CCTest 多选，GPT / Claude 对应协议；总超时 30–1800 秒、每日多时间 / 间隔。公网 HTTPS 标准端口校验、严格字段白名单，无新增必填 env，兼容旧降智配置请求。 |
+| `degradation-detector/src/model-store.js`（新增） | 原 SQLite 增量增加独立模型设置、平台、分组、任务、归档、限流与提交计数表。保存加密 Key 快照，分组 + 渠道活动唯一，已知远程任务重启只续查，未知已提交结果不重发、未提交队列可恢复。历史按组 / 渠道分页与批量 / 全清，保护在途；维护每轮最多 20 个组合、每组最多 200 条归档 / 200 份响应清理并让出请求，至少保护最近 60 条。清历史不能绕过 30 次 / 小时提交上限。 |
+| `degradation-detector/src/model-detection.js`（新增） | 独立串行队列和自动计划，手动不推迟自动。检测网站持异步任务，提交一次、轮询 GET 最多连续重连 5 次，整体期限包含 DNS / 退避 / 响应体；限制 2 MiB，校验返回格式 / 任务 ID。使用单独模型检测 Key 和网站 Key，不借用登录 Token；地址 / 渠道目的地改变须重填目标 Key，网站地址改变不复用原网站 Key。保留网站原结论及全部返回项，不混入降智率；demoMode 仅模拟。 |
+| `degradation-detector/src/model-results.js`、`src/model-routes.js`（新增） | 普通查询实时分组交集授权；管理员资源 / 配置 / 检测 / 批量 / 清理接口沿用实时角色、CSRF 和限流。完整脱敏响应保留 0、null、警告、未知字段和全部数组项；隐藏 Key、认证头、Cookie、用户 IP / 邮箱、目标地址、远程任务 ID 与报告定位信息，不返回加密配置。 |
+| `degradation-detector/src/server.js`、`src/scheduler.js`、`src/maintenance.js` | 集成模型服务生命周期、独立配置安全返回、与原降智保存同事务、受保护管理员资源及内容哈希版本，维护 / 空闲回收考虑模型任务。原降智路由和作品沙箱保持。 |
+| `degradation-detector/src/review-http.js` | 公用 HTTPS 连接器可选响应体限额 / 精确秘密脱敏，未指定时保留原视觉审核 256 KiB 边界；429 安全读取 Retry-After，无任务幂等 Key 时不发送对应头，模型调用仍禁止重定向和内网 DNS。 |
+| `degradation-detector/admin/model-config.js`、`admin/model-config.css`（新增）、`admin/app.js`、`admin/index.html` | 原配置编辑器下增加模型平台设置，分组下独立启用 / Key / 两渠道模型覆盖，独立自动计划和手动 / 平台批量检测。模型历史支持完整详情、在途自动刷新、最多 100 条选择、全选状态、批量删除和按渠道清空；原降智独立配置、复核、清理保留。 |
+| `degradation-detector/public/model-result-renderer.js`、`public/model-results.js`、`public/model-results.css`（新增）、`public/app.js`、`public/index.html` | 原结果页增加降智 / 模型两个页签；原降智柱状图、折叠证据、HTML / 源码交互保留。模型展示全部已选渠道、逐渠道历史、Bazaarlink 每项 / 身份 / 警告 / 诊断、CCTest 全 scores / 性能 / 全轮 Token 审计及完整脱敏 JSON，空值不假 0、网站总分不重算。区分本地查询失败与网站最后状态，错误不冒充匹配；响应文本全部转义，支持手机和深色。 |
+| `degradation-detector/tests/model-detection.test.js`、`tests/model-server.test.js`（新增） | 模拟两网站提交 / 轮询，覆盖双渠道协议、仅专用 Key、加密脱敏、全部项 / 0 / null / 未知字段、重复排队、5 次 GET 重连 / POST 不重发、重启恢复、ID 不一致 / 过期 / 超时 / 格式错误、独立计划、限流计数 / 分批维护 / 跨组渠道与在途保护。HTTP 验证真实会话、普通 / 匿名 / 撤角色 / CSRF / 分组撤权、配置原子性 / 旧客户端及管理员资源隔离。 |
+| `degradation-detector/scripts/check.cjs`、`scripts/model-preview.cjs`、`scripts/model-browser-check.cjs`（新增）、`package.json` | 新增语法检查及真实服务隔离模拟预览 / Chrome 回归入口。预览使用临时 SQLite / 假 Key，禁用上游请求，不连接生产；检查配置持久化、独立计划与分组覆盖、手动 / 批量检测、全部项与 Token 轮次、删除、原降智预览 / 源码、普通用户隔离及桌面 / 手机 / 深色布局。截图仅存系统临时目录，不添加浏览器生产依赖。 |
+| `degradation-detector/README.md`、`CUSTOMIZATIONS.md` | 记录两类 Key、目标公网地址、协议、独立计划 / 结果 / 授权 / 费用 / 保留、外部网站结论边界和本地模拟方法；入口仍为 `/admin/config` 与 `/results`。 |
+
+验证：降智检测完整 128 项测试通过；最终 IP / 任务定位信息脱敏与 Key 故障反馈收尾后，新增 11 项模型 / HTTP 回归再次通过。`npm run check` 检查 46 个 JavaScript 文件，`git diff --check` 通过。真实服务 + Chrome / Playwright 验证每日三时间点与间隔持久化、分组模型覆盖、Key 不回显、原降智有效题目不变、手动 / 平台双渠道检测、8 条 Probe 项 / 11 个 CCTest 分项 / 6 轮审计全部展示、0 / null / 未知字段 / 转义、批量及整渠道清空、原 HTML 预览 / 源码和证据默认折叠、普通用户四类管理访问均 403。1440px / 390px / 320px 与深色布局通过，无未捕获页面异常或整页溢出；已复核桌面、手机和深色截图，最终截图在本机临时 `sub2api-model-browser-UJvMIX`。浏览器和服务的真实上游调用均为 0；未运行 Docker / Linux CI、两网站生产 API 或真实付费检测，不以模拟通过代替网站协议 / 额度可用性验收。独立预览默认 http://127.0.0.1:19895，只使用临时数据，配置入口 `/admin/config?demo=1`、只读入口 `/results?demo=readonly#model`；正式服务仍需管理员配置并保存专用 Key 后使用。
+
+推送前 fetch 确认本地 main 与 origin/main 一致。本次仅提交上述模型检测功能、文档、测试和本节台账；沿用现有 GitHub 测试及 GHCR 镜像发布流程，构建 / 镜像是否发布须以本次完整提交 SHA 对应的 Actions 为准。提交和推送不代表服务器已更新；本轮不部署服务器，其他工程文件继续保留本地。
+
 ## 2026-11-06：充值中心管理员大额充值 Bark 提醒
 
 用户要求在只有管理员可见的到账审核页面配置单笔大额充值提醒，固定使用 iOS Bark，参考供应商监控通知实现。本轮仅修改充值中心；实现和凭据独立，不调用或修改供应商监控、运营中心及其通知通道，不改变对账规则、主站余额或兑换记录契约。部署仍未执行；本次 GitHub 提交和推送由用户在验收后明确授权。既有无关工作继续保留。
