@@ -24,13 +24,13 @@
     <span class="state-icon"><i data-lucide="shield-alert"></i></span>
     <h1>无法打开管理页面</h1>
     <p id="error-message"></p>
-    <a class="button" href="/results"><i data-lucide="arrow-left"></i><span>查看检测结果</span></a>
+    <a class="button" href="/results"><i data-lucide="arrow-left"></i><span>查看降智检测结果</span></a>
   </div>
 
   <main id="app-view" class="app-shell admin-shell" hidden>
     <header class="page-header admin-header">
       <div class="page-title">
-        <a class="icon-button back-button" href="/results" title="查看检测结果" aria-label="查看检测结果">
+        <a class="icon-button back-button" href="/results" title="查看降智检测结果" aria-label="查看降智检测结果">
           <i data-lucide="arrow-left"></i>
         </a>
         <span class="page-mark" aria-hidden="true"><i data-lucide="settings-2"></i></span>
@@ -41,6 +41,7 @@
       </div>
       <div class="header-actions">
         <span class="user-chip"><i data-lucide="shield-check"></i><span id="user-name"></span></span>
+        <a class="icon-button" href="/model-results" title="查看模型检测结果" aria-label="查看模型检测结果"><i data-lucide="scan-search"></i></a>
         <button id="save-button" class="button primary" type="submit" form="config-form">
           <i data-lucide="save"></i><span>保存配置</span>
         </button>
@@ -96,6 +97,8 @@
           <div id="model-schedule-interval-fields" class="schedule-fields" hidden><span class="schedule-field-label">每隔</span><label class="interval-field"><input id="model-schedule-interval" type="number" min="1" max="43200" value="360" required aria-label="模型检测间隔分钟"><span>分钟</span></label></div>
         </div>
       </section>
+
+      <section id="fingerprint-data" class="fp-data-band" aria-label="Fingerpoint 参考数据与更新"></section>
 
       <details class="storage-band">
         <summary>
@@ -191,7 +194,7 @@
 
   <dialog id="model-admin-history-dialog" class="yzai-pelican-modal model-modal" aria-labelledby="model-admin-history-title">
     <header class="yzai-pelican-head"><div class="dialog-copy"><h2 id="model-admin-history-title">模型检测历史</h2><p id="model-admin-history-meta" class="yzai-pelican-sub"></p></div><div class="dialog-actions"><button id="model-admin-history-refresh" class="icon-button" type="button" title="刷新模型历史" aria-label="刷新模型历史"><i data-lucide="refresh-cw"></i></button><button id="model-admin-history-close" class="icon-button" type="button" title="关闭模型历史" aria-label="关闭模型历史"><i data-lucide="x"></i></button></div></header>
-    <div class="model-admin-toolbar"><select id="model-admin-channel" aria-label="模型历史检测渠道"><option value="bazaarlink">Bazaarlink Probe</option><option value="cctest">CCTest</option></select><label class="model-check"><input id="model-admin-select-all" type="checkbox"><span>全选当前列表</span></label><span id="model-admin-selection"></span><button id="model-admin-delete-selected" class="button danger" type="button"><i data-lucide="trash-2"></i>删除选中</button><button id="model-admin-clear-all" class="button danger" type="button"><i data-lucide="list-x"></i>清空该渠道</button></div>
+    <div class="model-admin-toolbar"><select id="model-admin-channel" aria-label="模型历史检测渠道"><option value="bazaarlink">Bazaarlink Probe</option><option value="cctest">CCTest</option><option value="fingerpoint">Fingerpoint</option></select><label class="model-check"><input id="model-admin-select-all" type="checkbox"><span>全选当前列表</span></label><span id="model-admin-selection"></span><button id="model-admin-delete-selected" class="button danger" type="button"><i data-lucide="trash-2"></i>删除选中</button><button id="model-admin-clear-all" class="button danger" type="button"><i data-lucide="list-x"></i>清空该渠道</button></div>
     <div class="yzai-pelican-body model-body"><nav id="model-admin-history-list" class="yzai-pelican-history" aria-label="模型检测历史"></nav><section id="model-admin-detail" class="yzai-pelican-detail" aria-live="polite"></section></div>
     <footer class="model-admin-history-footer"><button id="model-admin-history-more" class="button" type="button" hidden><i data-lucide="chevrons-down"></i>加载更早记录</button></footer>
   </dialog>

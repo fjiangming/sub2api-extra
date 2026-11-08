@@ -5,6 +5,8 @@ const { AppError } = require('./errors');
 const { channels, modelGroupContext, publicModelPlatform } = require('./model-config');
 const { modelRunSummary, sanitizeModelResponse } = require('./model-results');
 const { requestReviewJson, resolveReviewAddress } = require('./review-http');
+const { runFingerprintWorker } = require('./fingerpoint-runner');
+const { demoFingerprintResponse } = require('./fingerpoint-fixture');
 
 function modelFailure(error, stage) {
   const code = error?.code || error?.message;
@@ -15,7 +17,9 @@ function modelFailure(error, stage) {
   if (status === 400 || status === 422) return '检测网站拒绝请求参数，请检查目标公网地址、模型及协议';
   if (code === 'REVIEW_URL_UNSAFE') return '检测接口或目标地址未通过公网 HTTPS 校验';
   if (code === 'REVIEW_RESPONSE_TOO_LARGE') return '检测网站响应超过 2 MiB 上限，本次未形成完整结果';
-  if (code === 'MODEL_CONFIG_CHANGED') return '配置已停用或变更，本地任务已停止；上游已提交任务不会重复发起';
+  if (code === 'MODEL_CONFIG_CHANGED') return '配置已停用或变更，检测任务已停止；已发出的请求不会重复发起';
+  if (String(code).startsWith('FINGERPOINT_DATA') || code === 'FINGERPOINT_SDK_UPGRADE_REQUIRED') return 'Fingerpoint 参考数据不可用，请管理员检查数据更新或升级服务镜像；未发起模型请求';
+  if (String(code).startsWith('FINGERPOINT_')) return 'Fingerpoint 检测未能完整完成，保留已取得的样本；未自动重发模型请求';
   if (code === 'DETECTION_KEY_UNREADABLE' || code === 'DETECTION_KEY_INVALID') return '模型检测专用 Key 或检测网站 Key 无法读取，请管理员重新配置';
   if (code === 'MODEL_TASK_MISMATCH') return '检测网站返回的任务标识不一致，已停止查询';
   if (code === 'MODEL_RESPONSE_INVALID' || code === 'REVIEW_RESPONSE_INVALID') return '检测网站返回格式不符合当前接入协议，无法形成有效结论';
@@ -54,8 +58,8 @@ function demoModelResponse(channel, model, platform) {
 }
 
 class ModelDetection {
-  constructor({ config, store, modelStore, vault, request = requestReviewJson, resolve = resolveReviewAddress, pollMs = 3000 }) {
-    Object.assign(this, { config, store, modelStore, vault, request, resolve, pollMs });
+  constructor({ config, store, modelStore, vault, fingerprintData, runFingerprint = runFingerprintWorker, request = requestReviewJson, resolve = resolveReviewAddress, pollMs = 3000 }) {
+    Object.assign(this, { config, store, modelStore, vault, fingerprintData, runFingerprint, request, resolve, pollMs });
     this.active = new Map();
     this.timer = null;
     this.closed = false;
@@ -70,9 +74,11 @@ class ModelDetection {
       const previous = this.modelStore.platform(platform.id);
       const candidate = platform.model_detection;
       const config = candidate ? structuredClone(candidate) : previous;
+      config.channels.fingerpoint ||= structuredClone(previous.channels.fingerpoint);
       if (config.enabled && !['openai', 'anthropic'].includes(platform.id)) throw new AppError('MODEL_PLATFORM_UNSUPPORTED', '模型检测目前仅支持 OpenAI 和 Anthropic 平台', { status: 400 });
       let destinationChanged = config.target_url !== previous.target_url;
       for (const channel of channels) {
+        if (channel === 'fingerpoint') continue;
         const settings = config.channels[channel];
         const old = previous.channels[channel];
         const key = String(settings.api_key || '').trim();
@@ -147,6 +153,7 @@ class ModelDetection {
     if (this.timer || this.closed) return;
     this.timer = setInterval(() => this.tick(), this.config.schedulerPollSeconds * 1000);
     this.timer.unref?.();
+    this.fingerprintData?.start();
     this.tick();
   }
   tick() {
@@ -167,7 +174,62 @@ class ModelDetection {
     const promise = this.execute(run, controller.signal).catch(() => {
       this.modelStore.finish(run.id, 'error', '模型检测执行异常，未自动重新提交', 'MODEL_EXECUTION_ERROR');
     }).finally(() => { this.active.delete(run.id); this.pump(); });
-    this.active.set(run.id, { promise, controller });
+    this.active.set(run.id, { run, promise, controller });
+  }
+
+  configurationChanged() {
+    for (const active of this.active.values()) if (!this.current(active.run)) active.controller.abort();
+    this.modelStore.cancelObsolete();
+  }
+
+  async executeFingerprint(run, snapshot, signal, ensureCurrent) {
+    let lease;
+    try {
+      if (this.config.demoMode) {
+        this.modelStore.updateResponse(run.id, demoFingerprintResponse(run.model, snapshot.platform, snapshot), 'completed');
+        this.modelStore.finish(run.id, 'completed', '演示数据：未请求真实模型或检测网站');
+        return;
+      }
+      lease = await this.fingerprintData.acquire(signal);
+      ensureCurrent();
+      const key = this.vault.decrypt(snapshot.target_key_context, snapshot.target_key_cipher);
+      const response = { engine: 'fingerpoint', status: 'running', requested_model: run.model, sdk_version: lease.sdk_version,
+        data: { built_at: lease.built_at, hash: lease.hash, models: lease.models },
+        parameters: Object.fromEntries(['api', 'effort', 'rounds', 'count', 'parallel', 'strict'].map(field => [field, snapshot[field]])),
+        rounds: [], analysis: null, progress: 0 };
+      const samples = new Set();
+      const record = () => {
+        ensureCurrent();
+        const safe = sanitizeModelResponse(response, [key, snapshot.target_url, this.config.sub2apiBaseUrl]);
+        if (Buffer.byteLength(JSON.stringify(safe)) > 2 * 1024 * 1024) throw new Error('FINGERPOINT_RESPONSE_TOO_LARGE');
+        this.modelStore.updateResponse(run.id, safe);
+      };
+      this.modelStore.markSubmitted(run.id);
+      await this.runFingerprint({ ...response.parameters, model: run.model, key, target_url: snapshot.target_url, timeout_seconds: snapshot.timeout_seconds, directory: lease.directory }, signal, message => {
+        if (message.type === 'sample') {
+          let round = response.rounds.find(item => item.round === message.round);
+          if (!round) { round = { round: message.round, samples: Array.from({ length: snapshot.count }, () => ({ state: 'queued', count: 0 })), analysis: null }; response.rounds.push(round); }
+          samples.add(`${message.round}:${message.index}`);
+          round.samples[message.index] = message.sample;
+          response.progress = Math.min(0.99, samples.size / (snapshot.rounds * snapshot.count)); record();
+        }
+        if (message.type === 'round') {
+          const result = message.result;
+          const round = { ...result, samples: result.samples.map((sample, index) => ({ ...sample, prompt: result.challenges?.[index]?.prompt || '' })) };
+          const index = response.rounds.findIndex(item => item.round === result.round);
+          if (index >= 0) response.rounds[index] = round;
+          else response.rounds.push(round);
+          response.analysis = result.analysis;
+          record();
+        }
+      });
+      ensureCurrent();
+      response.status = 'done'; response.progress = 1;
+      const decision = response.analysis?.decision || 'unscorable';
+      response.verdictKey = decision === 'scored' ? response.analysis.prediction === run.model ? 'candidate_match' : 'candidate_differs' : decision;
+      record();
+      this.modelStore.finish(run.id, 'completed', `${response.rounds.length} 轮指纹检测 · ${decision === 'scored' ? '评分完成' : decision === 'partial' ? '部分样本有效，不提供置信度' : '未形成可评分的候选排名'}`);
+    } finally { await lease?.release().catch(() => {}); }
   }
 
   async execute(run, closingSignal = new AbortController().signal) {
@@ -177,13 +239,14 @@ class ModelDetection {
     let stage = run.remote_id ? 'poll' : 'submit';
     let lastJson = '';
     const ensureCurrent = () => {
-      if (signal.aborted) throw new Error('MODEL_TIMEOUT');
       if (!this.current(run)) throw new Error('MODEL_CONFIG_CHANGED');
+      if (signal.aborted) throw new Error('MODEL_TIMEOUT');
     };
     try {
       if (remaining <= 0) throw new Error('MODEL_TIMEOUT');
       ensureCurrent();
       this.modelStore.markRunning(run.id);
+      if (run.channel === 'fingerpoint') { await this.executeFingerprint(run, snapshot, signal, ensureCurrent); return; }
       const targetKey = this.vault.decrypt(snapshot.target_key_context, snapshot.target_key_cipher);
       const siteKey = snapshot.key_cipher ? this.vault.decrypt(snapshot.key_context, snapshot.key_cipher) : '';
       const secrets = [targetKey, siteKey, snapshot.target_url, this.config.sub2apiBaseUrl, run.remote_id];
@@ -250,9 +313,10 @@ class ModelDetection {
       }
       throw new Error('MODEL_TIMEOUT');
     } catch (error) {
+      if (!this.current(run)) error = new Error('MODEL_CONFIG_CHANGED');
       if (this.closed && this.modelStore.run(run.id)?.remote_id) return;
       if (error.httpStatus === 429) this.modelStore.throttle(run.channel, error.retryAfterSeconds || 3600);
-      this.modelStore.finish(run.id, 'error', modelFailure(error, stage), String(error.code || (error.message?.startsWith('MODEL_') ? error.message : 'MODEL_REQUEST_FAILED')).slice(0, 80));
+      this.modelStore.finish(run.id, 'error', modelFailure(error, stage), String(error.code || (/^(MODEL_|FINGERPOINT_)/.test(error.message || '') ? error.message : 'MODEL_REQUEST_FAILED')).slice(0, 80));
     }
   }
 
@@ -262,6 +326,7 @@ class ModelDetection {
     this.timer = null;
     for (const active of this.active.values()) active.controller.abort();
     await Promise.allSettled([...this.active.values()].map(active => active.promise));
+    await this.fingerprintData?.close();
   }
 }
 

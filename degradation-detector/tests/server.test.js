@@ -94,6 +94,31 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   const publicAssetVersion = resultsPageHtml.match(/\/styles\.css\?v=([a-f0-9]{12})/)?.[1];
   assert.ok(publicAssetVersion);
   assert.match(resultsPageHtml, new RegExp(`/app\\.js\\?v=${publicAssetVersion}`));
+  assert.match(resultsPageHtml, new RegExp(`/session\\.js\\?v=${publicAssetVersion}`));
+  assert.match(resultsPage.headers.get('cache-control'), /no-store/);
+  assert.doesNotMatch(resultsPageHtml, /id="model-pane"|id="model-dialog"|result-tabs|src="\/model-results\.js/);
+  for (const route of ['/', '/index.html', '/results/']) {
+    const response = await fetch(`${http.baseUrl}${route}`);
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), resultsPageHtml);
+  }
+  let modelPageHtml;
+  for (const route of ['/model-results', '/model-results/', '/model-results.html']) {
+    const response = await fetch(`${http.baseUrl}${route}`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('cache-control'), /no-store/);
+    assert.match(response.headers.get('content-security-policy'), /frame-src 'self'/);
+    const html = await response.text();
+    if (modelPageHtml) assert.equal(html, modelPageHtml);
+    modelPageHtml = html;
+    assert.match(html, /<title>模型检测<\/title>/);
+    assert.match(html, new RegExp(`/session\\.js\\?v=${publicAssetVersion}`));
+    assert.match(html, new RegExp(`/model-results\\.js\\?v=${publicAssetVersion}`));
+    assert.doesNotMatch(html, /id="iq-pane"|id="result-dialog"|result-tabs|src="\/app\.js|admin\/config|立即检测/);
+  }
+  const publicSession = await fetch(`${http.baseUrl}/session.js?v=${publicAssetVersion}`);
+  assert.equal(publicSession.status, 200);
+  assert.match(await publicSession.text(), /window\.DetectorSession/);
 
   const anonymousPage = await fetch(`${http.baseUrl}/admin/config`);
   assert.equal(anonymousPage.status, 401);
@@ -457,13 +482,22 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
 test('frontends keep authentication and administrator controls separated', () => {
   const mainHtml = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const sessionSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'session.js'), 'utf8');
+  const modelHtml = fs.readFileSync(path.join(__dirname, '..', 'public', 'model-results.html'), 'utf8');
+  const modelSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'model-results.js'), 'utf8');
   const mainStyles = fs.readFileSync(path.join(__dirname, '..', 'public', 'styles.css'), 'utf8');
   const adminSource = fs.readFileSync(path.join(__dirname, '..', 'admin', 'app.js'), 'utf8');
   const adminHtml = fs.readFileSync(path.join(__dirname, '..', 'admin', 'index.html'), 'utf8');
   const adminStyles = fs.readFileSync(path.join(__dirname, '..', 'admin', 'styles.css'), 'utf8');
-  assert.match(mainSource, /params\.get\('token'\) \|\| params\.get\('access_token'\)/);
-  assert.match(mainSource, /\['token', 'access_token'\]/);
-  assert.match(mainSource, /state\.sessionToken && !headers\.Authorization/);
+  assert.match(sessionSource, /params\.get\('token'\) \|\| params\.get\('access_token'\)/);
+  assert.match(sessionSource, /\['token', 'access_token'\]/);
+  assert.match(sessionSource, /sessionToken && !headers\.Authorization/);
+  assert.match(mainHtml, /src="\/session\.js"/);
+  assert.match(modelHtml, /src="\/session\.js"/);
+  assert.doesNotMatch(mainHtml + modelHtml, /result-tabs|id="iq-tab"|id="model-tab"|role="tabpanel"/);
+  assert.doesNotMatch(mainSource, /\/api\/model-results|detector:refreshed/);
+  assert.doesNotMatch(modelSource, /\/api\/results|detector:refreshed|setView/);
+  assert.doesNotMatch(modelSource + sessionSource, /canOperate|csrfToken|立即检测|\/api\/admin/);
   assert.match(mainHtml, /class="capability-note" role="note"/);
   assert.match(mainHtml, /疑似降智 ≠ 不可用：多数日常任务仍可胜任，本检测主要为对模型能力上限要求较高的用户提供参考。/);
   assert.match(mainStyles, /\.capability-note\s*\{/);

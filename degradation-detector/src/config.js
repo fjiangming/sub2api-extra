@@ -6,7 +6,7 @@ const { load: loadHtml } = require('cheerio');
 const safeRegex = require('safe-regex2');
 const { z } = require('zod');
 const { normalizeVisualReview } = require('./visual-config');
-const { modelGroupSchema, modelPlatformSchema, modelScheduleSchema } = require('./model-config');
+const { fingerprintDataSchema, modelGroupSchema, modelPlatformSchema, modelScheduleSchema } = require('./model-config');
 
 const apiTypes = [
   'responses',
@@ -376,6 +376,7 @@ const adminConfigurationSchema = z.object({
   schedule_interval_minutes: z.coerce.number().int().min(1).max(43200),
   storage_policy: storagePolicySchema.optional(),
   model_schedule: modelScheduleSchema.optional(),
+  fingerprint_data: fingerprintDataSchema.optional(),
   platforms: z.array(platformSelectionSchema).max(64)
 }).strict().superRefine((value, context) => {
   const platforms = new Set();

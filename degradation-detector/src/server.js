@@ -17,6 +17,7 @@ const { Scheduler } = require('./scheduler');
 const { MaintenanceService } = require('./maintenance');
 const { ModelStore } = require('./model-store');
 const { ModelDetection } = require('./model-detection');
+const { FingerpointData } = require('./fingerpoint-data');
 const { defaultModelPlatform, modelGroupContext, publicModelPlatform } = require('./model-config');
 const { installModelRoutes } = require('./model-routes');
 const { Store, publicRun, publicValidationResult } = require('./store');
@@ -156,6 +157,7 @@ function versionFrontendAssets(html, version) {
   return html
     .replaceAll('href="/styles.css"', `href="/styles.css?v=${version}"`)
     .replaceAll('src="/app.js"', `src="/app.js?v=${version}"`)
+    .replaceAll('src="/session.js"', `src="/session.js?v=${version}"`)
     .replaceAll('href="/admin/config.css"', `href="/admin/config.css?v=${version}"`)
     .replaceAll('src="/admin/config.js"', `src="/admin/config.js?v=${version}"`)
     .replace(/(href|src)="(\/(?:model-results\.(?:js|css)|model-result-renderer\.js|admin\/model-config\.(?:js|css)))"/g, `$1="$2?v=${version}"`);
@@ -377,6 +379,7 @@ async function adminConfigurationPayload(req, runtime) {
     maintenance_last_result: settings.maintenance_last_result,
     updated_at: settings.updated_at / 1000,
     model_schedule: runtime.modelStore.schedule(),
+    fingerprint_data: runtime.fingerprintData.status(),
     platforms
   };
 }
@@ -474,7 +477,9 @@ async function saveAdminConfiguration(req, runtime) {
       groups: configuredGroups
     });
     if (modelInput) runtime.modelStore.save(modelInput);
+    if (submitted.fingerprint_data) runtime.fingerprintData.saveSettings(submitted.fingerprint_data);
   })();
+  runtime.modelDetection.configurationChanged?.();
   return adminConfigurationPayload(req, runtime);
 }
 
@@ -543,7 +548,8 @@ function createRuntime(config, overrides = {}) {
   store.prepareServiceOwnership?.(config.serviceOwnerId);
   const vault = overrides.vault || new CredentialVault(config);
   const modelStore = overrides.modelStore || new ModelStore(store);
-  const modelDetection = overrides.modelDetection || new ModelDetection({ config, store, modelStore, vault, ...overrides.modelDependencies });
+  const fingerprintData = overrides.fingerprintData || new FingerpointData({ config, store, modelStore, ...overrides.fingerprintDependencies });
+  const modelDetection = overrides.modelDetection || new ModelDetection({ config, store, modelStore, vault, fingerprintData, ...overrides.modelDependencies });
   const sub2api = overrides.sub2api || new Sub2ApiClient(config, overrides.fetchImpl);
   const auth = overrides.auth || new AuthService(config, sub2api);
   const groupMetrics = overrides.groupMetrics || new GroupMetrics(config);
@@ -557,7 +563,7 @@ function createRuntime(config, overrides = {}) {
     config, store, modelStore, isIdle: () => scheduler.active?.size === 0 && scheduler.queue?.length === 0 && modelDetection.active.size === 0
   });
   const scheduler = overrides.scheduler || new Scheduler({ config, store, runner, maintenance, modelDetection });
-  return { config, store, vault, sub2api, auth, groupMetrics, runner, scheduler, maintenance, modelStore, modelDetection };
+  return { config, store, vault, sub2api, auth, groupMetrics, runner, scheduler, maintenance, modelStore, modelDetection, fingerprintData };
 }
 
 function createApp(config, overrides = {}) {
@@ -606,6 +612,7 @@ function createApp(config, overrides = {}) {
   const adminRoot = path.join(config.projectRoot, 'admin');
   const assetVersion = frontendAssetVersion([
     path.join(publicRoot, 'app.js'),
+    path.join(publicRoot, 'session.js'),
     path.join(publicRoot, 'styles.css'),
     path.join(adminRoot, 'app.js'),
     path.join(adminRoot, 'styles.css'),
@@ -620,6 +627,10 @@ function createApp(config, overrides = {}) {
     fs.readFileSync(path.join(adminRoot, 'index.html'), 'utf8'),
     assetVersion
   );
+  const modelIndexHtml = versionFrontendAssets(
+    fs.readFileSync(path.join(publicRoot, 'model-results.html'), 'utf8'),
+    assetVersion
+  );
   const sendHtml = (html) => (_req, res) => {
     setNoStore(res);
     res.type('html').send(html);
@@ -630,6 +641,7 @@ function createApp(config, overrides = {}) {
   };
 
   app.get(['/', '/index.html', '/results', '/results/'], sendHtml(publicIndexHtml));
+  app.get(['/model-results', '/model-results/', '/model-results.html'], sendHtml(modelIndexHtml));
 
   const establishAdminEntrySession = async (req, res, next) => {
     const accessToken = String(req.query.token || req.query.access_token || '').trim();

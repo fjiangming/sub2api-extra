@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>模型检测</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/model-results.css">
+  <script src="/vendor/lucide/lucide.min.js" defer></script>
+  <script src="/session.js" defer></script>
+  <script src="/model-result-renderer.js" defer></script>
+  <script src="/model-results.js" defer></script>
+</head>
+<body>
+  <div id="loading-view" class="state-view">
+    <span class="spinner" aria-hidden="true"></span>
+    <p>正在读取模型检测结果</p>
+  </div>
+
+  <div id="error-view" class="state-view" hidden>
+    <span class="state-icon"><i data-lucide="circle-alert"></i></span>
+    <h1>无法打开模型检测</h1>
+    <p id="error-message"></p>
+    <button id="retry-button" class="button primary" type="button">
+      <i data-lucide="refresh-cw"></i><span>重试</span>
+    </button>
+  </div>
+
+  <main id="app-view" class="app-shell" hidden>
+    <header class="page-header">
+      <div class="page-title">
+        <span class="page-mark" aria-hidden="true"><i data-lucide="scan-search"></i></span>
+        <div class="page-heading">
+          <div class="page-heading-row"><h1 id="page-title">模型检测</h1></div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <span class="user-chip"><i data-lucide="circle-user-round"></i><span id="user-name"></span></span>
+        <button id="model-refresh" class="icon-button" type="button" title="刷新模型检测结果" aria-label="刷新模型检测结果"><i data-lucide="refresh-cw"></i></button>
+      </div>
+    </header>
+
+    <section id="model-pane" aria-labelledby="page-title">
+      <div class="fp-model-intro">
+        <ul id="model-channel-notes" class="fp-channel-notes" aria-label="检测渠道介绍"></ul>
+        <p id="model-meta">正在同步模型检测状态</p>
+      </div>
+      <section id="model-grid" class="group-grid" aria-live="polite"></section>
+    </section>
+  </main>
+
+  <dialog id="model-dialog" class="yzai-pelican-modal model-modal" aria-labelledby="model-dialog-title">
+    <header class="yzai-pelican-head">
+      <div class="dialog-copy"><h2 id="model-dialog-title">模型检测</h2><p id="model-dialog-subtitle" class="yzai-pelican-sub"></p></div>
+      <div class="dialog-actions"><button id="model-dialog-close" class="icon-button" type="button" title="关闭模型检测详情" aria-label="关闭模型检测详情"><i data-lucide="x"></i></button></div>
+    </header>
+    <nav id="model-channel-tabs" class="model-channel-tabs" role="tablist" aria-label="检测渠道"></nav>
+    <div class="yzai-pelican-body model-body">
+      <nav id="model-history" class="yzai-pelican-history" aria-label="当前渠道检测历史"></nav>
+      <section id="model-detail" class="yzai-pelican-detail" aria-live="polite"></section>
+    </div>
+  </dialog>
+
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

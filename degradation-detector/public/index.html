@@ -8,9 +8,9 @@
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/model-results.css">
   <script src="/vendor/lucide/lucide.min.js" defer></script>
-  <script src="/app.js" defer></script>
+  <script src="/session.js" defer></script>
   <script src="/model-result-renderer.js" defer></script>
-  <script src="/model-results.js" defer></script>
+  <script src="/app.js" defer></script>
 </head>
 <body>
   <div id="loading-view" class="state-view">
@@ -33,14 +33,8 @@
         <span class="page-mark" aria-hidden="true"><i data-lucide="brain-circuit"></i></span>
         <div class="page-heading">
           <div class="page-heading-row">
-            <h1 id="page-title">检测结果</h1>
-            <p id="capability-note" class="capability-note" role="note">
-              <i data-lucide="info" aria-hidden="true"></i>
-              <span>疑似降智 ≠ 不可用：多数日常任务仍可胜任，本检测主要为对模型能力上限要求较高的用户提供参考。</span>
-            </p>
+            <h1 id="page-title">降智检测</h1>
           </div>
-          <p id="page-meta">正在同步检测状态</p>
-          <p id="model-meta" hidden>正在同步模型检测状态</p>
         </div>
       </div>
       <div class="header-actions">
@@ -48,37 +42,16 @@
         <button id="refresh-button" class="icon-button" type="button" title="刷新" aria-label="刷新">
           <i data-lucide="refresh-cw"></i>
         </button>
-        <button id="model-refresh" class="icon-button" type="button" title="刷新模型检测结果" aria-label="刷新模型检测结果" hidden><i data-lucide="refresh-cw"></i></button>
       </div>
     </header>
 
-    <nav class="result-tabs" role="tablist" aria-label="检测类型" hidden>
-      <button id="iq-tab" role="tab" aria-selected="false" aria-controls="iq-pane" tabindex="-1" type="button" hidden><i data-lucide="brain-circuit"></i>降智检测<span id="iq-tab-count"></span></button>
-      <button id="model-tab" role="tab" aria-selected="false" aria-controls="model-pane" tabindex="-1" type="button" hidden><i data-lucide="scan-search"></i>模型检测</button>
-    </nav>
-    <div id="detection-empty" class="empty-list" role="status" tabindex="-1" hidden><i data-lucide="folder-search"></i><p>暂无可查看的检测分组</p></div>
-    <section id="iq-pane" role="tabpanel" aria-labelledby="iq-tab" hidden>
-      <section class="toolbar" aria-label="分组筛选">
-      <div class="select-control">
-        <i data-lucide="list-filter"></i>
-        <select id="platform-filter" aria-label="按平台筛选">
-          <option value="">全部平台</option>
-        </select>
-        <i data-lucide="chevron-down" class="select-chevron"></i>
+    <section id="iq-pane" aria-labelledby="page-title">
+      <div class="fp-iq-intro">
+        <p id="capability-note" class="capability-note" role="note"><i data-lucide="info" aria-hidden="true"></i><span>疑似降智 ≠ 不可用：多数日常任务仍可胜任，本检测主要为对模型能力上限要求较高的用户提供参考。</span></p>
+        <p id="page-meta">正在同步检测状态</p>
       </div>
-      <span id="group-count" class="group-count"></span>
-    </section>
 
-    <section id="group-grid" class="group-grid" aria-live="polite"></section>
-    </section>
-    <section id="model-pane" role="tabpanel" aria-labelledby="model-tab" hidden>
-      <section class="toolbar" aria-label="模型检测筛选">
-        <div class="model-filters">
-          <div class="select-control"><i data-lucide="list-filter"></i><select id="model-platform-filter" aria-label="模型检测按平台筛选"><option value="">全部平台</option></select><i data-lucide="chevron-down" class="select-chevron"></i></div>
-          <div class="select-control"><i data-lucide="route"></i><select id="model-channel-filter" aria-label="按检测渠道筛选"><option value="">全部检测渠道</option><option value="bazaarlink">Bazaarlink Probe</option><option value="cctest">CCTest</option></select><i data-lucide="chevron-down" class="select-chevron"></i></div>
-        </div><span id="model-group-count" class="group-count"></span>
-      </section>
-      <section id="model-grid" class="group-grid" aria-live="polite"></section>
+      <section id="group-grid" class="group-grid" aria-live="polite"></section>
     </section>
   </main>
 
@@ -98,12 +71,6 @@
       <nav id="history-list" class="yzai-pelican-history" aria-label="最近检测记录"></nav>
       <section id="result-detail" class="yzai-pelican-detail" aria-live="polite"></section>
     </div>
-  </dialog>
-
-  <dialog id="model-dialog" class="yzai-pelican-modal model-modal" aria-labelledby="model-dialog-title">
-    <header class="yzai-pelican-head"><div class="dialog-copy"><h2 id="model-dialog-title">模型检测</h2><p id="model-dialog-subtitle" class="yzai-pelican-sub"></p></div><div class="dialog-actions"><button id="model-dialog-close" class="icon-button" type="button" title="关闭模型检测详情" aria-label="关闭模型检测详情"><i data-lucide="x"></i></button></div></header>
-    <nav id="model-channel-tabs" class="model-channel-tabs" role="tablist" aria-label="检测渠道"></nav>
-    <div class="yzai-pelican-body model-body"><nav id="model-history" class="yzai-pelican-history" aria-label="当前渠道检测历史"></nav><section id="model-detail" class="yzai-pelican-detail" aria-live="polite"></section></div>
   </dialog>
 
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>

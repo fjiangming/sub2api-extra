@@ -1,5 +1,103 @@
 # 个性化功能维护台账
 
+## 2026-11-09：提交降智检测与 Fingerpoint 功能到 GitHub
+
+用户要求提交 GitHub。本次提交纳入 `degradation-detector` 的官方 Fingerpoint SDK 接入、参考数据更新管理、平台分区与动态渠道介绍、两个独立只读结果页、Node 22 运行时、相关测试 / 预览及文档，维护台账仅暂存本任务相关新增章节。保留未关联的画布、运营中心、多域名 Nginx 及其他文件和台账改动，不操作服务器或业务数据。
+
+沿用提交前已通过的完整 146 项测试、56 个 JavaScript 文件语法检查及正式页面 Chrome 验收，提交前复核暂存差异、凭据 / 运行数据排除和 diff --check。提交说明记录功能内容与验证范围；推送至既有 `origin/main`，由仓库既有工作流处理镜像构建。
+
+## 2026-11-09：拆分降智与模型只读结果页
+
+用户要求两个独立结果入口，原页面继续仅展示降智检测，移除检测类型 Tab；核实渠道介绍与启用配置的关系，并说明 Fingerpoint 首次配置及后续更新。本轮仅修改降智检测服务与本台账，保留既有 Fingerpoint 正式接入及其他任务改动，不操作生产、主站、资金契约或真实付费检测。
+
+| 文件 | 改动与保留要求 |
+| --- | --- |
+| `degradation-detector/public/index.html`、`public/app.js` | 原 `/`、`/index.html`、`/results` 始终展示降智结果，删除模型内容、检测类型 Tab 和跨类型事件；保留平台分区、说明与计划、倍率 / 缓存率、柱状图、原历史 / 预览 / 源码交互。无分组显示对应空状态，分组停用后关闭失效详情。 |
+| `public/model-results.html`（新增）、`public/model-results.js`、`public/model-results.css` | 新增独立模型结果页，直接读取模型接口并定时刷新，移除对降智 DOM、接口、Tab 和自动切换的依赖及废弃样式。保留全部渠道结果、官网入口、详情内渠道切换及独立历史；介绍继续按用户有权且启用模型检测的分组所启用渠道的并集生成，无需已有记录。 |
+| `public/session.js`（新增） | 两页共用原 SSO / Token 清理 / 会话 / 主题和只读请求契约，集中初始化、刷新、重试与 5 秒轮询；各页只加载自身结果。登录失效时停止轮询、清除会话及该页结果 / 详情；普通接口故障提供错误 / 重试反馈，不跳转到另一类检测。 |
+| `src/server.js` | 新增 `/model-results`、`/model-results/`、`/model-results.html` 独立 HTML 路由，沿用 no-store 和安全响应头；共享会话脚本纳入资源版本散列。原结果 API 兼容元数据保留，管理角色、CSRF 和分组权限边界不变。 |
+| `admin/index.html` | 原返回入口明确为降智结果，并增加带提示的模型结果图标入口；管理页权限及配置交互保持。 |
+| `tests/server.test.js`、`scripts/model-browser-check.cjs` | 验证两页及别名、安全 / 不缓存头、资源版本、公共脚本与管理操作分离；浏览器验证无类型 Tab、无跨类型结果请求或自动跳转、两类空状态、跨平台启停渠道时介绍同步、无历史渠道介绍、停用组详情关闭、503 重试和 401 清理。保留三渠道完整详情、管理更新操作、只读 / 越权、原 IQ 作品交互和桌面 / 手机 / 深色验收。 |
+| `scripts/model-preview.cjs`、`scripts/fingerprint-demo.cjs`、`scripts/fingerprint-demo/README.md` | 两个独立预览地址同步，继续使用隔离临时数据和禁真实调用的正式页面预览。 |
+| `degradation-detector/README.md`、`CUSTOMIZATIONS.md` | 同步三个独立入口、Sub2API 两个普通用户菜单地址与 Nginx 路径、渠道介绍范围、Fingerpoint 五步配置及参考数据 / SDK 分别更新的边界。 |
+
+验证：完整 **146 项测试**、**56 个 JavaScript 文件**语法检查及范围内 diff --check 通过。正式页面 Chrome + Playwright 验收通过，桌面 1440px、手机 390px / 320px 与深色模式无页面异常、整页横向溢出或外部 / 付费调用；已复核两类结果及手机配置截图，截图保存在系统临时 `sub2api-model-browser-hbxdvb`。另只读核对官方 SDK 文档、npm 最新发布及官方参考清单：当前固定与最新发布均为 `lmfpd-sdk@0.2.0`，官方参考数据构建于 2026-11-03、66 个模型；本轮未对实际服务数据执行安装或更新，首次使用仍应在管理页检查并取得参考数据。
+
+只重启本任务已核对的本地 loopback 隔离预览进程，19896 端口现分别使用 `/results?demo=readonly` 和 `/model-results?demo=readonly`，管理仍为 `/admin/config?demo=1`；不提交、推送、构建或部署生产镜像。
+
+## 2026-11-09：正式接入 Fingerpoint、数据更新管理及平台分区结果页
+
+用户确认 Demo 后要求完成正式开发。本轮将确认的布局和第三渠道接入既有降智检测服务，保留现有两渠道、降智规则 / 视觉审核 / 作品预览 / 复核 / 历史交互。仅修改 `degradation-detector` 与本台账；不修改主站、运营中心或资金契约，不连接生产、不提交 / 推送 / 发布或部署，不使用真实用户 Key 或收费模型。保留其他任务的既有文件和台账。
+
+| 文件 | 改动及必须保留的行为 |
+| --- | --- |
+| `degradation-detector/public/index.html`、`public/app.js` | 两段说明移入降智 Tab 原筛选位置，删除平台筛选和结果分组编号，按平台独立分区；保留原柱状图、倍率 / 缓存率、历史与 HTML 预览。 |
+| `public/model-results.js`、`public/model-results.css` | 模型 Tab 删除平台 / 渠道筛选，用当前用户可见模型分组所启用渠道的介绍替代，名称旁提供官网外链及无来源 / 无 opener 保护。模型分组按平台分区，展示所有启用渠道，删除卡片底部固定说明；详情时间统一“记录时间”，手机切换渠道后选中项保持可见。 |
+| `public/model-result-renderer.js` | 复用平台分区生成器，新增 Fingerpoint 全候选排名、每轮分析 / 样本 / 挑战 / 原始回答、诊断、SDK 与数据版本及脱敏 JSON。兼容部分样本、无分析、无排名、缺概率和中断；库内候选结果不转换成身份或智商证明。原两网站全部项 / 零分 / null / 扩展字段保留。 |
+| `admin/index.html`、`admin/app.js`、`admin/model-config.js`、`admin/model-config.css` | 在原管理页第三渠道配置中加入模型 / 协议 / 推理强度（含 Max）/ 轮数 / 样本 / 并发 / 严格模式、分组模型覆盖、独立专用 Key、原手动 / 批量与自动计划。新增更新策略、来源、版本状态、后台进度、检查 / 应用 / 恢复与更新记录；未保存配置不能操作，过期管理员状态清理敏感内容。Fingerpoint 不提供检测网站 Key 输入。 |
+| `src/model-config.js`、`src/config.js`、`src/model-store.js` | 增加第三渠道、取样约束、可选更新设置和分组模型覆盖；旧两渠道配置自动补入关闭的 Fingerpoint，不强制重填原设置。任务、历史、归档及清理继续分渠道；配置和加密 Key 使用原 SQLite / 数据卷。 |
+| `src/model-detection.js`、`src/model-results.js` | 接入官方 SDK Worker 和专用 Key，先取得可用参考数据再请求目标。逐样本 / 逐轮持久化进度和脱敏结果，最大响应 2 MiB，运行总限 1,800 秒；独立候选状态不进入降智率。停用 / 改配置取消执行；中断或重启不重发模型请求，已完成样本保留。 |
+| `src/fingerpoint-worker.js`、`src/fingerpoint-runner.js`（新增） | 官方 `lmfpd-sdk` 负责挑战、请求、解析和评分，支持 Responses / Chat Completions / Messages，多轮分别检测。Worker 内存限制、总取消及退出清理，不增加浏览器或截图服务；修复取消与 Worker 退出竞态的错误分类。 |
+| `src/fingerpoint-http.js`（新增） | 参考下载限流量、校验公网 HTTPS、不跟随重定向；模型传输限定为 SDK 生成的唯一 POST 端点，每次固定已验证公网 DNS，拒绝重定向和超大流式响应，完成 / 异常关闭连接。参考服务不接收模型 Key。 |
+| `src/fingerpoint-fixture.js`（新增） | 隔离演示与页面验收共用三轮样本及候选数据，明确模拟数据标记，不调用真实模型或参考下载服务。 |
+| `src/fingerpoint-data.js`（新增） | 固定官方 / 镜像来源，支持 1–168 小时自动检查、自动应用或手动应用、检查 / 安装 / 恢复和最多 30 条历史。校验 manifest / 路径 / 大小 / SHA-256 / 解压 / SDK 绑定，坏包尝试备用来源，旧数据源不能自动降级，失败保留可用版本。不可变 hash 目录和版本租约保证在途 / 历史不变，清理无引用版本和遗留临时目录；当前版在更新期间可立即取得，首次等待可取消。SDK 只提示版本，不安装远程代码。 |
+| `src/server.js`、`src/model-routes.js` | 管理设置同事务保存；新增仅实时管理员访问的数据状态与操作 API，写操作要求 CSRF。操作立即 202、GET 续看进度，避免长下载占用反代请求；普通用户仍只能按可见且已启用分组 / 渠道读取结果，无配置、Key 或目标 URL。演示模式禁止真实数据下载。 |
+| `package.json`、`package-lock.json`、`Dockerfile` | 固定官方 MIT SDK `lmfpd-sdk@0.2.0`，运行时最低 Node 22.15，Docker 两阶段使用 Node 22；不升级无关依赖，不新增 `.env` 变量、服务或容器。 |
+| `tests/fingerpoint-data.test.js`、`tests/fingerpoint-model.test.js`（新增） | 18 项专项覆盖参考包校验 / 来源回退 / 原子切换 / 重开与恢复 / 版本租约 / 保留 / 自动策略 / 取消 / 首次安装竞态、SDK 协议与 Worker、三渠道及仅 Fingerpoint、分组 Key / 模型、定时 / 部分结果 / 中断不重放、角色 / CSRF / 分组授权与后台操作。均使用隔离数据和模拟传输，不收费。 |
+| `scripts/model-preview.cjs`、`scripts/model-browser-check.cjs` | 正式页面三渠道隔离预览与 Chrome 验收，原有降智 / 两渠道交互继续验证；新增候选、轮次、空分析、更新策略与拦截响应的后台检查 / 应用 / 恢复 / 记录，验证手机、深色、越权拒绝及零真实调用。 |
+| `scripts/fingerprint-demo.cjs`、`scripts/fingerprint-demo-check.cjs`、`scripts/fingerprint-demo/README.md` | 原 Demo 启动与验收命令保留，改为复用正式页面与隔离预览；移除原型的四份动态叠加脚本 / 样式，不把模拟后端接入生产。19896 地址继续可用，检测结果是模拟数据，真实更新在演示中禁用。 |
+| `degradation-detector/README.md`、`CUSTOMIZATIONS.md` | 同步三渠道配置、Key 和费用边界、样本 / 排名含义、参考数据与 SDK 更新边界、限额 / 保留 / 安全、运行时及验证步骤。 |
+
+验证：降智检测完整 **146 项测试**、55 个 JavaScript 文件语法检查及范围内 diff --check 通过。正式页面 Chrome + Playwright 验收覆盖 1440px、390px / 320px 和深色模式、全部三渠道、后台更新操作反馈、原降智预览 / 源码 / 历史、角色与分组边界；无页面异常、整页横向溢出或真实外网 / 付费调用，截图在系统临时 `sub2api-model-browser-xVtcIb` 等目录。另实际从官方获取 2026-11-03 版本参考数据（66 个模型），校验解压 hash 与 SDK 加载 / 分析成功；用该真实参考库和三协议模拟 SSE 响应验证官方 SDK 取得各 3 个有效样本、66 个候选，9 次传输均为模拟，不请求真实模型。真实检测质量及目标 API 兼容性仍需管理员配置专用 Key 后按实际回包核对，不把演示候选当鉴定结果。
+
+只重启本任务已核对命令行的 loopback 预览，继续使用 `http://127.0.0.1:19896/results?demo=readonly#model` 与 `/admin/config?demo=1`；临时 SQLite 与实际数据隔离。当前机器 Docker Linux 引擎未运行，未构建或验收 Linux 镜像，不启动 Docker Desktop、不部署服务器。生产升级应使用后续发布的服务镜像并持久挂载原数据卷，SDK 后续程序逻辑升级仍须重新发布镜像。
+
+## 2026-11-08：按确认文案统一 Fingerpoint Demo 展示
+
+用户确认先前文案方案，并要求去除每个模型检测分组卡片底部的“独立检测记录 · 不计入降智率”。本轮仅调整 Demo 展示，正式接入继续等待确认；保留全部模拟标识、现有渠道能力和数据更新设计，其他任务文件保持。
+
+- `degradation-detector/scripts/fingerprint-demo/results.js`：第三渠道名称统一为 `Fingerpoint`，官网入口提示同步新名称；介绍改为“采用与官网一致的检测逻辑，分析模型回答特征，提供候选模型排名。”，摘要改为“指纹检测 · 版本随记录保存”。
+- 同目录 `admin.js`、`renderer.js`：配置、分组模型覆盖、历史渠道选项及详情标题统一名称，配置摘要改为“官方检测逻辑 · SDK 0.2.0 · 无需检测网站 Key”。
+- `degradation-detector/scripts/fingerprint-demo.cjs`：模拟结果返回与复用脚本的渠道名称同步，Demo 动态资源将详情时间标签改为“记录时间”，删除模型卡片完整底部说明节点，不保留空白占位；不改正式公共脚本或服务 API。
+- `degradation-detector/scripts/fingerprint-demo/README.md`、`CUSTOMIZATIONS.md`：同步已确认文案和原型边界，说明正式同源逻辑须以接入对应检测程序及参考数据版本为前提；当前仍为模拟数据。
+
+验证：51 个 JavaScript 文件语法检查及完整 Demo 浏览器验收通过，原有分组 / 渠道 / 详情 / 数据更新 / 权限流程正常，真实外部和付费调用均为 0。另对运行中的 19896 预览验证两分组 6 个渠道结果、介绍 / 返回名称 / 详情 / 管理历史新文案，以及卡片底部节点已删除；模型展示与配置中无旧名称或相关“本地”描述，无页面异常，320px 页面无整页横向溢出。已复核结果与配置截图，保存在临时 `sub2api-fingerpoint-copy-wl4WAy`，完整验收截图在 `sub2api-fingerprint-demo-JdCdZA`。已核对命令行，仅重启本任务的独立后台 Demo 进程，继续使用原 URL；未新增测试文件、提交、推送或部署正式服务。
+
+## 2026-11-08：Demo 渠道介绍增加官网入口
+
+按用户要求，仅调整既有模型结果 Demo。`degradation-detector/scripts/fingerprint-demo/results.js` 在已启用渠道名称旁增加官网外链图标，分别指向 `https://bazaarlink.ai/`、`https://cctest.ai/`、`https://lm.ikale.io/`；新标签页打开，设置 `noopener noreferrer`、中文悬停提示及无障碍名称，不附加凭据或检测数据。`preview.css` 补充固定尺寸图标入口、悬停和键盘焦点样式，沿用当前主题；同目录 `README.md` 与本台账同步说明。未修改正式功能、依赖或配置，不提交或部署。
+
+验证：对运行中的 Demo 检查三个链接的目标、提示及实际新标签页打开行为，确认新页 opener 为空、来源为空；外站导航在浏览器内拦截为模拟响应，无真实外网请求。1440px、390px / 320px 及深色模式显示正常，无页面异常和整页横向溢出；已复核桌面与手机截图，保存在临时 `sub2api-channel-links-xVHDP1`。修改脚本语法检查通过，未增加生产测试或依赖。
+
+## 2026-11-08：模型结果 Demo 去除筛选并按平台分区
+
+用户要求重新调整 Demo，确认后才开发正式功能。本轮只修改既有隔离原型，沿用已有页面风格和模拟数据，不接入第三渠道正式服务、不请求外部 API、不提交或部署；其他任务的文件和台账保持。
+
+| 文件 | 改动与保留要求 |
+| --- | --- |
+| `degradation-detector/scripts/fingerprint-demo/results.js` | 模型 Tab 隐藏平台和检测渠道筛选，原位置展示当前用户可见分组启用渠道的简短说明和检测计划；按模型结果自身平台分区，复用降智 Tab 的区标题、分隔线和卡片布局，取消卡片重复平台标签。说明随配置刷新同步，跨平台仍启用的渠道继续显示；保留所有已配置渠道结果、详情和独立历史，不借用降智分组决定模型分组可见性。 |
+| `degradation-detector/scripts/fingerprint-demo/preview.css` | 新增无框渠道说明布局，桌面并列、手机纵向；模型与降智结果共用平台分区网格，复用现有颜色变量和深色主题。 |
+| `degradation-detector/scripts/fingerprint-demo-check.cjs` | 更新浏览器验收：两类检测独立分区、筛选不可见、6 个渠道结果完整保留、跨平台关闭 / 恢复渠道后说明同步、刷新无重复分区；渠道变更使用各分组不同的模拟专用 Key 满足原安全确认。保留全部原型管理、数据更新、详情、权限检查，增加模型列表手机 / 深色截图。 |
+| `degradation-detector/scripts/fingerprint-demo/README.md`、`CUSTOMIZATIONS.md` | 同步最新 Demo 布局、验证范围与待确认边界。 |
+
+验证：完整 Demo 浏览器验收通过，原降智作品预览、三个模型渠道详情和管理操作正常；1440px、390px / 320px 与深色模式无整页横向溢出，页面未捕获异常为 0，真实外部 / 付费调用为 0。已复核桌面、手机和深色模型列表截图，保存于本机临时 `sub2api-fingerprint-demo-4Sa4XY`。`npm run check` 检查 51 个 JavaScript 文件。预览仍使用独立后台 loopback 服务 `http://127.0.0.1:19896/results?demo=readonly#model`，静态叠加资源刷新即生效；正式业务源码与生产配置未改。
+
+## 2026-11-08：降智结果分区与第三指纹渠道交互 Demo
+
+用户要求先输出最终 Demo，确认后再实施正式改造。本轮只新增本地隔离交互原型，不把 Fingerpoint SDK、渠道 schema 或更新器接入正式服务，不改 Sub2API、Docker、计费及现有生产页面。不提交、推送或部署；其他任务的文档、Nginx 修改及无关文件保留。
+
+| 文件 | 改动与保留要求 |
+| --- | --- |
+| `degradation-detector/scripts/model-preview.cjs` | 现有隔离预览额外返回 Express app，供新 Demo 复用；原端口、页面、临时数据、上游禁用和清理语义保持。 |
+| `degradation-detector/scripts/fingerprint-demo.cjs`（新增） | 仅 loopback 的 Demo 启动器，复用既有真实页面与临时模拟服务，按请求叠加资源和模拟第三渠道。新增设置保存、分组模型、排队 / 手动、历史及数据检查 / 应用 / 回退接口，仅操作内存及临时库；管理与写请求沿用管理员会话和 CSRF。完整样本、候选、置信度及数据版本均为虚构演示，无 SDK 安装、外网数据下载或模型请求。 |
+| `degradation-detector/scripts/fingerprint-demo/results.js`、`preview.css`（新增） | 两段提示移到降智 Tab 原筛选位置，该 Tab 去除可见平台筛选；按平台无框分区，保留原卡片、倍率 / 缓存率、柱状图、历史 / HTML 交互，取消只读分组编号。第三渠道沿用模型结果页，手机渠道导航保证选中项可见，兼容现有深色。 |
+| `degradation-detector/scripts/fingerprint-demo/admin.js`（新增） | 沿用配置页增加第三渠道，配置目标模型、协议、推理强度、轮数与取样参数，分组覆盖及仅选第三渠道可保存。独立数据管理提供自动检查间隔 / 应用策略 / 来源、手动检查 / 应用 / 回退和更新记录；明确参考数据可直接更新，程序与挑战生成逻辑仍随 SDK / 镜像升级。 |
+| `degradation-detector/scripts/fingerprint-demo/renderer.js`（新增） | 显示完整模拟候选、逐轮样本、挑战 / 原始回答、诊断、SDK / 参考数据版本与 JSON；部分样本不显示置信度，保留库内排名的解释，不计入降智率。更新前后历史保持其执行时数据版本。 |
+| `degradation-detector/scripts/fingerprint-demo-check.cjs`、`scripts/fingerprint-demo/README.md`（新增） | 提供 Chrome 验收和原型运行说明。验证布局、现有 HTML / 两渠道交互、管理员保存与分组覆盖、模拟手动取样、仅第三渠道、自动 / 手动策略保存、数据检查 / 应用 / 回退 / 记录、历史版本不覆盖及普通用户管理访问拒绝。截图仅存系统临时目录。 |
+| `CUSTOMIZATIONS.md` | 登记本轮 Demo 范围、确认前边界及验证结果，不覆盖其他任务台账。 |
+
+验证：新 Demo 与原模型检测浏览器回归均通过，桌面 1440px、手机 390px / 320px、深色模式无未捕获页面异常或整页横向溢出；已复核平台分区、管理更新、第三渠道、结果详情及手机 / 深色截图。普通用户访问管理页面、新管理脚本、数据设置和更新请求均 403；外部浏览器请求和模拟服务的真实上游调用均为 0。`npm run check` 检查 51 个 JavaScript 文件，降智检测范围 diff --check 通过。新增流程截图在本机临时 `sub2api-fingerprint-demo-JTW6hG`，原回归在 `sub2api-model-browser-bpGmWD`。默认新预览 http://127.0.0.1:19896，结果 `/results?demo=readonly`、模型 `/results?demo=readonly#model`、配置 `/admin/config?demo=1`；数据 / 版本与结论为演示，未运行生产 API、Docker / Linux 验收或实际升级。
+
 ## 2026-11-07：新旧域名并存与 yunhop.cc 加密回源准备
 
 用户授权兼容除 3X-UI、订阅管理和 Xray 节点之外的现有服务，并为 yunhop.cc 新增独立证书和 Nginx 8443 加密回源准备。用户随后明确保留当前 Cloudflare HTTP 回源，不修改 Cloudflare，仅将本轮代码推送到 extra main，应用镜像由用户自行更新。保留旧域名、原容器数据、计费合同和 fork 镜像通道，不修改排除服务的配置或资金数据。既有无关工作文件保持。

@@ -47,7 +47,11 @@ class ModelStore {
   }
 
   schedule() { return parse(this.db.prepare('SELECT schedule_json FROM model_settings WHERE id=1').get().schedule_json, defaultSchedule); }
-  platform(id) { return parse(this.db.prepare('SELECT config_json FROM model_platforms WHERE platform=?').get(id)?.config_json, defaultModelPlatform(id)); }
+  platform(id) {
+    const defaults = defaultModelPlatform(id);
+    const saved = parse(this.db.prepare('SELECT config_json FROM model_platforms WHERE platform=?').get(id)?.config_json, defaults);
+    return { ...defaults, ...saved, channels: { ...defaults.channels, ...saved.channels } };
+  }
   group(id) { return this.db.prepare('SELECT * FROM model_groups WHERE group_id=?').get(String(id)); }
   groups() { return this.db.prepare('SELECT * FROM model_groups ORDER BY group_id').all(); }
   enabledGroups() { return this.groups().filter(group => group.enabled && this.platform(group.platform).enabled); }
@@ -106,7 +110,7 @@ class ModelStore {
       AND (remote_id IS NOT NULL ${allowed.length ? `OR channel IN (${allowed.map(() => '?').join(',')})` : ''}) ORDER BY (remote_id IS NOT NULL) DESC,id LIMIT 1`).get(...allowed);
   }
   cancelObsolete() {
-    this.db.prepare(`UPDATE model_runs SET status='error', conclusion='error', reason='配置已停用或变更，本地任务已停止', error_code='MODEL_CONFIG_CHANGED', finished_at=?
+    this.db.prepare(`UPDATE model_runs SET status='error', conclusion='error', reason='配置已停用或变更，检测任务已停止', error_code='MODEL_CONFIG_CHANGED', finished_at=?
       WHERE status IN ('queued','running') AND NOT EXISTS (SELECT 1 FROM model_groups g WHERE g.group_id=model_runs.group_id AND g.enabled=1 AND g.revision=model_runs.revision)`).run(Date.now());
   }
   due(limit = 20) { return this.db.prepare('SELECT * FROM model_groups WHERE enabled=1 AND next_run_at<=? ORDER BY next_run_at LIMIT ?').all(Date.now(), limit); }
@@ -130,7 +134,7 @@ class ModelStore {
 
   updateResponse(id, response, status = 'running') {
     const row = this.run(id);
-    const itemCount = row.channel === 'bazaarlink' ? (Array.isArray(response.items) ? response.items.length : 0) : Object.keys(response.scores || {}).length;
+    const itemCount = row.channel === 'bazaarlink' ? (Array.isArray(response.items) ? response.items.length : 0) : row.channel === 'fingerpoint' ? response.analysis?.results?.length || 0 : Object.keys(response.scores || {}).length;
     this.db.prepare('UPDATE model_runs SET response_json=?, conclusion=?, total=?, item_count=?, progress=? WHERE id=?')
       .run(JSON.stringify(response), modelConclusion(row.channel, response, status), typeof response.total === 'number' && Number.isFinite(response.total) ? response.total : null, itemCount || 0, typeof response.progress === 'number' ? Math.min(1, Math.max(0, response.progress)) : null, id);
   }

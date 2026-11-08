@@ -1,19 +1,16 @@
 'use strict';
 
 const state = {
-  sessionToken: sessionStorage.getItem('degradation-detector.session') || '',
-  user: null,
   data: null,
-  platform: '',
   activeGroupId: null,
   opener: null,
   openerGroupId: null,
   selectedRunId: null,
   detailRequest: 0,
   previewUrls: new Set(),
-  refreshBusy: false,
-  pollTimer: null
+  refreshBusy: false
 };
+const { api, authenticatedFetch, responseError, refreshIcons } = window.DetectorSession;
 
 const labels = {
   normal: '正常',
@@ -36,67 +33,6 @@ function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   })[char]);
-}
-
-function refreshIcons() {
-  if (window.lucide) window.lucide.createIcons({ attrs: { 'stroke-width': 1.8 } });
-}
-
-function showView(name) {
-  $('loading-view').hidden = name !== 'loading';
-  $('error-view').hidden = name !== 'error';
-  $('app-view').hidden = name !== 'app';
-}
-
-function showError(message) {
-  $('error-message').textContent = message || '页面暂时不可用';
-  showView('error');
-  refreshIcons();
-}
-
-function toast(message, type = '') {
-  const item = document.createElement('div');
-  item.className = `toast ${type}`.trim();
-  item.textContent = message;
-  $('toast-region').append(item);
-  setTimeout(() => item.remove(), 4200);
-}
-
-async function authenticatedFetch(path, options = {}) {
-  const headers = { ...(options.headers || {}) };
-  if (state.sessionToken && !headers.Authorization && !headers.authorization) {
-    headers.Authorization = `Session ${state.sessionToken}`;
-  }
-  if (options.body != null) headers['Content-Type'] = 'application/json';
-  return fetch(path, {
-    ...options,
-    headers,
-    cache: 'no-store',
-    body: options.body == null || typeof options.body === 'string'
-      ? options.body
-      : JSON.stringify(options.body)
-  });
-}
-
-async function responseError(response) {
-  const payload = await response.json().catch(() => ({}));
-  const error = new Error(payload?.error?.message || `请求失败 (${response.status})`);
-  error.code = payload?.error?.code;
-  error.status = response.status;
-  return error;
-}
-
-async function api(path, options = {}) {
-  const response = await authenticatedFetch(path, options);
-  if (response.status === 204) return null;
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(payload?.error?.message || `请求失败 (${response.status})`);
-    error.code = payload?.error?.code;
-    error.status = response.status;
-    throw error;
-  }
-  return payload;
 }
 
 async function authenticatedBlob(path) {
@@ -177,19 +113,6 @@ function createArtifactPreview(blob, url, artifact, title, networkPreviewUrl) {
     return createPreviewFrame(networkPreviewUrl, title, 'allow-scripts');
   }
   return null;
-}
-
-function setSession(session) {
-  state.sessionToken = session.sessionToken || state.sessionToken;
-  state.user = session.user;
-  if (state.sessionToken) sessionStorage.setItem('degradation-detector.session', state.sessionToken);
-  $('user-name').textContent = session.user?.name || 'Sub2API 用户';
-}
-
-function cleanAuthParams() {
-  const url = new URL(location.href);
-  for (const key of ['token', 'access_token']) url.searchParams.delete(key);
-  history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
 }
 
 function statusHtml(status) {
@@ -309,10 +232,6 @@ function activeGroup() {
   return state.data?.groups.find((group) => String(group.id) === String(state.activeGroupId)) || null;
 }
 
-function platformIcon(platform) {
-  return ({ openai: 'sparkles', anthropic: 'bot', gemini: 'gem', grok: 'orbit' })[platform] || 'cpu';
-}
-
 function reasoningLabel(value, missing = '默认') {
   if (value == null || value === '') return missing;
   return reasoningLabels[value] || String(value);
@@ -353,15 +272,6 @@ function cacheRateTitle(stats) {
   return `${states[stats?.status] || ''}${formula}${window}`;
 }
 
-function renderPlatformFilter() {
-  const select = $('platform-filter');
-  const current = state.platform;
-  select.innerHTML = '<option value="">全部平台</option>' + (state.data?.platforms || [])
-    .map((platform) => `<option value="${escapeHtml(platform.id)}">${escapeHtml(platform.label)}</option>`)
-    .join('');
-  select.value = current;
-}
-
 function historyChart(history) {
   const runs = [...(history || [])].reverse().slice(-HISTORY_CHART_LENGTH);
   const padding = Array.from({ length: Math.max(0, HISTORY_CHART_LENGTH - runs.length) }, () => null);
@@ -389,19 +299,17 @@ function historyAriaLabel(group) {
 }
 
 function renderGroups() {
-  const groups = (state.data?.groups || []).filter((group) => !state.platform || group.platform === state.platform);
-  $('group-count').textContent = `${groups.length} 个可检测分组`;
+  const groups = state.data?.groups || [];
   if (!groups.length) {
-    $('group-grid').innerHTML = `<div class="empty-list"><i data-lucide="folder-search"></i><p>当前筛选下没有可检测分组</p></div>`;
+    $('group-grid').innerHTML = `<div class="empty-list" role="status"><i data-lucide="folder-search"></i><p>暂无可查看的降智检测分组</p></div>`;
     refreshIcons();
     return;
   }
-  $('group-grid').innerHTML = groups.map((group) => {
+  $('group-grid').innerHTML = window.ModelResultRenderer.platformSections(groups, (group) => {
     return `
     <article class="group-card" data-group-id="${escapeHtml(group.id)}">
       <div class="group-card-head">
-        <div><h2>${escapeHtml(group.name)}</h2><span class="group-id">#${escapeHtml(group.id)}</span></div>
-        <span class="platform-label"><i data-lucide="${platformIcon(group.platform)}"></i>${escapeHtml(group.platform_label)}</span>
+        <div><h2>${escapeHtml(group.name)}</h2></div>
       </div>
       <div class="group-model">
         <span title="${escapeHtml(group.model)}">${escapeHtml(group.model)}</span>
@@ -428,7 +336,7 @@ function renderGroups() {
       </div>
     </article>
   `;
-  }).join('');
+  });
   document.querySelectorAll('.detect-button').forEach((button) => {
     button.addEventListener('click', () => openGroup(button.dataset.groupId));
   });
@@ -438,7 +346,7 @@ function renderGroups() {
 function renderPageMeta() {
   const enabled = (state.data?.groups || []).length;
   const next = state.data?.next_run_at ? ` · 下次 ${when(state.data.next_run_at)}` : '';
-  $('page-meta').textContent = `只读结果 · ${scheduleDescription()} 检测 · ${enabled} 个分组已启用${next}`;
+  $('page-meta').textContent = `${scheduleDescription()} 检测 · ${enabled} 个分组已启用${next}`;
 }
 
 async function refresh() {
@@ -447,11 +355,12 @@ async function refresh() {
   $('refresh-button').classList.add('busy');
   try {
     state.data = await api('/api/results');
-    renderPlatformFilter();
     renderPageMeta();
     renderGroups();
-    document.dispatchEvent(new CustomEvent('detector:refreshed', { detail: { groups: state.data.groups.length, tabs: state.data.detection_tabs } }));
-    if ($('result-dialog').open && activeGroup()) renderDialog(false);
+    if ($('result-dialog').open) {
+      if (activeGroup()) renderDialog(false);
+      else $('result-dialog').close();
+    }
   } finally {
     state.refreshBusy = false;
     $('refresh-button').classList.remove('busy');
@@ -630,62 +539,6 @@ async function openGroup(groupId) {
   renderDialog(true);
 }
 
-function schedulePolling() {
-  clearInterval(state.pollTimer);
-  state.pollTimer = setInterval(() => {
-    if (!document.hidden) refresh(false).catch(() => {});
-  }, 5000);
-}
-
-async function authenticate() {
-  const params = new URLSearchParams(location.search);
-  const theme = params.get('theme');
-  if (theme === 'dark' || (!theme && matchMedia('(prefers-color-scheme: dark)').matches)) {
-    document.documentElement.classList.add('dark');
-  }
-  const token = params.get('token') || params.get('access_token');
-  let session;
-  if (token) {
-    cleanAuthParams();
-    session = await api('/api/auth/sso', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: {}
-    });
-  } else if (['1', 'readonly'].includes(params.get('demo'))) {
-    session = await api('/api/auth/demo', {
-      method: 'POST',
-      body: { readOnly: params.get('demo') === 'readonly' }
-    });
-  } else {
-    session = await api('/api/auth/me');
-  }
-  setSession(session);
-}
-
-async function initialize() {
-  showView('loading');
-  try {
-    await authenticate();
-    showView('app');
-    await refresh(true);
-    schedulePolling();
-    refreshIcons();
-  } catch (error) {
-    state.sessionToken = '';
-    sessionStorage.removeItem('degradation-detector.session');
-    showError(error.status === 401
-      ? '登录状态无效或已过期，请从 Sub2API 自定义菜单重新打开。'
-      : error.message);
-  }
-}
-
-$('platform-filter').addEventListener('change', (event) => {
-  state.platform = event.target.value;
-  renderGroups();
-});
-$('refresh-button').addEventListener('click', () => refresh(true).catch((error) => toast(error.message, 'error')));
-$('retry-button').addEventListener('click', initialize);
 $('dialog-close').addEventListener('click', () => $('result-dialog').close());
 $('result-dialog').addEventListener('click', (event) => {
   if (event.target !== $('result-dialog')) return;
@@ -711,4 +564,11 @@ $('result-dialog').addEventListener('close', () => {
   else fallback?.focus();
 });
 
-initialize();
+window.DetectorSession.mount(refresh, () => {
+  state.data = null;
+  state.detailRequest++;
+  $('result-dialog').close();
+  clearPreviewUrls();
+  $('group-grid').replaceChildren();
+  $('result-detail').replaceChildren();
+});

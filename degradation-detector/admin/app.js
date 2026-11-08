@@ -899,6 +899,7 @@ function collect() {
     schedule_times: scheduleTimes,
     schedule_interval_minutes: intervalMinutes,
     model_schedule: window.ModelConfig.collectSchedule(),
+    fingerprint_data: window.ModelConfig.collectData(),
     storage_policy: {
       enabled: $('storage-enabled').checked,
       history_days: Number($('storage-history-days').value),

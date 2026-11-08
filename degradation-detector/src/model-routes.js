@@ -21,7 +21,7 @@ function installModelRoutes(app, runtime, { requireAuth, requireAdmin, requireCs
   const validateChannels = body => {
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'channels')) throw new AppError('VALIDATION_ERROR', '模型检测请求参数无效', { status: 400 });
     if (body.channels == null) return channels;
-    if (!Array.isArray(body.channels) || !body.channels.length || body.channels.length > 2 || body.channels.some(key => !channels.includes(key)) || new Set(body.channels).size !== body.channels.length) throw new AppError('VALIDATION_ERROR', '检测渠道选择无效', { status: 400 });
+    if (!Array.isArray(body.channels) || !body.channels.length || body.channels.length > channels.length || body.channels.some(key => !channels.includes(key)) || new Set(body.channels).size !== body.channels.length) throw new AppError('VALIDATION_ERROR', '检测渠道选择无效', { status: 400 });
     return body.channels;
   };
   const handler = fn => async (req, res, next) => {
@@ -38,13 +38,24 @@ function installModelRoutes(app, runtime, { requireAuth, requireAdmin, requireCs
         next_run_at: stored.next_run_at == null ? null : stored.next_run_at / 1000,
         channels: Object.fromEntries(channels.filter(key => config.channels[key].enabled).map(key => [key, {
           name: channelNames[key], model: runtime.modelStore.effective(stored, key).model,
-          site_url: new URL(config.channels[key].api_url).origin,
+          site_url: key === 'fingerpoint' ? 'https://lm.ikale.io' : new URL(config.channels[key].api_url).origin,
           latest: runtime.modelStore.latest(group.id, key), ...runtime.modelStore.counts(group.id, key)
         }]))
       };
     });
     const ids = [...new Set(payload.map(group => group.platform))];
     res.json({ groups: payload, platforms: ids.map(id => ({ id, label: payload.find(group => group.platform === id).platform_label })), schedule: runtime.modelStore.schedule(), schedule_timezone: runtime.config.scheduleTimezone, server_time: Date.now() / 1000 });
+  }));
+  app.get('/api/admin/fingerpoint/data', requireAuth, requireAdmin, handler(async (_req, res) => res.json(runtime.fingerprintData.status())));
+  app.post('/api/admin/fingerpoint/data/:action', requireAuth, requireAdmin, requireCsrf, historyLimiter, handler(async (req, res) => {
+    if (!['check', 'apply', 'rollback'].includes(req.params.action)) throw new AppError('VALIDATION_ERROR', '未知的参考数据操作', { status: 400 });
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length) throw new AppError('VALIDATION_ERROR', '参考数据操作无需额外参数', { status: 400 });
+    if (runtime.config.demoMode) throw new AppError('DEMO_UPDATE_DISABLED', '演示模式不下载或更新真实参考数据', { status: 409 });
+    if (runtime.fingerprintData.closed) throw new AppError('FINGERPOINT_CLOSED', '参考数据服务正在关闭', { status: 503 });
+    if (runtime.fingerprintData.status().busy) throw new AppError('FINGERPOINT_UPDATE_BUSY', '已有参考数据操作正在执行，请稍后刷新', { status: 409 });
+    // Downloads continue after this short response; administrators read progress through GET.
+    runtime.fingerprintData[req.params.action]().catch(() => {});
+    res.status(202).json(runtime.fingerprintData.status());
   }));
   const history = async (req, res, admin = false) => {
     const group = await requireGroup(req, admin);

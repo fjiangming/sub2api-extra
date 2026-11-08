@@ -27,6 +27,11 @@
   function verdict(channel, run) {
     if (['pending', 'queued', 'running'].includes(run.status)) return { text: run.status === 'queued' ? '等待检测' : '检测中', tone: 'neutral', key: run.status, reason: '检测任务尚未结束' };
     if (['error', 'failed', 'aborted'].includes(run.status)) return { text: '检测异常', tone: 'neutral', key: run.status, reason: run.error || '本轮没有可用结论' };
+    if (channel === 'fingerpoint') {
+      const key = run.verdictKey || run.analysis?.decision || 'unscorable';
+      const text = ({ candidate_match: '候选相符', candidate_differs: '候选不同', scored: '已提供候选', partial: '部分样本有效', unscorable: '无法评分', not_model: '序列特征异常' })[key] || '待确认';
+      return { key, text, tone: ['candidate_match', 'scored'].includes(key) ? 'info' : 'warning', reason: '候选排序仅在参考库内比较，不代表模型身份或能力证明。' };
+    }
     if (channel === 'bazaarlink') {
       const assessment = run.identityAssessment || {};
       const detailed = assessment.verdict || {};
@@ -106,5 +111,32 @@
     return `${title}${heading}${run.error ? `<p class="model-notice">${icon('circle-alert')}${html(run.error)}</p>` : ''}${section('全部检测项结果', table, `${scores.length}/${scores.length} 个返回项 · 保留原分值`)}<p class="model-footnote">按接口 scores 中的全部字段逐项列出，包含 0 分、未知字段和空值；网站未给逐项原因时不推测。总分采用接口 total，不自行累加或设定通过阈值。</p>${section('性能与用量', performance)}${section('Token 用量审计', auditHtml)}${block('原始结论、任务状态与扩展字段', fieldList(extras), true)}${block('完整脱敏响应 JSON', `<pre>${html(json(redact(run)))}</pre>`)}<p class="model-footnote">可选字段只在接口返回时展示；指纹模式不伪造完整评分。网站的渠道标签属于其检测结论，不能据此直接判定模型降智。</p>`;
   }
 
-  window.ModelResultRenderer = { renderProbe, renderCheck, verdict, badge, html, icon, formatDate, duration };
+  function platformSections(groups, renderCard) {
+    const platforms = new Map();
+    for (const group of groups) {
+      if (!platforms.has(group.platform)) platforms.set(group.platform, []);
+      platforms.get(group.platform).push(group);
+    }
+    return [...platforms].map(([key, members]) => `<section class="fp-platform-zone" data-platform="${html(key)}"><header class="fp-platform-zone-head"><h2>${icon(({ openai: 'sparkles', anthropic: 'bot', gemini: 'gem', grok: 'orbit' })[key] || 'cpu')}${html(members[0].platform_label || key)}</h2><span>${members.length} 个检测分组</span></header><div class="group-grid fp-platform-grid">${members.map(renderCard).join('')}</div></section>`).join('');
+  }
+  const percent = value => typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : '不提供';
+  function ranking(analysis) {
+    const results = Array.isArray(analysis?.results) ? analysis.results : [];
+    if (!results.length) return '<p>本轮未返回可评分的候选排名。</p>';
+    return `<div class="data-scroll"><table class="model-table fp-rankings"><thead><tr><th>排名</th><th>候选模型</th><th>家族</th><th>排名分数</th><th>库内置信度</th></tr></thead><tbody>${results.map((result, index) => `<tr><td>${index + 1}</td><td><strong>${html(result.display_name || result.model || '未返回')}</strong>${index === 0 ? '<small>本轮最相近候选</small>' : ''}</td><td>${html(result.family || '未返回')}</td><td class="number">${html(typeof result.score === 'number' ? result.score.toFixed(3) : '不提供')}</td><td class="number">${percent(result.probability)}</td></tr>`).join('')}</tbody></table></div>`;
+  }
+  function fingerprintSamples(round) {
+    const samples = Array.isArray(round.samples) ? round.samples : [];
+    return `<div class="data-scroll"><table class="model-table fp-samples"><thead><tr><th>样本</th><th>状态</th><th>有效整数</th><th>首字节</th><th>返回模型 / 异常</th></tr></thead><tbody>${samples.map((sample, index) => `<tr><td>${index + 1}</td><td>${badge(sample.error ? '失败' : sample.state === 'complete' ? '完整' : sample.state || '未返回', sample.error ? 'warning' : 'neutral')}</td><td>${html(sample.count ?? '未返回')} / ${html(sample.expected_count ?? '未返回')}</td><td>${html(sample.first_byte_ms == null ? '未收到' : `${sample.first_byte_ms} ms`)}</td><td>${html(sample.error || sample.response_model || '未返回')}</td></tr>`).join('')}</tbody></table></div>${samples.map((sample, index) => block(`样本 ${index + 1} · 挑战与完整回答`, `<p class="model-footnote">挑战提示词</p><pre>${html(sample.prompt || round.challenges?.[index]?.prompt || '未保留')}</pre><p class="model-footnote">原始回答</p><pre>${html(sample.raw_text ?? sample.text ?? sample.error ?? '未返回')}</pre>${block('该样本全部返回字段', fieldList(sample))}`)).join('')}`;
+  }
+  function renderFingerprint(response, mode = {}) {
+    const analysis = response.analysis;
+    const rounds = Array.isArray(response.rounds) ? response.rounds : [];
+    const params = response.parameters || {};
+    const data = response.data || {};
+    const result = verdict('fingerpoint', { ...response, status: mode.local_status || response.status, error: mode.local_reason });
+    return `<div class="fp-result" data-fingerprint-detail><div class="model-verdict"><div><h3>${icon('fingerprint')}Fingerpoint ${badge(result.text, result.tone)}</h3><p>最相近候选：<strong>${html(analysis?.prediction_name || analysis?.prediction || '未提供')}</strong> · ${rounds.length} 轮检测</p></div></div><p class="fp-scope-note">${icon('info')}排名和置信度仅在参考库收录模型之间比较，不能单独证明模型身份，也不代表智商或能力评分。</p>${facts([['请求模型', response.requested_model || '未指定'], ['最新一轮有效样本', `${analysis?.used_outputs ?? 0} / ${params.count ?? '未返回'}`], ['参考库内置信度', percent(analysis?.probability)], ['检测程序', `SDK ${response.sdk_version || '未返回'}`], ['参考数据版本', data.built_at || '未返回'], ['参考模型数', data.models == null ? '未返回' : `${data.models} 个`]])}${section('全部候选排名', ranking(analysis), `${Array.isArray(analysis?.results) ? analysis.results.length : 0} 个返回候选`)}${analysis?.decision === 'partial' ? '<p class="model-footnote">有效样本不足三条，本轮只提供排名，不提供置信度。</p>' : ''}${section('逐轮结果与样本', rounds.map((round, index) => block(`第 ${round.round || index + 1} 轮 · ${round.analysis?.used_outputs ?? 0}/${params.count ?? '?'} 个有效样本 · ${percent(round.analysis?.probability)}`, `${facts([['最相近候选', round.analysis?.prediction_name || round.analysis?.prediction || '未提供'], ['判定类型', round.analysis?.decision || '未返回'], ['概率范围', '仅参考库内']])}${ranking(round.analysis)}${fingerprintSamples(round)}${block('该轮全部评分、诊断与序列特征', fieldList(round))}`, index === 0)).join('') || '<p>尚未取得完整轮次结果。</p>', '每轮独立评分')}${facts([['请求协议', ({ responses: 'OpenAI Responses', chat_completions: 'Chat Completions', messages: 'Anthropic Messages' })[params.api] || '未返回'], ['推理强度', params.effort || '默认'], ['数据指纹', data.hash || '未返回']])}${block('完整脱敏响应 JSON', `<pre>${html(json(redact(response)))}</pre>`)}<p class="model-footnote">检测使用执行时的固定数据版本。更新参考数据不会覆盖这条历史记录的原始结论。</p></div>`;
+  }
+
+  window.ModelResultRenderer = { renderProbe, renderCheck, renderFingerprint, platformSections, verdict, badge, html, icon, formatDate, duration };
 })();

@@ -24,7 +24,7 @@ function modelConclusion(channel, response, status) {
   if (status !== 'completed') return 'error';
   const value = channel === 'bazaarlink'
     ? response?.identityAssessment?.verdict?.status || response?.identityAssessment?.status
-    : response?.verdictKey;
+    : channel === 'fingerpoint' ? response?.verdictKey || response?.analysis?.decision : response?.verdictKey;
   return typeof value === 'string' && /^[a-zA-Z0-9_.:-]{1,100}$/.test(value) ? value : 'unconfirmed';
 }
 

@@ -7,6 +7,7 @@ const { createApp } = require('../src/server');
 const { loadConfig } = require('../src/config');
 const { defaultModelPlatform, modelGroupContext } = require('../src/model-config');
 const { demoModelResponse } = require('../src/model-detection');
+const { demoFingerprintResponse } = require('../src/fingerpoint-fixture');
 
 async function createPreview(port = 19895) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sub2api-model-preview-'));
@@ -31,16 +32,17 @@ async function createPreview(port = 19895) {
         item.key_cipher = runtime.vault.encrypt(item.key_context, `cct-demo-site-${id}-${channel}`);
         item.key_fingerprint = runtime.vault.fingerprint(`cct-demo-site-${id}-${channel}`);
       }
+      settings.channels.fingerpoint.enabled = true;
       const key = `sk-demo-model-only-${groupId}-1234567890`;
       return { id, config: settings, groups: [{ id: groupId, name, enabled: true, keyCipher: runtime.vault.encrypt(modelGroupContext(groupId), key), keyFingerprint: runtime.vault.fingerprint(key), models: {} }] };
     })
   });
   for (const group of runtime.modelStore.enabledGroups()) {
     for (let i = 0; i < 3; i++) {
-      for (const channel of ['bazaarlink', 'cctest']) {
+      for (const channel of ['bazaarlink', 'cctest', 'fingerpoint']) {
         const run = runtime.modelStore.create(group, channel, i ? 'manual' : 'scheduled');
         runtime.modelStore.markRunning(run.id);
-        runtime.modelStore.updateResponse(run.id, demoModelResponse(channel, run.model, group.platform), 'completed');
+        runtime.modelStore.updateResponse(run.id, channel === 'fingerpoint' ? demoFingerprintResponse(run.model, group.platform, JSON.parse(run.snapshot_json)) : demoModelResponse(channel, run.model, group.platform), 'completed');
         runtime.modelStore.finish(run.id, 'completed');
       }
     }
@@ -51,7 +53,7 @@ async function createPreview(port = 19895) {
     instance.once('error', reject);
   });
   return {
-    runtime, baseUrl: `http://127.0.0.1:${server.address().port}`, get outboundCalls() { return outboundCalls; },
+    app, runtime, baseUrl: `http://127.0.0.1:${server.address().port}`, get outboundCalls() { return outboundCalls; },
     async close() {
       server.close(); server.closeAllConnections?.();
       await runtime.scheduler.close(); runtime.auth.close(); await runtime.groupMetrics.close(); runtime.store.close();
@@ -65,7 +67,8 @@ async function createPreview(port = 19895) {
 if (require.main === module) {
   createPreview(Number(process.env.PORT || 19895)).then(preview => {
     console.log(`管理员配置：${preview.baseUrl}/admin/config?demo=1`);
-    console.log(`只读检测结果：${preview.baseUrl}/results?demo=readonly#model`);
+    console.log(`降智检测结果：${preview.baseUrl}/results?demo=readonly`);
+    console.log(`模型检测结果：${preview.baseUrl}/model-results?demo=readonly`);
     console.log('独立临时数据，所有上游请求已禁用。');
     for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => preview.close().then(() => process.exit(0)));
   }).catch(error => { console.error(error.message); process.exitCode = 1; });
