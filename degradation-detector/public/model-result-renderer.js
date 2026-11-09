@@ -30,7 +30,7 @@
     if (channel === 'fingerpoint') {
       const key = run.verdictKey || run.analysis?.decision || 'unscorable';
       const text = ({ candidate_match: '候选相符', candidate_differs: '候选不同', scored: '已提供候选', partial: '部分样本有效', unscorable: '无法评分', not_model: '序列特征异常' })[key] || '待确认';
-      return { key, text, tone: ['candidate_match', 'scored'].includes(key) ? 'info' : 'warning', reason: '候选排序仅在参考库内比较，不代表模型身份或能力证明。' };
+      return { key, text, tone: key === 'candidate_match' ? 'success' : key === 'scored' ? 'info' : 'warning', reason: '候选排序仅在参考库内比较，不代表模型身份或能力证明。' };
     }
     if (channel === 'bazaarlink') {
       const assessment = run.identityAssessment || {};
