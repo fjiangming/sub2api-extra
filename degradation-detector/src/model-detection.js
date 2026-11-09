@@ -3,7 +3,7 @@
 const { setTimeout: delay } = require('node:timers/promises');
 const { AppError } = require('./errors');
 const { channels, modelGroupContext, publicModelPlatform } = require('./model-config');
-const { modelRunSummary, sanitizeModelResponse } = require('./model-results');
+const { fingerprintComparison, modelRunSummary, sanitizeModelResponse } = require('./model-results');
 const { requestReviewJson, resolveReviewAddress } = require('./review-http');
 const { runFingerprintWorker } = require('./fingerpoint-runner');
 const { demoFingerprintResponse } = require('./fingerpoint-fixture');
@@ -226,7 +226,7 @@ class ModelDetection {
       ensureCurrent();
       response.status = 'done'; response.progress = 1;
       const decision = response.analysis?.decision || 'unscorable';
-      response.verdictKey = decision === 'scored' ? response.analysis.prediction === run.model ? 'candidate_match' : 'candidate_differs' : decision;
+      Object.assign(response, fingerprintComparison(response.analysis, run.model));
       record();
       this.modelStore.finish(run.id, 'completed', `${response.rounds.length} 轮指纹检测 · ${decision === 'scored' ? '评分完成' : decision === 'partial' ? '部分样本有效，不提供置信度' : '未形成可评分的候选排名'}`);
     } finally { await lease?.release().catch(() => {}); }

@@ -8,6 +8,7 @@ const { ModelDetection } = require('../src/model-detection');
 const { CredentialVault } = require('../src/credential-vault');
 const { defaultModelPlatform, modelGroupContext, modelPlatformSchema } = require('../src/model-config');
 const { demoFingerprintResponse } = require('../src/fingerpoint-fixture');
+const { fingerprintComparison } = require('../src/model-results');
 const { createApp } = require('../src/server');
 const { runFingerprintWorker } = require('../src/fingerpoint-runner');
 const { defaultTests, testConfig, listen } = require('./helpers');
@@ -82,6 +83,92 @@ test('Fingerpoint uses the group dedicated key and override, retains every round
   assert.equal(response.progress, 1); assert.equal(row.total, null); assert.equal(state.released, 1);
   assert.equal(store.db.serialize().includes(Buffer.from(state.input.key)), false);
   assert.equal(models.counts('1', 'cctest').total, 0);
+});
+
+test('Fingerpoint compares reference names and version aliases without merging different models or ambiguous names', () => {
+  const analysis = { decision: 'scored', prediction: 'claude-opus-5.5', prediction_name: 'claude-opus-5.5', results: [
+    { model: 'claude-opus-5.5', display_name: 'claude-opus-5.5' },
+    { model: 'claude-sonnet-5.5', display_name: 'claude-sonnet-5.5' },
+    { model: 'claude-opus-5', display_name: 'claude-opus-5' }
+  ] };
+  assert.equal(fingerprintComparison(analysis, 'claude-opus-5.5').comparison.method, 'exact_id');
+  assert.deepEqual(fingerprintComparison(analysis, 'claude-opus-5-5'), { verdictKey: 'candidate_match', comparison: { version: 1, method: 'version_separator' } });
+  assert.equal(fingerprintComparison(analysis, ' CLAUDE-OPUS-5-5 ').verdictKey, 'candidate_match');
+  for (const model of ['claude-sonnet-5-5', 'claude-opus-5', 'claude-opus-55', 'claude-opus-5-4', 'claude-opus-5-5-thinking', 'claude-opus-5-5-20261101']) {
+    assert.equal(fingerprintComparison(analysis, model).verdictKey, 'candidate_differs', model);
+  }
+  const named = { decision: 'scored', prediction: 'reference-model-id', results: [{ model: 'reference-model-id', display_name: 'model-5.5' }] };
+  assert.equal(fingerprintComparison(named, 'model-5.5').comparison.method, 'reference_name');
+  assert.equal(fingerprintComparison(named, 'model-5-5').verdictKey, 'candidate_match');
+  named.results.push({ model: 'another-id', display_name: 'model-5.5' });
+  assert.equal(fingerprintComparison(named, 'model-5-5').verdictKey, 'scored');
+  assert.equal(fingerprintComparison(named, 'model-5.5').comparison.method, 'ambiguous');
+  named.results.push({ model: 'model-5-5', display_name: 'Distinct exact model ID' });
+  assert.equal(fingerprintComparison(named, 'model-5-5').verdictKey, 'candidate_differs');
+  assert.equal(fingerprintComparison({ decision: 'scored', prediction: 'model-3.8b' }, 'model-3-8b').verdictKey, 'candidate_differs');
+  assert.equal(fingerprintComparison({ decision: 'scored' }, 'claude-opus-5-5').verdictKey, 'scored');
+  for (const decision of ['partial', 'unscorable', 'not_model']) {
+    assert.equal(fingerprintComparison({ ...analysis, decision }, 'claude-opus-5-5').verdictKey, decision);
+  }
+});
+
+test('Fingerpoint fixes the real Claude version alias while keeping requests and SDK analyses unchanged', async t => {
+  const { service, models } = setup(t);
+  models.db.prepare('UPDATE model_groups SET models_json=? WHERE group_id=?').run(JSON.stringify({ fingerpoint: 'claude-opus-5-5' }), '1');
+  const official = demoFingerprintResponse('claude-opus-5.5', 'anthropic', { rounds: 3 });
+  official.analysis.probability = 1;
+  let calls = 0;
+  service.runFingerprint = async (input, _signal, onEvent) => {
+    calls++; assert.equal(input.model, 'claude-opus-5-5');
+    for (const round of official.rounds) onEvent({ type: 'round', result: round });
+  };
+  const run = service.enqueue('1')[0]; await service.execute(models.run(run.id));
+  const row = models.run(run.id); const response = JSON.parse(row.response_json);
+  assert.equal(calls, 1); assert.equal(row.conclusion, 'candidate_match');
+  assert.equal(response.requested_model, 'claude-opus-5-5');
+  assert.equal(response.comparison.method, 'version_separator');
+  assert.deepEqual(response.analysis, official.analysis);
+  assert.deepEqual(response.rounds.map(round => round.analysis), official.rounds.map(round => round.analysis));
+  assert.equal(models.history('1', 'fingerpoint')[0].conclusion, 'candidate_match');
+});
+
+test('existing Fingerpoint comparisons migrate once in bounded batches without rerunning or changing SDK evidence', t => {
+  const { models, store, state } = setup(t);
+  const saved = [];
+  for (let i = 0; i < 53; i++) {
+    const run = models.create(models.group('1'), 'fingerpoint', 'manual');
+    const response = demoFingerprintResponse('claude-opus-5.5', 'anthropic', { rounds: 1 });
+    response.requested_model = i === 52 ? 'claude-sonnet-5-5' : 'claude-opus-5-5';
+    response.verdictKey = 'candidate_differs';
+    models.db.prepare('UPDATE model_runs SET model=? WHERE id=?').run(response.requested_model, run.id);
+    models.updateResponse(run.id, response, 'completed'); models.finish(run.id, 'completed', '3 rounds complete');
+    saved.push(models.run(run.id));
+  }
+  const archived = models.create(models.group('1'), 'fingerpoint', 'manual');
+  models.updateResponse(archived.id, { verdictKey: 'candidate_differs' }, 'completed'); models.finish(archived.id, 'completed');
+  models.db.prepare('UPDATE model_runs SET response_json=NULL WHERE id=?').run(archived.id);
+  const other = models.create(models.group('1'), 'cctest', 'manual');
+  models.updateResponse(other.id, { verdictKey: 'candidate_differs' }, 'completed'); models.finish(other.id, 'completed');
+  const originalOther = models.run(other.id);
+  const active = models.create(models.group('1'), 'fingerpoint', 'manual');
+  models.db.prepare('DROP TABLE model_result_migrations').run();
+  const reopened = new ModelStore(store);
+  for (const [index, before] of saved.entries()) {
+    const after = reopened.run(before.id); const response = JSON.parse(after.response_json);
+    const expected = index === 52 ? 'candidate_differs' : 'candidate_match';
+    assert.equal(after.conclusion, expected); assert.equal(response.verdictKey, expected);
+    const { verdictKey: _verdict, comparison: _comparison, ...evidence } = response;
+    const { verdictKey: _oldVerdict, ...oldEvidence } = JSON.parse(before.response_json);
+    assert.deepEqual(evidence, oldEvidence);
+    assert.deepEqual({ ...after, response_json: before.response_json, conclusion: before.conclusion }, before);
+  }
+  assert.equal(reopened.history('1', 'fingerpoint', archived.id, 100).filter(run => run.conclusion === 'candidate_match').length, 52);
+  assert.equal(reopened.run(archived.id).conclusion, 'candidate_differs');
+  assert.equal(reopened.run(active.id).status, 'queued'); assert.deepEqual(reopened.run(other.id), originalOther);
+  const changes = models.db.prepare('SELECT total_changes() AS n').get().n;
+  new ModelStore(store);
+  assert.equal(models.db.prepare('SELECT total_changes() AS n').get().n, changes);
+  assert.equal(state.calls, 0);
 });
 
 test('Fingerpoint partial, unscorable and missing analyses never turn into a confirmed match', async t => {

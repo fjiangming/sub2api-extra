@@ -57,10 +57,14 @@ test('model admin APIs enforce live role, CSRF, group scope, encryption, atomic 
   assert.equal((await send('/api/admin/groups/1/model-runs', {}, u)).status, 403);
   assert.equal((await send('/api/admin/groups/1/model-runs', {}, a, false)).status, 403);
   assert.equal((await send('/api/admin/groups/9/model-runs', {})).status, 404);
+  const schedulesBefore = runtime.modelStore.groups().map(group => group.next_run_at);
   const queuedResponse = await send('/api/admin/groups/1/model-runs', {});
   assert.equal(queuedResponse.status, 202);
   const queued = (await queuedResponse.json()).runs;
   assert.equal(queued.length, 2);
+  assert(queued.every(run => run.group_id === '1' && run.trigger_type === 'manual'));
+  for (const channel of ['bazaarlink', 'cctest']) assert.equal(runtime.modelStore.counts('2', channel).total, 0, 'single-group trigger never enqueues another group');
+  assert.deepEqual(runtime.modelStore.groups().map(group => group.next_run_at), schedulesBefore);
   assert.deepEqual((await (await send('/api/admin/groups/1/model-runs', {})).json()).runs.map(row => row.id), queued.map(row => row.id));
   for (const run of queued) await runtime.modelDetection.execute(runtime.modelStore.run(run.id));
   assert.equal(calls.filter(call => call.method === 'POST').length, 2);
@@ -96,6 +100,12 @@ test('model admin APIs enforce live role, CSRF, group scope, encryption, atomic 
   assert.equal(runtime.modelStore.platform('openai').target_url, 'https://relay.example.com');
   assert.equal((await send('/api/admin/groups/1/model-runs/bazaarlink', { ids: [queued[0].id] }, a, true, 'DELETE')).status, 200);
   assert.equal(runtime.modelStore.run(queued[1].id).status, 'completed', 'other channel history is preserved');
+  const batch = await send('/api/admin/platforms/openai/model-runs', {});
+  assert.equal(batch.status, 202);
+  const batchRuns = (await batch.json()).runs;
+  assert.equal(batchRuns.length, 4);
+  assert.deepEqual([...new Set(batchRuns.map(run => run.group_id))].sort(), ['1', '2'], 'only the explicit platform batch button enqueues both groups');
+  assert.equal(calls.filter(call => call.method === 'POST').length, 2, 'enqueuing does not replay previously completed requests');
   seedRuntime(runtime, allGroups);
   assert.deepEqual(await tabs(), { iq: true, model: true });
   visible = false;

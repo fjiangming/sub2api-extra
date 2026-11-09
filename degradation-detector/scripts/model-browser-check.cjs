@@ -5,12 +5,19 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { createPreview } = require('./model-preview.cjs');
+const { fingerprintComparison } = require('../src/model-results');
 let playwright;
 try { playwright = require(process.env.PLAYWRIGHT_MODULE || 'playwright'); }
 catch { playwright = require(path.join(os.homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')); }
 
 async function main() {
   const preview = await createPreview(0);
+  const aliasRun = preview.runtime.modelStore.latest('2', 'fingerpoint');
+  const aliasResponse = JSON.parse(preview.runtime.modelStore.run(aliasRun.id).response_json);
+  aliasResponse.analysis.prediction = aliasResponse.analysis.prediction_name = 'claude-sonnet-4.5';
+  aliasResponse.analysis.results[0].model = aliasResponse.analysis.results[0].display_name = 'claude-sonnet-4.5';
+  Object.assign(aliasResponse, fingerprintComparison(aliasResponse.analysis, aliasRun.model));
+  preview.runtime.modelStore.updateResponse(aliasRun.id, aliasResponse, 'completed');
   const browser = await playwright.chromium.launch({ channel: 'chrome', headless: true });
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sub2api-model-browser-'));
   const errors = [];
@@ -218,6 +225,14 @@ async function main() {
     assert.match(rendered, /&lt;img/); assert.doesNotMatch(rendered, /<img/);
     const stale = await page.evaluate(() => window.ModelResultRenderer.renderProbe({ status: 'running', items: [] }, { local_status: 'error', local_reason: '查询中断' }));
     assert.match(stale, /检测异常/); assert.match(stale, /查询中断/);
+    await page.locator('#model-dialog-close').click();
+    await page.locator('[data-model-open="2"][data-model-channel="fingerpoint"]').click();
+    await page.locator('[data-fingerprint-detail]').waitFor();
+    assert.match(await page.locator('#model-detail .model-verdict').innerText(), /候选相符/);
+    assert.match(await page.locator('#model-detail .model-verdict').innerText(), /版本号分隔符写法等价/);
+    assert.match(await page.locator('#model-detail .identity-facts').first().innerText(), /claude-sonnet-4-5/);
+    assert.match(await page.locator('#model-detail .fp-rankings').first().innerText(), /claude-sonnet-4\.5/);
+    await fit(page); await shot(page, 'desktop-fingerpoint-alias');
     await page.locator('#model-dialog-close').click();
     const denied = await page.evaluate(async () => {
       const targets = ['/api/admin/config', '/admin/config', '/admin/model-config.js', '/api/admin/fingerpoint/data'];

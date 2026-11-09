@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const { setImmediate: yieldToRequests } = require('node:timers/promises');
 const { nextScheduledRunAt } = require('./schedule');
 const { defaultModelPlatform, defaultSchedule, modelGroupContext } = require('./model-config');
-const { modelConclusion, modelRunSummary } = require('./model-results');
+const { fingerprintComparison, modelConclusion, modelRunSummary } = require('./model-results');
 
 const summaryColumns = 'id, group_id, channel, status, model, conclusion, total, item_count, started_at, created_at, finished_at, duration_ms, trigger_type, progress, reason, (response_json IS NOT NULL) AS has_response';
 const parse = (value, fallback = null) => { try { return JSON.parse(value); } catch { return fallback; } };
@@ -40,10 +40,36 @@ class ModelStore {
       CREATE TABLE IF NOT EXISTS model_throttles (channel TEXT PRIMARY KEY, until_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS model_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT NOT NULL, submitted_at INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS model_submissions_time_idx ON model_submissions(channel,submitted_at);
+      CREATE TABLE IF NOT EXISTS model_result_migrations (name TEXT PRIMARY KEY);
     `);
     this.db.prepare('INSERT OR IGNORE INTO model_settings VALUES (1,?)').run(JSON.stringify(defaultSchedule));
     // Without a remote task ID the outcome of an interrupted submission is unknown: never replay POST.
     this.db.prepare(`UPDATE model_runs SET status='error', conclusion='error', reason='服务重启中断了提交；未自动重发，请核对检测网站任务后再手动检测', error_code='SERVICE_RESTARTED', finished_at=? WHERE (status='running' OR (status='queued' AND submitted_at IS NOT NULL)) AND remote_id IS NULL`).run(Date.now());
+    this.repairFingerprintComparisons();
+  }
+
+  repairFingerprintComparisons() {
+    this.db.transaction(() => {
+      const migration = 'fingerpoint-name-comparison-v1';
+      if (this.db.prepare('SELECT 1 FROM model_result_migrations WHERE name=?').get(migration)) return;
+      const read = this.db.prepare(`SELECT id,model,json_extract(response_json,'$.analysis') AS analysis FROM model_runs
+        WHERE id>? AND channel='fingerpoint' AND status='completed' AND conclusion IN ('candidate_match','candidate_differs','scored')
+        AND response_json IS NOT NULL AND json_valid(response_json) ORDER BY id LIMIT 50`);
+      const update = this.db.prepare("UPDATE model_runs SET conclusion=?, response_json=json_set(response_json,'$.verdictKey',?,'$.comparison',json(?)) WHERE id=?");
+      let cursor = 0;
+      for (;;) {
+        const rows = read.all(cursor);
+        if (!rows.length) break;
+        for (const row of rows) {
+          const analysis = parse(row.analysis);
+          if (analysis?.decision !== 'scored') continue;
+          const result = fingerprintComparison(analysis, row.model);
+          update.run(result.verdictKey, result.verdictKey, JSON.stringify(result.comparison), row.id);
+        }
+        cursor = rows.at(-1).id;
+      }
+      this.db.prepare('INSERT INTO model_result_migrations VALUES (?)').run(migration);
+    })();
   }
 
   schedule() { return parse(this.db.prepare('SELECT schedule_json FROM model_settings WHERE id=1').get().schedule_json, defaultSchedule); }
