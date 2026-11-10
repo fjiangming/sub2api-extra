@@ -51,6 +51,24 @@ jobs:
         working-directory: provider-monitor
       - run: npm test
         working-directory: provider-monitor
+  test-recharge-center:
+    name: Recharge center reconciliation and midnight tests
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: recharge-center/package-lock.json
+      - run: npm ci
+        working-directory: recharge-center
+      - run: npm run check
+        working-directory: recharge-center
+      - run: npm test
+        working-directory: recharge-center
   test-video-adapter:
     name: Video adapter financial and protocol tests
     runs-on: ubuntu-24.04
@@ -90,7 +108,7 @@ jobs:
   build:
     name: Build ${{ matrix.service }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    needs: [test-operations-center, test-provider-monitor, test-video-adapter, test-usage-leaderboard]
+    needs: [test-operations-center, test-provider-monitor, test-recharge-center, test-video-adapter, test-usage-leaderboard]
     strategy:
       fail-fast: false
       matrix:

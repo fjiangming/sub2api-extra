@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { AlipayAccountLogPoller } = require('../src/alipay-accountlog-poller');
 const {
   AlipayAccountLogClient,
   RESPONSE_KEY,
@@ -152,6 +153,81 @@ test('Alipay timestamps are interpreted explicitly in Asia/Shanghai', () => {
   assert.equal(formatShanghaiDateTime(new Date('2026-10-03T16:00:00.000Z')), '2026-10-04 00:00:00');
   assert.equal(parseShanghaiDateTime('2026-10-04 00:00:00'), '2026-10-03T16:00:00.000Z');
   assert.throws(() => parseShanghaiDateTime('2026-02-30 00:00:00'), { code: 'ALIPAY_ACCOUNTLOG_TIME_INVALID' });
+});
+
+test('Alipay time formatting and parsing round-trip every hour including midnight and calendar boundaries', () => {
+  for (const day of ['2026-11-11', '2027-01-01', '2028-02-29', '2028-03-01']) {
+    for (let hour = 0; hour < 24; hour += 1) {
+      for (const minute of ['00', '30', '59']) {
+        for (const second of ['00', '59']) {
+          const text = `${day} ${String(hour).padStart(2, '0')}:${minute}:${second}`;
+          const instant = new Date(`${text.replace(' ', 'T')}+08:00`);
+          assert.equal(formatShanghaiDateTime(instant), text);
+          assert.equal(parseShanghaiDateTime(text), instant.toISOString());
+        }
+      }
+    }
+  }
+});
+
+test('Alipay bill timestamps reject hour 24 and invalid calendar or clock values', () => {
+  for (const value of ['2026-11-11 24:00:00', '2026-11-11 24:30:00', '2026-11-11 25:00:00',
+    '2026-11-11 00:60:00', '2026-11-11 00:00:60', '2026-02-29 00:10:00']) {
+    assert.throws(() => parseShanghaiDateTime(value), { code: 'ALIPAY_ACCOUNTLOG_TIME_INVALID' }, value);
+  }
+});
+
+test('signed midnight queries and receipts keep the real poller ready across day and year changes', async () => {
+  const { app, alipay } = keys();
+  const fixtures = [
+    { now: '2026-11-10T16:00:00.000Z', timestamp: '2026-11-11 00:00:00',
+      start: '2026-11-10 23:45:00', end: '2026-11-11 00:00:01',
+      paidAt: '2026-11-11 00:00:00', paidUtc: '2026-11-10T16:00:00.000Z' },
+    { now: '2026-11-10T16:30:00.000Z', timestamp: '2026-11-11 00:30:00',
+      start: '2026-11-11 00:15:00', end: '2026-11-11 00:30:01',
+      paidAt: '2026-11-11 00:25:00', paidUtc: '2026-11-10T16:25:00.000Z' },
+    { now: '2026-11-10T17:00:00.000Z', timestamp: '2026-11-11 01:00:00',
+      start: '2026-11-11 00:45:00', end: '2026-11-11 01:00:01',
+      paidAt: '2026-11-11 00:55:00', paidUtc: '2026-11-10T16:55:00.000Z' },
+    { now: '2026-12-31T16:00:00.000Z', timestamp: '2027-01-01 00:00:00',
+      start: '2026-12-31 23:45:00', end: '2027-01-01 00:00:01',
+      paidAt: '2027-01-01 00:00:00', paidUtc: '2026-12-31T16:00:00.000Z' }
+  ];
+  for (const fixture of fixtures) {
+    const accepted = [];
+    const clock = () => new Date(fixture.now);
+    const client = new AlipayAccountLogClient(config(), {
+      privateKey: app.privateKey, publicKey: alipay.publicKey, clock,
+      async fetch(_url, options) {
+        const parameters = Object.fromEntries(new URLSearchParams(options.body));
+        assert.equal(parameters.timestamp, fixture.timestamp);
+        assert.deepEqual(JSON.parse(parameters.biz_content), {
+          start_time: fixture.start, end_time: fixture.end, page_no: '1', page_size: '1000'
+        });
+        assert.equal(crypto.verify('RSA-SHA256', Buffer.from(canonicalizeParameters(parameters)),
+          app.publicKey, Buffer.from(parameters.sign, 'base64')), true);
+        return new Response(signedResponse(alipay.privateKey, {
+          code: '10000', msg: 'Success', page_no: '1', page_size: '1000', total_size: '1',
+          detail_list: [{ account_log_id: '117007123456789151', trans_amount: '12.34',
+            trans_dt: fixture.paidAt, direction: '收入' }]
+        }), { status: 200 });
+      }
+    });
+    const poller = new AlipayAccountLogPoller({ client, clock,
+      config: { env: 'test', accountLogPollSeconds: 15, accountLogLookbackSeconds: 900, accountLogStaleSeconds: 60 },
+      orders: { async acceptAccountLogEntry(entry) { accepted.push(entry); } },
+      setTimer() { return { unref() {} }; }, clearTimer() {}
+    });
+    try {
+      assert.equal((await poller.pollNow()).entries, 1);
+      assert.equal(accepted.length, 1);
+      assert.equal(accepted[0].paidAt, fixture.paidUtc);
+      assert.equal(accepted[0].amountMinor, 1234);
+      assert.equal(poller.status().lastSuccessAt, fixture.now);
+      assert.equal(poller.status().healthy, true);
+      assert.doesNotThrow(() => poller.assertReady());
+    } finally { poller.close(); }
+  }
 });
 
 test('accountlog client rejects RSA keys smaller than 2048 bits', () => {

@@ -439,6 +439,14 @@ docker compose --env-file compose.services.env up -d --no-deps --force-recreate 
 curl -fsS https://你的充值域名/readyz
 ```
 
+## 午夜提示服务暂时不可用
+
+旧版账务客户端在 Node 20 下同时设置 `hour12: false` 和 `hourCycle: 'h23'`，运行时可能按 `h24` 输出零点，将北京时间 `00:xx:xx` 写成 `24:xx:xx`。支付宝因此返回 `isv.invalid-timestamp`，账务轮询失败后，下单保护返回 `ACCOUNTLOG_POLLER_NOT_READY`。同一格式化函数还用于账单时间校验，因此只修改出站 timestamp 不能完整修复。
+
+现已统一使用明确的 `00–23` 小时制，同时覆盖请求 timestamp、查询起止时间和午夜流水解析；回归包含全天时段、跨日、跨年、闰日及真实轮询器的签名请求 / 验签响应，发布前由 Linux Node 20 CI 执行。修复只需更新充值中心代码 / 镜像，无需修改服务器时区、Nginx、环境变量、密钥或账本，不要求更新其他服务。
+
+故障期间应保留下单保护；升级后先检查 `/readyz` 中 `accountLog.healthy=true`，再恢复正常付款操作。超出原账务回看窗口的历史付款仍需独立核验，不会通过这次代码修复自动补充余额或重置订单。
+
 ## 异常订单人工处理
 
 - 只有账务流水已唯一关联到一个订单、但自动校验未全部通过时，系统才把该订单转为 `payment_reported` 并附加不可逆流水指纹。
