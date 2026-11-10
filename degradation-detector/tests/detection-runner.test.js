@@ -388,7 +388,8 @@ test('retryable model failures reconnect at most five times with backoff', async
     store: {},
     sub2api: {},
     vault: {},
-    sleepFn: async (delayMs) => delays.push(delayMs)
+    sleepFn: async (delayMs) => delays.push(delayMs),
+    randomFn: () => 0
   });
   runner.callModel = async () => {
     attempts += 1;
@@ -420,6 +421,7 @@ test('retryable model failures return normally after reconnecting succeeds', asy
     sub2api: {},
     vault: {},
     nowFn: () => now,
+    randomFn: () => 0,
     sleepFn: async (delayMs) => {
       delays.push(delayMs);
       now += delayMs;
@@ -458,6 +460,7 @@ test('retryable model failures stop when the total time budget is exhausted', as
     sub2api: {},
     vault: {},
     nowFn: () => now,
+    randomFn: () => 0,
     sleepFn: async (delayMs) => {
       delays.push(delayMs);
       now += delayMs;
@@ -492,6 +495,7 @@ test('a delayed backoff does not start a request after the total deadline', asyn
     sub2api: {},
     vault: {},
     nowFn: () => now,
+    randomFn: () => 0,
     sleepFn: async (delayMs) => {
       delays.push(delayMs);
       now += delayMs + 1000;

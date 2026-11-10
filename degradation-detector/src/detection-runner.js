@@ -8,13 +8,15 @@ const net = require('net');
 const path = require('path');
 const { validationSchema } = require('./config');
 const { AppError } = require('./errors');
+const { isTransientModelFailure } = require('./sub2api-client');
 const { evaluateOutput, imageDimensions } = require('./validation');
 const { VisualReviewer, combineReview, reviewFailure } = require('./visual-review');
 
 const MODEL_REQUEST_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
+const MODEL_RECOVERY_DELAYS_MS = [10000, 30000, 60000];
 
-function wait(delayMs) {
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
+function wait(delayMs, signal) {
+  return require('timers/promises').setTimeout(delayMs, undefined, { signal });
 }
 
 function contentText(content) {
@@ -255,7 +257,7 @@ function deterministicVerdict(test, output) {
 }
 
 class DetectionRunner {
-  constructor({ config, store, sub2api, vault, visualReviewer = new VisualReviewer(), sleepFn = wait, nowFn = Date.now }) {
+  constructor({ config, store, sub2api, vault, visualReviewer = new VisualReviewer(), sleepFn = wait, nowFn = Date.now, randomFn = Math.random }) {
     this.config = config;
     this.store = store;
     this.sub2api = sub2api;
@@ -263,6 +265,20 @@ class DetectionRunner {
     this.visualReviewer = visualReviewer;
     this.sleep = sleepFn;
     this.now = nowFn;
+    this.random = randomFn;
+    this.executions = new Map();
+    this.closed = false;
+  }
+
+  configurationChanged() {
+    for (const execution of this.executions.values()) {
+      if (!execution.current()) execution.controller.abort();
+    }
+  }
+
+  close() {
+    this.closed = true;
+    for (const execution of this.executions.values()) execution.controller.abort();
   }
 
   async callModel(test, apiKey, options = {}) {
@@ -291,7 +307,8 @@ class DetectionRunner {
     }
     const common = {
       timeoutMs: options.timeoutMs || this.config.requestTimeoutMs,
-      maxBytes: this.config.maxResponseBytes
+      maxBytes: this.config.maxResponseBytes,
+      signal: options.context?.signal
     };
     if (test.api === 'responses') {
       const body = {
@@ -318,14 +335,18 @@ class DetectionRunner {
           }));
         }
         if (event?.type === 'response.output_text.delta') outputText += String(event.delta || '');
-        if (['response.completed', 'response.failed', 'response.incomplete', 'error'].includes(event?.type)) {
+        if (['response.completed', 'response.failed', 'response.incomplete', 'response.cancelled', 'error'].includes(event?.type)) {
           terminalEvent = event;
           responseId = String(event.response?.id || responseId || '');
+          return false;
         }
       }, common);
 
       if (terminalEvent?.type === 'response.completed') {
         const payload = terminalEvent.response || {};
+        if (payload.error || (payload.status && payload.status !== 'completed')) {
+          throw new AppError('MODEL_RESPONSE_INVALID', '模型完成事件的状态无效，未保存本次输出', { status: 502 });
+        }
         if (outputText && !responseText(payload, 'responses')) payload.output_text = outputText;
         console.info(JSON.stringify({
           event: 'model_stream_completed',
@@ -345,19 +366,30 @@ class DetectionRunner {
         );
       }
 
-      if (terminalEvent?.type === 'response.failed' || terminalEvent?.type === 'error') {
-        const message = terminalEvent.response?.error?.message || terminalEvent.message || '模型流式响应失败';
-        throw new AppError('MODEL_RESPONSE_FAILED', message, {
-          status: 502,
-          details: { responseId: responseId || null }
-        });
+      if (terminalEvent?.type === 'response.cancelled') {
+        throw new AppError('MODEL_RESPONSE_CANCELLED', '上游已取消本次检测', { status: 502 });
       }
 
-      throw new AppError(
+      if (terminalEvent?.type === 'response.failed' || terminalEvent?.type === 'error') {
+        const upstream = terminalEvent.response?.error || terminalEvent.error || terminalEvent;
+        const message = upstream.message || '模型流式响应失败';
+        const upstreamCode = upstream.code || upstream.type || '';
+        const failure = new AppError('MODEL_RESPONSE_FAILED', message, {
+          status: 502,
+          details: { responseId: responseId || null, upstreamCode: String(upstreamCode).slice(0, 80) }
+        });
+        failure.recoverable = isTransientModelFailure(upstreamCode, message);
+        throw failure;
+      }
+
+      const incomplete = new AppError(
         'MODEL_STREAM_INCOMPLETE',
         '模型流式响应未收到完成标记；为避免展示残缺答案，未保存本次输出',
         { status: 502, details: { responseId: responseId || null } }
       );
+      incomplete.recoverable = true;
+      incomplete.outcomeUnknown = true;
+      throw incomplete;
     }
     if (test.api === 'chat_completions') {
       return this.sub2api.gatewayJson('/v1/chat/completions', apiKey, {
@@ -405,51 +437,113 @@ class DetectionRunner {
     const budgetMs = Number.isFinite(configuredBudget) && configuredBudget > 0
       ? configuredBudget
       : 30 * 60 * 1000;
-    const deadline = this.now() + budgetMs;
+    const recoveryLimit = Math.max(0, Math.min(3, this.config.recoveryRetries ?? 2));
+    const recoveryDeadline = this.now() + (this.config.recoveryTimeoutMs || budgetMs);
+    const deadline = Math.min(this.now() + budgetMs, recoveryDeadline);
     let retryAttempts = 0;
+    let recoveryAttempts = 0;
+    let unknownRecoveries = 0;
     let lastError = null;
+    const attempts = [];
+    const ensureCurrent = () => {
+      if (this.closed || context.signal?.aborted) throw new AppError('DETECTION_CANCELLED', '检测已停止，不再提交后续请求', { status: 409 });
+      context.ensureCurrent?.();
+    };
+    const record = () => context.onAttempts?.(attempts);
 
     while (true) {
-      const remainingMs = deadline - this.now();
+      ensureCurrent();
+      const remainingMs = (recoveryAttempts > 0 ? recoveryDeadline : deadline) - this.now();
       if (remainingMs <= 0 && lastError) {
         lastError.retryAttempts = retryAttempts;
+        lastError.recoveryAttempts = recoveryAttempts;
         throw lastError;
       }
+      const attempt = { number: attempts.length + 1, kind: attempts.length === 0 ? 'initial' : attempts.at(-1).next_action,
+        started_at: this.now(), state: 'running' };
+      attempts.push(attempt);
+      record();
       try {
         const payload = await this.callModel(test, apiKey, {
-          timeoutMs: Math.max(1, remainingMs),
+          timeoutMs: Math.max(1, Math.min(budgetMs, remainingMs)),
           context
         });
-        if (retryAttempts > 0) {
+        ensureCurrent();
+        if (payload?.error) {
+          const failure = new AppError('MODEL_RESPONSE_FAILED', payload.error.message || '模型响应失败', { status: 502,
+            details: { upstreamCode: String(payload.error.code || payload.error.type || '').slice(0, 80) } });
+          failure.recoverable = isTransientModelFailure(failure.details.upstreamCode, failure.message);
+          throw failure;
+        }
+        const stopReason = test.api === 'chat_completions' ? payload?.choices?.[0]?.finish_reason
+          : test.api === 'anthropic_messages' ? payload?.stop_reason : payload?.candidates?.[0]?.finishReason;
+        if (['length', 'max_tokens', 'MAX_TOKENS', 'content_filter', 'SAFETY'].includes(stopReason)) {
+          throw new AppError('MODEL_RESPONSE_INCOMPLETE', `模型响应未完整完成（${stopReason}），未保存残缺输出`, { status: 502 });
+        }
+        if (test.api && ['text', 'html', 'file'].includes(test.output_type) && !responseText(payload, test.api).trim()) {
+          const failure = new AppError('MODEL_RESPONSE_EMPTY', '模型没有返回文本内容', { status: 502 });
+          failure.recoverable = true;
+          throw failure;
+        }
+        Object.assign(attempt, { state: 'completed', finished_at: this.now() });
+        record();
+        if (retryAttempts > 0 || recoveryAttempts > 0) {
           console.info(JSON.stringify({
             event: 'model_request_retry_succeeded',
             runId: context.runId,
             monitorId: context.monitorId,
-            retryAttempts
+            retryAttempts,
+            recoveryAttempts
           }));
         }
         return payload;
       } catch (error) {
-        const delayMs = MODEL_REQUEST_RETRY_DELAYS_MS[retryAttempts];
+        Object.assign(attempt, { state: 'failed', finished_at: this.now(), code: error.code || 'UNKNOWN',
+          upstream_status: error.details?.upstreamStatus, upstream_code: error.details?.upstreamCode,
+          outcome_unknown: Boolean(error.outcomeUnknown) });
+        record();
+        ensureCurrent();
         const retryable = error?.retryable === true && error?.responseStarted !== true;
-        const withinBudget = Number.isFinite(delayMs) && this.now() + delayMs < deadline;
-        if (!retryable || !withinBudget) {
-          if (error && typeof error === 'object') error.retryAttempts = retryAttempts;
+        const recoverable = !retryable && error?.recoverable === true && recoveryAttempts < recoveryLimit &&
+          (!error.outcomeUnknown || unknownRecoveries < 1);
+        const baseDelay = retryable ? MODEL_REQUEST_RETRY_DELAYS_MS[retryAttempts]
+          : recoverable ? Math.max(error.outcomeUnknown ? 30000 : 0, MODEL_RECOVERY_DELAYS_MS[recoveryAttempts]) : NaN;
+        const delayMs = Math.max(baseDelay + Math.floor(this.random() * Math.min(1000, baseDelay * 0.2)), error.retryAfterMs || 0);
+        const activeDeadline = recoverable || recoveryAttempts > 0 ? recoveryDeadline : deadline;
+        const withinBudget = Number.isFinite(delayMs) && this.now() + delayMs < activeDeadline;
+        if ((!retryable && !recoverable) || !withinBudget) {
+          if (error && typeof error === 'object') {
+            error.retryAttempts = retryAttempts;
+            error.recoveryAttempts = recoveryAttempts;
+          }
           throw error;
         }
 
         lastError = error;
-        retryAttempts += 1;
+        if (retryable) retryAttempts += 1;
+        else {
+          recoveryAttempts += 1;
+          if (error.outcomeUnknown) unknownRecoveries += 1;
+        }
+        attempt.next_action = retryable ? 'retry' : 'recovery';
+        attempt.delay_ms = delayMs;
+        record();
         console.warn(JSON.stringify({
-          event: 'model_request_retry',
+          event: retryable ? 'model_request_retry' : 'model_request_recovery',
           runId: context.runId,
           monitorId: context.monitorId,
           retryAttempt: retryAttempts,
+          recoveryAttempt: recoveryAttempts,
           maxRetries: MODEL_REQUEST_RETRY_DELAYS_MS.length,
           delayMs,
           code: error.code || 'UNKNOWN'
         }));
-        await this.sleep(delayMs);
+        try {
+          await this.sleep(delayMs, context.signal);
+        } catch (error) {
+          ensureCurrent();
+          throw error;
+        }
       }
     }
   }
@@ -559,8 +653,16 @@ class DetectionRunner {
       });
       return this.store.getRun(runId);
     }
+    const controller = new AbortController();
+    const current = () => {
+      const active = this.store.getMonitorById(monitor.id);
+      return Boolean(active?.enabled && active.key_fingerprint === currentMonitor.key_fingerprint &&
+        JSON.stringify(this.store.getMonitorTest(active)) === JSON.stringify(test));
+    };
+    this.executions.set(runId, { controller, current });
+    let requestAttempts = [];
+    let apiKey;
     try {
-      let apiKey;
       try {
         apiKey = this.config.demoMode
           ? 'demo-only-not-a-real-api-key'
@@ -579,7 +681,16 @@ class DetectionRunner {
       }
       const payload = await this.callModelWithRetry(test, apiKey, {
         runId,
-        monitorId: currentMonitor.id
+        monitorId: currentMonitor.id,
+        signal: controller.signal,
+        ensureCurrent: () => {
+          if (!current()) throw new AppError('DETECTION_CONFIG_CHANGED', '检测配置已变更，本次停止补测', { status: 409 });
+        },
+        onAttempts: (attempts) => {
+          requestAttempts = attempts;
+          this.store.saveRequestAttempts?.(runId, attempts.map((attempt) => ({ ...attempt,
+            upstream_code: apiKey && String(attempt.upstream_code || '').includes(apiKey) ? undefined : attempt.upstream_code })));
+        }
       });
       const output = await this.normalizeOutput(test, payload);
       const artifact = await this.persistArtifact(runId, output);
@@ -596,6 +707,8 @@ class DetectionRunner {
       this.store.saveRunOutput?.(runId, savedOutput);
       const deterministic = deterministicVerdict(test, output);
       const verdict = await this.classify(test, output, deterministic, runId);
+      const recoveryCount = requestAttempts.filter((attempt) => attempt.kind === 'recovery').length;
+      if (recoveryCount) verdict.reason += `（自动补测 ${recoveryCount} 次后完成）`;
       const completed = this.store.completeRun(runId, {
         ...verdict,
         validationResult: verdict.validationResult,
@@ -620,14 +733,19 @@ class DetectionRunner {
       const appError = error instanceof AppError
         ? error
         : new AppError('DETECTION_FAILED', '检测执行失败', { status: 502 });
-      const retryAttempts = Number.isInteger(error?.retryAttempts) ? error.retryAttempts : 0;
+      const retryAttempts = requestAttempts.filter((attempt) => attempt.kind === 'retry').length;
       const retryNote = retryAttempts > 0 ? `（已自动重试 ${retryAttempts} 次）` : '';
+      const recoveryCount = requestAttempts.filter((attempt) => attempt.kind === 'recovery').length;
+      const recoveryNote = recoveryCount > 0 ? `（已自动补测 ${recoveryCount} 次）` : '';
+      const nextRunAt = this.closed ? Math.max(Date.now() + (this.config.requestTimeoutMs || 1800000),
+        this.store.nextScheduledAt?.() || 0) : undefined;
       return this.store.failRun(runId, {
-        reason: `${appError.message}${retryNote}，本次不计入有效结果`,
+        reason: `${apiKey ? appError.message.split(apiKey).join('[redacted]') : appError.message}${retryNote}${recoveryNote}，本次不计入有效结果`,
         source: 'request_error',
         errorCode: appError.code
-      });
+      }, nextRunAt);
     } finally {
+      this.executions.delete(runId);
       if (run?.prompt) run.prompt = null;
     }
   }

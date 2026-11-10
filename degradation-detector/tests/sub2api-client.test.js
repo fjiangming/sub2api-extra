@@ -232,3 +232,36 @@ test('an ambiguous streaming HTTP 500 is not resubmitted', async () => {
       !error.retryable && !error.responseStarted && error.details.upstreamStatus === 500
   );
 });
+
+test('JSON inference distinguishes uncertain accepted requests from ordinary read-only failures', async () => {
+  const config = { sub2apiBaseUrl: 'https://sub2api.example.test', requestTimeoutMs: 1000, maxResponseBytes: 4096 };
+  const api = new Sub2ApiClient(config, async () => ({
+    ok: true, status: 200, headers: { get: () => null },
+    body: { async *[Symbol.asyncIterator]() { throw Object.assign(new Error('closed after HTTP 200'), { code: 'UND_ERR_SOCKET' }); } }
+  }));
+  await assert.rejects(api.gatewayJson('/v1/messages', 'synthetic-key', {}), error =>
+    error.code === 'SUB2API_REQUEST_INTERRUPTED' && !error.retryable && error.recoverable && error.outcomeUnknown);
+  await assert.rejects(api.request('/api/v1/groups/available'), error => error.code === 'SUB2API_UNAVAILABLE' && error.retryable);
+});
+
+test('SSE event names supply a missing type, and terminal callbacks stop subsequent reads', async () => {
+  let reads = 0;
+  let closed = false;
+  const events = [];
+  const response = { body: {
+    async *[Symbol.asyncIterator]() {
+      try {
+        reads++;
+        yield Buffer.from('event: error\ndata: {"error":{"code":"upstream_error","message":"overloaded"}}\n\n');
+        reads++;
+        throw new Error('must not read after terminal event');
+      } finally { closed = true; }
+    }
+  } };
+  const result = await readEventStream(response, 4096, event => { events.push(event); return false; });
+  await Promise.resolve();
+  assert.equal(result.events, 1);
+  assert.equal(events[0].type, 'error');
+  assert.equal(reads, 1);
+  assert.equal(closed, true);
+});

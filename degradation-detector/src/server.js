@@ -479,6 +479,7 @@ async function saveAdminConfiguration(req, runtime) {
     if (modelInput) runtime.modelStore.save(modelInput);
     if (submitted.fingerprint_data) runtime.fingerprintData.saveSettings(submitted.fingerprint_data);
   })();
+  runtime.runner.configurationChanged?.();
   runtime.modelDetection.configurationChanged?.();
   return adminConfigurationPayload(req, runtime);
 }

@@ -634,6 +634,8 @@ function loadConfig(env = process.env) {
     sub2apiBaseUrl,
     sub2apiDatabaseUrl,
     requestTimeoutMs: 30 * 60 * 1000,
+    recoveryRetries: parseInteger(env.DEGRADATION_DETECTOR_RECOVERY_RETRIES, 2, 0, 3),
+    recoveryTimeoutMs: parseInteger(env.DEGRADATION_DETECTOR_RECOVERY_TIMEOUT_SECONDS, 3600, 60, 7200) * 1000,
     maxResponseBytes: 20 * 1024 * 1024,
     schedulerPollSeconds: parseInteger(env.DEGRADATION_DETECTOR_SCHEDULER_POLL_SECONDS, 15, 5, 300),
     concurrency: 2,

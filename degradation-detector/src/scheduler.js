@@ -33,6 +33,7 @@ class Scheduler {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.queue.length = 0;
+    this.runner.close?.();
     await this.modelDetection?.close();
     await Promise.allSettled([...this.active.values()]);
     await this.maintenance?.close();

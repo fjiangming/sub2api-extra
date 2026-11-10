@@ -222,7 +222,7 @@ test('manual completion preserves the automatic next run while scheduled complet
   assert.ok(advanced <= Date.now() + 30 * 60 * 1000);
 });
 
-test('unfinished runs are recovered after reopening the database', (t) => {
+test('restart delays unknown in-flight generation instead of submitting it immediately', (t) => {
   const config = testConfig(t);
   let store = new Store(config);
   const firstMonitor = monitor(store);
@@ -230,13 +230,30 @@ test('unfinished runs are recovered after reopening the database', (t) => {
   store.markRunRunning(run.id);
   store.close();
 
+  const beforeReopen = Date.now();
   store = new Store(config);
   t.after(() => store.close());
   const recovered = store.getRun(run.id);
   assert.equal(recovered.status, 'error');
   assert.equal(recovered.error_code, 'SERVICE_RESTARTED');
   assert.equal(recovered.source, 'service_restart');
+  assert.match(recovered.reason, /结果未知/);
+  assert.ok(store.getMonitor('user-1', 'group-1').next_run_at >= beforeReopen + config.requestTimeoutMs);
+});
+
+test('restart can reschedule an unsent queued detection and leaves disabled groups unscheduled', (t) => {
+  const config = testConfig(t);
+  let store = new Store(config);
+  const queued = store.createRun(monitor(store), testCase, 'manual');
+  const disabled = store.upsertMonitor({ userId: 'user-1', groupId: 'disabled', groupName: 'Disabled', platform: 'openai', enabled: false });
+  const running = store.createRun(disabled, testCase, 'manual');
+  store.markRunRunning(running.id);
+  store.close();
+  store = new Store(config);
+  t.after(() => store.close());
+  assert.equal(store.getRun(queued.id).status, 'error');
   assert.ok(store.getMonitor('user-1', 'group-1').next_run_at <= Date.now());
+  assert.equal(store.getMonitor('user-1', 'disabled').next_run_at, null);
 });
 
 test('a disabled monitor stays unscheduled when an in-flight run completes', (t) => {

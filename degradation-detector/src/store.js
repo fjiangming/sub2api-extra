@@ -9,7 +9,7 @@ const { snapshotValidation } = require('./visual-config');
 
 const runSummaryColumns = `
   id, started_at, finished_at, status, quality, reason, source, duration_ms,
-  output_type, model, reasoning_effort, score, validation_result_json, trigger_type,
+  output_type, model, reasoning_effort, score, validation_result_json, request_attempts_json, trigger_type,
   manual_status, manual_reason, manual_updated_at, manual_updated_by,
   (artifact_path IS NOT NULL OR (output_type = 'html' AND output_text IS NOT NULL)) AS has_artifact,
   (output_type = 'html' AND output_text IS NOT NULL) AS has_html
@@ -154,6 +154,26 @@ function storedSchedule(row) {
   };
 }
 
+function requestAttempts(value) {
+  let attempts;
+  try { attempts = typeof value === 'string' ? JSON.parse(value) : value; } catch { return []; }
+  if (!Array.isArray(attempts)) return [];
+  const code = (value) => typeof value === 'string' && /^[a-z0-9_.-]{1,80}$/i.test(value) && !/^sk-/i.test(value) ? value : undefined;
+  return attempts.filter((attempt) => attempt && typeof attempt === 'object').slice(0, 9).map((attempt, index) => ({
+    number: index + 1,
+    kind: ['initial', 'retry', 'recovery'].includes(attempt.kind) ? attempt.kind : 'initial',
+    state: ['running', 'failed', 'completed'].includes(attempt.state) ? attempt.state : 'failed',
+    started_at: Number.isFinite(attempt.started_at) ? attempt.started_at : null,
+    finished_at: Number.isFinite(attempt.finished_at) ? attempt.finished_at : null,
+    code: code(attempt.code),
+    upstream_code: code(attempt.upstream_code),
+    upstream_status: Number.isInteger(attempt.upstream_status) && attempt.upstream_status >= 100 && attempt.upstream_status <= 599 ? attempt.upstream_status : undefined,
+    outcome_unknown: Boolean(attempt.outcome_unknown),
+    next_action: ['retry', 'recovery'].includes(attempt.next_action) ? attempt.next_action : undefined,
+    delay_ms: Number.isFinite(attempt.delay_ms) && attempt.delay_ms >= 0 ? attempt.delay_ms : undefined
+  }));
+}
+
 function publicRun(row) {
   if (!row) return null;
   const review = publicReview(row);
@@ -166,6 +186,7 @@ function publicRun(row) {
     reason: review ? `人工复核：${review.reason}` : row.reason,
     source: row.source,
     duration_ms: nullableNumber(row.duration_ms),
+    request_attempts: requestAttempts(row.request_attempts_json),
     output_type: row.output_type,
     model: row.model,
     reasoning_effort: row.reasoning_effort || null,
@@ -372,6 +393,7 @@ class Store {
     this.#ensureColumn('runs', 'test_snapshot', 'TEXT');
     this.#ensureColumn('runs', 'validation_snapshot', 'TEXT');
     this.#ensureColumn('runs', 'validation_result_json', 'TEXT');
+    this.#ensureColumn('runs', 'request_attempts_json', 'TEXT');
     this.#ensureColumn('runs', 'score', 'REAL');
     this.#ensureColumn('runs', 'manual_status', 'TEXT');
     this.#ensureColumn('runs', 'manual_reason', 'TEXT');
@@ -573,27 +595,33 @@ class Store {
     this.invalidateSummary();
     const timestamp = nowMs();
     const transaction = this.db.transaction(() => {
-      const monitorIds = this.db.prepare(`
-        SELECT DISTINCT monitor_id FROM runs WHERE status IN ('queued', 'running')
-      `).all().map((row) => row.monitor_id);
-      if (monitorIds.length === 0) return 0;
+      const interrupted = this.db.prepare(`
+        SELECT monitor_id, MAX(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS submitted
+        FROM runs WHERE status IN ('queued', 'running') GROUP BY monitor_id
+      `).all();
+      if (interrupted.length === 0) return 0;
       const result = this.db.prepare(`
         UPDATE runs SET
           status = 'error', quality = NULL,
-          reason = '服务重启中断了本次检测，已安排重新检测',
+          reason = CASE WHEN status = 'queued' THEN '服务重启中断排队任务，已安排重新检测'
+            ELSE '服务重启中断检测，上游结果未知；保留历史并延后下一次计划，未立即重新提交' END,
           source = 'service_restart', finished_at = ?,
           duration_ms = CASE WHEN started_at IS NULL THEN 0 ELSE MAX(0, ? - started_at) END,
           error_code = 'SERVICE_RESTARTED'
         WHERE status IN ('queued', 'running')
       `).run(timestamp, timestamp);
-      const placeholders = monitorIds.map(() => '?').join(',');
-      this.db.prepare(`
+      const update = this.db.prepare(`
         UPDATE monitors SET
           last_run_at = ?,
           next_run_at = CASE WHEN enabled = 1 THEN ? ELSE NULL END,
           updated_at = ?
-        WHERE id IN (${placeholders})
-      `).run(timestamp, timestamp, timestamp, ...monitorIds);
+        WHERE id = ?
+      `);
+      for (const monitor of interrupted) {
+        const next = monitor.submitted
+          ? Math.max(timestamp + (this.config.requestTimeoutMs || 1800000), this.nextScheduledAt(timestamp)) : timestamp;
+        update.run(timestamp, next, timestamp, monitor.monitor_id);
+      }
       return result.changes;
     });
     return transaction();
@@ -778,6 +806,19 @@ class Store {
       UPDATE runs SET output_text = ?, artifact_path = ?, artifact_name = ?, artifact_mime = ?, preview_token = ?
       WHERE id = ? AND status = 'running'
     `).run(output.outputText, output.artifactPath, output.artifactName, output.artifactMime, output.previewToken, Number(id));
+  }
+
+  saveRequestAttempts(id, attempts) {
+    const run = this.getRun(id);
+    if (!run || run.status !== 'running') return;
+    const safe = requestAttempts(attempts);
+    const last = safe.at(-1);
+    const reason = last?.next_action === 'recovery' ? `上游请求异常，等待自动补测（${Math.ceil(last.delay_ms / 1000)} 秒）`
+      : last?.next_action === 'retry' ? `请求暂不可用，等待自动重连（${Math.ceil(last.delay_ms / 1000)} 秒）`
+      : last?.kind === 'recovery' && last.state === 'running' ? '正在自动补测，等待模型完整结果' : null;
+    this.db.prepare('UPDATE runs SET request_attempts_json = ?, reason = ? WHERE id = ? AND status = \'running\'')
+      .run(JSON.stringify(safe), reason, Number(id));
+    this.invalidateSummary(run.user_id, run.group_id);
   }
 
   completeRun(id, result, nextRunAt) {

@@ -30,6 +30,8 @@ test('runtime configuration only requires the Sub2API connection', (t) => {
   assert.equal(config.scheduleTimezone, 'Asia/Shanghai');
   assert.equal(config.concurrency, 2);
   assert.equal(config.requestTimeoutMs, 30 * 60 * 1000);
+  assert.equal(config.recoveryRetries, 2);
+  assert.equal(config.recoveryTimeoutMs, 3600000);
   assert.equal(config.listHistoryLimit, 60);
   assert.equal(config.listHistoryLimit, config.historyLimit);
   assert.equal(config.tests, undefined);
@@ -229,12 +231,22 @@ test('storage policies enforce bounded retention and preserve older configuratio
   }), /history_days/);
 });
 
-test('.env.example contains only Sub2API connection variables', () => {
+test('optional recovery limits are bounded and can disable generation replays', (t) => {
+  const config = loadConfig(env(t, { DEGRADATION_DETECTOR_RECOVERY_RETRIES: '0', DEGRADATION_DETECTOR_RECOVERY_TIMEOUT_SECONDS: '90' }));
+  assert.equal(config.recoveryRetries, 0);
+  assert.equal(config.recoveryTimeoutMs, 90000);
+  const bounded = loadConfig(env(t, { DEGRADATION_DETECTOR_RECOVERY_RETRIES: '99', DEGRADATION_DETECTOR_RECOVERY_TIMEOUT_SECONDS: '99999' }));
+  assert.ok(bounded.recoveryRetries <= 3);
+  assert.ok(bounded.recoveryTimeoutMs <= 7200000);
+});
+
+test('.env.example contains connections and optional bounded recovery settings', () => {
   const content = fs.readFileSync(path.join(__dirname, '..', '.env.example'), 'utf8');
   const variables = content.split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith('#'))
     .map((line) => line.slice(0, line.indexOf('=')));
-  assert.deepEqual(variables, ['SUB2API_BASE_URL', 'SUB2API_DATABASE_URL']);
+  assert.deepEqual(variables, ['SUB2API_BASE_URL', 'SUB2API_DATABASE_URL',
+    'DEGRADATION_DETECTOR_RECOVERY_RETRIES', 'DEGRADATION_DETECTOR_RECOVERY_TIMEOUT_SECONDS']);
   assert.doesNotMatch(content, /GROUP_KEYS|SUPPORTED_PLATFORMS|TESTS_JSON|INTERVAL_SECONDS/);
 });
