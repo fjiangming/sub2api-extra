@@ -8,7 +8,7 @@ const { ModelDetection } = require('../src/model-detection');
 const { CredentialVault } = require('../src/credential-vault');
 const { defaultModelPlatform, modelGroupContext, modelPlatformSchema } = require('../src/model-config');
 const { demoFingerprintResponse } = require('../src/fingerpoint-fixture');
-const { fingerprintComparison } = require('../src/model-results');
+const { fingerprintComparison, fingerprintComparisonVersion } = require('../src/model-results');
 const { createApp } = require('../src/server');
 const { runFingerprintWorker } = require('../src/fingerpoint-runner');
 const { defaultTests, testConfig, listen } = require('./helpers');
@@ -92,7 +92,7 @@ test('Fingerpoint compares reference names and version aliases without merging d
     { model: 'claude-opus-5', display_name: 'claude-opus-5' }
   ] };
   assert.equal(fingerprintComparison(analysis, 'claude-opus-5.5').comparison.method, 'exact_id');
-  assert.deepEqual(fingerprintComparison(analysis, 'claude-opus-5-5'), { verdictKey: 'candidate_match', comparison: { version: 1, method: 'version_separator' } });
+  assert.deepEqual(fingerprintComparison(analysis, 'claude-opus-5-5'), { verdictKey: 'candidate_match', comparison: { version: fingerprintComparisonVersion, method: 'version_separator' } });
   assert.equal(fingerprintComparison(analysis, ' CLAUDE-OPUS-5-5 ').verdictKey, 'candidate_match');
   for (const model of ['claude-sonnet-5-5', 'claude-opus-5', 'claude-opus-55', 'claude-opus-5-4', 'claude-opus-5-5-thinking', 'claude-opus-5-5-20261101']) {
     assert.equal(fingerprintComparison(analysis, model).verdictKey, 'candidate_differs', model);
@@ -110,6 +110,95 @@ test('Fingerpoint compares reference names and version aliases without merging d
   for (const decision of ['partial', 'unscorable', 'not_model']) {
     assert.equal(fingerprintComparison({ ...analysis, decision }, 'claude-opus-5-5').verdictKey, decision);
   }
+});
+
+test('Fingerpoint resolves only explicitly listed combined reference names and keeps independent IDs and ambiguity', () => {
+  const candidate = { model: 'gpt-6-astra', display_name: 'gpt-6-astra/6.1-sol' };
+  const analysis = { decision: 'scored', prediction: candidate.model, prediction_name: candidate.display_name, probability: 0.998, results: [candidate, { model: 'gpt-6-sol', display_name: 'gpt-6-sol' }] };
+  const original = structuredClone(analysis);
+  for (const requested of ['gpt-6.1-sol', 'gpt-6-1-sol', ' GPT-6.1-SOL ']) {
+    assert.deepEqual(fingerprintComparison(analysis, requested), { verdictKey: 'candidate_match', comparison: { version: fingerprintComparisonVersion, method: 'combined_reference', combined_candidate: true } });
+  }
+  for (const requested of ['gpt-6-astra', 'gpt-6-astra/6.1-sol']) {
+    const result = fingerprintComparison(analysis, requested);
+    assert.equal(result.verdictKey, 'candidate_match'); assert.equal(result.comparison.combined_candidate, true);
+  }
+  for (const requested of ['6.1-sol', 'gpt-6-sol', 'gpt-6.1-terra', 'gpt-6.1-sol-thinking', 'gpt-6.1-sol-20261109', 'gpt-6.2-sol', 'claude-6.1-sol']) {
+    assert.equal(fingerprintComparison(analysis, requested).verdictKey, 'candidate_differs', requested);
+  }
+  const fallback = { ...analysis }; delete fallback.results;
+  assert.equal(fingerprintComparison(fallback, 'gpt-6.1-sol').verdictKey, 'candidate_match');
+  assert.deepEqual(analysis, original);
+  const ambiguous = structuredClone(analysis);
+  ambiguous.results.push({ model: 'gpt-other', display_name: 'gpt-other/6.1-sol' });
+  assert.equal(fingerprintComparison(ambiguous, 'gpt-6.1-sol').verdictKey, 'scored');
+  assert.equal(fingerprintComparison(ambiguous, 'gpt-6-1-sol').comparison.method, 'ambiguous');
+  ambiguous.results.push({ model: 'gpt-6.1-sol', display_name: 'Independent reference model' });
+  assert.equal(fingerprintComparison(ambiguous, 'gpt-6.1-sol').verdictKey, 'candidate_differs');
+  for (const display_name of ['gpt-6-astra/unknown', 'gpt-6-astra/', '/6.1-sol']) {
+    assert.equal(fingerprintComparison({ ...analysis, results: [{ ...candidate, display_name }] }, 'gpt-6.1-sol').verdictKey, 'candidate_differs');
+  }
+  for (const decision of ['partial', 'unscorable', 'not_model']) {
+    assert.equal(fingerprintComparison({ ...analysis, decision }, 'gpt-6.1-sol').verdictKey, decision);
+  }
+});
+
+test('combined Fingerpoint references keep the configured request model and all SDK ranking evidence', async t => {
+  const { service, models } = setup(t);
+  models.db.prepare('UPDATE model_groups SET models_json=? WHERE group_id=?').run(JSON.stringify({ fingerpoint: 'gpt-6.1-sol' }), '1');
+  const official = demoFingerprintResponse('gpt-6-astra', 'openai', { rounds: 2 });
+  for (const round of official.rounds) {
+    round.analysis.prediction_name = round.analysis.results[0].display_name = 'gpt-6-astra/6.1-sol';
+    round.analysis.probability = 0.998;
+  }
+  let calls = 0;
+  service.runFingerprint = async (input, _signal, onEvent) => {
+    calls++; assert.equal(input.model, 'gpt-6.1-sol');
+    for (const round of official.rounds) onEvent({ type: 'round', result: round });
+  };
+  const run = service.enqueue('1')[0]; await service.execute(models.run(run.id));
+  const row = models.run(run.id); const response = JSON.parse(row.response_json);
+  assert.equal(calls, 1); assert.equal(row.conclusion, 'candidate_match');
+  assert.equal(response.requested_model, 'gpt-6.1-sol'); assert.equal(response.comparison.method, 'combined_reference');
+  assert.equal(response.comparison.combined_candidate, true); assert.equal(models.latest('1', 'fingerpoint').conclusion, 'candidate_match');
+  assert.deepEqual(response.analysis, official.analysis);
+  assert.deepEqual(response.rounds.map(round => round.analysis), official.rounds.map(round => round.analysis));
+});
+
+test('combined reference histories repair even after v1 migration without rerunning or modifying SDK evidence', t => {
+  const { models, store, state } = setup(t);
+  const migration = `fingerpoint-name-comparison-v${fingerprintComparisonVersion}`;
+  models.db.prepare('DELETE FROM model_result_migrations WHERE name=?').run(migration);
+  models.db.prepare('INSERT OR IGNORE INTO model_result_migrations VALUES (?)').run('fingerpoint-name-comparison-v1');
+  const group = models.group('1');
+  const saved = [];
+  for (const model of ['gpt-6.1-sol', 'gpt-6.1-terra']) {
+    const run = models.create(group, 'fingerpoint', 'manual');
+    const response = demoFingerprintResponse('gpt-6-astra', 'openai', { rounds: 1 });
+    response.requested_model = model;
+    response.analysis.prediction_name = response.analysis.results[0].display_name = 'gpt-6-astra/6.1-sol';
+    response.verdictKey = 'candidate_differs'; response.comparison = { version: 1, method: 'different' };
+    models.db.prepare('UPDATE model_runs SET model=? WHERE id=?').run(model, run.id);
+    models.updateResponse(run.id, response, 'completed'); models.finish(run.id, 'completed', '3 rounds complete');
+    saved.push(models.run(run.id));
+  }
+  const reopened = new ModelStore(store);
+  for (const [index, before] of saved.entries()) {
+    const after = reopened.run(before.id); const response = JSON.parse(after.response_json);
+    assert.equal(after.conclusion, index ? 'candidate_differs' : 'candidate_match');
+    assert.equal(response.verdictKey, after.conclusion); assert.equal(response.comparison.version, fingerprintComparisonVersion);
+    assert.equal(response.comparison.combined_candidate, true);
+    const { verdictKey: _verdict, comparison: _comparison, ...evidence } = response;
+    const { verdictKey: _oldVerdict, comparison: _oldComparison, ...oldEvidence } = JSON.parse(before.response_json);
+    assert.deepEqual(evidence, oldEvidence);
+    assert.deepEqual({ ...after, response_json: before.response_json, conclusion: before.conclusion }, before);
+    assert.equal(reopened.history('1', 'fingerpoint').find(run => run.id === before.id).conclusion, after.conclusion);
+  }
+  const changes = models.db.prepare('SELECT total_changes() AS n').get().n;
+  new ModelStore(store);
+  assert.equal(models.db.prepare('SELECT total_changes() AS n').get().n, changes);
+  assert.equal(models.db.prepare('SELECT COUNT(*) AS n FROM model_result_migrations WHERE name IN (?,?)').get('fingerpoint-name-comparison-v1', migration).n, 2);
+  assert.equal(state.calls, 0);
 });
 
 test('Fingerpoint fixes the real Claude version alias while keeping requests and SDK analyses unchanged', async t => {

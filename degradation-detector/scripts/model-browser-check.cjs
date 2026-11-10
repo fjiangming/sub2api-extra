@@ -18,6 +18,18 @@ async function main() {
   aliasResponse.analysis.results[0].model = aliasResponse.analysis.results[0].display_name = 'claude-sonnet-4.5';
   Object.assign(aliasResponse, fingerprintComparison(aliasResponse.analysis, aliasRun.model));
   preview.runtime.modelStore.updateResponse(aliasRun.id, aliasResponse, 'completed');
+  const combinedRun = preview.runtime.modelStore.history('2', 'fingerpoint')[1];
+  const combinedResponse = JSON.parse(preview.runtime.modelStore.run(combinedRun.id).response_json);
+  combinedResponse.requested_model = 'gpt-6.1-sol';
+  for (const round of combinedResponse.rounds) {
+    round.analysis.prediction = round.analysis.results[0].model = 'gpt-6-astra';
+    round.analysis.prediction_name = round.analysis.results[0].display_name = 'gpt-6-astra/6.1-sol';
+    round.analysis.probability = round.analysis.results[0].probability = 0.998;
+  }
+  combinedResponse.analysis = combinedResponse.rounds.at(-1).analysis;
+  Object.assign(combinedResponse, fingerprintComparison(combinedResponse.analysis, combinedResponse.requested_model));
+  preview.runtime.modelStore.db.prepare('UPDATE model_runs SET model=? WHERE id=?').run(combinedResponse.requested_model, combinedRun.id);
+  preview.runtime.modelStore.updateResponse(combinedRun.id, combinedResponse, 'completed');
   const browser = await playwright.chromium.launch({ channel: 'chrome', headless: true });
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sub2api-model-browser-'));
   const errors = [];
@@ -233,6 +245,23 @@ async function main() {
     assert.match(await page.locator('#model-detail .identity-facts').first().innerText(), /claude-sonnet-4-5/);
     assert.match(await page.locator('#model-detail .fp-rankings').first().innerText(), /claude-sonnet-4\.5/);
     await fit(page); await shot(page, 'desktop-fingerpoint-alias');
+    await page.locator(`[data-model-history="${combinedRun.id}"]`).click();
+    await page.locator('#model-detail .model-verdict').getByText('请求名称属于参考库明确列出的组合候选名称。该参考候选包含多个模型名称，本次结果无法区分组合内的具体型号。', { exact: true }).waitFor();
+    assert.match(await page.locator('#model-detail .model-verdict').innerText(), /候选相符/);
+    assert.match(await page.locator('#model-detail .identity-facts').first().innerText(), /gpt-6\.1-sol/);
+    assert.match(await page.locator('#model-detail .fp-rankings').first().innerText(), /gpt-6-astra\/6\.1-sol/);
+    assert.match(await page.locator('#model-detail .identity-facts').first().innerText(), /99\.8%/);
+    for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 844 }]) {
+      await page.setViewportSize(viewport); await fit(page);
+      assert(await page.locator('#model-detail .model-verdict').getByText('候选相符', { exact: true }).isVisible());
+      await shot(page, `fingerpoint-combined-${viewport.width}`);
+    }
+    await page.locator('html').evaluate(el => el.classList.add('dark'));
+    assert.equal(await page.locator('#model-detail .model-verdict .model-badge').evaluate(el => getComputedStyle(el).color), 'rgb(110, 231, 183)');
+    await shot(page, 'fingerpoint-combined-dark');
+    await page.locator('html').evaluate(el => el.classList.remove('dark'));
+    await page.setViewportSize({ width: 1440, height: 900 });
+    assert.equal(await page.locator('#model-detail .model-verdict .model-badge').evaluate(el => getComputedStyle(el).color), 'rgb(4, 120, 87)');
     await page.locator('#model-dialog-close').click();
     const denied = await page.evaluate(async () => {
       const targets = ['/api/admin/config', '/admin/config', '/admin/model-config.js', '/api/admin/fingerpoint/data'];

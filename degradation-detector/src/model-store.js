@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const { setImmediate: yieldToRequests } = require('node:timers/promises');
 const { nextScheduledRunAt } = require('./schedule');
 const { defaultModelPlatform, defaultSchedule, modelGroupContext } = require('./model-config');
-const { fingerprintComparison, modelConclusion, modelRunSummary } = require('./model-results');
+const { fingerprintComparison, fingerprintComparisonVersion, modelConclusion, modelRunSummary } = require('./model-results');
 
 const summaryColumns = 'id, group_id, channel, status, model, conclusion, total, item_count, started_at, created_at, finished_at, duration_ms, trigger_type, progress, reason, (response_json IS NOT NULL) AS has_response';
 const parse = (value, fallback = null) => { try { return JSON.parse(value); } catch { return fallback; } };
@@ -50,7 +50,7 @@ class ModelStore {
 
   repairFingerprintComparisons() {
     this.db.transaction(() => {
-      const migration = 'fingerpoint-name-comparison-v1';
+      const migration = `fingerpoint-name-comparison-v${fingerprintComparisonVersion}`;
       if (this.db.prepare('SELECT 1 FROM model_result_migrations WHERE name=?').get(migration)) return;
       const read = this.db.prepare(`SELECT id,model,json_extract(response_json,'$.analysis') AS analysis FROM model_runs
         WHERE id>? AND channel='fingerpoint' AND status='completed' AND conclusion IN ('candidate_match','candidate_differs','scored')
