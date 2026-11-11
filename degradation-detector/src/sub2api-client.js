@@ -318,13 +318,6 @@ class Sub2ApiClient {
         ...(this.dispatcher ? { dispatcher: this.dispatcher } : {})
       });
 
-      const recoveryToken = response.headers.get('x-sub2api-recovery-token');
-      options.onResponse?.({
-        token: typeof recoveryToken === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(recoveryToken)
-          ? recoveryToken : null,
-        applied: response.headers.get('x-sub2api-recovery-applied') === '1'
-      });
-
       if (!response.ok) {
         const payload = parsePayload(await readLimited(response, maxBytes));
         throw httpFailure(response, payload, true);
@@ -454,7 +447,6 @@ class Sub2ApiClient {
       timeoutMs: options.timeoutMs || this.config.requestTimeoutMs,
       maxBytes: options.maxBytes || this.config.maxResponseBytes,
       headers: options.headers,
-      onResponse: options.onResponse,
       signal: options.signal
     }, onEvent);
   }

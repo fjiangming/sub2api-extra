@@ -309,8 +309,7 @@ class DetectionRunner {
       timeoutMs: options.timeoutMs || this.config.requestTimeoutMs,
       maxBytes: this.config.maxResponseBytes,
       signal: options.context?.signal,
-      headers: options.headers,
-      onResponse: options.onResponse
+      headers: options.headers
     };
     if (test.api === 'responses') {
       const body = {
@@ -448,7 +447,7 @@ class DetectionRunner {
     let unknownRecoveries = 0;
     let lastError = null;
     const attempts = [];
-    const recoveryTokens = [];
+    let sessionId = test.api === 'responses' ? crypto.randomUUID() : null;
     const ensureCurrent = () => {
       if (this.closed || context.signal?.aborted) throw new AppError('DETECTION_CANCELLED', '检测已停止，不再提交后续请求', { status: 409 });
       context.ensureCurrent?.();
@@ -467,21 +466,10 @@ class DetectionRunner {
         started_at: this.now(), state: 'running' };
       attempts.push(attempt);
       record();
-      let recoveryToken = null;
       try {
         const payload = await this.callModel(test, apiKey, {
           timeoutMs: Math.max(1, Math.min(budgetMs, remainingMs)),
-          headers: test.api === 'responses' ? {
-            'x-sub2api-recovery': '1',
-            ...(recoveryTokens.length ? { 'x-sub2api-recovery-from': recoveryTokens.join(',') } : {})
-          } : undefined,
-          onResponse: test.api === 'responses' ? metadata => {
-            recoveryToken = metadata.token;
-            attempt.route_recovery = metadata.token
-              ? metadata.applied ? 'applied' : recoveryTokens.length ? 'not_applied' : 'available'
-              : 'unavailable';
-            record();
-          } : undefined,
+          headers: sessionId ? { 'session-id': sessionId } : undefined,
           context
         });
         ensureCurrent();
@@ -541,7 +529,8 @@ class DetectionRunner {
         else {
           recoveryAttempts += 1;
           if (error.outcomeUnknown) unknownRecoveries += 1;
-          if (recoveryToken && !recoveryTokens.includes(recoveryToken)) recoveryTokens.push(recoveryToken);
+          // A paid recovery starts a new session; safe reconnects keep its identity.
+          if (sessionId) sessionId = crypto.randomUUID();
         }
         attempt.next_action = retryable ? 'retry' : 'recovery';
         attempt.delay_ms = delayMs;

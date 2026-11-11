@@ -85,28 +85,59 @@ test('HTTP2 errors in HTTP error bodies never enter the five safe reconnects', a
   }
 });
 
-test('Responses recovery carries scoped gateway hints without changing inference or persisting tokens', async () => {
-  const tokens = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222',
-    '33333333-3333-4333-8333-333333333333'];
+test('Responses recoveries use native sessions without changing inference or requiring gateway extensions', async () => {
   const h = harness(number => sse(number === 3 ? [completed] : [{ type: 'error', code: 'stream_timeout', message: durationMessage }], {
-    'x-sub2api-recovery-token': tokens[number - 1], 'x-sub2api-recovery-applied': number > 1 ? '1' : '0'
+    'x-sub2api-recovery-token': 'legacy-unused', 'x-sub2api-recovery-applied': '1'
   }));
   await h.runner.callModelWithRetry(question, 'key', h.context);
-  assert.deepEqual(h.calls.map(c => c.headers['x-sub2api-recovery-from']), [undefined, tokens[0], tokens.slice(0, 2).join(',')]);
-  assert.ok(h.calls.every(c => c.headers['x-sub2api-recovery'] === '1'));
+  const sessions = h.calls.map(c => c.headers['session-id']);
+  assert.equal(new Set(sessions).size, 3);
+  for (const session of sessions) assert.match(session, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.ok(h.calls.every(c => !Object.keys(c.headers).some(key => key.startsWith('x-sub2api-recovery'))));
   assert.ok(h.calls.every(c => JSON.stringify(c.body) === JSON.stringify(h.calls[0].body)));
-  assert.deepEqual(h.snapshots.at(-1).map(a => a.route_recovery), ['available', 'applied', 'applied']);
-  for (const token of tokens) assert.ok(!JSON.stringify(h.snapshots).includes(token));
+  assert.ok(h.snapshots.at(-1).every(attempt => !Object.hasOwn(attempt, 'route_recovery')));
+  for (const session of sessions) assert.ok(!JSON.stringify(h.snapshots).includes(session));
 });
 
-test('unsupported, expired and malformed gateway hints never claim successful route avoidance', async () => {
-  const token = '11111111-1111-4111-8111-111111111111';
-  for (const header of [undefined, 'sk-private-value', token]) {
-    const h = harness(number => sse(number === 1 ? [{ type: 'error', code: 'stream_timeout', message: durationMessage }] : [completed],
-      header ? { 'x-sub2api-recovery-token': header, 'x-sub2api-recovery-applied': '0' } : {}));
-    await h.runner.callModelWithRetry(question, 'key', h.context);
-    assert.equal(h.calls[1].headers['x-sub2api-recovery-from'], header === token ? token : undefined);
-    assert.equal(h.snapshots.at(-1)[1].route_recovery, header === token ? 'not_applied' : 'unavailable');
+test('safe reconnects preserve native session identity and paid recoveries reset it', async () => {
+  const h = harness(number => {
+    if (number === 1) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+    if (number === 2) return sse([{ type: 'error', code: 'stream_timeout', message: durationMessage }]);
+    if (number === 3) return new Response('{"error":{"message":"overloaded"}}', { status: 503 });
+    return sse([completed]);
+  });
+  const result = await h.runner.callModelWithRetry(question, 'key', h.context);
+  assert.equal(result.output_text, '1161');
+  const sessions = h.calls.map(c => c.headers['session-id']);
+  assert.equal(sessions[0], sessions[1]);
+  assert.notEqual(sessions[1], sessions[2]);
+  assert.equal(sessions[2], sessions[3]);
+  assert.deepEqual(h.waits, [1000, 10000, 2000]);
+  assert.ok(h.calls.every(c => JSON.stringify(c.body) === JSON.stringify(h.calls[0].body)));
+});
+
+test('independent Responses detections do not reuse a content-derived sticky session', async () => {
+  const h = harness(() => sse([completed]));
+  await h.runner.callModelWithRetry(question, 'key');
+  await h.runner.callModelWithRetry(question, 'key');
+  assert.notEqual(h.calls[0].headers['session-id'], h.calls[1].headers['session-id']);
+  assert.deepEqual(h.calls[0].body, h.calls[1].body);
+});
+
+test('native Responses session handling does not change other detection protocols', async () => {
+  for (const [api, payload] of [
+    ['chat_completions', { choices: [{ message: { content: '1161' }, finish_reason: 'stop' }] }],
+    ['anthropic_messages', { content: [{ type: 'text', text: '1161' }], stop_reason: 'end_turn' }],
+    ['gemini_generate_content', { candidates: [{ content: { parts: [{ text: '1161' }] }, finishReason: 'STOP' }] }]
+  ]) {
+    const h = harness(number => new Response(JSON.stringify(number === 1 ? { error: {
+      code: 'upstream_http2_stream_error', message: 'Upstream HTTP/2 stream failed'
+    } } : payload), { headers: { 'content-type': 'application/json' } }));
+    await h.runner.callModelWithRetry({ ...question, api }, 'key', h.context);
+    assert.equal(h.calls.length, 2, api);
+    assert.deepEqual(h.waits, [30000], api);
+    assert.deepEqual(h.calls[0].body, h.calls[1].body, api);
+    assert.ok(h.calls.every(call => !Object.keys(call.headers).some(key => /session|sub2api-recovery/i.test(key))), api);
   }
 });
 
@@ -301,10 +332,7 @@ test('attempts persist across SQLite reopen without keys, raw messages or reques
     validation: { min_bytes: 1, required_patterns: ['^1161$'] } } });
   const monitor = store.getMonitor(config.serviceOwnerId, group.id);
   const run = store.createRun(monitor, store.getMonitorTest(monitor), 'manual');
-  const token = '11111111-1111-4111-8111-111111111111';
-  const h = harness(number => sse(number === 1 ? [{ type: 'error', error: { code: 'upstream_error', message: durationMessage } }] : [completed], {
-    'x-sub2api-recovery-token': token, 'x-sub2api-recovery-applied': number === 1 ? '0' : '1'
-  }));
+  const h = harness(number => sse(number === 1 ? [{ type: 'error', error: { code: 'upstream_error', message: durationMessage } }] : [completed]));
   h.runner.store = store;
   h.runner.vault = vault;
   h.runner.config.artifactDir = config.artifactDir;
@@ -313,8 +341,8 @@ test('attempts persist across SQLite reopen without keys, raw messages or reques
   assert.match(result.reason, /自动补测 1 次/);
   const saved = publicRun(store.getRun(run.id)).request_attempts;
   assert.deepEqual(saved.map(a => a.state), ['failed', 'completed']);
-  assert.deepEqual(saved.map(a => a.route_recovery), ['available', 'applied']);
-  assert.ok(!store.getRun(run.id).request_attempts_json.includes(token));
+  assert.ok(saved.every(attempt => !Object.hasOwn(attempt, 'route_recovery')));
+  for (const call of h.calls) assert.ok(!store.getRun(run.id).request_attempts_json.includes(call.headers['session-id']));
   assert.doesNotMatch(JSON.stringify(saved), /sk-test|synthetic|question|prompt|duration|https:/);
   store.close();
   store = new Store(config);
@@ -339,17 +367,18 @@ test('real HTTP streaming completion releases the socket without waiting for ups
   assert.ok(Date.now() - started < 2000);
 });
 
-test('real HTTP recovery exchanges gateway routing headers and discards failed output', async t => {
-  const token = '11111111-1111-4111-8111-111111111111';
+test('real HTTP recovery resets a native sticky session without gateway extensions', async t => {
   const sockets = new Set(), calls = [], waits = [], snapshots = [];
+  const routes = new Map();
   const server = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
-    calls.push({ body: JSON.parse(Buffer.concat(chunks)), headers: req.headers });
-    const applied = req.headers['x-sub2api-recovery-from'] === token;
-    res.writeHead(200, { 'content-type': 'text/event-stream',
-      'x-sub2api-recovery-token': token, 'x-sub2api-recovery-applied': applied ? '1' : '0' });
-    if (applied) res.write(`data: ${JSON.stringify(completed)}\n\n`);
+    const session = req.headers['session-id'];
+    if (!routes.has(session)) routes.set(session, routes.size === 0 ? 'primary' : 'backup');
+    const account = routes.get(session);
+    calls.push({ body: JSON.parse(Buffer.concat(chunks)), headers: req.headers, account });
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    if (account === 'backup') res.write(`data: ${JSON.stringify(completed)}\n\n`);
     else res.end(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'discard me' })}\n\n` +
       `data: ${JSON.stringify({ type: 'error', code: 'upstream_http2_stream_error', message: 'Upstream HTTP/2 stream failed' })}\n\n`);
   });
@@ -367,9 +396,10 @@ test('real HTTP recovery exchanges gateway routing headers and discards failed o
   assert.equal(result.output_text, '1161');
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[0].body, calls[1].body);
-  assert.equal(calls[0].headers['x-sub2api-recovery'], '1');
-  assert.equal(calls[0].headers['x-sub2api-recovery-from'], undefined);
-  assert.equal(calls[1].headers['x-sub2api-recovery-from'], token);
+  assert.notEqual(calls[0].headers['session-id'], calls[1].headers['session-id']);
+  assert.deepEqual(calls.map(call => call.account), ['primary', 'backup']);
+  assert.ok(calls.every(call => !Object.keys(call.headers).some(key => key.startsWith('x-sub2api-recovery'))));
   assert.deepEqual(waits, [30000]);
-  assert.deepEqual(snapshots.at(-1).map(a => a.route_recovery), ['available', 'applied']);
+  assert.deepEqual(snapshots.at(-1).map(attempt => attempt.state), ['failed', 'completed']);
+  for (const call of calls) assert.ok(!JSON.stringify(snapshots).includes(call.headers['session-id']));
 });
