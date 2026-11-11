@@ -5,8 +5,8 @@ const { encryptJson, decryptJson } = require('../security/encryption');
 const { maskValue, redactText } = require('../security/redaction');
 const { safeFetch } = require('../http/safe-fetch');
 const { nowIso, parseJson, stringifyJson } = require('../db');
+const { BARK_LEVELS, validateBarkLevelSchedule, resolveBarkLevel } = require('./bark-level-schedule');
 
-const BARK_LEVELS = new Set(['active', 'timeSensitive', 'critical', 'passive']);
 const BARK_CALL_VALUES = new Set([true, false, 1, 0, '1', '0']);
 
 function barkCallEnabled(value) {
@@ -33,6 +33,7 @@ function validateBarkChannel(config = {}, credentials = {}) {
       { status: 400 }
     );
   }
+  validateBarkLevelSchedule(config.levelSchedule);
   if (config.call != null && !BARK_CALL_VALUES.has(config.call)) {
     throw new AppError(
       'NOTIFICATION_CONFIG_INVALID',
@@ -140,11 +141,12 @@ function removeChannelId(values, channelId) {
 }
 
 class NotificationService {
-  constructor({ db, config, rechargeLinks = null, mailer = nodemailer }) {
+  constructor({ db, config, rechargeLinks = null, mailer = nodemailer, now = () => new Date() }) {
     this.db = db;
     this.config = config;
     this.rechargeLinks = rechargeLinks;
     this.mailer = mailer;
+    this.now = now;
   }
 
   listChannels() {
@@ -467,7 +469,7 @@ class NotificationService {
         title,
         body: message,
         group: config.group || 'Provider Monitor',
-        level: config.level || 'active'
+        level: resolveBarkLevel(config, this.now())
       };
       if (config.sound) payload.sound = config.sound;
       if (barkCallEnabled(config.call)) payload.call = 1;

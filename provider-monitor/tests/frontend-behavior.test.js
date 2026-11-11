@@ -132,6 +132,7 @@ test('Bark is presented as a structured iOS reminder channel', () => {
       credentials: { value: '{}' },
       barkEndpoint: { value: ' https://api.day.app/push ' },
       barkLevel: { value: 'critical' },
+      barkScheduleEnabled: { checked: false },
       barkCall: { checked: true },
       barkSound: { value: ' alarm ' },
       barkGroup: { value: ' Supplier alerts ' },

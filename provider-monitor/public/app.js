@@ -100,6 +100,9 @@ const NOTIFICATION_CHANNEL_LABELS = Object.freeze({
   dingtalk: '钉钉',
   feishu: '飞书'
 });
+const BARK_LEVEL_LABELS = Object.freeze({
+  active: '普通', timeSensitive: '时效性', critical: '重要警告', passive: '静默收件'
+});
 const DYNAMIC_ROUTE_RATE_ADAPTERS = new Set(['new-api']);
 const VIEW_META = {
   overview: ['资产总览', '供应商余额、状态与风险'],
@@ -4147,8 +4150,34 @@ function openChannel(channel = null) {
   form.elements.barkGroup.value = channel?.config?.group || 'Provider Monitor';
   form.elements.barkTitlePrefix.value = channel?.config?.titlePrefix || '';
   form.elements.barkCall.checked = Boolean(channel?.config?.call);
+  const schedule = channel?.config?.levelSchedule;
+  form.dataset.barkScheduleConfigured = String(Boolean(schedule));
+  form.elements.barkScheduleEnabled.checked = schedule?.enabled === true;
+  form.elements.barkScheduleTimezone.value = schedule?.timezone || 'Asia/Shanghai';
+  const periods = Array.isArray(schedule?.periods) && schedule.periods.length
+    ? schedule.periods
+    : [{ start: '22:00', end: '08:00', level: 'critical' }];
+  form.querySelector('[data-bark-periods]').innerHTML = periods.map(barkPeriodRowHtml).join('');
+  $('#notification-error').textContent = '';
   syncNotificationChannelFields(form);
   $('#notification-dialog').showModal(); icons();
+}
+
+function barkPeriodRowHtml(period = {}) {
+  const options = Object.entries(BARK_LEVEL_LABELS).map(([value, label]) =>
+    `<option value="${value}" ${value === (period.level || 'critical') ? 'selected' : ''}>${label}</option>`
+  ).join('');
+  return `<div class="bark-period-row" data-bark-period><label><span>开始</span><input type="time" step="60" data-bark-period-start value="${escapeHtml(period.start || '')}" required></label><label><span>结束</span><input type="time" step="60" data-bark-period-end value="${escapeHtml(period.end || '')}" required></label><label data-bark-period-level-field><span>提醒级别</span><select data-bark-period-level>${options}</select></label><button class="icon-button" type="button" data-bark-remove-period title="删除时段" aria-label="删除时段"><i data-lucide="trash-2"></i></button></div>`;
+}
+
+function syncBarkScheduleFields(form) {
+  const enabled = form.elements.type.value === 'bark' && form.elements.barkScheduleEnabled.checked;
+  const fields = form.querySelector('[data-bark-schedule]');
+  fields.hidden = !enabled;
+  fields.disabled = !enabled;
+  const rows = form.querySelectorAll('[data-bark-period]');
+  form.querySelector('[data-bark-add-period]').disabled = rows.length >= 24;
+  rows.forEach((row) => { row.querySelector('[data-bark-remove-period]').disabled = rows.length <= 1; });
 }
 
 function syncNotificationChannelFields(form) {
@@ -4159,6 +4188,7 @@ function syncNotificationChannelFields(form) {
     field.hidden = isBark;
   });
   form.elements.barkDeviceKey.required = isBark && form.dataset.hasBarkDeviceKey !== 'true';
+  syncBarkScheduleFields(form);
 }
 
 function notificationChannelPayload(form) {
@@ -4183,6 +4213,18 @@ function notificationChannelPayload(form) {
   optionalConfig('sound', form.elements.barkSound.value);
   optionalConfig('group', form.elements.barkGroup.value);
   optionalConfig('titlePrefix', form.elements.barkTitlePrefix.value);
+  if (form.elements.barkScheduleEnabled.checked || payload.config.levelSchedule ||
+      form.dataset?.barkScheduleConfigured === 'true') {
+    payload.config.levelSchedule = {
+      enabled: form.elements.barkScheduleEnabled.checked,
+      timezone: form.elements.barkScheduleTimezone.value.trim(),
+      periods: [...form.querySelectorAll('[data-bark-period]')].map((row) => ({
+        start: row.querySelector('[data-bark-period-start]').value,
+        end: row.querySelector('[data-bark-period-end]').value,
+        level: row.querySelector('[data-bark-period-level]').value
+      }))
+    };
+  }
   const deviceKey = form.elements.barkDeviceKey.value.trim();
   payload.credentials = deviceKey ? { deviceKey } : {};
   return payload;
@@ -5217,14 +5259,43 @@ $('#alert-rule-form').addEventListener('submit', async (event) => {
 
 $('#notification-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const id = form.elements.id.value;
+  const submit = form.querySelector('button[type=submit]');
+  if (submit.disabled) return;
+  submit.disabled = true;
+  $('#notification-error').textContent = '';
   try {
     const payload = notificationChannelPayload(form);
     await api(id ? `/api/notification-channels/${id}` : '/api/notification-channels', { method: id ? 'PUT' : 'POST', body: payload }); $('#notification-dialog').close(); toast('通知通道已保存'); navigate('settings');
-  } catch (error) { toast(error.message, 'error'); }
+  } catch (error) {
+    $('#notification-error').textContent = error.message;
+    $('#notification-error').scrollIntoView({ block: 'nearest' });
+  } finally { submit.disabled = false; }
 });
 
 $('#notification-form').addEventListener('change', (event) => {
   if (event.target.name === 'type') syncNotificationChannelFields(event.currentTarget);
+  if (event.target.name === 'barkScheduleEnabled') {
+    if (event.target.checked) event.currentTarget.dataset.barkScheduleConfigured = 'true';
+    syncBarkScheduleFields(event.currentTarget);
+  }
+  $('#notification-error').textContent = '';
+});
+
+$('#notification-form').addEventListener('click', (event) => {
+  const form = event.currentTarget;
+  if (event.target.closest('[data-bark-add-period]')) {
+    if (form.querySelectorAll('[data-bark-period]').length >= 24) return;
+    form.querySelector('[data-bark-periods]').insertAdjacentHTML('beforeend', barkPeriodRowHtml());
+    syncBarkScheduleFields(form);
+    icons();
+    form.querySelector('[data-bark-period]:last-child input').focus();
+  }
+  const remove = event.target.closest('[data-bark-remove-period]');
+  if (remove && form.querySelectorAll('[data-bark-period]').length > 1) {
+    remove.closest('[data-bark-period]').remove();
+    syncBarkScheduleFields(form);
+    $('#notification-error').textContent = '';
+  }
 });
 
 $('#automation-form').addEventListener('submit', async (event) => {

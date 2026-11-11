@@ -153,16 +153,26 @@
         <div class="span-2 channel-specific-grid" data-channel-fields="bark" hidden>
           <label><span>Device Key</span><input name="barkDeviceKey" type="password" autocomplete="new-password" placeholder="从 Bark App 复制"><small>新建时必填；编辑时留空保留原值</small></label>
           <label><span>Bark 服务地址</span><input name="barkEndpoint" type="url" value="https://api.day.app/push" placeholder="https://api.day.app/push"><small>可替换为自建 Bark Server 的 /push 地址</small></label>
-          <label><span>提醒级别</span><select name="barkLevel"><option value="active">普通</option><option value="timeSensitive" selected>时效性</option><option value="critical">重要警告</option><option value="passive">静默收件</option></select></label>
+          <label><span>默认提醒级别</span><select name="barkLevel"><option value="active">普通</option><option value="timeSensitive" selected>时效性</option><option value="critical">重要警告</option><option value="passive">静默收件</option></select></label>
           <label><span>提醒铃声</span><input name="barkSound" value="alarm" maxlength="80" placeholder="alarm"><small>留空使用 Bark 默认铃声</small></label>
           <label><span>通知分组</span><input name="barkGroup" value="Provider Monitor" maxlength="120"></label>
           <label><span>标题前缀</span><input name="barkTitlePrefix" maxlength="80" placeholder="可选"></label>
           <label class="toggle-field"><input name="barkCall" type="checkbox"><span>持续响铃 30 秒</span></label>
+          <label class="toggle-field"><input name="barkScheduleEnabled" type="checkbox"><span>按时间段切换提醒级别</span></label>
+          <fieldset class="span-2 bark-level-schedule" data-bark-schedule hidden disabled>
+            <legend>分时段提醒</legend>
+            <label><span>时区</span><input name="barkScheduleTimezone" value="Asia/Shanghai" list="bark-timezones" maxlength="80" required><small>北京时间：Asia/Shanghai</small></label>
+            <datalist id="bark-timezones"><option value="Asia/Shanghai"></option><option value="Asia/Hong_Kong"></option><option value="Asia/Tokyo"></option><option value="UTC"></option><option value="Europe/London"></option><option value="America/New_York"></option><option value="America/Los_Angeles"></option></datalist>
+            <div class="bark-period-list" data-bark-periods></div>
+            <button class="button small" type="button" data-bark-add-period><i data-lucide="plus"></i><span>添加时段</span></button>
+            <p class="bark-schedule-note">未覆盖的时间使用默认级别；结束早于开始表示跨午夜，结束时刻不包含在时段内。</p>
+          </fieldset>
           <p class="form-hint span-2">重要警告可越过静音和专注模式；需在 Bark 与 iOS 设置中允许重要警告。触觉反馈由 iOS“声音与触感”设置控制。</p>
         </div>
         <label class="span-2" data-channel-json-field><span>配置（JSON）</span><textarea name="config" rows="6">{}</textarea></label>
         <label class="span-2" data-channel-json-field><span>凭据（JSON）</span><textarea name="credentials" rows="5">{}</textarea></label>
         <label class="toggle-field"><input name="enabled" type="checkbox" checked><span>启用</span></label>
+        <p class="form-error span-2" id="notification-error" role="alert"></p>
       </div>
       <footer class="dialog-actions"><span class="action-spacer"></span><button class="button" type="button" data-dialog-close>取消</button><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存</span></button></footer>
     </form>
