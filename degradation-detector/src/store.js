@@ -169,6 +169,7 @@ function requestAttempts(value) {
     upstream_code: code(attempt.upstream_code),
     upstream_status: Number.isInteger(attempt.upstream_status) && attempt.upstream_status >= 100 && attempt.upstream_status <= 599 ? attempt.upstream_status : undefined,
     outcome_unknown: Boolean(attempt.outcome_unknown),
+    route_recovery: ['available', 'applied', 'not_applied', 'unavailable'].includes(attempt.route_recovery) ? attempt.route_recovery : undefined,
     next_action: ['retry', 'recovery'].includes(attempt.next_action) ? attempt.next_action : undefined,
     delay_ms: Number.isFinite(attempt.delay_ms) && attempt.delay_ms >= 0 ? attempt.delay_ms : undefined
   }));

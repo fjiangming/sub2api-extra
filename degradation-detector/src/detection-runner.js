@@ -8,7 +8,7 @@ const net = require('net');
 const path = require('path');
 const { validationSchema } = require('./config');
 const { AppError } = require('./errors');
-const { isTransientModelFailure } = require('./sub2api-client');
+const { isTransientModelFailure, isUncertainModelFailure } = require('./sub2api-client');
 const { evaluateOutput, imageDimensions } = require('./validation');
 const { VisualReviewer, combineReview, reviewFailure } = require('./visual-review');
 
@@ -308,7 +308,9 @@ class DetectionRunner {
     const common = {
       timeoutMs: options.timeoutMs || this.config.requestTimeoutMs,
       maxBytes: this.config.maxResponseBytes,
-      signal: options.context?.signal
+      signal: options.context?.signal,
+      headers: options.headers,
+      onResponse: options.onResponse
     };
     if (test.api === 'responses') {
       const body = {
@@ -379,6 +381,7 @@ class DetectionRunner {
           details: { responseId: responseId || null, upstreamCode: String(upstreamCode).slice(0, 80) }
         });
         failure.recoverable = isTransientModelFailure(upstreamCode, message);
+        failure.outcomeUnknown = isUncertainModelFailure(upstreamCode, message);
         throw failure;
       }
 
@@ -445,6 +448,7 @@ class DetectionRunner {
     let unknownRecoveries = 0;
     let lastError = null;
     const attempts = [];
+    const recoveryTokens = [];
     const ensureCurrent = () => {
       if (this.closed || context.signal?.aborted) throw new AppError('DETECTION_CANCELLED', '检测已停止，不再提交后续请求', { status: 409 });
       context.ensureCurrent?.();
@@ -463,9 +467,21 @@ class DetectionRunner {
         started_at: this.now(), state: 'running' };
       attempts.push(attempt);
       record();
+      let recoveryToken = null;
       try {
         const payload = await this.callModel(test, apiKey, {
           timeoutMs: Math.max(1, Math.min(budgetMs, remainingMs)),
+          headers: test.api === 'responses' ? {
+            'x-sub2api-recovery': '1',
+            ...(recoveryTokens.length ? { 'x-sub2api-recovery-from': recoveryTokens.join(',') } : {})
+          } : undefined,
+          onResponse: test.api === 'responses' ? metadata => {
+            recoveryToken = metadata.token;
+            attempt.route_recovery = metadata.token
+              ? metadata.applied ? 'applied' : recoveryTokens.length ? 'not_applied' : 'available'
+              : 'unavailable';
+            record();
+          } : undefined,
           context
         });
         ensureCurrent();
@@ -473,6 +489,7 @@ class DetectionRunner {
           const failure = new AppError('MODEL_RESPONSE_FAILED', payload.error.message || '模型响应失败', { status: 502,
             details: { upstreamCode: String(payload.error.code || payload.error.type || '').slice(0, 80) } });
           failure.recoverable = isTransientModelFailure(failure.details.upstreamCode, failure.message);
+          failure.outcomeUnknown = isUncertainModelFailure(failure.details.upstreamCode, failure.message);
           throw failure;
         }
         const stopReason = test.api === 'chat_completions' ? payload?.choices?.[0]?.finish_reason
@@ -524,6 +541,7 @@ class DetectionRunner {
         else {
           recoveryAttempts += 1;
           if (error.outcomeUnknown) unknownRecoveries += 1;
+          if (recoveryToken && !recoveryTokens.includes(recoveryToken)) recoveryTokens.push(recoveryToken);
         }
         attempt.next_action = retryable ? 'retry' : 'recovery';
         attempt.delay_ms = delayMs;

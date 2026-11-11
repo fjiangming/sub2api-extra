@@ -18,6 +18,12 @@ const SAFE_PRECONNECT_CODES = new Set([
   'EAI_AGAIN'
 ]);
 
+const STREAM_INTERRUPTION_CODES = new Set([
+  'upstream_http2_stream_error',
+  'upstream_stream_read_error',
+  'upstream_stream_truncated'
+]);
+
 function unwrap(payload) {
   if (payload?.success === false || (payload?.code != null && ![0, 200].includes(Number(payload.code)))) {
     throw new AppError(
@@ -132,8 +138,15 @@ function isPermanentModelFailure(code, message) {
 function isTransientModelFailure(code, message) {
   const text = `${code || ''} ${message || ''}`.toLowerCase();
   if (isPermanentModelFailure(code, message)) return false;
-  return /^(upstream_error|server_error|internal_error|internal_server_error|overloaded_error|api_error|rate_limit_error|rate_limit_exceeded|timeout|stream_timeout|upstream_timeout)$/i.test(String(code || '')) ||
+  return isUncertainModelFailure(code, message) ||
+    /^(upstream_error|server_error|internal_error|internal_server_error|overloaded_error|api_error|rate_limit_error|rate_limit_exceeded|timeout|stream_timeout|upstream_timeout)$/i.test(String(code || '')) ||
     /maximum stream duration|temporar(?:y|ily)|overload|timed? ?out|timeout|connection (reset|closed)|service unavailable/.test(text);
+}
+
+function isUncertainModelFailure(code, message) {
+  if (isPermanentModelFailure(code, message)) return false;
+  return STREAM_INTERRUPTION_CODES.has(String(code || '').toLowerCase()) ||
+    /upstream HTTP\/2 stream failed|upstream response stream (?:was interrupted|ended before completion)/i.test(String(message || ''));
 }
 
 function retryAfterMs(value, now = Date.now()) {
@@ -148,16 +161,17 @@ function httpFailure(response, payload, inference) {
   const upstreamCode = payload?.error?.code || payload?.error?.type || payload?.code || '';
   const message = errorMessage(payload, response.status);
   const transient = isTransientModelFailure(upstreamCode, message);
+  const uncertain = isUncertainModelFailure(upstreamCode, message);
   const error = new AppError(response.status === 401 ? 'SUB2API_AUTH_EXPIRED' : 'SUB2API_REQUEST_FAILED', message, {
     status: response.status === 401 ? 401 : response.status === 403 ? 403 : 502,
-    retryable: inference ? [429, 503].includes(response.status) && !isPermanentModelFailure(upstreamCode, message)
+    retryable: inference ? [429, 503].includes(response.status) && !uncertain && !isPermanentModelFailure(upstreamCode, message)
       : response.status === 429 || response.status >= 500,
     details: { upstreamStatus: response.status, upstreamCode: String(upstreamCode).slice(0, 80) }
   });
   error.retryAfterMs = retryAfterMs(response.headers.get('retry-after'));
   error.recoverable = inference && [429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529].includes(response.status) &&
     (transient || (!upstreamCode && !isPermanentModelFailure(upstreamCode, message)));
-  error.outcomeUnknown = inference && [502, 504, 520, 521, 522, 523, 524].includes(response.status);
+  error.outcomeUnknown = inference && (uncertain || [502, 504, 520, 521, 522, 523, 524].includes(response.status));
   return error;
 }
 
@@ -177,7 +191,8 @@ function isSafePreconnectError(error) {
 
 function canRecoverTransport(error) {
   const code = error?.cause?.code || error?.code || '';
-  return isTimeoutError(error) || ['UND_ERR_SOCKET', 'ECONNRESET', 'ECONNABORTED', 'EPIPE'].includes(code) ||
+  return isTimeoutError(error) || ['UND_ERR_SOCKET', 'ECONNRESET', 'ECONNABORTED', 'EPIPE',
+    'ERR_HTTP2_STREAM_ERROR', 'ERR_HTTP2_SESSION_ERROR', 'ERR_HTTP2_GOAWAY_SESSION'].includes(code) ||
     /socket|connection (reset|closed)|terminated/i.test(String(error?.message || ''));
 }
 
@@ -301,6 +316,13 @@ class Sub2ApiClient {
         redirect: 'error',
         signal,
         ...(this.dispatcher ? { dispatcher: this.dispatcher } : {})
+      });
+
+      const recoveryToken = response.headers.get('x-sub2api-recovery-token');
+      options.onResponse?.({
+        token: typeof recoveryToken === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(recoveryToken)
+          ? recoveryToken : null,
+        applied: response.headers.get('x-sub2api-recovery-applied') === '1'
       });
 
       if (!response.ok) {
@@ -432,6 +454,7 @@ class Sub2ApiClient {
       timeoutMs: options.timeoutMs || this.config.requestTimeoutMs,
       maxBytes: options.maxBytes || this.config.maxResponseBytes,
       headers: options.headers,
+      onResponse: options.onResponse,
       signal: options.signal
     }, onEvent);
   }
@@ -443,6 +466,7 @@ module.exports = {
   isSafePreconnectError,
   isTimeoutError,
   isTransientModelFailure,
+  isUncertainModelFailure,
   parsePayload,
   readEventStream,
   readLimited,

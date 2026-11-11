@@ -14,8 +14,8 @@ const question = { api: 'responses', model: 'unchanged-model', prompt: 'unchange
 const durationMessage = 'Upstream response exceeded the maximum stream duration';
 const completed = { type: 'response.completed', response: { id: 'resp_done', status: 'completed', output_text: '1161' } };
 
-function sse(events) {
-  return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } });
+function sse(events, headers = {}) {
+  return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream', ...headers } });
 }
 
 function harness(fetch, overrides = {}) {
@@ -24,7 +24,7 @@ function harness(fetch, overrides = {}) {
   let now = 0;
   const calls = [], waits = [], snapshots = [];
   const client = new Sub2ApiClient(config, async (url, options) => {
-    calls.push({ url: String(url), body: JSON.parse(options.body), signal: options.signal });
+    calls.push({ url: String(url), body: JSON.parse(options.body), signal: options.signal, headers: options.headers });
     return fetch(calls.length, options);
   });
   const runner = new DetectionRunner({ config, store: {}, vault: {}, sub2api: client, randomFn: () => 0,
@@ -45,6 +45,80 @@ test('stream duration failure and nested upstream errors recover with identical 
   assert.deepEqual(attempts.map(a => a.kind), ['initial', 'recovery', 'recovery']);
   assert.deepEqual(attempts.map(a => a.state), ['failed', 'failed', 'completed']);
   assert.equal(attempts[0].upstream_code, 'upstream_error');
+});
+
+test('production HTTP2 and stream interruption terminal errors get one cooled recovery', async () => {
+  for (const [code, message] of [
+    ['upstream_http2_stream_error', 'Upstream HTTP/2 stream failed'],
+    ['upstream_stream_read_error', 'Upstream response stream was interrupted'],
+    ['upstream_stream_truncated', 'Upstream response stream ended before completion']
+  ]) {
+    for (const failed of [
+      { type: 'error', code, message },
+      { type: 'response.failed', response: { error: { code, message } } }
+    ]) {
+      const h = harness(number => number === 1 ? sse([
+        { type: 'response.output_text.delta', delta: 'abandoned partial' }, failed
+      ]) : sse([completed]));
+      const result = await h.runner.callModelWithRetry(question, 'key', h.context);
+      assert.equal(result.output_text, '1161');
+      assert.deepEqual(h.waits, [30000]);
+      assert.equal(h.snapshots.at(-1)[0].outcome_unknown, true);
+      assert.deepEqual(h.calls[0].body, h.calls[1].body);
+    }
+    const repeated = harness(() => sse([{ type: 'error', code, message }]));
+    await assert.rejects(repeated.runner.callModelWithRetry(question, 'key'), error =>
+      error.recoveryAttempts === 1 && error.retryAttempts === 0);
+    assert.equal(repeated.calls.length, 2);
+  }
+});
+
+test('HTTP2 errors in HTTP error bodies never enter the five safe reconnects', async () => {
+  for (const status of [200, 500, 502, 503]) {
+    const h = harness(() => new Response(JSON.stringify({ error: {
+      code: 'upstream_http2_stream_error', message: 'Upstream HTTP/2 stream failed'
+    } }), { status, headers: { 'content-type': 'application/json' } }));
+    await assert.rejects(h.runner.callModelWithRetry(question, 'key'), error =>
+      error.recoveryAttempts === 1 && error.retryAttempts === 0);
+    assert.equal(h.calls.length, 2, `HTTP ${status}`);
+    assert.deepEqual(h.waits, [30000]);
+  }
+});
+
+test('Responses recovery carries scoped gateway hints without changing inference or persisting tokens', async () => {
+  const tokens = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222',
+    '33333333-3333-4333-8333-333333333333'];
+  const h = harness(number => sse(number === 3 ? [completed] : [{ type: 'error', code: 'stream_timeout', message: durationMessage }], {
+    'x-sub2api-recovery-token': tokens[number - 1], 'x-sub2api-recovery-applied': number > 1 ? '1' : '0'
+  }));
+  await h.runner.callModelWithRetry(question, 'key', h.context);
+  assert.deepEqual(h.calls.map(c => c.headers['x-sub2api-recovery-from']), [undefined, tokens[0], tokens.slice(0, 2).join(',')]);
+  assert.ok(h.calls.every(c => c.headers['x-sub2api-recovery'] === '1'));
+  assert.ok(h.calls.every(c => JSON.stringify(c.body) === JSON.stringify(h.calls[0].body)));
+  assert.deepEqual(h.snapshots.at(-1).map(a => a.route_recovery), ['available', 'applied', 'applied']);
+  for (const token of tokens) assert.ok(!JSON.stringify(h.snapshots).includes(token));
+});
+
+test('unsupported, expired and malformed gateway hints never claim successful route avoidance', async () => {
+  const token = '11111111-1111-4111-8111-111111111111';
+  for (const header of [undefined, 'sk-private-value', token]) {
+    const h = harness(number => sse(number === 1 ? [{ type: 'error', code: 'stream_timeout', message: durationMessage }] : [completed],
+      header ? { 'x-sub2api-recovery-token': header, 'x-sub2api-recovery-applied': '0' } : {}));
+    await h.runner.callModelWithRetry(question, 'key', h.context);
+    assert.equal(h.calls[1].headers['x-sub2api-recovery-from'], header === token ? token : undefined);
+    assert.equal(h.snapshots.at(-1)[1].route_recovery, header === token ? 'not_applied' : 'unavailable');
+  }
+});
+
+test('HTTP2 transport errors recover but authentication failures still stop immediately', async () => {
+  const interrupted = harness(() => { throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ERR_HTTP2_STREAM_ERROR' } }); });
+  await assert.rejects(interrupted.runner.callModelWithRetry(question, 'key'), error => error.recoveryAttempts === 1);
+  assert.deepEqual(interrupted.waits, [30000]);
+  for (const message of ['Upstream authentication failed', 'insufficient quota', 'content filter rejected']) {
+    const h = harness(() => sse([{ type: 'error', code: 'upstream_http2_stream_error', message }]));
+    await assert.rejects(h.runner.callModelWithRetry(question, 'key'));
+    assert.equal(h.calls.length, 1);
+  }
 });
 
 test('an accepted completed event survives broken or permanently open transport tails', async () => {
@@ -227,7 +301,10 @@ test('attempts persist across SQLite reopen without keys, raw messages or reques
     validation: { min_bytes: 1, required_patterns: ['^1161$'] } } });
   const monitor = store.getMonitor(config.serviceOwnerId, group.id);
   const run = store.createRun(monitor, store.getMonitorTest(monitor), 'manual');
-  const h = harness(number => number === 1 ? sse([{ type: 'error', error: { code: 'upstream_error', message: durationMessage } }]) : sse([completed]));
+  const token = '11111111-1111-4111-8111-111111111111';
+  const h = harness(number => sse(number === 1 ? [{ type: 'error', error: { code: 'upstream_error', message: durationMessage } }] : [completed], {
+    'x-sub2api-recovery-token': token, 'x-sub2api-recovery-applied': number === 1 ? '0' : '1'
+  }));
   h.runner.store = store;
   h.runner.vault = vault;
   h.runner.config.artifactDir = config.artifactDir;
@@ -236,6 +313,8 @@ test('attempts persist across SQLite reopen without keys, raw messages or reques
   assert.match(result.reason, /自动补测 1 次/);
   const saved = publicRun(store.getRun(run.id)).request_attempts;
   assert.deepEqual(saved.map(a => a.state), ['failed', 'completed']);
+  assert.deepEqual(saved.map(a => a.route_recovery), ['available', 'applied']);
+  assert.ok(!store.getRun(run.id).request_attempts_json.includes(token));
   assert.doesNotMatch(JSON.stringify(saved), /sk-test|synthetic|question|prompt|duration|https:/);
   store.close();
   store = new Store(config);
@@ -258,4 +337,39 @@ test('real HTTP streaming completion releases the socket without waiting for ups
   const result = await runner.callModelWithRetry(question, 'synthetic-key');
   assert.equal(result.output_text, '1161');
   assert.ok(Date.now() - started < 2000);
+});
+
+test('real HTTP recovery exchanges gateway routing headers and discards failed output', async t => {
+  const token = '11111111-1111-4111-8111-111111111111';
+  const sockets = new Set(), calls = [], waits = [], snapshots = [];
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    calls.push({ body: JSON.parse(Buffer.concat(chunks)), headers: req.headers });
+    const applied = req.headers['x-sub2api-recovery-from'] === token;
+    res.writeHead(200, { 'content-type': 'text/event-stream',
+      'x-sub2api-recovery-token': token, 'x-sub2api-recovery-applied': applied ? '1' : '0' });
+    if (applied) res.write(`data: ${JSON.stringify(completed)}\n\n`);
+    else res.end(`data: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'discard me' })}\n\n` +
+      `data: ${JSON.stringify({ type: 'error', code: 'upstream_http2_stream_error', message: 'Upstream HTTP/2 stream failed' })}\n\n`);
+  });
+  server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const config = { sub2apiBaseUrl: `http://127.0.0.1:${server.address().port}`, requestTimeoutMs: 10000,
+    recoveryTimeoutMs: 120000, recoveryRetries: 2, maxResponseBytes: 1048576 };
+  const client = new Sub2ApiClient(config);
+  t.after(async () => { for (const socket of sockets) socket.destroy(); await client.close(); await new Promise(resolve => server.close(resolve)); });
+  const runner = new DetectionRunner({ config, store: {}, vault: {}, sub2api: client, randomFn: () => 0,
+    sleepFn: async ms => { waits.push(ms); } });
+  const result = await runner.callModelWithRetry(question, 'synthetic-key', {
+    onAttempts: attempts => snapshots.push(structuredClone(attempts))
+  });
+  assert.equal(result.output_text, '1161');
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0].body, calls[1].body);
+  assert.equal(calls[0].headers['x-sub2api-recovery'], '1');
+  assert.equal(calls[0].headers['x-sub2api-recovery-from'], undefined);
+  assert.equal(calls[1].headers['x-sub2api-recovery-from'], token);
+  assert.deepEqual(waits, [30000]);
+  assert.deepEqual(snapshots.at(-1).map(a => a.route_recovery), ['available', 'applied']);
 });
