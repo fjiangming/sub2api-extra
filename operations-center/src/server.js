@@ -34,6 +34,9 @@ const { RetentionService } = require('./services/retention-service');
 const { CleanupScheduler } = require('./services/cleanup-scheduler');
 const { SystemSettingsService } = require('./services/system-settings-service');
 const { createApp } = require('./app');
+const { DomainAccessStore } = require('./domain-access-store');
+const { DomainAccessSource } = require('./services/domain-access-source');
+const { DomainAccessService } = require('./services/domain-access-service');
 
 async function main() {
   const settingsStore = new RuntimeSettingsStore(resolveDataDir());
@@ -56,6 +59,16 @@ async function main() {
   const messageStore = new UserMessageStore(config.dataDir);
   await messageStore.initialize();
   const messages = new UserMessagesService({ config, store: messageStore, sub2api });
+  const domainStore = new DomainAccessStore(config.dataDir, { timezone: config.sub2apiTimezone });
+  let domainAccess = null;
+  try {
+    domainStore.initialize();
+    domainAccess = new DomainAccessService({ config, store: domainStore,
+      source: new DomainAccessSource({ pool: database.read }), messages });
+  } catch {
+    domainStore.close();
+    console.warn('domain access unavailable: DOMAIN_STORE_INITIALIZATION_FAILED');
+  }
   const auth = new AuthService(config, {
     onAdminToken: (token, expiresAt) => sub2api.setRuntimeToken(token, expiresAt),
     onAdminTokenCleared: (token) => sub2api.clearRuntimeToken(token)
@@ -108,7 +121,7 @@ async function main() {
     sub2api
   });
   const app = createApp({
-    config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
+    config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
   });
   const server = http.createServer(app);
   server.requestTimeout = 120000;
@@ -124,6 +137,7 @@ async function main() {
   dailyProfit.start();
   cashFlow.start();
   billingRecovery.start();
+  domainAccess?.start();
   console.info(`operations-center listening on http://${config.bindHost}:${config.port}`);
 
   let stopping = false;
@@ -132,6 +146,7 @@ async function main() {
     stopping = true;
     console.info(`operations-center shutting down (${signal})`);
     scheduler.stop();
+    await domainAccess?.stop();
     await dailyProfit.stop();
     await cashFlow.stop();
     await billingImports.stop();
@@ -141,6 +156,7 @@ async function main() {
     await new Promise((resolve) => server.close(resolve));
     dailyProfitStore.close();
     accountingStore.close();
+    domainStore.close();
     billingRecoveryStore.close();
     telemetry.close();
     await database.close();

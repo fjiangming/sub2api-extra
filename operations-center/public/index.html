@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="/request-errors.css?v=20261102-1">
   <link rel="stylesheet" href="/billing-recovery.css?v=20261029-2">
   <link rel="stylesheet" href="/cost-accounting.css?v=20261106-1">
+  <link rel="stylesheet" href="/domain-access.css?v=20261113-1">
   <script src="/vendor/echarts.js" defer></script>
   <script src="/vendor/lucide.js" defer></script>
   <script src="/cost-analysis-ui.js?v=20260929-3" defer></script>
@@ -21,9 +22,10 @@
   <script src="/user-messages-ui.js?v=20261019-1" defer></script>
   <script src="/latency-ui.js?v=20261020-1" defer></script>
   <script src="/request-errors-ui.js?v=20261102-1" defer></script>
+  <script src="/domain-access-ui.js?v=20261113-1" defer></script>
   <script src="/billing-recovery-ui.js?v=20261023-1" defer></script>
   <script src="/billing-import-ui.js?v=20261030-1" defer></script>
-  <script src="/app.js?v=20261102-2" defer></script>
+  <script src="/app.js?v=20261113-1" defer></script>
 </head>
 <body>
   <div id="login-view" class="login-view" hidden>
@@ -56,6 +58,7 @@
         <button class="module-tab" data-view="users" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="users"></i><span>用户分析</span></button>
         <button class="module-tab" data-view="profiles" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="contact-round"></i><span>用户画像</span></button>
         <button class="module-tab" data-view="messages" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="mail"></i><span>用户消息</span></button>
+        <button class="module-tab" data-view="domains" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="globe"></i><span>域名访问</span></button>
         <button class="module-tab" data-view="billing" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="receipt-text"></i><span>计费核查</span></button>
         <button class="module-tab" data-view="finance" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="landmark"></i><span>收款与入账</span></button>
         <button class="module-tab" data-view="costs" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="chart-spline"></i><span>成本分析</span></button>
@@ -86,6 +89,7 @@
       </header>
 
       <main id="content" class="content">
+        <section id="view-domains" class="view" aria-labelledby="page-title"><div id="da-root"></div></section>
         <section id="view-overview" class="view active" aria-labelledby="page-title">
           <div id="overview-alerts" class="alert-stack"></div>
           <div id="overview-metrics" class="metric-grid"></div>

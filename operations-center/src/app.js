@@ -141,7 +141,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -325,6 +325,23 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.post('/billing-recovery/:id/settle', csrf, asyncRoute(async (req, res) => res.json(await billingRecovery.settle(req.params.id, req.body, req.auth.upstreamAccessToken))));
 
   api.get('/overview', asyncRoute(async (_req, res) => res.json(await metrics.getOverview())));
+  if (domainAccess) {
+    api.get('/domain-access/options', (_req, res) => res.json(domainAccess.options()));
+    api.get('/domain-access/status', (_req, res) => res.json(domainAccess.status()));
+    api.get('/domain-access/report', (req, res) => res.json(domainAccess.report(req.query)));
+    api.get('/domain-access/users', (req, res) => res.json(domainAccess.users(req.query)));
+    api.get('/domain-access/users.csv', (req, res) => res.type('text/csv').attachment('domain-access-users.csv').send(domainAccess.csv(req.query)));
+    api.get('/domain-access/users/:id', (req, res) => res.json(domainAccess.user(req.params.id, req.query)));
+    api.get('/domain-access/requests', (req, res) => res.json(domainAccess.requests(req.query)));
+    api.get('/domain-access/requests/:id', (req, res) => res.json(domainAccess.detail(req.params.id)));
+    api.get('/domain-access/history', (req, res) => res.json(domainAccess.history(req.query)));
+    api.put('/domain-access/settings', csrf, (req, res) => res.json(domainAccess.configure(req.body, req.auth.actor)));
+    api.post('/domain-access/notifications', csrf, (req, res) => res.json(domainAccess.notify(req.body, req.auth.actor)));
+    api.get('/domain-access/drafts', (req, res) => res.json({ items: domainAccess.drafts(req.query.domain) }));
+    api.post('/domain-access/drafts', csrf, (req, res) => res.status(202).json(domainAccess.createDraft(req.body, req.auth.actor,
+      req.get('idempotency-key'), req.auth.upstreamAccessToken)));
+    api.post('/domain-access/drafts/:id/retry', csrf, (req, res) => res.status(202).json(domainAccess.retryDraft(req.params.id, req.auth.upstreamAccessToken)));
+  }
   if (requestErrors) {
     api.get('/request-errors/options', (_req, res) => res.json(requestErrors.options()));
     api.get('/request-errors/report', asyncRoute(async (req, res) => res.json(await requestErrors.report(req.query, req.auth.upstreamAccessToken))));

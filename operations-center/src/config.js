@@ -3,6 +3,7 @@
 const path = require('path');
 const { z } = require('zod');
 const { publicOrigins } = require('./public-origins');
+const { domain: domainName } = require('./services/domain-access-format');
 
 const boolFromEnv = z.preprocess((value) => {
   if (typeof value === 'boolean') return value;
@@ -80,6 +81,11 @@ const schema = z.object({
   OPERATIONS_CENTER_ENABLE_CLEANUP: boolFromEnv.default(false),
   OPERATIONS_CENTER_BILLING_RECOVERY_ENABLED: boolFromEnv.default(true),
   OPERATIONS_CENTER_BILLING_LOG_DIR: optionalString,
+  OPERATIONS_CENTER_DOMAIN_ACCESS_LOG_DIR: optionalString,
+  OPERATIONS_CENTER_DOMAIN_ACCESS_DOMAINS: z.string().default('epoint2api.fjmooo.cn,aihub.fo2.us.ci')
+    .transform(value => value.split(',').map(host => host.trim()))
+    .refine(hosts => hosts.length >= 1 && hosts.length <= 20 && new Set(hosts).size === hosts.length && hosts.every(host => domainName(host) === host), '关注域名必须是互不重复的小写域名'),
+  OPERATIONS_CENTER_DOMAIN_ACCESS_TARGET: z.string().default('yunhop.cc').refine(host => domainName(host) === host, '迁移目标必须是小写域名'),
   OPERATIONS_CENTER_REQUIRE_FRESH_BACKUP: boolFromEnv.default(true),
   OPERATIONS_CENTER_PREVIEW_TTL_MINUTES: z.coerce.number().int().min(2).max(60).default(15),
   OPERATIONS_CENTER_QUERY_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(15000),
@@ -125,6 +131,9 @@ const schema = z.object({
   RETENTION_OPS_METRIC_DAYS: z.coerce.number().int().min(7).max(3650).default(30),
   RETENTION_BACKUP_MAX_AGE_HOURS: z.coerce.number().int().min(1).max(168).default(24)
 }).superRefine((value, ctx) => {
+  if (value.OPERATIONS_CENTER_DOMAIN_ACCESS_DOMAINS.includes(value.OPERATIONS_CENTER_DOMAIN_ACCESS_TARGET)) {
+    ctx.addIssue({ code: 'custom', path: ['OPERATIONS_CENTER_DOMAIN_ACCESS_TARGET'], message: '迁移目标不能包含在关注域名中' });
+  }
   if (value.OPERATIONS_CENTER_AUTH_MODE === 'local' && !value.OPERATIONS_CENTER_ADMIN_PASSWORD) {
     ctx.addIssue({
       code: 'custom',
@@ -272,6 +281,11 @@ function loadConfig(env = process.env, runtime = {}) {
     authMode: value.OPERATIONS_CENTER_AUTH_MODE,
     billingRecoveryEnabled: value.OPERATIONS_CENTER_BILLING_RECOVERY_ENABLED,
     billingLogDir: value.OPERATIONS_CENTER_BILLING_LOG_DIR ? path.resolve(value.OPERATIONS_CENTER_BILLING_LOG_DIR) : null,
+    domainAccess: {
+      directory: value.OPERATIONS_CENTER_DOMAIN_ACCESS_LOG_DIR ? path.resolve(value.OPERATIONS_CENTER_DOMAIN_ACCESS_LOG_DIR) : null,
+      domains: value.OPERATIONS_CENTER_DOMAIN_ACCESS_DOMAINS,
+      target: value.OPERATIONS_CENTER_DOMAIN_ACCESS_TARGET
+    },
     adminUser: value.OPERATIONS_CENTER_ADMIN_USER,
     adminPassword: value.OPERATIONS_CENTER_ADMIN_PASSWORD || '',
     sessionTtlMinutes: value.OPERATIONS_CENTER_SESSION_TTL_MINUTES,

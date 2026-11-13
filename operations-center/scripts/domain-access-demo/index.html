@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>域名访问 Demo · Sub2API 运营中心</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/demo/demo.css">
+  <script src="/vendor/lucide.js" defer></script>
+  <script src="/vendor/echarts.js" defer></script>
+  <script src="/demo/fixture.js" defer></script>
+  <script src="/demo/demo.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="module-header">
+      <div class="brand">
+        <div class="brand-mark small" aria-hidden="true"><i data-lucide="chart-no-axes-combined"></i></div>
+        <div><strong>Sub2API</strong><span>运营中心</span></div>
+      </div>
+      <nav class="module-tabs" aria-label="模块导航">
+        <span class="module-tab da-nav-static"><i data-lucide="layout-dashboard"></i><span>运营概览</span></span>
+        <span class="module-tab da-nav-static"><i data-lucide="contact-round"></i><span>用户画像</span></span>
+        <button class="module-tab active" data-main="users" aria-current="page"><i data-lucide="globe"></i><span>域名访问</span></button>
+        <button class="module-tab" data-main="drafts"><i data-lucide="mail"></i><span>用户消息</span></button>
+        <button class="module-tab" data-main="collection"><i data-lucide="settings"></i><span>采集设置</span></button>
+      </nav>
+      <div class="header-account"><span class="da-demo-chip">DEMO</span><span class="user-chip" title="演示管理员"><i data-lucide="circle-user-round"></i><span>管理员</span></span></div>
+    </header>
+    <div class="workspace">
+      <header class="topbar">
+        <div><h1>域名访问</h1><p>接口域名迁移 · 北京时间</p></div>
+        <div class="topbar-actions"><span class="connection-state"><span class="status-dot ok" id="collection-dot"></span><span id="collection-label">模拟采集正常</span></span><button id="refresh" class="icon-button" title="刷新模拟数据" aria-label="刷新模拟数据"><i data-lucide="refresh-cw"></i></button></div>
+      </header>
+      <main class="content da-content">
+        <div class="da-demo-bar"><span><i data-lucide="flask-conical"></i>交互预览 · 全部为模拟数据</span><label class="da-scene-label">演示场景<select id="scenario" aria-label="演示场景"><option value="normal">正常采集</option><option value="interrupted">采集中断</option><option value="unconfigured">尚未配置</option></select></label></div>
+        <section class="da-scope" aria-label="域名与时间范围">
+          <div class="da-domain-pair"><label>关注域名<select id="domain"><option value="epoint2api.fjmooo.cn">epoint2api.fjmooo.cn</option><option value="aihub.fo2.us.ci">aihub.fo2.us.ci</option></select></label><i class="da-domain-arrow" data-lucide="arrow-right"></i><div class="da-target"><span>迁移目标</span><strong>yunhop.cc<i data-lucide="arrow-up-right"></i></strong></div></div>
+          <div class="da-dates"><div class="da-presets" role="group" aria-label="观察时段"><button data-preset="1" aria-pressed="false">今天</button><button data-preset="7" aria-pressed="true">近 7 天</button><button data-preset="30" aria-pressed="false">近 30 天</button></div><div class="da-date-inputs"><input id="start" type="date" min="2026-10-15" max="2026-11-13" value="2026-11-07" aria-label="开始日期"><span>至</span><input id="end" type="date" min="2026-10-15" max="2026-11-13" value="2026-11-13" aria-label="结束日期"></div></div>
+        </section>
+        <p id="date-error" class="form-error" role="alert" hidden></p>
+        <div id="coverage-alert" role="status" hidden></div>
+        <section id="metrics" class="da-metrics" aria-label="域名访问指标"></section>
+        <section class="da-trend-section" aria-label="每日访问趋势">
+          <div class="da-section-heading"><div><h2>访问趋势</h2><span id="trend-range"></span></div><div class="da-legend"><span><b class="da-old-dot"></b>关注域名</span><span><b class="da-new-dot"></b>yunhop.cc</span></div></div>
+          <div id="trend" class="da-chart" role="img" aria-label="关注域名与新域名的每日请求数"></div><div id="trend-empty" class="da-chart-empty" hidden>尚无采集数据</div>
+        </section>
+        <div class="da-tabs" role="tablist" aria-label="域名访问视图">
+          <button id="tab-users" role="tab" data-tab="users" aria-selected="true" aria-controls="view-users"><i data-lucide="users"></i>用户列表<span id="users-count"></span></button>
+          <button id="tab-requests" role="tab" data-tab="requests" aria-selected="false" aria-controls="view-requests" tabindex="-1"><i data-lucide="list-filter"></i>访问明细</button>
+          <button id="tab-history" role="tab" data-tab="history" aria-selected="false" aria-controls="view-history" tabindex="-1"><i data-lucide="history"></i>历史线索</button>
+          <button id="tab-collection" role="tab" data-tab="collection" aria-selected="false" aria-controls="view-collection" tabindex="-1"><i data-lucide="radio-tower"></i>采集状态</button>
+          <button id="tab-drafts" role="tab" data-tab="drafts" aria-selected="false" aria-controls="view-drafts" tabindex="-1"><i data-lucide="file-pen-line"></i>通知草稿<span id="drafts-count" hidden></span></button>
+        </div>
+        <section id="view-users" role="tabpanel" aria-labelledby="tab-users">
+          <form id="users-filter" class="da-local-filter">
+            <label class="da-search"><i data-lucide="search"></i><input id="user-search" placeholder="搜索用户、邮箱或 Key 名称" aria-label="搜索用户、邮箱或 Key 名称" autocomplete="off"></label>
+            <select id="migration-filter" aria-label="域名使用状态"><option value="all">全部使用状态</option><option value="still">最近仍用旧域名</option><option value="new">近期仅见新域名</option><option value="inactive">近期无访问</option></select>
+            <select id="notification-filter" aria-label="通知状态"><option value="all">全部通知状态</option><option value="pending">待通知</option><option value="drafted">已生成草稿</option><option value="notified">已通知</option><option value="ignored">暂不通知</option></select>
+            <select id="sort" aria-label="用户排序"><option value="latest">最近旧域名访问</option><option value="count">旧域名请求最多</option><option value="id">用户 ID</option></select>
+            <button type="button" id="reset-filters" class="icon-button" title="重置筛选" aria-label="重置筛选"><i data-lucide="rotate-ccw"></i></button>
+          </form>
+          <div class="da-table-toolbar"><span id="selection-label" class="muted">已选择 0 位用户</span><div><button id="export-users" class="icon-button" title="导出筛选后的用户" aria-label="导出筛选后的用户"><i data-lucide="download"></i></button><button id="create-draft" class="button primary" disabled><i data-lucide="mail-plus"></i><span>生成通知草稿</span></button></div></div>
+          <div class="table-wrap da-main-table"><table><thead><tr><th class="da-check-cell"><input id="select-all" type="checkbox" aria-label="选择本页用户"></th><th>用户</th><th>使用的 Key</th><th>域名使用状态</th><th class="numeric">旧域名请求</th><th>最近旧域名访问</th><th>通知状态</th><th></th></tr></thead><tbody id="user-rows"></tbody></table></div>
+          <div id="user-pagination" class="da-pagination"></div>
+          <p class="da-footnote"><i data-lucide="badge-check"></i>仅包含身份已确认的账号 · 首次 / 最后访问以保留记录为准</p>
+        </section>
+        <section id="view-requests" role="tabpanel" aria-labelledby="tab-requests" hidden>
+          <div class="da-local-filter"><label class="da-search"><i data-lucide="search"></i><input id="request-search" placeholder="搜索请求 ID、用户或路径" aria-label="搜索请求 ID、用户或路径" autocomplete="off"></label><select id="association-filter" aria-label="身份关联状态"><option value="all">全部关联状态</option><option value="confirmed">已确认用户</option><option value="pending">等待关联</option><option value="ambiguous">身份冲突</option><option value="anonymous">匿名访问</option></select><span class="da-filter-meta" id="request-count"></span></div>
+          <div class="table-wrap da-main-table"><table><thead><tr><th>访问时间 / 请求 ID</th><th>域名 / 路径</th><th>用户 / Key</th><th>HTTP / 流状态</th><th>身份关联</th><th></th></tr></thead><tbody id="request-rows"></tbody></table></div><div id="request-pagination" class="da-pagination"></div>
+        </section>
+        <section id="view-history" role="tabpanel" aria-labelledby="tab-history" hidden></section>
+        <section id="view-collection" role="tabpanel" aria-labelledby="tab-collection" hidden></section>
+        <section id="view-drafts" role="tabpanel" aria-labelledby="tab-drafts" hidden></section>
+      </main>
+    </div>
+  </div>
+  <dialog id="detail-dialog" class="da-dialog da-drawer"><header><div id="detail-heading"></div><button class="icon-button" data-close="detail-dialog" title="关闭详情" aria-label="关闭详情"><i data-lucide="x"></i></button></header><div id="detail-body" class="da-dialog-body"></div></dialog>
+  <dialog id="draft-dialog" class="da-dialog da-compose"><header><div><span class="da-eyebrow">模拟通知</span><h2>通知草稿</h2></div><button class="icon-button" data-close="draft-dialog" title="关闭草稿" aria-label="关闭草稿"><i data-lucide="x"></i></button></header><form id="draft-form"><div class="da-dialog-body"><div class="da-recipients" id="draft-recipients"></div><label>标题<input id="draft-title" maxlength="120" required></label><div class="da-editor-heading"><span>消息内容</span><div class="da-presets" role="group" aria-label="草稿显示模式"><button type="button" data-editor="edit" aria-pressed="true">编辑</button><button type="button" data-editor="preview" aria-pressed="false">预览</button></div></div><textarea id="draft-content" rows="10" maxlength="4000" aria-label="通知内容" required></textarea><div id="draft-preview" hidden></div><p class="da-footnote"><i data-lucide="flask-conical"></i>草稿仅保存在本机浏览器，不发送消息</p></div><footer><button type="button" class="button secondary" data-close="draft-dialog">取消</button><button type="submit" class="button primary"><i data-lucide="save"></i>保存草稿</button></footer></form></dialog>
+  <dialog id="confirm-dialog" class="da-dialog da-confirm"><header><h2 id="confirm-title"></h2><button class="icon-button" data-close="confirm-dialog" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header><div id="confirm-body" class="da-dialog-body"></div><footer><button class="button secondary" data-close="confirm-dialog">取消</button><button id="confirm-action" class="button primary">确认</button></footer></dialog>
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+</body>
+</html>

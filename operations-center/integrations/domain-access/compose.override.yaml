@@ -1,0 +1,12 @@
+# Use together with operations-center/compose.yaml (see docs/domain-access.md).
+services:
+  operations-center:
+    environment:
+      OPERATIONS_CENTER_DOMAIN_ACCESS_LOG_DIR: /app/domain-access-logs
+    volumes:
+      - type: bind
+        source: /var/log/nginx/domain-access
+        target: /app/domain-access-logs
+        read_only: true
+        bind:
+          create_host_path: false
