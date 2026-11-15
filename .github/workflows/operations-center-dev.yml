@@ -3,6 +3,7 @@ name: Operations Center Dev
 on:
   push:
     branches: [dev]
+    paths-ignore: [CUSTOMIZATIONS.md, 'operations-center/docs/**', operations-center/README.md]
   pull_request:
     branches: [dev]
   workflow_dispatch:
