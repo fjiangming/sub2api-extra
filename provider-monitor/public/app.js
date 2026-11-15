@@ -22,6 +22,7 @@ const state = {
   authConfig: null,
   view: 'overview',
   providers: [],
+  rechargeHistory: { timezone: 'Asia/Shanghai' },
   summary: null,
   keys: [],
   groups: [],
@@ -529,6 +530,7 @@ async function cycleCostRateSort(listKey) {
 async function loadBase() {
   const [providers, summary] = await Promise.all([api('/api/providers'), api('/api/summary')]);
   state.providers = providers.items;
+  state.rechargeHistory = providers.rechargeHistory || { timezone: 'Asia/Shanghai' };
   state.summary = summary;
 }
 
@@ -3907,6 +3909,18 @@ function openProviderDialog(provider = null) {
   form.elements.secondaryWarningThreshold.value = provider?.secondary_warning_threshold ?? '';
   form.elements.thresholdCurrency.value = provider?.threshold_currency || 'USD';
   form.elements.rechargeMultiplier.value = provider?.recharge?.manualMultiplier ?? '';
+  const timezone = state.rechargeHistory.timezone;
+  const today = rechargeDateKey(new Date(), timezone);
+  form.dataset.rechargeHistoryRequest = String(Number(form.dataset.rechargeHistoryRequest || 0) + 1);
+  form.dataset.rechargeHistoryReady = provider ? 'false' : 'true';
+  form.elements.rechargeEffectiveDate.value = today;
+  form.elements.rechargeEffectiveDate.max = today;
+  form.elements.initialRechargeDate.value = rechargeDateKey(new Date(provider?.created_at || Date.now()), timezone);
+  form.elements.initialRechargeDate.max = today;
+  form.elements.initialRechargeMultiplier.value = provider?.recharge?.source !== 'default' ? provider?.recharge?.multiplier ?? '' : '';
+  $$('[data-recharge-timezone]', form).forEach(node => { node.textContent = `（${timezone}）`; });
+  $('#initial-recharge-status').textContent = provider ? '正在读取倍率历史…' : '';
+  $('#initial-recharge-history').hidden = !provider;
   form.elements.rechargeUrl.value = provider?.rechargeUrl || '';
   form.elements.rechargeLoginMode.value = provider?.typeConfig?.rechargeLogin?.enabled === true ? 'adapter' : 'direct';
   const dynamicRouteRate = provider?.typeConfig?.dynamicRouteRate === true
@@ -3925,10 +3939,60 @@ function openProviderDialog(provider = null) {
   $('#provider-form-error').textContent = '';
   renderCredentialFields(form.elements.adapterType.value, provider, form.elements.authMode.value);
   updateDynamicRouteRateFields(form);
+  updateInitialRechargeFields(form);
   renderMonitoredApiKeyOptions(form, provider);
   $('#provider-dialog').showModal();
   icons();
   loadMonitoredApiKeyOptions(form, provider);
+  if (provider) loadInitialRechargeHistory(form, provider);
+}
+
+function rechargeDateKey(value, timezone) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(value);
+  const fields = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${fields.year}-${fields.month}-${fields.day}`;
+}
+
+function updateInitialRechargeFields(form) {
+  const initial = !form.elements.id.value && form.elements.rechargeMultiplier.value !== '';
+  $('#initial-recharge-date-field').hidden = !initial;
+  form.elements.rechargeEffectiveDate.disabled = !initial;
+  form.elements.rechargeEffectiveDate.required = initial;
+  const ready = form.dataset.rechargeHistoryReady === 'true';
+  form.elements.confirmInitialRecharge.disabled = !ready;
+  const fill = Boolean(form.elements.id.value && ready && form.elements.confirmInitialRecharge.checked);
+  for (const name of ['initialRechargeMultiplier', 'initialRechargeDate']) {
+    form.elements[name].disabled = !fill;
+    form.elements[name].required = fill;
+  }
+}
+
+async function loadInitialRechargeHistory(form, provider) {
+  const request = form.dataset.rechargeHistoryRequest;
+  const current = () => $('#provider-dialog').open && form.elements.id.value === provider.id &&
+    form.dataset.rechargeHistoryRequest === request;
+  try {
+    const history = await api(`/api/providers/${encodeURIComponent(provider.id)}/recharge-history`);
+    if (!current()) return;
+    form.dataset.rechargeHistoryReady = 'true';
+    if (history.firstConfirmedAt) {
+      $('#initial-recharge-status').textContent = `已确认历史起点：${new Intl.DateTimeFormat('zh-CN', {
+        timeZone: history.timezone, dateStyle: 'medium', timeStyle: 'medium', hourCycle: 'h23'
+      }).format(new Date(history.firstConfirmedAt))}（${history.timezone}），倍率 1:${history.firstMultiplier}。补齐仅影响此前的初始时段。`;
+      form.elements.initialRechargeMultiplier.value = history.firstMultiplier;
+      form.elements.initialRechargeDate.max = rechargeDateKey(new Date(history.firstConfirmedAt), history.timezone);
+      if (form.elements.initialRechargeDate.value > form.elements.initialRechargeDate.max) {
+        form.elements.initialRechargeDate.value = form.elements.initialRechargeDate.max;
+      }
+    } else {
+      $('#initial-recharge-status').textContent = '尚无已确认倍率；可填写当前充值倍率并同时补齐初始时段。';
+    }
+    updateInitialRechargeFields(form);
+  } catch (error) {
+    if (current()) $('#initial-recharge-status').textContent = `倍率历史读取失败：${error.message}`;
+  }
 }
 
 function providerBalanceThresholds(form) {
@@ -4001,6 +4065,15 @@ function providerPayload(form) {
     delete typeConfig.monitoredKeyIds;
   }
   const balanceThresholds = providerBalanceThresholds(form);
+  let initialRechargeRate;
+  if (!form.elements.id?.value && form.elements.rechargeMultiplier.value !== '') {
+    initialRechargeRate = { multiplier: Number(form.elements.rechargeMultiplier.value), effectiveDate: form.elements.rechargeEffectiveDate?.value || '' };
+  } else if (form.elements.confirmInitialRecharge?.checked) {
+    initialRechargeRate = { multiplier: Number(form.elements.initialRechargeMultiplier.value), effectiveDate: form.elements.initialRechargeDate.value };
+  }
+  if (initialRechargeRate && (!initialRechargeRate.effectiveDate || !(initialRechargeRate.multiplier > 0))) {
+    throw new Error('请填写初始倍率及生效日期');
+  }
   return {
     name: form.elements.name.value.trim(), adapterType: form.elements.adapterType.value,
     baseUrl: normalizeProviderBaseUrl(form.elements.baseUrl.value), authMode: form.elements.authMode.value,
@@ -4010,6 +4083,7 @@ function providerPayload(form) {
     ...balanceThresholds,
     thresholdCurrency: form.elements.thresholdCurrency.value.trim() || 'USD',
     rechargeMultiplier: form.elements.rechargeMultiplier.value === '' ? null : Number(form.elements.rechargeMultiplier.value),
+    ...(initialRechargeRate ? { initialRechargeRate } : {}),
     rechargeUrl: form.elements.rechargeUrl.value.trim() || null,
     typeConfig,
     tags: form.elements.tags.value.split(',').map((x) => x.trim()).filter(Boolean), note: form.elements.note.value.trim(),
@@ -5081,13 +5155,20 @@ $('#automation-form')?.elements?.triggerType?.addEventListener('change', (event)
 $('#automation-form')?.elements?.scheduledConditionType?.addEventListener('change', (event) => updateAutomationActionFields(event.target.form));
 $('#automation-form')?.elements?.notifyOnAction?.addEventListener('change', (event) => updateAutomationActionFields(event.target.form));
 
+$('#provider-form')?.elements?.rechargeMultiplier?.addEventListener('input', event => updateInitialRechargeFields(event.target.form));
+$('#provider-form')?.elements?.confirmInitialRecharge?.addEventListener('change', event => updateInitialRechargeFields(event.target.form));
+
 $('#provider-form').addEventListener('submit', async (event) => {
   event.preventDefault(); const form = event.currentTarget; const id = form.elements.id.value;
+  const submit = $('button[type="submit"]', form);
+  submit.disabled = true;
+  $('#provider-form-error').textContent = '';
   try {
     const payload = providerPayload(form);
     await api(id ? `/api/providers/${id}` : '/api/providers', { method: id ? 'PUT' : 'POST', body: payload });
     $('#provider-dialog').close(); toast(id ? '供应商已更新' : '供应商已创建，首次同步已排队'); navigate('providers');
   } catch (error) { $('#provider-form-error').textContent = error.message; }
+  finally { submit.disabled = false; }
 });
 
 $('#key-ttft-alert-form').addEventListener('submit', async (event) => {

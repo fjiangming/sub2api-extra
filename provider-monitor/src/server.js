@@ -41,6 +41,7 @@ const { KeyProbeService } = require('./services/key-probe-service');
 const { KeyTtftAlertService } = require('./services/key-ttft-alert-service');
 const { GrossProfitService } = require('./services/gross-profit-service');
 const { DailyCostService } = require('./services/daily-cost-service');
+const { historyOptions, initialHistory } = require('./services/recharge-rate-history');
 const {
   RechargeLinkService,
   pageHeaders,
@@ -75,6 +76,10 @@ const providerSchema = z.object({
     }, '充值链接必须使用不含账号密码的 HTTP 或 HTTPS 地址')
     .optional().nullable(),
   rechargeMultiplier: z.number().positive().max(1000000).optional().nullable(),
+  initialRechargeRate: z.object({
+    multiplier: z.number().finite().positive().max(1000000),
+    effectiveDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+  }).strict().optional(),
   typeConfig: z.record(z.string(), z.any()).optional(),
   tags: z.array(z.string().max(40)).max(20).optional(),
   note: z.string().max(2000).optional(),
@@ -1153,7 +1158,11 @@ function createApplication(options = {}) {
   api.get('/adapters', (_req, res) => res.json({ items: listAdapterTypes() }));
   api.get('/summary', (_req, res) => res.json(queries.summary()));
 
-  api.get('/providers', (_req, res) => res.json({ items: providers.list() }));
+  api.get('/providers', (_req, res) => res.json({ items: providers.list(), rechargeHistory: historyOptions(config) }));
+  api.get('/providers/:id/recharge-history', (req, res) => {
+    providers.get(req.params.id);
+    res.set('Cache-Control', 'no-store').json(initialHistory(db, req.params.id, config));
+  });
   api.post('/providers/detect', asyncRoute(async (req, res) => {
     const input = validate(z.object({ baseUrl: z.string().url() }), req.body || {});
     const result = await detection.detect(input.baseUrl);

@@ -82,12 +82,22 @@
         <label><span>余额检查间隔（分钟）</span><input name="balanceRefreshIntervalMinutes" type="number" min="1" max="1440" step="1" value="1" required></label>
         <label><span>资产同步间隔（分钟）</span><input name="refreshIntervalMinutes" type="number" min="1" max="1440" step="1" value="15" required></label>
         <label><span>币种</span><input name="thresholdCurrency" value="USD" maxlength="12"></label>
-        <label><span>充值倍率（支付 1 = 余额）</span><input name="rechargeMultiplier" type="number" min="0.000001" step="0.0001" placeholder="自动获取"></label>
+        <label><span>充值倍率（支付 1 = 余额）</span><input name="rechargeMultiplier" type="number" min="0.000001" max="1000000" step="any" placeholder="自动获取"></label>
+        <label id="initial-recharge-date-field" hidden><span>初始倍率生效日期 <small data-recharge-timezone></small></span><input name="rechargeEffectiveDate" type="date" min="1970-01-01" disabled><small>确认所填倍率从该日零点起适用。</small></label>
         <label class="span-2"><span>充值链接</span><input name="rechargeUrl" type="url" maxlength="2048" placeholder="https://supplier.example/account/recharge"></label>
         <label><span>充值登录方式</span><select name="rechargeLoginMode"><option value="direct">直接打开</option><option value="adapter">适配器自动登录</option></select></label>
         <label><span>账户去重键</span><input name="accountDedupeKey" maxlength="200"></label>
         <label class="toggle-field"><input name="enabled" type="checkbox" checked><span>启用定时检查</span></label>
       </div>
+      <fieldset id="initial-recharge-history" hidden>
+        <legend>初始倍率历史</legend>
+        <div class="form-grid">
+          <p id="initial-recharge-status" class="span-2"></p>
+          <label class="toggle-field span-2"><input name="confirmInitialRecharge" type="checkbox"><span>补齐首次确认前的充值倍率</span></label>
+          <label><span>初始倍率（支付 1 = 余额）</span><input name="initialRechargeMultiplier" type="number" min="0.000001" max="1000000" step="any" disabled></label>
+          <label><span>生效日期 <small data-recharge-timezone></small></span><input name="initialRechargeDate" type="date" min="1970-01-01" disabled></label>
+        </div>
+      </fieldset>
       <fieldset><legend>凭据</legend><div class="form-grid" id="credential-fields"></div></fieldset>
       <fieldset id="monitored-api-keys-fieldset" hidden><legend>监控 API Keys</legend><div class="monitored-api-key-toolbar"><button class="icon-button small" type="button" data-action="refresh-provider-key-options" title="刷新远端 Key 列表" aria-label="刷新远端 Key 列表"><i data-lucide="refresh-cw"></i></button></div><div class="monitored-api-key-list" id="monitored-api-key-options"></div></fieldset>
       <fieldset id="dynamic-route-rate-fieldset" hidden><legend>动态路由倍率</legend><div class="form-grid">

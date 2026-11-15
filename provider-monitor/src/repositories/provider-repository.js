@@ -7,6 +7,7 @@ const {
   mergeConfiguredApiKeyCredentials
 } = require('../security/configured-api-keys');
 const { nowIso, parseJson, stringifyJson } = require('../db');
+const { confirmInitialRate } = require('../services/recharge-rate-history');
 
 function booleanValue(value, fallback = true) {
   if (value == null) return fallback ? 1 : 0;
@@ -379,6 +380,7 @@ class ProviderRepository {
           ) VALUES (?, ?, 'unknown', '{}', ?)
         `).run(id, positiveNumber(input.rechargeMultiplier), now);
       }
+      if (input.initialRechargeRate) confirmInitialRate(this.db, id, input.initialRechargeRate, this.config, now);
     });
 
     try {
@@ -474,6 +476,7 @@ class ProviderRepository {
             updated_at = excluded.updated_at
         `).run(id, positiveNumber(input.rechargeMultiplier), now);
       }
+      if (input.initialRechargeRate) confirmInitialRate(this.db, id, input.initialRechargeRate, this.config, now);
     });
     try {
       update();

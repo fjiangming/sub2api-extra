@@ -18,10 +18,11 @@ function fixture(t, specifications = [{ type: 'sub2api' }, { type: 'new-api' }])
     const provider = providers.create({ name: `Supplier ${index}`, adapterType: spec.type,
       baseUrl: `https://supplier-${index}.example`, authMode: spec.authMode || (spec.type === 'sub2api' ? 'token_pair' : 'system_token'),
       credentials: { accessToken: 'synthetic-access', systemToken: 'synthetic-system', userId: '7' },
-      rechargeMultiplier: 2, typeConfig: { monitoredKeyIds: ['123'] } });
+      rechargeMultiplier: spec.multiplier ?? 2, typeConfig: { monitoredKeyIds: ['123'] } });
     // The fixture has a verified rate covering the queried historical days.
-    context.db.prepare(`UPDATE provider_recharge_rate_history SET valid_from='2026-01-01T00:00:00.000Z',
-      paid_currency='USD', balance_currency='USD' WHERE connection_id=?`).run(provider.id);
+    context.db.prepare(`UPDATE provider_recharge_rate_history SET valid_from=?,
+      paid_currency=?, balance_currency='USD' WHERE connection_id=?`)
+      .run(spec.historyFrom || '2026-01-01T00:00:00.000Z', spec.paidCurrency || 'USD', provider.id);
     return { provider, amount: 12, requests: 3, ...spec };
   });
   context.db.prepare("INSERT OR REPLACE INTO settings VALUES ('currencyRates', ?, '2026-10-31')")
@@ -54,6 +55,25 @@ function fixture(t, specifications = [{ type: 'sub2api' }, { type: 'new-api' }])
 }
 
 const query = { from: '2026-10-29', to: '2026-10-29', timezone: 'Asia/Shanghai', currency: 'CNY' };
+
+test('confirmed initial rates repair first-day costs for Sub2API and New API using the original daily aggregate', async (t) => {
+  const f = fixture(t, ['sub2api', 'new-api'].map(type => ({ type, multiplier: 10,
+    historyFrom: '2026-10-28T16:47:26.000Z', paidCurrency: 'CNY' })));
+  // A real USD exchange rate must not multiply a cost already denominated in paid CNY.
+  f.db.prepare("UPDATE settings SET value_json=? WHERE key='currencyRates'").run(JSON.stringify({ USD: 1, CNY: 1 / 7 }));
+  const before = await f.service.report(query);
+  assert.equal(before.items[0].complete, false);
+  assert.ok(before.items[0].providers.every(provider => provider.upstreamCost === 12 && provider.cost == null));
+  const calls = f.calls.length;
+  for (const state of f.states) f.providers.update(state.provider.id, {
+    initialRechargeRate: { multiplier: 10, effectiveDate: query.from }
+  });
+  const after = await f.service.report(query);
+  assert.equal(after.items[0].complete, true);
+  assert.equal(after.items[0].cost, 2.4);
+  assert.ok(after.items[0].providers.every(provider => provider.cost === 1.2));
+  assert.equal(f.calls.length, calls);
+});
 
 test('daily costs read upstream account aggregates without keys or logs and never add the old ledger', async (t) => {
   const f = fixture(t);
