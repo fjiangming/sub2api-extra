@@ -111,6 +111,7 @@ const schema = z.object({
   SUB2API_PUBLIC_URLS: optionalString,
   OPERATIONS_CENTER_USER_MESSAGES_ENABLED: boolFromEnv.default(false),
   LATENCY_TELEMETRY_TOKEN: optionalIntegrationToken,
+  CONVERSATION_LOGS_TOKEN: optionalIntegrationToken,
   LATENCY_TELEMETRY_DIRECTORY: optionalString,
   LATENCY_TELEMETRY_MOUNT_PATH: optionalString,
   LATENCY_TELEMETRY_MAX_MB: z.coerce.number().int().min(32).max(65536).default(5120),
@@ -332,6 +333,7 @@ function loadConfig(env = process.env, runtime = {}) {
       maxMb: value.LATENCY_TELEMETRY_MAX_MB,
       minFreeMb: value.LATENCY_TELEMETRY_MIN_FREE_MB
     },
+    conversationLogs: { token: value.CONVERSATION_LOGS_TOKEN || null },
     sub2apiAnnouncementsUpstreamUrl: value.SUB2API_ANNOUNCEMENTS_UPSTREAM_URL?.replace(/\/$/, '') || null,
     sub2apiAdminEmail: value.ADMIN_EMAIL || null,
     sub2apiAdminPassword: value.ADMIN_PASSWORD || null,

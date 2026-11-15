@@ -1,0 +1,226 @@
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const Database = require('better-sqlite3');
+const { z } = require('zod');
+const { DateTime } = require('luxon');
+const { AppError } = require('./errors');
+const { decodeBody, maskPayload } = require('./services/conversation-redaction');
+
+const userId = z.number().int().positive().safe();
+const policySchema = z.object({
+  version: z.number().int().positive(), enabled: z.boolean(), mode: z.enum(['dual', 'masked', 'original']),
+  excludedUserIds: z.array(userId).max(1000), email: z.boolean(), phone: z.boolean(), secret: z.boolean(), ip: z.boolean(),
+  custom: z.array(z.object({ from: z.string().trim().min(2).max(120), to: z.string().min(1).max(80) }).strict()).max(10),
+  retention: z.number().int().min(1).max(365), capacity: z.number().int().min(1).max(1024),
+  reserve: z.number().int().min(0).max(1024), overflow: z.enum(['stop', 'evict']), maxBodyBytes: z.number().int().min(65536).max(16777216)
+}).strict();
+const defaults = { version: 1, enabled: false, mode: 'dual', excludedUserIds: [], email: true, phone: true, secret: true, ip: true,
+  custom: [], retention: 7, capacity: 10, reserve: 2, overflow: 'stop', maxBodyBytes: 8388608 };
+const frameSchema = z.object({ direction: z.enum(['in', 'out']), at: z.number().int().nonnegative(), body: z.string().max(24000000), binary: z.boolean().default(false) }).strict();
+const eventSchema = z.object({
+  schema: z.literal(1), id: z.string().regex(/^[a-f0-9]{32}$/), request_id: z.string().regex(/^[a-f0-9]{32}$/),
+  user_id: userId, key_id: userId, account_id: z.number().int().nonnegative().safe(),
+  session_id: z.string().regex(/^(?:[a-f0-9]{64})?$/), at: z.number().int().positive().safe(), duration_ms: z.number().int().nonnegative().max(86400000),
+  host: z.string().max(255).regex(/^[a-zA-Z0-9.:[\]-]*$/), path: z.string().max(1024).regex(/^\/[^?#\s]*$/),
+  method: z.enum(['POST', 'GET', 'PUT', 'PATCH', 'DELETE', 'WS']), protocol: z.enum(['JSON', 'SSE', 'WebSocket']),
+  model: z.string().max(200).default(''), status: z.number().int().min(0).max(599), complete: z.boolean(),
+  reason: z.enum(['', 'body_limit', 'memory_limit', 'transport_error', 'read_error', 'closed_early', 'session_closed']),
+  policy_version: z.number().int().positive(), encoding: z.enum(['', 'identity', 'gzip', 'br', 'deflate', 'zstd', 'unknown']).default(''),
+  request: z.string().max(24000000), response: z.string().max(24000000), frames: z.array(frameSchema).max(10000).default([])
+}).strict();
+function invalid(code = 'CONVERSATION_INVALID_INPUT', status = 400) { return new AppError(code, '对话日志参数无效', { status }); }
+function parse(schema, value) { const result = schema.safeParse(value); if (!result.success) throw invalid(); return result.data; }
+function b64(value) {
+  if (value.length % 4 || /[^A-Za-z0-9+/=]/.test(value)) throw invalid();
+  const result = Buffer.from(value, 'base64');
+  if (result.toString('base64') !== value) throw invalid();
+  return result;
+}
+function pack(raw) { return { request: raw.request.toString('base64'), response: raw.response.toString('base64'), frames: raw.frames.map(frame => ({ ...frame, body: frame.body.toString('base64') })) }; }
+function unpack(raw) { return { request: b64(raw.request), response: b64(raw.response), frames: raw.frames.map(frame => ({ ...frame, body: b64(frame.body) })) }; }
+
+class ConversationLogStore {
+  constructor(directory, { now = Date.now, timezone = 'Asia/Shanghai', freeBytes, usedBytes } = {}) {
+    this.directory = path.join(directory, 'conversation-logs'); this.now = now; this.timezone = timezone;
+    this.freeBytes = freeBytes || (() => { const stat = fs.statfsSync(this.directory); return Number(stat.bavail) * Number(stat.bsize); });
+    this.usedBytes = usedBytes || (() => ['', '-wal', '-shm'].reduce((sum, suffix) => sum + (fs.existsSync(this.file + suffix) ? fs.statSync(this.file + suffix).size : 0), 0));
+    this.lastContact = 0; this.lastError = null; this.collectorDropped = 0;
+  }
+  initialize() {
+    fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 }); this.file = path.join(this.directory, 'archive.sqlite');
+    const keyFile = path.join(this.directory, 'archive.key');
+    if (!fs.existsSync(keyFile)) {
+      if (fs.existsSync(this.file)) throw new Error('CONVERSATION_KEY_MISSING');
+      fs.writeFileSync(keyFile, crypto.randomBytes(32), { flag: 'wx', mode: 0o600 });
+    }
+    this.key = fs.readFileSync(keyFile); if (this.key.length !== 32) throw new Error('CONVERSATION_KEY_INVALID');
+    this.db = new Database(this.file);
+    this.db.pragma('auto_vacuum = INCREMENTAL'); this.db.pragma('journal_mode = WAL'); this.db.pragma('synchronous = FULL');
+    this.db.pragma('busy_timeout = 5000'); this.db.pragma('secure_delete = ON');
+    this.db.exec(`CREATE TABLE IF NOT EXISTS cl_policies(version INTEGER PRIMARY KEY,body BLOB NOT NULL,at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS cl_records(id TEXT PRIMARY KEY,request_id TEXT NOT NULL,user_id INTEGER NOT NULL,key_id INTEGER NOT NULL,
+        account_id INTEGER NOT NULL,session_id TEXT NOT NULL,at INTEGER NOT NULL,duration_ms INTEGER NOT NULL,
+        host TEXT NOT NULL,path TEXT NOT NULL,method TEXT NOT NULL,protocol TEXT NOT NULL,model TEXT NOT NULL,status INTEGER NOT NULL,
+        complete INTEGER NOT NULL,reason TEXT NOT NULL,policy_version INTEGER NOT NULL,mode TEXT NOT NULL,encoding TEXT NOT NULL,
+        original BLOB,masked BLOB,hits TEXT NOT NULL,bytes INTEGER NOT NULL,fingerprint TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS cl_time ON cl_records(at DESC,id);
+      CREATE INDEX IF NOT EXISTS cl_request ON cl_records(request_id,at);
+      CREATE INDEX IF NOT EXISTS cl_session ON cl_records(user_id,key_id,session_id,at);`);
+    if (!this.db.prepare('SELECT 1 FROM cl_policies LIMIT 1').get()) this.db.prepare('INSERT INTO cl_policies VALUES(?,?,?)').run(1, this.seal(defaults, 'policy:1'), this.now());
+    this.policy();
+    try { fs.chmodSync(this.file, 0o600); } catch { /* Windows uses the directory ACL. */ }
+    return this;
+  }
+  seal(value, aad) {
+    const nonce = crypto.randomBytes(12), cipher = crypto.createCipheriv('aes-256-gcm', this.key, nonce); cipher.setAAD(Buffer.from(aad));
+    const encrypted = Buffer.concat([cipher.update(JSON.stringify(value), 'utf8'), cipher.final()]);
+    return Buffer.concat([nonce, cipher.getAuthTag(), encrypted]);
+  }
+  open(value, aad) {
+    const decipher = crypto.createDecipheriv('aes-256-gcm', this.key, value.subarray(0, 12));
+    decipher.setAAD(Buffer.from(aad)); decipher.setAuthTag(value.subarray(12, 28));
+    return JSON.parse(Buffer.concat([decipher.update(value.subarray(28)), decipher.final()]).toString('utf8'));
+  }
+  policy(version) {
+    const row = version ? this.db.prepare('SELECT * FROM cl_policies WHERE version=?').get(version) : this.db.prepare('SELECT * FROM cl_policies ORDER BY version DESC LIMIT 1').get();
+    if (!row) throw invalid('CONVERSATION_POLICY_NOT_FOUND', 409);
+    return parse(policySchema, this.open(row.body, 'policy:' + row.version));
+  }
+  configure(body) {
+    const candidate = parse(policySchema, body);
+    return this.db.transaction(() => {
+      const current = this.policy(); if (candidate.version !== current.version) throw invalid('CONVERSATION_POLICY_CONFLICT', 409);
+      candidate.version++; candidate.excludedUserIds = [...new Set(candidate.excludedUserIds)].sort((a, b) => a - b);
+      this.db.prepare('INSERT INTO cl_policies VALUES(?,?,?)').run(candidate.version, this.seal(candidate, 'policy:' + candidate.version), this.now());
+      return candidate;
+    })();
+  }
+  collectorPolicy(dropped = 0) {
+    if (/^\d{1,16}$/.test(String(dropped)) && Number.isSafeInteger(Number(dropped))) this.collectorDropped = Number(dropped);
+    this.lastContact = this.now(); const policy = this.policy();
+    return { version: policy.version, enabled: policy.enabled, excluded_user_ids: policy.excludedUserIds, max_body_bytes: policy.maxBodyBytes };
+  }
+  ingest(input) {
+    const current = this.policy();
+    // The second exclusion gate also discards in-flight events created before an exclusion was saved.
+    if (!current.enabled || (Number.isSafeInteger(input?.user_id) && current.excludedUserIds.includes(input.user_id))) return { accepted: false };
+    const event = parse(eventSchema, input), policy = this.policy(event.policy_version);
+    if (!policy.enabled || policy.excludedUserIds.includes(event.user_id)) return { accepted: false };
+    if (event.at > this.now() + 60000 || event.at < this.now() - current.retention * 86400000) return { accepted: false };
+    const raw = { request: b64(event.request), response: b64(event.response), frames: event.frames.map(frame => ({ ...frame, body: b64(frame.body) })) };
+    const rawBytes = raw.request.length + raw.response.length + raw.frames.reduce((sum, frame) => sum + frame.body.length, 0);
+    if (rawBytes > policy.maxBodyBytes * 3 || rawBytes > 33554432) throw invalid();
+    const fingerprint = crypto.createHash('sha256').update(JSON.stringify(event)).digest('hex');
+    const existing = this.db.prepare('SELECT fingerprint FROM cl_records WHERE id=?').get(event.id);
+    if (existing) { if (existing.fingerprint !== fingerprint) throw invalid('CONVERSATION_ID_CONFLICT', 409); return { accepted: true, duplicate: true }; }
+    let original = null, masked = null, hits = [], reason = event.reason;
+    if (['body_limit', 'memory_limit'].includes(reason)) { /* Metadata remains explicit when a body could not be captured. */ }
+    else {
+      try {
+        if (policy.mode !== 'original') { const result = maskPayload(raw, policy, this.key, event.encoding); masked = this.seal(pack(result.payload), event.id + ':masked'); hits = result.hits; }
+        if (policy.mode !== 'masked') original = this.seal(pack(raw), event.id + ':original');
+      } catch { original = null; masked = null; hits = []; reason = 'redaction_failed'; }
+    }
+    let storedBytes = (original?.length || 0) + (masked?.length || 0) + 2048;
+    this.prune();
+    const canStore = () => this.usedBytes() + storedBytes < current.capacity * 1024 ** 3 && this.freeBytes() - storedBytes >= current.reserve * 1024 ** 3;
+    if (!canStore() && current.overflow === 'evict') {
+      for (let batch = 0; batch < 20 && !canStore(); batch++) {
+        if (!this.db.prepare('DELETE FROM cl_records WHERE id IN (SELECT id FROM cl_records ORDER BY at LIMIT 100)').run().changes) break;
+        this.db.pragma('wal_checkpoint(TRUNCATE)'); this.db.pragma('incremental_vacuum(512)');
+      }
+    }
+    if (!canStore()) {
+      original = null; masked = null; hits = []; reason = 'capacity'; storedBytes = 2048;
+      if (!canStore()) { this.lastError = 'capacity'; return { accepted: false, reason: 'capacity' }; }
+    }
+    const { schema, request, response, frames, ...metadata } = event;
+    this.db.prepare(`INSERT INTO cl_records VALUES(@id,@request_id,@user_id,@key_id,@account_id,@session_id,@at,@duration_ms,
+      @host,@path,@method,@protocol,@model,@status,@complete,@reason,@policy_version,@mode,@encoding,@original,@masked,@hits,@bytes,@fingerprint)`)
+      .run({ ...metadata, complete: event.complete && !reason ? 1 : 0, reason, mode: policy.mode, original, masked, hits: JSON.stringify(hits), bytes: storedBytes, fingerprint });
+    this.lastError = null; return { accepted: true };
+  }
+  prune() {
+    const removed = this.db.prepare('DELETE FROM cl_records WHERE at<?').run(this.now() - this.policy().retention * 86400000).changes;
+    if (removed) { this.db.pragma('wal_checkpoint(TRUNCATE)'); this.db.pragma('incremental_vacuum(128)'); }
+    return removed;
+  }
+  where(query = {}) {
+    const clauses = [], args = [];
+    for (const [field, max] of [['request_id', 32], ['session_id', 64], ['protocol', 16]]) if (query[field]) {
+      clauses.push(`${field}=?`); args.push(String(query[field]).slice(0, max));
+    }
+    for (const field of ['user_id', 'key_id']) if (query[field]) { const id = Number(query[field]); if (!Number.isSafeInteger(id) || id < 1) throw invalid(); clauses.push(`${field}=?`); args.push(id); }
+    if (query.search) { clauses.push('(id LIKE ? OR request_id LIKE ? OR model LIKE ? OR CAST(user_id AS TEXT)=?)'); const search = String(query.search).slice(0, 200); args.push('%' + search + '%', '%' + search + '%', '%' + search + '%', search); }
+    if (query.capture === 'complete') clauses.push('complete=1');
+    else if (query.capture === 'partial') clauses.push("complete=0 AND (original IS NOT NULL OR masked IS NOT NULL) AND reason!='redaction_failed'");
+    else if (query.capture === 'missing') clauses.push('original IS NULL AND masked IS NULL');
+    else if (query.capture === 'redaction_failed') clauses.push("reason='redaction_failed'");
+    for (const field of ['start', 'end']) if (query[field]) {
+      const date = DateTime.fromISO(String(query[field]), { zone: this.timezone }); if (!date.isValid) throw invalid();
+      clauses.push(`at${field === 'start' ? '>=' : '<'}?`); args.push((field === 'start' ? date.startOf('day') : date.plus({ days: 1 }).startOf('day')).toMillis());
+    }
+    if (query.start && query.end && String(query.start) > String(query.end)) throw invalid();
+    return { sql: clauses.length ? ' WHERE ' + clauses.join(' AND ') : '', args };
+  }
+  publicRow(row) {
+    const { original, masked, fingerprint, hits, ...metadata } = row;
+    return { ...metadata, complete: Boolean(row.complete), original: Boolean(original), masked: Boolean(masked), hits: JSON.parse(hits) };
+  }
+  list(query = {}) {
+    const page = Math.max(1, Math.min(1000000, Number(query.page) || 1)) | 0, pageSize = 20;
+    const filter = this.where(query);
+    const summary = this.db.prepare(`SELECT COUNT(*) total,COUNT(DISTINCT request_id) requests,COALESCE(SUM(complete),0) complete,COALESCE(SUM(bytes),0) bytes FROM cl_records${filter.sql}`).get(...filter.args);
+    const columns = "id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,original IS NOT NULL original,masked IS NOT NULL masked,hits,bytes";
+    const items = this.db.prepare(`SELECT ${columns} FROM cl_records${filter.sql} ORDER BY at DESC,id LIMIT ? OFFSET ?`).all(...filter.args, pageSize, (page - 1) * pageSize).map(row => this.publicRow(row));
+    return { items, summary, page, pageSize, pages: Math.ceil(summary.total / pageSize) };
+  }
+  detail(id) {
+    const row = this.db.prepare('SELECT * FROM cl_records WHERE id=?').get(id); if (!row) throw invalid('CONVERSATION_NOT_FOUND', 404);
+    const result = this.publicRow(row);
+    result.attempts = this.db.prepare('SELECT id,account_id,status,protocol,at,complete,reason FROM cl_records WHERE request_id=? AND user_id=? AND key_id=? ORDER BY at,id LIMIT 100')
+      .all(row.request_id, row.user_id, row.key_id);
+    const copy = row.masked ? unpack(this.open(row.masked, id + ':masked')) : row.original ? unpack(this.open(row.original, id + ':original')) : null;
+    result.frames = copy?.frames.map((frame, index) => ({ index, direction: frame.direction, at: frame.at, binary: frame.binary, bytes: frame.body.length })) || [];
+    return result;
+  }
+  payload(id, source, side) {
+    if (!['original', 'masked'].includes(source) || !/^(request|response|frame-\d+)$/.test(side)) throw invalid();
+    const row = this.db.prepare('SELECT * FROM cl_records WHERE id=?').get(id);
+    if (!row || !row[source]) throw invalid('CONVERSATION_COPY_NOT_FOUND', 404);
+    const raw = unpack(this.open(row[source], id + ':' + source));
+    const body = side.startsWith('frame-') ? raw.frames[Number(side.slice(6))]?.body : raw[side]; if (!body) throw invalid('CONVERSATION_MESSAGE_NOT_FOUND', 404);
+    let text = null; try { text = decodeBody(body, source === 'original' && side === 'response' ? row.encoding : ''); } catch { /* Binary raw data is still downloadable byte-for-byte. */ }
+    return { body, text, sha256: crypto.createHash('sha256').update(body).digest('hex'), bytes: body.length };
+  }
+  sessions(query = {}) {
+    const filter = this.where(query), clause = filter.sql ? filter.sql + " AND session_id!=''" : " WHERE session_id!=''";
+    return { items: this.db.prepare(`SELECT session_id,user_id,key_id,COUNT(DISTINCT request_id) turns,COUNT(*) attempts,MIN(at) first_at,MAX(at) last_at FROM cl_records${clause}
+      GROUP BY user_id,key_id,session_id ORDER BY last_at DESC LIMIT 100`).all(...filter.args) };
+  }
+  exportIndex(query = {}) {
+    const filter = this.where(query);
+    const columns = ['id', 'request_id', 'user_id', 'key_id', 'account_id', 'at', 'protocol', 'model', 'status', 'complete', 'reason'];
+    const rows = this.db.prepare(`SELECT ${columns.join(',')} FROM cl_records${filter.sql} ORDER BY at DESC,id LIMIT 10001`).all(...filter.args);
+    if (rows.length > 10000) throw invalid('CONVERSATION_EXPORT_TOO_LARGE', 400);
+    const cell = value => {
+      let text = String(value ?? '');
+      if (/^\s*[=+@-]/.test(text) || /^[\t\r\n]/.test(text)) text = "'" + text;
+      return '"' + text.replaceAll('"', '""') + '"';
+    };
+    return { csv: [columns, ...rows.map(row => columns.map(column => row[column]))].map(row => row.map(cell).join(',')).join('\r\n') + '\r\n', count: rows.length };
+  }
+  status() {
+    const counts = this.db.prepare('SELECT COUNT(*) records,COALESCE(SUM(bytes),0) bytes,COALESCE(SUM(complete=0),0) gaps FROM cl_records').get();
+    return { ...counts, lastContact: this.lastContact || null, lastError: this.lastError, collectorDropped: this.collectorDropped, policy: this.policy(), diskBytes: this.usedBytes(), freeBytes: this.freeBytes(), timezone: this.timezone,
+      coverage: ['HTTP JSON / SSE (including TLS fingerprint and transport fallbacks)', 'OpenAI pooled WebSocket / passthrough messages'],
+      limitations: ['Only bytes consumed by the gateway are observed; early close is marked incomplete.', 'Queue/process failure can lose archives; this archive does not control inference or billing.'] };
+  }
+  start() { this.timer = setInterval(() => { try { this.prune(); } catch { this.lastError = 'retention_failed'; } }, 60000); this.timer.unref(); }
+  close() { clearInterval(this.timer); this.db?.close(); this.db = null; this.key?.fill(0); }
+}
+
+module.exports = { ConversationLogStore, policySchema, eventSchema, defaults };

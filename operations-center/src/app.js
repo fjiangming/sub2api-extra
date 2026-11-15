@@ -141,7 +141,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -166,7 +166,7 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
     }
   }));
   const jsonBody = express.json({ limit: '64kb' });
-  app.use((req, res, next) => req.method === 'POST' && ['/api/billing-imports', '/api/billing-imports/inspect'].includes(req.path) ? next() : jsonBody(req, res, next));
+  app.use((req, res, next) => req.method === 'POST' && ['/api/billing-imports', '/api/billing-imports/inspect', '/api/conversation-logs/ingest'].includes(req.path) ? next() : jsonBody(req, res, next));
 
   app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
   app.get('/readyz', asyncRoute(async (_req, res) => {
@@ -263,6 +263,19 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
     res.set('cache-control', 'no-store').json(telemetry.ingest(req.body));
   }));
   const csrf = auth.csrfMiddleware();
+  const conversationCollectorAuth = (req, res, next) => {
+    res.set('cache-control', 'no-store');
+    const supplied = bearerToken(req), expected = config.conversationLogs?.token;
+    if (!expected || !supplied || !crypto.timingSafeEqual(crypto.createHash('sha256').update(supplied).digest(), crypto.createHash('sha256').update(expected).digest())) {
+      return next(new AppError('CONVERSATION_AUTH_REQUIRED', '采集认证无效', { status: 401 }));
+    }
+    if (!conversations) return next(new AppError('CONVERSATION_UNAVAILABLE', '对话归档暂不可用', { status: 503 }));
+    next();
+  };
+  app.get('/api/conversation-logs/collector-policy', conversationCollectorAuth, (req, res) => res.json(conversations.collectorPolicy(req.get('x-conversation-dropped'))));
+  app.post('/api/conversation-logs/ingest', conversationCollectorAuth, express.json({ limit: '48mb', strict: true }), asyncRoute(async (req, res) => {
+    res.json(conversations.ingest(req.body));
+  }));
   app.get('/api/auth/me', authenticated, (req, res) => {
     res.set('cache-control', 'no-store').json(auth.publicSession(req.auth));
   });
@@ -297,6 +310,21 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.use((_req, res, next) => {
     res.set('cache-control', 'no-store');
     next();
+  });
+
+  api.use('/conversation-logs', (_req, _res, next) => conversations ? next() : next(new AppError('CONVERSATION_UNAVAILABLE', '对话归档暂不可用', { status: 503 })));
+  api.get('/conversation-logs/status', (_req, res) => res.json({ ...conversations.status(), configured: Boolean(config.conversationLogs?.token) }));
+  api.get('/conversation-logs/policy', (_req, res) => res.json(conversations.policy()));
+  api.put('/conversation-logs/policy', csrf, (req, res) => res.json(conversations.configure(req.body)));
+  api.get('/conversation-logs/users', asyncRoute(async (req, res) => res.json(await messages.searchUsers(req.query, req.auth.upstreamAccessToken))));
+  api.get('/conversation-logs/sessions', (req, res) => res.json(conversations.sessions(req.query)));
+  api.get('/conversation-logs/records', (req, res) => res.json(conversations.list(req.query)));
+  api.get('/conversation-logs/index', (req, res) => res.json(conversations.exportIndex(req.query)));
+  api.get('/conversation-logs/records/:id', (req, res) => res.json(conversations.detail(req.params.id)));
+  api.get('/conversation-logs/records/:id/payload/:side', (req, res) => {
+    const value = conversations.payload(req.params.id, req.query.source || 'masked', req.params.side);
+    if (req.query.download === '1') return res.type('application/octet-stream').attachment(`conversation-${req.params.id}-${req.params.side}-${req.query.source || 'masked'}.raw`).send(value.body);
+    res.json({ text: value.text, base64: value.body.toString('base64'), sha256: value.sha256, bytes: value.bytes });
   });
 
   api.get('/billing-imports/options', asyncRoute(async (_req, res) => res.json(await billingImports.options())));

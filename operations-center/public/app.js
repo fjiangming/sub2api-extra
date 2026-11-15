@@ -50,6 +50,7 @@ const titles = {
   profiles: '用户画像',
   messages: '用户消息',
   domains: '域名访问',
+  conversations: '对话日志',
   billing: '计费核查',
   finance: '收款与入账',
   costs: '成本分析',
@@ -256,6 +257,7 @@ function showLogin(message = '') {
   latencyUi.reset();
   requestErrorsUi.reset();
   domainAccessUi.reset();
+  conversationLogsUi.reset();
   billingUi.reset();
   if (state.runPoller) clearInterval(state.runPoller);
   state.runPoller = null;
@@ -1623,6 +1625,7 @@ async function loadCurrentView(options = {}) {
     profiles: () => profilesUi.load(options),
     messages: () => messagesUi.load(),
     domains: () => domainAccessUi.load(options),
+    conversations: () => conversationLogsUi.load(options),
     billing: () => billingUi.load(),
     finance: loadFinance,
     costs: state.costAutomaticIncome.active
@@ -1657,6 +1660,7 @@ function navigate(view) {
   if (state.currentView === 'latency') latencyUi.leave();
   if (state.currentView === 'errors') requestErrorsUi.leave();
   if (state.currentView === 'domains') domainAccessUi.leave();
+  if (state.currentView === 'conversations') conversationLogsUi.leave();
   if (state.currentView === 'billing') billingUi.leave();
   if (state.costAutomaticIncome.active) closeAutomaticIncomeDrilldown({ restoreHeader: false });
   state.currentView = view;
@@ -1906,6 +1910,11 @@ const domainAccessUi = window.DomainAccessUi.create({
   api, escapeHtml, icon, refreshIcons, toast, setPageMeta,
   isActive: () => state.currentView === 'domains' && Boolean(state.user),
   openMessages: () => navigate('messages')
+});
+
+const conversationLogsUi = window.ConversationLogsUi.create({
+  api, escapeHtml, icon, refreshIcons, toast, setPageMeta,
+  isActive: () => state.currentView === 'conversations' && Boolean(state.user)
 });
 
 const billingUi = window.BillingRecoveryUi.create({

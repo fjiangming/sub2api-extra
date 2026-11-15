@@ -1,5 +1,20 @@
 # 个性化功能维护台账
 
+## 2026-11-16：正式对话日志与 dev 发布
+
+用户确认 Demo，要求从主站重建后的 dev 正式开发、提交 / 推送并自动发布可拉取版本；本仓库在独立 `sub2api-extra-conversation-dev` worktree 从 origin/main b8c5f9c 创建配套 dev。原工作目录的其他脏改动和 Demo 保留。本次不连接、更新或部署服务器，不改资金和主站业务表。
+
+- `operations-center/src/conversation-log-store.js`（新增）：独立 SQLite、AES-256-GCM 正文 / 策略和本地 key、不可变策略与 CAS、前后排除检查、原字节下载 / SHA-256、幂等与冲突、请求 / 重试 / 用户和 Key 隔离会话、分页 / 日期筛选 / 有界 CSV、保留 / 容量 / 缺口。排除用户不新增任何归档记录，已有历史按原保留期处理。
+- `operations-center/src/services/conversation-redaction.js`（新增）：字符串 token 替换保留原键、数值表达及空白，稳定 HMAC 占位符、常见敏感规则 / 字面量规则、工具关联字段保护、内嵌 JSON、Responses / Chat / Claude / Gemini 跨片段处理；不支持或结构冲突时不回退保存明文。
+- `operations-center/src/{app,config,server}.js`：独立采集 token、鉴权后大正文解析、入库 / 策略接口、原管理员与 CSRF 保护的读取 / 配置 / 用户搜索 / 下载，初始化失败隔离及生命周期清理。不改现有业务和财务契约。
+- `operations-center/public/{conversation-logs-ui.js,conversation-logs.css}`（新增）、`public/{index.html,app.js}`：正式导航及请求、会话、采集状态、保存策略，原文 / 脱敏与 WS 消息查看 / 下载、重试链 / 索引导出、排除用户真实搜索、多选 / 取消、配置冲突和退出 / 迟到结果清理，沿用现有浅色运营界面。
+- `operations-center/tests/{conversation-logs-fixture.js,conversation-logs.test.js}`（新增）、`tests/frontend-layout.test.js`：正文精度、落盘加密、跨片段、结构保护、WS / gzip、排除零新增、历史保留、CAS / 幂等 / 保留 / 容量、管理员 / token / CSRF / 原字节下载；更新导航数量。
+- `operations-center/scripts/{conversation-logs-live-preview.cjs,conversation-logs-live-browser-check.cjs}`（新增）、`package.json`：隔离临时数据和正式页面 Chrome 验收，接入语法检查与便捷命令，不进入生产 Docker 运行流程。
+- `.github/workflows/operations-center-dev.yml`（新增）：dev 推送自动测试、原生双架构 SQLite / revision 验证、不可变 SHA 镜像及 operations-center-dev 清单；不改变 main 的既有镜像流程，不发布其他服务的 dev 标签。
+- `operations-center/.env.example`、`README.md`、`docs/conversation-logs.md`（新增）：待确认接入变量、私有网络 / 数据卷、采集 / 脱敏 / 排除与历史边界、原生更新来源、发布和回滚说明。服务器实际配置保持未操作。
+
+验证进展：运营中心完整 400 项测试通过；后续补充凭据字段与 CSV 前导空白公式用例后，13 项归档专项通过。完整 `npm run check` 与 YAML / diff 检查通过。正式页面 Chrome 在 1440 / 390 / 320 和系统深色偏好下沿用现有浅色 UI，两轮通过原文精度与下载字节、XSS、WS、会话、筛选 / CSV、排除保存 / 刷新及退出清理，无整页溢出或外部请求。桌面列表已改为有界滚动并复验，截图位于本机临时 sub2api-conversation-browser-BCOttn。实际 GitHub 发布结果在完成后补记。
+
 ## 2026-11-15：供应商初始充值倍率生效日期与整数输入修复
 
 用户要求实现新供应商首日倍率确认、已有供应商补齐初始历史，并修复整数倍率被浏览器判为无效。本轮只修改供应商监控及本节台账，保留原多域名、迁移页、图标、画布与其他未提交工作；不连接生产、不回填实际倍率、不提交 / 推送或部署，不修改主站资金、用量或现金流水。

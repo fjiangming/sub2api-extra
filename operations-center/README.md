@@ -1,5 +1,7 @@
 # Sub2API 运营数据与存储管理中心
 
+“对话日志”支持主站 dev 的微侵入上游 Raw Request / Response 归档、流式消息、会话、完整性、脱敏副本、保存策略和排除用户。默认关闭，保存到独立加密 SQLite，排除用户不新增正文或元数据；接入配置、版本包和边界见[对话日志说明](docs/conversation-logs.md)。本 dev 基于主站新 main，未重新引入旧 dev 的计费恢复定制。
+
 `operations-center` 是 `sub2api-extra` 中的独立服务，默认监听 `9872`。它直接读取 Sub2API PostgreSQL 业务表与原生聚合表，不创建新的扣费账本；本地保存加密运行配置、手工收支、经营核算所需来源快照及审计、定向用户消息与已读记录，以及可选的有界请求诊断数据。
 
 当前实现基于 Sub2API `d2e319b2a17006122cd2d53d828c44a0bf21bd9b` 之后的最新 schema 完成核对。线上接入时仍会检查实际表结构；未知或缺失 schema 会阻断清理。
