@@ -1,6 +1,6 @@
 # 对话日志接入
 
-本模块配套 `fjiangming/sub2api` 的 dev 采集器。主站负责鉴权后识别用户和旁路读取上游正文，运营中心负责独立归档、策略、脱敏和查询，不写主站业务表，不参与余额或计费。新 dev 基于上游新 main，不包含此前旧 dev 的计费恢复定制；运营中心既有模块遇到缺少旧 API 时沿用其不可用 / 降级处理。
+本模块随 `fjiangming/sub2api-extra` 的 main 发布，配套 `fjiangming/sub2api` 的 dev 采集器。主站负责鉴权后识别用户和旁路读取上游正文，运营中心负责独立归档、策略、脱敏和查询，不写主站业务表，不参与余额或计费。主站新 dev 基于上游新 main，不包含此前旧 dev 的计费恢复定制；运营中心既有模块遇到缺少旧 API 时沿用其不可用 / 降级处理。
 
 ## 待确认的接入配置
 
@@ -18,7 +18,7 @@ CONVERSATION_LOGS_TOKEN=<独立随机值，至少32字符>
 ```dotenv
 CONVERSATION_LOGS_TOKEN=<与主站相同的值>
 OPERATIONS_CENTER_DATA_DIR=/app/data
-OPERATIONS_CENTER_IMAGE=ghcr.io/fjiangming/sub2api-extra:operations-center-dev
+OPERATIONS_CENTER_IMAGE=ghcr.io/fjiangming/sub2api-extra:operations-center-latest
 ```
 
 `operations-center` 主机名要求两个容器共享可解析的私有 Docker 网络；分开运行时，应先核查网络、服务名和已有挂载。主站 URL 仅允许 HTTPS 或私有 / loopback HTTP，不经系统代理、不跟随重定向。不要向公网额外开放采集端口。现有管理员登录 / SSO 和 CSRF 保护继续适用，采集 token 不具备管理员读取权限。
@@ -51,10 +51,12 @@ HTTP 每次真实 RoundTrip 独立保存，包括 TLS 指纹请求、账号切�
 
 保留期每分钟和入库时执行；容量按数据库 / WAL / SHM 实际占用及可用磁盘检查。淘汰为有界批次，不能保证立即回收所有 SQLite 文件空间。缩短保留期或选择淘汰会影响历史记录。管理员原文下载包含敏感内容；本功能不会额外记录管理员原文读取审计。
 
-## dev 发布与验收
+## 发布与验收
 
 主站 dev 推送触发 Fork Dev Release，单元 / race 测试、前端构建、五平台压缩包及 SHA-256 校验、双架构镜像运行验证通过后发布。GitHub Release 为三段数值版本，兼容原生更新器；镜像为 `ghcr.io/fjiangming/sub2api:<version>`，最新成功版本更新 `dev`、`latest`。主站更新来源、版本菜单和安装脚本均指向本 fork，旧上游缓存不会复用。
 
-本仓库 dev 推送触发 Operations Center Dev，只测试 / 发布运营中心：`ghcr.io/fjiangming/sub2api-extra:operations-center-dev`，另保留完整提交 SHA 的不可变标签 `operations-center-dev-<SHA>`；支持 linux/amd64 和 linux/arm64，不覆盖 main 的 `operations-center-latest`。
+本仓库 main 推送沿用 Docker images 流程，运行运营中心完整测试后构建原生 linux/amd64 和 linux/arm64 镜像，检查 SQLite、源码 revision、对话归档模块和导航资源，再发布 `ghcr.io/fjiangming/sub2api-extra:operations-center-latest`、`operations-center-main` 及 `operations-center-sha-<短SHA>`。不再维护本仓库独立 dev 分支或 dev 发布流程；主站仍保留其独立 dev 分支。
+
+主站左上角更新仅升级主站程序。运营中心需要按原 Compose 项目单独更新，保留完整原数据卷及归档 key；沿用 `operations-center-latest` 的部署无需切换镜像通道。新版运营中心即使尚未接入采集也会显示“对话日志”入口，实际保存仍需上面的连接 / token 配置和管理员启用策略。源代码发布不自动操作服务器。
 
 本地 `npm test`、`npm run check`；`npm run preview:conversations` 启动隔离的正式页面预览（默认 `http://127.0.0.1:19907/preview`），仅虚构数据和临时 SQLite。`npm run check:conversations-ui` 通过 Playwright 检查下载原字节、会话、排除保存 / 重载、XSS、退出清理及窄屏布局，可用 `PLAYWRIGHT_MODULE_PATH` / `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定已有运行时。

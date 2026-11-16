@@ -1,5 +1,15 @@
 # 个性化功能维护台账
 
+## 2026-11-16：对话日志迁入 main 并撤下 extra dev
+
+用户明确要求将运营中心的完整对话日志迁入 main，核对无功能遗漏后删除本仓库 dev。迁移保留 dev 的全部历史及前节所列源码、配置、13 项归档专项和正式页面验收脚本；与 origin/main 的现有基线整合，保留原 main 工作目录中的所有未提交维护记录、Demo、域名和其他项目改动。不连接、配置或部署服务器，不改计费和主站功能代码。
+
+- `.github/workflows/operations-center-dev.yml`：撤下独立 dev 发布流程；沿用 `.github/workflows/docker-publish.yml` 的 main 全量测试、双架构构建、SQLite / revision 和标准镜像发布，在原生运行验证中额外检查归档 / 脱敏模块可加载、对话导航及 JS / CSS 确实进入运营中心镜像，不改变其他服务的业务实现。
+- `operations-center/README.md`、`docs/conversation-logs.md`：统一为 main 和 `operations-center-latest` 常规通道，记录主站与运营中心分别更新、采集未配置时仍显示入口及保留原数据卷 / key；`.env.example` 和 Compose 原默认值已是该通道，无需额外变更。
+- 配套主站仅同步 `CONVERSATION_LOGS.md` 的运营中心说明链接到 extra main，并记录主站维护台账；保留主站 dev、采集实现和已发布版本，不重新发布功能包。
+
+迁移前核验：对 `origin/dev` 的 `src`、`public`、`tests`、`scripts`、依赖清单、`.env.example`、Compose 和 Dockerfile 做 Git 逐文件比较，全部一致；完整 **401 项测试通过、0 失败 / 跳过**，`npm run check`、工作流 YAML / 发布门禁核对及 diff 检查通过。正式页面 Chrome 的 1440 / 390 / 320 和系统深色偏好四组流程通过 Raw 字节下载、XSS、WebSocket、会话、筛选 / CSV、排除保存 / 刷新与退出清理；截图 `sub2api-conversation-browser-JBMetl` 已复核。只有 main 镜像实际发布并核对成功后，才删除本仓库的远端和本地 dev；历史镜像与原数据均保留。
+
 ## 2026-11-16：正式对话日志与 dev 发布
 
 用户确认 Demo，要求从主站重建后的 dev 正式开发、提交 / 推送并自动发布可拉取版本；本仓库在独立 `sub2api-extra-conversation-dev` worktree 从 origin/main b8c5f9c 创建配套 dev。原工作目录的其他脏改动和 Demo 保留。本次不连接、更新或部署服务器，不改资金和主站业务表。

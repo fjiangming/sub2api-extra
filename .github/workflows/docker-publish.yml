@@ -188,18 +188,28 @@ jobs:
         env:
           BUILD_DIGEST: ${{ steps.build.outputs.digest }}
           TARGET_ARCH: ${{ matrix.arch }}
+          TARGET_SERVICE: ${{ matrix.service }}
           EXPECTED_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
           image_ref="$REGISTRY/$IMAGE_NAME@$BUILD_DIGEST"
           docker run --rm --network none --read-only \
-            -e EXPECTED_ARCH="${TARGET_ARCH/amd64/x64}" --entrypoint node "$image_ref" -e '
+            -e EXPECTED_ARCH="${TARGET_ARCH/amd64/x64}" -e EXPECTED_SERVICE="$TARGET_SERVICE" --entrypoint node "$image_ref" -e '
               const assert = require("node:assert/strict");
               assert.equal(process.arch, process.env.EXPECTED_ARCH);
               if (require("node:fs").existsSync("node_modules/better-sqlite3")) {
                 const db = require("better-sqlite3")(":memory:");
                 assert.equal(db.prepare("SELECT 1 AS value").get().value, 1);
                 db.close();
+              }
+              if (process.env.EXPECTED_SERVICE === "operations-center") {
+                require("./src/conversation-log-store");
+                require("./src/services/conversation-redaction");
+                const fs = require("node:fs");
+                assert.match(fs.readFileSync("public/index.html", "utf8"), /data-view="conversations"/);
+                for (const file of ["public/conversation-logs-ui.js", "public/conversation-logs.css"]) {
+                  assert.ok(fs.existsSync(file), file + " missing from image");
+                }
               }
               console.log(process.version, process.arch, "runtime OK");
             '
