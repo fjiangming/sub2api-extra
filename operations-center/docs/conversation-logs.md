@@ -67,6 +67,47 @@ HTTP 每次真实 RoundTrip 独立保存，包括 TLS 指纹请求、账号切�
 
 保留期每分钟和入库时执行；容量按数据库 / WAL / SHM 实际占用及可用磁盘检查。淘汰为有界批次，不能保证立即回收所有 SQLite 文件空间。缩短保留期或选择淘汰会影响历史记录。管理员原文下载包含敏感内容；本功能不会额外记录管理员原文读取审计。
 
+## 日志推送
+
+在“对话日志 → 推送策略”保存 Webhook、S3 兼容存储和发送设置。推送独立于保存开关，默认关闭；当前采集器不需要修改或重新发行，无新增主站环境变量。仅升级运营中心并保留原数据卷 / `archive.key`。关闭采集不会阻止管理员推送已有历史，关闭推送则暂停队列。
+
+1. 配置接收目标，可同时启用两类目标。Webhook 使用 HTTPS URL 与可选 Bearer Token；S3 使用 Endpoint、Region、Bucket、对象前缀和静态 / 临时访问凭据，MinIO 等可选择 Path Style。Bucket 必须已存在，所用凭据需具备目标前缀的 PutObject 权限。
+2. 选择“脱敏副本”或“原文”。默认脱敏，不重新改写正文；所选副本不存在会跳过，处理异常的原文不会自动替代脱敏副本。原文可能包含敏感信息，须明确选择。用户排除和模型名单对历史 / 自动 / 重试任务同样生效，变更名单不会删除历史或撤回外部副本。
+3. 保存后可“测试连接”，仅发送 `sub2api.conversation.test.v1` 虚构诊断 envelope；S3 会留下 `test-*.json` 对象，不读取历史正文。
+4. 勾选“自动推送新日志”后，从此次开启之后的新归档开始。关闭期间的历史不自动补发；开启状态下进程重启会继续原扫描位置和持久任务。存量日志在“历史批量推送”按日期、模型 / 请求搜索、用户、Key、协议、完整性筛选，选择目标后预览、勾选确认并加入队列。每批最多 10,000 条日志，多目标各产生一个任务；已存在的相同任务不重复新增。
+
+凭据与独立推送策略保存在原归档 SQLite 的 AES-GCM 加密表内，管理员 API 仅返回“已设置”。输入留空保留原凭据；清除须勾选清除选项。S3 Session Token 可单独清除，Access / Secret Key 可独立填写新值；清除全部凭据前需关闭 S3 目标（如果是唯一目标，同时关闭推送）。策略版本冲突须重新读取。目标变更后旧任务不会转发到新地址，副本更新后旧任务不会偷偷改发新版；需按新策略重新预览创建批次。
+
+公网目标要求 HTTPS；私网 / loopback 和 HTTP 需要显式勾选“允许私有网络目标 / HTTP”。每次实际发送重新解析并检查所有 DNS 地址，固定本次连接 IP；链路本地 / 云元数据、组播和未指定地址始终禁止，不跟随 HTTP 或 S3 重定向。URL 不含鉴权、查询参数或 fragment，Webhook 鉴权放入专用 Token 字段。没有使用环境代理或 AWS 默认凭据链。
+
+原 SQLite 内的队列仅保存正文引用和任务状态，不复制正文、不建立明文临时文件，不向采集请求内发送外部网络请求。串行后台 worker 有超时、有限指数退避、队列上限与租约恢复。网络故障、408、429、5xx 自动重试，其他 4xx / 重定向 / 禁止地址停止；可以在推送记录手动重试失败任务，使用原幂等标识。队列满时自动扫描停在未排队位置，腾出空间后续扫；原日志仍可能先被原保留期 / 容量策略淘汰，过期记录和关联任务会一并清理，不能将本功能当成无限期备份。
+
+批次取消只取消未完成任务。配置 / 采集名单变化和正常退出会中止在途发送，但已发出的字节不能撤回；目标可能已接收而回执丢失，因此是**至少一次**投递。Webhook 接收端必须按 `Idempotency-Key` 去重，同一任务重试时该值和 `delivery_id` 保持相同。S3 固定对象名为 `<prefix>/<UTC日期>/<delivery_id>.json`，同任务重试覆盖同一 key；开启版本控制的 Bucket 仍可能保留多个对象版本。关闭运营中心或进程异常后的未知送达会沿用原标识重试，不承诺恰好一次。
+
+外部副本的访问控制、保留期、删除和加密由接收系统负责；本地淘汰或用户排除不会远程删除已送达对象。Webhook 仅以 2xx、S3 以成功 PutObject 回执确认送达，不检查下游是否已完成入库或后续处理。目标返回正文和原始错误不会落入任务表，只保存固定错误码与 HTTP 状态。
+
+### 接收格式
+
+Webhook POST 与 S3 JSON 对象使用相同 envelope：
+
+```json
+{
+  "schema": "sub2api.conversation.v1",
+  "delivery_id": "<稳定的64位十六进制任务ID>",
+  "source": "masked",
+  "metadata": { "id": "<归档ID>", "model": "gpt-6-astra", "at": 1700000000000, "encoding": "", "complete": true },
+  "body_encoding": "base64",
+  "request": "<Request字节的base64>",
+  "response": "<Response字节的base64>",
+  "frames": [],
+  "checksums": { "request": { "bytes": 0, "sha256": "<摘要>" }, "response": { "bytes": 0, "sha256": "<摘要>" }, "frames": [] }
+}
+```
+
+`metadata` 包含原归档的用户 / Key / 上游账号、请求 / 会话、协议 / Host / path、采集策略 / 完整性 / 处理异常等字段。Request / Response 是原已保存副本的完整字节，未解析重排 JSON；base64 解码后数值拼写、空格、未知字段和 SSE 包装保持。原文 `encoding` 保留响应压缩标识，脱敏副本为已处理的 UTF-8 字节。WebSocket `frames` 逐项保留 `direction`、`at`、`binary` 和 base64 `body`，校验数组与消息一一对应。示例省略其余元数据，`bytes` 和摘要由真实内容计算。
+
+管理员接口均位于 `/api/conversation-logs/push`，需要现有管理员会话，写请求还需 CSRF；采集令牌不能访问。策略 `GET/PUT /policy`，状态分页 `GET /jobs`，历史 `POST /preview` → `POST /batches`，批次 `GET /batches/:id` / `POST /batches/:id/cancel`，单任务 `POST /jobs/:id/retry`，诊断 `POST /test/:destination`。批次提交使用客户端 UUID 和预览 token，相同 UUID / 参数重复提交返回原批次；策略 / 内容版本改变须重新预览。没有新增公开正文下载端点。
+
 ## 发布与验收
 
 大正文初次仅加载前 64K 字符的文本预览，不重复携带整段 base64；“查看完整”按钮按需展开，复制与下载始终读取完整内容。预览不改变保存正文、原始字节、SHA-256、脱敏规则或排除名单。邮箱规则按 `@` 定位并从固定位置校验域名，流式替换统一拼接，避免长文本和大量替换阻塞运营中心。
@@ -78,3 +119,5 @@ HTTP 每次真实 RoundTrip 独立保存，包括 TLS 指纹请求、账号切�
 主站左上角更新仅升级主站程序。运营中心需要按原 Compose 项目单独更新，保留完整原数据卷及归档 key；沿用 `operations-center-latest` 的部署无需切换镜像通道。新版运营中心即使尚未接入采集也会显示“对话日志”入口，实际保存仍需上面的连接 / token 配置和管理员启用策略。源代码发布不自动操作服务器。
 
 本地 `npm test`、`npm run check`；`npm run preview:conversations` 启动隔离的正式页面预览（默认 `http://127.0.0.1:19907/preview`），仅虚构数据和临时 SQLite。`npm run check:conversations-ui` 通过 Playwright 检查下载原字节、会话、排除与模型配置保存 / 重载、名单外零新增、空名单 / Kimi 范围、XSS、退出清理及窄屏布局，可用 `PLAYWRIGHT_MODULE_PATH` / `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定已有运行时。
+
+`npm run check:conversation-push-ui` 额外用 loopback 接收器验证 Webhook / S3 签名、诊断、自动 / 历史 / 去重、失败 / 重试、凭据留空和离开 / 退出清理，覆盖 1440 / 390 / 320px 及系统深色；不会发送生产正文或连接真实存储。发布前仍需原有 CI / 原生镜像运行检查，源码和本地测试通过不等于已发布或部署。

@@ -4,8 +4,10 @@ const express = require('express');
 const { fixture,event } = require('../tests/conversation-logs-fixture');
 const { AuthService } = require('../src/auth');
 const { createApp } = require('../src/app');
+const { ConversationPushStore } = require('../src/conversation-push-store');
+const { ConversationPushService } = require('../src/services/conversation-push-service');
 
-async function startPreview({port = Number(process.env.CONVERSATION_PREVIEW_PORT || 19907)} = {}) {
+async function startPreview({port = Number(process.env.CONVERSATION_PREVIEW_PORT || 19907),pushTransport} = {}) {
   const f = fixture();
   const at = Date.now();
   for (let index = 0; index < 35; index++) f.store.ingest(event('sample-' + index,{at:at - 60000 - index * 1000,user_id:index % 3 + 2,key_id:(index % 3 + 2) * 10,...(index === 3 ? {complete:false,reason:'closed_early'} : {})}));
@@ -18,7 +20,8 @@ async function startPreview({port = Number(process.env.CONVERSATION_PREVIEW_PORT
   ]}));
   f.store.collectorPolicy();
   const auth = new AuthService(f.config);
-  const app = createApp({config:f.config,auth,database:{},conversations:f.store,messages:f.messages,settings:{getStatus:() => ({setupRequired:false})}});
+  const push = new ConversationPushService(new ConversationPushStore(f.store).initialize(),pushTransport?{transport:pushTransport}:{});
+  const app = createApp({config:f.config,auth,database:{},conversations:f.store,conversationPush:push,messages:f.messages,settings:{getStatus:() => ({setupRequired:false})}});
   const outer = express();
   outer.get('/preview',async (req,res,next) => { try { await auth.login(req,res,{username:f.config.adminUser,password:f.config.adminPassword}); res.redirect('/#conversations'); } catch(error) { next(error); } });
   outer.use(app);
@@ -27,8 +30,9 @@ async function startPreview({port = Number(process.env.CONVERSATION_PREVIEW_PORT
     try { server = await new Promise((resolve,reject) => { const value = outer.listen({host:'127.0.0.1',port,exclusive:true},() => resolve(value)); value.once('error',reject); }); }
     catch(error) { if (error.code !== 'EADDRINUSE') { auth.close(); f.close(); throw error; } port++; }
   }
+  push.start();
   let stopped = false;
-  return {port:server.address().port,fixture:f,raw,async stop() { if (stopped) return; stopped = true; auth.close(); await new Promise(resolve => server.close(resolve)); f.close(); }};
+  return {port:server.address().port,fixture:f,push,raw,async stop() { if (stopped) return; stopped = true; await push.stop();auth.close(); await new Promise(resolve => server.close(resolve)); f.close(); }};
 }
 if (require.main === module) startPreview().then(preview => {
   console.log(`Conversation archive formal-page preview (fictional local data): http://127.0.0.1:${preview.port}/preview`);

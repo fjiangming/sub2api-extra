@@ -38,6 +38,8 @@ const { DomainAccessStore } = require('./domain-access-store');
 const { DomainAccessSource } = require('./services/domain-access-source');
 const { DomainAccessService } = require('./services/domain-access-service');
 const { ConversationLogStore } = require('./conversation-log-store');
+const { ConversationPushStore } = require('./conversation-push-store');
+const { ConversationPushService } = require('./services/conversation-push-service');
 
 async function main() {
   const settingsStore = new RuntimeSettingsStore(resolveDataDir());
@@ -47,6 +49,11 @@ async function main() {
   const conversationStore = new ConversationLogStore(config.dataDir, { timezone: config.sub2apiTimezone });
   try { conversations = conversationStore.initialize(); }
   catch { conversationStore.close(); console.warn('conversation archive unavailable: CONVERSATION_INITIALIZATION_FAILED'); }
+  let conversationPush = null;
+  if (conversations) {
+    try { conversationPush = new ConversationPushService(new ConversationPushStore(conversations).initialize()); }
+    catch { console.warn('conversation push unavailable: CONVERSATION_PUSH_INITIALIZATION_FAILED'); }
+  }
   const database = createDatabase(config);
   const sub2api = new Sub2ApiClient(config);
   const providerMonitor = new ProviderMonitorClient(config);
@@ -126,7 +133,7 @@ async function main() {
     sub2api
   });
   const app = createApp({
-    config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
+    config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationPush, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
   });
   const server = http.createServer(app);
   server.requestTimeout = 120000;
@@ -144,6 +151,7 @@ async function main() {
   billingRecovery.start();
   domainAccess?.start();
   conversations?.start();
+  conversationPush?.start();
   console.info(`operations-center listening on http://${config.bindHost}:${config.port}`);
 
   let stopping = false;
@@ -152,6 +160,7 @@ async function main() {
     stopping = true;
     console.info(`operations-center shutting down (${signal})`);
     scheduler.stop();
+    await conversationPush?.stop();
     await domainAccess?.stop();
     await dailyProfit.stop();
     await cashFlow.stop();

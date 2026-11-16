@@ -1,5 +1,24 @@
 # 个性化功能维护台账
 
+## 2026-11-16：对话日志推送策略
+
+用户确认在指定模型采集完成后继续开发外部推送，首版同时支持 Webhook、S3 兼容存储、自动新日志与手动历史批量。只修改 extra main 的运营中心，不修改或重新发行 sub2api；推送独立配置、默认关闭，不使用真实生产正文或凭据测试，不部署服务器。
+
+- `operations-center/src/services/conversation-push-policy.js`、`src/conversation-push-store.js`（新增）：独立加密策略、凭据只写不回显、版本 CAS，原 SQLite 内增加引用队列 / 自动到达序号 / 批次与租约。任务不复制正文；历史预览绑定当前策略和内容版本，UUID 幂等提交、容量限制、重试 / 取消 / 过期清理。发送前重新检查用户排除、模型名单、目标和副本；脱敏不可用不回退推送原文。
+- `operations-center/src/services/conversation-push-transport.js`、`conversation-push-service.js`（新增）：后台串行发送 Webhook / AWS SDK S3、稳定幂等键 / 对象名、超时中止、重试与固定错误码；DNS 每次校验并固定连接地址，不跟随重定向。私网须显式启用，元数据 / 链路本地地址始终阻断；停止与配置变化中止未完成发送。
+- `operations-center/package.json`、`package-lock.json`：固定新增 AWS S3 SDK、Smithy HTTP handler 和 ipaddr.js 依赖，适配现有 Node 20+ / 生产 Node 22。
+
+- `operations-center/src/app.js`、`src/server.js`：现有管理员 / CSRF 边界接入策略、状态、批次预览 / 创建 / 查询 / 取消、失败重试和虚构连接测试；后台启动，关闭归档前中止并等待发送。采集策略变更同步中止在途请求，采集令牌不具管理员权限。
+- `operations-center/public/conversation-push-ui.js`（新增）、`conversation-logs-ui.js`、`conversation-logs.css`、`index.html`：增加推送策略 tab，双目标配置、凭据状态 / 清除、发送设置、历史筛选 / 预览 / 显式确认、任务分页 / 状态 / 重试与批次取消。后台刷新不覆盖未保存草稿，离开 / 退出清空凭据并忽略迟到响应，复用既有图标与明暗主题，更新静态版本。
+- `operations-center/tests/conversation-push.test.js`、`scripts/conversation-push-browser-check.cjs`（新增）、`scripts/conversation-logs-live-preview.cjs`：隔离 SQLite / loopback 验证加密 / CAS / 幂等、自动序号 / 重启 / 保留清理、当前用户 / 模型复核、原字节 / gzip / WS、队列上限、租约 / 迟到回执、SDK 签名 / 目标检查 / 超时 / 重定向、认证 / CSRF，以及桌面 / 手机 / 窄屏 / 深色的真实页面操作；演示接入同套正式推送服务，仅虚构数据。
+- `operations-center/package.json`、`README.md`、`docs/conversation-logs.md`：新增语法与浏览器检查入口，记录接收 envelope、开启步骤、重试 / 关闭 / 取消 / 至少一次及外部保留边界。
+
+本地验证完成：完整运营中心 **431 项测试通过、0 失败 / 跳过**，`npm run check`、差异空白检查通过；最后的原子初始化调整另跑 14 项推送专项全部通过。推送及原归档两套 Chrome 回归各覆盖 1440 / 390 / 320px / 深色四组，包含真实 loopback Webhook / S3 协议发送、虚构诊断、自动与历史、重复提交、失败重试、凭据不回显 / 离开清除，以及既有原字节 / WS / 模型 / 排除 / 异常重处理。检查截图后修正源选择标签折行及窄屏筛选下拉框高度；最终截图 `sub2api-push-browser-7cIKmT`、原归档 `sub2api-conversation-browser-rNobtv` 已复核。预览只读元数据与严格递增处理时间，不扫描正文 BLOB；空闲游标不重复写同一值，初始化在事务中完成。额外覆盖虚拟主机式 S3 的实际 Bucket 域名及不可信错误 XML 的固定分类，临时 Session Token 可独立清除。
+
+独立正式页面预览 `http://127.0.0.1:19917/preview` 已启动（仅本机 / 虚构数据、临时 SQLite，推送默认关闭），不替换原 19907 预览。生产现有 sub2api 及模型采集策略无需改变。没有实际第三方存储验收、Docker 构建或 Linux CI；未提交、推送、发布、部署或向真实外部接口发送数据。新增依赖没有引入 audit 告警，npm 报出的 body-parser / qs / zod 三项均在原 HEAD 锁文件中已存在，未混入无关依赖升级。保留此前独立维护台账及所有无关文件。
+
+用户随后明确要求提交 GitHub。本次仅提交上述推送功能、依赖、界面、测试、说明和本节台账至 `fjiangming/sub2api-extra` 的 `main`；已有未提交维护章节、其他模块 / 域名配置与无关文件保留本地。推送前 fetch 核对远端，沿用现有 Actions 测试及双架构 GHCR 自动构建；以本次完整提交 SHA 核验构建和正式镜像，不修改或发行 sub2api，不部署服务器、不配置真实推送目标。
+
 ## 2026-11-16：对话日志指定模型采集
 
 用户要求配置记录的模型，名单外不保存，确认 Kimi K3 及后续版本均包含；要求先完成本功能，再开发外部日志推送策略。沿用 extra main / 主站 dev，保留无关本地改动、用户排除、加密 key、历史、容量 / 脱敏规则与计费契约。

@@ -23,7 +23,9 @@
     "postcheck": "npm run check:request-errors && npm run check:domain-access && npm run check:conversations",
     "preview:conversations": "node scripts/conversation-logs-live-preview.cjs",
     "check:conversations-ui": "node scripts/conversation-logs-live-browser-check.cjs",
-    "check:conversations": "node --check src/conversation-log-store.js && node --check src/services/conversation-models.js && node --check src/services/conversation-redaction.js && node --check public/conversation-logs-ui.js && node --check tests/conversation-logs-fixture.js && node --check tests/conversation-logs.test.js && node --check tests/conversation-models.test.js && node --check scripts/conversation-logs-live-preview.cjs && node --check scripts/conversation-logs-live-browser-check.cjs",
+    "check:conversations": "node --check src/conversation-log-store.js && node --check src/services/conversation-models.js && node --check src/services/conversation-redaction.js && node --check public/conversation-logs-ui.js && node --check tests/conversation-logs-fixture.js && node --check tests/conversation-logs.test.js && node --check tests/conversation-models.test.js && node --check scripts/conversation-logs-live-preview.cjs && node --check scripts/conversation-logs-live-browser-check.cjs && npm run check:conversation-push",
+    "check:conversation-push": "node --check src/services/conversation-push-policy.js && node --check src/conversation-push-store.js && node --check src/services/conversation-push-transport.js && node --check src/services/conversation-push-service.js && node --check public/conversation-push-ui.js && node --check tests/conversation-push.test.js && node --check scripts/conversation-push-browser-check.cjs",
+    "check:conversation-push-ui": "node scripts/conversation-push-browser-check.cjs",
     "test": "node --test --test-concurrency=1 tests/*.test.js",
     "check": "node --check src/server.js && node --check src/user-message-store.js && node --check src/services/user-messages-service.js && node --check src/services/user-profiles-service.js && node --check src/latency-telemetry-store.js && node --check src/services/latency-service.js && node --check integrations/collector.cjs && node --check integrations/sub2api/install.cjs && node --check scripts/latency-preview.cjs && node --check public/latency-ui.js && node --check public/user-messages-ui.js && node --check public/user-profiles-ui.js && node --check public/cost-analysis-ui.js && node --check public/app.js && node --check src/billing-recovery-store.js && node --check src/services/billing-recovery-usage.js && node --check src/services/billing-recovery-service.js && node --check public/billing-recovery-ui.js && node --check src/billing-import-store.js && node --check src/services/billing-import-csv.js && node --check src/services/billing-import-source.js && node --check src/services/billing-import-matcher.js && node --check src/services/billing-import-logs.js && node --check scripts/billing-import-replay.cjs && node --check src/services/billing-import-service.js && node --check public/billing-import-ui.js && node --check scripts/billing-import-preview.cjs && node --check scripts/billing-import-browser-check.cjs"
   },
@@ -31,6 +33,8 @@
     "node": ">=20.18.1"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1169.0",
+    "@smithy/node-http-handler": "4.14.2",
     "better-sqlite3": "^12.11.1",
     "csv-parse": "^7.0.3",
     "decimal.js": "^10.6.0",
@@ -39,6 +43,7 @@
     "express": "^5.1.0",
     "express-rate-limit": "^8.1.0",
     "helmet": "^8.1.0",
+    "ipaddr.js": "2.5.0",
     "lucide": "^0.544.0",
     "luxon": "^3.7.2",
     "marked": "^18.1.1",
