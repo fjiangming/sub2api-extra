@@ -34,7 +34,7 @@ async function createService(t, rows = [], balance = { user_balance: '0', balanc
   return { service, store, queries };
 }
 
-test('real SQL excludes subsidy prefixes consistently in legacy reports, user totals and record drilldowns', async t => {
+test('real SQL excludes subsidy mentions anywhere consistently in legacy reports, user totals and record drilldowns', async t => {
   const database = new PGlite(); t.after(() => database.close());
   await database.exec(`CREATE TABLE users(id bigint PRIMARY KEY,email text,username text,deleted_at timestamptz,balance numeric);
     CREATE TABLE redeem_codes(id bigint,used_by bigint,type text,status text,value numeric,used_at timestamptz,code text,notes text,created_at timestamptz);
@@ -42,10 +42,14 @@ test('real SQL excludes subsidy prefixes consistently in legacy reports, user to
     INSERT INTO redeem_codes VALUES
       (1,2,'balance','used',100,'2026-10-02','paid-100',NULL,'2026-10-01'),
       (2,2,'balance','used',50,'2026-10-02','subsidy-50','[补贴] 故障补偿','2026-10-01'),
-      (3,2,'admin_balance','used',5,'2026-10-02','subsidy-5','[补贴] 管理员补发','2026-10-01'),
+      (3,2,'admin_balance','used',5,'2026-10-02','subsidy-5','管理员补贴说明','2026-10-01'),
       (4,2,'admin_balance','used',-5,'2026-10-02','correction-5','','2026-10-01'),
-      (5,2,'balance','used',10,'2026-10-02','paid-10','正常充值，不含[补贴]','2026-10-01'),
-      (6,2,'balance','used',1,'2026-10-02','paid-1','[补贴说明] 正常充值','2026-10-01');`);
+      (5,2,'balance','used',10,'2026-10-02','paid-10','正常充值','2026-10-01'),
+      (6,2,'balance','used',1,'2026-10-02','paid-1','','2026-10-01'),
+      (7,2,'balance','used',1000,'2026-10-02','subsidy-end','充值补贴','2026-10-01'),
+      (8,2,'balance','used',1000,'2026-10-02','subsidy-start','补贴说明','2026-10-01'),
+      (9,2,'balance','used',1000,'2026-10-02','subsidy-negation','本单不含[补贴]','2026-10-01'),
+      (10,2,'admin_balance','used',1000,'2026-10-02','subsidy-brackets','[补贴说明] 正常充值','2026-10-01');`);
   const { service } = await createService(t, [], undefined, async (sql, params) => (await database.query(sql, params)).rows);
   const range = { start: '2026-10-01', end: '2026-10-31', include_consumption: '0' };
   const report = await service.getReport(range);

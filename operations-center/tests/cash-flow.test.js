@@ -67,13 +67,18 @@ test('activity rewards are gifts and cannot create automatic cash income', async
   assert.equal((await f.service.creditUsers(f.query)).summary.totalIncome, 120);
 });
 
-test('subsidy prefixes exclude balance and admin credits from income and recharge drilldowns without altering source records', async t => {
+test('subsidy mentions anywhere exclude balance and admin credits from income and recharge drilldowns without altering source records', async t => {
   const f = fixture(t); f.source.payments = [];
   f.source.credits = [credit({ value: '100', notes: null }),
     credit({ id: '2', value: '50', notes: '[补贴] 故障补偿' }),
     credit({ id: '3', type: 'admin_balance', value: '5', notes: '[补贴] 管理员补发' }),
     credit({ id: '4', type: 'admin_balance', value: '-5', notes: '[补贴] 补贴纠错' }),
-    credit({ id: '5', value: '20', notes: '正常充值，不含[补贴]' })];
+    credit({ id: '5', value: '20', notes: '正常充值' }),
+    credit({ id: '6', value: '20', notes: '故障补贴说明' }),
+    credit({ id: '7', type: 'admin_balance', value: '10', notes: '余额补贴' }),
+    credit({ id: '8', value: '10', notes: '[补贴说明] 额外赠送' }),
+    credit({ id: '9', value: '10', notes: '本单不含补贴' }),
+    credit({ id: '10', value: '5', notes: '补贴说明' })];
   const report = await f.service.getReport(f.query);
   assert.equal(report.summary.income, 120); assert.equal(report.cumulative.income, 120);
   assert.equal(report.items.length, 2);
@@ -90,7 +95,7 @@ test('subsidy prefixes exclude balance and admin credits from income and recharg
 
 test('linked payments and old receipt decisions cannot restore subsidized income after exclusion or restart', async t => {
   const f = fixture(t);
-  f.source.credits = [credit({ notes: '[补贴] 故障补偿' }),credit({ id: '2', value: '100' })];
+  f.source.credits = [credit({ notes: '管理员发放的故障补贴' }),credit({ id: '2', value: '100' })];
   let report = await f.service.getReport(f.query);
   assert.equal(report.summary.income, 100);
   assert.equal(report.items.find(row => row.key === 'payment:1').counted, false);
@@ -102,7 +107,7 @@ test('linked payments and old receipt decisions cannot restore subsidized income
   report = await f.service.getReport(f.query);
   assert.equal(report.summary.income, 100); assert.equal(report.cumulative.income, 100);
   assert.equal((await f.service.creditUsers(f.query)).summary.totalIncome, 100);
-  assert.equal(f.store.document('redeem:1').note, '[补贴] 故障补偿');
+  assert.equal(f.store.document('redeem:1').note, '管理员发放的故障补贴');
 });
 
 test('linked orders use redemption value and date once while unlinked actual subscription payments remain income', async t => {

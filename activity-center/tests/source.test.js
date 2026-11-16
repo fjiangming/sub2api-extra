@@ -90,18 +90,20 @@ test('reward redemptions cannot fund further draws and negative adjustments reta
   assert.equal((await f.lottery.summary(USER.id)).available,1);
 });
 
-test('subsidy prefixes cannot grant chances or unlock higher prizes while normal notes still count', async t => {
+test('subsidy mentions anywhere cannot grant chances or unlock higher prizes while normal notes still count', async t => {
   const f = fixture(t,{ storeOptions: { now: () => Date.parse('2026-11-01T00:00:00Z'),rng: () => 9999 } });
   const db = await database(t);
   f.lottery.source = new RechargeSource(f.config,{ pool: db });
-  await credit(db,{ value: '49.99',notes: '正常充值，不含[补贴]' });
-  await credit(db,{ value: '5000',notes: '[补贴] 故障补偿' });
-  await credit(db,{ type: 'admin_balance',value: '2000',notes: '[补贴] 管理员补发' });
+  await credit(db,{ value: '49.99',notes: '正常充值' });
+  await credit(db,{ value: '5000',notes: '系统补贴到账' });
+  await credit(db,{ type: 'admin_balance',value: '2000',notes: '余额补贴' });
   await credit(db,{ type: 'admin_balance',value: '-5',notes: '[补贴] 补贴纠错' });
+  await credit(db,{ value: '50',notes: '[补贴说明] 额外赠送' });
+  await credit(db,{ value: '100',notes: '本单不含补贴' });
   assert.equal(await f.lottery.source.total(USER.id,f.store.campaign.start_at),4999);
   assert.equal((await f.lottery.summary(USER.id)).available,0);
   await assert.rejects(f.lottery.draw(USER,crypto.randomUUID(),1),{ code: 'CHANCES_INSUFFICIENT' });
-  await credit(db,{ value: '0.01',notes: '[补贴说明] 正常充值' });
+  await credit(db,{ value: '0.01',notes: '' });
   assert.equal((await f.lottery.summary(USER.id)).available,1);
   const batch = await f.lottery.draw(USER,crypto.randomUUID(),1);
   assert.equal(batch.rewards[0].amountMinor,500);

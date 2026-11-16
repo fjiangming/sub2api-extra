@@ -10,7 +10,7 @@ FROM redeem_codes r
 WHERE r.used_by = $1::bigint AND r.used_by IS DISTINCT FROM 1
   AND r.status = 'used' AND r.type IN ('balance', 'admin_balance')
   AND r.used_at >= $2::timestamptz AND r.used_at <= CURRENT_TIMESTAMP
-  AND COALESCE(r.notes, '') NOT LIKE '[补贴]%'
+  AND COALESCE(r.notes, '') NOT LIKE '%补贴%'
   AND NOT (r.type = 'balance' AND COALESCE(r.code, '') ~ '^AC-[a-f0-9]{48}$'
     AND COALESCE(r.notes, '') ~ '^活动奖励; activity=recharge-lottery; reward=[a-f0-9-]{36}; batch=[a-f0-9-]{36}$')`;
 

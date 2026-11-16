@@ -1,5 +1,16 @@
 # 个性化功能维护台账
 
+## 2026-11-17：补贴备注改为包含匹配
+
+用户要求将原 `[补贴]` 前缀改为备注任意位置包含连续“补贴”二字即排除，修改后提交 GitHub；无须方括号或固定位置。活动中心与运营中心统一按字面包含匹配，原到账余额、兑换明细、活动起点与已用次数保留。
+
+- `activity-center/src/recharge-source.js`、`operations-center/src/services/cost-analysis-service.js`：SQL 改为排除 `%补贴%`，管理员口径说明同步；空备注正常处理。
+- `operations-center/src/services/recharge-credit.js`：核算及现金统计共用识别改为 `includes('补贴')`，关联订单防重、零现金价值及用户下钻沿用原路径。
+- `activity-center/tests/source.test.js`、`operations-center/tests/cash-flow.test.js`、`tests/cost-analysis-service.test.js`：调整实际 PostgreSQL / 抽奖 / 现金 / 核算回归数据，覆盖开头、中间、末尾、带括号、相似括号及否定语境的字面匹配；确认正常 / 空 / NULL 备注仍计入，补贴不增加次数或高额奖品资格，关联支付与重启不恢复其收入。
+- `activity-center/README.md`、`operations-center/docs/cost-accounting.md`、`docs/cost-analysis.md`：更新备注匹配说明与示例。
+
+本地活动中心 **43 项**、运营中心完整 **460 项**测试全部通过，共 **503 项，0 失败 / 跳过**；两模块语法检查及相关差异空白检查通过。验证覆盖真实 PostgreSQL 的包含筛选、抽奖次数和奖品资格、充值 / 自动收入 / 下钻一致及关联订单重启防回填。仅提交本节与本轮相关文件；GitHub 构建结果完成后补记，本轮不部署服务器，保留其他独立改动。
+
 ## 2026-11-17：按备注前缀排除补贴并提交 GitHub
 
 用户确认最简方案并授权验证后提交 GitHub：补贴独立生成兑换记录，备注以精确 `[补贴]` 前缀开头，正常到账但不计充值。原有活动奖励双标识排除继续保留，普通备注中间提及补贴不触发排除；不新增数据库字段、开关或用户页规则说明。
