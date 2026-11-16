@@ -17,6 +17,7 @@ async function main() {
       const context = await browser.newContext({viewport:{width,height},colorScheme,acceptDownloads:true});
       try {
         const page = await context.newPage(), errors = [], external = [];
+        await page.addInitScript(() => { Object.defineProperty(navigator,'clipboard',{value:{writeText:async text => { window.conversationCopiedText = text; }}}); });
         page.on('pageerror',error => errors.push(error.message));
         page.on('request',request => { if (!request.url().startsWith(`http://127.0.0.1:${preview.port}/`) && !/^(?:blob:|data:)/.test(request.url())) external.push(request.url()); });
         const layout = async () => {
@@ -58,6 +59,25 @@ async function main() {
         await page.locator('[data-cl-action=clear-users]').click(); await page.locator('[data-cl-action=remove-rule]').click(); await page.locator('#cl-save').click();
         await page.waitForFunction(() => document.getElementById('cl-save')?.disabled === false && document.getElementById('cl-excluded-count')?.textContent.includes('0 位'));
         assert.deepEqual(preview.fixture.store.policy().excludedUserIds,[]);
+        const largeText = JSON.stringify({ content: 'a'.repeat(350000) + ' END_OF_FULL_RESPONSE' });
+        const large = event('large-' + name,{at:Date.now()+1000,request:preview.raw.request,response:Buffer.from(largeText).toString('base64'),policy_version:preview.fixture.store.policy().version});
+        assert.equal(preview.fixture.store.ingest(large).accepted,true);
+        await page.locator('#cl-tab-requests').click();
+        await page.locator(`[data-cl-record="${large.id}"]`).click();
+        await page.waitForFunction(() => document.getElementById('cl-body-response')?.textContent.length === 65536);
+        await page.locator('[data-cl-full=response]').waitFor({state:'visible'});
+        await page.locator('[data-cl-copy=response]').click();
+        await page.waitForFunction(() => window.conversationCopiedText?.includes('END_OF_FULL_RESPONSE'));
+        assert.equal(await page.evaluate(() => window.conversationCopiedText),largeText);
+        const fullDownloadEvent = page.waitForEvent('download'); await page.locator('[data-cl-download=response]').click();
+        const fullDownload = await fullDownloadEvent;
+        assert.deepEqual(fs.readFileSync(await fullDownload.path()),Buffer.from(largeText));
+        assert.equal((await page.locator('#cl-body-response').textContent()).length,65536);
+        await layout(); await page.screenshot({path:path.join(directory,name + '-large-preview.png'),fullPage:true});
+        await page.locator('[data-cl-full=response]').click();
+        await page.waitForFunction(() => document.getElementById('cl-body-response')?.textContent.includes('END_OF_FULL_RESPONSE'));
+        assert.equal(await page.locator('#cl-body-response').textContent(),largeText);
+        await page.locator('[data-cl-full=response]').waitFor({state:'hidden'});
         await page.locator('#logout-button').click(); await page.locator('#login-view').waitFor({state:'visible'});
         assert.equal(await page.locator('#cl-list [data-cl-record]').count(),0); assert.equal(await page.locator('#cl-inspector').innerText(),'选择一条请求查看原始请求与响应');
         assert.deepEqual(errors,[]); assert.deepEqual(external,[]);

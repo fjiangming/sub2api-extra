@@ -39,16 +39,16 @@
     }
     async function load() {
       const current = ++seq; controller?.abort(); controller = new AbortController(); const signal = controller.signal;
-      const next = await api('/api/conversation-logs/status', { signal }); if (current !== seq || !isActive()) return;
+      const [next, data] = await Promise.all([api('/api/conversation-logs/status', { signal }),
+        tab === 'requests' ? api(url('records'), { signal }) : tab === 'sessions' ? api(url('sessions'), { signal }) : null]);
+      if (current !== seq || !isActive()) return;
       status = next; overview();
       if (tab === 'policy') { if (!dirty && !saving) renderPolicy(status.policy); return; }
       if (tab === 'collection') { renderCollection(); return; }
       if (tab === 'sessions') {
-        const data = await api(url('sessions'), { signal }); if (current !== seq || !isActive()) return;
         $('sessions').innerHTML = `<div class="cl-section-heading"><h2>最近会话</h2><span>最多 100 个 · 仅包含有会话标识的请求</span></div>${data.items.length ? data.items.map(row => `<button class="cl-session" data-cl-session="${row.session_id}" data-user="${row.user_id}" data-key="${row.key_id}"><strong>用户 #${row.user_id} · Key #${row.key_id}</strong><span>${num(row.turns)} 次请求 / ${num(row.attempts)} 次尝试 · ${esc(time(row.last_at))}</span><code>${row.session_id}</code>${icon('arrow-up-right')}</button>`).join('') : empty('尚无可关联的会话记录')}`;
         refreshIcons(); return;
       }
-      const data = await api(url('records'), { signal }); if (current !== seq || !isActive()) return;
       report = data;
       $('list').innerHTML = data.items.length ? data.items.map(row => `<button class="cl-record" data-cl-record="${row.id}" aria-pressed="${detail?.id === row.id}"><div><strong>${esc(row.model || row.protocol)}</strong><span>${esc(time(row.at))}</span></div><p>用户 #${row.user_id} · ${esc(row.protocol)} · HTTP ${row.status || '—'}</p><code>${row.request_id.slice(0,20)}</code>${badge(row)}</button>`).join('') : empty('当前筛选下没有记录');
       $('page-label').textContent = `${num(data.summary.requests)} 次请求 / ${num(data.summary.total)} 次尝试 · ${page} / ${Math.max(1,data.pages)} 页`;
@@ -77,7 +77,7 @@
       $('source').addEventListener('change', () => { source = $('source').value; payloads.clear(); renderDetailBody(); if (detailTab === 'raw') run(() => loadBodies(detailSeq)); });
       renderDetailBody(); refreshIcons();
     }
-    function pane(side, title) { return `<section class="cl-body-pane"><header><strong>${esc(title)}</strong><span>RAW</span><div>${tool('copy','复制 ' + title,`data-cl-copy="${side}" disabled`)}${tool('download','下载 ' + title,`data-cl-download="${side}" disabled`)}</div></header><pre class="cl-raw" tabindex="0"><code id="cl-body-${side}">正在读取</code></pre><footer id="cl-info-${side}"></footer></section>`; }
+    function pane(side, title) { return `<section class="cl-body-pane"><header><strong>${esc(title)}</strong><span>RAW</span><div>${tool('maximize-2','查看完整 ' + title,`data-cl-full="${side}" hidden`)}${tool('copy','复制 ' + title,`data-cl-copy="${side}" disabled`)}${tool('download','下载 ' + title,`data-cl-download="${side}" disabled`)}</div></header><pre class="cl-raw" tabindex="0"><code id="cl-body-${side}">正在读取</code></pre><footer id="cl-info-${side}"></footer></section>`; }
     function renderDetailBody() {
       if (!detail) return;
       if (detailTab === 'raw') $('detail-body').innerHTML = `<div class="cl-bodies">${pane('request','Request')}${pane('response','Response')}</div>`;
@@ -85,14 +85,23 @@
       else $('detail-body').innerHTML = detail.hits.length ? `<div class="table-wrap"><table><thead><tr><th>规则</th><th>占位符</th><th>命中次数</th></tr></thead><tbody>${detail.hits.map(hit => `<tr><td>${esc(hit.name)}</td><td><code>${esc(hit.replacement)}</code></td><td>${hit.count}</td></tr>`).join('')}</tbody></table></div>` : empty(detail.reason === 'redaction_failed' ? '脱敏未通过，没有保存正文或命中值' : '此记录没有脱敏命中');
       refreshIcons();
     }
-    async function loadPayload(side, current) {
+    async function loadPayload(side, current, { full = false, raw = false, render = true } = {}) {
       if (!detail?.[source]) { const node = $('body-' + side); if (node) node.textContent = '此版本未保存'; return null; }
-      const requestedSource = source, requestedId = detail.id, key = source + ':' + side;
-      const data = payloads.get(key) || await api(`/api/conversation-logs/records/${requestedId}/payload/${side}?source=${requestedSource}`, { signal: detailController.signal });
+      const requestedSource = source, requestedId = detail.id, view = raw ? 'raw' : full ? 'text' : 'preview';
+      const prefix = requestedId + ':' + source + ':' + side + ':', key = prefix + view;
+      let pending = payloads.get(key) || (!raw && (payloads.get(prefix + 'raw') || payloads.get(prefix + 'text')));
+      if (!pending) {
+        pending = api(`/api/conversation-logs/records/${requestedId}/payload/${side}?source=${requestedSource}${raw ? '' : '&view=' + view}`, { signal: detailController.signal });
+        payloads.set(key, pending);
+      }
+      let data;
+      try { data = await pending; }
+      catch (error) { if (payloads.get(key) === pending) payloads.delete(key); throw error; }
       if (current !== detailSeq || !isActive() || tab !== 'requests' || source !== requestedSource || detail?.id !== requestedId) return null;
-      payloads.set(key, data);
+      if (!render) return data;
       const node = $('body-' + side); if (node) node.textContent = data.text ?? '二进制或不支持的编码，可下载原始字节';
-      const info = $('info-' + side); if (info) info.textContent = `${bytes(data.bytes)} · SHA-256 ${data.sha256}`;
+      const info = $('info-' + side); if (info) info.textContent = `${data.truncated ? '预览 · ' : ''}${bytes(data.bytes)} · SHA-256 ${data.sha256}`;
+      const expand = container.querySelector(`[data-cl-full="${side}"]`); if (expand) expand.hidden = !data.truncated;
       for (const button of container.querySelectorAll(`[data-cl-download="${side}"], [data-cl-copy="${side}"]`)) button.disabled = button.hasAttribute('data-cl-copy') && data.text === null;
       return data;
     }
@@ -169,7 +178,8 @@
       if (d.clSession) { sessionFilter = {session_id:d.clSession,user_id:d.user,key_id:d.key}; page = 1; return run(() => switchTab('requests')); }
       if (d.clDetail) { detailTab = d.clDetail; renderDetail(); if (detailTab === 'raw') run(() => loadBodies(detailSeq)); return; }
       if (d.clFrame !== undefined) { $('frame-view').innerHTML = pane('frame-' + d.clFrame,'消息 #' + (Number(d.clFrame)+1)); refreshIcons(); return run(() => loadPayload('frame-' + d.clFrame,detailSeq)); }
-      if (d.clCopy || d.clDownload) return run(async () => { const side = d.clCopy || d.clDownload, value = await loadPayload(side,detailSeq); if (!value) return; if (d.clCopy) { await navigator.clipboard.writeText(value.text); toast('已复制原始文本'); } else { const raw = Uint8Array.from(atob(value.base64),ch => ch.charCodeAt(0)); download(new Blob([raw]),`conversation-${detail.id}-${source}-${side}.raw`); } });
+      if (d.clFull) return run(() => loadPayload(d.clFull,detailSeq,{ full:true }));
+      if (d.clCopy || d.clDownload) return run(async () => { const side = d.clCopy || d.clDownload, value = await loadPayload(side,detailSeq,{ full:true,raw:Boolean(d.clDownload),render:false }); if (!value) return; if (d.clCopy) { await navigator.clipboard.writeText(value.text); toast('已复制原始文本'); } else { const raw = Uint8Array.from(atob(value.base64),ch => ch.charCodeAt(0)); download(new Blob([raw]),`conversation-${detail.id}-${source}-${side}.raw`); } });
       if (d.clRemoveUser) { excluded.delete(Number(d.clRemoveUser)); updateExcluded(); markDirty(); return; }
       const action = d.clAction;
       if (action === 'close-detail') clearDetail();

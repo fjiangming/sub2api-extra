@@ -5,12 +5,33 @@ const zlib = require('node:zlib');
 
 const protectedFields = new Set(['type', 'role', 'id', 'call_id', 'tool_call_id', 'tool_use_id', 'previous_response_id', 'item_id', 'name', 'model', 'signature', 'encrypted_content']);
 const secretField = /^(?:authorization|api[_-]?key|access_token|refresh_token|password|passwd|secret|client_secret|token)$/i;
+const emailLocal = /[A-Z0-9.!#$%&'*+/=?^_`{|}~-]/i;
+const emailDomain = /[A-Z0-9](?:[A-Z0-9.-]*[A-Z0-9])?\.[A-Z]{2,}/iy;
 const patterns = {
-  email: /[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9.-]*[A-Z0-9])?\.[A-Z]{2,}/gi,
   phone: /(?<![\w])\+?\d[\d ()-]{6,}\d(?![\w])/g,
   secret: /(?:\bsk-[A-Za-z0-9_-]{12,}|\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*|\bdemo_secret_[A-Za-z0-9_]+)/g,
   ip: /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g
 };
+
+function replaceEmails(text, replace) {
+  const parts = []; let cursor = 0, search = 0;
+  // Anchor domain checks at each @ so long non-email tokens are scanned once.
+  for (let at; (at = text.indexOf('@', search)) !== -1;) {
+    search = at + 1;
+    let start = at;
+    while (start > cursor && emailLocal.test(text[start - 1])) start--;
+    if (start === at) continue;
+    emailDomain.lastIndex = at + 1;
+    const domain = emailDomain.exec(text);
+    if (!domain) continue;
+    const end = emailDomain.lastIndex;
+    parts.push(text.slice(cursor, start), replace(text.slice(start, end)));
+    cursor = search = end;
+  }
+  if (!parts.length) return text;
+  parts.push(text.slice(cursor));
+  return parts.join('');
+}
 
 function decodeBody(buffer, encoding = '') {
   const options = { maxOutputLength: 32 * 1024 * 1024 };
@@ -78,7 +99,7 @@ function createRedactor(policy, salt) {
     return replacement;
   }
   function replace(value) {
-    let text = value;
+    let text = policy.email ? replaceEmails(value, match => placeholder('email', match)) : value;
     for (const [kind, pattern] of Object.entries(patterns)) if (policy[kind]) text = text.replace(pattern, match => {
       return placeholder(kind, match);
     });
@@ -149,7 +170,13 @@ function createRedactor(policy, salt) {
       }
     }
     return texts.map((text, file) => {
-      for (const edit of edits[file].sort((a, b) => b.start - a.start)) text = text.slice(0, edit.start) + JSON.stringify(edit.value) + text.slice(edit.end);
+      if (edits[file].length) {
+        const parts = []; let offset = 0;
+        for (const edit of edits[file].sort((a, b) => a.start - b.start)) {
+          parts.push(text.slice(offset, edit.start), JSON.stringify(edit.value)); offset = edit.end;
+        }
+        parts.push(text.slice(offset)); text = parts.join('');
+      }
       for (const document of documents(text)) JSON.parse(document.text);
       return text;
     });

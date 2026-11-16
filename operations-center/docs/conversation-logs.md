@@ -53,6 +53,8 @@ HTTP 每次真实 RoundTrip 独立保存，包括 TLS 指纹请求、账号切�
 
 ## 发布与验收
 
+大正文初次仅加载前 64K 字符的文本预览，不重复携带整段 base64；“查看完整”按钮按需展开，复制与下载始终读取完整内容。预览不改变保存正文、原始字节、SHA-256、脱敏规则或排除名单。邮箱规则按 `@` 定位并从固定位置校验域名，流式替换统一拼接，避免长文本和大量替换阻塞运营中心。
+
 主站 dev 推送触发 Fork Dev Release，单元 / race 测试、前端构建、五平台压缩包及 SHA-256 校验、双架构镜像运行验证通过后发布。GitHub Release 为三段数值版本，兼容原生更新器；镜像为 `ghcr.io/fjiangming/sub2api:<version>`，最新成功版本更新 `dev`、`latest`。主站更新来源、版本菜单和安装脚本均指向本 fork，旧上游缓存不会复用。
 
 本仓库 main 推送沿用 Docker images 流程，运行运营中心完整测试后构建原生 linux/amd64 和 linux/arm64 镜像，检查 SQLite、源码 revision、对话归档模块和导航资源，再发布 `ghcr.io/fjiangming/sub2api-extra:operations-center-latest`、`operations-center-main` 及 `operations-center-sha-<短SHA>`。不再维护本仓库独立 dev 分支或 dev 发布流程；主站仍保留其独立 dev 分支。
