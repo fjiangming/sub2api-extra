@@ -51,6 +51,21 @@ test('used balance redemptions restore automatic income without paid orders and 
   assert.throws(() => f.service.remove('redeem:1', 'admin'), { code: 'CASH_SOURCE_IMMUTABLE' });
 });
 
+test('activity rewards are gifts and cannot create automatic cash income', async t => {
+  const f = fixture(t); f.source.payments = [];
+  const code = 'AC-' + 'a'.repeat(48);
+  const notes = '活动奖励; activity=recharge-lottery; reward=11111111-1111-4111-8111-111111111111; batch=22222222-2222-4222-8222-222222222222';
+  f.source.credits = [credit({ id: '1', code, notes, value: '50' }), credit({ id: '2', value: '100' }),
+    credit({ id: '3', code: 'ordinary-paid', notes, value: '20' })];
+  const report = await f.service.getReport(f.query);
+  assert.equal(report.summary.income, 120);
+  assert.equal(report.cumulative.income, 120);
+  const gift = f.accounting.effectiveDocuments().find(d => d.key === 'redeem:1');
+  assert.equal(gift.kind, 'gift'); assert.equal(gift.cash, 0); assert.equal(gift.fundingValue, 0); assert.equal(gift.pending, false);
+  const users = await f.accounting.creditUsers({ start: '2026-10-01', end: '2026-10-31' });
+  assert.equal(users.summary.totalIncome, 120);
+});
+
 test('linked orders use redemption value and date once while unlinked actual subscription payments remain income', async t => {
   const f = fixture(t); f.source.payments = [payment({ paid_at: '2026-09-30T01:00:00+08:00' }), payment({ id: '2', order_type: 'subscription', amount: '199', redeem_ids: [] })];
   f.source.credits = [credit()];

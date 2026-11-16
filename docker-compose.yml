@@ -11,3 +11,4 @@ include:
   - ./video-adapter/compose.yaml
   - ./usage-leaderboard/compose.yaml
   - ./infinite-canvas/compose.yaml
+  - ./activity-center/compose.yaml

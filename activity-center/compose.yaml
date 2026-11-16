@@ -1,0 +1,46 @@
+services:
+  activity-center:
+    profiles: [activity-center]
+    image: ${ACTIVITY_CENTER_IMAGE:-ghcr.io/fjiangming/sub2api-extra:activity-center-latest}
+    build:
+      context: .
+    container_name: ${ACTIVITY_CENTER_CONTAINER_NAME:-sub2api-activity-center}
+    restart: ${ACTIVITY_CENTER_RESTART_POLICY:-unless-stopped}
+    ports:
+      - "127.0.0.1:${ACTIVITY_CENTER_PORT:-9878}:9878"
+    environment:
+      NODE_ENV: production
+      ACTIVITY_CENTER_BIND_HOST: "0.0.0.0"
+      ACTIVITY_CENTER_PORT: "9878"
+    env_file:
+      - path: ./.env
+        required: false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - activity-center-data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9878/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+volumes:
+  activity-center-data:
+    name: ${ACTIVITY_CENTER_DATA_VOLUME:-sub2api-extra_activity-center-data}

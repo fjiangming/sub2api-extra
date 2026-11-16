@@ -261,3 +261,7 @@ npm test
 ```
 
 不要把 `.env`、支付宝二维码、事件样本、SQLite 数据卷或任何监听/通知凭据提交到 Git。
+
+## 活动中心只读集成
+
+可选配置 `RECHARGE_CENTER_ACTIVITY_INTEGRATION_TOKEN`（独立随机值，至少 32 字符）后，活动中心可通过内部服务认证读取指定用户、指定起点后的人民币实付合计。接口为 `GET /api/integrations/activity-center/recharges?user_id=<id>&since=<UTC ISO timestamp>`，请求使用 Bearer 集成令牌；不接受普通登录会话或管理员浏览器会话替代令牌，未配置时始终拒绝。只返回整数分合计、用户 ID 和查询起点，不返回订单、邮箱或兑换码。仅认三种个人收款模式中已核验付款并完成原生入账的订单；官方支付模式由主站数据源读取，避免重复。此接口不改变原充值、核验或入账流程。详见 [活动中心](../activity-center/README.md)。

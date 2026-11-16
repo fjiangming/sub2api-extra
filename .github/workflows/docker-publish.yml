@@ -105,14 +105,32 @@ jobs:
         working-directory: usage-leaderboard
       - run: npm test
         working-directory: usage-leaderboard
+  test-activity-center:
+    name: Activity center lottery and reward accounting tests
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: activity-center/package-lock.json
+      - run: npm ci
+        working-directory: activity-center
+      - run: npm run check
+        working-directory: activity-center
+      - run: npm test
+        working-directory: activity-center
   build:
     name: Build ${{ matrix.service }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    needs: [test-operations-center, test-provider-monitor, test-recharge-center, test-video-adapter, test-usage-leaderboard]
+    needs: [test-operations-center, test-provider-monitor, test-recharge-center, test-video-adapter, test-usage-leaderboard, test-activity-center]
     strategy:
       fail-fast: false
       matrix:
-        service: [account-manager, provider-monitor, operations-center, degradation-detector, recharge-center, video-adapter, usage-leaderboard]
+        service: [account-manager, provider-monitor, operations-center, degradation-detector, recharge-center, video-adapter, usage-leaderboard, activity-center]
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -140,6 +158,9 @@ jobs:
           - service: usage-leaderboard
             context: ./usage-leaderboard
             tag_prefix: usage-leaderboard-
+          - service: activity-center
+            context: ./activity-center
+            tag_prefix: activity-center-
     permissions:
       contents: read
       packages: write
@@ -258,6 +279,8 @@ jobs:
             tag_prefix: video-adapter-
           - service: usage-leaderboard
             tag_prefix: usage-leaderboard-
+          - service: activity-center
+            tag_prefix: activity-center-
     permissions:
       contents: read
       packages: write

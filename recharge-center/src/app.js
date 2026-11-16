@@ -8,6 +8,7 @@ const rateLimit = require('express-rate-limit');
 const { z } = require('zod');
 const { AppError, asyncRoute, errorResponse } = require('./errors');
 const { clientContext, redactText } = require('./security');
+const { installActivityRecharges } = require('./activity-recharges');
 
 const loginSchema = z.object({
   email: z.string().trim().email().max(320),
@@ -228,6 +229,10 @@ function createApp({
   });
 
   const loginLimiter = limiter(10, 'LOGIN_RATE_LIMITED', '登录尝试过多，请稍后再试');
+  installActivityRecharges(app, { config, db }, rateLimit({
+    windowMs: 60000, limit: 6000, standardHeaders: 'draft-8', legacyHeaders: false,
+    message: { error: { code: 'INTEGRATION_RATE_LIMITED', message: '集成请求过于频繁' } }
+  }));
   const orderLimiter = limiter(20, 'ORDER_RATE_LIMITED', '订单操作过于频繁，请稍后再试');
   const qrLimiter = limiter(60, 'QR_RATE_LIMITED', '二维码读取过于频繁，请稍后再试');
   const relayLimiter = limiter(120, 'PAYMENT_RELAY_RATE_LIMITED', '付款入口访问过于频繁，请稍后再试');

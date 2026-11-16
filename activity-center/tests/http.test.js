@@ -1,0 +1,110 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const { AuthService } = require('../src/auth');
+const { createApp } = require('../src/app');
+const { AppError } = require('../src/errors');
+const { fixture, USER } = require('./fixtures');
+
+async function httpFixture(t) {
+  const f = fixture(t);
+  const roles = new Map([['user','user'],['admin','admin'],['other','user']]);
+  f.core.me = async token => {
+    if (!roles.has(token)) throw new AppError('AUTH_REJECTED','登录无效',401);
+    return { ...USER,id: token === 'other' ? '99' : token === 'admin' ? '1' : '42',role: roles.get(token) };
+  };
+  const auth = new AuthService(f.config,f.core,f.now);
+  const app = createApp({ config: f.config,auth,store: f.store,lottery: f.lottery });
+  const server = app.listen(0,'127.0.0.1');
+  await new Promise(resolve => server.once('listening',resolve));
+  const base = `http://127.0.0.1:${server.address().port}`; f.config.publicUrl = base;
+  t.after(async () => { auth.close(); await new Promise(resolve => server.close(resolve)); });
+  const call = (url,session,body,headers = {}) => fetch(`${base}/api/${url}`,{
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { 'user-agent': 'activity-test',origin: base,...(session ? { authorization: `Session ${session.sessionToken}`,'x-csrf-token': session.csrfToken } : {}),
+      ...(body !== undefined ? { 'content-type': 'application/json' } : {}),...headers }, body: body === undefined ? undefined : JSON.stringify(body)
+  });
+  const login = async token => {
+    const response = await call('auth/sso',null,{}, { authorization: `Bearer ${token}` }); assert.equal(response.status,200); return response.json();
+  };
+  return { ...f,auth,roles,base,call,login };
+}
+
+test('HTTP auth, same-origin SSO, CSRF, bounded input and no-cache security headers', async t => {
+  const f = await httpFixture(t);
+  assert.equal((await f.call('activities')).status,401);
+  assert.equal((await f.call('auth/sso',null,{}, { origin: 'https://evil.test',authorization: 'Bearer user' })).status,403);
+  const session = await f.login('user');
+  const registry = await f.call('activities',session);
+  assert.equal(registry.headers.get('cache-control'),'no-store');
+  assert.match(registry.headers.get('content-security-policy'),/object-src 'none'/);
+  assert.deepEqual(Object.keys((await registry.json()).activities[0]).sort(),['enabled','id','kind','name','prizes']);
+  const body = { count: 1,requestId: crypto.randomUUID() };
+  assert.equal((await f.call('activities/recharge-lottery/draw',session,body,{ 'x-csrf-token': '' })).status,403);
+  assert.equal((await f.call('activities/recharge-lottery/draw',session,body,{ origin: 'https://evil.test' })).status,403);
+  assert.equal((await f.call('activities/recharge-lottery/draw',session,{ ...body,count: 2 })).status,400);
+  assert.equal((await f.call('activities/recharge-lottery/draw',session,{ ...body,amount: 5000 })).status,400);
+  assert.equal(f.store.used(USER.id),0);
+  assert.equal((await f.call('activities/recharge-lottery/draw',session,body)).status,200);
+  await f.lottery.kick();
+  assert.equal((await f.call('rewards?page=-1',session)).status,400);
+  const vendor = await fetch(`${f.base}/vendor/lucide.js`); assert.equal(vendor.status,200);
+  assert.equal((await fetch(`${f.base}/views/ledger.html`)).status,404);
+  assert.equal((await fetch(`${f.base}/src/prizes.js`)).status,404);
+});
+
+test('ordinary users cannot access admin shell, totals, detail, retries or another user batch', async t => {
+  const f = await httpFixture(t); const user = await f.login('user'); const other = await f.login('other');
+  const response = await f.call('activities/recharge-lottery/draw',user,{ count: 1,requestId: crypto.randomUUID() });
+  const batch = await response.json(); await f.lottery.kick();
+  for (const endpoint of ['admin/view','admin/summary','admin/rewards',`admin/rewards/${batch.rewards[0].id}`]) assert.equal((await f.call(endpoint,user)).status,403);
+  assert.equal((await f.call(`admin/rewards/${batch.rewards[0].id}/retry`,user,{})).status,403);
+  assert.equal((await f.call(`activities/recharge-lottery/batches/${batch.id}`,other)).status,404);
+  assert.equal((await (await f.call('rewards',other)).json()).total,0);
+  const history = JSON.stringify(await (await f.call('rewards',user)).json());
+  assert.doesNotMatch(history,/receipt|AC-|email|weight|minimum|recharge_minor|attempts/);
+  const admin = await f.login('admin');
+  assert.equal((await f.call('admin/view',admin)).status,200);
+  const summary = await (await f.call('admin/summary',admin)).json(); assert.equal(summary.totalMinor,50);
+  const detail = await (await f.call(`admin/rewards/${batch.rewards[0].id}`,admin)).json(); assert.equal(detail.receipt.userId,'42');
+  assert.equal((await f.call('admin/rewards?from=2026-02-30',admin)).status,400);
+  assert.equal((await f.call('admin/rewards?from=2026-11-17&to=2026-11-01',admin)).status,400);
+});
+
+test('admin role revocation and account disablement take effect before sensitive requests', async t => {
+  const f = await httpFixture(t); const admin = await f.login('admin'); const user = await f.login('user');
+  f.roles.set('admin','user'); assert.equal((await f.call('admin/summary',admin)).status,403);
+  f.roles.delete('user');
+  assert.equal((await f.call('activities/recharge-lottery/draw',user,{ count: 1,requestId: crypto.randomUUID() })).status,401);
+  assert.equal(f.store.used(USER.id),0);
+});
+
+test('admin recovery requires both CSRF and origin and cannot alter the original award', async t => {
+  const f = await httpFixture(t); const user = await f.login('user'); const admin = await f.login('admin');
+  const batch = f.store.reserve(USER,crypto.randomUUID(),1,5000);
+  const id = batch.rewards[0].id;
+  f.store.db.prepare("UPDATE rewards SET status='failed' WHERE id=?").run(id);
+  assert.equal((await f.call(`admin/rewards/${id}/retry`,admin,{}, { 'x-csrf-token': '' })).status,403);
+  assert.equal((await f.call(`admin/rewards/${id}/retry`,admin,{}, { origin: 'https://evil.test' })).status,403);
+  assert.equal(f.store.detail(id).status,'failed'); assert.equal(f.store.detail(id).retries.length,0);
+  assert.equal((await f.call(`admin/rewards/${id}/retry`,admin,{})).status,200);
+  await f.lottery.kick();
+  assert.equal(f.store.detail(id).status,'paid'); assert.equal(f.store.used(USER.id),1);
+  assert.equal(f.store.detail(id).retries.length,1);
+  assert.equal((await f.call('rewards?user_id=1',user)).status,400);
+});
+
+test('logout and expiry cannot be undone by late upstream identity verification', async t => {
+  const f = await httpFixture(t); const user = await f.login('user');
+  const session = f.auth.sessions.get(user.sessionToken);
+  let release; const hold = new Promise(resolve => { release = resolve; });
+  f.core.me = async () => { await hold; return { ...USER }; };
+  const req = { ip: '127.0.0.1',get: name => name === 'user-agent' ? 'activity-test' : null };
+  const refresh = f.auth.refresh(session,req);
+  f.auth.sessions.delete(session.id); release();
+  await assert.rejects(refresh,{ code: 'AUTH_REQUIRED' });
+  assert.equal(f.auth.sessions.size,0);
+  assert.equal((await f.call('rewards',user)).status,401);
+});

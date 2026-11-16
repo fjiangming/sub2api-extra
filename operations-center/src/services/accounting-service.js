@@ -1,5 +1,7 @@
 'use strict';
 
+const { isActivityReward } = require('./activity-reward');
+
 const crypto = require('node:crypto');
 const Decimal = require('decimal.js');
 const { DateTime } = require('luxon');
@@ -198,7 +200,7 @@ class AccountingService {
       to_jsonb(u)->>'username' AS username,deleted_at FROM users u WHERE id<>1`)).rows : [];
     const byUser = new Map(sourceUsers.map(user => [user.id, user]));
     const groups = new Map();
-    const credits = this.effectiveDocuments().filter(item => item.origin === 'redeem' && item.userId !== '1' && item.date >= range.start && item.date <= range.end);
+    const credits = this.effectiveDocuments().filter(item => item.origin === 'redeem' && !isActivityReward(item) && item.userId !== '1' && item.date >= range.start && item.date <= range.end);
     for (const credit of credits) {
       const key = credit.userId || 'unassigned';
       if (!groups.has(key)) {
@@ -231,7 +233,7 @@ class AccountingService {
     const effective = documents.map(document => {
       const saved = decisions[document.key];
       const decision = saved && (!saved.sourceHash || saved.sourceHash === this.sourceHash(document)) ? saved : null;
-      let kind = decision?.kind || (document.origin === 'payment' ? document.kind : null);
+      let kind = isActivityReward(document) ? 'gift' : decision?.kind || (document.origin === 'payment' ? document.kind : null);
       if (document.origin === 'manual') kind = decision?.kind || null;
       const amount = decision?.amount ?? document.amount;
       const currency = decision?.currency || document.currency;

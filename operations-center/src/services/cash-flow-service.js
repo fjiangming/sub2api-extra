@@ -1,5 +1,7 @@
 'use strict';
 
+const { isActivityReward } = require('./activity-reward');
+
 const crypto = require('node:crypto');
 const Decimal = require('decimal.js');
 const { DateTime } = require('luxon');
@@ -241,7 +243,7 @@ class CashFlowService {
         date: credit.date, name: `${credit.redeemType === 'admin_balance' ? '管理员余额入账' : '余额兑换'} #${credit.key.slice(7)}`,
         amount: credit.quantity, currency: 'CNY', rate: 1, userId: credit.userId || null,
         category: 'custom', providerId: '', sourceRef: credit.key, note: credit.note || '',
-        active: !excluded.has(credit.key) && !paymentKeys.some(key => excluded.has(key)) && !(validDecision && decision.paid === false),
+        active: !isActivityReward(credit) && !excluded.has(credit.key) && !paymentKeys.some(key => excluded.has(key)) && !(validDecision && decision.paid === false),
         aliases: [credit.key, credit.code, ...paymentKeys].filter(Boolean) });
     }
     for (const record of this.store.cashRecords()) {
