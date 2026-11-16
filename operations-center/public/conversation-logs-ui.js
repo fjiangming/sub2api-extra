@@ -1,17 +1,19 @@
 (function (root) {
   'use strict';
-  const reasons = { body_limit: '超过单条采集上限', memory_limit: '采集内存已满', transport_error: '上游连接失败', read_error: '读取中断', closed_early: '响应提前关闭', session_closed: '连接关闭前未见结束事件', redaction_failed: '脱敏未通过，正文未保存', capacity: '存储空间不足' };
+  const reasons = { body_limit: '超过单条采集上限，仅保留已采集部分', memory_limit: '采集内存已满，可能仅保留部分内容', transport_error: '上游连接失败', read_error: '读取中断', closed_early: '响应提前关闭', session_closed: '连接关闭前未见结束事件', redaction_failed: '旧记录脱敏失败，原文未保留，无法重新处理', capacity: '存储空间不足' };
+  const processingErrors = { INVALID_JSON: 'JSON 不完整或格式不兼容', PROTECTED_FIELD_MATCH: '自定义规则会改变结构或关联字段', UNSUPPORTED_ENCODING: '不支持的压缩编码', INVALID_UTF8: '正文含非 UTF-8 字节', DECOMPRESSION_FAILED: '解压失败或超过解压上限', BINARY_MESSAGE_REQUIRES_ORIGINAL_MODE: '二进制消息暂不支持脱敏', UNSAFE_SSE_REPLACEMENT: '替换会改变 SSE 结构', DOCUMENT_TOO_DEEP: 'JSON 嵌套超过处理上限', NESTED_ARGUMENTS_TOO_DEEP: '工具参数嵌套超过处理上限', PROCESSING_FAILED: '处理异常' };
   const modeNames = { dual: '原文 + 脱敏副本', masked: '仅脱敏副本', original: '仅原文' };
   function create({ api, escapeHtml: esc, icon, refreshIcons, toast, setPageMeta, isActive }) {
     const $ = id => document.getElementById('cl-' + id), container = $('root');
     let tab = 'requests', page = 1, report = null, status = null, policy = null, detail = null, source = 'masked', detailTab = 'raw';
     let seq = 0, detailSeq = 0, searchSeq = 0, lifecycle = 0, controller = null, detailController = null, userController = null, searchTimer = null;
     let payloads = new Map(), excluded = new Set(), users = new Map(), sessionFilter = null, saving = false, dirty = false;
+    const reprocessing = new Set();
     const num = value => new Intl.NumberFormat('zh-CN').format(value || 0);
     const bytes = value => value >= 1048576 ? (value / 1048576).toFixed(2) + ' MiB' : value >= 1024 ? (value / 1024).toFixed(1) + ' KiB' : num(value) + ' B';
     const time = value => value ? new Date(value).toLocaleString('zh-CN', { timeZone: status?.timezone || 'Asia/Shanghai', hour12: false }) : '尚无记录';
     const tool = (name, title, attrs = '') => `<button class="icon-button" type="button" title="${esc(title)}" aria-label="${esc(title)}" ${attrs}>${icon(name)}</button>`;
-    const badge = row => `<span class="cl-badge ${row.complete ? 'green' : 'amber'}">${row.complete ? '完整采集' : row.original || row.masked ? '部分采集' : '正文缺失'}</span>`;
+    const badge = row => `<span class="cl-badge ${row.complete ? 'green' : 'amber'}">${row.complete ? '完整采集' : row.original || row.masked ? '部分采集' : '正文缺失'}</span>${row.processing_error ? '<span class="cl-badge amber">处理异常</span>' : ''}`;
     const facts = values => `<dl class="cl-facts">${values.map(([key, value]) => `<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl>`;
     const empty = text => `<div class="cl-empty">${esc(text)}</div>`;
     function run(task) { Promise.resolve().then(task).catch(error => { if (error.name !== 'AbortError' && isActive()) { $('notice').textContent = error.message; toast(error.message, 'error'); } }); }
@@ -72,6 +74,7 @@
       if (!detail) return;
       $('inspector').innerHTML = `<div class="cl-detail-heading"><div><code>${detail.request_id}</code><h2>${esc(detail.model || detail.protocol + ' 请求')}</h2><p>${badge(detail)} · ${esc(detail.protocol)} · ${esc(modeNames[detail.mode])} · 策略 v${detail.policy_version}</p></div>${tool('x','关闭请求详情','data-cl-action="close-detail"')}</div>${facts([['用户 / Key',`#${detail.user_id} / #${detail.key_id}`],['上游账号',detail.account_id ? '#' + detail.account_id : '未提供'],['时间',time(detail.at)],['耗时',num(detail.duration_ms) + ' ms'],['上游 Host',detail.host || '未提供'],['路径',detail.path]])}
         ${detail.reason ? `<div class="cl-notice amber">${esc(reasons[detail.reason] || detail.reason)}</div>` : ''}
+        ${detail.processing_error ? `<div class="cl-notice amber cl-processing" role="status"><div><strong>处理异常 · ${esc(processingErrors[detail.processing_error] || '处理异常')}</strong><span>${detail.original ? '已保留加密原文，当前内容可能包含敏感信息' : '原文未保留'} · ${esc(detail.processing_error)} · 处理策略 v${detail.processing_policy_version}</span>${detail.retry_blocked === 'user_excluded' ? '<span>该用户已排除，不能重新处理</span>' : ''}</div><button type="button" class="button secondary" data-cl-action="reprocess" title="按当前策略重新处理；成功后按此记录的保存版本保留副本" ${!detail.retry_available || reprocessing.has(detail.id) ? 'disabled' : ''}>${icon('refresh-cw')}${reprocessing.has(detail.id) ? '处理中' : '重新处理'}</button></div>` : detail.processing_policy_version ? `<p class="cl-muted">脱敏策略 v${detail.processing_policy_version} · ${esc(time(detail.processed_at))}</p>` : ''}
         <div class="cl-attempts"><span>请求尝试</span>${detail.attempts.map((row,index) => `<button data-cl-attempt="${row.id}" aria-pressed="${row.id === detail.id}">#${index + 1} · ${row.status || '连接错误'} · 账号 ${row.account_id || '未提供'}</button>`).join('')}</div>
         <div class="cl-detail-tabs" role="tablist" aria-label="请求详情视图">${[['raw','Request / Response'],['frames',`消息 (${detail.frames.length})`],['redactions','脱敏记录']].map(([id,label]) => `<button data-cl-detail="${id}" role="tab" aria-selected="${id === detailTab}">${label}</button>`).join('')}<select id="cl-source" aria-label="日志版本"><option value="masked" ${source === 'masked' ? 'selected' : ''} ${!detail.masked ? 'disabled' : ''}>脱敏副本</option><option value="original" ${source === 'original' ? 'selected' : ''} ${!detail.original ? 'disabled' : ''}>原文</option></select></div><div id="cl-detail-body"></div>`;
       $('source').addEventListener('change', () => { source = $('source').value; payloads.clear(); renderDetailBody(); if (detailTab === 'raw') run(() => loadBodies(detailSeq)); });
@@ -82,7 +85,7 @@
       if (!detail) return;
       if (detailTab === 'raw') $('detail-body').innerHTML = `<div class="cl-bodies">${pane('request','Request')}${pane('response','Response')}</div>`;
       else if (detailTab === 'frames') $('detail-body').innerHTML = detail.frames.length ? `<div class="cl-frames">${detail.frames.map(frame => `<button data-cl-frame="${frame.index}" class="cl-frame"><strong>#${frame.index + 1} ${frame.direction === 'out' ? 'Request →' : '← Response'}</strong><span>+${frame.at} ms · ${bytes(frame.bytes)} · ${frame.binary ? 'Binary' : 'Text'}</span>${icon('chevron-down')}</button>`).join('')}</div><div id="cl-frame-view"></div>` : empty('此请求没有 WebSocket 消息');
-      else $('detail-body').innerHTML = detail.hits.length ? `<div class="table-wrap"><table><thead><tr><th>规则</th><th>占位符</th><th>命中次数</th></tr></thead><tbody>${detail.hits.map(hit => `<tr><td>${esc(hit.name)}</td><td><code>${esc(hit.replacement)}</code></td><td>${hit.count}</td></tr>`).join('')}</tbody></table></div>` : empty(detail.reason === 'redaction_failed' ? '脱敏未通过，没有保存正文或命中值' : '此记录没有脱敏命中');
+      else $('detail-body').innerHTML = detail.hits.length ? `<div class="table-wrap"><table><thead><tr><th>规则</th><th>占位符</th><th>命中次数</th></tr></thead><tbody>${detail.hits.map(hit => `<tr><td>${esc(hit.name)}</td><td><code>${esc(hit.replacement)}</code></td><td>${hit.count}</td></tr>`).join('')}</tbody></table></div>` : empty(detail.processing_error ? '处理异常，尚无脱敏副本' : detail.reason === 'redaction_failed' ? '旧记录未保留正文或命中值' : '此记录没有脱敏命中');
       refreshIcons();
     }
     async function loadPayload(side, current, { full = false, raw = false, render = true } = {}) {
@@ -113,8 +116,8 @@
       policy = value; excluded = new Set(value.excludedUserIds); users.clear(); dirty = false;
       $('policy').innerHTML = `<form id="cl-policy-form" class="cl-policy-form"><div class="cl-section-heading"><h2>保存策略 <small>v${value.version}</small></h2><span id="cl-dirty" role="status"></span></div><label class="cl-setting"><span>保存对话日志</span><input name="enabled" type="checkbox" role="switch" ${value.enabled ? 'checked' : ''}></label>
         <fieldset><legend>排除用户</legend><div class="cl-user-toolbar"><span id="cl-excluded-count"></span><button class="cl-link" type="button" data-cl-action="clear-users">清空选择</button></div><div id="cl-selected-users" class="cl-selected-users"></div><div class="cl-user-search"><input id="cl-user-search" type="search" aria-label="搜索排除用户" placeholder="输入用户名、邮箱或用户 ID" autocomplete="off">${tool('search','搜索排除用户','data-cl-action="search-users"')}</div><div id="cl-users" role="group" aria-label="不采集的用户"></div><p class="cl-muted">所选用户全部 Key 均不采集，不保存正文、元数据、索引、会话或缺口。保存时也会丢弃尚未入库的请求；历史记录按原保留期处理。</p></fieldset>
-        <fieldset><legend>保存版本</legend><div class="cl-modes">${Object.entries(modeNames).map(([id,label]) => `<label><input type="radio" name="mode" value="${id}" ${value.mode === id ? 'checked' : ''}>${label}</label>`).join('')}</div><p class="cl-muted">原文含完整敏感内容，仅管理员可读。仅脱敏模式不保存原文；脱敏失败时仅记录缺失原因。</p></fieldset>
-        <fieldset><legend>脱敏规则</legend><div class="cl-rules">${[['email','邮箱地址'],['phone','电话号码'],['secret','正文中的密钥'],['ip','IPv4 地址']].map(([id,label]) => `<label>${label}<input name="${id}" type="checkbox" ${value[id] ? 'checked' : ''}></label>`).join('')}</div><p class="cl-muted">相同值使用稳定占位符，保留字段、角色、工具与消息关联。结构字段命中规则或片段无法安全处理时，正文不保存。</p><div id="cl-custom-rules"></div><button type="button" class="button secondary" data-cl-action="add-rule">${icon('plus')}添加文本规则</button></fieldset>
+        <fieldset><legend>保存版本</legend><div class="cl-modes">${Object.entries(modeNames).map(([id,label]) => `<label><input type="radio" name="mode" value="${id}" ${value.mode === id ? 'checked' : ''}>${label}</label>`).join('')}</div><p class="cl-muted">原文含完整敏感内容，仅管理员可读。处理异常时会保留加密原文；仅脱敏记录在重新处理成功后移除临时原文。</p></fieldset>
+        <fieldset><legend>脱敏规则</legend><div class="cl-rules">${[['email','邮箱地址'],['phone','电话号码'],['secret','正文中的密钥'],['ip','IPv4 地址']].map(([id,label]) => `<label>${label}<input name="${id}" type="checkbox" ${value[id] ? 'checked' : ''}></label>`).join('')}</div><p class="cl-muted">相同值使用稳定占位符，保留字段、角色、工具与消息关联。结构标识不参与自动识别；自定义规则冲突时保留原文并标记异常。</p><div id="cl-custom-rules"></div><button type="button" class="button secondary" data-cl-action="add-rule">${icon('plus')}添加文本规则</button></fieldset>
         <fieldset><legend>容量与保留</legend><div class="cl-policy-grid"><label>保留天数<input name="retention" type="number" min="1" max="365" value="${value.retention}" required></label><label>容量上限 (GiB)<input name="capacity" type="number" min="1" max="1024" value="${value.capacity}" required></label><label>磁盘预留 (GiB)<input name="reserve" type="number" min="0" max="1024" value="${value.reserve}" required></label><label>单条采集上限 (MiB)<input name="limit" type="number" min="0.0625" max="16" step="0.0625" value="${value.maxBodyBytes / 1048576}" required></label><label>空间不足<select name="overflow"><option value="stop" ${value.overflow === 'stop' ? 'selected' : ''}>停止保存正文</option><option value="evict" ${value.overflow === 'evict' ? 'selected' : ''}>淘汰最旧日志</option></select></label></div><p class="cl-muted">缩短保留期或选择淘汰可能清理历史记录。修改正文处理规则只影响新记录。</p></fieldset><p id="cl-policy-error" class="form-error" role="alert"></p><footer><button id="cl-save" class="button primary" type="submit">${icon('save')}保存策略</button><button class="button secondary" type="button" data-cl-action="discard-policy">放弃更改</button></footer></form>`;
       for (const rule of value.custom) addRule(rule);
       updateExcluded();
@@ -162,6 +165,22 @@
       finally { saving = false; if ($('policy-form')) $('policy-form').querySelectorAll('input,button,select').forEach(node => { node.disabled = false; }); }
     }
     function download(blob, name) { const href = URL.createObjectURL(blob), anchor = document.createElement('a'); anchor.href = href; anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(href),1000); }
+    async function reprocess() {
+      if (!detail?.retry_available || reprocessing.has(detail.id)) return;
+      const id = detail.id, current = detailSeq, epoch = lifecycle, processedAt = detail.processed_at;
+      reprocessing.add(id); const button = container.querySelector('[data-cl-action="reprocess"]'); if (button) button.disabled = true;
+      try {
+        const row = await api(`/api/conversation-logs/records/${id}/reprocess`, { method: 'POST', body: JSON.stringify({ policy_version: status.policy.version, processed_at: processedAt }) });
+        if (!isActive() || epoch !== lifecycle || current !== detailSeq || detail?.id !== id || tab !== 'requests') return;
+        reprocessing.delete(id); payloads.clear(); detail = row; source = row.masked ? 'masked' : 'original';
+        renderDetail(); if (detailTab === 'raw') await loadBodies(current);
+        toast(row.processing_error ? '处理仍有异常，原文已保留' : '重新处理完成', row.processing_error ? 'error' : undefined);
+        await load();
+      } finally {
+        reprocessing.delete(id);
+        if (epoch === lifecycle && detail?.id === id) { const node = container.querySelector('[data-cl-action="reprocess"]'); if (node) node.disabled = !detail.retry_available; }
+      }
+    }
     async function switchTab(value) {
       if (!['requests','sessions','collection','policy'].includes(value)) return;
       if (value !== tab) { ++searchSeq; userController?.abort(); clearTimeout(searchTimer); clearDetail(); }
@@ -182,6 +201,7 @@
       if (d.clCopy || d.clDownload) return run(async () => { const side = d.clCopy || d.clDownload, value = await loadPayload(side,detailSeq,{ full:true,raw:Boolean(d.clDownload),render:false }); if (!value) return; if (d.clCopy) { await navigator.clipboard.writeText(value.text); toast('已复制原始文本'); } else { const raw = Uint8Array.from(atob(value.base64),ch => ch.charCodeAt(0)); download(new Blob([raw]),`conversation-${detail.id}-${source}-${side}.raw`); } });
       if (d.clRemoveUser) { excluded.delete(Number(d.clRemoveUser)); updateExcluded(); markDirty(); return; }
       const action = d.clAction;
+      if (action === 'reprocess') return run(reprocess);
       if (action === 'close-detail') clearDetail();
       if (action === 'reset-filter') { $('filter').reset(); sessionFilter = null; page = 1; run(load); }
       if (action === 'clear-session') { sessionFilter = null; page = 1; run(load); }

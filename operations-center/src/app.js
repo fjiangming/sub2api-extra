@@ -321,6 +321,8 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.get('/conversation-logs/records', (req, res) => res.json(conversations.list(req.query)));
   api.get('/conversation-logs/index', (req, res) => res.json(conversations.exportIndex(req.query)));
   api.get('/conversation-logs/records/:id', (req, res) => res.json(conversations.detail(req.params.id)));
+  api.post('/conversation-logs/records/:id/reprocess', csrf, rateLimit({ windowMs: 60000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false }),
+    (req, res) => res.json(conversations.retry(req.params.id, req.body)));
   api.get('/conversation-logs/records/:id/payload/:side', (req, res) => {
     const value = conversations.payload(req.params.id, req.query.source || 'masked', req.params.side);
     if (req.query.download === '1') return res.type('application/octet-stream').attachment(`conversation-${req.params.id}-${req.params.side}-${req.query.source || 'masked'}.raw`).send(value.body);

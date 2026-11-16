@@ -70,13 +70,20 @@ test('named credential strings are masked and CSV neutralizes leading whitespace
   assert(f.store.exportIndex().csv.includes("'  =HYPERLINK"));
 });
 
-test('unsafe structural rules, malformed content and binary frames fail closed without plaintext fallback', t => {
+test('processing failures retain exact encrypted originals with safe error classifications, including masked mode', t => {
   const f = fixture(); t.after(() => f.close());
-  const p = f.store.configure({...f.store.policy(),custom:[{from:'call_demo',to:'broken'}]});
-  for (const row of [event('protected',{policy_version:p.version}),event('invalid',{policy_version:p.version,response:Buffer.from('{broken').toString('base64')}),event('binary',{policy_version:p.version,protocol:'WebSocket',frames:[{direction:'in',at:0,binary:true,body:Buffer.from('secret').toString('base64')}]})]) {
+  const p = f.store.configure({...f.store.policy(),mode:'masked',custom:[{from:'call_demo',to:'broken'}]});
+  for (const row of [event('protected',{policy_version:p.version}),event('invalid',{policy_version:p.version,request:Buffer.from('{}').toString('base64'),response:Buffer.from('{broken secret@example.com').toString('base64')}),event('binary',{policy_version:p.version,protocol:'WebSocket',frames:[{direction:'in',at:0,binary:true,body:Buffer.from('secret').toString('base64')}]})]) {
     f.store.ingest(row); const saved = f.store.detail(row.id);
-    assert.equal(saved.reason,'redaction_failed'); assert.equal(saved.original,false); assert.equal(saved.masked,false);
+    assert.equal(saved.reason,''); assert.equal(saved.complete,true); assert.equal(saved.original,true); assert.equal(saved.masked,false); assert.equal(saved.retry_available,true);
+    assert.equal(saved.processing_error, { [id('protected')]:'PROTECTED_FIELD_MATCH',[id('invalid')]:'INVALID_JSON',[id('binary')]:'BINARY_MESSAGE_REQUIRES_ORIGINAL_MODE' }[row.id]);
+    assert.equal(f.store.payload(row.id,'original','request').body.toString('base64'),row.request);
+    assert.equal(f.store.payload(row.id,'original','response').body.toString('base64'),row.response);
   }
+  assert.equal(f.store.list({capture:'redaction_failed'}).summary.total,3);
+  assert(!JSON.stringify(f.store.list()).includes('secret@example.com'));
+  f.store.db.pragma('wal_checkpoint(TRUNCATE)');
+  assert(!fs.readFileSync(f.store.file).includes(Buffer.from('secret@example.com')));
   const original = f.store.configure({...p,mode:'original'}), row = event('binary-original',{policy_version:original.version,response:Buffer.from([0xff,0x00]).toString('base64')});
   f.store.ingest(row); assert.deepEqual(f.store.payload(row.id,'original','response').body,Buffer.from([0xff,0x00]));
 });
@@ -107,7 +114,7 @@ test('policy compare-and-swap, idempotency, filter isolation, retention and capa
   now += 8 * 86400000; assert.equal(f.store.prune(),2); assert.equal(f.store.list().summary.total,0);
 });
 
-test('masked-only never persists originals and restart preserves the key and policy', t => {
+test('successful masked-only processing omits originals and restart preserves the key and policy', t => {
   const f = fixture(); t.after(() => f.close()); const p = f.store.configure({...f.store.policy(),mode:'masked'});
   const row = event('masked',{policy_version:p.version}); f.store.ingest(row); assert.equal(f.store.detail(row.id).original,false);
   f.store.close(); f.store = new ConversationLogStore(f.directory).initialize();
@@ -133,5 +140,11 @@ test('collector requires its own token and admin APIs require admin session and 
   response = await fetch(base + `/api/conversation-logs/records/${row.id}/payload/request?source=original&download=1`,{headers}); assert.equal(response.status,200); assert.equal(Buffer.from(await response.arrayBuffer()).toString(),rawRequest);
   assert.equal(response.headers.get('cache-control'),'no-store'); assert(response.headers.get('content-disposition').includes('attachment'));
   response = await fetch(base + '/api/conversation-logs/status',{headers}); assert.equal((await response.json()).collectorDropped,12);
+  const failed = event('api-retry',{response:Buffer.from('{invalid').toString('base64')}); f.store.ingest(failed);
+  const retryPath = base + `/api/conversation-logs/records/${failed.id}/reprocess`, retryBody = JSON.stringify({policy_version:f.store.policy().version,processed_at:f.store.detail(failed.id).processed_at});
+  response = await fetch(retryPath,{method:'POST',headers:{'content-type':'application/json'},body:retryBody}); assert.equal(response.status,401);
+  response = await fetch(retryPath,{method:'POST',headers:{...headers,'content-type':'application/json'},body:retryBody}); assert.equal(response.status,403);
+  response = await fetch(retryPath,{method:'POST',headers:{...headers,'content-type':'application/json','x-csrf-token':session.csrfToken},body:retryBody});
+  assert.equal(response.status,200); const retried = await response.json(); assert.equal(retried.processing_error,'INVALID_JSON'); assert(retried.original); assert(!JSON.stringify(retried).includes('{invalid'));
   response = await fetch(base + '/api/conversation-logs/policy',{method:'PUT',headers:{...headers,'content-type':'application/json','x-csrf-token':session.csrfToken},body:JSON.stringify({...f.store.policy(),excludedUserIds:[2]})}); assert.equal(response.status,200);
 });

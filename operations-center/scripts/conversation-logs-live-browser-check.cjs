@@ -25,6 +25,7 @@ async function main() {
           assert.equal(result.overflow,false,name + ' page overflow'); assert.deepEqual(result.controls,[]);
         };
         await page.goto(`http://127.0.0.1:${preview.port}/preview`);
+        await page.locator(`[data-cl-record="${preview.raw.id}"]`).click();
         await page.locator('#cl-body-request').filter({hasText:'EMAIL_'}).waitFor();
         assert.equal(await page.locator('#cl-inspector img').count(),0);
         await layout(); await page.screenshot({path:path.join(directory,name + '-requests.png'),fullPage:true});
@@ -78,10 +79,41 @@ async function main() {
         await page.waitForFunction(() => document.getElementById('cl-body-response')?.textContent.includes('END_OF_FULL_RESPONSE'));
         assert.equal(await page.locator('#cl-body-response').textContent(),largeText);
         await page.locator('[data-cl-full=response]').waitFor({state:'hidden'});
+        const failedPolicy = preview.fixture.store.configure({...preview.fixture.store.policy(),mode:'masked',custom:[{from:'call_demo',to:'broken'}]});
+        const failed = event('retry-ui-' + name,{at:Date.now()+2000,policy_version:failedPolicy.version}); preview.fixture.store.ingest(failed);
+        await page.locator('[data-cl-action=reset-filter]').click(); await page.locator(`[data-cl-record="${failed.id}"]`).click();
+        await page.locator('.cl-processing').filter({hasText:'PROTECTED_FIELD_MATCH'}).waitFor();
+        await page.locator('#cl-body-response').filter({hasText:'alice@example.com'}).waitFor();
+        await layout(); await page.screenshot({path:path.join(directory,name + '-processing-error.png'),fullPage:true});
+        const firstAttempt = preview.fixture.store.detail(failed.id).processed_at;
+        await page.locator('[data-cl-action=reprocess]').click();
+        await page.waitForFunction(() => document.querySelector('[data-cl-action=reprocess]')?.disabled === false);
+        assert(preview.fixture.store.detail(failed.id).processed_at > firstAttempt);
+        assert(preview.fixture.store.detail(failed.id).original);
+        preview.fixture.store.configure({...preview.fixture.store.policy(),custom:[]});
+        await page.locator('[data-cl-action=reset-filter]').click();
+        await page.locator(`[data-cl-record="${failed.id}"][aria-pressed=true]`).waitFor();
+        // Hold the mutation response to check duplicate clicks and late-response isolation.
+        let release, arrived, delivered;
+        const held = new Promise(resolve => { release = resolve; }), reached = new Promise(resolve => { arrived = resolve; }), fulfilled = new Promise(resolve => { delivered = resolve; });
+        const routePath = `**/records/${failed.id}/reprocess`;
+        await page.route(routePath,async route => { const response = await route.fetch(); arrived(); await held; await route.fulfill({response}); delivered(); });
+        await page.locator('[data-cl-action=reprocess]').click(); await reached;
+        assert.equal(await page.locator('[data-cl-action=reprocess]').isDisabled(),true);
+        await page.locator(`[data-cl-record="${large.id}"]`).click();
+        release(); await fulfilled; await page.unroute(routePath);
+        await page.waitForFunction(() => document.getElementById('cl-body-response')?.textContent.includes('aaaa'));
+        assert(!await page.locator('.cl-processing').count());
+        await page.locator(`[data-cl-record="${failed.id}"]`).click();
+        await page.locator('#cl-body-response').filter({hasText:'EMAIL_'}).waitFor();
+        assert.equal(await page.locator('.cl-processing').count(),0);
+        assert.equal(await page.locator('#cl-source option[value=original]').isDisabled(),true);
+        assert.equal(preview.fixture.store.detail(failed.id).original,false);
+        await layout(); await page.screenshot({path:path.join(directory,name + '-reprocessed.png'),fullPage:true});
         await page.locator('#logout-button').click(); await page.locator('#login-view').waitFor({state:'visible'});
         assert.equal(await page.locator('#cl-list [data-cl-record]').count(),0); assert.equal(await page.locator('#cl-inspector').innerText(),'选择一条请求查看原始请求与响应');
         assert.deepEqual(errors,[]); assert.deepEqual(external,[]);
-        console.log(name + ': raw bytes, XSS, WS frames, sessions, filters, downloads, exclusion persistence and logout passed');
+        console.log(name + ': raw bytes, XSS, WS frames, previews, exclusion, encrypted fallback, retry, late responses and logout passed');
       } finally { await context.close(); }
     }
     console.log('Screenshots: ' + directory);

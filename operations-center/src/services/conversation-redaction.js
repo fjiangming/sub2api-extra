@@ -38,6 +38,7 @@ function decodeBody(buffer, encoding = '') {
   if (encoding === 'gzip') buffer = zlib.gunzipSync(buffer, options);
   else if (encoding === 'br') buffer = zlib.brotliDecompressSync(buffer, options);
   else if (encoding === 'deflate') buffer = zlib.inflateSync(buffer, options);
+  else if (encoding === 'zstd' && zlib.zstdDecompressSync) buffer = zlib.zstdDecompressSync(buffer, options);
   else if (encoding && encoding !== 'identity') throw new Error('UNSUPPORTED_ENCODING');
   return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
 }
@@ -115,26 +116,67 @@ function createRedactor(policy, salt) {
   }
   function documents(text) {
     if (!text.trim()) return [];
-    if (text.trimStart().startsWith('{') || text.trimStart().startsWith('[')) return [{ start: 0, text }];
-    const result = []; let offset = 0;
-    for (const line of text.split('\n')) {
-      const data = /^data:\s?(.*?)(\r?)$/.exec(line);
-      if (data && data[1].trim() !== '[DONE]' && data[1].trim()) result.push({ start: offset + line.indexOf(data[1], 5), text: data[1] });
-      else if (line.trim() && !/^(?:event:|id:|retry:|:|data:)/.test(line)) throw new Error('UNSUPPORTED_PAYLOAD');
-      offset += line.length + 1;
+    const result = [];
+    const add = (value, start, segments, validJson = false) => {
+      if (!value.trim() || value.trim() === '[DONE]') return;
+      const json = validJson || /^[\s]*[\[{]/.test(value);
+      if (json) { try { JSON.parse(value); } catch { throw new Error('INVALID_JSON'); } }
+      result.push({ text: value, start, segments, json });
+    };
+    if (!/^(?:data:|event:|id:|retry:|:)/m.test(text)) {
+      // NDJSON is common on compatible upstreams; never reserialize the documents.
+      try { JSON.parse(text); add(text, 0, undefined, true); }
+      catch {
+        if (/^[\s]*[\[{]/.test(text) && text.trim().split(/\r?\n/).length > 1) {
+          let offset = 0;
+          for (const line of text.split(/(?<=\n)/)) { add(line, offset); offset += line.length; }
+        } else add(text, 0);
+      }
+      return result;
     }
-    if (!result.length && text.trim() !== 'data: [DONE]') throw new Error('UNSUPPORTED_PAYLOAD');
+    let offset = 0, parts = [], segments = [], length = 0;
+    const flush = () => { add(parts.join('\n'), 0, segments); parts = []; segments = []; length = 0; };
+    for (const match of text.matchAll(/([^\r\n]*)(\r\n|\r|\n|$)/g)) {
+      const line = match[1];
+      if (!line) flush();
+      else if (line === 'data' || line.startsWith('data:')) {
+        const prefix = line === 'data' ? 4 : line.startsWith('data: ') ? 6 : 5, value = line.slice(prefix);
+        segments.push({ start: length, end: length + value.length, raw: offset + prefix });
+        parts.push(value); length += value.length + 1;
+      }
+      offset += match[0].length;
+    }
+    flush();
     return result;
+  }
+  function nested(value, depth) {
+    if (/^[\s]*[\[{]/.test(value)) {
+      try { JSON.parse(value); } catch { return replace(value); }
+      return redactDocuments([value], depth + 1)[0];
+    }
+    return replace(value);
   }
   function redactDocuments(texts, depth = 0) {
     if (depth > 8) throw new Error('NESTED_ARGUMENTS_TOO_DEEP');
     const edits = texts.map(() => []), deltas = new Map();
     for (let file = 0; file < texts.length; file++) for (const document of documents(texts[file])) {
+      if (!document.json) {
+        for (const segment of document.segments || [{ start: 0, end: document.text.length, raw: document.start }]) {
+          const before = document.text.slice(segment.start, segment.end), value = replace(before);
+          if (document.segments && /[\r\n]/.test(value)) throw new Error('UNSAFE_SSE_REPLACEMENT');
+          if (value !== before) edits[file].push({ start: segment.raw, end: segment.raw + before.length, value, literal: true });
+        }
+        continue;
+      }
       const parsed = JSON.parse(document.text);
       for (const token of tokens(document.text)) {
-        const entry = { ...token, start: document.start + token.start, end: document.start + token.end, file };
-        if (protectedFields.has(token.field)) {
-          if (replace(token.value) !== token.value) throw new Error('PROTECTED_FIELD_MATCH');
+        const segment = document.segments?.find(part => token.start >= part.start && token.end <= part.end);
+        if (document.segments && !segment) throw new Error('UNSAFE_SSE_REPLACEMENT');
+        const base = segment ? segment.raw - segment.start : document.start;
+        const entry = { ...token, start: base + token.start, end: base + token.end, file };
+        if (depth === 0 && protectedFields.has(token.field)) {
+          // Numeric IDs are often mistaken for phone numbers. Protocol identities stay exact.
+          if (policy.custom.some(rule => token.value.includes(rule.from) && rule.from !== rule.to)) throw new Error('PROTECTED_FIELD_MATCH');
           continue;
         }
         const group = streamGroup(token, parsed);
@@ -144,7 +186,7 @@ function createRedactor(policy, salt) {
         }
         let value;
         if (policy.secret && secretField.test(token.field) && token.value) value = placeholder('secret', token.value);
-        else if (['arguments', 'output'].includes(token.field) && /^[\s]*[\[{]/.test(token.value)) value = redactDocuments([token.value], depth + 1)[0];
+        else if (['arguments', 'output'].includes(token.field)) value = nested(token.value, depth);
         else value = replace(token.value);
         if (value !== token.value) edits[file].push({ ...entry, value });
       }
@@ -152,7 +194,7 @@ function createRedactor(policy, salt) {
     // Mask across SSE/WS text-delta boundaries while retaining every event and its structural fields.
     for (const { entries, json } of deltas.values()) {
       const joined = entries.map(entry => entry.value).join('');
-      const masked = json ? redactDocuments([joined], depth + 1)[0] : replace(joined);
+      const masked = json ? nested(joined, depth) : replace(joined);
       if (masked !== joined) {
         let common = 0;
         while (common < joined.length && common < masked.length && joined[common] === masked[common]) common++;
@@ -173,11 +215,11 @@ function createRedactor(policy, salt) {
       if (edits[file].length) {
         const parts = []; let offset = 0;
         for (const edit of edits[file].sort((a, b) => a.start - b.start)) {
-          parts.push(text.slice(offset, edit.start), JSON.stringify(edit.value)); offset = edit.end;
+          parts.push(text.slice(offset, edit.start), edit.literal ? edit.value : JSON.stringify(edit.value)); offset = edit.end;
         }
         parts.push(text.slice(offset)); text = parts.join('');
       }
-      for (const document of documents(text)) JSON.parse(document.text);
+      documents(text);
       return text;
     });
   }

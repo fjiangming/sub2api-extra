@@ -1,5 +1,18 @@
 # 个性化功能维护台账
 
+## 2026-11-16：对话日志兼容、异常原文保留与一键重处理
+
+用户明确要求尽量保留原内容，仅替换敏感信息；处理异常直接保存原文、展示异常并支持一键重处理。此要求替代此前失败即丢正文的策略，包括“仅脱敏”模式。保留全部无关本地工作、用户排除、原归档密钥、历史、推理及计费契约。
+
+- `operations-center/src/services/conversation-redaction.js`：协议 ID 不参加自动 PII 匹配，自定义破坏结构的规则仍报错；支持多行 SSE data 及原换行 / 前缀 / 扩展字段、NDJSON / 文本、运行时 zstd；工具普通字符串 / 不完整参数不再被强制按完整 JSON 解析。沿用数值 / 字段原拼写、跨流片段关联和线性邮箱识别。
+- `operations-center/src/conversation-log-store.js`：兼容迁移增加独立处理异常 / 策略 / 时间列，显式 INSERT 列；失败保存 AES-GCM 原始字节，不保留半成品。采集完整性独立，超限的已采集部分仍入库。重处理按最新规则 / 原保存模式执行，成功原子替换、仅脱敏成功后移除临时原文；失败 / 空间不足不丢原文。排除校验、版本冲突、幂等及历史无原文边界保留。
+- `operations-center/src/app.js`、`public/conversation-logs-ui.js`、`public/conversation-logs.css`、`public/index.html`：管理员 + CSRF + 频率限制重处理接口，正文旁异常与按钮、失败状态筛选和处理版本；忙状态 / 迟到响应隔离，更新静态资源版本。
+- `operations-center/tests/conversation-logs.test.js`、`tests/conversation-reprocessing.test.js`（新增）、`scripts/conversation-logs-live-browser-check.cjs`：覆盖兼容 / 字节与结构保留、加密回退、两种保存模式重处理、失败保留、空间 / 排除 / 并发版本 / 认证 / CSRF、旧表迁移及四视口按钮与迟到响应；`README.md`、`docs/conversation-logs.md` 同步行为与边界。
+
+配套主站 dev 的 `capture.go` / 专项测试与维护文档另记其台账：单条超限保留 HTTP 前缀，内存 / WebSocket 超限保留已有完整片段，不扩大总内存与队列，不改变推理或采集排除。
+
+本地验证：运营中心完整 **412 项测试通过、0 失败 / 跳过**，`npm run check` 通过，归档 / 性能 / 重处理 24 项专项通过。真实 Chrome 的 1440 / 390 / 320 像素及系统深色四组流程通过原始字节 / XSS / WebSocket、全文与预览、排除、异常原文显示、失败重试、成功移除临时原文、重复点击保护、切换记录迟到响应及退出清理；截图 `sub2api-conversation-browser-M1rnN7` 已复核。测试脚本初轮修复了路由拦截释放顺序和跨视口共享样例的选中对象，不改业务数据或系统剪贴板。主站采集 7 项测试通过；本机无 C 编译器，race 留给既有 Linux 发布门禁，不跳过该门禁。发布及生产结果完成后补记。
+
 ## 2026-11-16：对话日志长文本脱敏与访问性能修复
 
 用户反馈服务器访问对话日志卡慢并要求优化，本轮据此只维护运营中心的采集处理与正文查看，保留全部无关工作、主站程序、余额 / 计费契约、已有日志和采集策略。生产只有 2 条归档，查询本身约 1–4ms；运营中心却长期占满一个 CPU 核心、healthz 超时且 unhealthy。隔离复现旧邮箱正则处理 6 万个无邮箱字符约 1.4 秒，确认是长文本回溯阻塞事件循环，不能归因为日志量或内存不足。
