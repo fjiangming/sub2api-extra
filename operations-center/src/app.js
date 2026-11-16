@@ -141,7 +141,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationPush, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationPush, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -272,8 +272,10 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
     if (!conversations) return next(new AppError('CONVERSATION_UNAVAILABLE', '对话归档暂不可用', { status: 503 }));
     next();
   };
-  app.get('/api/conversation-logs/collector-policy', conversationCollectorAuth, (req, res) => res.json(conversations.collectorPolicy(req.get('x-conversation-dropped'))));
-  app.post('/api/conversation-logs/ingest', conversationCollectorAuth, express.json({ limit: '48mb', strict: true }), asyncRoute(async (req, res) => {
+  app.get('/api/conversation-logs/collector-policy', conversationCollectorAuth, (req, res) => res.json(conversations.collectorPolicy(req.get('x-conversation-dropped'), req.get('x-conversation-collector-version'))));
+  app.post('/api/conversation-logs/ingest', conversationCollectorAuth,
+    (req, res, next) => conversationArchive ? conversationArchive.proxy(req, res, next) : next(),
+    express.json({ limit: '272mb', strict: true }), asyncRoute(async (req, res) => {
     res.json(conversations.ingest(req.body));
   }));
   app.get('/api/auth/me', authenticated, (req, res) => {
@@ -338,7 +340,9 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.get('/conversation-logs/index', (req, res) => res.json(conversations.exportIndex(req.query)));
   api.get('/conversation-logs/records/:id', (req, res) => res.json(conversations.detail(req.params.id)));
   api.post('/conversation-logs/records/:id/reprocess', csrf, rateLimit({ windowMs: 60000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false }),
-    (req, res) => res.json(conversations.retry(req.params.id, req.body)));
+    (req, res, next) => conversationArchive
+      ? conversationArchive.proxy(req, res, next, '/reprocess/' + encodeURIComponent(req.params.id), Buffer.from(JSON.stringify(req.body || {})))
+      : res.json(conversations.retry(req.params.id, req.body)));
   api.get('/conversation-logs/records/:id/payload/:side', (req, res) => {
     const value = conversations.payload(req.params.id, req.query.source || 'masked', req.params.side);
     if (req.query.download === '1') return res.type('application/octet-stream').attachment(`conversation-${req.params.id}-${req.params.side}-${req.query.source || 'masked'}.raw`).send(value.body);

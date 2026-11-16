@@ -8,33 +8,37 @@ const { z } = require('zod');
 const { DateTime } = require('luxon');
 const { AppError } = require('./errors');
 const { decodeBody, maskPayload } = require('./services/conversation-redaction');
+const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversation-sensitive');
 const { recommendedModels, normalizeModel, modelAllowed } = require('./services/conversation-models');
 
 const userId = z.number().int().positive().safe();
 const policySchema = z.object({
   version: z.number().int().positive(), enabled: z.boolean(), mode: z.enum(['dual', 'masked', 'original']),
   excludedUserIds: z.array(userId).max(1000), email: z.boolean(), phone: z.boolean(), secret: z.boolean(), ip: z.boolean(),
+  identity: z.boolean().default(true), financial: z.boolean().default(true), personal: z.boolean().default(true), device: z.boolean().default(true),
   modelFilterEnabled: z.boolean().default(false),
   allowedModels: z.array(z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9 ._:/[\]-]*$/)).max(100).default([]),
   kimiK3Plus: z.boolean().default(false),
-  custom: z.array(z.object({ from: z.string().trim().min(2).max(120), to: z.string().min(1).max(80) }).strict()).max(10),
-  retention: z.number().int().min(1).max(365), capacity: z.number().int().min(1).max(1024),
+  custom: z.array(z.object({ from: z.string().trim().min(2).max(120), to: z.string().min(1).max(80) }).strict()).max(50),
+  retention: z.number().int().min(0).max(365), capacity: z.number().int().min(1).max(1024),
   reserve: z.number().int().min(0).max(1024), overflow: z.enum(['stop', 'evict']), maxBodyBytes: z.number().int().min(65536).max(16777216)
 }).strict();
 const defaults = { version: 1, enabled: false, mode: 'dual', excludedUserIds: [], email: true, phone: true, secret: true, ip: true,
+  identity: true, financial: true, personal: true, device: true,
   modelFilterEnabled: true, allowedModels: recommendedModels, kimiK3Plus: true,
   custom: [], retention: 7, capacity: 10, reserve: 2, overflow: 'stop', maxBodyBytes: 8388608 };
-const frameSchema = z.object({ direction: z.enum(['in', 'out']), at: z.number().int().nonnegative(), body: z.string().max(24000000), binary: z.boolean().default(false) }).strict();
+const frameSchema = z.object({ direction: z.enum(['in', 'out']), at: z.number().int().nonnegative().safe(), body: z.string(), binary: z.boolean().default(false) }).strict();
 const eventSchema = z.object({
   schema: z.literal(1), id: z.string().regex(/^[a-f0-9]{32}$/), request_id: z.string().regex(/^[a-f0-9]{32}$/),
   user_id: userId, key_id: userId, account_id: z.number().int().nonnegative().safe(),
-  session_id: z.string().regex(/^(?:[a-f0-9]{64})?$/), at: z.number().int().positive().safe(), duration_ms: z.number().int().nonnegative().max(86400000),
+  session_id: z.string().regex(/^(?:[a-f0-9]{64})?$/), at: z.number().int().positive().safe(), duration_ms: z.number().int().nonnegative().safe(),
   host: z.string().max(255).regex(/^[a-zA-Z0-9.:[\]-]*$/), path: z.string().max(1024).regex(/^\/[^?#\s]*$/),
   method: z.enum(['POST', 'GET', 'PUT', 'PATCH', 'DELETE', 'WS']), protocol: z.enum(['JSON', 'SSE', 'WebSocket']),
   model: z.string().max(200).default(''), status: z.number().int().min(0).max(599), complete: z.boolean(),
   reason: z.enum(['', 'body_limit', 'memory_limit', 'transport_error', 'read_error', 'closed_early', 'session_closed']),
   policy_version: z.number().int().positive(), encoding: z.enum(['', 'identity', 'gzip', 'br', 'deflate', 'zstd', 'unknown']).default(''),
-  request: z.string().max(24000000), response: z.string().max(24000000), frames: z.array(frameSchema).max(10000).default([])
+  request: z.string(), response: z.string(), frames: z.array(frameSchema).default([]),
+  capture_version: z.union([z.literal(1),z.literal(2)]).default(1), body_sha256: z.string().regex(/^(?:[a-f0-9]{64})?$/).default('')
 }).strict();
 function invalid(code = 'CONVERSATION_INVALID_INPUT', status = 400) { return new AppError(code, '对话日志参数无效', { status }); }
 function parse(schema, value) { const result = schema.safeParse(value); if (!result.success) throw invalid(); return result.data; }
@@ -46,9 +50,17 @@ function b64(value) {
 }
 function pack(raw) { return { request: raw.request.toString('base64'), response: raw.response.toString('base64'), frames: raw.frames.map(frame => ({ ...frame, body: frame.body.toString('base64') })) }; }
 function unpack(raw) { return { request: b64(raw.request), response: b64(raw.response), frames: raw.frames.map(frame => ({ ...frame, body: b64(frame.body) })) }; }
+function bodyDigest(raw) {
+  const hash = crypto.createHash('sha256');
+  const number = value => { const buffer = Buffer.alloc(8); buffer.writeBigUInt64BE(BigInt(value)); hash.update(buffer); };
+  const body = buffer => { number(buffer.length); hash.update(buffer); };
+  body(raw.request); body(raw.response); number(raw.frames.length);
+  for (const frame of raw.frames) { hash.update(frame.direction); number(frame.at); hash.update(Buffer.from([Number(frame.binary)])); body(frame.body); }
+  return hash.digest('hex');
+}
 function processingError(error) {
   const allowed = ['INVALID_JSON', 'PROTECTED_FIELD_MATCH', 'UNSUPPORTED_ENCODING', 'UNSAFE_SSE_REPLACEMENT',
-    'DOCUMENT_TOO_DEEP', 'NESTED_ARGUMENTS_TOO_DEEP', 'BINARY_MESSAGE_REQUIRES_ORIGINAL_MODE'];
+    'DOCUMENT_TOO_DEEP', 'NESTED_ARGUMENTS_TOO_DEEP', 'BINARY_MESSAGE_REQUIRES_ORIGINAL_MODE', 'UNINSPECTABLE_CONTENT', 'REDACTION_RESOURCE_LIMIT', 'INCOMPLETE_PRIVATE_KEY'];
   if (allowed.includes(error.message)) return error.message;
   if (error.code === 'ERR_ENCODING_INVALID_ENCODED_DATA') return 'INVALID_UTF8';
   if (['Z_DATA_ERROR', 'Z_BUF_ERROR', 'ERR_BUFFER_TOO_LARGE'].includes(error.code)) return 'DECOMPRESSION_FAILED';
@@ -56,8 +68,9 @@ function processingError(error) {
 }
 
 class ConversationLogStore {
-  constructor(directory, { now = Date.now, timezone = 'Asia/Shanghai', freeBytes, usedBytes } = {}) {
+  constructor(directory, { now = Date.now, timezone = 'Asia/Shanghai', freeBytes, usedBytes, processingLimits = () => ({}) } = {}) {
     this.directory = path.join(directory, 'conversation-logs'); this.now = now; this.timezone = timezone;
+    this.processingLimits = processingLimits;
     this.freeBytes = freeBytes || (() => { const stat = fs.statfsSync(this.directory); return Number(stat.bavail) * Number(stat.bsize); });
     this.usedBytes = usedBytes || (() => ['', '-wal', '-shm'].reduce((sum, suffix) => sum + (fs.existsSync(this.file + suffix) ? fs.statSync(this.file + suffix).size : 0), 0));
     this.lastContact = 0; this.lastError = null; this.collectorDropped = 0;
@@ -84,7 +97,8 @@ class ConversationLogStore {
       CREATE INDEX IF NOT EXISTS cl_session ON cl_records(user_id,key_id,session_id,at);`);
     this.db.transaction(() => {
       const columns = new Set(this.db.pragma('table_info(cl_records)').map(column => column.name));
-      for (const [name, definition] of [['processing_error', "TEXT NOT NULL DEFAULT ''"], ['processing_policy_version', 'INTEGER NOT NULL DEFAULT 0'], ['processed_at', 'INTEGER NOT NULL DEFAULT 0']]) {
+      for (const [name, definition] of [['processing_error', "TEXT NOT NULL DEFAULT ''"], ['processing_policy_version', 'INTEGER NOT NULL DEFAULT 0'], ['processed_at', 'INTEGER NOT NULL DEFAULT 0'],
+        ['redaction_version','INTEGER NOT NULL DEFAULT 0'], ['redaction_policy_hash',"TEXT NOT NULL DEFAULT ''"], ['capture_version','INTEGER NOT NULL DEFAULT 1'], ['body_sha256',"TEXT NOT NULL DEFAULT ''"]]) {
         if (!columns.has(name)) this.db.exec(`ALTER TABLE cl_records ADD COLUMN ${name} ${definition}`);
       }
     })();
@@ -111,19 +125,25 @@ class ConversationLogStore {
   configure(body) {
     return this.db.transaction(() => {
       const current = this.policy();
-      const candidate = parse(policySchema, { modelFilterEnabled: current.modelFilterEnabled, allowedModels: current.allowedModels, kimiK3Plus: current.kimiK3Plus, ...body });
+      const candidate = parse(policySchema, { identity: current.identity, financial: current.financial, personal: current.personal, device: current.device,
+        modelFilterEnabled: current.modelFilterEnabled, allowedModels: current.allowedModels, kimiK3Plus: current.kimiK3Plus, ...body });
       if (candidate.version !== current.version) throw invalid('CONVERSATION_POLICY_CONFLICT', 409);
       candidate.version++; candidate.excludedUserIds = [...new Set(candidate.excludedUserIds)].sort((a, b) => a - b);
+      candidate.overflow = 'stop';
       candidate.allowedModels = [...new Set(candidate.allowedModels.map(normalizeModel))].sort();
       this.db.prepare('INSERT INTO cl_policies VALUES(?,?,?)').run(candidate.version, this.seal(candidate, 'policy:' + candidate.version), this.now());
       return candidate;
     })();
   }
-  collectorPolicy(dropped = 0) {
+  collectorPolicy(dropped = 0, collectorVersion = '') {
     if (/^\d{1,16}$/.test(String(dropped)) && Number.isSafeInteger(Number(dropped))) this.collectorDropped = Number(dropped);
     this.lastContact = this.now(); const policy = this.policy();
-    return { version: policy.version, enabled: policy.enabled, excluded_user_ids: policy.excludedUserIds, max_body_bytes: policy.maxBodyBytes,
-      model_filter_version: 1, model_filter_enabled: policy.modelFilterEnabled, allowed_models: policy.allowedModels, kimi_k3_plus: policy.kimiK3Plus };
+    this.collectorVersion = collectorVersion === '2' ? 2 : 1;
+    const available = this.usedBytes() + 1048576 < policy.capacity * 1024 ** 3 && this.freeBytes() - 1048576 >= policy.reserve * 1024 ** 3;
+    if (!available) this.lastError = 'capacity';
+    else if (this.lastError === 'capacity') this.lastError = null;
+    return { version: policy.version, enabled: policy.enabled && available, excluded_user_ids: policy.excludedUserIds, max_body_bytes: policy.maxBodyBytes,
+      capture_version: 2, model_filter_version: 1, model_filter_enabled: policy.modelFilterEnabled, allowed_models: policy.allowedModels, kimi_k3_plus: policy.kimiK3Plus };
   }
   ingest(input) {
     const current = this.policy();
@@ -131,74 +151,92 @@ class ConversationLogStore {
     if (!current.enabled || (Number.isSafeInteger(input?.user_id) && current.excludedUserIds.includes(input.user_id)) || !modelAllowed(current, input?.model)) return { accepted: false };
     const event = parse(eventSchema, input), policy = this.policy(event.policy_version);
     if (!policy.enabled || policy.excludedUserIds.includes(event.user_id) || !modelAllowed(policy, event.model)) return { accepted: false };
-    if (event.at > this.now() + 60000 || event.at < this.now() - current.retention * 86400000) return { accepted: false };
+    if (event.at > this.now() + 60000 || current.retention && event.at < this.now() - current.retention * 86400000) return { accepted: false };
     const raw = { request: b64(event.request), response: b64(event.response), frames: event.frames.map(frame => ({ ...frame, body: b64(frame.body) })) };
     const rawBytes = raw.request.length + raw.response.length + raw.frames.reduce((sum, frame) => sum + frame.body.length, 0);
-    if (rawBytes > policy.maxBodyBytes * 3 || rawBytes > 33554432) throw invalid();
-    const fingerprint = crypto.createHash('sha256').update(JSON.stringify(event)).digest('hex');
+    // The transport safety bound covers the collector's global 64 MiB observation budget, including WS aliases.
+    if (rawBytes > 192 * 1024 * 1024) throw invalid('CONVERSATION_RESOURCE_LIMIT', 413);
+    const digest = bodyDigest(raw);
+    if (event.capture_version === 2 && event.body_sha256 !== digest) throw invalid('CONVERSATION_INTEGRITY_FAILED', 422);
+    const ack = { accepted: true, id: event.id, body_sha256: digest };
+    const { capture_version, body_sha256, ...legacy } = event;
+    const fingerprint = crypto.createHash('sha256').update(JSON.stringify(event.capture_version === 1 ? legacy : event)).digest('hex');
     const existing = this.db.prepare('SELECT fingerprint FROM cl_records WHERE id=?').get(event.id);
-    if (existing) { if (existing.fingerprint !== fingerprint) throw invalid('CONVERSATION_ID_CONFLICT', 409); return { accepted: true, duplicate: true }; }
+    if (existing) { if (existing.fingerprint !== fingerprint) throw invalid('CONVERSATION_ID_CONFLICT', 409); return { ...ack, duplicate: true }; }
+    const canFit = bytes => this.usedBytes() + bytes < current.capacity * 1024 ** 3 && this.freeBytes() - bytes >= current.reserve * 1024 ** 3;
+    if (!canFit(rawBytes * (policy.mode === 'dual' ? 3 : 1.5) + 4096)) { this.lastError = 'capacity'; return { accepted: false, reason: 'capacity' }; }
     let original = null, masked = null, hits = [], reason = event.reason, processing_error = '';
     if (rawBytes || !['body_limit', 'memory_limit'].includes(reason)) {
       try {
-        if (policy.mode !== 'original') { const result = maskPayload(raw, policy, this.key, event.encoding); masked = this.seal(pack(result.payload), event.id + ':masked'); hits = result.hits; }
+        if (policy.mode !== 'original') { const result = maskPayload(raw, policy, this.key, event.encoding, this.processingLimits()); masked = this.seal(pack(result.payload), event.id + ':masked'); hits = result.hits; }
         if (policy.mode !== 'masked') original = this.seal(pack(raw), event.id + ':original');
       } catch (error) {
         // Explicit operator policy: failed processing retains the exact encrypted source, even in masked mode.
         original = this.seal(pack(raw), event.id + ':original'); masked = null; hits = []; processing_error = processingError(error);
       }
     }
-    let storedBytes = (original?.length || 0) + (masked?.length || 0) + 2048;
-    this.prune();
-    const canStore = () => this.usedBytes() + storedBytes < current.capacity * 1024 ** 3 && this.freeBytes() - storedBytes >= current.reserve * 1024 ** 3;
-    if (!canStore() && current.overflow === 'evict') {
-      for (let batch = 0; batch < 20 && !canStore(); batch++) {
-        if (!this.db.prepare('DELETE FROM cl_records WHERE id IN (SELECT id FROM cl_records ORDER BY at LIMIT 100)').run().changes) break;
-        this.db.pragma('wal_checkpoint(TRUNCATE)'); this.db.pragma('incremental_vacuum(512)');
-      }
-    }
-    if (!canStore()) {
-      original = null; masked = null; hits = []; reason = 'capacity'; storedBytes = 2048;
-      if (!canStore()) { this.lastError = 'capacity'; return { accepted: false, reason: 'capacity' }; }
-    }
+    const storedBytes = (original?.length || 0) + (masked?.length || 0) + 2048;
     const { schema, request, response, frames, ...metadata } = event;
-    this.db.prepare(`INSERT INTO cl_records(id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,
+    try { return this.db.transaction(() => {
+      // Processing runs outside the write lock; a policy saved by the API process wins here.
+      const latest = this.policy();
+      if (!latest.enabled || latest.excludedUserIds.includes(event.user_id) || !modelAllowed(latest, event.model) ||
+        latest.retention && event.at < this.now() - latest.retention * 86400000) return { accepted: false };
+      const duplicate = this.db.prepare('SELECT fingerprint FROM cl_records WHERE id=?').get(event.id);
+      if (duplicate) { if (duplicate.fingerprint !== fingerprint) throw invalid('CONVERSATION_ID_CONFLICT', 409); return { ...ack, duplicate: true }; }
+      if (this.usedBytes() + storedBytes >= latest.capacity * 1024 ** 3 || this.freeBytes() - storedBytes < latest.reserve * 1024 ** 3) {
+        this.lastError = 'capacity'; return { accepted: false, reason: 'capacity' };
+      }
+      this.db.prepare(`INSERT INTO cl_records(id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,
       host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,original,masked,hits,bytes,fingerprint,
-      processing_error,processing_policy_version,processed_at) VALUES(@id,@request_id,@user_id,@key_id,@account_id,@session_id,@at,@duration_ms,
+      processing_error,processing_policy_version,processed_at,redaction_version,redaction_policy_hash,capture_version,body_sha256) VALUES(@id,@request_id,@user_id,@key_id,@account_id,@session_id,@at,@duration_ms,
       @host,@path,@method,@protocol,@model,@status,@complete,@reason,@policy_version,@mode,@encoding,@original,@masked,@hits,@bytes,@fingerprint,
-      @processing_error,@processing_policy_version,@processed_at)`)
+      @processing_error,@processing_policy_version,@processed_at,@redaction_version,@redaction_policy_hash,@capture_version,@body_sha256)`)
       .run({ ...metadata, complete: event.complete && !reason ? 1 : 0, reason, mode: policy.mode, original, masked, hits: JSON.stringify(hits), bytes: storedBytes, fingerprint,
+        body_sha256: digest, redaction_version: masked ? REDACTION_VERSION : 0, redaction_policy_hash: masked ? redactionPolicyHash(policy) : '',
         processing_error, processing_policy_version: policy.mode === 'original' ? 0 : policy.version, processed_at: this.now() });
-    this.lastError = null; return { accepted: true };
+      this.lastError = null; return ack;
+    }).immediate();
+    } catch (error) {
+      if (!/^SQLITE_(?:FULL|IOERR|READONLY|BUSY|CANTOPEN|NOMEM|CORRUPT)/.test(error.code || '')) throw error;
+      this.lastError = 'storage_failed'; return { accepted: false, reason: 'storage_failed' };
+    }
   }
   retry(id, input) {
     const expected = parse(z.object({ policy_version: z.number().int().positive(), processed_at: z.number().int().nonnegative().safe() }).strict(), input);
-    return this.db.transaction(() => {
-      const policy = this.policy(), row = this.db.prepare('SELECT * FROM cl_records WHERE id=?').get(id);
+    const policy = this.policy(), row = this.db.prepare('SELECT * FROM cl_records WHERE id=?').get(id);
+    const validate = (policy, row) => {
       if (!row) throw invalid('CONVERSATION_NOT_FOUND', 404);
       if (policy.excludedUserIds.includes(row.user_id)) throw new AppError('CONVERSATION_USER_EXCLUDED', '该用户已排除，不能重新处理', { status: 409 });
       if (!modelAllowed(policy, row.model)) throw new AppError('CONVERSATION_MODEL_EXCLUDED', '该模型不在采集名单中，不能重新处理', { status: 409 });
       if (policy.version !== expected.policy_version || row.processed_at !== expected.processed_at) throw new AppError('CONVERSATION_RETRY_CONFLICT', '策略或记录已更新，请刷新后重试', { status: 409 });
-      if (!row.original || !row.processing_error) throw new AppError('CONVERSATION_RETRY_UNAVAILABLE', '没有待处理的原文；历史缺失正文无法恢复', { status: 409 });
-      let result;
+      if (!this.publicRow(row).retry_available) throw new AppError('CONVERSATION_RETRY_UNAVAILABLE', '没有待处理的原文；历史缺失正文无法恢复', { status: 409 });
+    };
+    validate(policy, row);
+    let result, errorCode = '';
+    try { result = maskPayload(unpack(this.open(row.original, id + ':original')), policy, this.key, row.encoding, this.processingLimits()); }
+    catch (error) { errorCode = processingError(error); }
+    const masked = result ? this.seal(pack(result.payload), id + ':masked') : null;
+    this.db.transaction(() => {
+      validate(this.policy(), this.db.prepare('SELECT * FROM cl_records WHERE id=?').get(id));
       const processedAt = Math.max(this.now(), row.processed_at + 1);
-      try { result = maskPayload(unpack(this.open(row.original, id + ':original')), policy, this.key, row.encoding); }
-      catch (error) {
+      if (errorCode) {
         this.db.prepare('UPDATE cl_records SET processing_error=?,processing_policy_version=?,processed_at=? WHERE id=?')
-          .run(processingError(error), policy.version, processedAt, id);
-        return this.detail(id);
+          .run(errorCode, policy.version, processedAt, id);
+        return;
       }
-      const masked = this.seal(pack(result.payload), id + ':masked'), original = row.mode === 'masked' ? null : row.original;
+      const original = row.mode === 'masked' ? null : row.original;
       // Reserve space for the new encrypted copy before atomically removing a fallback source.
       if (this.usedBytes() + masked.length + 2048 >= policy.capacity * 1024 ** 3 || this.freeBytes() - masked.length - 2048 < policy.reserve * 1024 ** 3) {
         throw new AppError('CONVERSATION_RETRY_CAPACITY', '空间不足，已保留原文，请释放空间后重试', { status: 409 });
       }
-      this.db.prepare(`UPDATE cl_records SET original=?,masked=?,hits=?,bytes=?,processing_error='',processing_policy_version=?,processed_at=? WHERE id=?`)
-        .run(original, masked, JSON.stringify(result.hits), (original?.length || 0) + masked.length + 2048, policy.version, processedAt, id);
-      return this.detail(id);
-    })();
+      this.db.prepare(`UPDATE cl_records SET original=?,masked=?,hits=?,bytes=?,processing_error='',processing_policy_version=?,processed_at=?,redaction_version=?,redaction_policy_hash=? WHERE id=?`)
+        .run(original, masked, JSON.stringify(result.hits), (original?.length || 0) + masked.length + 2048, policy.version, processedAt, REDACTION_VERSION, redactionPolicyHash(policy), id);
+    }).immediate();
+    return this.detail(id);
   }
   prune() {
+    if (!this.policy().retention) return 0;
     const removed = this.db.prepare('DELETE FROM cl_records WHERE at<?').run(this.now() - this.policy().retention * 86400000).changes;
     if (removed) { this.db.pragma('wal_checkpoint(TRUNCATE)'); this.db.pragma('incremental_vacuum(128)'); }
     return removed;
@@ -225,14 +263,15 @@ class ConversationLogStore {
     const { original, masked, fingerprint, hits, ...metadata } = row;
     const policy = this.policy(), excluded = policy.excludedUserIds.includes(row.user_id);
     const modelExcluded = !modelAllowed(policy, row.model);
+    const outdated = row.mode !== 'original' && (row.redaction_version !== REDACTION_VERSION || row.redaction_policy_hash !== redactionPolicyHash(policy));
     return { ...metadata, complete: Boolean(row.complete), original: Boolean(original), masked: Boolean(masked), hits: JSON.parse(hits),
-      retry_available: Boolean(original && row.processing_error && !excluded && !modelExcluded), retry_blocked: excluded ? 'user_excluded' : modelExcluded ? 'model_excluded' : !original ? 'no_original' : '' };
+      redaction_outdated: outdated, retry_available: Boolean(original && (row.processing_error || outdated) && !excluded && !modelExcluded), retry_blocked: excluded ? 'user_excluded' : modelExcluded ? 'model_excluded' : !original ? 'no_original' : '' };
   }
   list(query = {}) {
     const page = Math.max(1, Math.min(1000000, Number(query.page) || 1)) | 0, pageSize = 20;
     const filter = this.where(query);
     const summary = this.db.prepare(`SELECT COUNT(*) total,COUNT(DISTINCT request_id) requests,COALESCE(SUM(complete),0) complete,COALESCE(SUM(bytes),0) bytes FROM cl_records${filter.sql}`).get(...filter.args);
-    const columns = "id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,original IS NOT NULL original,masked IS NOT NULL masked,hits,bytes,processing_error,processing_policy_version,processed_at";
+    const columns = "id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,original IS NOT NULL original,masked IS NOT NULL masked,hits,bytes,processing_error,processing_policy_version,processed_at,redaction_version,redaction_policy_hash,capture_version,body_sha256";
     const items = this.db.prepare(`SELECT ${columns} FROM cl_records${filter.sql} ORDER BY at DESC,id LIMIT ? OFFSET ?`).all(...filter.args, pageSize, (page - 1) * pageSize).map(row => this.publicRow(row));
     return { items, summary, page, pageSize, pages: Math.ceil(summary.total / pageSize) };
   }
@@ -273,7 +312,7 @@ class ConversationLogStore {
   }
   status() {
     const counts = this.db.prepare("SELECT COUNT(*) records,COALESCE(SUM(bytes),0) bytes,COALESCE(SUM(complete=0),0) gaps,COALESCE(SUM(processing_error!='' OR reason='redaction_failed'),0) processingFailures FROM cl_records").get();
-    return { ...counts, lastContact: this.lastContact || null, lastError: this.lastError, collectorDropped: this.collectorDropped, policy: this.policy(), diskBytes: this.usedBytes(), freeBytes: this.freeBytes(), timezone: this.timezone,
+    return { ...counts, lastContact: this.lastContact || null, lastError: this.lastError, collectorDropped: this.collectorDropped, collectorVersion: this.collectorVersion || null, redactionVersion: REDACTION_VERSION, policy: this.policy(), diskBytes: this.usedBytes(), freeBytes: this.freeBytes(), timezone: this.timezone,
       coverage: ['HTTP JSON / SSE (including TLS fingerprint and transport fallbacks)', 'OpenAI pooled WebSocket / passthrough messages'],
       limitations: ['Only bytes consumed by the gateway are observed; early close is marked incomplete.', 'Queue/process failure can lose archives; this archive does not control inference or billing.'] };
   }
@@ -281,4 +320,4 @@ class ConversationLogStore {
   close() { clearInterval(this.timer); this.db?.close(); this.db = null; this.key?.fill(0); }
 }
 
-module.exports = { ConversationLogStore, policySchema, eventSchema, defaults };
+module.exports = { ConversationLogStore, policySchema, eventSchema, defaults, bodyDigest };

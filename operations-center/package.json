@@ -20,10 +20,12 @@
     "check:domain-access-ui": "node scripts/domain-access-live-browser-check.cjs",
     "check:domain-access": "node --check src/domain-access-store.js && node --check src/services/domain-access-format.js && node --check src/services/domain-access-collector.js && node --check src/services/domain-access-source.js && node --check src/services/domain-access-service.js && node --check public/domain-access-ui.js && node --check tests/domain-access-fixture.js && node --check tests/domain-access.test.js && node --check scripts/domain-access-live-preview.cjs && node --check scripts/domain-access-live-browser-check.cjs",
     "check:request-errors": "node --check src/services/request-errors-source.js && node --check src/services/request-errors-classifier.js && node --check src/services/request-errors-service.js && node --check public/request-errors-ui.js && node --check scripts/request-errors-preview.cjs && node --check scripts/request-errors-browser-check.cjs && node --check scripts/check-sub2api-error-telemetry.cjs && node --check tests/request-errors-fixture.js && node --check tests/request-errors.test.js",
-    "postcheck": "npm run check:request-errors && npm run check:domain-access && npm run check:conversations",
+    "postcheck": "npm run check:request-errors && npm run check:domain-access && npm run check:conversations && npm run check:conversation-archive",
+    "check:conversation-archive": "node --check src/services/conversation-archive-service.js && node --check src/services/conversation-archive-worker.js && node --check tests/conversation-archive-worker.test.js && node --check scripts/conversation-archive-perf.cjs",
+    "bench:conversation-archive": "node scripts/conversation-archive-perf.cjs",
     "preview:conversations": "node scripts/conversation-logs-live-preview.cjs",
     "check:conversations-ui": "node scripts/conversation-logs-live-browser-check.cjs",
-    "check:conversations": "node --check src/conversation-log-store.js && node --check src/services/conversation-models.js && node --check src/services/conversation-redaction.js && node --check public/conversation-logs-ui.js && node --check tests/conversation-logs-fixture.js && node --check tests/conversation-logs.test.js && node --check tests/conversation-models.test.js && node --check scripts/conversation-logs-live-preview.cjs && node --check scripts/conversation-logs-live-browser-check.cjs && npm run check:conversation-push",
+    "check:conversations": "node --check src/conversation-log-store.js && node --check src/services/conversation-models.js && node --check src/services/conversation-redaction.js && node --check src/services/conversation-sensitive.js && node --check public/conversation-logs-ui.js && node --check tests/conversation-logs-fixture.js && node --check tests/conversation-logs.test.js && node --check tests/conversation-models.test.js && node --check tests/conversation-integrity.test.js && node --check tests/conversation-privacy.test.js && node --check scripts/conversation-logs-live-preview.cjs && node --check scripts/conversation-logs-live-browser-check.cjs && npm run check:conversation-push",
     "check:conversation-push": "node --check src/services/conversation-push-policy.js && node --check src/conversation-push-store.js && node --check src/services/conversation-push-transport.js && node --check src/services/conversation-push-service.js && node --check public/conversation-push-ui.js && node --check tests/conversation-push.test.js && node --check scripts/conversation-push-browser-check.cjs",
     "check:conversation-push-ui": "node scripts/conversation-push-browser-check.cjs",
     "test": "node --test --test-concurrency=1 tests/*.test.js",
@@ -49,6 +51,7 @@
     "marked": "^18.1.1",
     "node-cron": "^4.6.0",
     "pg": "^8.16.3",
+    "validator": "13.15.35",
     "zod": "^4.1.11"
   },
   "devDependencies": {

@@ -2,16 +2,10 @@
 
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
+const { REDACTION_VERSION, fieldKind, protocolField, assertInspectable, replacePatterns } = require('./conversation-sensitive');
 
-const protectedFields = new Set(['type', 'role', 'id', 'call_id', 'tool_call_id', 'tool_use_id', 'previous_response_id', 'item_id', 'name', 'model', 'signature', 'encrypted_content']);
-const secretField = /^(?:authorization|api[_-]?key|access_token|refresh_token|password|passwd|secret|client_secret|token)$/i;
 const emailLocal = /[A-Z0-9.!#$%&'*+/=?^_`{|}~-]/i;
 const emailDomain = /[A-Z0-9](?:[A-Z0-9.-]*[A-Z0-9])?\.[A-Z]{2,}/iy;
-const patterns = {
-  phone: /(?<![\w])\+?\d[\d ()-]{6,}\d(?![\w])/g,
-  secret: /(?:\bsk-[A-Za-z0-9_-]{12,}|\bBearer\s+[A-Za-z0-9._~+/-]{12,}=*|\bdemo_secret_[A-Za-z0-9_]+)/g,
-  ip: /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g
-};
 
 function replaceEmails(text, replace) {
   const parts = []; let cursor = 0, search = 0;
@@ -33,8 +27,11 @@ function replaceEmails(text, replace) {
   return parts.join('');
 }
 
-function decodeBody(buffer, encoding = '') {
-  const options = { maxOutputLength: 32 * 1024 * 1024 };
+function decodeBody(buffer, encoding = '', maxOutputBytes = 256 * 1024 * 1024) {
+  // Processing memory protection never changes the stored original bytes.
+  if (!buffer.length && !encoding) return '';
+  if (maxOutputBytes < 1 || buffer.length > maxOutputBytes) throw new Error('REDACTION_RESOURCE_LIMIT');
+  const options = { maxOutputLength: maxOutputBytes };
   if (encoding === 'gzip') buffer = zlib.gunzipSync(buffer, options);
   else if (encoding === 'br') buffer = zlib.brotliDecompressSync(buffer, options);
   else if (encoding === 'deflate') buffer = zlib.inflateSync(buffer, options);
@@ -71,7 +68,10 @@ function tokens(text) {
       while (text[at] !== ']') { walk(field, depth + 1, [...path, index++]); space(); if (text[at] !== ',') break; at++; }
       at++; return;
     }
+    const start = at;
     while (at < text.length && !/[\s,}\]]/.test(text[at])) at++;
+    const raw = text.slice(start, at);
+    if (/^-?\d/.test(raw)) values.push({ start, end: at, value: raw, numeric: true, field, path });
   }
   walk(''); return values;
 }
@@ -93,6 +93,12 @@ function streamGroup(token, parsed) {
 
 function createRedactor(policy, salt) {
   const hits = new Map();
+  const known = new Map();
+  const kindFor = token => {
+    const schema = token.path.some(field => ['properties','$defs','definitions'].includes(field));
+    const kind = fieldKind(token.field, policy) || (!schema && token.path.slice(0, -1).map(field => fieldKind(field, policy)).find(Boolean)) || '';
+    return ['identity','personal','phone'].includes(kind) && policy.email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(token.value) ? 'email' : kind;
+  };
   function placeholder(kind, match) {
     const digest = crypto.createHmac('sha256', salt).update(kind + '\0' + match).digest('hex').slice(0, 12).toUpperCase();
     const replacement = `<${kind.toUpperCase()}_${digest}>`;
@@ -100,9 +106,24 @@ function createRedactor(policy, salt) {
     return replacement;
   }
   function replace(value) {
-    let text = policy.email ? replaceEmails(value, match => placeholder('email', match)) : value;
-    for (const [kind, pattern] of Object.entries(patterns)) if (policy[kind]) text = text.replace(pattern, match => {
-      return placeholder(kind, match);
+    let text = value;
+    for (const [match, kind] of [...known].sort((a, b) => b[0].length - a[0].length)) {
+      if (text.includes(match)) text = text.split(/(<[A-Z]+_[A-F0-9]{12}>)/g).map((part, index) => index % 2 ? part : part.replaceAll(match, (_value, at) => {
+        if (kind === 'personal' && (/[A-Za-z0-9_]/.test(match[0]) && /[A-Za-z0-9_]/.test(part[at - 1] || '') ||
+          /[A-Za-z0-9_]/.test(match.at(-1)) && /[A-Za-z0-9_]/.test(part[at + match.length] || ''))) return match;
+        return placeholder(kind, match);
+      })).join('');
+    }
+    text = replacePatterns(text, { secret: policy.secret }, placeholder);
+    text = policy.email ? replaceEmails(text, match => placeholder('email', match)) : text;
+    text = replacePatterns(text, { ...policy, secret: false }, placeholder);
+    // Decode URL parameter values independently, preserving the URL spelling and all other parameters.
+    text = text.replace(/([?&#]([^\s?&#=]{1,80})=)([^\s&#"'<>]{1,4096})/g, (all, prefix, key, raw) => {
+      let decoded, label;
+      try { decoded = decodeURIComponent(raw); label = decodeURIComponent(key); } catch { return all; }
+      const kind = /^x-amz-|^x-goog-|^(?:sig|signature|se|sp|sv)$/i.test(label) && policy.secret ? 'secret' : fieldKind(label, policy);
+      const next = kind ? placeholder(kind, decoded) : replacePatterns(policy.email ? replaceEmails(decoded, m => placeholder('email', m)) : decoded, policy, placeholder);
+      return next === decoded ? all : prefix + encodeURIComponent(next);
     });
     for (const rule of policy.custom) {
       const count = text.split(rule.from).length - 1;
@@ -143,6 +164,9 @@ function createRedactor(policy, salt) {
         const prefix = line === 'data' ? 4 : line.startsWith('data: ') ? 6 : 5, value = line.slice(prefix);
         segments.push({ start: length, end: length + value.length, raw: offset + prefix });
         parts.push(value); length += value.length + 1;
+      } else if (line.startsWith(':') || !/^(?:event|id|retry):/.test(line)) {
+        const colon = line.indexOf(':'), prefix = colon < 0 ? 0 : colon + 1;
+        result.push({ text: line.slice(prefix), start: offset + prefix, json: false });
       }
       offset += match[0].length;
     }
@@ -156,8 +180,29 @@ function createRedactor(policy, salt) {
     }
     return replace(value);
   }
+  function learn(texts, depth) {
+    if (depth > 8) throw new Error('NESTED_ARGUMENTS_TOO_DEEP');
+    for (const text of texts) for (const document of documents(text)) {
+      if (!document.json) continue;
+      const parsed = JSON.parse(document.text);
+      for (const token of tokens(document.text)) {
+        assertInspectable(token);
+        if (protocolField(token, parsed, depth)) continue;
+        const kind = kindFor(token);
+        if (kind && ['personal','identity','financial','secret','device'].includes(kind) && token.value.length >= (kind === 'personal' ? 2 : 4) && token.value.length <= 4096) {
+          if (known.size >= 256 && !known.has(token.value)) throw new Error('REDACTION_RESOURCE_LIMIT');
+          if (!known.has(token.value)) known.set(token.value, kind);
+        }
+        if (!token.numeric && /^[\s]*[\[{]/.test(token.value)) {
+          try { JSON.parse(token.value); } catch { continue; }
+          learn([token.value], depth + 1);
+        }
+      }
+    }
+  }
   function redactDocuments(texts, depth = 0) {
     if (depth > 8) throw new Error('NESTED_ARGUMENTS_TOO_DEEP');
+    learn(texts, depth);
     const edits = texts.map(() => []), deltas = new Map();
     for (let file = 0; file < texts.length; file++) for (const document of documents(texts[file])) {
       if (!document.json) {
@@ -174,7 +219,8 @@ function createRedactor(policy, salt) {
         if (document.segments && !segment) throw new Error('UNSAFE_SSE_REPLACEMENT');
         const base = segment ? segment.raw - segment.start : document.start;
         const entry = { ...token, start: base + token.start, end: base + token.end, file };
-        if (depth === 0 && protectedFields.has(token.field)) {
+        assertInspectable(token);
+        if (protocolField(token, parsed, depth)) {
           // Numeric IDs are often mistaken for phone numbers. Protocol identities stay exact.
           if (policy.custom.some(rule => token.value.includes(rule.from) && rule.from !== rule.to)) throw new Error('PROTECTED_FIELD_MATCH');
           continue;
@@ -185,9 +231,10 @@ function createRedactor(policy, salt) {
           deltas.get(group.key).entries.push(entry); continue;
         }
         let value;
-        if (policy.secret && secretField.test(token.field) && token.value) value = placeholder('secret', token.value);
-        else if (['arguments', 'output'].includes(token.field)) value = nested(token.value, depth);
-        else value = replace(token.value);
+        const kind = kindFor(token);
+        if (kind && token.value) value = placeholder(kind, token.value);
+        else if (!token.numeric && /^[\s]*[\[{]/.test(token.value)) value = nested(token.value, depth);
+        else value = token.numeric ? replacePatterns(token.value, { identity: policy.identity, financial: policy.financial }, placeholder) : replace(token.value);
         if (value !== token.value) edits[file].push({ ...entry, value });
       }
     }
@@ -226,19 +273,25 @@ function createRedactor(policy, salt) {
   return { process: redactDocuments, hits: () => [...hits.values()] };
 }
 
-function maskPayload(raw, policy, salt, encoding = '') {
+function maskPayload(raw, policy, salt, encoding = '', { maxOutputBytes = 256 * 1024 * 1024 } = {}) {
   const redactor = createRedactor(policy, salt);
+  let remaining = maxOutputBytes;
+  const decode = (body, compression = '') => {
+    const text = decodeBody(body, compression, remaining);
+    remaining -= Buffer.byteLength(text);
+    return text;
+  };
   if (raw.frames.length) {
     if (raw.frames.some(frame => frame.binary)) throw new Error('BINARY_MESSAGE_REQUIRES_ORIGINAL_MODE');
-    const output = redactor.process(raw.frames.map(frame => decodeBody(frame.body)));
+    const output = redactor.process(raw.frames.map(frame => decode(frame.body)));
     const frames = raw.frames.map((frame, index) => ({ ...frame, body: Buffer.from(output[index]) }));
     return { payload: { request: frames.find(frame => frame.direction === 'out')?.body || Buffer.alloc(0),
       response: frames.findLast(frame => frame.direction === 'in')?.body || Buffer.alloc(0), frames }, hits: redactor.hits() };
   }
-  const inputs = [decodeBody(raw.request), decodeBody(raw.response, encoding), ...raw.frames.map(frame => decodeBody(frame.body))];
+  const inputs = [decode(raw.request), decode(raw.response, encoding)];
   const output = redactor.process(inputs);
   return { payload: { request: Buffer.from(output[0]), response: Buffer.from(output[1]),
     frames: raw.frames.map((frame, index) => ({ ...frame, body: Buffer.from(output[index + 2]) })) }, hits: redactor.hits() };
 }
 
-module.exports = { decodeBody, createRedactor, maskPayload };
+module.exports = { decodeBody, createRedactor, maskPayload, REDACTION_VERSION };

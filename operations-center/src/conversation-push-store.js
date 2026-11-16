@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { z } = require('zod');
 const { modelAllowed } = require('./services/conversation-models');
+const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversation-sensitive');
 const { defaults,parsePolicy,publicPolicy,targetHash,invalid } = require('./services/conversation-push-policy');
 
 const destinations = z.array(z.enum(['webhook','s3'])).min(1).max(2);
@@ -11,7 +12,7 @@ const filterSchema = z.object({search:z.string().max(200).optional(),start:z.str
   protocol:z.enum(['','JSON','SSE','WebSocket']).optional(),capture:z.enum(['','complete','partial','missing','redaction_failed']).optional()}).strict();
 const previewSchema = z.object({filter:filterSchema,destinations}).strict();
 const enqueueSchema = previewSchema.extend({batchId:z.string().uuid(),previewToken:z.string().regex(/^[a-f0-9]{64}$/)}).strict();
-const columns = 'id,rowid AS cursor_id,user_id,model,at,fingerprint,processed_at,processing_policy_version,processing_error,original IS NOT NULL AS original,masked IS NOT NULL AS masked';
+const columns = 'id,rowid AS cursor_id,user_id,model,at,fingerprint,processed_at,processing_policy_version,processing_error,complete,reason,redaction_version,redaction_policy_hash,original IS NOT NULL AS original,masked IS NOT NULL AS masked';
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function parse(schema,value) { const result=schema.safeParse(value);if(!result.success)throw invalid();return result.data; }
 
@@ -55,6 +56,10 @@ class ConversationPushStore {
   // The archive increments processed_at strictly on every reprocess; metadata scans never load body BLOBs.
   version(row,source) { return hash([row.fingerprint,source,source==='masked'?[row.processed_at,row.processing_policy_version]:0]); }
   allowed(row,policy) { return !policy.excludedUserIds.includes(row.user_id) && modelAllowed(policy,row.model); }
+  copyReady(row,source,policy) {
+    return Boolean(row.complete && !row.reason && row[source] && (source === 'original' ||
+      !row.processing_error && row.redaction_version === REDACTION_VERSION && row.redaction_policy_hash === redactionPolicyHash(policy)));
+  }
   jobId(row,policy,destination) { return hash([row.id,destination,targetHash(policy,destination),this.version(row,policy.source)]); }
   pendingCount() { return this.db.prepare("SELECT COUNT(*) n FROM cl_push_jobs WHERE status IN ('pending','running')").get().n; }
   insert(row,policy,destination,batchId) {
@@ -69,13 +74,13 @@ class ConversationPushStore {
     const where=this.archive.where(value.filter);
     const rows=this.db.prepare(`SELECT ${columns} FROM cl_records${where.sql} ORDER BY at,id LIMIT 10001`).all(...where.args);
     if(rows.length>10000)throw invalid('单批最多 10,000 条，请缩小筛选范围');
-    const eligible=rows.filter(row=>this.allowed(row,archivePolicy)&&row[policy.source]);
+    const eligible=rows.filter(row=>this.allowed(row,archivePolicy)&&this.copyReady(row,policy.source,archivePolicy));
     const token=crypto.createHmac('sha256',this.archive.key).update(JSON.stringify([policy.version,archivePolicy.version,value.filter,targets,eligible.map(row=>[row.id,this.version(row,policy.source)])])).digest('hex');
     const existing=this.db.prepare('SELECT status FROM cl_push_jobs WHERE id=?');
     let duplicates=0;
     for(const row of eligible)for(const target of targets)if(existing.get(this.jobId(row,policy,target)))duplicates++;
     return {policy,targets,eligible,previewToken:token,matched:rows.length,excluded:rows.filter(row=>!this.allowed(row,archivePolicy)).length,
-      unavailable:rows.filter(row=>this.allowed(row,archivePolicy)&&!row[policy.source]).length,duplicates,jobs:eligible.length*targets.length-duplicates};
+      unavailable:rows.filter(row=>this.allowed(row,archivePolicy)&&!this.copyReady(row,policy.source,archivePolicy)).length,duplicates,jobs:eligible.length*targets.length-duplicates};
   }
   preview(input) {
     const value=this.selection(input);
@@ -104,7 +109,7 @@ class ConversationPushStore {
       const archivePolicy=this.archive.policy(),targets=['webhook','s3'].filter(target=>policy[target].enabled);
       let created=0,pending=this.pendingCount();
       for(const row of rows){
-        if(this.allowed(row,archivePolicy)&&row[policy.source]){
+        if(this.allowed(row,archivePolicy)&&this.copyReady(row,policy.source,archivePolicy)){
           const needed=targets.filter(target=>!this.db.prepare('SELECT 1 FROM cl_push_jobs WHERE id=?').get(this.jobId(row,policy,target)));
           if(pending+needed.length>policy.queueLimit)return {created,full:true};
           for(const target of needed){created+=this.insert(row,policy,target,'');pending++;}
@@ -122,6 +127,7 @@ class ConversationPushStore {
     if(!row)return {cancel:'RECORD_EXPIRED'};
     if(!this.allowed(row,this.archive.policy()))return {cancel:'COLLECTION_EXCLUDED'};
     if(!row[job.source])return {cancel:'COPY_UNAVAILABLE'};
+    if(!this.copyReady(row,job.source,this.archive.policy()))return {cancel:!row.complete||row.reason?'INCOMPLETE_CAPTURE':'REDACTION_OUTDATED'};
     if(this.version(row,job.source)!==job.content_version)return {cancel:'CONTENT_CHANGED'};
     return {row};
   }
@@ -178,7 +184,7 @@ class ConversationPushStore {
       batches:this.db.prepare('SELECT id,created_at,matched,eligible,created FROM cl_push_batches ORDER BY created_at DESC LIMIT 10').all()};
   }
   envelope(job) {
-    const fields='id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,processing_error,processing_policy_version,processed_at';
+    const fields='id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,processing_error,processing_policy_version,processed_at,capture_version,body_sha256,redaction_version';
     const row=this.db.prepare(`SELECT ${fields},${job.source} AS payload FROM cl_records WHERE id=?`).get(job.record_id);
     if(!row?.payload)throw invalid('日志副本不可用','CONVERSATION_PUSH_COPY_UNAVAILABLE',409);
     const {payload,...metadata}=row,raw=this.archive.open(payload,row.id+':'+job.source);

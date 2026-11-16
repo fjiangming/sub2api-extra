@@ -35,6 +35,12 @@ async function main() {
         assert.equal(await page.locator('#cl-inspector img').count(),0);
         const downloadEvent = page.waitForEvent('download'); await page.locator('[data-cl-download=request]').click();
         const downloaded = await downloadEvent; assert.deepEqual(fs.readFileSync(await downloaded.path()),Buffer.from(preview.raw.request,'base64'));
+        await page.locator(`[data-cl-record="${id('privacy-case')}"]`).click();
+        await page.locator('#cl-body-request').filter({hasText:'IDENTITY_'}).waitFor();
+        const privateText = await page.locator('#cl-body-request').textContent();
+        for (const value of ['张三','11010519491231002X','4111111111111111','E12345678','测试路','246810']) assert(!privateText.includes(value));
+        assert(JSON.parse(privateText).messages[0].content.includes(JSON.parse(privateText).customer.name));
+        await layout(); await page.screenshot({path:path.join(directory,name + '-privacy.png'),fullPage:true});
         await page.locator(`[data-cl-record="${id('ws-case')}"]`).click(); await page.locator('[data-cl-detail=frames]').click();
         await page.locator('[data-cl-frame="1"]').click(); await page.locator('#cl-body-frame-1').filter({hasText:'EMAIL_'}).waitFor();
         await layout(); await page.screenshot({path:path.join(directory,name + '-frames.png'),fullPage:true});
@@ -48,6 +54,9 @@ async function main() {
         assert(fs.readFileSync(await csv.path(),'utf8').includes('request_id'));
         await page.locator('#cl-tab-collection').click(); await page.locator('#cl-collection h2').waitFor(); await layout();
         await page.locator('#cl-tab-policy').click(); await page.locator('#cl-policy-form').waitFor();
+        assert.equal(await page.locator('[name=limit]').count(),0);
+        for (const field of ['identity','financial','personal','device']) assert(await page.locator(`#cl-policy-form input[name=${field}]`).isChecked());
+        await page.locator('[name=retention]').fill('0');
         await page.locator('#cl-user-search').fill('2'); await page.locator('[data-cl-user="2"]').waitFor(); await page.locator('[data-cl-user="2"]').check();
         await page.locator('[data-cl-action=add-rule]').click(); await page.locator('[data-rule-from]').fill('ORION-42'); await page.locator('[data-rule-to]').fill('<ORDER>');
         await page.locator('[name=modelFilterEnabled]').check();
@@ -58,6 +67,8 @@ async function main() {
         assert.deepEqual(preview.fixture.store.policy().excludedUserIds,[2]);
         const selectedPolicy = preview.fixture.store.policy(), before = preview.fixture.store.status();
         assert(selectedPolicy.modelFilterEnabled && selectedPolicy.kimiK3Plus);
+        assert.equal(selectedPolicy.retention,0); assert.equal(selectedPolicy.overflow,'stop');
+        for (const field of ['identity','financial','personal','device']) assert(selectedPolicy[field]);
         assert.deepEqual(selectedPolicy.allowedModels,['claude-fable-5-1','gemini-carbon','gpt-6.1-sol']);
         for (const [label,model,user_id] of [['excluded','gpt-6.1-sol',2],['unlisted','claude-fable-5-2',3],['unknown','',3]]) {
           assert.equal(preview.fixture.store.ingest(event(label + '-' + name,{user_id,model,policy_version:selectedPolicy.version})).accepted,false);
@@ -68,6 +79,7 @@ async function main() {
           assert.equal(preview.fixture.store.ingest(event(model + '-' + name,{user_id:3,model,at:preview.raw.at-30000,policy_version:selectedPolicy.version})).accepted,true);
         }
         await page.reload(); await page.locator('#cl-tab-policy').click(); await page.locator('[data-cl-remove-user="2"]').waitFor();
+        assert.equal(await page.locator('[name=retention]').inputValue(),'0');
         assert(await page.locator('[name=modelFilterEnabled]').isChecked());
         assert(await page.locator('[name=kimiK3Plus]').isChecked());
         assert.equal(await page.locator('[name=allowedModels]').inputValue(),'claude-fable-5-1\ngemini-carbon\ngpt-6.1-sol');
