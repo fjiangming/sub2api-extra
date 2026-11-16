@@ -27,7 +27,7 @@ async function startPreview({ port = 19927, seed = true } = {}) {
   };
   const source = { values, async total(id) { return values.get(id) || 0; } };
   let roll = 0; const rolls = [0,5100,7500,8500,9300,9600,9850,9999];
-  const runtime = createRuntime({ NODE_ENV: 'test',ACTIVITY_CENTER_PORT: String(port || 19927),ACTIVITY_CENTER_RECHARGE_SOURCES: 'official',
+  const runtime = createRuntime({ NODE_ENV: 'test',ACTIVITY_CENTER_PORT: String(port || 19927),
     ACTIVITY_CENTER_DATA_DIR: directory,SUB2API_DATABASE_URL: 'postgres://synthetic:synthetic@localhost/preview',SUB2API_ADMIN_API_KEY: 'synthetic-preview-admin-key'
   }, { core,source,worker: false,storeOptions: { rng: () => rolls[roll++ % rolls.length] } });
   if (seed) {

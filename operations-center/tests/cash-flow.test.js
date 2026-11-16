@@ -64,6 +64,45 @@ test('activity rewards are gifts and cannot create automatic cash income', async
   assert.equal(gift.kind, 'gift'); assert.equal(gift.cash, 0); assert.equal(gift.fundingValue, 0); assert.equal(gift.pending, false);
   const users = await f.accounting.creditUsers({ start: '2026-10-01', end: '2026-10-31' });
   assert.equal(users.summary.totalIncome, 120);
+  assert.equal((await f.service.creditUsers(f.query)).summary.totalIncome, 120);
+});
+
+test('subsidy prefixes exclude balance and admin credits from income and recharge drilldowns without altering source records', async t => {
+  const f = fixture(t); f.source.payments = [];
+  f.source.credits = [credit({ value: '100', notes: null }),
+    credit({ id: '2', value: '50', notes: '[补贴] 故障补偿' }),
+    credit({ id: '3', type: 'admin_balance', value: '5', notes: '[补贴] 管理员补发' }),
+    credit({ id: '4', type: 'admin_balance', value: '-5', notes: '[补贴] 补贴纠错' }),
+    credit({ id: '5', value: '20', notes: '正常充值，不含[补贴]' })];
+  const report = await f.service.getReport(f.query);
+  assert.equal(report.summary.income, 120); assert.equal(report.cumulative.income, 120);
+  assert.equal(report.items.length, 2);
+  assert.equal((await f.service.creditUsers(f.query)).summary.totalIncome, 120);
+  const records = await f.service.creditUsers(f.query, '2');
+  assert.equal(records.summary.transactions, 2);
+  assert.deepEqual(new Set(records.items.map(row => row.id)), new Set(['1', '5']));
+  assert.equal((await f.accounting.creditUsers(f.query)).summary.totalIncome, 120);
+  const subsidy = f.accounting.effectiveDocuments().find(row => row.key === 'redeem:2');
+  assert.equal(subsidy.kind, 'gift'); assert.equal(subsidy.cash, 0); assert.equal(subsidy.fundingValue, 0);
+  assert.equal(f.store.document('redeem:2').quantity, '50');
+  assert.equal(f.store.document('redeem:2').note, '[补贴] 故障补偿');
+});
+
+test('linked payments and old receipt decisions cannot restore subsidized income after exclusion or restart', async t => {
+  const f = fixture(t);
+  f.source.credits = [credit({ notes: '[补贴] 故障补偿' }),credit({ id: '2', value: '100' })];
+  let report = await f.service.getReport(f.query);
+  assert.equal(report.summary.income, 100);
+  assert.equal(report.items.find(row => row.key === 'payment:1').counted, false);
+  f.accounting.classify('redeem:1', { kind: 'customer_receipt', amount: 120, currency: 'CNY', reason: 'Historical receipt decision' }, 'admin');
+  assert.equal((await f.service.getReport(f.query)).summary.income, 100);
+  assert.equal(f.accounting.effectiveDocuments().find(row => row.key === 'redeem:1').kind, 'gift');
+  f.source.payments = []; f.source.credits = []; f.store.close(); f.store.initialize();
+  await f.service.sync({ force: true });
+  report = await f.service.getReport(f.query);
+  assert.equal(report.summary.income, 100); assert.equal(report.cumulative.income, 100);
+  assert.equal((await f.service.creditUsers(f.query)).summary.totalIncome, 100);
+  assert.equal(f.store.document('redeem:1').note, '[补贴] 故障补偿');
 });
 
 test('linked orders use redemption value and date once while unlinked actual subscription payments remain income', async t => {

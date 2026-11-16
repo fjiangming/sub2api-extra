@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
+const { PGlite } = require('@electric-sql/pglite');
 const { CostLedgerStore } = require('../src/cost-ledger-store');
 const { CostAnalysisService, createPeriods, periodStart } = require('../src/services/cost-analysis-service');
 
@@ -32,6 +33,29 @@ async function createService(t, rows = [], balance = { user_balance: '0', balanc
   });
   return { service, store, queries };
 }
+
+test('real SQL excludes subsidy prefixes consistently in legacy reports, user totals and record drilldowns', async t => {
+  const database = new PGlite(); t.after(() => database.close());
+  await database.exec(`CREATE TABLE users(id bigint PRIMARY KEY,email text,username text,deleted_at timestamptz,balance numeric);
+    CREATE TABLE redeem_codes(id bigint,used_by bigint,type text,status text,value numeric,used_at timestamptz,code text,notes text,created_at timestamptz);
+    INSERT INTO users VALUES(2,'customer@example.test','Customer',NULL,180);
+    INSERT INTO redeem_codes VALUES
+      (1,2,'balance','used',100,'2026-10-02','paid-100',NULL,'2026-10-01'),
+      (2,2,'balance','used',50,'2026-10-02','subsidy-50','[补贴] 故障补偿','2026-10-01'),
+      (3,2,'admin_balance','used',5,'2026-10-02','subsidy-5','[补贴] 管理员补发','2026-10-01'),
+      (4,2,'admin_balance','used',-5,'2026-10-02','correction-5','','2026-10-01'),
+      (5,2,'balance','used',10,'2026-10-02','paid-10','正常充值，不含[补贴]','2026-10-01'),
+      (6,2,'balance','used',1,'2026-10-02','paid-1','[补贴说明] 正常充值','2026-10-01');`);
+  const { service } = await createService(t, [], undefined, async (sql, params) => (await database.query(sql, params)).rows);
+  const range = { start: '2026-10-01', end: '2026-10-31', include_consumption: '0' };
+  const report = await service.getReport(range);
+  assert.equal(report.summary.automaticRevenue, 106); assert.equal(report.summary.transactions, 4);
+  assert.equal(report.summary.userBalance, 180);
+  assert.equal((await service.getAutomaticIncomeUsers(range)).summary.totalIncome, 106);
+  const records = await service.getAutomaticIncomeRecords('2', range);
+  assert.equal(records.summary.totalIncome, 106);
+  assert.deepEqual(new Set(records.items.map(row => row.id)), new Set(['1', '4', '5', '6']));
+});
 
 test('cost analysis aggregates used monetary balance records, manual income and expenses by Monday-based weeks', async (t) => {
   const { service, store, queries } = await createService(t, [

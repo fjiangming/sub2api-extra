@@ -17,6 +17,7 @@ const AUTOMATIC_INCOME_FILTER_SQL = `
   AND r.status = 'used'
   AND r.type IN ('balance', 'admin_balance')
   AND r.used_by IS DISTINCT FROM 1
+  AND COALESCE(r.notes, '') NOT LIKE '[补贴]%'
   AND $4 = 'CNY'
 `;
 
@@ -754,7 +755,7 @@ class CostAnalysisService {
         periods.some((period) => !period.consumptionComplete)
           ? ['部分日期的用量明细不完整或无法核验，余额消费与实际利润趋势留空；支出仍完整展示。'] : [],
       caveats: [
-        '自动收入只统计 Sub2API 兑换页面中已使用的余额记录（balance、admin_balance），排除用户 ID 1，以 used_at 归属日期；每条记录只统计一次。',
+        '自动收入只统计 Sub2API 兑换页面中已使用的余额记录（balance、admin_balance），排除用户 ID 1 及备注以 [补贴] 开头的记录，以 used_at 归属日期；每条记录只统计一次。',
         '并发、管理员并发调整、订阅和邀请记录不是金额，均不计入自动收入。',
         '管理员为其他用户增加余额会增加自动收入，扣减余额等负数记录会冲减自动收入；admin_balance 也可能是赠送或纠错，并不必然代表现金实收。',
         '同一笔线下充值若已录入手工收入，请删除对应手工记录，避免与管理员余额调整记录重复统计。',

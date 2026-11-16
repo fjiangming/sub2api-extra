@@ -15,9 +15,9 @@ const schema = z.object({
   ACTIVITY_CENTER_ENABLED: flag.default(true),
   ACTIVITY_CENTER_TRUST_PROXY: flag.default(false),
   ACTIVITY_CENTER_COOKIE_SECURE: flag.optional(),
-  ACTIVITY_CENTER_RECHARGE_SOURCES: z.string().default('recharge_center'),
+  ACTIVITY_CENTER_RECHARGE_SOURCES: z.string().default('redemptions'),
+  // Retained only to verify the source identity when migrating an existing campaign.
   ACTIVITY_CENTER_RECHARGE_URL: z.string().optional(),
-  ACTIVITY_CENTER_RECHARGE_TOKEN: z.string().min(32).max(256).optional(),
   SUB2API_BASE_URL: z.string().default('http://127.0.0.1:8080'),
   SUB2API_PUBLIC_URL: z.string().default('http://127.0.0.1:8080'),
   SUB2API_PUBLIC_URLS: z.string().default(''),
@@ -44,10 +44,10 @@ function loadConfig(env = process.env) {
   const v = parsed.data;
   const publicUrl = httpUrl(v.ACTIVITY_CENTER_PUBLIC_URL, 'ACTIVITY_CENTER_PUBLIC_URL');
   const sub2apiPublicUrl = httpUrl(v.SUB2API_PUBLIC_URL, 'SUB2API_PUBLIC_URL');
-  const sources = [...new Set(v.ACTIVITY_CENTER_RECHARGE_SOURCES.split(',').map(s => s.trim()))];
-  if (!sources.length || sources.some(s => !['official', 'recharge_center'].includes(s))) throw new Error('ACTIVITY_CENTER_RECHARGE_SOURCES: 无效来源');
-  if (sources.includes('recharge_center') && (!v.ACTIVITY_CENTER_RECHARGE_URL || !v.ACTIVITY_CENTER_RECHARGE_TOKEN)) throw new Error('充值中心来源需要 URL 和只读集成令牌');
-  if (sources.includes('official') && !v.SUB2API_DATABASE_URL) throw new Error('主站支付来源需要只读数据库连接');
+  const configuredSources = [...new Set(v.ACTIVITY_CENTER_RECHARGE_SOURCES.split(',').map(s => s.trim()))];
+  if (configuredSources.some(s => !['redemptions', 'official', 'recharge_center'].includes(s)) ||
+      (configuredSources.includes('redemptions') && configuredSources.length !== 1)) throw new Error('ACTIVITY_CENTER_RECHARGE_SOURCES: 无效来源');
+  if (!v.SUB2API_DATABASE_URL) throw new Error('主站兑换来源需要只读数据库连接');
   if (v.SUB2API_DATABASE_URL) {
     const db = new URL(v.SUB2API_DATABASE_URL);
     if (!['postgres:', 'postgresql:'].includes(db.protocol) || !db.hostname || db.pathname.length < 2 || db.search || db.hash) throw new Error('SUB2API_DATABASE_URL: 无效连接串');
@@ -63,8 +63,8 @@ function loadConfig(env = process.env) {
     env: v.NODE_ENV, projectRoot, dataDir, port: v.ACTIVITY_CENTER_PORT, bindHost: v.ACTIVITY_CENTER_BIND_HOST,
     publicUrl, sub2apiPublicUrl, origins, sub2apiBaseUrl: httpUrl(v.SUB2API_BASE_URL, 'SUB2API_BASE_URL'),
     rechargeUrl: v.ACTIVITY_CENTER_RECHARGE_URL ? httpUrl(v.ACTIVITY_CENTER_RECHARGE_URL, 'ACTIVITY_CENTER_RECHARGE_URL') : null,
-    rechargeToken: v.ACTIVITY_CENTER_RECHARGE_TOKEN, adminKey: v.SUB2API_ADMIN_API_KEY,
-    sources,
+    adminKey: v.SUB2API_ADMIN_API_KEY,
+    sources: ['redemptions'],
     enabled: v.ACTIVITY_CENTER_ENABLED, timezone: v.SUB2API_TIMEZONE,
     databaseUrl: v.SUB2API_DATABASE_URL, databaseSsl: v.SUB2API_DATABASE_SSL,
     timeoutMs: v.SUB2API_REQUEST_TIMEOUT_MS, forwardFingerprint: v.SUB2API_FORWARD_CLIENT_FINGERPRINT,

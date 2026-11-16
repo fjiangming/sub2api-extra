@@ -4,26 +4,35 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const { PGlite } = require('@electric-sql/pglite');
-const { RechargeSource, OFFICIAL_SQL } = require('../src/recharge-source');
+const { RechargeSource } = require('../src/recharge-source');
 const { CoreClient, requestJson } = require('../src/upstream');
 const { config, fixture, USER } = require('./fixtures');
 
-test('first startup excludes historical payments from chances and prize eligibility, even if credited later', async t => {
-  const f = fixture(t,{ storeOptions: { now: () => Date.parse('2026-11-01T00:00:00Z'),rng: () => 9999 } });
+async function database(t) {
   const db = new PGlite(); t.after(() => db.close());
-  await db.exec(`CREATE TABLE payment_orders(user_id bigint,order_type text,paid_at timestamptz,completed_at timestamptz,
-    status text,pay_amount numeric,amount numeric,refund_amount numeric DEFAULT 0,provider_snapshot jsonb);
-    INSERT INTO payment_orders VALUES
-      (42,'balance','2026-10-31T23:59:59.999Z','2026-11-02','COMPLETED',5000,5000,0,null);`);
+  await db.exec(`CREATE TABLE redeem_codes(id bigserial PRIMARY KEY,used_by bigint,type text,value numeric,
+    used_at timestamptz,created_at timestamptz,status text,code text,notes text)`);
+  return db;
+}
+
+function credit(db, extra = {}) {
+  const row = { user: '42', type: 'balance', value: '50', usedAt: '2026-11-02T00:00:00Z',
+    createdAt: '2026-10-01T00:00:00Z', status: 'used', code: 'paid-balance', notes: null, ...extra };
+  return db.query(`INSERT INTO redeem_codes(used_by,type,value,used_at,created_at,status,code,notes)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [row.user,row.type,row.value,row.usedAt,row.createdAt,row.status,row.code,row.notes]);
+}
+
+test('first startup filters by redemption time and excludes historical credits from chances and prize eligibility', async t => {
+  const f = fixture(t,{ storeOptions: { now: () => Date.parse('2026-11-01T00:00:00Z'),rng: () => 9999 } });
+  const db = await database(t);
+  await credit(db,{ value: '5000',usedAt: '2026-10-31T23:59:59.999Z',createdAt: '2026-11-02' });
   f.lottery.source = new RechargeSource(f.config,{ pool: db });
   assert.equal(f.store.campaign.start_at,'2026-11-01T00:00:00.000Z');
   assert.equal((await f.lottery.summary(USER.id)).available,0);
   await assert.rejects(f.lottery.draw(USER,crypto.randomUUID(),1),{ code: 'CHANCES_INSUFFICIENT' });
-  await db.exec(`INSERT INTO payment_orders VALUES
-    (42,'balance','2026-11-02','2026-11-02','COMPLETED',49.99,49.99,0,null);`);
+  await credit(db,{ value: '49.99' });
   assert.equal((await f.lottery.summary(USER.id)).available,0);
-  await db.exec(`INSERT INTO payment_orders VALUES
-    (42,'balance','2026-11-01T00:00:00.000Z','2026-11-02','COMPLETED',0.01,0.01,0,null);`);
+  await credit(db,{ value: '0.01',usedAt: '2026-11-01T00:00:00.000Z' });
   assert.equal((await f.lottery.summary(USER.id)).available,1);
   const batch = await f.lottery.draw(USER,crypto.randomUUID(),1);
   assert.equal(batch.rewards[0].amountMinor,500);
@@ -31,46 +40,93 @@ test('first startup excludes historical payments from chances and prize eligibil
   assert.equal((await f.lottery.summary(USER.id)).available,0);
 });
 
-test('real SQL uses paid CNY cash, net partial refunds, strict user/date/completion and excludes subscriptions/gifts', async t => {
-  const db = new PGlite(); t.after(() => db.close());
-  await db.exec(`CREATE TABLE payment_orders(user_id bigint,order_type text,paid_at timestamptz,completed_at timestamptz,
-    status text,pay_amount numeric,amount numeric,refund_amount numeric DEFAULT 0,provider_snapshot jsonb);
-    INSERT INTO payment_orders VALUES
-      (42,'balance','2026-11-02',now(),'COMPLETED',50.01,100,0,'{"currency":"CNY"}'),
-      (42,'balance','2026-11-02',now(),'PARTIALLY_REFUNDED',100,200,50,'{"currency":"CNY"}'),
-      (42,'balance','2026-11-02',now(),'REFUNDED',100,100,100,'{"currency":"CNY"}'),
-      (42,'subscription','2026-11-02',now(),'COMPLETED',999,999,0,null),
-      (42,'balance','2026-10-02',now(),'COMPLETED',999,999,0,null),
-      (42,'balance','2026-11-02',null,'PAID',999,999,0,null),
-      (99,'balance','2026-11-02',now(),'COMPLETED',999,999,0,null),
-      (42,'balance','2026-11-02',now(),'REFUNDING',999,999,0,null),
-      (42,'balance','2026-11-02',now(),'COMPLETED',5.99,5.99,0,null);`);
+test('redemption face values match the operations balance-credit basis, net adjustments and never add payments', async t => {
+  const db = await database(t);
+  await credit(db,{ code: 'PAY-42',value: '50.01' });
+  await credit(db,{ type: 'admin_balance',value: '24.99' });
+  await credit(db,{ type: 'admin_balance',value: '-5' });
+  for (const extra of [{ user: '99' },{ user: '1' },{ user: null },{ usedAt: null },{ usedAt: '2099-01-01' },
+    { status: 'unused' },{ status: 'disabled' },{ status: 'expired' },{ type: 'concurrency' },
+    { type: 'admin_concurrency' },{ type: 'subscription' },{ type: 'invitation' }]) await credit(db,extra);
+  await db.exec(`CREATE TABLE payment_orders(user_id bigint,recharge_code text,pay_amount numeric,status text);
+    INSERT INTO payment_orders VALUES (42,'PAY-42',30,'COMPLETED'),(42,'NO-CREDIT',1000,'COMPLETED')`);
   const source = new RechargeSource(config(),{ pool: db });
-  assert.equal(await source.total('42','2026-11-01T00:00:00.000Z'),13100);
-  assert.match(OFFICIAL_SQL,/^SELECT/);
-  await db.exec(`INSERT INTO payment_orders VALUES (42,'balance','2026-11-02',now(),'COMPLETED',100,100,0,'{"currency":"USD"}')`);
-  await assert.rejects(source.total('42','2026-11-01T00:00:00.000Z'),{ code: 'RECHARGE_CURRENCY_UNSUPPORTED' });
+  assert.equal(await source.total('42','2026-11-01T00:00:00.000Z'),7000);
+  assert.equal(await source.total('1','2026-11-01T00:00:00.000Z'),0);
 });
 
-test('both recharge sources add independent verified cash and failures prevent partial chance grants', async () => {
-  const cfg = config({ sources: ['official','recharge_center'],rechargeUrl: 'http://localhost:9874',rechargeToken: 'synthetic-token' });
-  let fail = false;
-  const source = new RechargeSource(cfg,{ pool: { async query() { return { rows: [{ total_minor: '5001',foreign_count: '0' }] }; } },
-    fetchImpl: async (url,options) => {
-      assert.match(String(url),/user_id=42/); assert.equal(options.headers.authorization,'Bearer synthetic-token');
-      return new Response(JSON.stringify(fail ? { error: {} } : { version: 1,userId: '42',since: '2026-11-01T00:00:00.000Z',currency: 'CNY',totalMinor: '4999' }),{ status: fail ? 503 : 200 });
-    } });
-  assert.equal(await source.total('42','2026-11-01T00:00:00.000Z'),10000);
-  fail = true; await assert.rejects(source.total('42','2026-11-01T00:00:00.000Z'));
+test('only complete activity reward markers exclude a credit, matching operations gift detection', async t => {
+  const db = await database(t);
+  const code = 'AC-' + 'a'.repeat(48);
+  const notes = '活动奖励; activity=recharge-lottery; reward=11111111-1111-4111-8111-111111111111; batch=22222222-2222-4222-8222-222222222222';
+  await credit(db,{ code,notes,value: '50' });
+  await credit(db,{ notes,value: '20' });
+  await credit(db,{ code,value: '10' });
+  const source = new RechargeSource(config(),{ pool: db });
+  assert.equal(await source.total('42','2026-11-01T00:00:00.000Z'),3000);
 });
 
-test('wrong identity, currency, start date and unsafe totals from recharge integration are rejected', async () => {
-  for (const override of [{ userId: '99' },{ currency: 'USD' },{ since: '2020-01-01' },{ totalMinor: '-1' },{ totalMinor: '1.5' },{ totalMinor: '9007199254740992' },{ version: 2 }]) {
-    const source = new RechargeSource(config({ sources: ['recharge_center'],rechargeUrl: 'http://localhost',rechargeToken: 'test' }),{
-      fetchImpl: async () => new Response(JSON.stringify({ version: 1,userId: '42',since: '2026-11-01T00:00:00.000Z',currency: 'CNY',totalMinor: '5000',...override }))
-    });
-    await assert.rejects(source.total('42','2026-11-01T00:00:00.000Z'));
+test('reward redemptions cannot fund further draws and negative adjustments retain consumed chances', async t => {
+  const f = fixture(t,{ storeOptions: { now: () => Date.parse('2026-11-01T00:00:00Z') } });
+  const db = await database(t);
+  f.lottery.source = new RechargeSource(f.config,{ pool: db });
+  const original = f.core.credit.bind(f.core);
+  f.core.credit = async row => {
+    const result = await original(row), receipt = result.redeem_code;
+    await credit(db,{ code: receipt.code,notes: receipt.notes,value: String(receipt.value),usedAt: receipt.used_at });
+    return result;
+  };
+  await credit(db);
+  await f.lottery.draw(USER,crypto.randomUUID(),1); await f.lottery.kick();
+  assert.equal(f.store.ledgerSummary().totalMinor,50);
+  assert.equal(await f.lottery.source.total(USER.id,f.store.campaign.start_at),5000);
+  assert.equal((await f.lottery.summary(USER.id)).available,0);
+  await credit(db,{ type: 'admin_balance',value: '-100' });
+  assert.equal(await f.lottery.source.total(USER.id,f.store.campaign.start_at),0);
+  assert.equal(f.store.used(USER.id),1);
+  await credit(db,{ value: '100' });
+  assert.equal((await f.lottery.summary(USER.id)).available,0);
+  await credit(db);
+  assert.equal((await f.lottery.summary(USER.id)).available,1);
+});
+
+test('subsidy prefixes cannot grant chances or unlock higher prizes while normal notes still count', async t => {
+  const f = fixture(t,{ storeOptions: { now: () => Date.parse('2026-11-01T00:00:00Z'),rng: () => 9999 } });
+  const db = await database(t);
+  f.lottery.source = new RechargeSource(f.config,{ pool: db });
+  await credit(db,{ value: '49.99',notes: '正常充值，不含[补贴]' });
+  await credit(db,{ value: '5000',notes: '[补贴] 故障补偿' });
+  await credit(db,{ type: 'admin_balance',value: '2000',notes: '[补贴] 管理员补发' });
+  await credit(db,{ type: 'admin_balance',value: '-5',notes: '[补贴] 补贴纠错' });
+  assert.equal(await f.lottery.source.total(USER.id,f.store.campaign.start_at),4999);
+  assert.equal((await f.lottery.summary(USER.id)).available,0);
+  await assert.rejects(f.lottery.draw(USER,crypto.randomUUID(),1),{ code: 'CHANCES_INSUFFICIENT' });
+  await credit(db,{ value: '0.01',notes: '[补贴说明] 正常充值' });
+  assert.equal((await f.lottery.summary(USER.id)).available,1);
+  const batch = await f.lottery.draw(USER,crypto.randomUUID(),1);
+  assert.equal(batch.rewards[0].amountMinor,500);
+  await f.lottery.kick();
+  assert.equal((await f.lottery.summary(USER.id)).available,0);
+});
+
+test('sub-cent credits accumulate precisely and cannot round an incomplete threshold into a chance', async t => {
+  const db = await database(t);
+  const source = new RechargeSource(config(),{ pool: db });
+  await credit(db,{ value: '49.99999999' });
+  assert.equal(await source.total('42','2026-11-01T00:00:00.000Z'),4999);
+  await credit(db,{ value: '0.00000001' });
+  assert.equal(await source.total('42','2026-11-01T00:00:00.000Z'),5000);
+});
+
+test('source failures and unsafe database totals cannot grant chances or expose upstream errors', async t => {
+  for (const value of [undefined,'-1','1.5','NaN','9007199254740992']) {
+    const source = new RechargeSource(config(),{ pool: { async query() { return { rows: [{ total_minor: value }] }; } } });
+    await assert.rejects(source.total('42','2026-11-01T00:00:00.000Z'),{ code: 'RECHARGE_UNVERIFIED' });
   }
+  const f = fixture(t);
+  f.lottery.source = new RechargeSource(f.config,{ pool: { async query() { throw new Error('secret connection'); } } });
+  await assert.rejects(f.lottery.draw(USER,crypto.randomUUID(),1),error => error.code === 'RECHARGE_UNAVAILABLE' && !error.message.includes('secret'));
+  assert.equal(f.store.used(USER.id),0);
 });
 
 test('credit uses only the native fixed-code contract and bounded errors never expose keys or upstream bodies', async () => {

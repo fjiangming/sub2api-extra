@@ -70,9 +70,20 @@ class Store {
       let campaign = this.db.prepare('SELECT * FROM campaign WHERE id=?').get(ACTIVITY.id);
       const sources = [...config.sources].sort().join(',');
       const dbUrl = config.databaseUrl ? new URL(config.databaseUrl) : null;
-      const scope = crypto.createHash('sha256').update(JSON.stringify([config.sub2apiBaseUrl, dbUrl ? `${dbUrl.host}${dbUrl.pathname}` : null, config.rechargeUrl || null])).digest('hex');
+      const identity = [config.sub2apiBaseUrl, dbUrl ? `${dbUrl.host}${dbUrl.pathname}` : null];
+      const hash = parts => crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');
+      const scope = hash(identity);
       if (!campaign) {
         this.db.prepare('INSERT INTO campaign VALUES (?,?,?,?,?,1)').run(ACTIVITY.id, new Date(now()).toISOString(), config.timezone, sources, scope);
+        campaign = this.db.prepare('SELECT * FROM campaign WHERE id=?').get(ACTIVITY.id);
+      }
+      const legacySources = campaign.sources.split(',');
+      const legacyScopes = [hash([...identity, config.rechargeUrl || null])];
+      if (!legacySources.includes('official')) legacyScopes.push(hash([config.sub2apiBaseUrl, null, config.rechargeUrl || null]));
+      // Change only the calculation basis; keep the original cutoff and consumed chances.
+      if (sources === 'redemptions' && legacySources.every(source => ['official', 'recharge_center'].includes(source)) &&
+          campaign.timezone === config.timezone && legacyScopes.includes(campaign.source_scope)) {
+        this.db.prepare('UPDATE campaign SET sources=?,source_scope=? WHERE id=?').run(sources, scope, ACTIVITY.id);
         campaign = this.db.prepare('SELECT * FROM campaign WHERE id=?').get(ACTIVITY.id);
       }
       if (campaign.sources !== sources || campaign.timezone !== config.timezone || campaign.source_scope !== scope) throw new Error('已存在活动的充值来源和时区不能直接更改，请保留原配置与数据库');

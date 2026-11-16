@@ -146,8 +146,43 @@ test('persistent campaign start and chance usage survive restart; scope changes 
     first.reserve(USER,crypto.randomUUID(),1,5000); first.close();
     const second = new Store(cfg,{ filename,now: () => Date.parse('2026-11-16T00:00:00Z') });
     assert.equal(second.campaign.start_at,'2026-11-01T00:00:00.000Z'); assert.equal(second.used(USER.id),1); second.close();
-    for (const change of [{ timezone: 'UTC' },{ sources: ['recharge_center'] },{ sub2apiBaseUrl: 'http://another.example.test' }]) {
+    for (const change of [{ timezone: 'UTC' },{ sources: ['recharge_center'] },{ sub2apiBaseUrl: 'http://another.example.test' },
+      { databaseUrl: 'postgres://synthetic:synthetic@another.example.test/test' }]) {
       assert.throws(() => new Store({ ...cfg,...change },{ filename }),/不能直接更改/);
+    }
+  } finally { fs.rmSync(directory,{ recursive: true,force: true }); }
+});
+
+test('legacy payment campaigns migrate once without resetting cutoff, consumed chances or reward history', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(),'activity-source-migration-'));
+  try {
+    for (const [index,legacySources,hadDatabase] of [[0,'official',true],[1,'recharge_center',true],
+      [2,'official,recharge_center',true],[3,'recharge_center',false]]) {
+      const filename = path.join(directory,`${index}.sqlite`);
+      const cfg = config({ rechargeUrl: legacySources.includes('recharge_center') ? 'http://localhost:9874' : null });
+      const first = new Store(cfg,{ filename,now: () => Date.parse('2026-11-01T00:00:00Z') });
+      const batch = first.reserve(USER,crypto.randomUUID(),1,5000);
+      const dbUrl = new URL(cfg.databaseUrl);
+      const oldScope = crypto.createHash('sha256').update(JSON.stringify([
+        cfg.sub2apiBaseUrl,hadDatabase ? `${dbUrl.host}${dbUrl.pathname}` : null,cfg.rechargeUrl
+      ])).digest('hex');
+      first.db.prepare('UPDATE campaign SET sources=?,source_scope=?').run(legacySources,oldScope);
+      first.close();
+      assert.throws(() => new Store({ ...cfg,timezone: 'UTC' },{ filename }),/不能直接更改/);
+      assert.throws(() => new Store({ ...cfg,sub2apiBaseUrl: 'http://another.example.test' },{ filename }),/不能直接更改/);
+      if (cfg.rechargeUrl) assert.throws(() => new Store({ ...cfg,rechargeUrl: null },{ filename }),/不能直接更改/);
+      const migrated = new Store(cfg,{ filename,now: () => Date.parse('2026-11-16T00:00:00Z') });
+      try {
+        assert.equal(migrated.campaign.sources,'redemptions');
+        assert.equal(migrated.campaign.start_at,'2026-11-01T00:00:00.000Z');
+        assert.equal(migrated.used(USER.id),1);
+        assert.deepEqual(migrated.batch(USER.id,batch.id),batch);
+        assert.equal(migrated.ledgerSummary().pendingCount,1);
+      } finally { migrated.close(); }
+      const restarted = new Store({ ...cfg,rechargeUrl: null },{ filename,now: () => Date.parse('2026-11-17T00:00:00Z') });
+      assert.equal(restarted.campaign.start_at,'2026-11-01T00:00:00.000Z');
+      assert.equal(restarted.used(USER.id),1);
+      restarted.close();
     }
   } finally { fs.rmSync(directory,{ recursive: true,force: true }); }
 });

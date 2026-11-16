@@ -6,7 +6,7 @@ const { Lottery } = require('../src/lottery');
 
 const USER = Object.freeze({ id: '42', name: '示例用户', email: 'user@example.test', role: 'user' });
 function config(extra = {}) {
-  return { ...loadConfig({ NODE_ENV: 'test', ACTIVITY_CENTER_RECHARGE_SOURCES: 'official', SUB2API_DATABASE_URL: 'postgres://synthetic:synthetic@localhost/test',
+  return { ...loadConfig({ NODE_ENV: 'test', SUB2API_DATABASE_URL: 'postgres://synthetic:synthetic@localhost/test',
     SUB2API_ADMIN_API_KEY: 'synthetic-admin-key-0123456789' }), ...extra };
 }
 function fixture(t, options = {}) {

@@ -45,13 +45,13 @@ test.before(async () => {
   await database.exec(`
     CREATE TABLE users (id bigint PRIMARY KEY, balance numeric, deleted_at timestamptz);
     CREATE TABLE redeem_codes (id bigint, used_by bigint, used_at timestamptz,
-      status text, type text, value numeric);
+      status text, type text, value numeric, notes text);
     CREATE TABLE usage_logs (id bigint PRIMARY KEY, user_id bigint, created_at timestamptz,
       billing_type smallint DEFAULT 0, actual_cost numeric);
     CREATE TABLE usage_dashboard_daily (bucket_date date PRIMARY KEY, total_requests bigint);
     INSERT INTO users VALUES (1, 999999, NULL), (2, 123, NULL), (3, 456, NOW());
     INSERT INTO redeem_codes VALUES
-      (1, 2, '2026-01-01T00:00:00Z', 'used', 'balance', 1000);
+      (1, 2, '2026-01-01T00:00:00Z', 'used', 'balance', 1000, NULL);
   `);
   inspector = new SchemaInspector(database);
 });

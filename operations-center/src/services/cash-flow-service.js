@@ -1,6 +1,6 @@
 'use strict';
 
-const { isActivityReward } = require('./activity-reward');
+const { isNonRechargeCredit } = require('./recharge-credit');
 
 const crypto = require('node:crypto');
 const Decimal = require('decimal.js');
@@ -172,7 +172,7 @@ class CashFlowService {
     const rows = [];
     const append = (document, direction, source = 'legacy') => {
       const decision = decisionFor(document);
-      if (document.userId === '1' || noncash.has(decision?.kind) || decision?.paid === false || document.paid === false) return;
+      if (document.userId === '1' || isNonRechargeCredit(document) || noncash.has(decision?.kind) || decision?.paid === false || document.paid === false) return;
       const currency = String(decision?.currency || document.currency || 'UNKNOWN').toUpperCase();
       const amount = decision?.amount ?? document.amount;
       if (!validAmount(amount)) return;
@@ -243,7 +243,7 @@ class CashFlowService {
         date: credit.date, name: `${credit.redeemType === 'admin_balance' ? '管理员余额入账' : '余额兑换'} #${credit.key.slice(7)}`,
         amount: credit.quantity, currency: 'CNY', rate: 1, userId: credit.userId || null,
         category: 'custom', providerId: '', sourceRef: credit.key, note: credit.note || '',
-        active: !isActivityReward(credit) && !excluded.has(credit.key) && !paymentKeys.some(key => excluded.has(key)) && !(validDecision && decision.paid === false),
+        active: !isNonRechargeCredit(credit) && !excluded.has(credit.key) && !paymentKeys.some(key => excluded.has(key)) && !(validDecision && decision.paid === false),
         aliases: [credit.key, credit.code, ...paymentKeys].filter(Boolean) });
     }
     for (const record of this.store.cashRecords()) {
@@ -333,7 +333,7 @@ class CashFlowService {
     try { sourceUsers = (await this.pool.query(`SELECT u.id::text AS id,to_jsonb(u)->>'email' AS email,
       to_jsonb(u)->>'username' AS username,u.deleted_at FROM users u WHERE u.id<>1`)).rows; } catch { /* Archived credits retain their original identity. */ }
     const byUser = new Map(sourceUsers.map(user => [user.id, user])), groups = new Map();
-    for (const credit of this.store.documents().filter(row => row.origin === 'redeem' && row.userId !== '1' &&
+    for (const credit of this.store.documents().filter(row => row.origin === 'redeem' && !isNonRechargeCredit(row) && row.userId !== '1' &&
       ['balance', 'admin_balance'].includes(row.redeemType) && row.date >= range.start && row.date <= range.end && row.date <= today)) {
       const key = credit.userId || 'unassigned', user = byUser.get(credit.userId);
       if (!groups.has(key)) groups.set(key, { userKey: key, userId: credit.userId, username: user?.username || credit.userName || null,
