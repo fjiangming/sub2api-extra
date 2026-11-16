@@ -8,16 +8,21 @@ const { z } = require('zod');
 const { DateTime } = require('luxon');
 const { AppError } = require('./errors');
 const { decodeBody, maskPayload } = require('./services/conversation-redaction');
+const { recommendedModels, normalizeModel, modelAllowed } = require('./services/conversation-models');
 
 const userId = z.number().int().positive().safe();
 const policySchema = z.object({
   version: z.number().int().positive(), enabled: z.boolean(), mode: z.enum(['dual', 'masked', 'original']),
   excludedUserIds: z.array(userId).max(1000), email: z.boolean(), phone: z.boolean(), secret: z.boolean(), ip: z.boolean(),
+  modelFilterEnabled: z.boolean().default(false),
+  allowedModels: z.array(z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9][A-Za-z0-9 ._:/[\]-]*$/)).max(100).default([]),
+  kimiK3Plus: z.boolean().default(false),
   custom: z.array(z.object({ from: z.string().trim().min(2).max(120), to: z.string().min(1).max(80) }).strict()).max(10),
   retention: z.number().int().min(1).max(365), capacity: z.number().int().min(1).max(1024),
   reserve: z.number().int().min(0).max(1024), overflow: z.enum(['stop', 'evict']), maxBodyBytes: z.number().int().min(65536).max(16777216)
 }).strict();
 const defaults = { version: 1, enabled: false, mode: 'dual', excludedUserIds: [], email: true, phone: true, secret: true, ip: true,
+  modelFilterEnabled: true, allowedModels: recommendedModels, kimiK3Plus: true,
   custom: [], retention: 7, capacity: 10, reserve: 2, overflow: 'stop', maxBodyBytes: 8388608 };
 const frameSchema = z.object({ direction: z.enum(['in', 'out']), at: z.number().int().nonnegative(), body: z.string().max(24000000), binary: z.boolean().default(false) }).strict();
 const eventSchema = z.object({
@@ -104,10 +109,12 @@ class ConversationLogStore {
     return parse(policySchema, this.open(row.body, 'policy:' + row.version));
   }
   configure(body) {
-    const candidate = parse(policySchema, body);
     return this.db.transaction(() => {
-      const current = this.policy(); if (candidate.version !== current.version) throw invalid('CONVERSATION_POLICY_CONFLICT', 409);
+      const current = this.policy();
+      const candidate = parse(policySchema, { modelFilterEnabled: current.modelFilterEnabled, allowedModels: current.allowedModels, kimiK3Plus: current.kimiK3Plus, ...body });
+      if (candidate.version !== current.version) throw invalid('CONVERSATION_POLICY_CONFLICT', 409);
       candidate.version++; candidate.excludedUserIds = [...new Set(candidate.excludedUserIds)].sort((a, b) => a - b);
+      candidate.allowedModels = [...new Set(candidate.allowedModels.map(normalizeModel))].sort();
       this.db.prepare('INSERT INTO cl_policies VALUES(?,?,?)').run(candidate.version, this.seal(candidate, 'policy:' + candidate.version), this.now());
       return candidate;
     })();
@@ -115,14 +122,15 @@ class ConversationLogStore {
   collectorPolicy(dropped = 0) {
     if (/^\d{1,16}$/.test(String(dropped)) && Number.isSafeInteger(Number(dropped))) this.collectorDropped = Number(dropped);
     this.lastContact = this.now(); const policy = this.policy();
-    return { version: policy.version, enabled: policy.enabled, excluded_user_ids: policy.excludedUserIds, max_body_bytes: policy.maxBodyBytes };
+    return { version: policy.version, enabled: policy.enabled, excluded_user_ids: policy.excludedUserIds, max_body_bytes: policy.maxBodyBytes,
+      model_filter_version: 1, model_filter_enabled: policy.modelFilterEnabled, allowed_models: policy.allowedModels, kimi_k3_plus: policy.kimiK3Plus };
   }
   ingest(input) {
     const current = this.policy();
     // The second exclusion gate also discards in-flight events created before an exclusion was saved.
-    if (!current.enabled || (Number.isSafeInteger(input?.user_id) && current.excludedUserIds.includes(input.user_id))) return { accepted: false };
+    if (!current.enabled || (Number.isSafeInteger(input?.user_id) && current.excludedUserIds.includes(input.user_id)) || !modelAllowed(current, input?.model)) return { accepted: false };
     const event = parse(eventSchema, input), policy = this.policy(event.policy_version);
-    if (!policy.enabled || policy.excludedUserIds.includes(event.user_id)) return { accepted: false };
+    if (!policy.enabled || policy.excludedUserIds.includes(event.user_id) || !modelAllowed(policy, event.model)) return { accepted: false };
     if (event.at > this.now() + 60000 || event.at < this.now() - current.retention * 86400000) return { accepted: false };
     const raw = { request: b64(event.request), response: b64(event.response), frames: event.frames.map(frame => ({ ...frame, body: b64(frame.body) })) };
     const rawBytes = raw.request.length + raw.response.length + raw.frames.reduce((sum, frame) => sum + frame.body.length, 0);
@@ -169,6 +177,7 @@ class ConversationLogStore {
       const policy = this.policy(), row = this.db.prepare('SELECT * FROM cl_records WHERE id=?').get(id);
       if (!row) throw invalid('CONVERSATION_NOT_FOUND', 404);
       if (policy.excludedUserIds.includes(row.user_id)) throw new AppError('CONVERSATION_USER_EXCLUDED', '该用户已排除，不能重新处理', { status: 409 });
+      if (!modelAllowed(policy, row.model)) throw new AppError('CONVERSATION_MODEL_EXCLUDED', '该模型不在采集名单中，不能重新处理', { status: 409 });
       if (policy.version !== expected.policy_version || row.processed_at !== expected.processed_at) throw new AppError('CONVERSATION_RETRY_CONFLICT', '策略或记录已更新，请刷新后重试', { status: 409 });
       if (!row.original || !row.processing_error) throw new AppError('CONVERSATION_RETRY_UNAVAILABLE', '没有待处理的原文；历史缺失正文无法恢复', { status: 409 });
       let result;
@@ -214,9 +223,10 @@ class ConversationLogStore {
   }
   publicRow(row) {
     const { original, masked, fingerprint, hits, ...metadata } = row;
-    const excluded = this.policy().excludedUserIds.includes(row.user_id);
+    const policy = this.policy(), excluded = policy.excludedUserIds.includes(row.user_id);
+    const modelExcluded = !modelAllowed(policy, row.model);
     return { ...metadata, complete: Boolean(row.complete), original: Boolean(original), masked: Boolean(masked), hits: JSON.parse(hits),
-      retry_available: Boolean(original && row.processing_error && !excluded), retry_blocked: excluded ? 'user_excluded' : !original ? 'no_original' : '' };
+      retry_available: Boolean(original && row.processing_error && !excluded && !modelExcluded), retry_blocked: excluded ? 'user_excluded' : modelExcluded ? 'model_excluded' : !original ? 'no_original' : '' };
   }
   list(query = {}) {
     const page = Math.max(1, Math.min(1000000, Number(query.page) || 1)) | 0, pageSize = 20;

@@ -17,7 +17,7 @@ function event(seed = 'one', extra = {}) {
 function fixture(options = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(),'sub2api-conversation-'));
   const store = new ConversationLogStore(directory, options).initialize();
-  store.configure({...store.policy(),enabled:true,reserve:0});
+  store.configure({...store.policy(),enabled:true,reserve:0,modelFilterEnabled:false});
   const token = crypto.randomBytes(32).toString('hex');
   const config = loadConfig({ NODE_ENV:'test', OPERATIONS_CENTER_ADMIN_PASSWORD:'conversation-local-preview', CONVERSATION_LOGS_TOKEN:token });
   const users = Array.from({length:25},(_,index) => ({id:index+1,username:'示例用户 ' + (index+1),email:`user${index+1}@example.com`}));

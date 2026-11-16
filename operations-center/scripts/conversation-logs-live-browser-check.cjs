@@ -21,7 +21,7 @@ async function main() {
         page.on('pageerror',error => errors.push(error.message));
         page.on('request',request => { if (!request.url().startsWith(`http://127.0.0.1:${preview.port}/`) && !/^(?:blob:|data:)/.test(request.url())) external.push(request.url()); });
         const layout = async () => {
-          const result = await page.evaluate(() => ({overflow:document.documentElement.scrollWidth > innerWidth + 1,controls:[...document.querySelectorAll('#cl-root input,#cl-root select,#cl-root .button')].filter(node => node.getBoundingClientRect().width).filter(node => node.getBoundingClientRect().right > innerWidth + 1).map(node => node.outerHTML)}));
+          const result = await page.evaluate(() => ({overflow:document.documentElement.scrollWidth > innerWidth + 1,controls:[...document.querySelectorAll('#cl-root input,#cl-root select,#cl-root textarea,#cl-root .button')].filter(node => node.getBoundingClientRect().width).filter(node => node.getBoundingClientRect().right > innerWidth + 1).map(node => node.outerHTML)}));
           assert.equal(result.overflow,false,name + ' page overflow'); assert.deepEqual(result.controls,[]);
         };
         await page.goto(`http://127.0.0.1:${preview.port}/preview`);
@@ -50,16 +50,35 @@ async function main() {
         await page.locator('#cl-tab-policy').click(); await page.locator('#cl-policy-form').waitFor();
         await page.locator('#cl-user-search').fill('2'); await page.locator('[data-cl-user="2"]').waitFor(); await page.locator('[data-cl-user="2"]').check();
         await page.locator('[data-cl-action=add-rule]').click(); await page.locator('[data-rule-from]').fill('ORION-42'); await page.locator('[data-rule-to]').fill('<ORDER>');
+        await page.locator('[name=modelFilterEnabled]').check();
+        await page.locator('[name=allowedModels]').fill('gpt-6.1-sol\nFable5.1\nGemini carbon');
+        await page.locator('[name=kimiK3Plus]').check();
         await layout(); await page.screenshot({path:path.join(directory,name + '-policy.png'),fullPage:true});
         await page.locator('#cl-save').click(); await page.waitForFunction(() => document.getElementById('cl-save')?.disabled === false && document.getElementById('cl-excluded-count')?.textContent.includes('1 位'));
         assert.deepEqual(preview.fixture.store.policy().excludedUserIds,[2]);
-        const before = preview.fixture.store.status().records;
-        assert.equal(preview.fixture.store.ingest(event('excluded-' + name,{policy_version:preview.fixture.store.policy().version})).accepted,false);
-        assert.equal(preview.fixture.store.status().records,before);
+        const selectedPolicy = preview.fixture.store.policy(), before = preview.fixture.store.status();
+        assert(selectedPolicy.modelFilterEnabled && selectedPolicy.kimiK3Plus);
+        assert.deepEqual(selectedPolicy.allowedModels,['claude-fable-5-1','gemini-carbon','gpt-6.1-sol']);
+        for (const [label,model,user_id] of [['excluded','gpt-6.1-sol',2],['unlisted','claude-fable-5-2',3],['unknown','',3]]) {
+          assert.equal(preview.fixture.store.ingest(event(label + '-' + name,{user_id,model,policy_version:selectedPolicy.version})).accepted,false);
+        }
+        const unchanged = preview.fixture.store.status();
+        for (const key of ['records','gaps','bytes']) assert.equal(unchanged[key],before[key],key);
+        for (const model of ['gpt-6.1-sol','Fable5.1','Kimi K4']) {
+          assert.equal(preview.fixture.store.ingest(event(model + '-' + name,{user_id:3,model,at:preview.raw.at-30000,policy_version:selectedPolicy.version})).accepted,true);
+        }
         await page.reload(); await page.locator('#cl-tab-policy').click(); await page.locator('[data-cl-remove-user="2"]').waitFor();
-        await page.locator('[data-cl-action=clear-users]').click(); await page.locator('[data-cl-action=remove-rule]').click(); await page.locator('#cl-save').click();
+        assert(await page.locator('[name=modelFilterEnabled]').isChecked());
+        assert(await page.locator('[name=kimiK3Plus]').isChecked());
+        assert.equal(await page.locator('[name=allowedModels]').inputValue(),'claude-fable-5-1\ngemini-carbon\ngpt-6.1-sol');
+        await page.locator('[data-cl-action=clear-users]').click(); await page.locator('[data-cl-action=remove-rule]').click();
+        await page.locator('[name=allowedModels]').fill(''); await page.locator('[name=kimiK3Plus]').uncheck(); await page.locator('#cl-save').click();
         await page.waitForFunction(() => document.getElementById('cl-save')?.disabled === false && document.getElementById('cl-excluded-count')?.textContent.includes('0 位'));
         assert.deepEqual(preview.fixture.store.policy().excludedUserIds,[]);
+        assert.equal(preview.fixture.store.ingest(event('empty-models-' + name,{model:'gpt-6.1-sol',policy_version:preview.fixture.store.policy().version})).accepted,false);
+        await page.locator('[name=modelFilterEnabled]').uncheck(); await page.locator('#cl-save').click();
+        await page.waitForFunction(() => document.getElementById('cl-save')?.disabled === false);
+        assert.equal(preview.fixture.store.policy().modelFilterEnabled,false);
         const largeText = JSON.stringify({ content: 'a'.repeat(350000) + ' END_OF_FULL_RESPONSE' });
         const large = event('large-' + name,{at:Date.now()+1000,request:preview.raw.request,response:Buffer.from(largeText).toString('base64'),policy_version:preview.fixture.store.policy().version});
         assert.equal(preview.fixture.store.ingest(large).accepted,true);
@@ -85,6 +104,13 @@ async function main() {
         await page.locator('.cl-processing').filter({hasText:'PROTECTED_FIELD_MATCH'}).waitFor();
         await page.locator('#cl-body-response').filter({hasText:'alice@example.com'}).waitFor();
         await layout(); await page.screenshot({path:path.join(directory,name + '-processing-error.png'),fullPage:true});
+        preview.fixture.store.configure({...preview.fixture.store.policy(),modelFilterEnabled:true,allowedModels:['gpt-6.1-sol'],kimiK3Plus:false});
+        await page.locator('[data-cl-action=reset-filter]').click();
+        await page.locator('.cl-processing').filter({hasText:'该模型不在采集名单中'}).waitFor();
+        assert(await page.locator('[data-cl-action=reprocess]').isDisabled());
+        preview.fixture.store.configure({...preview.fixture.store.policy(),modelFilterEnabled:false});
+        await page.locator('[data-cl-action=reset-filter]').click();
+        await page.waitForFunction(() => document.querySelector('[data-cl-action=reprocess]')?.disabled === false);
         const firstAttempt = preview.fixture.store.detail(failed.id).processed_at;
         await page.locator('[data-cl-action=reprocess]').click();
         await page.waitForFunction(() => document.querySelector('[data-cl-action=reprocess]')?.disabled === false);
@@ -113,7 +139,7 @@ async function main() {
         await page.locator('#logout-button').click(); await page.locator('#login-view').waitFor({state:'visible'});
         assert.equal(await page.locator('#cl-list [data-cl-record]').count(),0); assert.equal(await page.locator('#cl-inspector').innerText(),'选择一条请求查看原始请求与响应');
         assert.deepEqual(errors,[]); assert.deepEqual(external,[]);
-        console.log(name + ': raw bytes, XSS, WS frames, previews, exclusion, encrypted fallback, retry, late responses and logout passed');
+        console.log(name + ': raw bytes, XSS, WS frames, previews, exclusions, model policy save/reload/deny/empty/Kimi, encrypted fallback, retry, late responses and logout passed');
       } finally { await context.close(); }
     }
     console.log('Screenshots: ' + directory);

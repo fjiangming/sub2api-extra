@@ -23,9 +23,21 @@ OPERATIONS_CENTER_IMAGE=ghcr.io/fjiangming/sub2api-extra:operations-center-lates
 
 `operations-center` 主机名要求两个容器共享可解析的私有 Docker 网络；分开运行时，应先核查网络、服务名和已有挂载。主站 URL 仅允许 HTTPS 或私有 / loopback HTTP，不经系统代理、不跟随重定向。不要向公网额外开放采集端口。现有管理员登录 / SSO 和 CSRF 保护继续适用，采集 token 不具备管理员读取权限。
 
-先在“对话日志 → 保存策略”选择排除用户、保存版本和容量，再启用保存。默认关闭，原文与脱敏双副本、保留 7 天、容量 10 GiB、预留磁盘 2 GiB、单条上限 8 MiB、空间不足停止正文。单条上限最多 16 MiB；磁盘不足会标记正文缺失或拒收，不阻断推理。
+先在“对话日志 → 保存策略”选择排除用户、采集模型、保存版本和容量，再启用保存。默认关闭，原文与脱敏双副本、保留 7 天、容量 10 GiB、预留磁盘 2 GiB、单条上限 8 MiB、空间不足停止正文。单条上限最多 16 MiB；磁盘不足会标记正文缺失或拒收，不阻断推理。
 
 排除按主站鉴权用户 ID，覆盖其全部 API Key。采集前、发送前和接收端入库前检查，策略读取失败则停止本次采集。保存排除后，尚未入库的记录也会丢弃；不新增正文、用户元数据、索引、会话和该用户缺口。已存在的历史归档不会隐式删除，仍按当前保留期清理。主站原有业务用量和原生诊断记录属于原有功能，不受本归档开关控制。
+
+## 采集模型
+
+在“保存策略 → 采集模型”开启“仅记录所选模型”，每行填写一个模型名（最多 100 个、每个最多 200 字符），另可勾选“Kimi K3 及后续版本”。名单为空且 Kimi 未勾选时不记录任何模型；关闭筛选则恢复按其他保存条件采集。
+
+按网关实际发送给上游的模型匹配，不使用客户端改写前的别名，也不改变原始正文或模型字段。忽略大小写及空格；Fable5 / Fable5.1 和 Opus5 / Opus5.5 兼容 `claude-fable-5` / `claude-fable-5-1` 和 `claude-opus-5` / `claude-opus-5-5`，Gemini carbon 对应 `gemini-carbon`。其他模型与版本按名单精确匹配，不自动包含 Fable5.2、模型日期后缀或其他 Gemini 版本。Kimi 范围包含 K3、K3.1、K4 等后续版本及常见版本后缀，不包含 K2 系列。
+
+新建归档的建议名单为 `gpt-6-astra`、`gpt-6-sol`、`gpt-6.1-sol`、`gpt-5.6-sol`、`claude-fable-5`、`claude-fable-5-1`、`claude-opus-5`、`claude-opus-5-5`、`gemini-carbon`，并勾选 Kimi K3 及后续版本。旧加密策略升级时保持原采集范围，模型筛选默认关闭，需显式保存新策略；旧客户端未提供模型配置时保留当前模型设置。
+
+主站完成模型识别后、排队发送前及运营中心入库前分别检查；不匹配或无法识别时不新增正文、元数据、索引、会话或该模型缺口。在途旧策略记录也必须符合当前名单。HTTP 从实际请求体或 Gemini / Vertex 的 `/models/` 路径取值；WebSocket 兼容顶层 / response 内的模型及同租约后续消息段的模型继承。识别观察使用原有有界内存，不写原文磁盘临时文件。模型识别只影响归档，不阻断正常推理；超限截断且无法识别模型时不归档。
+
+用户排除始终优先，即使模型已选中仍不采集该用户。历史记录不因名单变化被删除，仍可读取；当前名单外的历史记录不能通过重新处理写入新副本。启用此功能需更新主站采集器和运营中心。
 
 ## Raw 和完整性
 
@@ -65,4 +77,4 @@ HTTP 每次真实 RoundTrip 独立保存，包括 TLS 指纹请求、账号切�
 
 主站左上角更新仅升级主站程序。运营中心需要按原 Compose 项目单独更新，保留完整原数据卷及归档 key；沿用 `operations-center-latest` 的部署无需切换镜像通道。新版运营中心即使尚未接入采集也会显示“对话日志”入口，实际保存仍需上面的连接 / token 配置和管理员启用策略。源代码发布不自动操作服务器。
 
-本地 `npm test`、`npm run check`；`npm run preview:conversations` 启动隔离的正式页面预览（默认 `http://127.0.0.1:19907/preview`），仅虚构数据和临时 SQLite。`npm run check:conversations-ui` 通过 Playwright 检查下载原字节、会话、排除保存 / 重载、XSS、退出清理及窄屏布局，可用 `PLAYWRIGHT_MODULE_PATH` / `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定已有运行时。
+本地 `npm test`、`npm run check`；`npm run preview:conversations` 启动隔离的正式页面预览（默认 `http://127.0.0.1:19907/preview`），仅虚构数据和临时 SQLite。`npm run check:conversations-ui` 通过 Playwright 检查下载原字节、会话、排除与模型配置保存 / 重载、名单外零新增、空名单 / Kimi 范围、XSS、退出清理及窄屏布局，可用 `PLAYWRIGHT_MODULE_PATH` / `PLAYWRIGHT_CHROMIUM_EXECUTABLE` 指定已有运行时。

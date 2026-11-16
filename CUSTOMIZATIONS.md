@@ -1,5 +1,20 @@
 # 个性化功能维护台账
 
+## 2026-11-16：对话日志指定模型采集
+
+用户要求配置记录的模型，名单外不保存，确认 Kimi K3 及后续版本均包含；要求先完成本功能，再开发外部日志推送策略。沿用 extra main / 主站 dev，保留无关本地改动、用户排除、加密 key、历史、容量 / 脱敏规则与计费契约。
+
+- `operations-center/src/services/conversation-models.js`（新增）：大小写 / 空格及 Fable / Opus / Gemini carbon / Kimi 名称归一化，仅匹配列举版本，独立 Kimi K3+ 范围；不扩大到 Fable5.2 或其他 GPT / Gemini 版本。
+- `operations-center/src/conversation-log-store.js`：加密策略增加模型开关 / 名单 / Kimi 范围，最多 100 个模型、单个 200 字符；旧策略缺字段默认关闭，旧客户端省略时保留当前设置，沿用不可变版本 / CAS。新档案预置用户列举名单，保存仍默认关闭。入库解码前按当前策略、解析后按原策略检查；拒收不新增正文 / 元数据 / 索引 / 会话 / 缺口。保留历史读取，禁止名单外历史重处理写新副本。
+- `operations-center/public/conversation-logs-ui.js`、`public/conversation-logs.css`、`public/index.html`：保存策略增加开关、逐行模型名单和 Kimi 选项，保存 / 刷新 / 忙状态、窄屏文本框、历史重处理阻断说明和静态资源版本。列表刷新发现策略版本变化时重读当前详情，及时更新重处理权限。
+- `operations-center/tests/conversation-models.test.js`（新增）、`tests/conversation-logs-fixture.js`：名称与版本边界、未知 / 在途旧策略零新增、空名单、用户排除优先、旧策略 / 客户端兼容、输入限制与历史重处理回归；通用旧样例显式关闭模型筛选。
+- `operations-center/scripts/conversation-logs-live-browser-check.cjs`：四组视口验证模型配置保存 / 重载、名单外和未知零新增、选中模型 / Kimi 可入库、空名单拒收、用户排除及名单外历史重处理按钮禁用，保留原字节 / 脱敏 / 重处理流程。
+- `operations-center/package.json`、`README.md`、`docs/conversation-logs.md`、`CUSTOMIZATIONS.md`：新模块 / 测试纳入语法门禁，说明实际出站模型、精确匹配、旧策略迁移及两端更新要求，无新增依赖或数据库表。
+
+配套主站只修改既有 conversationlog 包的模型元数据提取与发送门禁，清单另记主站台账。识别前沿用既有有界内存观察，不落原文 spool；未知模型不归档，不承诺超限 / 网络故障下无损采集。未触及推理、余额或计费。
+
+本地验证：完整 417 项测试通过、无失败 / 跳过，npm run check 及 29 项归档 / 模型 / 性能 / 重处理专项通过。Chrome 1440 / 390 / 320 像素及系统深色四组流程通过，截图 `sub2api-conversation-browser-clFwVZ` 已复核；新增测试还发现并验证了策略变更后当前详情的按钮状态刷新。主站 12 项采集测试通过；本机缺 C 编译器，race 继续由既有 Linux 发布门禁验证。发布与生产应用结果完成后补记；本节源码变更单独提交，既有独立生产维护记录继续保留本地。
+
 ## 2026-11-16：对话日志兼容、异常原文保留与一键重处理
 
 用户明确要求尽量保留原内容，仅替换敏感信息；处理异常直接保存原文、展示异常并支持一键重处理。此要求替代此前失败即丢正文的策略，包括“仅脱敏”模式。保留全部无关本地工作、用户排除、原归档密钥、历史、推理及计费契约。
