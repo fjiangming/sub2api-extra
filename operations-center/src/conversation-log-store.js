@@ -236,8 +236,10 @@ class ConversationLogStore {
     return this.detail(id);
   }
   prune() {
-    if (!this.policy().retention) return 0;
-    const removed = this.db.prepare('DELETE FROM cl_records WHERE at<?').run(this.now() - this.policy().retention * 86400000).changes;
+    const removed = this.db.transaction(() => {
+      const { retention } = this.policy();
+      return retention ? this.db.prepare('DELETE FROM cl_records WHERE at<?').run(this.now() - retention * 86400000).changes : 0;
+    }).immediate();
     if (removed) { this.db.pragma('wal_checkpoint(TRUNCATE)'); this.db.pragma('incremental_vacuum(128)'); }
     return removed;
   }

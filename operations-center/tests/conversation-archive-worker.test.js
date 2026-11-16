@@ -119,3 +119,24 @@ test('processing memory limits retain exact source and report the failure withou
   assert(saved.processing_error); assert(saved.original); assert(!saved.masked);
   assert.deepEqual(f.store.payload(row.id, 'original', 'response').body, compressed);
 });
+
+test('retention cleanup serializes policy changes and a committed permanent-retention policy preserves all history', t => {
+  let now = Date.now(); const f = fixture({ now: () => now });
+  const other = new ConversationLogStore(f.directory, { now: () => now }).initialize();
+  t.after(() => { other.close(); f.close(); }); other.db.pragma('busy_timeout = 1');
+  const policy = f.store.configure({ ...f.store.policy(), retention: 1 });
+  f.store.ingest(event('expiring', { at: now, policy_version: policy.version })); now += 2 * 86400000;
+  const prepare = f.store.db.prepare.bind(f.store.db); let protectedDelete = false;
+  f.store.db.prepare = sql => {
+    if (sql.startsWith('DELETE FROM cl_records')) {
+      assert.throws(() => other.configure({ ...other.policy(), retention: 0 }), error => error.code.startsWith('SQLITE_BUSY'));
+      protectedDelete = true;
+    }
+    return prepare(sql);
+  };
+  assert.equal(f.store.prune(), 1); assert(protectedDelete);
+  const permanent = other.configure({ ...other.policy(), retention: 0 });
+  const row = event('permanent-after-cleanup', { at: now, policy_version: permanent.version });
+  assert(f.store.ingest(row).accepted); now += 400 * 86400000;
+  assert.equal(f.store.prune(), 0); assert.equal(f.store.status().records, 1);
+});
