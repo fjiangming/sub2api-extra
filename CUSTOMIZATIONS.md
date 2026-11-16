@@ -10,6 +10,8 @@
 
 迁移前核验：对 `origin/dev` 的 `src`、`public`、`tests`、`scripts`、依赖清单、`.env.example`、Compose 和 Dockerfile 做 Git 逐文件比较，全部一致；完整 **401 项测试通过、0 失败 / 跳过**，`npm run check`、工作流 YAML / 发布门禁核对及 diff 检查通过。正式页面 Chrome 的 1440 / 390 / 320 和系统深色偏好四组流程通过 Raw 字节下载、XSS、WebSocket、会话、筛选 / CSV、排除保存 / 刷新与退出清理；截图 `sub2api-conversation-browser-JBMetl` 已复核。只有 main 镜像实际发布并核对成功后，才删除本仓库的远端和本地 dev；历史镜像与原数据均保留。
 
+实际发布与清理：main 功能提交 `08841ed89c5611e1bd3e601be4a9600dc04f4638` 的 Docker images（run 43796777648）全部测试、14 个原生构建及 7 个服务清单发布成功；运营中心两架构的归档模块 / 导航资源、SQLite 与 revision 运行检查通过。匿名 GHCR 核对 `operations-center-latest`、`operations-center-main` 和 `operations-center-sha-08841ed` 均为 manifest `sha256:187412129732393a7cb6cfeb121ab1e27fc220b169d44b24b737d94e3c25dacd`，两架构 revision 精确匹配上述提交。随后按旧 dev 精确 SHA 做受保护删除，远端与本地 dev 均已删除；完整历史已在 main，保留主站 dev 和旧镜像，不操作服务器。本地 main 已快进同步，原有 114 行未提交台账增量、其他未提交差异、暂存状态及 31 个未跟踪文件的摘要均与迁移前一致。最终只追加本发布记录，不重复构建已验证的功能镜像。
+
 ## 2026-11-16：正式对话日志与 dev 发布
 
 用户确认 Demo，要求从主站重建后的 dev 正式开发、提交 / 推送并自动发布可拉取版本；本仓库在独立 `sub2api-extra-conversation-dev` worktree 从 origin/main b8c5f9c 创建配套 dev。原工作目录的其他脏改动和 Demo 保留。本次不连接、更新或部署服务器，不改资金和主站业务表。
