@@ -16,7 +16,7 @@
 docker compose --env-file compose.services.env --profile activity-center up -d --build activity-center
 ```
 
-以上是部署说明，本次开发未执行部署。`activity-center-latest` 已加入镜像工作流，是否可拉取以未来对应提交的 CI 成功发布为准。使用充值中心来源需一并更新充值中心的只读集成接口；运营中心需更新活动赠送识别，避免奖励虚增自动收入。主站不需要改库或改源码，但必须支持固定兑换码的 `create-and-redeem` 原生入账契约。
+部署前须确认对应提交的 CI 和 `activity-center-latest` 镜像已成功发布。使用充值中心来源需一并更新充值中心的只读集成接口；运营中心需更新活动赠送识别，避免奖励虚增自动收入。主站不需要改库或改源码，但必须支持固定兑换码的 `create-and-redeem` 原生入账契约。已上线环境和验证记录见[生产部署](docs/production-deployment.md)。
 
 ## 内部结算口径
 
