@@ -9,7 +9,9 @@
 - `activity-center/tests/source.test.js`、`operations-center/tests/cash-flow.test.js`、`tests/cost-analysis-service.test.js`：调整实际 PostgreSQL / 抽奖 / 现金 / 核算回归数据，覆盖开头、中间、末尾、带括号、相似括号及否定语境的字面匹配；确认正常 / 空 / NULL 备注仍计入，补贴不增加次数或高额奖品资格，关联支付与重启不恢复其收入。
 - `activity-center/README.md`、`operations-center/docs/cost-accounting.md`、`docs/cost-analysis.md`：更新备注匹配说明与示例。
 
-本地活动中心 **43 项**、运营中心完整 **460 项**测试全部通过，共 **503 项，0 失败 / 跳过**；两模块语法检查及相关差异空白检查通过。验证覆盖真实 PostgreSQL 的包含筛选、抽奖次数和奖品资格、充值 / 自动收入 / 下钻一致及关联订单重启防回填。仅提交本节与本轮相关文件；GitHub 构建结果完成后补记，本轮不部署服务器，保留其他独立改动。
+本地活动中心 **43 项**、运营中心完整 **460 项**测试全部通过，共 **503 项，0 失败 / 跳过**；两模块语法检查及相关差异空白检查通过。验证覆盖真实 PostgreSQL 的包含筛选、抽奖次数和奖品资格、充值 / 自动收入 / 下钻一致及关联订单重启防回填。仅提交本节与本轮相关文件，本轮不部署服务器，保留其他独立改动。
+
+GitHub 已推送 main 源码提交 `e348a855714523600113a006c1e99e88b36158c9`，[Docker images run 43911396494](https://github.com/fjiangming/sub2api-extra/actions/runs/43911396494) 最终 Success：六组测试、16 个 amd64 / arm64 镜像构建和八项镜像发布均完成。源码提交核对仅包含十个相关文件；验收结果使用跳过 CI 的纯文档提交补记，不重复构建。未连接或部署服务器。
 
 ## 2026-11-17：按备注前缀排除补贴并提交 GitHub
 
