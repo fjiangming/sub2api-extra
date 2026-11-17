@@ -121,10 +121,15 @@ async function run() {
       await admin.locator('[name=status]').selectOption('failed'); await admin.locator('#ledger-filters button[type=submit]').click();
       await admin.waitForFunction(() => document.querySelector('#ledger-rows').textContent.includes('入账异常'));
       await admin.locator('#ledger-rows button').first().click(); await admin.locator('#detail-dialog[open]').waitFor();
+      assert.match(await admin.locator('#dialog-body').innerText(),/原入账状态尚未核实/);
       await admin.screenshot({ path: path.join(output,`${name}-detail.png`),fullPage: true });
       if (name === 'dark') {
         await admin.locator('#retry-credit').click();
         await admin.waitForFunction(() => !document.querySelector('#retry-credit'));
+        const converted = await admin.locator('#dialog-body').innerText();
+        assert.match(converted,/原入账码/); assert.match(converted,/兼容核验时间/);
+        assert.match(converted,/原尝试次数\s+8/);
+        await admin.screenshot({ path: path.join(output,'legacy-credit-recovered.png'),fullPage: true });
       }
       await admin.locator('#close-dialog').click();
       await admin.locator('#clear-filters').click();
@@ -175,7 +180,7 @@ async function run() {
       await cleanContext.close();
     } finally { await cleanPreview.close(); }
     assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({ passed: results,checks: 'wheel pixels/landing, hidden parameters, single tab, single/batch/recovery, session reload, roles, ledger filters/details/retry, audit alerts/filters/details/unverifiable/healthy/read failures, fractional cash, reduced motion, layouts',screenshots: output },null,2));
+    console.log(JSON.stringify({ passed: results,checks: 'wheel pixels/landing, hidden parameters, single tab, single/batch/recovery, session reload, roles, ledger filters/details/retry, legacy credit review/recovery, audit alerts/filters/details/unverifiable/healthy/read failures, fractional cash, reduced motion, layouts',screenshots: output },null,2));
   } finally { await browser.close(); await preview.close(); }
 }
 

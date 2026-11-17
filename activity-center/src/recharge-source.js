@@ -42,6 +42,27 @@ class RechargeSource {
       throw new AppError('RECHARGE_UNAVAILABLE', '暂时无法读取充值记录，请稍后重试', 503);
     } finally { this.active--; }
   }
+  async inspectLegacyCredit(code) {
+    if (!/^AC-[a-f0-9]{48}$/.test(code)) throw new AppError('CREDIT_LEGACY_REVIEW_REQUIRED', '原奖励入账信息需要核查', 409);
+    if (this.active >= 8) throw new AppError('SERVICE_BUSY', '当前访问人数较多，请稍后重试', 503);
+    this.active++;
+    try {
+      const { rows } = await this.pool.query(`SELECT id::text,code,type,status,value::text,used_by::text,used_at,notes
+        FROM redeem_codes WHERE code=$1 LIMIT 2`,[code]);
+      if (rows.length > 1) throw new AppError('CREDIT_LEGACY_REVIEW_REQUIRED', '原奖励入账信息需要核查', 409);
+      if (rows.length) return { receipt: rows[0] };
+      const metadata = await this.pool.query(`SELECT character_maximum_length AS maximum FROM information_schema.columns
+        WHERE table_schema=current_schema() AND table_name='redeem_codes' AND column_name='code' AND data_type='character varying'`);
+      // A missing receipt alone cannot justify replacing an idempotency code.
+      if (metadata.rows.length !== 1 || metadata.rows[0].maximum !== 32) {
+        throw new AppError('CREDIT_LEGACY_REVIEW_REQUIRED', '原奖励入账信息需要核查', 409);
+      }
+      return { receipt: null,codeLimit: 32 };
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError('CREDIT_LEGACY_UNAVAILABLE', '暂时无法核验原奖励入账记录', 503);
+    } finally { this.active--; }
+  }
   async close() { await this.pool?.end?.(); }
 }
 

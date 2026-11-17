@@ -7,6 +7,7 @@ const { PGlite } = require('@electric-sql/pglite');
 const { RechargeSource } = require('../src/recharge-source');
 const { CoreClient, requestJson } = require('../src/upstream');
 const { config, fixture, USER } = require('./fixtures');
+const { creditNotes } = require('../src/reward-credit');
 
 async function database(t) {
   const db = new PGlite(); t.after(() => db.close());
@@ -79,7 +80,9 @@ test('reward redemptions cannot fund further draws and negative adjustments reta
   await credit(db);
   await f.lottery.draw(USER,crypto.randomUUID(),1); await f.lottery.kick();
   assert.equal(f.store.summary(USER.id,5000).creditedMinor,50);
-  assert.equal([...f.credited.values()][0].type,'affiliate_balance');
+  assert.equal([...f.credited.values()][0].type,'balance');
+  assert.match([...f.credited.values()][0].notes,/活动奖励补贴/);
+  assert.equal([...f.credited.values()][0].code.length,31);
   assert.equal(f.store.ledgerSummary().totalMinor,50);
   assert.equal(await f.lottery.source.total(USER.id,f.store.campaign.start_at),5000);
   assert.equal((await f.lottery.summary(USER.id)).available,0);
@@ -160,11 +163,13 @@ test('source failures and unsafe database totals cannot grant chances or expose 
 test('credit uses only the native fixed-code contract and bounded errors never expose keys or upstream bodies', async () => {
   const cfg = config(); let received;
   const core = new CoreClient(cfg,async (url,options) => { received = { url,options }; return new Response(JSON.stringify({ code: 0,data: { redeem_code: {} } })); });
-  await core.credit({ id: 'reward',attempts: 2,credit_code: 'AC-secret',credit_type: 'affiliate_balance',amount_minor: 50,user_id: '42',batch_id: 'batch' });
+  const row = { id: 'reward',attempts: 2,credit_code: `AC-${'a'.repeat(28)}`,credit_type: 'balance',amount_minor: 50,user_id: '42',batch_id: 'batch' };
+  row.credit_notes = creditNotes(row);
+  await core.credit(row);
   assert.match(received.url,/\/api\/v1\/admin\/redeem-codes\/create-and-redeem$/);
   assert.equal(received.options.headers['x-api-key'],cfg.adminKey);
-  assert.equal(received.options.headers['idempotency-key'],'activity-reward-2');
-  assert.deepEqual(JSON.parse(received.options.body),{ code: 'AC-secret',type: 'affiliate_balance',value: 0.5,user_id: 42,notes: '活动奖励; activity=recharge-lottery; reward=reward; batch=batch' });
+  assert.equal(received.options.headers['idempotency-key'],`activity-reward-${row.credit_code}-2`);
+  assert.deepEqual(JSON.parse(received.options.body),{ code: row.credit_code,type: 'balance',value: 0.5,user_id: 42,notes: row.credit_notes });
   for (const response of [new Response('x'.repeat(300000)),new Response('not json'),new Response(JSON.stringify({ error: { message: 'secret password' } }),{ status: 500 })]) {
     await assert.rejects(requestJson('http://localhost',{},1000,async () => response),error => !error.message.includes('secret'));
   }

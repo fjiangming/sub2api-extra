@@ -2,6 +2,7 @@
 
 const net = require('node:net');
 const { AppError } = require('./errors');
+const { creditNotes } = require('./reward-credit');
 
 async function requestJson(url, options = {}, timeout = 10000, fetchImpl = fetch) {
   const controller = new AbortController();
@@ -48,12 +49,14 @@ class CoreClient {
   }
 
   credit(row) {
-    if (!['balance', 'affiliate_balance'].includes(row.credit_type)) throw new AppError('CREDIT_TYPE_INVALID', '奖励入账类型无效', 502);
+    if (row.credit_type !== 'balance' || !/^AC-[a-f0-9]{28}$/.test(row.credit_code) || row.credit_notes !== creditNotes(row)) {
+      throw new AppError('CREDIT_CONTRACT_INVALID', '奖励入账信息无法核验', 502);
+    }
     return requestJson(`${this.config.sub2apiBaseUrl}/api/v1/admin/redeem-codes/create-and-redeem`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': this.config.adminKey,
-        'idempotency-key': `activity-${row.id}-${row.attempts}` },
+        'idempotency-key': `activity-${row.id}-${row.credit_code}-${row.attempts}` },
       body: JSON.stringify({ code: row.credit_code, type: row.credit_type, value: row.amount_minor / 100,
-        user_id: Number(row.user_id), notes: `活动奖励; activity=recharge-lottery; reward=${row.id}; batch=${row.batch_id}` })
+        user_id: Number(row.user_id), notes: row.credit_notes })
     }, this.config.timeoutMs, this.fetch);
   }
 }

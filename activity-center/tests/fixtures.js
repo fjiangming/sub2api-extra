@@ -21,11 +21,12 @@ function fixture(t, options = {}) {
       attempts.push({ ...row });
       if (!credited.has(row.credit_code)) credited.set(row.credit_code, { id: credited.size+1, code: row.credit_code, type: row.credit_type, value: row.amount_minor/100,
         status: 'used', used_by: Number(row.user_id), used_at: new Date(now).toISOString(),
-        notes: `活动奖励; activity=recharge-lottery; reward=${row.id}; batch=${row.batch_id}` });
+        notes: row.credit_notes });
       return { redeem_code: { ...credited.get(row.credit_code) } };
     }
   };
-  const source = { value: 500000, calls: 0, async total() { this.calls++; if (this.error) throw this.error; return this.value; } };
+  const source = { value: 500000, calls: 0, async total() { this.calls++; if (this.error) throw this.error; return this.value; },
+    async inspectLegacyCredit(code) { return { receipt: credited.get(code) || null,codeLimit: 32 }; } };
   const lottery = new Lottery(store, source, core);
   t.after(async () => { await lottery.close(); store.close(); });
   return { config: cfg, store, core, source, lottery, credited, attempts, now: () => now, advance: value => { now += value; } };

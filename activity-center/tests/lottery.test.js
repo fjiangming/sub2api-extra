@@ -10,6 +10,7 @@ const { PRIZES, sample } = require('../src/prizes');
 const { Store, day } = require('../src/store');
 const { Lottery } = require('../src/lottery');
 const { CoreClient } = require('../src/upstream');
+const { legacyNotes, creditNotes } = require('../src/reward-credit');
 const { fixture, config, USER } = require('./fixtures');
 
 for (const [total,weights] of [
@@ -102,7 +103,10 @@ test('legacy reward migration preserves balance receipts, lost-response retries 
   const originalStart = store.campaign.start_at;
   const requests = Array.from({ length: 3 },() => crypto.randomUUID());
   const batches = requests.map(id => store.reserve(USER,id,1,500000));
-  store.db.prepare("UPDATE rewards SET credit_type='balance'").run();
+  for (const row of store.db.prepare('SELECT * FROM rewards').all()) {
+    store.db.prepare("UPDATE rewards SET credit_type='balance',credit_code=?,credit_notes=? WHERE id=?")
+      .run(`AC-${crypto.randomBytes(24).toString('hex')}`,legacyNotes(row),row.id);
+  }
   const paid = store.claim();
   const paidReceipt = (await f.core.credit(paid)).redeem_code;
   store.settle(paid,{ usedAt: paidReceipt.used_at,type: paidReceipt.type });
@@ -112,14 +116,14 @@ test('legacy reward migration preserves balance receipts, lost-response retries 
   const failed = store.claim();
   store.fail(failed,'CREDIT_RECEIPT_UNVERIFIED',true);
   // Reproduce the deployed v1 schema, including pending, failed and paid records.
-  store.db.exec('ALTER TABLE rewards DROP COLUMN credit_type; PRAGMA user_version=1;');
+  store.db.exec('ALTER TABLE rewards DROP COLUMN credit_type; ALTER TABLE rewards DROP COLUMN credit_notes; ALTER TABLE rewards DROP COLUMN credit_migration; PRAGMA user_version=1;');
   const oldRows = store.db.prepare('SELECT * FROM rewards ORDER BY id').all();
   store.close();
   store = new Store(cfg,{ filename,now: f.now,rng: () => { throw new Error('old outcomes must not be resampled'); } });
-  assert.equal(store.db.pragma('user_version',{ simple: true }),2);
+  assert.equal(store.db.pragma('user_version',{ simple: true }),3);
   assert.equal(store.campaign.start_at,originalStart);
   assert.equal(store.used(USER.id),3);
-  assert.deepEqual(store.db.prepare('SELECT * FROM rewards ORDER BY id').all(),oldRows.map(row => ({ ...row,credit_type: 'balance' })));
+  assert.deepEqual(store.db.prepare('SELECT * FROM rewards ORDER BY id').all(),oldRows.map(row => ({ ...row,credit_type: 'balance',credit_notes: legacyNotes(row),credit_migration: null })));
   requests.forEach((id,i) => assert.equal(store.existing(USER.id,id,1).id,batches[i].id));
   assert.equal(store.ledgerSummary().totalMinor,50);
   f.advance(60000);
@@ -127,14 +131,14 @@ test('legacy reward migration preserves balance receipts, lost-response retries 
   await lottery.kick();
   assert.equal(store.detail(lost.id).status,'paid');
   assert.equal(f.credited.size,2);
-  assert.equal(f.attempts.filter(row => row.credit_code === lost.credit_code).length,2);
+  assert.equal(f.attempts.filter(row => row.credit_code === lost.credit_code).length,1);
   assert.ok(f.attempts.every(row => row.credit_type === 'balance'));
   store.retry(failed.id,'1'); await lottery.kick();
   assert.equal(store.detail(failed.id).status,'paid');
   assert.equal(f.credited.size,3);
   store.rng = () => 0;
   const fresh = await lottery.draw(USER,crypto.randomUUID(),1); await lottery.kick();
-  assert.equal(store.detail(fresh.rewards[0].id).receipt.type,'affiliate_balance');
+  assert.equal(store.detail(fresh.rewards[0].id).receipt.type,'balance');
   assert.equal(store.ledgerSummary().totalMinor,200);
   assert.equal(f.credited.size,4);
   const allRows = store.db.prepare('SELECT * FROM rewards ORDER BY id').all();
@@ -145,26 +149,29 @@ test('legacy reward migration preserves balance receipts, lost-response retries 
   assert.equal(store.used(USER.id),4);
 });
 
-test('an old core rejecting affiliate credits retains the same reward and never falls back to balance', async t => {
+test('the original 32-character core accepts new balance rewards and lost responses reuse the same subsidy code', async t => {
   const f = fixture(t); const payloads = [];
+  const native = new Map();
   f.lottery.core = new CoreClient(f.config,async (_url,options) => {
-    payloads.push(JSON.parse(options.body));
-    return new Response(JSON.stringify({ code: 400,message: 'unsupported type' }),{ status: 400 });
+    const input = JSON.parse(options.body); payloads.push(input);
+    assert.equal(input.type,'balance'); assert.equal(input.code.length,31); assert.match(input.notes,/补贴/);
+    if (!native.has(input.code)) native.set(input.code,{ id: 1,...input,status: 'used',used_by: input.user_id,used_at: new Date(f.now()).toISOString() });
+    if (payloads.length === 1) throw new Error('response lost after native commit');
+    return new Response(JSON.stringify({ code: 0,data: { redeem_code: native.get(input.code) } }));
   });
   const batch = await f.lottery.draw(USER,crypto.randomUUID(),1); await f.lottery.kick();
   assert.equal(f.store.detail(batch.rewards[0].id).status,'pending');
   f.advance(60000); await f.lottery.kick();
   assert.equal(payloads.length,2);
-  assert.ok(payloads.every(row => row.type === 'affiliate_balance'));
+  assert.ok(payloads.every(row => row.type === 'balance'));
   assert.equal(payloads[0].code,payloads[1].code);
   assert.equal(f.store.used(USER.id),1);
-  assert.equal(f.store.ledgerSummary().totalMinor,0);
-  f.lottery.core = f.core; f.advance(60000); await f.lottery.kick();
   assert.equal(f.store.detail(batch.rewards[0].id).status,'paid');
-  assert.equal(f.credited.size,1);
+  assert.equal(f.store.ledgerSummary().totalMinor,50); assert.equal(native.size,1);
+  assert.equal(payloads[0].notes,creditNotes(f.store.db.prepare('SELECT * FROM rewards').get()));
 });
 
-for (const [field,value] of [['code','wrong-code'],['type','balance'],['status','unused'],['used_by',999],['value',0.51],['id',null],['used_at','invalid'],['notes','unrelated credit']]) {
+for (const [field,value] of [['code','wrong-code'],['type','affiliate_balance'],['status','unused'],['used_by',999],['value',0.51],['id',null],['used_at','invalid'],['notes','unrelated credit']]) {
   test(`unverified receipt ${field} cannot enter sent totals and admin recovery preserves prize`, async t => {
     const f = fixture(t); const original = f.core.credit.bind(f.core);
     f.core.credit = async row => { const result = await original(row); result.redeem_code[field] = value; return result; };

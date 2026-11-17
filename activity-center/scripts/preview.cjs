@@ -6,6 +6,7 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { createRuntime } = require('../src/server');
 const { AppError } = require('../src/errors');
+const { legacyNotes } = require('../src/reward-credit');
 
 async function startPreview({ port = 19927, seed = true, auditSeed = false } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(),'sub2api-activity-preview-'));
@@ -21,11 +22,12 @@ async function startPreview({ port = 19927, seed = true, auditSeed = false } = {
     async credit(row) {
       if (creditFailure) throw new AppError('UPSTREAM_UNAVAILABLE','模拟连接中断',503);
       if (!credited.has(row.credit_code)) credited.set(row.credit_code,{ id: ++receiptId,code: row.credit_code,type: row.credit_type,status: 'used',value: row.amount_minor/100,
-        used_by: Number(row.user_id),used_at: new Date().toISOString(),notes: `活动奖励; activity=recharge-lottery; reward=${row.id}; batch=${row.batch_id}` });
+        used_by: Number(row.user_id),used_at: new Date().toISOString(),notes: row.credit_notes });
       return { redeem_code: { ...credited.get(row.credit_code) } };
     }
   };
-  const source = { values, async total(id) { return values.get(id) || 0; } };
+  const source = { values, async total(id) { return values.get(id) || 0; },
+    async inspectLegacyCredit(code) { return { receipt: credited.get(code) || null,codeLimit: 32 }; } };
   let roll = 0; const rolls = [0,5200,7200,8200,8700,8900,9400,9800];
   const runtime = createRuntime({ NODE_ENV: 'test',ACTIVITY_CENTER_PORT: String(port || 19927),
     ACTIVITY_CENTER_DATA_DIR: directory,SUB2API_DATABASE_URL: 'postgres://synthetic:synthetic@localhost/preview',SUB2API_ADMIN_API_KEY: 'synthetic-preview-admin-key'
@@ -39,6 +41,9 @@ async function startPreview({ port = 19927, seed = true, auditSeed = false } = {
     const failed = runtime.store.reserve(user,crypto.randomUUID(),1,600000);
     runtime.store.db.prepare("UPDATE rewards SET status='failed',error_code='CREDIT_RECEIPT_UNVERIFIED',attempts=1 WHERE id=?").run(failed.rewards[0].id);
     if (auditSeed) {
+      const row = runtime.store.db.prepare('SELECT * FROM rewards WHERE id=?').get(failed.rewards[0].id);
+      runtime.store.db.prepare("UPDATE rewards SET credit_code=?,credit_notes=?,error_code='CREDIT_LEGACY_REVIEW_REQUIRED',attempts=8 WHERE id=?")
+        .run(`AC-${crypto.randomBytes(24).toString('hex')}`,legacyNotes(row),row.id);
       // Deliberately inconsistent local fixtures exercise the administrator audit.
       for (const [amount,recharge] of [[1000,5000],[2000,100000],[5000,200000],[1000,-1]]) {
         const sample = runtime.store.reserve(user,crypto.randomUUID(),1,600000);

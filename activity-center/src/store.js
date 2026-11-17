@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const Database = require('better-sqlite3');
 const { AppError } = require('./errors');
 const { sample, PRIZES } = require('./prizes');
+const { creditCode, creditNotes, legacyCredit } = require('./reward-credit');
 
 const ACTIVITY = Object.freeze({ id: 'recharge-lottery', name: '充值抽奖', kind: 'wheel' });
 const AUDIT_REQUIRED = `CASE r.amount_minor ${PRIZES.filter(p => p.minimum > 0).map(p => `WHEN ${p.amount} THEN ${p.minimum}`).join(' ')} ELSE 0 END`;
@@ -24,7 +25,8 @@ function publicReward(row, admin = false) {
     status: row.status, createdAt: row.created_at, creditedAt: row.credited_at, activity: ACTIVITY.name };
   if (admin) Object.assign(result, { userId: row.user_id, email: row.user_email, name: row.user_name,
     attempts: row.attempts, errorCode: row.error_code, receipt: row.receipt ? JSON.parse(row.receipt) : null,
-    audit: { status: row.audit_status, requiredMinor: row.audit_required_minor, rechargeMinor: row.audit_recharge_minor } });
+    audit: { status: row.audit_status, requiredMinor: row.audit_required_minor, rechargeMinor: row.audit_recharge_minor },
+    creditMigration: row.credit_migration ? JSON.parse(row.credit_migration) : null });
   return result;
 }
 
@@ -42,7 +44,7 @@ class Store {
     this.db.pragma('synchronous = FULL');
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
-    if (this.db.pragma('user_version', { simple: true }) > 2) throw new Error('活动数据库版本高于当前程序');
+    if (this.db.pragma('user_version', { simple: true }) > 3) throw new Error('活动数据库版本高于当前程序');
     this.db.transaction(() => {
       this.db.exec(`
       CREATE TABLE IF NOT EXISTS campaign (
@@ -63,6 +65,7 @@ class Store {
         amount_minor INTEGER NOT NULL CHECK(amount_minor IN (50,100,200,300,500,1000,2000,5000)),
         credit_code TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','paid','failed')),
         credit_type TEXT NOT NULL DEFAULT 'balance' CHECK(credit_type IN ('balance','affiliate_balance')),
+        credit_notes TEXT, credit_migration TEXT,
         created_at TEXT NOT NULL, created_day TEXT NOT NULL, credited_at TEXT, credited_day TEXT,
         attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0,
         lease_until INTEGER NOT NULL DEFAULT 0, error_code TEXT, receipt TEXT,
@@ -80,7 +83,14 @@ class Store {
       if (!this.db.pragma('table_info(rewards)').some(column => column.name === 'credit_type')) {
         this.db.exec("ALTER TABLE rewards ADD COLUMN credit_type TEXT NOT NULL DEFAULT 'balance' CHECK(credit_type IN ('balance','affiliate_balance'))");
       }
-      this.db.pragma('user_version = 2');
+      if (!this.db.pragma('table_info(rewards)').some(column => column.name === 'credit_notes')) {
+        this.db.exec('ALTER TABLE rewards ADD COLUMN credit_notes TEXT');
+      }
+      if (!this.db.pragma('table_info(rewards)').some(column => column.name === 'credit_migration')) {
+        this.db.exec('ALTER TABLE rewards ADD COLUMN credit_migration TEXT');
+      }
+      this.db.exec("UPDATE rewards SET credit_notes='活动奖励; activity=recharge-lottery; reward='||id||'; batch='||batch_id WHERE credit_notes IS NULL");
+      this.db.pragma('user_version = 3');
     }).immediate();
     this.db.transaction(() => {
       let campaign = this.db.prepare('SELECT * FROM campaign WHERE id=?').get(ACTIVITY.id);
@@ -133,11 +143,12 @@ class Store {
       const at = new Date(this.now()).toISOString();
       this.db.prepare('INSERT INTO batches VALUES (?,?,?,?,?,?)').run(batchId, user.id, requestId, count, rechargeMinor, at);
       this.db.prepare('INSERT INTO accounts VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET used=used+excluded.used').run(user.id, count);
-      const insert = this.db.prepare(`INSERT INTO rewards(id,batch_id,sequence,user_id,user_email,user_name,amount_minor,credit_code,credit_type,created_at,created_day)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+      const insert = this.db.prepare(`INSERT INTO rewards(id,batch_id,sequence,user_id,user_email,user_name,amount_minor,credit_code,credit_type,credit_notes,created_at,created_day)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
       for (let index = 1; index <= count; index++) {
-        insert.run(crypto.randomUUID(), batchId, index, user.id, user.email, user.name, sample(rechargeMinor, this.rng),
-          `AC-${crypto.randomBytes(24).toString('hex')}`, 'affiliate_balance', at, day(at, this.config.timezone));
+        const id = crypto.randomUUID();
+        insert.run(id, batchId, index, user.id, user.email, user.name, sample(rechargeMinor, this.rng),
+          creditCode(), 'balance', creditNotes({ id,batch_id: batchId }), at, day(at, this.config.timezone));
       }
       return this.batch(user.id, batchId);
     }).immediate();
@@ -209,12 +220,27 @@ class Store {
   settle(row, receipt) {
     const at = receipt.usedAt;
     return this.db.prepare(`UPDATE rewards SET status='paid',receipt=?,credited_at=?,credited_day=?,lease_until=0,error_code=NULL
-      WHERE id=? AND status='pending' AND attempts=?`).run(JSON.stringify(receipt), at, day(at, this.config.timezone), row.id, row.attempts).changes;
+      WHERE id=? AND status='pending' AND attempts=? AND credit_code=? AND credit_type=? AND credit_notes=?`)
+      .run(JSON.stringify(receipt), at, day(at, this.config.timezone), row.id, row.attempts, row.credit_code, row.credit_type, row.credit_notes).changes;
+  }
+  replaceLegacyCredit(row, codeLimit) {
+    if (codeLimit !== 32 || !legacyCredit(row) || row.credit_migration) throw new AppError('CREDIT_LEGACY_REVIEW_REQUIRED', '原奖励入账信息需要核查', 409);
+    return this.db.transaction(() => {
+      const code = creditCode(), notes = creditNotes(row);
+      const migration = JSON.stringify({ code: row.credit_code,type: row.credit_type,notes: row.credit_notes,
+        attempts: row.attempts-1,verifiedAt: new Date(this.now()).toISOString(),codeLimit });
+      const changed = this.db.prepare(`UPDATE rewards SET credit_code=?,credit_type='balance',credit_notes=?,credit_migration=?,attempts=1,error_code=NULL
+        WHERE id=? AND status='pending' AND attempts=? AND credit_code=? AND credit_type=? AND credit_notes=? AND credit_migration IS NULL`)
+        .run(code,notes,migration,row.id,row.attempts,row.credit_code,row.credit_type,row.credit_notes).changes;
+      return changed ? this.db.prepare('SELECT * FROM rewards WHERE id=?').get(row.id) : null;
+    }).immediate();
   }
   fail(row, code, permanent = false) {
     const failed = permanent || row.attempts >= 8;
-    this.db.prepare(`UPDATE rewards SET status=?,lease_until=0,error_code=?,next_attempt_at=? WHERE id=? AND status='pending' AND attempts=?`)
-      .run(failed ? 'failed' : 'pending', code, this.now() + Math.min(3600000, 15000 * 2 ** Math.min(row.attempts, 8)), row.id, row.attempts);
+    this.db.prepare(`UPDATE rewards SET status=?,lease_until=0,error_code=?,next_attempt_at=?
+      WHERE id=? AND status='pending' AND attempts=? AND credit_code=? AND credit_type=? AND credit_notes=?`)
+      .run(failed ? 'failed' : 'pending', code, this.now() + Math.min(3600000, 15000 * 2 ** Math.min(row.attempts, 8)),
+        row.id,row.attempts,row.credit_code,row.credit_type,row.credit_notes);
   }
   retry(id, actorId) {
     this.db.transaction(() => {

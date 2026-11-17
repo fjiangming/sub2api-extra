@@ -220,9 +220,11 @@ async function showReward(id) {
       if (row.audit.status === 'violation') entries.push(['充值差额',money(row.audit.requiredMinor-row.audit.rechargeMinor)]);
     }
     if (row.errorCode) entries.push(['异常代码',row.errorCode]);
+    if (row.creditMigration) entries.push(['原入账码',row.creditMigration.code],['原入账类型',row.creditMigration.type],
+      ['原尝试次数',row.creditMigration.attempts],['兼容核验时间',time(row.creditMigration.verifiedAt)]);
     if (row.retries.length) entries.push(['恢复操作',row.retries.map(r => `管理员 #${r.actorId} · ${time(r.createdAt)}`).join(' / ')]);
     $('dialog-title').textContent = '奖励详情';
-    $('dialog-body').innerHTML = `${['violation','unverifiable'].includes(row.audit?.status) ? `<p class="audit-detail ${row.audit.status === 'violation' ? 'failed' : 'pending'}" role="alert">${row.audit.status === 'violation' ? '该奖励未达到充值门槛，请核查' : '该奖励的抽奖时充值快照无法核验，请核查'}</p>` : ''}<dl class="detail-grid">${entries.map(([key,value]) => `<div><dt>${key}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>${row.status === 'failed' ? '<button id="retry-credit" class="button primary dialog-action">恢复入账</button>' : ''}<div id="detail-error" class="error" role="alert" hidden></div>`;
+    $('dialog-body').innerHTML = `${row.errorCode === 'CREDIT_LEGACY_REVIEW_REQUIRED' ? '<p class="audit-detail pending" role="alert">原入账状态尚未核实，已暂停发放，请核查原回执</p>' : ''}${['violation','unverifiable'].includes(row.audit?.status) ? `<p class="audit-detail ${row.audit.status === 'violation' ? 'failed' : 'pending'}" role="alert">${row.audit.status === 'violation' ? '该奖励未达到充值门槛，请核查' : '该奖励的抽奖时充值快照无法核验，请核查'}</p>` : ''}<dl class="detail-grid">${entries.map(([key,value]) => `<div><dt>${key}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>${row.status === 'failed' ? '<button id="retry-credit" class="button primary dialog-action">恢复入账</button>' : ''}<div id="detail-error" class="error" role="alert" hidden></div>`;
     if ($('retry-credit')) $('retry-credit').onclick = async () => {
       $('retry-credit').disabled = true;
       try { await api(`admin/rewards/${id}/retry`,{ method: 'POST',body: '{}' }); await showReward(id); await refreshLedger(); }
