@@ -10,6 +10,7 @@ const { ConversationPushSupervisor } = require('../src/services/conversation-pus
 const { ConversationArchiveService } = require('../src/services/conversation-archive-service');
 const { ConversationCleanupService } = require('../src/services/conversation-cleanup-service');
 const { ConversationRepairService } = require('../src/services/conversation-repair-service');
+const { ConversationReadService } = require('../src/services/conversation-read-service');
 
 async function startPreview({port = Number(process.env.CONVERSATION_PREVIEW_PORT || 19907),pushTransport,compatibilityExamples = false} = {}) {
   const f = fixture();
@@ -50,8 +51,9 @@ async function startPreview({port = Number(process.env.CONVERSATION_PREVIEW_PORT
   const archive = new ConversationArchiveService(f.store);
   const cleanup = new ConversationCleanupService(f.store,{canWork:() => !archive.busy});
   const repair = new ConversationRepairService(f.store,{canWork:() => !archive.busy && !cleanup.child});
+  const read = new ConversationReadService(f.store,{configured:true,canWork:() => !archive.busy && !cleanup.child && !repair.child});
   await archive.start();
-  const app = createApp({config:f.config,auth,database:{},conversations:f.store,conversationArchive:archive,conversationPush:push,conversationCleanup:cleanup,conversationRepair:repair,messages:f.messages,settings:{getStatus:() => ({setupRequired:false})}});
+  const app = createApp({config:f.config,auth,database:{},conversations:f.store,conversationArchive:archive,conversationRead:read,conversationPush:push,conversationCleanup:cleanup,conversationRepair:repair,messages:f.messages,settings:{getStatus:() => ({setupRequired:false})}});
   const outer = express();
   outer.get('/preview',async (req,res,next) => { try { await auth.login(req,res,{username:f.config.adminUser,password:f.config.adminPassword}); res.redirect('/#conversations'); } catch(error) { next(error); } });
   outer.use(app);
@@ -63,8 +65,9 @@ async function startPreview({port = Number(process.env.CONVERSATION_PREVIEW_PORT
   push.start();
   cleanup.start();
   repair.start();
+  read.start();
   let stopped = false;
-  return {port:server.address().port,fixture:f,push,cleanup,repair,raw,async stop() { if (stopped) return; stopped = true; await repair.stop(); await cleanup.stop(); await push.stop(); await archive.stop(); auth.close(); await new Promise(resolve => server.close(resolve)); f.close(); }};
+  return {port:server.address().port,fixture:f,push,cleanup,repair,read,raw,async stop() { if (stopped) return; stopped = true; await read.stop(); await repair.stop(); await cleanup.stop(); await push.stop(); await archive.stop(); auth.close(); await new Promise(resolve => server.close(resolve)); f.close(); }};
 }
 if (require.main === module) startPreview({compatibilityExamples:true}).then(preview => {
   console.log(`Conversation archive formal-page preview (fictional local data): http://127.0.0.1:${preview.port}/preview`);

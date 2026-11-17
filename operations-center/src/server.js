@@ -43,6 +43,7 @@ const { ConversationPushStore } = require('./conversation-push-store');
 const { ConversationPushSupervisor } = require('./services/conversation-push-supervisor');
 const { ConversationCleanupService } = require('./services/conversation-cleanup-service');
 const { ConversationRepairService } = require('./services/conversation-repair-service');
+const { ConversationReadService } = require('./services/conversation-read-service');
 
 async function main() {
   const settingsStore = new RuntimeSettingsStore(resolveDataDir());
@@ -69,6 +70,10 @@ async function main() {
     try { conversationRepair = new ConversationRepairService(conversations,{canWork:() => !conversationArchive?.busy && !conversationCleanup?.child}); }
     catch { console.warn('conversation repair unavailable: CONVERSATION_REPAIR_INITIALIZATION_FAILED'); }
   }
+  const conversationRead = conversations ? new ConversationReadService(conversations, {
+    configured:Boolean(config.conversationLogs?.token),
+    canWork:() => !conversationArchive?.busy && !conversationCleanup?.child && !conversationRepair?.child
+  }) : null;
   const database = createDatabase(config);
   const sub2api = new Sub2ApiClient(config);
   const providerMonitor = new ProviderMonitorClient(config);
@@ -148,7 +153,7 @@ async function main() {
     sub2api
   });
   const app = createApp({
-    config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
+    config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationRead, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
   });
   const server = http.createServer(app);
   server.requestTimeout = 120000;
@@ -168,6 +173,7 @@ async function main() {
   conversationPush?.start();
   conversationCleanup?.start();
   conversationRepair?.start();
+  conversationRead?.start();
   console.info(`operations-center listening on http://${config.bindHost}:${config.port}`);
 
   let stopping = false;
@@ -176,6 +182,7 @@ async function main() {
     stopping = true;
     console.info(`operations-center shutting down (${signal})`);
     scheduler.stop();
+    await conversationRead?.stop();
     await conversationCleanup?.stop();
     await conversationRepair?.stop();
     await conversationPush?.stop();

@@ -1,5 +1,31 @@
 # 个性化功能维护台账
 
+## 2026-11-17：修复对话日志取消误报与大库查询阻塞
+
+用户授权修复并提交 GitHub。本轮只改运营中心，不修改 sub2api 采集 / 推理 / 计费链路；不连接、重启或部署生产，不修改生产配置或历史。保留域名、备份、图标、演示及其他独立改动。与前轮只读诊断报告一起提交，沿用 main 的现有自动测试 / 双架构镜像发布流程。
+
+- `operations-center/src/services/conversation-metadata.js`（新增）、`src/conversation-log-store.js`：加法创建紧凑元数据及事务同步触发器，不在启动扫描历史。列表 / 会话 / 导出 / 汇总从元数据读取，未完成回填时附真实进度、全库统计未准备值和导出门禁；HTTP 详情不解密正文、payload 只查所选副本。旧元数据单条读取在短写锁外，最终写入复核存在性并不覆盖并发更新；同步删除与清理，无原始密文重写。
+- `src/services/conversation-read-service.js`、`conversation-read-worker.js`、`conversation-read-response.js`（新增）、`src/app.js`、`src/server.js`：六类管理员读取接口移入单独低优先级进程，保留原鉴权 / CSRF / 采集隔离和格式。单并发、八项等候、5 秒排队 / 15 秒读取 / 10 秒单条回填、192 MiB old-space / 2 MiB SQLite 缓存、共享内存准入、客户端取消 / 崩溃回收和按需重启、15 秒闲置退出；主进程流式转发，不解析正文或失败回退。历史每秒最多回填一条，归档 / 清理 / 检查活动时避让，归档或交互到来时中止后台读取，先等旧进程退出再重启，避免进程重叠。
+- `public/app.js`、`public/conversation-logs-ui.js`、`public/index.html`：正常 AbortError 与过期同视图加载不报数据源异常；详情 / 副本旧错误不覆盖新选择。索引准备进度、未准备全库计数、部分列表 / 会话及禁止提前导出，每 5 秒刷新且离开取消，更新静态资源版本。
+- `tests/conversation-read.test.js`、`conversation-read-worker-fixture.cjs`（新增）、`conversation-logs-fixture.js`、`conversation-compatibility.test.js`、`conversation-inspection.test.js`、`conversation-reprocessing.test.js`：旧模式迁移模拟删除新元数据设施；补充懒迁移 / 重启 / 并发更新删除、筛选一致 / 正文不解密、重处理 / 过期 / 清空同步、真实读取进程的卡死 / 采集并发 / 超时 / 客户端取消 / 进程退出 / 排队 / 内存 / 闲置 / 后台让行与恢复回归。
+- `scripts/conversation-logs-live-preview.cjs`、`conversation-read-browser-check.cjs`（新增）、`package.json`：正式预览接入真实读取服务，新增浏览器取消 / 新旧加载竞态 / 真实超时 / 索引准备与自动刷新四布局检查，新文件纳入语法门禁，无新增依赖。
+- `operations-center/README.md`、`docs/conversation-logs.md`、`conversation-integrity-privacy.md`：登记升级与索引准备、读取保护、原文字节和性能边界。不保证绝对零共享资源成本，也不补回从未保存的数据。
+
+复核补齐压缩正文的查看解压预算：按解密后剩余内存限制文本展开，超预算明确提示，直接原始下载不解压、JSON 原始字节接口仍返回原 base64；新增压缩展开回归，不改变存储字节。测试的极短排队期限只用于验证排队过期，冷启动恢复验证恢复生产 5 秒期限，避免繁忙测试宿主误判；过期数据模拟使用已入库记录，保留既有过期入库拒绝门禁。
+
+最终运营中心完整 **558 项测试全部通过，0 失败 / 跳过**（约 191.5 秒），含新增 13 项读取 / 元数据专项；`npm run check` 通过，随后最终测试文件与浏览器脚本语法及相关差异空白检查通过。原日志与新增取消 / 索引准备两套桌面 1440 / 手机 390 / 窄屏 320px / 深色偏好浏览器流程全部通过，覆盖原文精确下载、完整文本 / 预览、WS / 脱敏 / 重处理、取消误报、新旧请求竞态、真实错误与索引自动刷新。截图 `sub2api-conversation-browser-cOB2DU` / `sub2api-read-browser-x2XBOg`，已视觉复核桌面准备与 320px 详情；没有外部真实流量。独立虚构数据预览 `http://127.0.0.1:19941/preview`（PID 51756）已启动，仅监听 loopback，healthz 正常，保留此前预览。按本节与上一节诊断选择提交，其他独立改动留在本地；发布结果核验后补记。本轮未部署服务器。
+
+## 2026-11-17：升级后取消提示与运营中心阻塞只读排查
+
+用户要求排查升级后打开对话日志提示 `signal is aborted without reason`。本轮仅只读连接生产、审查源码与查询计划，并在 loopback 虚构数据页面用 Chromium 复现；不改服务器配置、不部署 / 重启、不建索引或改写日志、不执行历史任务、不调用真实模型或外推，不导出正文 / 图片 / 令牌 / 密钥。保留所有独立改动。
+
+- `operations-center/docs/conversation-diagnostics-20261117-abort-stall.md`（新增）：记录已经复现的预期 AbortError 被外层页面加载当成数据源异常，以及线上主进程阻塞读取 archive.sqlite 的独立问题；包含版本 / 健康 / cgroup、系统调用采样、EXPLAIN、归档时效、证据边界与仅运营中心修复建议。
+- 线上已运行 ed32c56，运营容器 22:13:58 启动后未重启 / OOM，但 22:52 至 22:59 unhealthy，源站 healthz 也超时；主站 Docker healthy、启动时间不变。归档约 21.0 GiB / 7,607 条，运营 cgroup 512 MiB 接近上限且有大量 max 事件、无 OOM；主进程 wchan 为 folio_wait_bit_common，连续 pread64 指向 archive.sqlite，两秒增加约 40 MiB 物理读取。
+- 独立只读限速容器仅 EXPLAIN / schema / 覆盖索引计数和时间：状态、列表汇总均扫描记录表，现有索引不覆盖；覆盖索引计数约 1.3 ms。22:59 复核最近归档为 22:50:08、条数未增长。策略不可达会过期跳过采集，不等待归档完成用户对话；不能把主站健康等同零延迟实测，也不能从最近时间单独推断每条流量丢失。
+- 本地延迟列表后切换采集状态，准确复现同句英文；定位 public/app.js 外层 loadCurrentView catch 没有过滤正常取消。前后版本相关主读路径未改，未采集活动 SQL 栈 / 同库 A/B，未唯一归因到某个请求或升级触发链。
+
+仅新增报告及本节维护记录，正式源码 / 配置 / 测试未改；未重复完整测试。诊断容器网络关闭、生产卷只读、128 MiB / 0.15 CPU / 16 PID 和期限保护，退出均清理，无残留；最终运营仍未恢复，不将诊断当作修复。相关文档空白检查通过，未提交 / 推送或执行服务器恢复操作。
+
 ## 2026-11-17：提交协议图片与完成事件兼容修复
 
 用户授权提交 GitHub。本次仅提交运营中心协议图片兼容 v5、JSON 标签 SSE 完成检查 v2、读取异常说明，以及相关界面、预览、回归测试和两份只读诊断报告；维护台账仅选择本节及上述两轮功能记录，保留域名、备份、独立演示、图标和其他未提交记录。沿用 main 的 Docker images 自动测试 / 双架构构建发布流程，不修改 sub2api 源码，不连接或更新服务器，不重处理 / 清理生产历史，不发送真实外部推送。

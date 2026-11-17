@@ -9,6 +9,7 @@ const { z } = require('zod');
 const { asyncRoute, errorMiddleware, AppError } = require('./errors');
 const { cleanupTargetIds } = require('./config');
 const { ROLE_PATTERN } = require('./services/system-settings-service');
+const { sendPayload } = require('./services/conversation-read-response');
 
 const loginSchema = z.object({
   username: z.string().min(1).max(320).optional(),
@@ -141,7 +142,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationRead, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -315,7 +316,9 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   });
 
   api.use('/conversation-logs', (_req, _res, next) => conversations ? next() : next(new AppError('CONVERSATION_UNAVAILABLE', '对话归档暂不可用', { status: 503 })));
-  api.get('/conversation-logs/status', (_req, res) => res.json({ ...conversations.status(), configured: Boolean(config.conversationLogs?.token) }));
+  const readConversation = fallback => (req,res,next) => conversationRead
+    ? conversationRead.proxy(req,res,next,req.originalUrl.slice('/api/conversation-logs'.length)) : fallback(req,res);
+  api.get('/conversation-logs/status', readConversation((_req, res) => res.json({ ...conversations.status(), configured: Boolean(config.conversationLogs?.token) })));
   api.get('/conversation-logs/policy', (_req, res) => res.json(conversations.policy()));
   api.put('/conversation-logs/policy', csrf, (req, res) => {
     const result = conversations.configure(req.body);
@@ -358,25 +361,18 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.post('/conversation-logs/push/test/:destination', csrf, rateLimit({ windowMs: 60000, limit: 5, standardHeaders: 'draft-8', legacyHeaders: false }),
     asyncRoute(async (req, res) => res.json(await conversationPush.test(req.params.destination))));
   api.get('/conversation-logs/users', asyncRoute(async (req, res) => res.json(await messages.searchUsers(req.query, req.auth.upstreamAccessToken))));
-  api.get('/conversation-logs/sessions', (req, res) => res.json(conversations.sessions(req.query)));
-  api.get('/conversation-logs/records', (req, res) => res.json(conversations.list(req.query)));
-  api.get('/conversation-logs/index', (req, res) => res.json(conversations.exportIndex(req.query)));
-  api.get('/conversation-logs/records/:id', (req, res) => res.json(conversations.detail(req.params.id)));
+  api.get('/conversation-logs/sessions', readConversation((req, res) => res.json(conversations.sessions(req.query))));
+  api.get('/conversation-logs/records', readConversation((req, res) => res.json(conversations.list(req.query))));
+  api.get('/conversation-logs/index', readConversation((req, res) => res.json(conversations.exportIndex(req.query))));
+  api.get('/conversation-logs/records/:id', readConversation((req, res) => res.json(conversations.detail(req.params.id))));
   api.post('/conversation-logs/records/:id/reprocess', csrf, rateLimit({ windowMs: 60000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false }),
     (req, res, next) => conversationArchive
       ? conversationArchive.proxy(req, res, next, '/reprocess/' + encodeURIComponent(req.params.id), Buffer.from(JSON.stringify(req.body || {})))
       : res.json(conversations.retry(req.params.id, req.body)));
-  api.get('/conversation-logs/records/:id/payload/:side', (req, res) => {
-    const value = conversations.payload(req.params.id, req.query.source || 'masked', req.params.side);
-    if (req.query.download === '1') return res.type('application/octet-stream').attachment(`conversation-${req.params.id}-${req.params.side}-${req.query.source || 'masked'}.raw`).send(value.body);
-    if (['preview', 'text'].includes(req.query.view)) {
-      const truncated = req.query.view === 'preview' && value.text !== null && value.text.length > 65536;
-      let text = truncated ? value.text.slice(0, 65536) : value.text;
-      if (truncated && /[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
-      return res.json({ text, sha256: value.sha256, bytes: value.bytes, truncated });
-    }
-    res.json({ text: value.text, base64: value.body.toString('base64'), sha256: value.sha256, bytes: value.bytes });
-  });
+  api.get('/conversation-logs/records/:id/payload/:side', readConversation((req, res) => {
+    const value = conversations.payload(req.params.id, req.query.source || 'masked', req.params.side,{decodeText:req.query.download !== '1'});
+    sendPayload(req,res,value);
+  }));
 
   api.get('/billing-imports/options', asyncRoute(async (_req, res) => res.json(await billingImports.options())));
   api.post('/billing-imports/inspect', csrf, express.json({ limit: '12mb' }), asyncRoute(async (req, res) => res.json(billingImports.inspect(req.body))));

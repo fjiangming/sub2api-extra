@@ -6,7 +6,7 @@ const zlib = require('node:zlib');
 const { availableMemory, processingBudget } = require('../src/services/conversation-memory');
 const { maskPayload } = require('../src/services/conversation-redaction');
 const { inspectCompletion } = require('../src/services/conversation-completion');
-const { fixture,event } = require('./conversation-logs-fixture');
+const { fixture,event,removeMetadata } = require('./conversation-logs-fixture');
 const { defaults, ConversationLogStore } = require('../src/conversation-log-store');
 const { ConversationPushStore } = require('../src/conversation-push-store');
 
@@ -297,6 +297,7 @@ test('encrypted reasoning retains exact original in masked mode and stays inelig
 test('additive completion migration never decodes history at startup or changes archived ciphertext', t => {
   const f = fixture();t.after(() => {f.store.close();f.close();});const row = event('schema-completion');f.store.ingest(row);
   const before = f.store.db.prepare('SELECT original,masked,complete,reason,processed_at FROM cl_records WHERE id=?').get(row.id);
+  removeMetadata(f.store);
   for (const field of ['upstream_status','upstream_evidence','completion_version','completion_source']) f.store.db.exec('ALTER TABLE cl_records DROP COLUMN ' + field);
   f.store.close(); f.store = new ConversationLogStore(f.directory).initialize();
   assert.deepEqual(f.store.db.prepare('SELECT original,masked,complete,reason,processed_at FROM cl_records WHERE id=?').get(row.id),before);

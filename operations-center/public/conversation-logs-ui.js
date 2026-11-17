@@ -11,14 +11,14 @@
   function create({ api, escapeHtml: esc, icon, refreshIcons, toast, setPageMeta, isActive }) {
     const $ = id => document.getElementById('cl-' + id), container = $('root');
     let tab = 'requests', page = 1, report = null, status = null, policy = null, detail = null, source = 'masked', detailTab = 'raw';
-    let seq = 0, detailSeq = 0, searchSeq = 0, lifecycle = 0, controller = null, detailController = null, userController = null, searchTimer = null;
+    let seq = 0, detailSeq = 0, searchSeq = 0, lifecycle = 0, controller = null, detailController = null, userController = null, searchTimer = null, indexTimer = null;
     let payloads = new Map(), excluded = new Set(), users = new Map(), sessionFilter = null, saving = false, dirty = false;
     const reprocessing = new Set();
     let pushUi = null;
     const repairUi = root.ConversationRepairUi.create({api,escapeHtml:esc,icon,refreshIcons,isActive:() => isActive() && tab === 'collection'});
     const clearUi = root.ConversationClearUi.create({api,escapeHtml:esc,icon,refreshIcons,isActive,onChanged:() => { clearDetail(); page = 1; run(load); }});
     let cleanupState = null, cleanupBusy = false, cleanupTimer = null, cleanupController = null;
-    const num = value => new Intl.NumberFormat('zh-CN').format(value || 0);
+    const num = value => value === null ? '准备中' : new Intl.NumberFormat('zh-CN').format(value || 0);
     const bytes = value => value >= 1048576 ? (value / 1048576).toFixed(2) + ' MiB' : value >= 1024 ? (value / 1024).toFixed(1) + ' KiB' : num(value) + ' B';
     const time = value => value ? new Date(value).toLocaleString('zh-CN', { timeZone: status?.timezone || 'Asia/Shanghai', hour12: false }) : '尚无记录';
     const tool = (name, title, attrs = '') => `<button class="icon-button" type="button" title="${esc(title)}" aria-label="${esc(title)}" ${attrs}>${icon(name)}</button>`;
@@ -28,7 +28,7 @@
     const empty = text => `<div class="cl-empty">${esc(text)}</div>`;
     function run(task) { Promise.resolve().then(task).catch(error => { if (error.name !== 'AbortError' && isActive()) { $('notice').textContent = error.message; toast(error.message, 'error'); } }); }
     function init() {
-      container.innerHTML = `<div id="cl-notice" class="cl-notice" role="status"></div><div id="cl-metrics" class="cl-metrics"></div><section id="cl-history-clear" aria-label="清空历史日志"></section>
+      container.innerHTML = `<div id="cl-notice" class="cl-notice" role="status"></div><div id="cl-metrics" class="cl-metrics"></div><div id="cl-index-notice" class="cl-notice amber" role="status" hidden></div><section id="cl-history-clear" aria-label="清空历史日志"></section>
         <div class="cl-tabs" role="tablist" aria-label="对话日志视图">${[['requests','list-filter','请求日志'],['sessions','messages-square','会话视图'],['collection','radio-tower','采集状态'],['policy','shield-check','保存策略'],['push','send','推送策略']].map(([id, glyph, label]) => `<button id="cl-tab-${id}" role="tab" data-cl-tab="${id}" aria-selected="${id === tab}" aria-controls="cl-${id}" tabindex="${id === tab ? 0 : -1}">${icon(glyph)}${label}</button>`).join('')}</div>
         <section id="cl-requests" role="tabpanel" aria-labelledby="cl-tab-requests"><form id="cl-filter" class="cl-filters"><label class="cl-search">${icon('search')}<input name="search" aria-label="搜索请求、用户或模型" placeholder="请求 ID、用户 ID、模型" autocomplete="off"></label><input name="start" type="date" aria-label="开始日期"><input name="end" type="date" aria-label="结束日期"><select name="protocol" aria-label="协议"><option value="">全部协议</option><option>JSON</option><option>SSE</option><option>WebSocket</option></select><select name="capture" aria-label="采集完整性"><option value="">全部完整性</option><option value="complete">完整采集</option><option value="partial">部分采集</option><option value="missing">正文缺失</option><option value="redaction_failed">脱敏失败</option></select><button class="button secondary" type="submit">${icon('search')}查询</button>${tool('rotate-ccw','重置筛选','data-cl-action="reset-filter"')}${tool('download','导出筛选索引 CSV','data-cl-action="export"')}</form><div id="cl-session-filter"></div><div class="cl-explorer"><aside class="cl-records"><div id="cl-list"></div><div class="cl-pagination"><span id="cl-page-label"></span><div>${tool('chevron-left','上一页','id="cl-prev"')}${tool('chevron-right','下一页','id="cl-next"')}</div></div></aside><article id="cl-inspector" class="cl-inspector" aria-label="请求详情">${empty('选择一条请求查看原始请求与响应')}</article></div></section>
         <section id="cl-sessions" role="tabpanel" aria-labelledby="cl-tab-sessions" hidden></section><section id="cl-collection" role="tabpanel" aria-labelledby="cl-tab-collection" hidden></section><section id="cl-policy" role="tabpanel" aria-labelledby="cl-tab-policy" hidden></section><section id="cl-push" role="tabpanel" aria-labelledby="cl-tab-push" hidden></section>`;
@@ -46,41 +46,56 @@
     function query() { return { ...Object.fromEntries(new FormData($('filter'))), ...(sessionFilter || {}), page: String(page) }; }
     function url(path, params = query()) { return '/api/conversation-logs/' + path + '?' + new URLSearchParams(params); }
     function overview() {
-      $('metrics').innerHTML = [['已归档尝试', num(status.records)],['正文完整', num(status.records - status.gaps)],['当前占用', bytes(status.diskBytes)],['排除用户', num(status.policy.excludedUserIds.length)]].map(([label,value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join('');
+      $('metrics').innerHTML = [['已归档尝试', num(status.records)],['正文完整', status.gaps === null ? '准备中' : num(status.records - status.gaps)],['当前占用', bytes(status.diskBytes)],['排除用户', num(status.policy.excludedUserIds.length)]].map(([label,value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join('');
+      const preparing = status.metadataIndex?.ready === false;
+      $('index-notice').hidden = !preparing;
+      $('index-notice').textContent = preparing ? `历史日志索引正在后台准备：${num(status.metadataIndex.indexed)} / ${num(status.metadataIndex.total)} 条。当前列表、会话和汇总仅包含已准备的记录，原始正文保留。` : '';
+      container.querySelector('[data-cl-action="export"]').disabled = preparing;
       $('notice').textContent = !status.configured ? '尚未配置主站采集连接' : !status.policy.enabled ? '对话日志保存已关闭' : status.lastError === 'capacity' ? '空间不足，已停止保存新日志' : !status.lastContact ? '等待主站采集连接' : Date.now() - status.lastContact > 60000 ? '近期未收到主站策略读取，请检查采集连接' : status.collectorVersion !== 2 ? '主站仍为旧采集器，正文可能截断；需要同时升级主站' : '采集连接正常';
       setPageMeta(`上游请求与响应归档 · ${status.timezone} · 策略 v${status.policy.version}`);
     }
     async function load() {
+      clearTimeout(indexTimer);
       const current = ++seq; controller?.abort(); controller = new AbortController(); const signal = controller.signal;
+      const checkCurrent = () => { if (current !== seq || signal.aborted || !isActive()) throw new DOMException('Request cancelled','AbortError'); };
+      try {
       const [next, data] = await Promise.all([api('/api/conversation-logs/status', { signal }),
         tab === 'requests' ? api(url('records'), { signal }) : tab === 'sessions' ? api(url('sessions'), { signal }) : null]);
-      if (current !== seq || !isActive()) return;
+      checkCurrent();
       const policyChanged = status?.policy.version !== next.policy.version;
       status = next; overview();
       await clearUi.load();
-      if (current !== seq || !isActive()) return;
+      checkCurrent();
       if (tab === 'push') { await pushUi.load(); return; }
       if (tab === 'policy') { if (!dirty && !saving) renderPolicy(status.policy); await refreshCleanup(); return; }
       if (tab === 'collection') { renderCollection(); await repairUi.load($('history-repair'),status.policy.version); return; }
       if (tab === 'sessions') {
-        $('sessions').innerHTML = `<div class="cl-section-heading"><h2>最近会话</h2><span>最多 100 个 · 仅包含有会话标识的请求</span></div>${data.items.length ? data.items.map(row => `<button class="cl-session" data-cl-session="${row.session_id}" data-user="${row.user_id}" data-key="${row.key_id}"><strong>用户 #${row.user_id} · Key #${row.key_id}</strong><span>${num(row.turns)} 次请求 / ${num(row.attempts)} 次尝试 · ${esc(time(row.last_at))}</span><code>${row.session_id}</code>${icon('arrow-up-right')}</button>`).join('') : empty('尚无可关联的会话记录')}`;
+        $('sessions').innerHTML = `<div class="cl-section-heading"><h2>最近会话</h2><span>最多 100 个 · 仅包含有会话标识的请求${data.metadataIndex?.ready === false ? ' · 历史正在准备' : ''}</span></div>${data.items.length ? data.items.map(row => `<button class="cl-session" data-cl-session="${row.session_id}" data-user="${row.user_id}" data-key="${row.key_id}"><strong>用户 #${row.user_id} · Key #${row.key_id}</strong><span>${num(row.turns)} 次请求 / ${num(row.attempts)} 次尝试 · ${esc(time(row.last_at))}</span><code>${row.session_id}</code>${icon('arrow-up-right')}</button>`).join('') : empty(data.metadataIndex?.ready === false ? '历史会话正在准备，请稍候' : '尚无可关联的会话记录')}`;
         refreshIcons(); return;
       }
       report = data;
-      $('list').innerHTML = data.items.length ? data.items.map(row => `<button class="cl-record" data-cl-record="${row.id}" aria-pressed="${detail?.id === row.id}"><div><strong>${esc(row.model || row.protocol)}</strong><span>${esc(time(row.at))}</span></div><p>用户 #${row.user_id} · ${esc(row.protocol)} · HTTP ${row.status || '—'}</p><code>${row.request_id.slice(0,20)}</code>${badge(row)}</button>`).join('') : empty('当前筛选下没有记录');
-      $('page-label').textContent = `${num(data.summary.requests)} 次请求 / ${num(data.summary.total)} 次尝试 · ${page} / ${Math.max(1,data.pages)} 页`;
+      $('list').innerHTML = data.items.length ? data.items.map(row => `<button class="cl-record" data-cl-record="${row.id}" aria-pressed="${detail?.id === row.id}"><div><strong>${esc(row.model || row.protocol)}</strong><span>${esc(time(row.at))}</span></div><p>用户 #${row.user_id} · ${esc(row.protocol)} · HTTP ${row.status || '—'}</p><code>${row.request_id.slice(0,20)}</code>${badge(row)}</button>`).join('') : empty(data.metadataIndex?.ready === false ? '历史日志正在准备，请稍候' : '当前筛选下没有记录');
+      $('page-label').textContent = `${data.metadataIndex?.ready === false ? '已准备部分 · ' : ''}${num(data.summary.requests)} 次请求 / ${num(data.summary.total)} 次尝试 · ${page} / ${Math.max(1,data.pages)} 页`;
       $('prev').disabled = page <= 1; $('next').disabled = page >= data.pages;
       $('session-filter').innerHTML = sessionFilter ? `<div class="cl-notice">会话筛选 · 用户 #${sessionFilter.user_id} · Key #${sessionFilter.key_id}${tool('x','清除会话筛选','data-cl-action="clear-session"')}</div>` : '';
       refreshIcons();
       if (detail && !data.items.some(row => row.id === detail.id)) clearDetail();
       if (detail && policyChanged) await openDetail(detail.id);
       else if (!detail && data.items.length) await openDetail(data.items[0].id);
+      } catch(error) { checkCurrent(); throw error; }
+      finally {
+        if (current === seq && !signal.aborted && isActive() && status?.metadataIndex?.ready === false) {
+          indexTimer = setTimeout(() => { if (current === seq && isActive()) run(load); },5000);
+        }
+      }
     }
     function clearDetail() { ++detailSeq; detailController?.abort(); detail = null; payloads.clear(); $('inspector').innerHTML = empty('选择一条请求查看原始请求与响应'); }
     async function openDetail(id) {
       const current = ++detailSeq; detailController?.abort(); detailController = new AbortController(); payloads.clear(); detail = null;
       $('inspector').innerHTML = empty('正在读取请求详情');
-      const row = await api('/api/conversation-logs/records/' + id, { signal: detailController.signal });
+      let row;
+      try { row = await api('/api/conversation-logs/records/' + id, { signal: detailController.signal }); }
+      catch(error) { if (current !== detailSeq || !isActive() || tab !== 'requests') return; throw error; }
       if (current !== detailSeq || !isActive() || tab !== 'requests') return;
       detail = row; source = row.masked ? 'masked' : 'original'; detailTab = 'raw';
       container.querySelectorAll('[data-cl-record]').forEach(node => node.setAttribute('aria-pressed', String(node.dataset.clRecord === id)));
@@ -133,7 +148,11 @@
       }
       let data;
       try { data = await pending; }
-      catch (error) { if (payloads.get(key) === pending) payloads.delete(key); throw error; }
+      catch (error) {
+        if (payloads.get(key) === pending) payloads.delete(key);
+        if (current !== detailSeq || !isActive() || tab !== 'requests' || source !== requestedSource || detail?.id !== requestedId) return null;
+        throw error;
+      }
       if (current !== detailSeq || !isActive() || tab !== 'requests' || source !== requestedSource || detail?.id !== requestedId) return null;
       if (!render) return data;
       const node = $('body-' + side); if (node) node.textContent = data.text ?? '二进制或不支持的编码，可下载原始字节';
@@ -288,7 +307,7 @@
       if (action === 'remove-rule') { node.closest('.cl-custom-rule').remove(); markDirty(); }
       if (action === 'discard-policy') { dirty = false; run(load); }
     }
-    function leave() { ++seq; ++detailSeq; ++searchSeq; ++lifecycle; controller?.abort(); detailController?.abort(); userController?.abort(); cleanupController?.abort(); clearTimeout(cleanupTimer); cleanupState = null; cleanupBusy = false; pushUi?.leave(); repairUi.leave(); clearUi.leave(); clearTimeout(searchTimer); payloads.clear(); detail = null; report = null; dirty = false; for (const id of ['inspector','list','sessions','collection','policy','metrics','notice','history-clear']) if ($(id)) $(id).innerHTML = ''; }
+    function leave() { ++seq; ++detailSeq; ++searchSeq; ++lifecycle; controller?.abort(); detailController?.abort(); userController?.abort(); cleanupController?.abort(); clearTimeout(indexTimer); clearTimeout(cleanupTimer); cleanupState = null; cleanupBusy = false; pushUi?.leave(); repairUi.leave(); clearUi.leave(); clearTimeout(searchTimer); payloads.clear(); detail = null; report = null; dirty = false; if ($('index-notice')) $('index-notice').hidden = true; for (const id of ['inspector','list','sessions','collection','policy','metrics','notice','history-clear']) if ($(id)) $(id).innerHTML = ''; }
     function reset() { leave(); status = null; policy = null; users.clear(); excluded.clear(); sessionFilter = null; page = 1; tab = 'requests'; container.innerHTML = ''; init(); }
     init(); return { load, leave, reset };
   }

@@ -11,6 +11,7 @@ const { decodeBody, maskPayload } = require('./services/conversation-redaction')
 const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversation-sensitive');
 const { recommendedModels, normalizeModel, modelAllowed } = require('./services/conversation-models');
 const { inspectCompletion } = require('./services/conversation-completion');
+const { projection, initializeMetadata, metadataStatus, backfillMetadata } = require('./services/conversation-metadata');
 
 const userId = z.number().int().positive().safe();
 const policySchema = z.object({
@@ -106,11 +107,23 @@ class ConversationLogStore {
         if (!columns.has(name)) this.db.exec(`ALTER TABLE cl_records ADD COLUMN ${name} ${definition}`);
       }
     })();
+    initializeMetadata(this.db);
     if (!this.db.prepare('SELECT 1 FROM cl_policies LIMIT 1').get()) this.db.prepare('INSERT INTO cl_policies VALUES(?,?,?)').run(1, this.seal(defaults, 'policy:1'), this.now());
     this.policy();
     try { fs.chmodSync(this.file, 0o600); } catch { /* Windows uses the directory ACL. */ }
     return this;
   }
+  openReader() {
+    this.file = path.join(this.directory, 'archive.sqlite');
+    this.key = fs.readFileSync(path.join(this.directory, 'archive.key'));
+    if (this.key.length !== 32) throw new Error('CONVERSATION_KEY_INVALID');
+    this.db = new Database(this.file, { fileMustExist:true, timeout:1 });
+    this.db.pragma('cache_size = -2048');
+    this.db.pragma('wal_autocheckpoint = 0');
+    return this;
+  }
+  metadataStatus() { return metadataStatus(this.db); }
+  backfillMetadata() { return backfillMetadata(this.db); }
   seal(value, aad) {
     const nonce = crypto.randomBytes(12), cipher = crypto.createCipheriv('aes-256-gcm', this.key, nonce); cipher.setAAD(Buffer.from(aad));
     const encrypted = Buffer.concat([cipher.update(JSON.stringify(value), 'utf8'), cipher.final()]);
@@ -286,7 +299,7 @@ class ConversationLogStore {
     if (removed) { this.db.pragma('wal_checkpoint(TRUNCATE)'); this.db.pragma('incremental_vacuum(128)'); }
     return removed;
   }
-  where(query = {}) {
+  where(query = {}, indexed = false) {
     const clauses = [], args = [];
     for (const [field, max] of [['request_id', 32], ['session_id', 64], ['protocol', 16]]) if (query[field]) {
       clauses.push(`${field}=?`); args.push(String(query[field]).slice(0, max));
@@ -294,8 +307,8 @@ class ConversationLogStore {
     for (const field of ['user_id', 'key_id']) if (query[field]) { const id = Number(query[field]); if (!Number.isSafeInteger(id) || id < 1) throw invalid(); clauses.push(`${field}=?`); args.push(id); }
     if (query.search) { clauses.push('(id LIKE ? OR request_id LIKE ? OR model LIKE ? OR CAST(user_id AS TEXT)=?)'); const search = String(query.search).slice(0, 200); args.push('%' + search + '%', '%' + search + '%', '%' + search + '%', search); }
     if (query.capture === 'complete') clauses.push('complete=1');
-    else if (query.capture === 'partial') clauses.push('complete=0 AND (original IS NOT NULL OR masked IS NOT NULL)');
-    else if (query.capture === 'missing') clauses.push('original IS NULL AND masked IS NULL');
+    else if (query.capture === 'partial') clauses.push(indexed ? 'complete=0 AND (original!=0 OR masked!=0)' : 'complete=0 AND (original IS NOT NULL OR masked IS NOT NULL)');
+    else if (query.capture === 'missing') clauses.push(indexed ? 'original=0 AND masked=0' : 'original IS NULL AND masked IS NULL');
     else if (query.capture === 'redaction_failed') clauses.push("(processing_error!='' OR reason='redaction_failed')");
     for (const field of ['start', 'end']) if (query[field]) {
       const date = DateTime.fromISO(String(query[field]), { zone: this.timezone }); if (!date.isValid) throw invalid();
@@ -314,40 +327,49 @@ class ConversationLogStore {
       redaction_outdated: outdated, retry_available: Boolean(original && (row.processing_error || outdated || warnings.length) && !excluded && !modelExcluded), retry_blocked: excluded ? 'user_excluded' : modelExcluded ? 'model_excluded' : !original ? 'no_original' : '' };
   }
   list(query = {}) {
+    return this.db.transaction(() => {
     const page = Math.max(1, Math.min(1000000, Number(query.page) || 1)) | 0, pageSize = 20;
-    const filter = this.where(query);
-    const summary = this.db.prepare(`SELECT COUNT(*) total,COUNT(DISTINCT request_id) requests,COALESCE(SUM(complete),0) complete,COALESCE(SUM(bytes),0) bytes FROM cl_records${filter.sql}`).get(...filter.args);
-    const columns = "id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,original IS NOT NULL original,masked IS NOT NULL masked,hits,bytes,processing_error,processing_policy_version,processed_at,redaction_version,redaction_policy_hash,capture_version,body_sha256,inspection_warnings,upstream_status,upstream_evidence,completion_version,completion_source";
-    const items = this.db.prepare(`SELECT ${columns} FROM cl_records${filter.sql} ORDER BY at DESC,id LIMIT ? OFFSET ?`).all(...filter.args, pageSize, (page - 1) * pageSize).map(row => this.publicRow(row));
-    return { items, summary, page, pageSize, pages: Math.ceil(summary.total / pageSize) };
+    const filter = this.where(query,true);
+    const summary = this.db.prepare(`SELECT COUNT(*) total,COUNT(DISTINCT request_id) requests,COALESCE(SUM(complete),0) complete,COALESCE(SUM(bytes),0) bytes FROM cl_record_metadata${filter.sql}`).get(...filter.args);
+    const items = this.db.prepare(`SELECT * FROM cl_record_metadata${filter.sql} ORDER BY at DESC,id LIMIT ? OFFSET ?`).all(...filter.args, pageSize, (page - 1) * pageSize).map(row => this.publicRow(row));
+    return { items, summary, page, pageSize, pages: Math.ceil(summary.total / pageSize), metadataIndex:this.metadataStatus() };
+    })();
   }
   detail(id) {
-    const row = this.db.prepare('SELECT * FROM cl_records WHERE id=?').get(id); if (!row) throw invalid('CONVERSATION_NOT_FOUND', 404);
+    const row = this.db.prepare('SELECT * FROM cl_record_metadata WHERE id=?').get(id)
+      || this.db.prepare('SELECT ' + projection() + ' FROM cl_records WHERE id=?').get(id); if (!row) throw invalid('CONVERSATION_NOT_FOUND', 404);
     const result = this.publicRow(row);
     result.attempts = this.db.prepare('SELECT id,account_id,status,protocol,at,complete,reason FROM cl_records WHERE request_id=? AND user_id=? AND key_id=? ORDER BY at,id LIMIT 100')
       .all(row.request_id, row.user_id, row.key_id);
-    const copy = row.masked ? unpack(this.open(row.masked, id + ':masked')) : row.original ? unpack(this.open(row.original, id + ':original')) : null;
+    const source = row.masked ? 'masked' : row.original ? 'original' : '';
+    const payload = row.protocol === 'WebSocket' && source ? this.db.prepare(`SELECT ${source} payload FROM cl_records WHERE id=?`).get(id)?.payload : null;
+    const copy = payload ? unpack(this.open(payload,id + ':' + source)) : null;
     result.frames = copy?.frames.map((frame, index) => ({ index, direction: frame.direction, at: frame.at, binary: frame.binary, bytes: frame.body.length })) || [];
     return result;
   }
-  payload(id, source, side) {
+  payload(id, source, side, {decodeText=true} = {}) {
     if (!['original', 'masked'].includes(source) || !/^(request|response|frame-\d+)$/.test(side)) throw invalid();
-    const row = this.db.prepare('SELECT * FROM cl_records WHERE id=?').get(id);
+    const row = this.db.prepare(`SELECT encoding,${source} FROM cl_records WHERE id=?`).get(id);
     if (!row || !row[source]) throw invalid('CONVERSATION_COPY_NOT_FOUND', 404);
     const raw = unpack(this.open(row[source], id + ':' + source));
     const body = side.startsWith('frame-') ? raw.frames[Number(side.slice(6))]?.body : raw[side]; if (!body) throw invalid('CONVERSATION_MESSAGE_NOT_FOUND', 404);
-    let text = null; try { text = decodeBody(body, source === 'original' && side === 'response' ? row.encoding : ''); } catch { /* Binary raw data is still downloadable byte-for-byte. */ }
-    return { body, text, sha256: crypto.createHash('sha256').update(body).digest('hex'), bytes: body.length };
+    let text = null, textLimited = false;
+    if (decodeText) try { text = decodeBody(body, source === 'original' && side === 'response' ? row.encoding : '',this.processingLimits().maxOutputBytes); }
+    catch(error) { textLimited = error.code === 'REDACTION_MEMORY_PRESSURE'; /* Raw bytes remain downloadable even when text decoding fails. */ }
+    return { body, text, textLimited, sha256: crypto.createHash('sha256').update(body).digest('hex'), bytes: body.length };
   }
   sessions(query = {}) {
-    const filter = this.where(query), clause = filter.sql ? filter.sql + " AND session_id!=''" : " WHERE session_id!=''";
-    return { items: this.db.prepare(`SELECT session_id,user_id,key_id,COUNT(DISTINCT request_id) turns,COUNT(*) attempts,MIN(at) first_at,MAX(at) last_at FROM cl_records${clause}
-      GROUP BY user_id,key_id,session_id ORDER BY last_at DESC LIMIT 100`).all(...filter.args) };
+    return this.db.transaction(() => {
+    const filter = this.where(query,true), clause = filter.sql ? filter.sql + " AND session_id!=''" : " WHERE session_id!=''";
+    return { items: this.db.prepare(`SELECT session_id,user_id,key_id,COUNT(DISTINCT request_id) turns,COUNT(*) attempts,MIN(at) first_at,MAX(at) last_at FROM cl_record_metadata${clause}
+      GROUP BY user_id,key_id,session_id ORDER BY last_at DESC LIMIT 100`).all(...filter.args), metadataIndex:this.metadataStatus() };
+    })();
   }
   exportIndex(query = {}) {
-    const filter = this.where(query);
+    if (!this.metadataStatus().ready) throw new AppError('CONVERSATION_HISTORY_PREPARING','历史日志仍在准备，请稍后导出完整索引',{status:409});
+    const filter = this.where(query,true);
     const columns = ['id', 'request_id', 'user_id', 'key_id', 'account_id', 'at', 'protocol', 'model', 'status', 'complete', 'reason'];
-    const rows = this.db.prepare(`SELECT ${columns.join(',')} FROM cl_records${filter.sql} ORDER BY at DESC,id LIMIT 10001`).all(...filter.args);
+    const rows = this.db.prepare(`SELECT ${columns.join(',')} FROM cl_record_metadata${filter.sql} ORDER BY at DESC,id LIMIT 10001`).all(...filter.args);
     if (rows.length > 10000) throw invalid('CONVERSATION_EXPORT_TOO_LARGE', 400);
     const cell = value => {
       let text = String(value ?? '');
@@ -357,11 +379,16 @@ class ConversationLogStore {
     return { csv: [columns, ...rows.map(row => columns.map(column => row[column]))].map(row => row.map(cell).join(',')).join('\r\n') + '\r\n', count: rows.length };
   }
   status() {
-    const counts = this.db.prepare("SELECT COUNT(*) records,COALESCE(SUM(bytes),0) bytes,COALESCE(SUM(complete=0),0) gaps,COALESCE(SUM(processing_error!='' OR reason='redaction_failed'),0) processingFailures FROM cl_records").get();
-    return { ...counts, lastContact: this.lastContact || null, lastError: this.lastError, collectorDropped: this.collectorDropped, collectorVersion: this.collectorVersion || null, redactionVersion: REDACTION_VERSION, policy: this.policy(), diskBytes: this.usedBytes(), freeBytes: this.freeBytes(), timezone: this.timezone,
+    return this.db.transaction(() => {
+    const metadataIndex = this.metadataStatus();
+    const counts = this.db.prepare("SELECT COUNT(*) records,COALESCE(SUM(bytes),0) bytes,COALESCE(SUM(complete=0),0) gaps,COALESCE(SUM(processing_error!='' OR reason='redaction_failed'),0) processingFailures FROM cl_record_metadata").get();
+    if (!metadataIndex.ready) { counts.records = metadataIndex.total; counts.bytes = null; counts.gaps = null; counts.processingFailures = null; }
+    return { ...counts, metadataIndex, ...this.liveStatus(), redactionVersion: REDACTION_VERSION, policy: this.policy(), diskBytes: this.usedBytes(), freeBytes: this.freeBytes(), timezone: this.timezone,
       coverage: ['HTTP JSON / SSE (including TLS fingerprint and transport fallbacks)', 'OpenAI pooled WebSocket / passthrough messages'],
       limitations: ['Only bytes consumed by the gateway are observed; early close is marked incomplete.', 'Queue/process failure can lose archives; this archive does not control inference or billing.'] };
+    })();
   }
+  liveStatus() { return {lastContact:this.lastContact || null,lastError:this.lastError,collectorDropped:this.collectorDropped,collectorVersion:this.collectorVersion || null}; }
   start() { this.timer = setInterval(() => { try { this.prune(); } catch { this.lastError = 'retention_failed'; } }, 60000); this.timer.unref(); }
   close() { clearInterval(this.timer); this.db?.close(); this.db = null; this.key?.fill(0); }
 }

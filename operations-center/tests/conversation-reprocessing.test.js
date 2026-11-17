@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { fixture, event, rawResponse } = require('./conversation-logs-fixture');
+const { fixture, event, rawResponse, removeMetadata } = require('./conversation-logs-fixture');
 const { ConversationLogStore, defaults } = require('../src/conversation-log-store');
 const { maskPayload } = require('../src/services/conversation-redaction');
 
@@ -85,8 +85,10 @@ test('migration preserves old encrypted rows, key, policy and history without in
   const f = fixture(); t.after(() => { f.store.close(); f.close(); }); const row = event('old-schema'); f.store.ingest(row);
   const request = f.store.payload(row.id,'original','request').body;
   f.store.db.exec("UPDATE cl_records SET original=NULL,masked=NULL,reason='redaction_failed',complete=0");
+  removeMetadata(f.store);
   for (const column of ['processing_error','processing_policy_version','processed_at']) f.store.db.exec('ALTER TABLE cl_records DROP COLUMN ' + column);
   f.store.close(); f.store = new ConversationLogStore(f.directory).initialize();
+  while (!f.store.backfillMetadata().done) { /* The real reader migrates history in background steps. */ }
   assert.equal(f.store.list({capture:'redaction_failed'}).summary.total,1); assert.equal(f.store.detail(row.id).retry_available,false);
   assert.throws(() => f.store.retry(row.id,expected(f.store,row)),{code:'CONVERSATION_RETRY_UNAVAILABLE'});
   const next = event('post-migration'); assert.equal(f.store.ingest(next).accepted,true);

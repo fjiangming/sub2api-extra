@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const { fixture, event } = require('./conversation-logs-fixture');
+const { fixture, event, removeMetadata } = require('./conversation-logs-fixture');
 const { ConversationLogStore, defaults } = require('../src/conversation-log-store');
 const { ConversationPushStore } = require('../src/conversation-push-store');
 const { ConversationPushService } = require('../src/services/conversation-push-service');
@@ -138,6 +138,7 @@ test('old schema and failed URL/signature history migrate without rewriting orig
   for(const row of [link,sig])f.store.ingest(row);
   f.store.db.exec("UPDATE cl_records SET mode='masked',masked=NULL,processing_error='UNINSPECTABLE_CONTENT',redaction_version=0,redaction_policy_hash=''");
   const encrypted=f.store.db.prepare('SELECT id,original FROM cl_records ORDER BY id').all(),key=Buffer.from(f.store.key);
+  removeMetadata(f.store);
   f.store.db.exec('ALTER TABLE cl_records DROP COLUMN inspection_warnings');f.store.close();f.store=new ConversationLogStore(f.directory).initialize();
   assert.deepEqual(f.store.key,key);assert.deepEqual(f.store.policy(),p);assert.deepEqual(f.store.db.prepare('SELECT id,original FROM cl_records ORDER BY id').all(),encrypted);
   assert.deepEqual(f.store.detail(link.id).inspection_warnings,[]);

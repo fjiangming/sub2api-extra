@@ -24,4 +24,7 @@ function fixture(options = {}) {
   const messages = { searchUsers: async ({search}) => ({items:users.filter(user => [user.username,user.email,String(user.id)].some(value => value.includes(search))).slice(0,20)}) };
   return { directory,store,token,config,messages, close() { store.close(); fs.rmSync(directory,{recursive:true,force:true}); } };
 }
-module.exports = {fixture,event,id,rawRequest,rawResponse};
+function removeMetadata(store) {
+  store.db.exec('DROP TRIGGER cl_metadata_insert; DROP TRIGGER cl_metadata_update; DROP TRIGGER cl_metadata_delete; DROP TABLE cl_record_metadata');
+}
+module.exports = {fixture,event,id,rawRequest,rawResponse,removeMetadata};

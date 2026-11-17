@@ -1614,7 +1614,9 @@ async function navigateAfterAuthentication(initialView) {
   }
 }
 
+let viewLoadSequence = 0;
 async function loadCurrentView(options = {}) {
+  const requestedSequence = ++viewLoadSequence;
   const requestedView = state.currentView;
   const loaders = {
     overview: loadOverview,
@@ -1638,10 +1640,10 @@ async function loadCurrentView(options = {}) {
   };
   try {
     await loaders[requestedView]();
-    if (requestedView !== state.currentView || !state.user) return;
+    if (requestedSequence !== viewLoadSequence || requestedView !== state.currentView || !state.user) return;
     if (!['maintenance', 'settings'].includes(state.currentView)) setConnection(true, '数据源正常');
   } catch (error) {
-    if (requestedView !== state.currentView || !state.user) return;
+    if (error.name === 'AbortError' || requestedSequence !== viewLoadSequence || requestedView !== state.currentView || !state.user) return;
     setConnection(false, '数据源异常');
     setPageMeta(error.message);
     toast(error.message, 'error');
