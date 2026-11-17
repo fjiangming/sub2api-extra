@@ -3,9 +3,24 @@
   <div id="ledger-error" class="error" role="alert" hidden></div>
   <div class="ledger-stats"><div><span class="mini-label">累计已发放</span><strong id="ledger-total">¥0.00</strong></div><div><span class="mini-label">今日已发放</span><strong id="ledger-today">¥0.00</strong></div><div><span class="mini-label">获奖用户</span><strong id="ledger-users">0</strong></div><div><span class="mini-label">已入账笔数</span><strong id="ledger-paid">0</strong></div></div>
   <div id="ledger-unsettled" class="unsettled"></div>
+  <section id="ledger-audit" class="ledger-audit" aria-labelledby="audit-heading">
+    <h2 id="audit-heading">门槛审计</h2>
+    <div id="audit-summary" class="audit-summary" role="status" aria-live="polite">正在核验奖励记录</div>
+    <div class="audit-actions">
+      <button id="view-audit-violations" class="button" hidden><i data-lucide="list-filter"></i>查看未达门槛</button>
+      <button id="view-audit-unverifiable" class="button" hidden><i data-lucide="file-search"></i>查看待核查</button>
+    </div>
+  </section>
   <section class="ledger-section"><h2>奖励明细</h2>
-    <form id="ledger-filters" class="filters"><label class="field search">用户 / 邮箱 / 流水号<input name="query" maxlength="320" type="search" placeholder="搜索奖励记录"></label><label class="field">开始日期<input name="from" type="date"></label><label class="field">结束日期<input name="to" type="date"></label><label class="field">入账状态<select name="status"><option value="">全部状态</option><option value="paid">已入账</option><option value="pending">待入账</option><option value="failed">入账异常</option></select></label><button class="icon-button" type="submit" title="筛选" aria-label="筛选"><i data-lucide="search"></i></button><button id="clear-filters" class="icon-button" type="button" title="清空筛选" aria-label="清空筛选"><i data-lucide="filter-x"></i></button></form>
-    <div class="ledger-scroll"><table class="table ledger-table"><thead><tr><th>用户</th><th>奖励</th><th>活动</th><th>时间</th><th>状态</th><th>详情</th></tr></thead><tbody id="ledger-rows"></tbody></table></div>
+    <form id="ledger-filters" class="filters">
+      <label class="field search">用户 / 邮箱 / 流水号<input name="query" maxlength="320" type="search" placeholder="搜索奖励记录"></label>
+      <label class="field">开始日期<input name="from" type="date"></label>
+      <label class="field">结束日期<input name="to" type="date"></label>
+      <label class="field">入账状态<select name="status"><option value="">全部状态</option><option value="paid">已入账</option><option value="pending">待入账</option><option value="failed">入账异常</option></select></label>
+      <label class="field">门槛审计<select name="audit"><option value="">全部结果</option><option value="violation">未达门槛</option><option value="unverifiable">待核查</option><option value="passed">已达门槛</option><option value="not_required">无需门槛</option></select></label>
+      <div class="filter-actions"><button class="icon-button" type="submit" title="筛选" aria-label="筛选"><i data-lucide="search"></i></button><button id="clear-filters" class="icon-button" type="button" title="清空筛选" aria-label="清空筛选"><i data-lucide="filter-x"></i></button></div>
+    </form>
+    <div class="ledger-scroll"><table class="table ledger-table"><thead><tr><th>用户</th><th>奖励</th><th>活动</th><th>时间</th><th>状态</th><th>门槛审计</th><th>详情</th></tr></thead><tbody id="ledger-rows"></tbody></table></div>
     <div class="pagination"><span id="ledger-page"></span><button id="ledger-prev" class="icon-button" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><button id="ledger-next" class="icon-button" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div>
   </section>
 </div>

@@ -8,6 +8,14 @@ const { AppError } = require('./errors');
 const { sample, PRIZES } = require('./prizes');
 
 const ACTIVITY = Object.freeze({ id: 'recharge-lottery', name: '充值抽奖', kind: 'wheel' });
+const AUDIT_REQUIRED = `CASE r.amount_minor ${PRIZES.filter(p => p.minimum > 0).map(p => `WHEN ${p.amount} THEN ${p.minimum}`).join(' ')} ELSE 0 END`;
+const AUDIT_SNAPSHOT_VALID = `(b.user_id=r.user_id AND typeof(b.recharge_minor)='integer' AND b.recharge_minor BETWEEN 0 AND ${Number.MAX_SAFE_INTEGER})`;
+const AUDIT_STATUS = `CASE WHEN (${AUDIT_REQUIRED})=0 THEN 'not_required'
+  WHEN NOT COALESCE(${AUDIT_SNAPSHOT_VALID},0) THEN 'unverifiable'
+  WHEN b.recharge_minor<(${AUDIT_REQUIRED}) THEN 'violation' ELSE 'passed' END`;
+const ADMIN_REWARDS_FROM = 'FROM rewards r LEFT JOIN batches b ON b.id=r.batch_id';
+const ADMIN_REWARDS_SELECT = `r.*, (${AUDIT_REQUIRED}) AS audit_required_minor, (${AUDIT_STATUS}) AS audit_status,
+  CASE WHEN ${AUDIT_SNAPSHOT_VALID} THEN b.recharge_minor END AS audit_recharge_minor`;
 function day(value, timezone) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value));
 }
@@ -15,7 +23,8 @@ function publicReward(row, admin = false) {
   const result = { id: row.id, batchId: row.batch_id, sequence: row.sequence, amountMinor: row.amount_minor,
     status: row.status, createdAt: row.created_at, creditedAt: row.credited_at, activity: ACTIVITY.name };
   if (admin) Object.assign(result, { userId: row.user_id, email: row.user_email, name: row.user_name,
-    attempts: row.attempts, errorCode: row.error_code, receipt: row.receipt ? JSON.parse(row.receipt) : null });
+    attempts: row.attempts, errorCode: row.error_code, receipt: row.receipt ? JSON.parse(row.receipt) : null,
+    audit: { status: row.audit_status, requiredMinor: row.audit_required_minor, rechargeMinor: row.audit_recharge_minor } });
   return result;
 }
 
@@ -33,8 +42,9 @@ class Store {
     this.db.pragma('synchronous = FULL');
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
-    if (this.db.pragma('user_version', { simple: true }) > 1) throw new Error('活动数据库版本高于当前程序');
-    this.db.exec(`
+    if (this.db.pragma('user_version', { simple: true }) > 2) throw new Error('活动数据库版本高于当前程序');
+    this.db.transaction(() => {
+      this.db.exec(`
       CREATE TABLE IF NOT EXISTS campaign (
         id TEXT PRIMARY KEY, start_at TEXT NOT NULL, timezone TEXT NOT NULL, sources TEXT NOT NULL, source_scope TEXT NOT NULL,
         probability_version INTEGER NOT NULL CHECK(probability_version=1)
@@ -52,6 +62,7 @@ class Store {
         user_id TEXT NOT NULL, user_email TEXT NOT NULL, user_name TEXT NOT NULL,
         amount_minor INTEGER NOT NULL CHECK(amount_minor IN (50,100,200,300,500,1000,2000,5000)),
         credit_code TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','paid','failed')),
+        credit_type TEXT NOT NULL DEFAULT 'balance' CHECK(credit_type IN ('balance','affiliate_balance')),
         created_at TEXT NOT NULL, created_day TEXT NOT NULL, credited_at TEXT, credited_day TEXT,
         attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0,
         lease_until INTEGER NOT NULL DEFAULT 0, error_code TEXT, receipt TEXT,
@@ -64,8 +75,13 @@ class Store {
       CREATE TABLE IF NOT EXISTS retry_audit (
         id INTEGER PRIMARY KEY, reward_id TEXT NOT NULL REFERENCES rewards(id), actor_id TEXT NOT NULL, created_at TEXT NOT NULL
       );
-      PRAGMA user_version = 1;
-    `);
+      `);
+      // Keep old codes on their original contract, including credits committed before a lost response.
+      if (!this.db.pragma('table_info(rewards)').some(column => column.name === 'credit_type')) {
+        this.db.exec("ALTER TABLE rewards ADD COLUMN credit_type TEXT NOT NULL DEFAULT 'balance' CHECK(credit_type IN ('balance','affiliate_balance'))");
+      }
+      this.db.pragma('user_version = 2');
+    }).immediate();
     this.db.transaction(() => {
       let campaign = this.db.prepare('SELECT * FROM campaign WHERE id=?').get(ACTIVITY.id);
       const sources = [...config.sources].sort().join(',');
@@ -117,11 +133,11 @@ class Store {
       const at = new Date(this.now()).toISOString();
       this.db.prepare('INSERT INTO batches VALUES (?,?,?,?,?,?)').run(batchId, user.id, requestId, count, rechargeMinor, at);
       this.db.prepare('INSERT INTO accounts VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET used=used+excluded.used').run(user.id, count);
-      const insert = this.db.prepare(`INSERT INTO rewards(id,batch_id,sequence,user_id,user_email,user_name,amount_minor,credit_code,created_at,created_day)
-        VALUES (?,?,?,?,?,?,?,?,?,?)`);
+      const insert = this.db.prepare(`INSERT INTO rewards(id,batch_id,sequence,user_id,user_email,user_name,amount_minor,credit_code,credit_type,created_at,created_day)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
       for (let index = 1; index <= count; index++) {
         insert.run(crypto.randomUUID(), batchId, index, user.id, user.email, user.name, sample(rechargeMinor, this.rng),
-          `AC-${crypto.randomBytes(24).toString('hex')}`, at, day(at, this.config.timezone));
+          `AC-${crypto.randomBytes(24).toString('hex')}`, 'affiliate_balance', at, day(at, this.config.timezone));
       }
       return this.batch(user.id, batchId);
     }).immediate();
@@ -132,24 +148,27 @@ class Store {
     return { id: batch.id, count: batch.count, createdAt: batch.created_at,
       rewards: this.db.prepare('SELECT * FROM rewards WHERE batch_id=? ORDER BY sequence').all(id).map(r => publicReward(r)) };
   }
-  list({ userId, query = '', from, to, status, page = 1, pageSize = 20 } = {}) {
+  list({ userId, query = '', from, to, status, audit, page = 1, pageSize = 20 } = {}) {
     const clauses = [];
     const params = [];
-    if (userId) { clauses.push('user_id=?'); params.push(userId); }
-    if (status) { clauses.push('status=?'); params.push(status); }
-    if (from) { clauses.push('created_day>=?'); params.push(from); }
-    if (to) { clauses.push('created_day<=?'); params.push(to); }
+    if (userId) { clauses.push('r.user_id=?'); params.push(userId); }
+    if (status) { clauses.push('r.status=?'); params.push(status); }
+    if (from) { clauses.push('r.created_day>=?'); params.push(from); }
+    if (to) { clauses.push('r.created_day<=?'); params.push(to); }
+    if (audit && !userId) { clauses.push(`(${AUDIT_STATUS})=?`); params.push(audit); }
     if (query) {
-      clauses.push("(instr(lower(user_email),lower(?))>0 OR instr(lower(user_name),lower(?))>0 OR user_id=? OR id=? OR batch_id=? OR instr(COALESCE(receipt,''),?)>0)");
+      clauses.push("(instr(lower(r.user_email),lower(?))>0 OR instr(lower(r.user_name),lower(?))>0 OR r.user_id=? OR r.id=? OR r.batch_id=? OR instr(COALESCE(r.receipt,''),?)>0)");
       params.push(query, query, query, query, query, query);
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-    const total = this.db.prepare(`SELECT COUNT(*) AS total FROM rewards ${where}`).get(...params).total;
-    const rows = this.db.prepare(`SELECT * FROM rewards ${where} ORDER BY created_at DESC,batch_id DESC,sequence DESC LIMIT ? OFFSET ?`).all(...params, pageSize, (page - 1) * pageSize);
+    const source = userId ? 'FROM rewards r' : ADMIN_REWARDS_FROM;
+    const total = this.db.prepare(`SELECT COUNT(*) AS total ${source} ${where}`).get(...params).total;
+    const rows = this.db.prepare(`SELECT ${userId ? 'r.*' : ADMIN_REWARDS_SELECT} ${source} ${where}
+      ORDER BY r.created_at DESC,r.batch_id DESC,r.sequence DESC LIMIT ? OFFSET ?`).all(...params, pageSize, (page - 1) * pageSize);
     return { rows: rows.map(r => publicReward(r, !userId)), total, page, pageSize };
   }
   detail(id) {
-    const row = this.db.prepare('SELECT * FROM rewards WHERE id=?').get(id);
+    const row = this.db.prepare(`SELECT ${ADMIN_REWARDS_SELECT} ${ADMIN_REWARDS_FROM} WHERE r.id=?`).get(id);
     if (!row) throw new AppError('REWARD_NOT_FOUND', '奖励记录不存在', 404);
     return { ...publicReward(row, true), retries: this.db.prepare('SELECT actor_id AS actorId,created_at AS createdAt FROM retry_audit WHERE reward_id=? ORDER BY id').all(id) };
   }
@@ -163,6 +182,19 @@ class Store {
       COALESCE(SUM(CASE WHEN status='pending' THEN amount_minor ELSE 0 END),0) AS pendingMinor,
       COALESCE(SUM(CASE WHEN status='failed' THEN amount_minor ELSE 0 END),0) AS failedMinor FROM rewards`).get(day(this.now(), this.config.timezone));
     if (Object.values(result).some(v => !Number.isSafeInteger(v))) throw new AppError('SUMMARY_OVERFLOW', '奖励汇总超出支持范围', 503);
+    return result;
+  }
+  auditSummary() {
+    const result = this.db.prepare(`SELECT COUNT(*) AS totalCount,
+      COALESCE(SUM(audit_status='passed'),0) AS passedCount,
+      COALESCE(SUM(audit_status='violation'),0) AS violationCount,
+      COUNT(DISTINCT CASE WHEN audit_status='violation' THEN user_id END) AS violationUsers,
+      COALESCE(SUM(CASE WHEN audit_status='violation' THEN amount_minor ELSE 0 END),0) AS violationMinor,
+      COALESCE(SUM(CASE WHEN audit_status='violation' AND status='paid' THEN amount_minor ELSE 0 END),0) AS violationPaidMinor,
+      COALESCE(SUM(audit_status='unverifiable'),0) AS unverifiableCount
+      FROM (SELECT r.user_id,r.amount_minor,r.status,(${AUDIT_STATUS}) AS audit_status
+        ${ADMIN_REWARDS_FROM} WHERE (${AUDIT_REQUIRED})>0)`).get();
+    if (Object.values(result).some(v => !Number.isSafeInteger(v))) throw new AppError('AUDIT_OVERFLOW', '门槛审计汇总超出支持范围', 503);
     return result;
   }
   claim() {

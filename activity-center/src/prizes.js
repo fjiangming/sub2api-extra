@@ -4,9 +4,9 @@ const { randomInt } = require('node:crypto');
 
 // Private server configuration. Never include weights or eligibility in public responses.
 const PRIZES = Object.freeze([
-  { amount: 50, weight: 4000, minimum: 0 }, { amount: 100, weight: 2400, minimum: 0 },
-  { amount: 200, weight: 1100, minimum: 0 }, { amount: 300, weight: 800, minimum: 0 },
-  { amount: 500, weight: 600, minimum: 0 }, { amount: 1000, weight: 500, minimum: 100000 },
+  { amount: 50, weight: 5200, minimum: 0 }, { amount: 100, weight: 2000, minimum: 0 },
+  { amount: 200, weight: 1000, minimum: 0 }, { amount: 300, weight: 500, minimum: 0 },
+  { amount: 500, weight: 200, minimum: 0 }, { amount: 1000, weight: 500, minimum: 100000 },
   { amount: 2000, weight: 400, minimum: 200000 }, { amount: 5000, weight: 200, minimum: 500000 }
 ].map(Object.freeze));
 

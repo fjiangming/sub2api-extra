@@ -64,13 +64,44 @@ test('ordinary users cannot access admin shell, totals, detail, retries or anoth
   assert.equal((await f.call(`activities/recharge-lottery/batches/${batch.id}`,other)).status,404);
   assert.equal((await (await f.call('rewards',other)).json()).total,0);
   const history = JSON.stringify(await (await f.call('rewards',user)).json());
-  assert.doesNotMatch(history,/receipt|AC-|email|weight|minimum|recharge_minor|attempts/);
+  assert.doesNotMatch(history,/receipt|AC-|email|weight|minimum|recharge_minor|attempts|audit|requiredMinor|rechargeMinor/);
   const admin = await f.login('admin');
   assert.equal((await f.call('admin/view',admin)).status,200);
   const summary = await (await f.call('admin/summary',admin)).json(); assert.equal(summary.totalMinor,50);
   const detail = await (await f.call(`admin/rewards/${batch.rewards[0].id}`,admin)).json(); assert.equal(detail.receipt.userId,'42');
   assert.equal((await f.call('admin/rewards?from=2026-02-30',admin)).status,400);
   assert.equal((await f.call('admin/rewards?from=2026-11-17&to=2026-11-01',admin)).status,400);
+});
+
+test('only admins can inspect and filter threshold violations while customer responses remain private', async t => {
+  const f = await httpFixture(t); const user = await f.login('user'); const admin = await f.login('admin');
+  const batch = f.store.reserve(USER,crypto.randomUUID(),1,5000);
+  const id = batch.rewards[0].id;
+  f.store.db.prepare("UPDATE rewards SET amount_minor=1000,status='failed' WHERE id=?").run(id);
+  const before = f.store.db.prepare('SELECT * FROM rewards WHERE id=?').get(id);
+  const summary = await (await f.call('admin/summary',admin)).json();
+  assert.equal(summary.audit.violationCount,1); assert.equal(summary.audit.violationUsers,1);
+  assert.equal(summary.audit.violationMinor,1000); assert.equal(summary.audit.violationPaidMinor,0);
+  const response = await f.call('admin/rewards?audit=violation&status=failed',admin);
+  assert.equal(response.status,200); assert.equal(response.headers.get('cache-control'),'no-store');
+  const rows = await response.json(); assert.equal(rows.total,1);
+  assert.deepEqual(rows.rows[0].audit,{ status: 'violation',requiredMinor: 100000,rechargeMinor: 5000 });
+  const detail = await (await f.call(`admin/rewards/${id}`,admin)).json();
+  assert.deepEqual(detail.audit,rows.rows[0].audit);
+  assert.equal((await (await f.call('admin/rewards?audit=passed',admin)).json()).total,0);
+  assert.equal((await f.call('admin/rewards?audit=unknown',admin)).status,400);
+  assert.equal((await f.call('admin/rewards?audit=violation',user)).status,403);
+  assert.equal((await f.call('rewards?audit=violation',user)).status,400);
+  for (const endpoint of ['rewards','activities/recharge-lottery',`activities/recharge-lottery/batches/${batch.id}`]) {
+    assert.doesNotMatch(JSON.stringify(await (await f.call(endpoint,user)).json()),/audit|requiredMinor|rechargeMinor|100000/);
+  }
+  const shell = await (await f.call('admin/view',admin)).text();
+  assert.match(shell,/id="audit-summary"/);
+  assert.doesNotMatch(await (await fetch(f.base)).text(),/audit-summary|audit-heading|充值门槛/);
+  f.roles.set('admin','user');
+  assert.equal((await f.call('admin/rewards?audit=violation',admin)).status,403);
+  assert.equal((await f.call('admin/summary',admin)).status,403);
+  assert.deepEqual(f.store.db.prepare('SELECT * FROM rewards WHERE id=?').get(id),before);
 });
 
 test('admin role revocation and account disablement take effect before sensitive requests', async t => {

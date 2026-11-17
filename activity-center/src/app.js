@@ -9,7 +9,8 @@ const { AppError, errorMiddleware } = require('./errors');
 
 const paging = z.object({ page: z.coerce.number().int().min(1).max(1000000).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(20) }).strict();
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(s => Number.isFinite(Date.parse(s)) && new Date(s).toISOString().startsWith(s));
-const ledgerQuery = paging.extend({ query: z.string().trim().max(320).default(''), from: date.optional(), to: date.optional(), status: z.enum(['pending','paid','failed']).optional() }).refine(v => !v.from || !v.to || v.from <= v.to);
+const ledgerQuery = paging.extend({ query: z.string().trim().max(320).default(''), from: date.optional(), to: date.optional(),
+  status: z.enum(['pending','paid','failed']).optional(), audit: z.enum(['violation','unverifiable','passed','not_required']).optional() }).refine(v => !v.from || !v.to || v.from <= v.to);
 const drawInput = z.object({ requestId: z.string().uuid().transform(v => v.toLowerCase()), count: z.union([z.literal(1),z.literal(10),z.literal(20),z.literal(50)]) }).strict();
 function parse(schema, value) {
   const result = schema.safeParse(value);
@@ -53,7 +54,7 @@ function createApp({ config, auth, store, lottery }) {
   const admin = express.Router();
   admin.use(auth.admin.bind(auth));
   admin.get('/view', (_req, res) => res.type('html').sendFile(path.join(config.projectRoot, 'views', 'ledger.html')));
-  admin.get('/summary', (_req, res) => res.json(store.ledgerSummary()));
+  admin.get('/summary', (_req, res) => res.json({ ...store.ledgerSummary(), audit: store.auditSummary() }));
   admin.get('/rewards', (req, res) => res.json(store.list(parse(ledgerQuery, req.query))));
   admin.get('/rewards/:id', (req, res) => res.json(store.detail(parse(z.string().uuid(), req.params.id))));
   admin.post('/rewards/:id/retry', limit(10), auth.mutation(), (req, res) => {

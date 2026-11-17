@@ -73,11 +73,13 @@ test('reward redemptions cannot fund further draws and negative adjustments reta
   const original = f.core.credit.bind(f.core);
   f.core.credit = async row => {
     const result = await original(row), receipt = result.redeem_code;
-    await credit(db,{ code: receipt.code,notes: receipt.notes,value: String(receipt.value),usedAt: receipt.used_at });
+    await credit(db,{ type: receipt.type,code: receipt.code,notes: receipt.notes,value: String(receipt.value),usedAt: receipt.used_at });
     return result;
   };
   await credit(db);
   await f.lottery.draw(USER,crypto.randomUUID(),1); await f.lottery.kick();
+  assert.equal(f.store.summary(USER.id,5000).creditedMinor,50);
+  assert.equal([...f.credited.values()][0].type,'affiliate_balance');
   assert.equal(f.store.ledgerSummary().totalMinor,50);
   assert.equal(await f.lottery.source.total(USER.id,f.store.campaign.start_at),5000);
   assert.equal((await f.lottery.summary(USER.id)).available,0);
@@ -111,6 +113,30 @@ test('subsidy mentions anywhere cannot grant chances or unlock higher prizes whi
   assert.equal((await f.lottery.summary(USER.id)).available,0);
 });
 
+test('affiliate transfers cannot fund draws or unlock prizes through history rows, balances or recharge totals', async t => {
+  const f = fixture(t,{ storeOptions: { now: () => Date.parse('2026-11-01T00:00:00Z'),rng: () => 9999 } });
+  const db = await database(t);
+  await db.exec(`CREATE TABLE users(id bigint,balance numeric,total_recharged numeric);
+    CREATE TABLE user_affiliate_ledger(id bigint,user_id bigint,action text,amount numeric,created_at timestamptz);
+    INSERT INTO users VALUES(42,10049.99,10049.99);
+    INSERT INTO user_affiliate_ledger VALUES(1,42,'transfer',5000,'2026-11-02');`);
+  f.lottery.source = new RechargeSource(f.config,{ pool: db });
+  await credit(db,{ type: 'affiliate_balance',code: 'AFF-1',value: '5000',notes: null });
+  await credit(db,{ type: 'affiliate_balance',code: 'AFF-2',value: '-100',notes: '' });
+  await credit(db,{ value: '49.99' });
+  assert.equal(await f.lottery.source.total(USER.id,f.store.campaign.start_at),4999);
+  assert.equal((await f.lottery.summary(USER.id)).available,0);
+  await assert.rejects(f.lottery.draw(USER,crypto.randomUUID(),1),{ code: 'CHANCES_INSUFFICIENT' });
+  await credit(db,{ type: 'admin_balance',value: '0.01' });
+  assert.equal((await f.lottery.summary(USER.id)).available,1);
+  const batch = await f.lottery.draw(USER,crypto.randomUUID(),1);
+  assert.equal(batch.rewards[0].amountMinor,500);
+  await f.lottery.kick();
+  assert.equal((await f.lottery.summary(USER.id)).available,0);
+  assert.equal((await db.query('SELECT balance::text FROM users WHERE id=42')).rows[0].balance,'10049.99');
+  assert.equal((await db.query('SELECT amount::text FROM user_affiliate_ledger WHERE id=1')).rows[0].amount,'5000');
+});
+
 test('sub-cent credits accumulate precisely and cannot round an incomplete threshold into a chance', async t => {
   const db = await database(t);
   const source = new RechargeSource(config(),{ pool: db });
@@ -134,11 +160,11 @@ test('source failures and unsafe database totals cannot grant chances or expose 
 test('credit uses only the native fixed-code contract and bounded errors never expose keys or upstream bodies', async () => {
   const cfg = config(); let received;
   const core = new CoreClient(cfg,async (url,options) => { received = { url,options }; return new Response(JSON.stringify({ code: 0,data: { redeem_code: {} } })); });
-  await core.credit({ id: 'reward',attempts: 2,credit_code: 'AC-secret',amount_minor: 50,user_id: '42',batch_id: 'batch' });
+  await core.credit({ id: 'reward',attempts: 2,credit_code: 'AC-secret',credit_type: 'affiliate_balance',amount_minor: 50,user_id: '42',batch_id: 'batch' });
   assert.match(received.url,/\/api\/v1\/admin\/redeem-codes\/create-and-redeem$/);
   assert.equal(received.options.headers['x-api-key'],cfg.adminKey);
   assert.equal(received.options.headers['idempotency-key'],'activity-reward-2');
-  assert.deepEqual(JSON.parse(received.options.body),{ code: 'AC-secret',type: 'balance',value: 0.5,user_id: 42,notes: '活动奖励; activity=recharge-lottery; reward=reward; batch=batch' });
+  assert.deepEqual(JSON.parse(received.options.body),{ code: 'AC-secret',type: 'affiliate_balance',value: 0.5,user_id: 42,notes: '活动奖励; activity=recharge-lottery; reward=reward; batch=batch' });
   for (const response of [new Response('x'.repeat(300000)),new Response('not json'),new Response(JSON.stringify({ error: { message: 'secret password' } }),{ status: 500 })]) {
     await assert.rejects(requestJson('http://localhost',{},1000,async () => response),error => !error.message.includes('secret'));
   }

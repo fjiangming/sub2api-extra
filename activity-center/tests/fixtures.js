@@ -19,7 +19,7 @@ function fixture(t, options = {}) {
     async me() { return { ...USER }; },
     async credit(row) {
       attempts.push({ ...row });
-      if (!credited.has(row.credit_code)) credited.set(row.credit_code, { id: credited.size+1, code: row.credit_code, type: 'balance', value: row.amount_minor/100,
+      if (!credited.has(row.credit_code)) credited.set(row.credit_code, { id: credited.size+1, code: row.credit_code, type: row.credit_type, value: row.amount_minor/100,
         status: 'used', used_by: Number(row.user_id), used_at: new Date(now).toISOString(),
         notes: `活动奖励; activity=recharge-lottery; reward=${row.id}; batch=${row.batch_id}` });
       return { redeem_code: { ...credited.get(row.credit_code) } };

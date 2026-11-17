@@ -35,7 +35,7 @@ class Lottery {
       try {
         const result = await this.core.credit(row);
         const receipt = result?.redeem_code;
-        if (!receipt || receipt.code !== row.credit_code || receipt.type !== 'balance' || receipt.status !== 'used' ||
+        if (!receipt || receipt.code !== row.credit_code || receipt.type !== row.credit_type || receipt.status !== 'used' ||
           String(receipt.used_by) !== row.user_id || Number(receipt.value) !== row.amount_minor / 100 ||
           !/^[1-9]\d*$/.test(String(receipt.id)) || !Number.isFinite(Date.parse(receipt.used_at)) ||
           receipt.notes !== `活动奖励; activity=recharge-lottery; reward=${row.id}; batch=${row.batch_id}`) {

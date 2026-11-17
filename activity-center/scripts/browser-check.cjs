@@ -14,7 +14,7 @@ function playwright() {
 
 async function run() {
   const output = fs.mkdtempSync(path.join(os.tmpdir(),'sub2api-activity-browser-'));
-  const preview = await startPreview({ port: 0 });
+  const preview = await startPreview({ port: 0,auditSeed: true });
   const browser = await playwright().chromium.launch({ headless: true,channel: 'chrome' });
   const errors = [];
   const results = [];
@@ -32,6 +32,7 @@ async function run() {
       assert.equal(await page.locator('[role=tab]').count(),1);
       assert.equal(await page.locator('#open-ledger').count(),0);
       assert.equal(await page.locator('#ledger-total').count(),0);
+      assert.equal(await page.locator('#ledger-audit').count(),0);
       const content = await page.locator('#activity-view').innerText();
       assert(!/概率|解锁|门槛|活动规则|每充值|5000元|2000元|1000元/.test(content));
       assert.equal(await page.locator('#recharge-link').count(),0);
@@ -84,6 +85,39 @@ async function run() {
       assert.equal(await admin.locator('#ledger-total').innerText(),`¥${(preview.store.ledgerSummary().totalMinor/100).toLocaleString('zh-CN',{ minimumFractionDigits: 2,maximumFractionDigits: 2 })}`);
       assert(await admin.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       await admin.screenshot({ path: path.join(output,`${name}-ledger.png`),fullPage: true });
+      assert.equal(await admin.locator('#audit-summary').getAttribute('role'),'alert');
+      assert.match(await admin.locator('#audit-summary').innerText(),/1 位用户有 3 笔未达充值门槛/);
+      assert.match(await admin.locator('#audit-summary').innerText(),/1 笔奖励缺少有效/);
+      await admin.locator('#view-audit-violations').click();
+      await admin.waitForFunction(() => document.querySelectorAll('#ledger-rows tr').length === 3);
+      assert.equal(await admin.locator('[name=audit]').inputValue(),'violation');
+      assert.equal((await admin.locator('#ledger-rows').innerText()).match(/未达门槛/g).length,3);
+      await admin.screenshot({ path: path.join(output,`${name}-audit.png`),fullPage: true });
+      await admin.locator('#ledger-rows button').first().click();
+      await admin.locator('#detail-dialog[open]').waitFor();
+      assert.match(await admin.locator('#dialog-body').innerText(),/未达到充值门槛/);
+      for (const label of ['所需充值','抽奖时充值','充值差额']) assert((await admin.locator('#dialog-body').innerText()).includes(label));
+      await admin.screenshot({ path: path.join(output,`${name}-audit-detail.png`),fullPage: true });
+      await admin.locator('#close-dialog').click();
+      await admin.locator('#view-audit-unverifiable').click();
+      await admin.waitForFunction(() => document.querySelectorAll('#ledger-rows tr').length === 1 && document.querySelector('#ledger-rows').textContent.includes('待核查'));
+      await admin.locator('#ledger-rows button').first().click(); await admin.locator('#detail-dialog[open]').waitFor();
+      assert.match(await admin.locator('#dialog-body').innerText(),/缺少有效快照/);
+      await admin.locator('#close-dialog').click();
+      if (name === 'desktop') {
+        const failedList = /\/api\/admin\/rewards\?/;
+        await admin.route(failedList,route => route.fulfill({ status: 503,contentType: 'application/json',body: '{}' }));
+        await admin.locator('#refresh-ledger').click(); await admin.locator('#ledger-error').waitFor({ state: 'visible' });
+        assert.match(await admin.locator('#audit-summary').innerText(),/3 笔未达充值门槛/);
+        await admin.unroute(failedList);
+        const failedSummary = /\/api\/admin\/summary$/;
+        await admin.route(failedSummary,route => route.fulfill({ status: 503,contentType: 'application/json',body: '{}' }));
+        await admin.locator('#refresh-ledger').click();
+        await admin.waitForFunction(() => document.querySelector('#audit-summary').textContent.includes('暂不可用'));
+        assert.doesNotMatch(await admin.locator('#audit-summary').innerText(),/未发现异常/);
+        await admin.unroute(failedSummary);
+      }
+      await admin.locator('#clear-filters').click();
       await admin.locator('[name=status]').selectOption('failed'); await admin.locator('#ledger-filters button[type=submit]').click();
       await admin.waitForFunction(() => document.querySelector('#ledger-rows').textContent.includes('入账异常'));
       await admin.locator('#ledger-rows button').first().click(); await admin.locator('#detail-dialog[open]').waitFor();
@@ -96,6 +130,7 @@ async function run() {
       await admin.locator('#clear-filters').click();
       await admin.locator('[name=query]').fill('no-matching-user'); await admin.locator('#ledger-filters button[type=submit]').click();
       await admin.waitForFunction(() => document.querySelector('#ledger-rows').textContent.includes('没有符合条件'));
+      assert.match(await admin.locator('#audit-summary').innerText(),/3 笔未达充值门槛/);
       assert.equal(await admin.locator('#ledger-total').innerText(),`¥${(preview.store.ledgerSummary().totalMinor/100).toLocaleString('zh-CN',{ minimumFractionDigits: 2,maximumFractionDigits: 2 })}`);
       await admin.locator('#back-activity').click(); assert.equal(await admin.locator('#ledger-total').count(),0);
       await adminContext.close();
@@ -126,8 +161,21 @@ async function run() {
       await page.waitForFunction(() => !document.querySelector('#single-draw').disabled);
     }
     await context.close();
+    const cleanPreview = await startPreview({ port: 0 });
+    try {
+      const cleanContext = await browser.newContext({ viewport: { width: 390,height: 844 } });
+      const admin = await cleanContext.newPage(); admin.on('pageerror',error => errors.push(error.message));
+      await admin.goto(`${cleanPreview.base}/?token=preview-admin`);
+      await admin.locator('#open-ledger').click();
+      await admin.waitForFunction(() => document.querySelector('#audit-summary')?.textContent.includes('未发现异常'));
+      assert.equal(await admin.locator('#audit-summary').getAttribute('role'),'status');
+      assert(await admin.locator('#view-audit-violations').isHidden());
+      assert(await admin.locator('#view-audit-unverifiable').isHidden());
+      await admin.screenshot({ path: path.join(output,'audit-healthy.png'),fullPage: true });
+      await cleanContext.close();
+    } finally { await cleanPreview.close(); }
     assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({ passed: results,checks: 'wheel pixels/landing, hidden parameters, single tab, single/batch/recovery, session reload, roles, ledger filters/details/retry, fractional cash, reduced motion, layouts',screenshots: output },null,2));
+    console.log(JSON.stringify({ passed: results,checks: 'wheel pixels/landing, hidden parameters, single tab, single/batch/recovery, session reload, roles, ledger filters/details/retry, audit alerts/filters/details/unverifiable/healthy/read failures, fractional cash, reduced motion, layouts',screenshots: output },null,2));
   } finally { await browser.close(); await preview.close(); }
 }
 

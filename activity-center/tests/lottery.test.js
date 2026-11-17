@@ -8,18 +8,20 @@ const path = require('node:path');
 const os = require('node:os');
 const { PRIZES, sample } = require('../src/prizes');
 const { Store, day } = require('../src/store');
+const { Lottery } = require('../src/lottery');
+const { CoreClient } = require('../src/upstream');
 const { fixture, config, USER } = require('./fixtures');
 
 for (const [total,weights] of [
-  [0,[5100,2400,1100,800,600,0,0,0]], [99999,[5100,2400,1100,800,600,0,0,0]],
-  [100000,[4600,2400,1100,800,600,500,0,0]], [199999,[4600,2400,1100,800,600,500,0,0]],
-  [200000,[4200,2400,1100,800,600,500,400,0]], [499999,[4200,2400,1100,800,600,500,400,0]],
-  [500000,[4000,2400,1100,800,600,500,400,200]]
+  [0,[6300,2000,1000,500,200,0,0,0]], [99999,[6300,2000,1000,500,200,0,0,0]],
+  [100000,[5800,2000,1000,500,200,500,0,0]], [199999,[5800,2000,1000,500,200,500,0,0]],
+  [200000,[5400,2000,1000,500,200,500,400,0]], [499999,[5400,2000,1000,500,200,500,400,0]],
+  [500000,[5200,2000,1000,500,200,500,400,200]]
 ]) test(`all 10000 random outcomes match exact distribution at ${total} cents`, () => {
   const counts = PRIZES.map(() => 0);
   for (let roll = 0; roll < 10000; roll++) counts[PRIZES.findIndex(p => p.amount === sample(total, () => roll))]++;
   assert.deepEqual(counts,weights);
-  if (total === 500000) assert.equal(PRIZES.reduce((sum,p,i) => sum+p.amount*counts[i],0)/10000,350);
+  if (total === 500000) assert.equal(PRIZES.reduce((sum,p,i) => sum+p.amount*counts[i],0)/10000,321);
 });
 
 test('fractional successful recharge carries across draws, without creating chances from rewards', async t => {
@@ -89,7 +91,80 @@ test('ambiguous credit responses recover with the same fixed code and credit onl
   assert.equal(f.store.ledgerSummary().totalMinor,50);
 });
 
-for (const [field,value] of [['code','wrong-code'],['type','admin_balance'],['status','unused'],['used_by',999],['value',0.51],['id',null],['used_at','invalid'],['notes','unrelated credit']]) {
+test('legacy reward migration preserves balance receipts, lost-response retries and consumed chances', async t => {
+  const f = fixture(t);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(),'activity-credit-migration-'));
+  const filename = path.join(directory,'test.sqlite');
+  const cfg = config();
+  let store = new Store(cfg,{ filename,now: f.now,rng: () => 0 });
+  let lottery;
+  t.after(async () => { await lottery?.close(); store.close(); fs.rmSync(directory,{ recursive: true,force: true }); });
+  const originalStart = store.campaign.start_at;
+  const requests = Array.from({ length: 3 },() => crypto.randomUUID());
+  const batches = requests.map(id => store.reserve(USER,id,1,500000));
+  store.db.prepare("UPDATE rewards SET credit_type='balance'").run();
+  const paid = store.claim();
+  const paidReceipt = (await f.core.credit(paid)).redeem_code;
+  store.settle(paid,{ usedAt: paidReceipt.used_at,type: paidReceipt.type });
+  const lost = store.claim();
+  await f.core.credit(lost);
+  store.fail(lost,'CREDIT_UNAVAILABLE',false);
+  const failed = store.claim();
+  store.fail(failed,'CREDIT_RECEIPT_UNVERIFIED',true);
+  // Reproduce the deployed v1 schema, including pending, failed and paid records.
+  store.db.exec('ALTER TABLE rewards DROP COLUMN credit_type; PRAGMA user_version=1;');
+  const oldRows = store.db.prepare('SELECT * FROM rewards ORDER BY id').all();
+  store.close();
+  store = new Store(cfg,{ filename,now: f.now,rng: () => { throw new Error('old outcomes must not be resampled'); } });
+  assert.equal(store.db.pragma('user_version',{ simple: true }),2);
+  assert.equal(store.campaign.start_at,originalStart);
+  assert.equal(store.used(USER.id),3);
+  assert.deepEqual(store.db.prepare('SELECT * FROM rewards ORDER BY id').all(),oldRows.map(row => ({ ...row,credit_type: 'balance' })));
+  requests.forEach((id,i) => assert.equal(store.existing(USER.id,id,1).id,batches[i].id));
+  assert.equal(store.ledgerSummary().totalMinor,50);
+  f.advance(60000);
+  lottery = new Lottery(store,f.source,f.core);
+  await lottery.kick();
+  assert.equal(store.detail(lost.id).status,'paid');
+  assert.equal(f.credited.size,2);
+  assert.equal(f.attempts.filter(row => row.credit_code === lost.credit_code).length,2);
+  assert.ok(f.attempts.every(row => row.credit_type === 'balance'));
+  store.retry(failed.id,'1'); await lottery.kick();
+  assert.equal(store.detail(failed.id).status,'paid');
+  assert.equal(f.credited.size,3);
+  store.rng = () => 0;
+  const fresh = await lottery.draw(USER,crypto.randomUUID(),1); await lottery.kick();
+  assert.equal(store.detail(fresh.rewards[0].id).receipt.type,'affiliate_balance');
+  assert.equal(store.ledgerSummary().totalMinor,200);
+  assert.equal(f.credited.size,4);
+  const allRows = store.db.prepare('SELECT * FROM rewards ORDER BY id').all();
+  await lottery.close(); store.close();
+  store = new Store(cfg,{ filename,now: f.now });
+  assert.deepEqual(store.db.prepare('SELECT * FROM rewards ORDER BY id').all(),allRows);
+  assert.equal(store.campaign.start_at,originalStart);
+  assert.equal(store.used(USER.id),4);
+});
+
+test('an old core rejecting affiliate credits retains the same reward and never falls back to balance', async t => {
+  const f = fixture(t); const payloads = [];
+  f.lottery.core = new CoreClient(f.config,async (_url,options) => {
+    payloads.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ code: 400,message: 'unsupported type' }),{ status: 400 });
+  });
+  const batch = await f.lottery.draw(USER,crypto.randomUUID(),1); await f.lottery.kick();
+  assert.equal(f.store.detail(batch.rewards[0].id).status,'pending');
+  f.advance(60000); await f.lottery.kick();
+  assert.equal(payloads.length,2);
+  assert.ok(payloads.every(row => row.type === 'affiliate_balance'));
+  assert.equal(payloads[0].code,payloads[1].code);
+  assert.equal(f.store.used(USER.id),1);
+  assert.equal(f.store.ledgerSummary().totalMinor,0);
+  f.lottery.core = f.core; f.advance(60000); await f.lottery.kick();
+  assert.equal(f.store.detail(batch.rewards[0].id).status,'paid');
+  assert.equal(f.credited.size,1);
+});
+
+for (const [field,value] of [['code','wrong-code'],['type','balance'],['status','unused'],['used_by',999],['value',0.51],['id',null],['used_at','invalid'],['notes','unrelated credit']]) {
   test(`unverified receipt ${field} cannot enter sent totals and admin recovery preserves prize`, async t => {
     const f = fixture(t); const original = f.core.credit.bind(f.core);
     f.core.credit = async row => { const result = await original(row); result.redeem_code[field] = value; return result; };
@@ -135,7 +210,7 @@ test('customer responses omit receipt, identity, private recharge snapshot and p
   const f = fixture(t); const batch = f.store.reserve(USER,crypto.randomUUID(),1,5000);
   assert.throws(() => f.store.batch('99',batch.id),{ status: 404 });
   const data = JSON.stringify({ registry: f.store.registry(),batch,history: f.store.list({ userId: USER.id }) });
-  assert.doesNotMatch(data,/weight|minimum|threshold|probability|recharge_minor|credit_code|receipt|user_email|example\.test|AC-/);
+  assert.doesNotMatch(data,/weight|minimum|threshold|probability|recharge_minor|credit_code|receipt|user_email|example\.test|AC-|audit|requiredMinor|rechargeMinor/);
 });
 
 test('persistent campaign start and chance usage survive restart; scope changes refuse startup', () => {

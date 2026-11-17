@@ -13,6 +13,8 @@ const icon = name => `<i data-lucide="${name}" aria-hidden="true"></i>`;
 const icons = () => window.lucide?.createIcons({ attrs: { 'aria-hidden': 'true' } });
 const statusText = status => ({ paid: '已入账', pending: '待入账', failed: '入账异常' })[status] || '待核验';
 const statusHtml = status => `<span class="${['paid','pending','failed'].includes(status) ? status : ''}">${statusText(status)}</span>`;
+const auditText = status => ({ violation: '未达门槛', unverifiable: '待核查', passed: '已达门槛', not_required: '无需门槛' })[status] || '待核查';
+const auditHtml = audit => `<span class="${audit?.status === 'violation' ? 'failed' : audit?.status === 'passed' || audit?.status === 'not_required' ? 'muted' : 'pending'}">${auditText(audit?.status)}</span>`;
 function storage(key, value) {
   try { if (value === undefined) return sessionStorage.getItem(key); if (value === null) sessionStorage.removeItem(key); else sessionStorage.setItem(key, value); }
   catch { /* Session cookies and in-memory recovery remain available. */ }
@@ -163,6 +165,19 @@ function pagination(prefix, data) {
   $(`${prefix}-page`).textContent = `${data.total} 条 · ${data.page} / ${pages}`;
   $(`${prefix}-prev`).disabled = data.page <= 1; $(`${prefix}-next`).disabled = data.page >= pages;
 }
+function renderAudit(audit) {
+  const summary = $('audit-summary');
+  let html;
+  if (!audit) html = '<span class="pending">门槛审计暂不可用，请刷新重试</span>';
+  else if (audit.violationCount) html = `<strong class="failed">发现 ${audit.violationUsers} 位用户有 ${audit.violationCount} 笔未达充值门槛的奖励</strong><p>异常奖励合计 ${money(audit.violationMinor)}，其中已入账 ${money(audit.violationPaidMinor)}</p>`;
+  else html = `<span class="${audit.unverifiableCount ? 'pending' : 'muted'}">${audit.unverifiableCount ? '部分奖励的充值快照待核查' : audit.totalCount ? `已核验 ${audit.passedCount} 笔门槛奖励，未发现异常` : '暂无需要门槛核验的奖励'}</span>`;
+  if (audit?.unverifiableCount) html += `<p class="pending">${audit.unverifiableCount} 笔奖励缺少有效的抽奖时充值快照，需核查</p>`;
+  if (summary.innerHTML !== html) summary.innerHTML = html;
+  summary.setAttribute('role',audit?.violationCount ? 'alert' : 'status');
+  $('ledger-audit').classList.toggle('audit-violation',Boolean(audit?.violationCount));
+  $('view-audit-violations').hidden = !audit?.violationCount;
+  $('view-audit-unverifiable').hidden = !audit?.unverifiableCount;
+}
 async function refreshLedger() {
   const seq = ++state.ledgerSequence;
   const filters = new URLSearchParams(new FormData($('ledger-filters')));
@@ -170,25 +185,44 @@ async function refreshLedger() {
   filters.set('page',state.ledgerPage);
   errorBox('ledger-error');
   try {
-    const [summary,data] = await Promise.all([api('admin/summary'),api(`admin/rewards?${filters}`)]);
+    const results = await Promise.allSettled([api('admin/summary'),api(`admin/rewards?${filters}`)]);
     if (!state.admin || seq !== state.ledgerSequence) return;
-    $('ledger-total').textContent = money(summary.totalMinor); $('ledger-today').textContent = money(summary.todayMinor);
-    $('ledger-users').textContent = summary.recipients.toLocaleString('zh-CN'); $('ledger-paid').textContent = summary.paidCount.toLocaleString('zh-CN');
-    $('ledger-unsettled').innerHTML = `<span class="pending">待入账 ${summary.pendingCount} 笔 · ${money(summary.pendingMinor)}</span><span class="failed">入账异常 ${summary.failedCount} 笔 · ${money(summary.failedMinor)}</span>`;
-    $('ledger-rows').innerHTML = data.rows.length ? data.rows.map(row => `<tr><td>${escapeHtml(row.name)}<span class="row-sub">${escapeHtml(row.email)} · #${escapeHtml(row.userId)}</span></td><td>${money(row.amountMinor)}</td><td>${escapeHtml(row.activity)}</td><td>${escapeHtml(time(row.createdAt))}</td><td>${statusHtml(row.status)}</td><td><button class="icon-button" data-detail="${row.id}" title="查看详情" aria-label="查看奖励详情">${icon('file-text')}</button></td></tr>`).join('') : '<tr><td class="empty" colspan="6">没有符合条件的奖励记录</td></tr>';
-    pagination('ledger',data); icons();
-    document.querySelectorAll('[data-detail]').forEach(button => { button.onclick = () => showReward(button.dataset.detail); });
-  } catch (error) { if (state.admin && seq === state.ledgerSequence) errorBox('ledger-error',error.message || '账本加载失败'); }
+    if (results[0].status === 'fulfilled') {
+      const summary = results[0].value;
+      $('ledger-total').textContent = money(summary.totalMinor); $('ledger-today').textContent = money(summary.todayMinor);
+      $('ledger-users').textContent = summary.recipients.toLocaleString('zh-CN'); $('ledger-paid').textContent = summary.paidCount.toLocaleString('zh-CN');
+      $('ledger-unsettled').innerHTML = `<span class="pending">待入账 ${summary.pendingCount} 笔 · ${money(summary.pendingMinor)}</span><span class="failed">入账异常 ${summary.failedCount} 笔 · ${money(summary.failedMinor)}</span>`;
+      renderAudit(summary.audit);
+    } else renderAudit(null);
+    if (results[1].status === 'fulfilled') {
+      const data = results[1].value;
+      $('ledger-rows').innerHTML = data.rows.length ? data.rows.map(row => `<tr><td>${escapeHtml(row.name)}<span class="row-sub">${escapeHtml(row.email)} · #${escapeHtml(row.userId)}</span></td><td>${money(row.amountMinor)}</td><td>${escapeHtml(row.activity)}</td><td>${escapeHtml(time(row.createdAt))}</td><td>${statusHtml(row.status)}</td><td>${auditHtml(row.audit)}</td><td><button class="icon-button" data-detail="${row.id}" title="查看详情" aria-label="查看奖励详情">${icon('file-text')}</button></td></tr>`).join('') : '<tr><td class="empty" colspan="7">没有符合条件的奖励记录</td></tr>';
+      pagination('ledger',data); icons();
+      document.querySelectorAll('[data-detail]').forEach(button => { button.onclick = () => showReward(button.dataset.detail); });
+    }
+    const failures = results.filter(result => result.status === 'rejected');
+    if (failures.length) errorBox('ledger-error',failures.map(result => result.reason.message || '账本加载失败').join('；'));
+  } catch (error) {
+    if (state.admin && seq === state.ledgerSequence) {
+      renderAudit(null);
+      errorBox('ledger-error',error.message || '账本加载失败');
+    }
+  }
 }
 async function showReward(id) {
   try {
     const row = await api(`admin/rewards/${id}`);
     if (!state.admin) return;
     const entries = [['奖励流水',row.id],['批次',row.batchId],['用户',`${row.name} · #${row.userId}`],['邮箱',row.email],['奖励',money(row.amountMinor)],['活动',row.activity],['抽奖时间',time(row.createdAt)],['入账时间',row.creditedAt ? time(row.creditedAt) : '待入账'],['状态',statusText(row.status)],['入账尝试',row.attempts],['主站回执编号',row.receipt?.id || '尚未核验'],['主站兑换回执',row.receipt?.code || '尚未核验']];
+    entries.push(['门槛审计',auditText(row.audit?.status)]);
+    if (row.audit?.requiredMinor > 0) {
+      entries.push(['所需充值',money(row.audit.requiredMinor)],['抽奖时充值',row.audit.rechargeMinor === null ? '缺少有效快照' : money(row.audit.rechargeMinor)]);
+      if (row.audit.status === 'violation') entries.push(['充值差额',money(row.audit.requiredMinor-row.audit.rechargeMinor)]);
+    }
     if (row.errorCode) entries.push(['异常代码',row.errorCode]);
     if (row.retries.length) entries.push(['恢复操作',row.retries.map(r => `管理员 #${r.actorId} · ${time(r.createdAt)}`).join(' / ')]);
     $('dialog-title').textContent = '奖励详情';
-    $('dialog-body').innerHTML = `<dl class="detail-grid">${entries.map(([key,value]) => `<div><dt>${key}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>${row.status === 'failed' ? '<button id="retry-credit" class="button primary dialog-action">恢复入账</button>' : ''}<div id="detail-error" class="error" role="alert" hidden></div>`;
+    $('dialog-body').innerHTML = `${['violation','unverifiable'].includes(row.audit?.status) ? `<p class="audit-detail ${row.audit.status === 'violation' ? 'failed' : 'pending'}" role="alert">${row.audit.status === 'violation' ? '该奖励未达到充值门槛，请核查' : '该奖励的抽奖时充值快照无法核验，请核查'}</p>` : ''}<dl class="detail-grid">${entries.map(([key,value]) => `<div><dt>${key}</dt><dd>${escapeHtml(value)}</dd></div>`).join('')}</dl>${row.status === 'failed' ? '<button id="retry-credit" class="button primary dialog-action">恢复入账</button>' : ''}<div id="detail-error" class="error" role="alert" hidden></div>`;
     if ($('retry-credit')) $('retry-credit').onclick = async () => {
       $('retry-credit').disabled = true;
       try { await api(`admin/rewards/${id}/retry`,{ method: 'POST',body: '{}' }); await showReward(id); await refreshLedger(); }
@@ -209,6 +243,9 @@ async function openAdmin() {
     $('refresh-ledger').onclick = refreshLedger;
     $('ledger-filters').onsubmit = event => { event.preventDefault(); state.ledgerPage = 1; refreshLedger(); };
     $('clear-filters').onclick = () => { $('ledger-filters').reset(); state.ledgerPage = 1; refreshLedger(); };
+    for (const [id,audit] of [['view-audit-violations','violation'],['view-audit-unverifiable','unverifiable']]) {
+      $(id).onclick = () => { $('ledger-filters').reset(); $('ledger-filters').elements.audit.value = audit; state.ledgerPage = 1; refreshLedger(); };
+    }
     $('ledger-prev').onclick = () => { state.ledgerPage--; refreshLedger(); };
     $('ledger-next').onclick = () => { state.ledgerPage++; refreshLedger(); };
     await refreshLedger();

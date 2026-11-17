@@ -48,10 +48,11 @@ class CoreClient {
   }
 
   credit(row) {
+    if (!['balance', 'affiliate_balance'].includes(row.credit_type)) throw new AppError('CREDIT_TYPE_INVALID', '奖励入账类型无效', 502);
     return requestJson(`${this.config.sub2apiBaseUrl}/api/v1/admin/redeem-codes/create-and-redeem`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': this.config.adminKey,
         'idempotency-key': `activity-${row.id}-${row.attempts}` },
-      body: JSON.stringify({ code: row.credit_code, type: 'balance', value: row.amount_minor / 100,
+      body: JSON.stringify({ code: row.credit_code, type: row.credit_type, value: row.amount_minor / 100,
         user_id: Number(row.user_id), notes: `活动奖励; activity=recharge-lottery; reward=${row.id}; batch=${row.batch_id}` })
     }, this.config.timeoutMs, this.fetch);
   }
