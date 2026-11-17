@@ -3,7 +3,7 @@
   const reasons = { body_limit: '旧采集器按单条上限截断，仅保留已采集部分', memory_limit: '旧采集器内存不足，可能仅保留部分内容', transport_error: '上游连接失败', read_error: '上游读取返回非正常 EOF；可能为断流、超时或结束后取消，当前记录仍按不完整处理', closed_early: '响应提前关闭', session_closed: '连接关闭前未见结束事件', redaction_failed: '旧记录脱敏失败，原文未保留，无法重新处理', capacity: '存储空间不足' };
   const processingErrors = { INVALID_JSON: 'JSON 不完整或格式不兼容', PROTECTED_FIELD_MATCH: '自定义规则会改变结构或关联字段', UNSUPPORTED_ENCODING: '不支持的压缩编码', INVALID_UTF8: '正文含非 UTF-8 字节', DECOMPRESSION_FAILED: '解压失败或超过解压上限', BINARY_MESSAGE_REQUIRES_ORIGINAL_MODE: '二进制消息暂不支持脱敏', UNSAFE_SSE_REPLACEMENT: '替换会改变 SSE 结构', DOCUMENT_TOO_DEEP: 'JSON 嵌套超过处理上限', NESTED_ARGUMENTS_TOO_DEEP: '工具参数嵌套超过处理上限', PROCESSING_FAILED: '处理异常' };
   const modeNames = { dual: '原文 + 脱敏副本', masked: '仅脱敏副本', original: '仅原文' };
-  Object.assign(processingErrors, { UNINSPECTABLE_CONTENT: '媒体、外部文件或加密内容无法完整检查', REDACTION_RESOURCE_LIMIT: '脱敏处理资源不足，原文未截断' });
+  Object.assign(processingErrors, { UNINSPECTABLE_CONTENT: '媒体、外部文件或加密内容无法完整检查', REDACTION_RESOURCE_LIMIT: '脱敏处理达到资源保护上限，原文未截断', REDACTION_MEMORY_PRESSURE: '当前脱敏内存预算不足，原文未截断，可稍后重试', REDACTION_VALUE_LIMIT: '敏感值数量达到处理保护上限，原文未截断' });
   reasons.storage_failed = '存储写入失败，未保存新日志';
   reasons.processor_busy = '归档处理繁忙，已跳过新日志';
   reasons.processor_memory = '归档处理内存不足，已跳过新日志';
@@ -15,17 +15,20 @@
     let payloads = new Map(), excluded = new Set(), users = new Map(), sessionFilter = null, saving = false, dirty = false;
     const reprocessing = new Set();
     let pushUi = null;
+    const repairUi = root.ConversationRepairUi.create({api,escapeHtml:esc,icon,refreshIcons,isActive:() => isActive() && tab === 'collection'});
+    const clearUi = root.ConversationClearUi.create({api,escapeHtml:esc,icon,refreshIcons,isActive,onChanged:() => { clearDetail(); page = 1; run(load); }});
     let cleanupState = null, cleanupBusy = false, cleanupTimer = null, cleanupController = null;
     const num = value => new Intl.NumberFormat('zh-CN').format(value || 0);
     const bytes = value => value >= 1048576 ? (value / 1048576).toFixed(2) + ' MiB' : value >= 1024 ? (value / 1024).toFixed(1) + ' KiB' : num(value) + ' B';
     const time = value => value ? new Date(value).toLocaleString('zh-CN', { timeZone: status?.timezone || 'Asia/Shanghai', hour12: false }) : '尚无记录';
     const tool = (name, title, attrs = '') => `<button class="icon-button" type="button" title="${esc(title)}" aria-label="${esc(title)}" ${attrs}>${icon(name)}</button>`;
-    const badge = row => `<span class="cl-badge ${row.complete ? 'green' : 'amber'}">${row.complete ? '完整采集' : row.original || row.masked ? '部分采集' : '正文缺失'}</span>${row.processing_error ? '<span class="cl-badge amber">处理异常</span>' : row.inspection_warnings?.length ? '<span class="cl-badge amber">部分内容未检查</span>' : ''}`;
+    const endedAbnormally = row => !row.complete && row.upstream_status === 'completed' && row.completion_source !== 'masked' && ['read_error','closed_early','session_closed'].includes(row.reason);
+    const badge = row => `<span class="cl-badge ${row.complete ? 'green' : 'amber'}">${row.complete ? '完整采集' : endedAbnormally(row) ? '传输采集异常' : row.original || row.masked ? '部分采集' : '正文缺失'}</span>${row.upstream_status === 'completed' ? `<span class="cl-badge green">${row.completion_source === 'masked' ? '副本含完成事件' : '上游已完成'}</span>` : row.upstream_status === 'failed' ? '<span class="cl-badge amber">上游执行失败</span>' : row.upstream_status === 'incomplete' ? '<span class="cl-badge amber">上游未完整完成</span>' : ''}${row.processing_error ? '<span class="cl-badge amber">处理异常</span>' : row.inspection_warnings?.length ? '<span class="cl-badge amber">部分内容未检查</span>' : ''}`;
     const facts = values => `<dl class="cl-facts">${values.map(([key, value]) => `<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl>`;
     const empty = text => `<div class="cl-empty">${esc(text)}</div>`;
     function run(task) { Promise.resolve().then(task).catch(error => { if (error.name !== 'AbortError' && isActive()) { $('notice').textContent = error.message; toast(error.message, 'error'); } }); }
     function init() {
-      container.innerHTML = `<div id="cl-notice" class="cl-notice" role="status"></div><div id="cl-metrics" class="cl-metrics"></div>
+      container.innerHTML = `<div id="cl-notice" class="cl-notice" role="status"></div><div id="cl-metrics" class="cl-metrics"></div><section id="cl-history-clear" aria-label="清空历史日志"></section>
         <div class="cl-tabs" role="tablist" aria-label="对话日志视图">${[['requests','list-filter','请求日志'],['sessions','messages-square','会话视图'],['collection','radio-tower','采集状态'],['policy','shield-check','保存策略'],['push','send','推送策略']].map(([id, glyph, label]) => `<button id="cl-tab-${id}" role="tab" data-cl-tab="${id}" aria-selected="${id === tab}" aria-controls="cl-${id}" tabindex="${id === tab ? 0 : -1}">${icon(glyph)}${label}</button>`).join('')}</div>
         <section id="cl-requests" role="tabpanel" aria-labelledby="cl-tab-requests"><form id="cl-filter" class="cl-filters"><label class="cl-search">${icon('search')}<input name="search" aria-label="搜索请求、用户或模型" placeholder="请求 ID、用户 ID、模型" autocomplete="off"></label><input name="start" type="date" aria-label="开始日期"><input name="end" type="date" aria-label="结束日期"><select name="protocol" aria-label="协议"><option value="">全部协议</option><option>JSON</option><option>SSE</option><option>WebSocket</option></select><select name="capture" aria-label="采集完整性"><option value="">全部完整性</option><option value="complete">完整采集</option><option value="partial">部分采集</option><option value="missing">正文缺失</option><option value="redaction_failed">脱敏失败</option></select><button class="button secondary" type="submit">${icon('search')}查询</button>${tool('rotate-ccw','重置筛选','data-cl-action="reset-filter"')}${tool('download','导出筛选索引 CSV','data-cl-action="export"')}</form><div id="cl-session-filter"></div><div class="cl-explorer"><aside class="cl-records"><div id="cl-list"></div><div class="cl-pagination"><span id="cl-page-label"></span><div>${tool('chevron-left','上一页','id="cl-prev"')}${tool('chevron-right','下一页','id="cl-next"')}</div></div></aside><article id="cl-inspector" class="cl-inspector" aria-label="请求详情">${empty('选择一条请求查看原始请求与响应')}</article></div></section>
         <section id="cl-sessions" role="tabpanel" aria-labelledby="cl-tab-sessions" hidden></section><section id="cl-collection" role="tabpanel" aria-labelledby="cl-tab-collection" hidden></section><section id="cl-policy" role="tabpanel" aria-labelledby="cl-tab-policy" hidden></section><section id="cl-push" role="tabpanel" aria-labelledby="cl-tab-push" hidden></section>`;
@@ -54,9 +57,11 @@
       if (current !== seq || !isActive()) return;
       const policyChanged = status?.policy.version !== next.policy.version;
       status = next; overview();
+      await clearUi.load();
+      if (current !== seq || !isActive()) return;
       if (tab === 'push') { await pushUi.load(); return; }
       if (tab === 'policy') { if (!dirty && !saving) renderPolicy(status.policy); await refreshCleanup(); return; }
-      if (tab === 'collection') { renderCollection(); return; }
+      if (tab === 'collection') { renderCollection(); await repairUi.load($('history-repair'),status.policy.version); return; }
       if (tab === 'sessions') {
         $('sessions').innerHTML = `<div class="cl-section-heading"><h2>最近会话</h2><span>最多 100 个 · 仅包含有会话标识的请求</span></div>${data.items.length ? data.items.map(row => `<button class="cl-session" data-cl-session="${row.session_id}" data-user="${row.user_id}" data-key="${row.key_id}"><strong>用户 #${row.user_id} · Key #${row.key_id}</strong><span>${num(row.turns)} 次请求 / ${num(row.attempts)} 次尝试 · ${esc(time(row.last_at))}</span><code>${row.session_id}</code>${icon('arrow-up-right')}</button>`).join('') : empty('尚无可关联的会话记录')}`;
         refreshIcons(); return;
@@ -87,13 +92,24 @@
       const processingTitle = detail.processing_error ? '处理异常 · ' + (processingErrors[detail.processing_error] || '处理异常') : detail.redaction_outdated ? '脱敏规则已有更新' : '可读文本已处理 · 部分内容未检查';
       $('inspector').innerHTML = `<div class="cl-detail-heading"><div><code>${detail.request_id}</code><h2>${esc(detail.model || detail.protocol + ' 请求')}</h2><p>${badge(detail)} · ${esc(detail.protocol)} · ${esc(modeNames[detail.mode])} · 策略 v${detail.policy_version}</p></div>${tool('x','关闭请求详情','data-cl-action="close-detail"')}</div>${facts([['用户 / Key',`#${detail.user_id} / #${detail.key_id}`],['上游账号',detail.account_id ? '#' + detail.account_id : '未提供'],['时间',time(detail.at)],['耗时',num(detail.duration_ms) + ' ms'],['上游 Host',detail.host || '未提供'],['路径',detail.path]])}
         ${detail.reason ? `<div class="cl-notice amber">${esc(reasons[detail.reason] || detail.reason)}</div>` : ''}
+        ${detail.upstream_status === 'completed' ? `<div class="cl-notice ${detail.complete ? '' : 'amber'}">${detail.completion_source === 'masked' ? '脱敏副本中有有效完成事件；原文未保留，来源按副本注明。' : '已解析并核对上游应用完成事件。'}${!detail.complete ? ' 原始采集仍标记异常，不能据此证明请求、响应或用户端逐字节完整，也不会放宽推送完整性条件。' : ''} · ${esc(detail.upstream_evidence)}</div>` : ''}
         ${detail.processing_error || detail.redaction_outdated || limited ? `<div class="cl-notice amber cl-processing" role="status"><div><strong>${esc(processingTitle)}</strong><span>${detail.original ? '已保留加密原文，支持按当前规则重处理' : '未保留原文，无法重新识别全部敏感信息'} · ${esc(detail.processing_error || (limited ? '含未检查内容，暂停脱敏推送' : '旧副本暂停脱敏推送'))} · 处理策略 v${detail.processing_policy_version}</span>${limited ? '<span>模型协议签名原样保留，签名内部未检查；其他可读文本已按该副本的规则处理。</span>' : ''}${detail.retry_blocked === 'user_excluded' ? '<span>该用户已排除，不能重新处理</span>' : detail.retry_blocked === 'model_excluded' ? '<span>该模型不在采集名单中，不能重新处理</span>' : ''}</div><button type="button" class="button secondary" data-cl-action="reprocess" title="按当前策略重新处理；成功后按此记录的保存版本保留副本" ${!detail.retry_available || reprocessing.has(detail.id) ? 'disabled' : ''}>${icon('refresh-cw')}${reprocessing.has(detail.id) ? '处理中' : '重新处理'}</button></div>` : detail.processing_policy_version ? `<p class="cl-muted">脱敏策略 v${detail.processing_policy_version} · ${esc(time(detail.processed_at))}</p>` : ''}
         <div class="cl-attempts"><span>请求尝试</span>${detail.attempts.map((row,index) => `<button data-cl-attempt="${row.id}" aria-pressed="${row.id === detail.id}">#${index + 1} · ${row.status || '连接错误'} · 账号 ${row.account_id || '未提供'}</button>`).join('')}</div>
         <div class="cl-detail-tabs" role="tablist" aria-label="请求详情视图">${[['raw','Request / Response'],['frames',`消息 (${detail.frames.length})`],['redactions','脱敏记录']].map(([id,label]) => `<button data-cl-detail="${id}" role="tab" aria-selected="${id === detailTab}">${label}</button>`).join('')}<select id="cl-source" aria-label="日志版本"><option value="masked" ${source === 'masked' ? 'selected' : ''} ${!detail.masked ? 'disabled' : ''}>脱敏副本</option><option value="original" ${source === 'original' ? 'selected' : ''} ${!detail.original ? 'disabled' : ''}>原文</option></select></div><div id="cl-detail-body"></div>`;
       $('source').addEventListener('change', () => { source = $('source').value; payloads.clear(); renderDetailBody(); if (detailTab === 'raw') run(() => loadBodies(detailSeq)); });
+      if (detail.completion_version && detail.upstream_status !== 'completed') {
+        const evidence = document.createElement('p'); evidence.className = 'cl-muted';
+        evidence.textContent = `上游完成检查：${({unknown:'未见可靠完成证据',unverified:'无法核验',failed:'执行失败',incomplete:'未完整完成'})[detail.upstream_status] || '待检查'} · ${detail.upstream_evidence}`;
+        container.querySelector('.cl-detail-heading').after(evidence);
+      }
+      if (limited) {
+        const scope = container.querySelector('.cl-processing > div > span:nth-of-type(2)');
+        const scopes = [['OPAQUE_SIGNATURE','模型协议签名'],['OPAQUE_ENCRYPTED_REASONING','模型加密推理']].filter(([code]) => detail.inspection_warnings.includes(code)).map(([,name]) => name).join('、');
+        if (scope) scope.textContent = `${scopes || '不透明协议内容'}原样保留，其内部未检查；其他可读文本已按该副本规则处理。`;
+      }
       if (detail.processing_error === 'UNINSPECTABLE_CONTENT') {
         const explanation = document.createElement('span');
-        explanation.textContent = '旧规则可能因普通链接或模型协议签名触发，可按最新规则重处理。媒体、外部文件、未识别签名和加密正文仍可能无法检查；原文不会因此丢失。';
+        explanation.textContent = '旧规则可能因普通链接、模型协议签名、加密推理或工具业务文件编号触发，可按最新规则重处理。真实媒体、外部文件及未识别加密正文仍可能无法检查；原文不会因此丢失。';
         container.querySelector('.cl-processing > div')?.append(explanation);
       }
       renderDetailBody(); refreshIcons();
@@ -129,6 +145,7 @@
     async function loadBodies(current) { await Promise.all(['request','response'].map(side => loadPayload(side,current))); }
     function renderCollection() {
       $('collection').innerHTML = `<div class="cl-section-heading"><h2>采集状态</h2><span>${status.policy.enabled ? '已启用保存' : '保存已关闭'}</span></div>${facts([['最近策略读取',time(status.lastContact)],['归档尝试',num(status.records)],['不完整 / 缺失',num(status.gaps)],['采集端累计丢弃',num(status.collectorDropped)],['存储占用',bytes(status.diskBytes)],['磁盘可用',bytes(status.freeBytes)],['保存版本',modeNames[status.policy.mode]],['保留时长',status.policy.retention ? status.policy.retention + ' 天' : '永久'],['正文采集',status.collectorVersion === 2 ? '完整正文 · 无单条截断' : '等待新版采集器'],['最近异常',reasons[status.lastError] || status.lastError || '无']])}<div class="cl-notice amber">用户对话优先。内存、队列或存储不足时放弃归档；上游断流只保留实际收到的部分并标记不完整。完整采集不代表模型执行成功。</div>`;
+      const section = document.createElement('section'); section.id = 'cl-history-repair'; section.className = 'clp-section cl-model-cleanup'; $('collection').append(section);
     }
     function renderPolicy(value) {
       policy = value; excluded = new Set(value.excludedUserIds); users.clear(); dirty = false;
@@ -156,7 +173,7 @@
       const ready = policy.modelFilterEnabled && (policy.allowedModels.length || policy.kimiK3Plus);
       const names = { pending:'等待后台清理', running:'后台清理中', done:'清理完成', cancelled:'已停止', paused:'模型名单已变化，清理已暂停' };
       const errors = { MODEL_POLICY_CHANGED:'请核对当前模型名单后重新启动', CLEANUP_WORKER_UNAVAILABLE:'清理进程暂不可用，将自动重试', CLEANUP_STORAGE_UNAVAILABLE:'存储暂不可用，将稍后重试' };
-      host.innerHTML = `<div class="cl-section-heading"><h2>历史模型清理</h2><span>使用已保存的模型名单</span></div><p class="cl-muted">删除名单外的历史日志，包含未知模型的记录、正文和索引；删除后无法恢复。所选模型与新增归档保留。</p><div class="cl-cleanup-actions"><button class="button secondary" type="button" data-cl-action="cleanup-models" ${cleanupBusy || running || dirty || saving || !ready ? 'disabled' : ''}>${icon('trash-2')}后台清理名单外日志</button>${running ? `<button class="button secondary" type="button" data-cl-action="stop-model-cleanup" ${cleanupBusy ? 'disabled' : ''}>${icon('square')}停止清理</button>` : ''}</div><p id="cl-cleanup-progress" class="cl-muted" role="status">${job ? `${esc(names[job.status] || job.status)} · 已扫描 ${num(job.scanned)} 条 · 已删除 ${num(job.deleted)} 条 · 启动策略 v${job.policy_version}` : '尚未启动清理'}${dirty ? ' · 请先保存模型名单' : !ready ? ' · 请先启用并保存至少一个模型' : ''}${job?.error_code || cleanupState?.lastError ? '<br>' + esc(errors[job?.error_code || cleanupState.lastError] || '清理暂不可用') : ''}</p>`;
+      host.innerHTML = `<div class="cl-section-heading"><h2>历史模型清理</h2><span>使用已保存的模型名单</span></div><p class="cl-muted">删除名单外的历史日志，包含未知模型的记录、正文和索引；删除后无法恢复。所选模型与新增归档保留。</p><div class="cl-cleanup-actions"><button class="button secondary" type="button" data-cl-action="cleanup-models" ${cleanupBusy || running || cleanupState?.activeScope === 'all' || dirty || saving || !ready ? 'disabled' : ''}>${icon('trash-2')}后台清理名单外日志</button>${running ? `<button class="button secondary" type="button" data-cl-action="stop-model-cleanup" ${cleanupBusy ? 'disabled' : ''}>${icon('square')}停止清理</button>` : ''}</div><p id="cl-cleanup-progress" class="cl-muted" role="status">${job ? `${esc(names[job.status] || job.status)} · 已扫描 ${num(job.scanned)} 条 · 已删除 ${num(job.deleted)} 条 · 启动策略 v${job.policy_version}` : '尚未启动清理'}${cleanupState?.activeScope === 'all' ? ' · 正在清空全部历史' : ''}${dirty ? ' · 请先保存模型名单' : !ready ? ' · 请先启用并保存至少一个模型' : ''}${job?.error_code || cleanupState?.lastError ? '<br>' + esc(errors[job?.error_code || cleanupState.lastError] || '清理暂不可用') : ''}</p>`;
       refreshIcons();
     }
     async function refreshCleanup() {
@@ -165,7 +182,7 @@
       const value = await api('/api/conversation-logs/model-cleanup', { signal: cleanupController.signal });
       if (epoch !== lifecycle || !isActive() || tab !== 'policy') return;
       cleanupState = value; renderCleanup();
-      if (['pending','running'].includes(value.job?.status)) cleanupTimer = setTimeout(() => run(refreshCleanup), 2000);
+      if (value.activeScope) cleanupTimer = setTimeout(() => run(refreshCleanup), 2000);
     }
     async function startCleanup() {
       if (cleanupBusy || dirty || saving) return;
@@ -240,7 +257,7 @@
     }
     async function switchTab(value) {
       if (!['requests','sessions','collection','policy','push'].includes(value)) return;
-      if (value !== tab) { ++searchSeq; userController?.abort(); clearTimeout(searchTimer); clearTimeout(cleanupTimer); cleanupController?.abort(); clearDetail(); pushUi.leave(); }
+      if (value !== tab) { ++searchSeq; userController?.abort(); clearTimeout(searchTimer); clearTimeout(cleanupTimer); cleanupController?.abort(); clearDetail(); pushUi.leave(); repairUi.leave(); }
       tab = value;
       for (const id of ['requests','sessions','collection','policy','push']) { $(id).hidden = id !== tab; $('tab-' + id).setAttribute('aria-selected',String(id === tab)); $('tab-' + id).tabIndex = id === tab ? 0 : -1; }
       await load();
@@ -271,7 +288,7 @@
       if (action === 'remove-rule') { node.closest('.cl-custom-rule').remove(); markDirty(); }
       if (action === 'discard-policy') { dirty = false; run(load); }
     }
-    function leave() { ++seq; ++detailSeq; ++searchSeq; ++lifecycle; controller?.abort(); detailController?.abort(); userController?.abort(); cleanupController?.abort(); clearTimeout(cleanupTimer); cleanupState = null; cleanupBusy = false; pushUi?.leave(); clearTimeout(searchTimer); payloads.clear(); detail = null; report = null; dirty = false; for (const id of ['inspector','list','sessions','collection','policy','metrics','notice']) if ($(id)) $(id).innerHTML = ''; }
+    function leave() { ++seq; ++detailSeq; ++searchSeq; ++lifecycle; controller?.abort(); detailController?.abort(); userController?.abort(); cleanupController?.abort(); clearTimeout(cleanupTimer); cleanupState = null; cleanupBusy = false; pushUi?.leave(); repairUi.leave(); clearUi.leave(); clearTimeout(searchTimer); payloads.clear(); detail = null; report = null; dirty = false; for (const id of ['inspector','list','sessions','collection','policy','metrics','notice','history-clear']) if ($(id)) $(id).innerHTML = ''; }
     function reset() { leave(); status = null; policy = null; users.clear(); excluded.clear(); sessionFilter = null; page = 1; tab = 'requests'; container.innerHTML = ''; init(); }
     init(); return { load, leave, reset };
   }

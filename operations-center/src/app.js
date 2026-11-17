@@ -141,7 +141,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationPush, conversationCleanup, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -331,6 +331,18 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
     res.status(202).json(result);
   });
   api.post('/conversation-logs/model-cleanup/:id/cancel', csrf, conversationCleanupLimiter, (req, res) => res.json(conversationCleanup.cancel(req.params.id)));
+  api.use('/conversation-logs/history-clear', (_req, _res, next) => conversationCleanup ? next() : next(new AppError('CONVERSATION_CLEANUP_UNAVAILABLE', '历史清理后台暂不可用', { status: 503 })));
+  api.get('/conversation-logs/history-clear', (_req, res) => res.json(conversationCleanup.status('all')));
+  api.post('/conversation-logs/history-clear', csrf, conversationCleanupLimiter, (req, res) => {
+    const result = conversationCleanup.requestAll(req.body);
+    conversationPush?.invalidate();
+    res.status(202).json(result);
+  });
+  api.post('/conversation-logs/history-clear/:id/cancel', csrf, conversationCleanupLimiter, (req, res) => res.json(conversationCleanup.cancel(req.params.id, 'all')));
+  api.use('/conversation-logs/history-repair', (_req, _res, next) => conversationRepair ? next() : next(new AppError('CONVERSATION_REPAIR_UNAVAILABLE', '历史检查后台暂不可用', { status: 503 })));
+  api.get('/conversation-logs/history-repair', (_req, res) => res.json(conversationRepair.status()));
+  api.post('/conversation-logs/history-repair', csrf, conversationCleanupLimiter, (req, res) => res.status(202).json(conversationRepair.request(req.body)));
+  api.post('/conversation-logs/history-repair/:id/cancel', csrf, conversationCleanupLimiter, (req, res) => res.json(conversationRepair.cancel(req.params.id)));
   api.use('/conversation-logs/push', (_req, _res, next) => conversationPush ? next() : next(new AppError('CONVERSATION_PUSH_UNAVAILABLE', '日志推送暂不可用', { status: 503 })));
   const pushLimiter = rateLimit({ windowMs: 60000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false });
   api.get('/conversation-logs/push/policy', (_req, res) => res.json(conversationPush.policy()));

@@ -55,6 +55,10 @@
 .cl-model-cleanup { max-width: 940px; }
 .cl-cleanup-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0; }
 .cl-cleanup-actions .button { min-height: 36px; white-space: normal; text-align: left; }
+.cl-history-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 20px; padding-bottom: 12px; }
+.cl-history-actions > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.cl-history-actions .button { min-height: 36px; }
+.cl-history-actions p { margin: 0; }
 .cl-model-list textarea { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; resize: vertical; min-height: 100px; padding: 9px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--surface); font: 12px/1.7 ui-monospace, Consolas, monospace; }
 .clp-section { border-top: 1px solid var(--line); padding-block: 6px 24px; min-width: 0; }
 #cl-push .cl-policy-form { max-width: none; }

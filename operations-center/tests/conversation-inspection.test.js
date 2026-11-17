@@ -143,7 +143,7 @@ test('old schema and failed URL/signature history migrate without rewriting orig
   assert.deepEqual(f.store.detail(link.id).inspection_warnings,[]);
   const linkDone=f.store.retry(link.id,expected(f,link.id));assert(!linkDone.original);assert(linkDone.masked);assert.equal(linkDone.processing_error,'');assert.deepEqual(linkDone.inspection_warnings,[]);
   const sigDone=f.store.retry(sig.id,expected(f,sig.id));assert(sigDone.original&&sigDone.masked);assert.equal(sigDone.processing_error,'');assert.deepEqual(sigDone.inspection_warnings,['OPAQUE_SIGNATURE']);
-  assert.equal(f.store.payload(sig.id,'original','request').text,signed());assert.equal(sigDone.redaction_version,3);
+  assert.equal(f.store.payload(sig.id,'original','request').text,signed());assert.equal(sigDone.redaction_version,4);
 });
 
 test('masked push previews, automatic queues and existing JSONL members reject uninspected signatures', async t => {

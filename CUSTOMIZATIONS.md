@@ -1,5 +1,53 @@
 # 个性化功能维护台账
 
+## 2026-11-17：提交对话日志兼容修复与一键清空历史
+
+用户授权提交 GitHub。本次仅选择运营中心的内存预算 / 加密推理 / 工具文件编号兼容、独立完成证据、后台历史检查与一键清空历史，以及配套界面、测试、二次只读诊断报告和维护文档。沿用 extra 的 main 与现有 Docker images 自动测试 / 双架构构建发布流程；不修改主站代码，不连接或部署服务器，不清空 / 重处理生产历史，不发送真实外部推送。域名、备份、独立演示、图标及其他维护章节保持本地原状。
+
+提交前将实际暂存的 36 个相关文件完整导出到独立目录验证：运营中心完整 **535 项测试全部通过，0 失败 / 跳过**（约 167.2 秒），`npm run check` 通过，差异空白检查通过。新清空 / 原模型清理 / 兼容检查页面的桌面、手机、320px 与深色偏好验证记录保留在对应功能章节；不把本地并发验证当作生产零开销证明。提交与镜像发布结果完成后补记。
+
+## 2026-11-17：对话日志一键后台清空全部历史
+
+用户要求增加清空全部已采集历史的按钮，优先不影响中转站用户。本轮只改运营中心；不修改 sub2api / 计费 / 用量 / 余额，不连接或部署生产，不实际删除服务器日志，保留其他所有独立改动和前轮兼容修复。
+
+- `operations-center/src/conversation-cleanup-store.js`：既有清理任务表加法迁移 scope / 到达边界，新增明确确认 + UUID 幂等的全历史请求，与模型清理互斥；不依赖名单、保存开关或页面筛选。复用原推送到达序号 / 触发器，固定 rowid 和单调序号边界，无需复制全库或回填旧记录，避免并发删除最高旧行后 rowid 复用误删新日志；分批删除原文 / 脱敏 / 索引及本地推送引用，保留策略 / key / 外部副本和聚合操作审计。
+- `src/services/conversation-cleanup-service.js`、`conversation-cleanup-worker.js`、`src/server.js`：复用独立低优先级 96 MiB old-space 进程，改为父进程逐批派发，避让正在归档，每 250ms 最多删一条；短写锁、忙时退避、单批期限、故障续办、闲时退出及可停止。管理创建 / 停止写锁等待也降至 1ms，未获锁不阻塞管理主线程等待 5 秒。保留原安全设置，不解密正文、不 VACUUM / 强制 checkpoint。
+- `src/app.js`：管理员 / CSRF / 限流保护的 history-clear 状态 / 创建 / 停止 API，复用清理服务及推送失效通知；不能用采集令牌调用。
+- `public/conversation-clear-ui.js`（新增）、`conversation-logs-ui.js`、`conversation-logs.css`、`index.html`：各日志视图顶部增加一键清空、明确范围确认、进度 / 停止 / 刷新恢复及错误，保留相同请求标识重试，清理后刷新列表和详情；模型清理互斥提示，更新静态版本。新归档与外部副本保留。
+- `tests/conversation-clear.test.js`、`scripts/conversation-clear-browser-check.cjs`（新增）、`scripts/conversation-logs-live-preview.cjs`、`package.json`：全范围 / 空库 / 策略 / 新增 / rowid 复用 / 同时刻 / 幂等 / 迁移 / 停止续办 / 互斥 / 本地推送引用 / 写锁 / 权限 / 真实独立进程并发归档回归及桌面 / 手机页面流程；预览接入正式避让逻辑，新文件纳入语法与完整测试门禁，无新增依赖。
+- `operations-center/README.md`、`docs/conversation-logs.md`：登记按钮、全用户 / 全模型范围、入库边界、API、不可恢复 / 外部副本、空间复用和共享资源成本。
+
+验证：运营中心完整 **533 项测试通过，0 失败 / 跳过**（约 161.4 秒）；随后补齐扫描上限与共卷新记录边界，最终清空 / 模型清理 / 历史检查相关 **30 项测试全部通过**，含 11 项清空专项。`npm run check` 通过，最终新增界面 / 浏览器脚本语法和相关差异空白检查通过。新清空与原模型清理页面均在 1440 / 390 / 320px / 深色偏好四组正式页面流程通过，覆盖确认取消、状态读取中断恢复、跨视图 / 筛选、停止、新增归档保留和刷新；截图 `sub2api-clear-browser-DP9DtO` / `sub2api-cleanup-browser-heN73Y`，已视觉复核桌面完成与 320px 运行布局。
+
+最新独立虚构数据预览 `http://127.0.0.1:19938/preview` 已启动（PID 45176），仅监听 loopback，健康正常、41 条示例记录、无清空任务，保留其他已有预览。未提交 / 推送 / 部署，未连接生产或清理生产历史；后台共享 CPU / IO 的成本不能保证绝对为零。
+
+## 2026-11-17：仅运营中心兼容日志预算、加密推理与历史检查
+
+用户要求只在运营中心优化二次排查发现的部分采集和处理异常。本轮只改 extra 的运营中心，不修改主站采集器 / 推理 / 计费链路，不连接、部署或重启生产，不自动重写生产历史、不调用真实模型或外部推送；保留所有域名、备份、图标、演示等其他独立改动。
+
+- `operations-center/src/services/conversation-memory.js`（新增）、`conversation-archive-worker.js`、`conversation-push-worker.js`：共用 cgroup v1 / v2 / 宿主 MemAvailable 预算，保守折算一半干净 inactive file cache，扣除共享、dirty / writeback，不承认匿名内存；保留 32 MiB 余量、V8 堆和 override / 单任务保护，统计缺失不提高预算。
+- `services/conversation-sensitive.js`、`conversation-redaction.js`：引擎 v4 仅在确切 Responses 请求 / JSON / SSE / WS 位置保留 reasoning.encrypted_content 字节，单列 `OPAQUE_ENCRYPTED_REASONING`，保护真实 reasoning 的 ID / 类型 / 状态与 summary 类型，保持 item_id 关联；普通业务对象不豁免。已确认工具数据中的业务 file_id 按标识一致替换，向合法内嵌 JSON / 参数分片传递上下文，实际文件 / 媒体 / 未识别字段继续保护。保留签名与自定义规则冲突门禁，区分瞬时 `REDACTION_MEMORY_PRESSURE` 与固定 `REDACTION_VALUE_LIMIT`，不删除资源上限或截断原文。
+- `services/conversation-completion.js`（新增）、`src/conversation-log-store.js`：加法迁移独立应用完成状态 / 证据 / 来源 / 版本和入库时间，不启动解密全库；严格解析 JSON / 完整 SSE / 所有 WS 入站帧，区分完成 / 失败 / incomplete / 未核验，拒绝伪造文字、未结束事件与后续异常；最多解码 8 MiB 且受动态预算保护。原 `complete` / `reason` / 摘要和默认外推条件不改。重处理和分析在写锁外进行，锁内只读取校验元数据；分析前与提交前检查容量 / 预留，空间不足不更新旧记录。仅剩脱敏副本可单独分析并注明来源，不宣称原文已验证。
+- `src/conversation-repair-store.js`、`services/conversation-repair-service.js`、`conversation-repair-worker.js`（新增）、`src/app.js`、`src/server.js`：管理员显式启动的持久后台历史任务，固定 rowid / 入库时间边界，跳过排除用户 / 名单外模型 / 过期和无正文；低优先级按需子进程、256 MiB old / 8 MiB semi，最多每秒一条正文、跳过间隔 250ms，避让正在归档和模型清理。短写锁 1ms、忙时退避、空间 / 内存暂缓、20 秒期限与最多 3 次中断尝试，5 秒故障续办；结果与游标计数同事务，策略变化暂停，停止阻止当前未提交结果落库。只释放加密旧 BLOB 页供复用，不主动全库压缩或强制 checkpoint；任务仍共享宿主资源。
+- `public/conversation-repair-ui.js`（新增）、`conversation-logs-ui.js`、`public/index.html`：采集状态增加历史兼容检查、进度 / 停止 / 刷新恢复；分开展示上游已完成和传输采集异常、脱敏副本来源、签名 / 加密推理检查范围，不把处理成功等同全部匿名化。现有单条重处理继续可用，更新静态脚本版本。
+- `tests/conversation-compatibility.test.js`、`conversation-repair.test.js`、`conversation-repair-races.test.js`（新增）、`tests/conversation-inspection.test.js`、`conversation-privacy.test.js`：覆盖缓存 / dirty / anon / v1 / v2 / 真实低预算、协议确切路径和伪装负例、业务标识 / 实际文件、原字节与推送门禁、完成事件 / 坏尾部 / 多段 WS / 安全分类、加法迁移、历史单副本 / 排除 / 容量 / 取消 / 策略 / 锁竞争 / rowid 复用及独立进程崩溃恢复与并发归档。
+- `scripts/conversation-repair-browser-check.cjs`（新增）、`conversation-logs-live-preview.cjs`、`conversation-logs-live-browser-check.cjs`、`package.json`：新历史界面四尺寸流程、加密推理 / 传输证据 / 业务标识 / 停止 / 后台完成 / 重载 / 策略暂停，沿用正式页面和真实后台服务；独立 CLI 预览增加虚构兼容与旧异常样例，修正 WS 完成示例。新文件进入 npm 语法和完整测试门禁，保留原预览；无新增依赖。
+- `operations-center/README.md`、`docs/conversation-logs.md`、`docs/conversation-integrity-privacy.md`：登记 v4 范围、历史入口 / API / 资源与停止恢复边界、原始采集和应用完成的区别，以及缺失字节和真实不可检查内容不可凭空恢复。
+
+最终验证：运营中心完整 **524 项测试全部通过，0 失败 / 跳过**（约 110.1 秒），包括最终 reasoning 关联字段与分析空间竞争回归；`npm run check` 通过。最终协议保护还单独通过全部 **131 项**对话专项。原归档页面和新兼容检查页面各在 1440 / 390 / 320px / 深色偏好四组流程通过，截图分别为 `sub2api-conversation-browser-kCx25T` / `sub2api-repair-browser-rXmcuR`，桌面历史检查和 320px 加密推理布局已复核。相关差异空白检查通过，新增文件未发现行尾空白。仅有 Git 的 Windows 换行提示，无新增生产依赖。
+
+最终虚构数据预览 `http://127.0.0.1:19937/preview` 已启动，仅监听 loopback / 独立临时 SQLite，含 41 条虚构记录和 1 条可重处理旧异常示例；健康和管理 API 正常，引擎为 4，历史检查尚未启动，保留其他已有预览。未连接生产、未提交 / 推送 / 部署，生产历史不会因本轮本地实现而变化；真实缺失字节无法补回，无法检查内容继续明确警告，后台共享资源不能承诺绝对零性能影响。
+
+## 2026-11-17：二次只读排查对话日志部分采集与处理异常
+
+用户要求分析服务器数据并评估兼容方案。本轮只读核对实际二进制、运营中心引擎、元数据及固定最新 120 条样本，在服务器内存中诊断重放；不改生产设置、不部署 / 重启、不删除或重处理原记录，不调用真实推送或模型。后期使用同版镜像的临时只读隔离进程，网络关闭，限制 CPU / 内存 / 运行时间，退出即清除；正文与密钥未导出。保留其他独立改动。
+
+- `operations-center/docs/conversation-diagnostics-20261117-followup.md`（新增）：记录 15:18 的 6,261 条元数据快照及 14:18 至 15:08 固定样本。120 条中 39 条 read_error 均有完整 response.completed 和有效 SSE 事件；10 条资源异常重放时 8 条成功、2 条暴露加密推理兼容缺口；5 条内容异常分别为 4 条确切协议 reasoning.encrypted_content、1 条嵌套工具 JSON 数字 file_id。10 条签名检查范围警告独立于处理异常。
+- 核对运营中心 512 MiB / 1 CPU 限额：无诊断 Node 时约 478 MiB 使用中，含约 340 MiB 文件缓存 / 330 MiB inactive_file，匿名内存约 127 MiB。当前资源预算将可回收缓存直接算入余量，可能给出 0 或数百 KiB 处理预算；OOM 计数为 0。历史没有瞬时预算，报告明确限制推断范围。
+- 建议优先在运营中心修正资源预算 / 分类 / 限速重试、兼容确切协议加密推理与工具文件标识、拆分业务完成和传输状态，保留原完整性与默认推送隐私门禁。历史版本 1 的 12 条 body_limit / 13 条 memory_limit 及无正文旧记录无法补回；精确传输原因才需要采集器增加轻量错误侧和枚举。
+
+最终主站和运营中心均 healthy，启动时间保持，无诊断容器或进程残留，未改正式源码、配置或测试，未提交 / 推送 / 部署。主站实际 0.2.22002301 / 8a5888d66daf4148e7f92f63df4b7809cb21e8d2，运营中心 e8e0e95aea9beec616ac6452545177d42055e19d / 脱敏引擎 3；本地对照 capture.go 与该主站提交的 blob 一致。仅新增本报告及维护记录，相关差异空白检查通过，新文件仅有 Windows 换行提示；不重复执行无关全量测试。
+
 ## 2026-11-17：活动奖励兼容原主站并撤回配套改动
 
 用户确认仅在活动中心实现奖励入账，并还原不必要的主站改动。新奖励改为原固定码接口的普通 `balance`，使用 31 位随机固定码及含“补贴”的完整活动备注，两个中心复用既有补贴排除，不修改运营统计正式逻辑。概率、管理员门槛审计、活动起点、原始奖项与已用次数保留；退款抵扣规则不变。仅本地实现 / 隔离验证及相关 GitHub 提交，不部署或操作生产资金。

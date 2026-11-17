@@ -2,10 +2,12 @@
 
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
-const { REDACTION_VERSION, fieldKind, protocolField, assertInspectable, replacePatterns } = require('./conversation-sensitive');
+const { REDACTION_VERSION, fieldKind, protocolField, assertInspectable, replacePatterns, toolDataContext } = require('./conversation-sensitive');
 
 const emailLocal = /[A-Z0-9.!#$%&'*+/=?^_`{|}~-]/i;
 const emailDomain = /[A-Z0-9](?:[A-Z0-9.-]*[A-Z0-9])?\.[A-Z]{2,}/iy;
+
+function resourceLimit(code) { const error = new Error('REDACTION_RESOURCE_LIMIT'); error.code = code; return error; }
 
 function replaceEmails(text, replace) {
   const parts = []; let cursor = 0, search = 0;
@@ -30,13 +32,18 @@ function replaceEmails(text, replace) {
 function decodeBody(buffer, encoding = '', maxOutputBytes = 256 * 1024 * 1024) {
   // Processing memory protection never changes the stored original bytes.
   if (!buffer.length && !encoding) return '';
-  if (maxOutputBytes < 1 || buffer.length > maxOutputBytes) throw new Error('REDACTION_RESOURCE_LIMIT');
+  if (maxOutputBytes < 1 || buffer.length > maxOutputBytes) throw resourceLimit(maxOutputBytes < 256 * 1024 ** 2 ? 'REDACTION_MEMORY_PRESSURE' : 'REDACTION_RESOURCE_LIMIT');
   const options = { maxOutputLength: maxOutputBytes };
-  if (encoding === 'gzip') buffer = zlib.gunzipSync(buffer, options);
-  else if (encoding === 'br') buffer = zlib.brotliDecompressSync(buffer, options);
-  else if (encoding === 'deflate') buffer = zlib.inflateSync(buffer, options);
-  else if (encoding === 'zstd' && zlib.zstdDecompressSync) buffer = zlib.zstdDecompressSync(buffer, options);
-  else if (encoding && encoding !== 'identity') throw new Error('UNSUPPORTED_ENCODING');
+  try {
+    if (encoding === 'gzip') buffer = zlib.gunzipSync(buffer, options);
+    else if (encoding === 'br') buffer = zlib.brotliDecompressSync(buffer, options);
+    else if (encoding === 'deflate') buffer = zlib.inflateSync(buffer, options);
+    else if (encoding === 'zstd' && zlib.zstdDecompressSync) buffer = zlib.zstdDecompressSync(buffer, options);
+    else if (encoding && encoding !== 'identity') throw new Error('UNSUPPORTED_ENCODING');
+  } catch (error) {
+    if (error.code === 'ERR_BUFFER_TOO_LARGE') throw resourceLimit(maxOutputBytes < 256 * 1024 ** 2 ? 'REDACTION_MEMORY_PRESSURE' : 'REDACTION_RESOURCE_LIMIT');
+    throw error;
+  }
   return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
 }
 
@@ -210,37 +217,38 @@ function createRedactor(policy, salt) {
     flush();
     return result;
   }
-  function nested(value, depth) {
+  function nested(value, depth, toolData = false) {
     if (/^[\s]*[\[{]/.test(value)) {
       try { JSON.parse(value); } catch { return replace(value); }
-      return redactDocuments([value], depth + 1)[0];
+      return redactDocuments([value], depth + 1, toolData)[0];
     }
     return replace(value);
   }
-  function learn(texts, depth) {
+  function learn(texts, depth, toolData = false) {
     if (depth > 8) throw new Error('NESTED_ARGUMENTS_TOO_DEEP');
     for (const text of texts) for (const document of documents(text)) {
       if (!document.json) continue;
       const parsed = JSON.parse(document.text);
       for (const token of tokens(document.text)) {
-        const warning = assertInspectable(token, parsed, depth);
+        const context = toolData || !token.numeric && (/^[\s]*[\[{]/.test(token.value) || ['delta','arguments','partial_json'].includes(token.field)) && toolDataContext(token, parsed);
+        const warning = assertInspectable(token, parsed, depth, context);
         if (warning) { warnings.add(warning); continue; }
         if (protocolField(token, parsed, depth)) continue;
         const kind = kindFor(token);
         if (kind && ['personal','identity','financial','secret','device'].includes(kind) && token.value.length >= (kind === 'personal' ? 2 : 4) && token.value.length <= 4096) {
-          if (known.size >= 256 && !known.has(token.value)) throw new Error('REDACTION_RESOURCE_LIMIT');
+          if (known.size >= 256 && !known.has(token.value)) throw resourceLimit('REDACTION_VALUE_LIMIT');
           if (!known.has(token.value)) known.set(token.value, kind);
         }
         if (!token.numeric && /^[\s]*[\[{]/.test(token.value)) {
           try { JSON.parse(token.value); } catch { continue; }
-          learn([token.value], depth + 1);
+          learn([token.value], depth + 1, context);
         }
       }
     }
   }
-  function redactDocuments(texts, depth = 0) {
+  function redactDocuments(texts, depth = 0, toolData = false) {
     if (depth > 8) throw new Error('NESTED_ARGUMENTS_TOO_DEEP');
-    learn(texts, depth);
+    learn(texts, depth, toolData);
     const edits = texts.map(() => []), deltas = new Map();
     for (let file = 0; file < texts.length; file++) for (const document of documents(texts[file])) {
       if (!document.json) {
@@ -256,8 +264,9 @@ function createRedactor(policy, salt) {
         const segment = document.segments?.find(part => token.start >= part.start && token.end <= part.end);
         if (document.segments && !segment) throw new Error('UNSAFE_SSE_REPLACEMENT');
         const base = segment ? segment.raw - segment.start : document.start;
-        const entry = { ...token, start: base + token.start, end: base + token.end, file };
-        const warning = assertInspectable(token, parsed, depth);
+        const context = toolData || !token.numeric && (/^[\s]*[\[{]/.test(token.value) || ['delta','arguments','partial_json'].includes(token.field)) && toolDataContext(token, parsed);
+        const entry = { ...token, start: base + token.start, end: base + token.end, file, toolData: context };
+        const warning = assertInspectable(token, parsed, depth, context);
         if (warning || protocolField(token, parsed, depth)) {
           if (warning) warnings.add(warning);
           // Numeric IDs are often mistaken for phone numbers. Protocol identities stay exact.
@@ -272,7 +281,7 @@ function createRedactor(policy, salt) {
         let value;
         const kind = kindFor(token);
         if (kind && token.value) value = placeholder(kind, token.value);
-        else if (!token.numeric && /^[\s]*[\[{]/.test(token.value)) value = nested(token.value, depth);
+        else if (!token.numeric && /^[\s]*[\[{]/.test(token.value)) value = nested(token.value, depth, context);
         else value = token.numeric ? replacePatterns(token.value, { identity: policy.identity, financial: policy.financial }, placeholder) : replace(token.value);
         if (value !== token.value) edits[file].push({ ...entry, value });
       }
@@ -280,7 +289,7 @@ function createRedactor(policy, salt) {
     // Mask across SSE/WS text-delta boundaries while retaining every event and its structural fields.
     for (const { entries, json } of deltas.values()) {
       const joined = entries.map(entry => entry.value).join('');
-      const masked = json ? nested(joined, depth) : replace(joined);
+      const masked = json ? nested(joined, depth, entries.every(entry => entry.toolData)) : replace(joined);
       if (masked !== joined) {
         let common = 0;
         while (common < joined.length && common < masked.length && joined[common] === masked[common]) common++;

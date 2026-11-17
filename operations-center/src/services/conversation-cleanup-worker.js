@@ -5,8 +5,8 @@ const { ConversationCleanupStore } = require('../conversation-cleanup-store');
 
 process.once('message', settings => {
   if (settings?.type !== 'initialize') return process.exit(1);
-  let archive, timer, stopped = false;
-  const stop = () => { if (stopped) return; stopped = true; clearTimeout(timer); archive?.close(); process.exit(0); };
+  let archive, stopped = false;
+  const stop = () => { if (stopped) return; stopped = true; archive?.close(); process.exit(0); };
   try {
     archive = new ConversationLogStore(settings.directory, { timezone: settings.timezone }).initialize();
     archive.db.pragma('foreign_keys = ON');
@@ -16,20 +16,17 @@ process.once('message', settings => {
     // Body values are already AES-GCM ciphertext. Avoid overwriting multi-MiB freed BLOBs under a write lock.
     archive.db.pragma('secure_delete = OFF');
     const cleanup = new ConversationCleanupStore(archive).initialize();
-    const tick = () => {
-      if (stopped) return;
-      let busy = false;
+    process.on('message', message => {
+      if (message?.type === 'stop') return stop();
+      if (message?.type !== 'step' || stopped) return;
       try {
-        cleanup.step();
-        if (!cleanup.pending()) return stop();
+        process.send?.({ type: 'idle', ...cleanup.step() });
       } catch (error) {
-        busy = /^SQLITE_(?:BUSY|LOCKED)/.test(error.code || '');
-        if (!busy) { process.send?.({ type: 'failure', code: 'CLEANUP_STORAGE_UNAVAILABLE' }); return process.exit(1); }
+        if (/^SQLITE_(?:BUSY|LOCKED)/.test(error.code || '')) process.send?.({ type: 'idle', busy: true });
+        else { process.send?.({ type: 'failure', code: 'CLEANUP_STORAGE_UNAVAILABLE' }); process.exit(1); }
       }
-      timer = setTimeout(tick, busy ? 1000 : 250);
-    };
-    process.on('message', message => { if (message?.type === 'stop') stop(); });
+    });
     process.once('disconnect', stop); process.once('SIGTERM', stop);
-    process.send?.({ type: 'ready' }); tick();
+    process.send?.({ type: 'ready' });
   } catch { archive?.close(); process.exit(1); }
 });

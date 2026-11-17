@@ -52,7 +52,7 @@ async function main() {
         await page.locator('[data-cl-action=reset-filter]').click(); await page.locator('[data-cl-record]').first().waitFor();
         const csvEvent = page.waitForEvent('download'); await page.locator('[data-cl-action=export]').click(); const csv = await csvEvent;
         assert(fs.readFileSync(await csv.path(),'utf8').includes('request_id'));
-        await page.locator('#cl-tab-collection').click(); await page.locator('#cl-collection h2').waitFor(); await layout();
+        await page.locator('#cl-tab-collection').click(); await page.locator('#cl-collection h2').first().waitFor(); await layout();
         await page.locator('#cl-tab-policy').click(); await page.locator('#cl-policy-form').waitFor();
         assert.equal(await page.locator('[name=limit]').count(),0);
         for (const field of ['identity','financial','personal','device']) assert(await page.locator(`#cl-policy-form input[name=${field}]`).isChecked());

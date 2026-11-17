@@ -10,6 +10,7 @@ const { AppError } = require('./errors');
 const { decodeBody, maskPayload } = require('./services/conversation-redaction');
 const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversation-sensitive');
 const { recommendedModels, normalizeModel, modelAllowed } = require('./services/conversation-models');
+const { inspectCompletion } = require('./services/conversation-completion');
 
 const userId = z.number().int().positive().safe();
 const policySchema = z.object({
@@ -59,6 +60,7 @@ function bodyDigest(raw) {
   return hash.digest('hex');
 }
 function processingError(error) {
+  if (['REDACTION_MEMORY_PRESSURE','REDACTION_VALUE_LIMIT'].includes(error.code)) return error.code;
   const allowed = ['INVALID_JSON', 'PROTECTED_FIELD_MATCH', 'UNSUPPORTED_ENCODING', 'UNSAFE_SSE_REPLACEMENT',
     'DOCUMENT_TOO_DEEP', 'NESTED_ARGUMENTS_TOO_DEEP', 'BINARY_MESSAGE_REQUIRES_ORIGINAL_MODE', 'UNINSPECTABLE_CONTENT', 'REDACTION_RESOURCE_LIMIT', 'INCOMPLETE_PRIVATE_KEY'];
   if (allowed.includes(error.message)) return error.message;
@@ -99,7 +101,8 @@ class ConversationLogStore {
       const columns = new Set(this.db.pragma('table_info(cl_records)').map(column => column.name));
       for (const [name, definition] of [['processing_error', "TEXT NOT NULL DEFAULT ''"], ['processing_policy_version', 'INTEGER NOT NULL DEFAULT 0'], ['processed_at', 'INTEGER NOT NULL DEFAULT 0'],
         ['redaction_version','INTEGER NOT NULL DEFAULT 0'], ['redaction_policy_hash',"TEXT NOT NULL DEFAULT ''"], ['capture_version','INTEGER NOT NULL DEFAULT 1'], ['body_sha256',"TEXT NOT NULL DEFAULT ''"],
-        ['inspection_warnings',"TEXT NOT NULL DEFAULT '[]'"]]) {
+        ['inspection_warnings',"TEXT NOT NULL DEFAULT '[]'"], ['upstream_status',"TEXT NOT NULL DEFAULT 'unknown'"],
+        ['upstream_evidence',"TEXT NOT NULL DEFAULT ''"], ['completion_version','INTEGER NOT NULL DEFAULT 0'], ['completion_source',"TEXT NOT NULL DEFAULT ''"], ['archived_at','INTEGER NOT NULL DEFAULT 0']]) {
         if (!columns.has(name)) this.db.exec(`ALTER TABLE cl_records ADD COLUMN ${name} ${definition}`);
       }
     })();
@@ -167,9 +170,10 @@ class ConversationLogStore {
     const canFit = bytes => this.usedBytes() + bytes < current.capacity * 1024 ** 3 && this.freeBytes() - bytes >= current.reserve * 1024 ** 3;
     if (!canFit(rawBytes * (policy.mode === 'dual' ? 3 : 1.5) + 4096)) { this.lastError = 'capacity'; return { accepted: false, reason: 'capacity' }; }
     let original = null, masked = null, hits = [], warnings = [], reason = event.reason, processing_error = '';
+    const limits = this.processingLimits(), completion = inspectCompletion(raw, event, limits);
     if (rawBytes || !['body_limit', 'memory_limit'].includes(reason)) {
       try {
-        if (policy.mode !== 'original') { const result = maskPayload(raw, policy, this.key, event.encoding, this.processingLimits()); masked = this.seal(pack(result.payload), event.id + ':masked'); hits = result.hits; warnings = result.warnings; }
+        if (policy.mode !== 'original') { const result = maskPayload(raw, policy, this.key, event.encoding, limits); masked = this.seal(pack(result.payload), event.id + ':masked'); hits = result.hits; warnings = result.warnings; }
         if (policy.mode !== 'masked' || warnings.length) original = this.seal(pack(raw), event.id + ':original');
       } catch (error) {
         // Explicit operator policy: failed processing retains the exact encrypted source, even in masked mode.
@@ -190,10 +194,10 @@ class ConversationLogStore {
       }
       this.db.prepare(`INSERT INTO cl_records(id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,
       host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,original,masked,hits,bytes,fingerprint,
-      processing_error,processing_policy_version,processed_at,redaction_version,redaction_policy_hash,capture_version,body_sha256,inspection_warnings) VALUES(@id,@request_id,@user_id,@key_id,@account_id,@session_id,@at,@duration_ms,
+      processing_error,processing_policy_version,processed_at,redaction_version,redaction_policy_hash,capture_version,body_sha256,inspection_warnings,upstream_status,upstream_evidence,completion_version,completion_source,archived_at) VALUES(@id,@request_id,@user_id,@key_id,@account_id,@session_id,@at,@duration_ms,
       @host,@path,@method,@protocol,@model,@status,@complete,@reason,@policy_version,@mode,@encoding,@original,@masked,@hits,@bytes,@fingerprint,
-      @processing_error,@processing_policy_version,@processed_at,@redaction_version,@redaction_policy_hash,@capture_version,@body_sha256,@inspection_warnings)`)
-      .run({ ...metadata, complete: event.complete && !reason ? 1 : 0, reason, mode: policy.mode, original, masked, hits: JSON.stringify(hits), bytes: storedBytes, fingerprint,
+      @processing_error,@processing_policy_version,@processed_at,@redaction_version,@redaction_policy_hash,@capture_version,@body_sha256,@inspection_warnings,@upstream_status,@upstream_evidence,@completion_version,@completion_source,@archived_at)`)
+      .run({ ...metadata, ...completion, completion_source: 'original', archived_at: this.now(), complete: event.complete && !reason ? 1 : 0, reason, mode: policy.mode, original, masked, hits: JSON.stringify(hits), bytes: storedBytes, fingerprint,
         body_sha256: digest, redaction_version: masked ? REDACTION_VERSION : 0, redaction_policy_hash: masked ? redactionPolicyHash(policy) : '',
         inspection_warnings: JSON.stringify(warnings), processing_error, processing_policy_version: policy.mode === 'original' ? 0 : policy.version, processed_at: this.now() });
       this.lastError = null; return ack;
@@ -203,9 +207,10 @@ class ConversationLogStore {
       this.lastError = 'storage_failed'; return { accepted: false, reason: 'storage_failed' };
     }
   }
-  retry(id, input) {
+  retry(id, input, { beforeCommit = () => {}, afterCommit = () => {}, detail = true } = {}) {
     const expected = parse(z.object({ policy_version: z.number().int().positive(), processed_at: z.number().int().nonnegative().safe() }).strict(), input);
-    const policy = this.policy(), row = this.db.prepare('SELECT * FROM cl_records WHERE id=?').get(id);
+    const fields = 'user_id,model,mode,protocol,status,encoding,processed_at,processing_error,redaction_version,redaction_policy_hash,inspection_warnings,hits';
+    const policy = this.policy(), row = this.db.prepare(`SELECT ${fields},original FROM cl_records WHERE id=?`).get(id);
     const validate = (policy, row) => {
       if (!row) throw invalid('CONVERSATION_NOT_FOUND', 404);
       if (policy.excludedUserIds.includes(row.user_id)) throw new AppError('CONVERSATION_USER_EXCLUDED', '该用户已排除，不能重新处理', { status: 409 });
@@ -214,16 +219,23 @@ class ConversationLogStore {
       if (!this.publicRow(row).retry_available) throw new AppError('CONVERSATION_RETRY_UNAVAILABLE', '没有待处理的原文；历史缺失正文无法恢复', { status: 409 });
     };
     validate(policy, row);
-    let result, errorCode = '';
-    try { result = maskPayload(unpack(this.open(row.original, id + ':original')), policy, this.key, row.encoding, this.processingLimits()); }
+    let result, errorCode = '', completion;
+    try {
+      const raw = unpack(this.open(row.original, id + ':original')), limits = this.processingLimits();
+      completion = inspectCompletion(raw, row, limits);
+      result = maskPayload(raw, policy, this.key, row.encoding, limits);
+    }
     catch (error) { errorCode = processingError(error); }
     const masked = result ? this.seal(pack(result.payload), id + ':masked') : null;
     this.db.transaction(() => {
-      validate(this.policy(), this.db.prepare('SELECT * FROM cl_records WHERE id=?').get(id));
+      validate(this.policy(), this.db.prepare(`SELECT ${fields},original IS NOT NULL original FROM cl_records WHERE id=?`).get(id));
+      beforeCommit();
+      if (completion) this.db.prepare("UPDATE cl_records SET upstream_status=@upstream_status,upstream_evidence=@upstream_evidence,completion_version=@completion_version,completion_source='original' WHERE id=@id").run({ id, ...completion });
       const processedAt = Math.max(this.now(), row.processed_at + 1);
       if (errorCode) {
         this.db.prepare('UPDATE cl_records SET processing_error=?,processing_policy_version=?,processed_at=? WHERE id=?')
           .run(errorCode, policy.version, processedAt, id);
+        afterCommit({ processing_error: errorCode, inspection_warnings: [] });
         return;
       }
       const original = row.mode === 'masked' && !result.warnings.length ? null : row.original;
@@ -233,8 +245,38 @@ class ConversationLogStore {
       }
       this.db.prepare(`UPDATE cl_records SET original=?,masked=?,hits=?,bytes=?,processing_error='',processing_policy_version=?,processed_at=?,redaction_version=?,redaction_policy_hash=?,inspection_warnings=? WHERE id=?`)
         .run(original, masked, JSON.stringify(result.hits), (original?.length || 0) + masked.length + 2048, policy.version, processedAt, REDACTION_VERSION, redactionPolicyHash(policy), JSON.stringify(result.warnings), id);
+      afterCommit({ processing_error: '', inspection_warnings: result.warnings });
     }).immediate();
-    return this.detail(id);
+    return detail ? this.detail(id) : undefined;
+  }
+  analyze(id, expected, { beforeCommit = () => {}, afterCommit = () => {} } = {}) {
+    const policy = this.policy(), row = this.db.prepare(`SELECT user_id,model,bytes,processed_at,protocol,status,encoding,
+      CASE WHEN original IS NOT NULL THEN original ELSE masked END payload,
+      CASE WHEN original IS NOT NULL THEN 'original' WHEN masked IS NOT NULL THEN 'masked' ELSE '' END source FROM cl_records WHERE id=?`).get(id);
+    if (!row || policy.version !== expected.policy_version || row.processed_at !== expected.processed_at || policy.excludedUserIds.includes(row.user_id) || !modelAllowed(policy, row.model)) {
+      throw invalid('CONVERSATION_RETRY_CONFLICT', 409);
+    }
+    const source = row.source;
+    if (!source) return false;
+    const ensureSpace = () => {
+      const bytes = row.bytes + 4096;
+      if (this.usedBytes() + bytes >= policy.capacity * 1024 ** 3 || this.freeBytes() - bytes < policy.reserve * 1024 ** 3) {
+        throw new AppError('CONVERSATION_RETRY_CAPACITY', '空间不足，已保留原记录，请释放空间后重试', { status: 409 });
+      }
+    };
+    ensureSpace();
+    const raw = unpack(this.open(row.payload, id + ':' + source));
+    const completion = inspectCompletion(raw, { ...row, encoding: source === 'masked' ? '' : row.encoding }, this.processingLimits());
+    this.db.transaction(() => {
+      const latest = this.db.prepare('SELECT processed_at FROM cl_records WHERE id=?').get(id);
+      if (this.policy().version !== policy.version || latest?.processed_at !== row.processed_at) throw invalid('CONVERSATION_RETRY_CONFLICT', 409);
+      beforeCommit();
+      ensureSpace();
+      this.db.prepare('UPDATE cl_records SET upstream_status=@upstream_status,upstream_evidence=@upstream_evidence,completion_version=@completion_version,completion_source=@source WHERE id=@id')
+        .run({ ...completion, source, id });
+      afterCommit(completion);
+    }).immediate();
+    return true;
   }
   prune() {
     const removed = this.db.transaction(() => {
@@ -275,7 +317,7 @@ class ConversationLogStore {
     const page = Math.max(1, Math.min(1000000, Number(query.page) || 1)) | 0, pageSize = 20;
     const filter = this.where(query);
     const summary = this.db.prepare(`SELECT COUNT(*) total,COUNT(DISTINCT request_id) requests,COALESCE(SUM(complete),0) complete,COALESCE(SUM(bytes),0) bytes FROM cl_records${filter.sql}`).get(...filter.args);
-    const columns = "id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,original IS NOT NULL original,masked IS NOT NULL masked,hits,bytes,processing_error,processing_policy_version,processed_at,redaction_version,redaction_policy_hash,capture_version,body_sha256,inspection_warnings";
+    const columns = "id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,original IS NOT NULL original,masked IS NOT NULL masked,hits,bytes,processing_error,processing_policy_version,processed_at,redaction_version,redaction_policy_hash,capture_version,body_sha256,inspection_warnings,upstream_status,upstream_evidence,completion_version,completion_source";
     const items = this.db.prepare(`SELECT ${columns} FROM cl_records${filter.sql} ORDER BY at DESC,id LIMIT ? OFFSET ?`).all(...filter.args, pageSize, (page - 1) * pageSize).map(row => this.publicRow(row));
     return { items, summary, page, pageSize, pages: Math.ceil(summary.total / pageSize) };
   }

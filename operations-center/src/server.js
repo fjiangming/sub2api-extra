@@ -42,6 +42,7 @@ const { ConversationArchiveService } = require('./services/conversation-archive-
 const { ConversationPushStore } = require('./conversation-push-store');
 const { ConversationPushSupervisor } = require('./services/conversation-push-supervisor');
 const { ConversationCleanupService } = require('./services/conversation-cleanup-service');
+const { ConversationRepairService } = require('./services/conversation-repair-service');
 
 async function main() {
   const settingsStore = new RuntimeSettingsStore(resolveDataDir());
@@ -60,8 +61,13 @@ async function main() {
   }
   let conversationCleanup = null;
   if (conversations) {
-    try { conversationCleanup = new ConversationCleanupService(conversations); }
+    try { conversationCleanup = new ConversationCleanupService(conversations, { canWork: () => !conversationArchive?.busy }); }
     catch { console.warn('conversation cleanup unavailable: CONVERSATION_CLEANUP_INITIALIZATION_FAILED'); }
+  }
+  let conversationRepair = null;
+  if (conversations) {
+    try { conversationRepair = new ConversationRepairService(conversations,{canWork:() => !conversationArchive?.busy && !conversationCleanup?.child}); }
+    catch { console.warn('conversation repair unavailable: CONVERSATION_REPAIR_INITIALIZATION_FAILED'); }
   }
   const database = createDatabase(config);
   const sub2api = new Sub2ApiClient(config);
@@ -142,7 +148,7 @@ async function main() {
     sub2api
   });
   const app = createApp({
-    config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationPush, conversationCleanup, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
+    config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
   });
   const server = http.createServer(app);
   server.requestTimeout = 120000;
@@ -161,6 +167,7 @@ async function main() {
   domainAccess?.start();
   conversationPush?.start();
   conversationCleanup?.start();
+  conversationRepair?.start();
   console.info(`operations-center listening on http://${config.bindHost}:${config.port}`);
 
   let stopping = false;
@@ -170,6 +177,7 @@ async function main() {
     console.info(`operations-center shutting down (${signal})`);
     scheduler.stop();
     await conversationCleanup?.stop();
+    await conversationRepair?.stop();
     await conversationPush?.stop();
     await conversationArchive?.stop();
     await domainAccess?.stop();

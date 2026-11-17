@@ -1,34 +1,17 @@
 'use strict';
 
 const http = require('node:http');
-const fs = require('node:fs');
-const os = require('node:os');
-const v8 = require('node:v8');
 const crypto = require('node:crypto');
 const express = require('express');
 const { ConversationLogStore } = require('../conversation-log-store');
 const { AppError } = require('../errors');
-
-function availableMemory(override) {
-  if (Number.isSafeInteger(override) && override >= 0) return override;
-  let available = os.freemem();
-  try {
-    const maximum = fs.readFileSync('/sys/fs/cgroup/memory.max', 'utf8').trim();
-    if (maximum !== 'max') available = Math.min(available, Number(maximum) - Number(fs.readFileSync('/sys/fs/cgroup/memory.current', 'utf8')));
-  } catch { /* Older cgroup hosts use the paths below. */ }
-  try {
-    const maximum = Number(fs.readFileSync('/sys/fs/cgroup/memory/memory.limit_in_bytes', 'utf8'));
-    available = Math.min(available, maximum - Number(fs.readFileSync('/sys/fs/cgroup/memory/memory.usage_in_bytes', 'utf8')));
-  } catch { /* Non-Linux hosts use the available host memory. */ }
-  return Math.max(0, available);
-}
+const { processingBudget } = require('./conversation-memory');
 
 process.once('message', async settings => {
   if (settings?.type !== 'initialize' || !settings.secret) return process.exit(1);
   let store, server;
   try {
-    const budget = () => Math.max(0, Math.min(availableMemory(settings.memoryBudgetBytes) - 32 * 1024 ** 2,
-      v8.getHeapStatistics().heap_size_limit - v8.getHeapStatistics().used_heap_size - 32 * 1024 ** 2));
+    const budget = () => processingBudget(settings.memoryBudgetBytes);
     store = new ConversationLogStore(settings.directory, { timezone: settings.timezone,
       processingLimits: () => ({ maxOutputBytes: Math.min(256 * 1024 ** 2, Math.floor(budget() / 8)) }) }).initialize();
     store.start();
