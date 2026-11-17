@@ -15,6 +15,8 @@
 
 最终运营中心完整 **558 项测试全部通过，0 失败 / 跳过**（约 191.5 秒），含新增 13 项读取 / 元数据专项；`npm run check` 通过，随后最终测试文件与浏览器脚本语法及相关差异空白检查通过。原日志与新增取消 / 索引准备两套桌面 1440 / 手机 390 / 窄屏 320px / 深色偏好浏览器流程全部通过，覆盖原文精确下载、完整文本 / 预览、WS / 脱敏 / 重处理、取消误报、新旧请求竞态、真实错误与索引自动刷新。截图 `sub2api-conversation-browser-cOB2DU` / `sub2api-read-browser-x2XBOg`，已视觉复核桌面准备与 320px 详情；没有外部真实流量。独立虚构数据预览 `http://127.0.0.1:19941/preview`（PID 51756）已启动，仅监听 loopback，healthz 正常，保留此前预览。按本节与上一节诊断选择提交，其他独立改动留在本地；发布结果核验后补记。本轮未部署服务器。
 
+发布验收：提交前已核对 24 个暂存文件与验证工作文件一致，维护台账只包含本节及前轮诊断，差异空白检查通过，提交 tree 与核验 tree `176aa9db2277bb89a029af5afcd14d21cf357aec` 一致。源码已推送 main `8af2df4ae55c309ebd7ddd63217eaaca5986a21f`，[Docker images run 44117713957](https://github.com/fjiangming/sub2api-extra/actions/runs/44117713957) 最终 Success，六组测试、16 项 amd64 / arm64 构建及八项发布全部成功。匿名 GHCR 核验 `operations-center-latest` 与 `operations-center-sha-8af2df4` 同指 `sha256:9e410e33c75f3b1c74e4914c389436e61a64b2b891bb3c4c6a44da7c118c3baf`，两架构镜像 revision 均精确对应上述完整源码提交。验收记录以跳过 CI 的纯文档提交补记，保持已核验源码镜像；没有连接或更新服务器，没有操作生产历史，所有独立改动保留本地。
+
 ## 2026-11-17：升级后取消提示与运营中心阻塞只读排查
 
 用户要求排查升级后打开对话日志提示 `signal is aborted without reason`。本轮仅只读连接生产、审查源码与查询计划，并在 loopback 虚构数据页面用 Chromium 复现；不改服务器配置、不部署 / 重启、不建索引或改写日志、不执行历史任务、不调用真实模型或外推，不导出正文 / 图片 / 令牌 / 密钥。保留所有独立改动。
