@@ -18,6 +18,9 @@ const raw = (request = '{}',response = '{}',frames = []) => ({request:Buffer.fro
 const mask = value => maskPayload(value,defaults,Buffer.alloc(32,1));
 const encrypted = 'gAAAAAB_fictional-encrypted-reasoning_12345678901234567890==';
 const reasoning = () => ({type:'reasoning',id:'rs_12345678901234567890',status:'completed',summary:[{type:'summary_text',text:'contact alice@example.com'}],encrypted_content:encrypted});
+const imageUrl = 'data:image/png;base64,aGVsbG8=';
+const imageRequest = (image = imageUrl, model = 'gpt-6.1-sol') => ({model,input:[{role:'user',content:[{type:'input_text',text:'contact alice@example.com'},
+  {type:'input_image',image_url:image,detail:'auto'}]}]});
 const terminal = (type = 'completed', id = 'resp_demo') => ({type:'response.' + type,response:{object:'response',id,status:type,output:[]}});
 const sse = values => values.map(value => 'event: ' + value.type + '\r\ndata: ' + JSON.stringify(value) + '\r\n\r\n').join('');
 const inspect = (response,extra = {},limits) => inspectCompletion(raw('{}',response),{protocol:'SSE',status:200,encoding:'',...extra},limits);
@@ -86,6 +89,118 @@ test('encrypted reasoning exemptions do not pass arbitrary keys, paths, nested t
   for (const from of [reasoning().id,'summary_text']) assert.throws(() => maskPayload(raw(JSON.stringify({model:'gpt-6.1-sol',input:[reasoning()]})),{...defaults,custom:[{from,to:'changed'}]},Buffer.alloc(32,1)),/PROTECTED_FIELD_MATCH/);
 });
 
+test('Responses protocol images preserve every image byte while readable request and streamed response text is masked', () => {
+  const input = JSON.stringify(imageRequest()).replace('"image_url":','"image_url" : ').replace('aGVsbG8=','aGVsbG8\\u003d');
+  const events = [{type:'response.output_text.delta',item_id:'item_demo',delta:'alice@'},
+    {type:'response.output_text.delta',item_id:'item_demo',delta:'example.com'},terminal()];
+  const response = sse(events), result = mask(raw(input,response));
+  assert.deepEqual(result.warnings,['OPAQUE_IMAGE']);
+  assert(result.payload.request.toString().includes('"image_url" : "data:image/png;base64,aGVsbG8\\u003d"'));
+  const parsed = JSON.parse(result.payload.request);assert.equal(parsed.input[0].content[1].image_url,imageUrl);
+  assert.equal(parsed.input[0].content[1].type,'input_image');assert.equal(parsed.input[0].content[1].detail,'auto');
+  assert(!result.payload.request.includes('alice@example.com'));
+  const output = result.payload.response.toString().split('\r\n\r\n').filter(Boolean).map(value => JSON.parse(value.split('\r\n')[1].slice(6)));
+  assert.equal(output.length,events.length);assert.match(output[0].delta + output[1].delta,/^<EMAIL_[A-F0-9]{12}>$/);
+  assert.deepEqual(output[2],events[2]);
+  const longImage = 'data:image/jpeg;base64,' + '1234'.repeat(256 * 1024);
+  const large = mask(raw(JSON.stringify(imageRequest(longImage,'kimi-k3.1-pro'))));
+  assert.deepEqual(large.warnings,['OPAQUE_IMAGE']);assert.equal(JSON.parse(large.payload.request).input[0].content[1].image_url,longImage);
+});
+
+test('known Chat and Claude image paths preserve embedded images and external references without fetching or rewriting them', () => {
+  const reference = 'https://127.0.0.1:1/private.png?token=private-token&email=alice@example.com';
+  for (const part of [{type:'image_url',image_url:{url:imageUrl}}, {type:'image_url',image_url:{url:reference}},
+    {type:'image',source:{type:'base64',media_type:'image/png',data:'aGVsbG8='}},
+    {type:'image',source:{type:'url',url:reference}}]) {
+    const document = {model:'example-model',messages:[{role:'user',content:[{type:'text',text:'alice@example.com'},part]}]};
+    const result = mask(raw(JSON.stringify(document))),parsed = JSON.parse(result.payload.request);
+    assert.deepEqual(result.warnings,['OPAQUE_IMAGE']);assert.deepEqual(parsed.messages[0].content[1],part);
+    assert.match(parsed.messages[0].content[0].text,/^<EMAIL_/);
+  }
+});
+
+test('Responses multimodal function outputs preserve tool images and call association while redacting business data', () => {
+  const source = {model:'gpt-6.1-sol',input:[{type:'function_call_output',call_id:'call_12345678901234567890',output:[
+    {type:'input_text',text:'contact alice@example.com'},{type:'input_image',image_url:imageUrl,detail:'original'}]}]};
+  for (const type of ['function_call_output','custom_tool_call_output']) {
+    source.input[0].type = type;
+    const result = mask(raw(JSON.stringify(source))),parsed = JSON.parse(result.payload.request);
+    assert.deepEqual(result.warnings,['OPAQUE_IMAGE']);assert.equal(parsed.input[0].call_id,source.input[0].call_id);
+    assert.equal(parsed.input[0].type,type);assert.deepEqual(parsed.input[0].output[1],source.input[0].output[1]);
+    assert.match(parsed.input[0].output[0].text,/^contact <EMAIL_/);
+  }
+  for (const message of [{...source.input[0],type:'other'},{...source.input[0],call_id:undefined}]) {
+    assert.throws(() => mask(raw(JSON.stringify({...source,input:[message]}))),/UNINSPECTABLE_CONTENT/);
+  }
+  assert.throws(() => mask(raw(JSON.stringify({model:'example',messages:[{role:'tool',content:JSON.stringify(source)}]}))),/UNINSPECTABLE_CONTENT/);
+});
+
+test('Claude tool-result images preserve content and tool association only at exact native protocol positions', () => {
+  const image = {type:'image',source:{type:'base64',media_type:'image/png',data:'aGVsbG8='}};
+  const tool = {type:'tool_result',tool_use_id:'toolu_12345678901234567890',content:[{type:'text',text:'alice@example.com'},image]};
+  const document = {model:'claude-opus-5-5',messages:[{role:'user',content:[tool]}]};
+  const result = mask(raw(JSON.stringify(document))),parsed = JSON.parse(result.payload.request),output = parsed.messages[0].content[0];
+  assert.deepEqual(result.warnings,['OPAQUE_IMAGE']);assert.equal(output.tool_use_id,tool.tool_use_id);
+  assert.deepEqual(output.content[1],image);assert.match(output.content[0].text,/^<EMAIL_/);
+  for (const invalid of [{...tool,tool_use_id:undefined},{...tool,tool_use_id:123},{...tool,type:'other'}]) {
+    assert.throws(() => mask(raw(JSON.stringify({...document,messages:[{role:'user',content:[invalid]}]}))),/UNINSPECTABLE_CONTENT/);
+  }
+  assert.throws(() => mask(raw(JSON.stringify({...document,messages:[{role:'assistant',content:[tool]}]}))),/UNINSPECTABLE_CONTENT/);
+  assert.throws(() => mask(raw(JSON.stringify({model:'example',messages:[{role:'tool',content:JSON.stringify(document)}]}))),/UNINSPECTABLE_CONTENT/);
+  for (const from of ['aGVsbG8','image/png']) {
+    assert.throws(() => maskPayload(raw(JSON.stringify(document)),{...defaults,custom:[{from,to:'changed'}]},Buffer.alloc(32,1)),/PROTECTED_FIELD_MATCH/);
+  }
+});
+
+test('WebSocket create wrappers support images and retain frames, encrypted reasoning and their independent inspection scopes', () => {
+  for (const document of [{type:'response.create',...imageRequest()},{type:'response.create',response:imageRequest()}]) {
+    const request = document.response || document;request.input.unshift(reasoning());
+    const frames = [{direction:'out',at:0,binary:false,body:Buffer.from(JSON.stringify(document))},
+      {direction:'in',at:1,binary:false,body:Buffer.from(JSON.stringify(terminal()))}];
+    const result = mask(raw('','',frames)),parsed = JSON.parse(result.payload.frames[0].body),input = (parsed.response || parsed).input;
+    assert.deepEqual(result.warnings,['OPAQUE_ENCRYPTED_REASONING','OPAQUE_IMAGE']);
+    assert.equal(input[0].encrypted_content,encrypted);assert.equal(input[1].content[1].image_url,imageUrl);
+    assert.match(input[1].content[0].text,/^contact <EMAIL_/);
+    assert.deepEqual(result.payload.frames.map(({body,...metadata}) => metadata),frames.map(({body,...metadata}) => metadata));
+    assert.deepEqual(result.payload.frames[1].body,frames[1].body);
+  }
+});
+
+test('image compatibility does not allow fake protocol paths, nested tool JSON, unknown media or sensitive opaque siblings', () => {
+  const document = imageRequest();
+  for (const value of [{input:document.input}, {...document,input:[{...document.input[0],role:'tool'}]},
+    {model:'example',input:[{role:'user',content:[{type:'input_file',image_url:imageUrl}]}]},
+    {metadata:document},{model:'example',messages:[{role:'tool',content:JSON.stringify(document)}]},
+    imageRequest('data:text/plain;base64,aGVsbG8='),imageRequest('data:image/png;base64,alice@example.com'),
+    imageRequest('file:///private.png'),imageRequest('blob:private-reference'),
+    {...document,encrypted_data:'private-ciphertext'},
+    {model:'example',messages:[{role:'user',content:[{type:'image',source:{type:'base64',media_type:'application/pdf',data:'aGVsbG8='}}]}]}]) {
+    assert.throws(() => mask(raw(JSON.stringify(value))),/UNINSPECTABLE_CONTENT/);
+  }
+  for (const from of ['aGVsbG8','input_image']) {
+    assert.throws(() => maskPayload(raw(JSON.stringify(document)),{...defaults,custom:[{from,to:'changed'}]},Buffer.alloc(32,1)),/PROTECTED_FIELD_MATCH/);
+  }
+  const unchanged = maskPayload(raw(JSON.stringify(document)),{...defaults,custom:[{from:'aGVsbG8',to:'aGVsbG8'}]},Buffer.alloc(32,1));
+  assert.deepEqual(unchanged.warnings,['OPAQUE_IMAGE']);
+});
+
+test('image history reprocesses explicitly with encrypted originals intact and masked push eligibility still denied', t => {
+  const f = fixture();t.after(() => f.close());const policy = f.store.configure({...f.store.policy(),mode:'masked'});
+  const row = event('image-legacy',{policy_version:policy.version,request:Buffer.from(JSON.stringify(imageRequest())).toString('base64')});
+  assert(f.store.ingest(row).accepted);const saved = f.store.detail(row.id);
+  assert.equal(saved.processing_error,'');assert(saved.original && saved.masked);assert.deepEqual(saved.inspection_warnings,['OPAQUE_IMAGE']);
+  const original = f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(row.id).original;
+  f.store.db.prepare("UPDATE cl_records SET masked=NULL,processing_error='UNINSPECTABLE_CONTENT',redaction_version=0,inspection_warnings='[]' WHERE id=?").run(row.id);
+  assert(!f.store.detail(row.id).masked);assert.equal(f.store.detail(row.id).processing_error,'UNINSPECTABLE_CONTENT');
+  const retried = f.store.retry(row.id,{policy_version:policy.version,processed_at:saved.processed_at});
+  assert.equal(retried.processing_error,'');assert.equal(retried.redaction_version,5);assert(retried.original && retried.masked);
+  assert.deepEqual(retried.inspection_warnings,['OPAQUE_IMAGE']);assert(retried.complete);assert.equal(retried.reason,'');
+  assert.deepEqual(f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(row.id).original,original);
+  assert.equal(f.store.payload(row.id,'original','request').body.toString('base64'),row.request);
+  const push = new ConversationPushStore(f.store).initialize();
+  assert(!push.copyReady(push.metadata(row.id),'masked',policy));assert(push.copyReady(push.metadata(row.id),'original',policy));
+});
+
 test('business file IDs in real tool results and streamed arguments are consistently masked, while actual references stay protected', () => {
   const data = JSON.stringify([{file_id:'123456789',email:'alice@example.com',note:'reference 123456789'}]);
   const value = {model:'example',messages:[{role:'tool',tool_call_id:'call_demo',content:data},{role:'user',content:'reference 123456789'}]};
@@ -134,6 +249,22 @@ test('completion evidence rejects forged strings, malformed SSE, contradictory e
   assert.equal(inspect(sse([terminal('failed'),terminal()])).upstream_evidence,'response.failed');
   const privateStatus = inspect(JSON.stringify({object:'response',status:'private-user-value'}),{protocol:'JSON'});
   assert.equal(privateStatus.upstream_status,'unverified');assert(!JSON.stringify(privateStatus).includes('private-user-value'));
+});
+
+test('completion checks recognize real SSE despite JSON metadata without accepting forged text or truncated events', () => {
+  const response = sse([{type:'response.created',response:{id:'resp_demo',status:'in_progress'}},terminal()]);
+  for (const prefix of ['',': ping\r\n\r\n','\r\n\r\n']) {
+    const result = inspect(prefix + response,{protocol:'JSON'});
+    assert.equal(result.upstream_status,'completed');assert.equal(result.upstream_evidence,'response.completed');assert.equal(result.completion_version,2);
+  }
+  assert.equal(inspect(zlib.gzipSync(Buffer.from(response)),{protocol:'JSON',encoding:'gzip'}).upstream_status,'completed');
+  assert.equal(inspect(response,{protocol:'JSON'},{maxOutputBytes:1}).upstream_evidence,'resource');
+  for (const text of [response.trimEnd(),response+'data: {"type":',response+'data: invalid\r\n\r\n',
+    'event: response.failed\r\ndata: '+JSON.stringify(terminal())+'\r\n\r\n']) assert.equal(inspect(text,{protocol:'JSON'}).upstream_status,'unverified');
+  for (const text of [JSON.stringify({text:response}),JSON.stringify({type:'response.output_text.delta',delta:response}),
+    JSON.stringify({text:'prefix\n'+response})]) assert.equal(inspect(text,{protocol:'JSON'}).upstream_status,'unknown');
+  assert.equal(inspect(sse([terminal('failed')]),{protocol:'JSON'}).upstream_status,'failed');
+  assert.equal(inspect(sse([terminal('incomplete')]),{protocol:'JSON'}).upstream_status,'incomplete');
 });
 
 test('JSON, compressed SSE, chat choices, Claude, Gemini and all incoming WS frames receive independent completion evidence', () => {

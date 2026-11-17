@@ -2,7 +2,7 @@
 
 const { decodeBody } = require('./conversation-redaction');
 
-const COMPLETION_VERSION = 1;
+const COMPLETION_VERSION = 2;
 
 // This is application-level evidence only. It must never rewrite the collector's transport flags.
 function inspectCompletion(raw, metadata, { maxOutputBytes = 256 * 1024 ** 2 } = {}) {
@@ -82,10 +82,11 @@ function inspectCompletion(raw, metadata, { maxOutputBytes = 256 * 1024 ** 2 } =
         if (frame.binary) return result('unverified', 'binary');
         json(read(frame.body));
       }
-    } else if (metadata.protocol === 'SSE') sse(read(raw.response, metadata.encoding));
-    else {
+    } else {
       const text = read(raw.response, metadata.encoding);
-      if (text.trim()) {
+      // Compatible upstreams sometimes label an actual event stream as JSON.
+      if (metadata.protocol === 'SSE' || /^(?:\r\n|\r|\n)*(?:data:|event:|id:|retry:|:)/.test(text)) sse(text);
+      else if (text.trim()) {
         try { document(JSON.parse(text)); }
         catch (error) {
           if (!(error instanceof SyntaxError)) throw error;

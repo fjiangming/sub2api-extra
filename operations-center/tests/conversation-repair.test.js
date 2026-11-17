@@ -51,6 +51,36 @@ test('masked-only history can be analyzed independently without inventing an ori
   assert.deepEqual(snapshot(f,row.id),before);assert.equal(store.latest().analyzed,1);assert.equal(store.latest().repaired,0);
 });
 
+test('explicit history checks repair old image failures without changing media, capture errors or fresh records', t => {
+  const f = fixture();t.after(() => f.close());f.store.configure({...f.store.policy(),mode:'masked'});
+  const image = 'data:image/png;base64,aGVsbG8=',request = b64(JSON.stringify({model:'gpt-6.1-sol',input:[{role:'user',content:[
+    {type:'input_text',text:'alice@example.com'},{type:'input_image',image_url:image}]}]}));
+  const row = old(f,'history-image',{request});
+  f.store.db.prepare("UPDATE cl_records SET masked=NULL,processing_error='UNINSPECTABLE_CONTENT',redaction_version=0,inspection_warnings='[]' WHERE id=?").run(row.id);
+  const before = snapshot(f,row.id),store = new ConversationRepairStore(f.store).initialize();assert.equal(store.pending(),null);
+  assert.equal(f.store.detail(row.id).processing_error,'UNINSPECTABLE_CONTENT');
+  store.request({policy_version:f.store.policy().version});const fresh = event('fresh-image',{request});assert(f.store.ingest(fresh).accepted);
+  const freshBefore = snapshot(f,fresh.id);finish(store);const saved = f.store.detail(row.id);
+  assert.equal(saved.processing_error,'');assert.deepEqual(saved.inspection_warnings,['OPAQUE_IMAGE']);assert(saved.original && saved.masked);
+  assert(!saved.complete);assert.equal(saved.reason,'read_error');assert.equal(saved.upstream_status,'completed');
+  assert.deepEqual(snapshot(f,row.id).original,before.original);assert.deepEqual(snapshot(f,fresh.id),freshBefore);
+  assert.equal(JSON.parse(f.store.payload(row.id,'masked','request').text).input[0].content[1].image_url,image);
+  assert(!f.store.payload(row.id,'masked','request').text.includes('alice@example.com'));
+  assert.equal(store.latest().repaired,1);assert.equal(store.latest().warnings,1);
+});
+
+test('history explicitly upgrades old completion evidence for SSE recorded as JSON while preserving all transport and body fields', t => {
+  const f = fixture();t.after(() => f.close());
+  const row = event('json-labelled-sse',{protocol:'JSON',complete:false,reason:'read_error',response:b64(terminal)});assert(f.store.ingest(row).accepted);
+  f.store.db.prepare("UPDATE cl_records SET completion_version=1,upstream_status='unverified',upstream_evidence='invalid_format' WHERE id=?").run(row.id);
+  const before = snapshot(f,row.id),store = new ConversationRepairStore(f.store).initialize();assert.equal(store.pending(),null);
+  store.request({policy_version:f.store.policy().version});finish(store);const saved = f.store.detail(row.id);
+  assert.equal(saved.upstream_status,'completed');assert.equal(saved.upstream_evidence,'response.completed');assert.equal(saved.completion_version,2);
+  assert.equal(saved.protocol,'JSON');assert(!saved.complete);assert.equal(saved.reason,'read_error');assert.deepEqual(snapshot(f,row.id),before);
+  assert.equal(store.latest().analyzed,1);assert.equal(store.latest().repaired,0);
+  const push = new ConversationPushStore(f.store).initialize();assert(!push.copyReady(push.metadata(row.id),'original',f.store.policy()));
+});
+
 test('excluded users, unselected models, expired logs and missing historical bodies never enter decryption', t => {
   let now = Date.now(); const f = fixture({now:() => now});t.after(() => f.close());
   old(f,'excluded-user',{user_id:3});old(f,'excluded-model',{model:'other-model'});old(f,'expired');old(f,'missing');
@@ -103,7 +133,7 @@ test('bounded crash attempts, persistent cursors and reused SQLite rowids cannot
   f.store.db.prepare('DELETE FROM cl_records WHERE id=?').run(b.id);
   f.store.ingest(event('reused-new'));f.store.db.prepare('UPDATE cl_records SET archived_at=? WHERE id=?').run(job.requested_at,event('reused-new').id);
   const reopened = new ConversationRepairStore(f.store).initialize();finish(reopened);assert.equal(reopened.latest().scanned,2);assert.equal(reopened.latest().skipped,1);
-  assert.equal(f.store.detail(event('reused-new').id).redaction_version,4);
+  assert.equal(f.store.detail(event('reused-new').id).redaction_version,5);
 });
 
 test('administrator authentication, CSRF and current-policy validation protect history endpoints', async t => {

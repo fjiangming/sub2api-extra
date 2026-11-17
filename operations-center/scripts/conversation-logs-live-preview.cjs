@@ -29,6 +29,13 @@ async function startPreview({port = Number(process.env.CONVERSATION_PREVIEW_PORT
   ]})).toString('base64')}));
   if (compatibilityExamples) {
     const response = Buffer.from('data: {"type":"response.completed","response":{"id":"resp_example","object":"response","status":"completed","output":[]}}\n\n').toString('base64');
+    const imageRequest = Buffer.from(JSON.stringify({model:'example-model',input:[{role:'user',content:[
+      {type:'input_text',text:'联系 alice@example.com，查看图片'},
+      {type:'input_image',image_url:'data:image/png;base64,aGVsbG8=',detail:'auto'}]}]})).toString('base64');
+    f.store.ingest(event('image-case',{at:at-50,protocol:'SSE',request:imageRequest,response}));
+    const legacyImage = event('legacy-image-case',{at:at-150,protocol:'SSE',request:imageRequest,response});
+    f.store.ingest(legacyImage);
+    f.store.db.prepare("UPDATE cl_records SET masked=NULL,processing_error='UNINSPECTABLE_CONTENT',redaction_version=4,inspection_warnings='[]' WHERE id=?").run(legacyImage.id);
     f.store.ingest(event('encrypted-reasoning-case',{at:at-100,protocol:'SSE',complete:false,reason:'read_error',response,
       request:Buffer.from(JSON.stringify({model:'example-model',input:[{type:'reasoning',encrypted_content:'gAAAAAB_fictional-reasoning_1234567890==',summary:[{type:'summary_text',text:'联系 alice@example.com'}]}]})).toString('base64')}));
     const legacy = event('legacy-business-file-case',{at:at-200,protocol:'SSE',complete:false,reason:'read_error',response,

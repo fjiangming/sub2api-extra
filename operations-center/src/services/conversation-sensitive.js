@@ -6,7 +6,7 @@ const { default: isIBAN } = require('validator/lib/isIBAN');
 const isIP = require('validator/lib/isIP');
 const crypto = require('node:crypto');
 
-const REDACTION_VERSION = 4;
+const REDACTION_VERSION = 5;
 function redactionPolicyHash(policy) {
   return crypto.createHash('sha256').update(JSON.stringify([REDACTION_VERSION,
     ...['email','phone','secret','ip','identity','financial','personal','device'].map(key => Boolean(policy[key])), policy.custom])).digest('hex');
@@ -40,6 +40,8 @@ function protocolField(token, parsed, depth) {
   if (depth) return false;
   const p = token.path, field = token.field;
   const parent = p.slice(0, -1).reduce((obj, key) => obj?.[key], parsed);
+  const image = protocolImageContext(p, parsed, depth);
+  if (image && (image.tail.length === 1 && field === 'type' || image.kind === 'claude' && image.tail.length === 2 && image.tail[0] === 'source' && ['type','media_type'].includes(field))) return true;
   if (['id','type','status'].includes(field) && protocolReasoningPath(p.slice(0,-1),parsed,depth)) return true;
   if (field === 'type' && parent?.type === 'summary_text' && p.at(-3) === 'summary' && Number.isInteger(p.at(-2)) && protocolReasoningPath(p.slice(0,-3),parsed,depth)) return true;
   const root = p.length === 1 || (p.length === 2 && ['response', 'message', 'item'].includes(p[0]));
@@ -92,6 +94,51 @@ function protocolEncryptedReasoning(token, parsed, depth) {
   return token.field === 'encrypted_content' && !token.numeric && /^[A-Za-z0-9+/=_-]+$/.test(token.value) && protocolReasoningPath(token.path.slice(0,-1),parsed,depth);
 }
 
+function protocolImageContext(path, parsed, depth) {
+  if (depth) return null;
+  let p = path, root = parsed;
+  if (p[0] === 'response') {
+    if (root?.type !== 'response.create') return null;
+    p = p.slice(1); root = root.response;
+  }
+  if (!root || typeof root.model !== 'string' && parsed.type !== 'response.create') return null;
+  if (p.length < 5 || !['input','messages'].includes(p[0]) || !Number.isInteger(p[1]) || !Number.isInteger(p[3])) return null;
+  const message = root[p[0]]?.[p[1]], part = message?.[p[2]]?.[p[3]];
+  const content = p[2] === 'content' && ['user','assistant','system','developer'].includes(message?.role);
+  const toolOutput = p[0] === 'input' && p[2] === 'output' && ['function_call_output','custom_tool_call_output'].includes(message?.type) && typeof message.call_id === 'string';
+  if (!content && !toolOutput) return null;
+  if (p[0] === 'messages' && message.role === 'user' && part?.type === 'tool_result' && typeof part.tool_use_id === 'string' &&
+      p.length >= 7 && p[4] === 'content' && Number.isInteger(p[5]) && part.content?.[p[5]]?.type === 'image') {
+    return {kind:'claude',part:part.content[p[5]],tail:p.slice(6)};
+  }
+  const kind = p[0] === 'input' && part?.type === 'input_image' ? 'responses' :
+    p[0] === 'messages' && part?.type === 'image_url' ? 'chat' : p[0] === 'messages' && part?.type === 'image' ? 'claude' : '';
+  return kind ? {kind,part,tail:p.slice(4)} : null;
+}
+
+const imageMime = /^image\/(?:png|jpe?g|gif|webp|avif|heic|heif|bmp|tiff|x-icon)$/i;
+const base64Image = value => /^[A-Za-z0-9+/]+={0,2}$/.test(value);
+function imageReference(value) {
+  if (/^https?:\/\//i.test(value)) {
+    try { return Boolean(new URL(value).hostname); } catch { return false; }
+  }
+  const comma = value.indexOf(',');
+  return comma > 0 && /;base64$/i.test(value.slice(0,comma)) && imageMime.test(value.slice(5,comma - 7)) &&
+    /^data:/i.test(value) && base64Image(value.slice(comma + 1));
+}
+
+function protocolImage(token, parsed, depth) {
+  if (token.numeric) return false;
+  const context = protocolImageContext(token.path,parsed,depth);
+  if (!context) return false;
+  const {kind,part,tail} = context;
+  if (kind === 'responses' && tail.length === 1 && tail[0] === 'image_url' ||
+      kind === 'chat' && tail.length === 2 && tail[0] === 'image_url' && tail[1] === 'url') return imageReference(token.value);
+  if (kind !== 'claude' || tail.length !== 2 || tail[0] !== 'source') return false;
+  return tail[1] === 'data' && part.source?.type === 'base64' && imageMime.test(part.source.media_type || '') && base64Image(token.value) ||
+    tail[1] === 'url' && part.source?.type === 'url' && /^https?:\/\//i.test(token.value) && imageReference(token.value);
+}
+
 const mediaFields = new Set(['image','imageurl','audio','audiourl','video','videourl','document','file','fileurl','filedata','inlinedata']);
 const mediaValues = new Set(['data','image','audio','video','document','file','imageurl','audiourl','videourl','fileurl']);
 const opaqueFields = new Set(['encryptedcontent','signature','thoughtsignature','encrypteddata','ciphertext','b64json','base64','imagedata','audiodata','filedata','fileid','fileuri','gcsuri']);
@@ -134,6 +181,7 @@ function assertInspectable(token, parsed, depth = 0, toolData = false) {
   // Only known vendor protocol paths may pass through; callers must withhold warned masked copies from export.
   if (protocolSignature(token, parsed, depth)) return 'OPAQUE_SIGNATURE';
   if (protocolEncryptedReasoning(token, parsed, depth)) return 'OPAQUE_ENCRYPTED_REASONING';
+  if (protocolImage(token, parsed, depth)) return 'OPAQUE_IMAGE';
   if (key === 'fileid' && businessFileIdentifier(token, parsed, toolData)) return '';
   if (opaqueFields.has(key) || /^data:[^,]*;base64,/i.test(value) || key === 'url' && /^(?:blob:|file:|data:)/i.test(value)) throw new Error('UNINSPECTABLE_CONTENT');
   if (!mediaValues.has(key) && !['url','uri'].includes(key)) return '';

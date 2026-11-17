@@ -143,22 +143,27 @@ test('old schema and failed URL/signature history migrate without rewriting orig
   assert.deepEqual(f.store.detail(link.id).inspection_warnings,[]);
   const linkDone=f.store.retry(link.id,expected(f,link.id));assert(!linkDone.original);assert(linkDone.masked);assert.equal(linkDone.processing_error,'');assert.deepEqual(linkDone.inspection_warnings,[]);
   const sigDone=f.store.retry(sig.id,expected(f,sig.id));assert(sigDone.original&&sigDone.masked);assert.equal(sigDone.processing_error,'');assert.deepEqual(sigDone.inspection_warnings,['OPAQUE_SIGNATURE']);
-  assert.equal(f.store.payload(sig.id,'original','request').text,signed());assert.equal(sigDone.redaction_version,4);
+  assert.equal(f.store.payload(sig.id,'original','request').text,signed());assert.equal(sigDone.redaction_version,5);
 });
 
-test('masked push previews, automatic queues and existing JSONL members reject uninspected signatures', async t => {
+test('masked push previews, automatic queues and existing JSONL members reject uninspected signatures and images', async t => {
   const f=fixture(),push=new ConversationPushStore(f.store).initialize(),service=new ConversationPushService(push);t.after(async()=>{await service.stop();f.close();});
   const p=push.policy();push.configure({...p,enabled:true,automatic:true,source:'masked',webhook:{...p.webhook,enabled:true,url:'https://receiver.example/logs'},s3:{...p.s3,enabled:true,endpoint:'https://s3.example',bucket:'fixture-bucket',accessKeyId:'fictional',secretAccessKey:'fictional'}});
-  const normal=event('normal-export'),limited=event('limited-export',{request:raw(signed())});f.store.ingest(normal);f.store.ingest(limited);
+  const normal=event('normal-export'),limited=event('limited-export',{request:raw(signed())}),image=event('image-export',{request:raw(JSON.stringify({model:'example',input:[{role:'user',content:[{type:'input_image',image_url:'data:image/png;base64,aGVsbG8='}]}]}))});
+  for(const row of [normal,limited,image])f.store.ingest(row);
   assert.equal(push.scanAutomatic().created,2);assert(push.list().items.every(row=>row.record_id===normal.id));
-  const preview=push.preview({filter:{},destinations:['webhook','s3']});assert.equal(preview.eligible,1);assert.equal(preview.unavailable,1);
+  const preview=push.preview({filter:{},destinations:['webhook','s3']});assert.equal(preview.eligible,1);assert.equal(preview.unavailable,2);
   service.jsonl.store.assignOne();const file=service.jsonl.store.db.prepare('SELECT * FROM cl_push_jsonl_files LIMIT 1').get();assert(file);
-  f.store.db.prepare('UPDATE cl_records SET inspection_warnings=? WHERE id=?').run('["OPAQUE_SIGNATURE"]',normal.id);
   const job=push.db.prepare("SELECT * FROM cl_push_jobs WHERE record_id=? AND destination='webhook'").get(normal.id);
-  assert.equal(push.validJob(job).cancel,'INSPECTION_INCOMPLETE');assert.equal(service.jsonl.store.invalidReason(file,{full:true}),'INSPECTION_INCOMPLETE');
+  for(const warning of ['OPAQUE_SIGNATURE','OPAQUE_IMAGE']) {
+    f.store.db.prepare('UPDATE cl_records SET inspection_warnings=? WHERE id=?').run(JSON.stringify([warning]),normal.id);
+    assert.equal(push.validJob(job).cancel,'INSPECTION_INCOMPLETE');assert.equal(service.jsonl.store.invalidReason(file,{full:true}),'INSPECTION_INCOMPLETE');
+  }
   const current=push.policy();push.configure({...current,source:'original'});
-  const input={filter:{},destinations:['webhook']},selected=push.preview(input);assert.equal(selected.eligible,2);
+  const input={filter:{},destinations:['webhook']},selected=push.preview(input);assert.equal(selected.eligible,3);
   push.enqueue({...input,previewToken:selected.previewToken,batchId:crypto.randomUUID()});
   const original=push.db.prepare("SELECT * FROM cl_push_jobs WHERE record_id=? AND source='original'").get(limited.id),envelope=push.envelope(original);
   assert.deepEqual(envelope.metadata.inspection_warnings,['OPAQUE_SIGNATURE']);assert.equal(Buffer.from(envelope.request,'base64').toString(),signed());
+  const imageJob=push.db.prepare("SELECT * FROM cl_push_jobs WHERE record_id=? AND source='original'").get(image.id),imageEnvelope=push.envelope(imageJob);
+  assert.deepEqual(imageEnvelope.metadata.inspection_warnings,['OPAQUE_IMAGE']);assert.equal(imageEnvelope.request,image.request);
 });
