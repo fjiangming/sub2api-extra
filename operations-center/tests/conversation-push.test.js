@@ -201,6 +201,10 @@ test('push admin endpoints enforce authentication, CSRF and collector separation
   const headers={authorization:'Session '+session.sessionToken},writes={...headers,'x-csrf-token':session.csrfToken};
   const response=await request('conversation-logs/push/policy','GET',headers);assert.equal(response.headers.get('cache-control'),'no-store');assert(!JSON.stringify(await response.json()).includes('test-private-token'));
   assert.equal((await request('conversation-logs/push/policy','PUT',headers,f.push.policy())).status,403);
+  assert.equal((await request('conversation-logs/push/jsonl/flush','POST',headers,{})).status,403);
+  assert.equal((await request('conversation-logs/push/jsonl/flush','POST',writes,{})).status,409);
+  assert.equal((await request('conversation-logs/push/jsonl/missing/retry','POST',headers,{})).status,403);
+  assert.equal((await request('conversation-logs/push/jsonl/missing/retry','POST',writes,{})).status,409);
   assert.equal((await request('conversation-logs/push/test/webhook','POST',writes,{})).status,200);assert.equal(sent[0].schema,'sub2api.conversation.test.v1');assert(!JSON.stringify(sent[0]).includes('alice'));
   const preview=await(await request('conversation-logs/push/preview','POST',writes,{filter:{},destinations:['webhook']})).json();
   const body={filter:{},destinations:['webhook'],batchId:crypto.randomUUID(),previewToken:preview.previewToken};

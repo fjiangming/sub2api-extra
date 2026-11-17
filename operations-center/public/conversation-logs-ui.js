@@ -1,6 +1,6 @@
 (function (root) {
   'use strict';
-  const reasons = { body_limit: '旧采集器按单条上限截断，仅保留已采集部分', memory_limit: '旧采集器内存不足，可能仅保留部分内容', transport_error: '上游连接失败', read_error: '读取中断', closed_early: '响应提前关闭', session_closed: '连接关闭前未见结束事件', redaction_failed: '旧记录脱敏失败，原文未保留，无法重新处理', capacity: '存储空间不足' };
+  const reasons = { body_limit: '旧采集器按单条上限截断，仅保留已采集部分', memory_limit: '旧采集器内存不足，可能仅保留部分内容', transport_error: '上游连接失败', read_error: '上游读取返回非正常 EOF；可能为断流、超时或结束后取消，当前记录仍按不完整处理', closed_early: '响应提前关闭', session_closed: '连接关闭前未见结束事件', redaction_failed: '旧记录脱敏失败，原文未保留，无法重新处理', capacity: '存储空间不足' };
   const processingErrors = { INVALID_JSON: 'JSON 不完整或格式不兼容', PROTECTED_FIELD_MATCH: '自定义规则会改变结构或关联字段', UNSUPPORTED_ENCODING: '不支持的压缩编码', INVALID_UTF8: '正文含非 UTF-8 字节', DECOMPRESSION_FAILED: '解压失败或超过解压上限', BINARY_MESSAGE_REQUIRES_ORIGINAL_MODE: '二进制消息暂不支持脱敏', UNSAFE_SSE_REPLACEMENT: '替换会改变 SSE 结构', DOCUMENT_TOO_DEEP: 'JSON 嵌套超过处理上限', NESTED_ARGUMENTS_TOO_DEEP: '工具参数嵌套超过处理上限', PROCESSING_FAILED: '处理异常' };
   const modeNames = { dual: '原文 + 脱敏副本', masked: '仅脱敏副本', original: '仅原文' };
   Object.assign(processingErrors, { UNINSPECTABLE_CONTENT: '媒体、外部文件或加密内容无法完整检查', REDACTION_RESOURCE_LIMIT: '脱敏处理资源不足，原文未截断' });
@@ -15,11 +15,12 @@
     let payloads = new Map(), excluded = new Set(), users = new Map(), sessionFilter = null, saving = false, dirty = false;
     const reprocessing = new Set();
     let pushUi = null;
+    let cleanupState = null, cleanupBusy = false, cleanupTimer = null, cleanupController = null;
     const num = value => new Intl.NumberFormat('zh-CN').format(value || 0);
     const bytes = value => value >= 1048576 ? (value / 1048576).toFixed(2) + ' MiB' : value >= 1024 ? (value / 1024).toFixed(1) + ' KiB' : num(value) + ' B';
     const time = value => value ? new Date(value).toLocaleString('zh-CN', { timeZone: status?.timezone || 'Asia/Shanghai', hour12: false }) : '尚无记录';
     const tool = (name, title, attrs = '') => `<button class="icon-button" type="button" title="${esc(title)}" aria-label="${esc(title)}" ${attrs}>${icon(name)}</button>`;
-    const badge = row => `<span class="cl-badge ${row.complete ? 'green' : 'amber'}">${row.complete ? '完整采集' : row.original || row.masked ? '部分采集' : '正文缺失'}</span>${row.processing_error ? '<span class="cl-badge amber">处理异常</span>' : ''}`;
+    const badge = row => `<span class="cl-badge ${row.complete ? 'green' : 'amber'}">${row.complete ? '完整采集' : row.original || row.masked ? '部分采集' : '正文缺失'}</span>${row.processing_error ? '<span class="cl-badge amber">处理异常</span>' : row.inspection_warnings?.length ? '<span class="cl-badge amber">部分内容未检查</span>' : ''}`;
     const facts = values => `<dl class="cl-facts">${values.map(([key, value]) => `<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl>`;
     const empty = text => `<div class="cl-empty">${esc(text)}</div>`;
     function run(task) { Promise.resolve().then(task).catch(error => { if (error.name !== 'AbortError' && isActive()) { $('notice').textContent = error.message; toast(error.message, 'error'); } }); }
@@ -54,7 +55,7 @@
       const policyChanged = status?.policy.version !== next.policy.version;
       status = next; overview();
       if (tab === 'push') { await pushUi.load(); return; }
-      if (tab === 'policy') { if (!dirty && !saving) renderPolicy(status.policy); return; }
+      if (tab === 'policy') { if (!dirty && !saving) renderPolicy(status.policy); await refreshCleanup(); return; }
       if (tab === 'collection') { renderCollection(); return; }
       if (tab === 'sessions') {
         $('sessions').innerHTML = `<div class="cl-section-heading"><h2>最近会话</h2><span>最多 100 个 · 仅包含有会话标识的请求</span></div>${data.items.length ? data.items.map(row => `<button class="cl-session" data-cl-session="${row.session_id}" data-user="${row.user_id}" data-key="${row.key_id}"><strong>用户 #${row.user_id} · Key #${row.key_id}</strong><span>${num(row.turns)} 次请求 / ${num(row.attempts)} 次尝试 · ${esc(time(row.last_at))}</span><code>${row.session_id}</code>${icon('arrow-up-right')}</button>`).join('') : empty('尚无可关联的会话记录')}`;
@@ -82,12 +83,19 @@
     }
     function renderDetail() {
       if (!detail) return;
+      const limited = Boolean(detail.inspection_warnings?.length);
+      const processingTitle = detail.processing_error ? '处理异常 · ' + (processingErrors[detail.processing_error] || '处理异常') : detail.redaction_outdated ? '脱敏规则已有更新' : '可读文本已处理 · 部分内容未检查';
       $('inspector').innerHTML = `<div class="cl-detail-heading"><div><code>${detail.request_id}</code><h2>${esc(detail.model || detail.protocol + ' 请求')}</h2><p>${badge(detail)} · ${esc(detail.protocol)} · ${esc(modeNames[detail.mode])} · 策略 v${detail.policy_version}</p></div>${tool('x','关闭请求详情','data-cl-action="close-detail"')}</div>${facts([['用户 / Key',`#${detail.user_id} / #${detail.key_id}`],['上游账号',detail.account_id ? '#' + detail.account_id : '未提供'],['时间',time(detail.at)],['耗时',num(detail.duration_ms) + ' ms'],['上游 Host',detail.host || '未提供'],['路径',detail.path]])}
         ${detail.reason ? `<div class="cl-notice amber">${esc(reasons[detail.reason] || detail.reason)}</div>` : ''}
-        ${detail.processing_error || detail.redaction_outdated ? `<div class="cl-notice amber cl-processing" role="status"><div><strong>${detail.processing_error ? '处理异常 · ' + esc(processingErrors[detail.processing_error] || '处理异常') : '脱敏规则已有更新'}</strong><span>${detail.original ? '已保留加密原文，支持按当前规则重处理' : '未保留原文，无法重新识别全部敏感信息'} · ${esc(detail.processing_error || '旧副本暂停脱敏推送')} · 处理策略 v${detail.processing_policy_version}</span>${detail.retry_blocked === 'user_excluded' ? '<span>该用户已排除，不能重新处理</span>' : detail.retry_blocked === 'model_excluded' ? '<span>该模型不在采集名单中，不能重新处理</span>' : ''}</div><button type="button" class="button secondary" data-cl-action="reprocess" title="按当前策略重新处理；成功后按此记录的保存版本保留副本" ${!detail.retry_available || reprocessing.has(detail.id) ? 'disabled' : ''}>${icon('refresh-cw')}${reprocessing.has(detail.id) ? '处理中' : '重新处理'}</button></div>` : detail.processing_policy_version ? `<p class="cl-muted">脱敏策略 v${detail.processing_policy_version} · ${esc(time(detail.processed_at))}</p>` : ''}
+        ${detail.processing_error || detail.redaction_outdated || limited ? `<div class="cl-notice amber cl-processing" role="status"><div><strong>${esc(processingTitle)}</strong><span>${detail.original ? '已保留加密原文，支持按当前规则重处理' : '未保留原文，无法重新识别全部敏感信息'} · ${esc(detail.processing_error || (limited ? '含未检查内容，暂停脱敏推送' : '旧副本暂停脱敏推送'))} · 处理策略 v${detail.processing_policy_version}</span>${limited ? '<span>模型协议签名原样保留，签名内部未检查；其他可读文本已按该副本的规则处理。</span>' : ''}${detail.retry_blocked === 'user_excluded' ? '<span>该用户已排除，不能重新处理</span>' : detail.retry_blocked === 'model_excluded' ? '<span>该模型不在采集名单中，不能重新处理</span>' : ''}</div><button type="button" class="button secondary" data-cl-action="reprocess" title="按当前策略重新处理；成功后按此记录的保存版本保留副本" ${!detail.retry_available || reprocessing.has(detail.id) ? 'disabled' : ''}>${icon('refresh-cw')}${reprocessing.has(detail.id) ? '处理中' : '重新处理'}</button></div>` : detail.processing_policy_version ? `<p class="cl-muted">脱敏策略 v${detail.processing_policy_version} · ${esc(time(detail.processed_at))}</p>` : ''}
         <div class="cl-attempts"><span>请求尝试</span>${detail.attempts.map((row,index) => `<button data-cl-attempt="${row.id}" aria-pressed="${row.id === detail.id}">#${index + 1} · ${row.status || '连接错误'} · 账号 ${row.account_id || '未提供'}</button>`).join('')}</div>
         <div class="cl-detail-tabs" role="tablist" aria-label="请求详情视图">${[['raw','Request / Response'],['frames',`消息 (${detail.frames.length})`],['redactions','脱敏记录']].map(([id,label]) => `<button data-cl-detail="${id}" role="tab" aria-selected="${id === detailTab}">${label}</button>`).join('')}<select id="cl-source" aria-label="日志版本"><option value="masked" ${source === 'masked' ? 'selected' : ''} ${!detail.masked ? 'disabled' : ''}>脱敏副本</option><option value="original" ${source === 'original' ? 'selected' : ''} ${!detail.original ? 'disabled' : ''}>原文</option></select></div><div id="cl-detail-body"></div>`;
       $('source').addEventListener('change', () => { source = $('source').value; payloads.clear(); renderDetailBody(); if (detailTab === 'raw') run(() => loadBodies(detailSeq)); });
+      if (detail.processing_error === 'UNINSPECTABLE_CONTENT') {
+        const explanation = document.createElement('span');
+        explanation.textContent = '旧规则可能因普通链接或模型协议签名触发，可按最新规则重处理。媒体、外部文件、未识别签名和加密正文仍可能无法检查；原文不会因此丢失。';
+        container.querySelector('.cl-processing > div')?.append(explanation);
+      }
       renderDetailBody(); refreshIcons();
     }
     function pane(side, title) { return `<section class="cl-body-pane"><header><strong>${esc(title)}</strong><span>RAW</span><div>${tool('maximize-2','查看完整 ' + title,`data-cl-full="${side}" hidden`)}${tool('copy','复制 ' + title,`data-cl-copy="${side}" disabled`)}${tool('download','下载 ' + title,`data-cl-download="${side}" disabled`)}</div></header><pre class="cl-raw" tabindex="0"><code id="cl-body-${side}">正在读取</code></pre><footer id="cl-info-${side}"></footer></section>`; }
@@ -137,9 +145,46 @@
       $('policy-form').addEventListener('submit', event => { event.preventDefault(); run(savePolicy); });
       $('user-search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => run(searchUsers), 350); });
       $('user-search').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); run(searchUsers); } });
+      const cleanupSection = document.createElement('section'); cleanupSection.id = 'cl-model-cleanup'; cleanupSection.className = 'clp-section cl-model-cleanup';
+      $('policy').append(cleanupSection); renderCleanup();
       refreshIcons();
     }
-    function markDirty() { dirty = true; if ($('dirty')) $('dirty').textContent = '有未保存更改'; }
+    function markDirty() { dirty = true; if ($('dirty')) $('dirty').textContent = '有未保存更改'; renderCleanup(); }
+    function renderCleanup() {
+      const host = $('model-cleanup'); if (!host || !policy) return;
+      const job = cleanupState?.job, running = ['pending','running'].includes(job?.status);
+      const ready = policy.modelFilterEnabled && (policy.allowedModels.length || policy.kimiK3Plus);
+      const names = { pending:'等待后台清理', running:'后台清理中', done:'清理完成', cancelled:'已停止', paused:'模型名单已变化，清理已暂停' };
+      const errors = { MODEL_POLICY_CHANGED:'请核对当前模型名单后重新启动', CLEANUP_WORKER_UNAVAILABLE:'清理进程暂不可用，将自动重试', CLEANUP_STORAGE_UNAVAILABLE:'存储暂不可用，将稍后重试' };
+      host.innerHTML = `<div class="cl-section-heading"><h2>历史模型清理</h2><span>使用已保存的模型名单</span></div><p class="cl-muted">删除名单外的历史日志，包含未知模型的记录、正文和索引；删除后无法恢复。所选模型与新增归档保留。</p><div class="cl-cleanup-actions"><button class="button secondary" type="button" data-cl-action="cleanup-models" ${cleanupBusy || running || dirty || saving || !ready ? 'disabled' : ''}>${icon('trash-2')}后台清理名单外日志</button>${running ? `<button class="button secondary" type="button" data-cl-action="stop-model-cleanup" ${cleanupBusy ? 'disabled' : ''}>${icon('square')}停止清理</button>` : ''}</div><p id="cl-cleanup-progress" class="cl-muted" role="status">${job ? `${esc(names[job.status] || job.status)} · 已扫描 ${num(job.scanned)} 条 · 已删除 ${num(job.deleted)} 条 · 启动策略 v${job.policy_version}` : '尚未启动清理'}${dirty ? ' · 请先保存模型名单' : !ready ? ' · 请先启用并保存至少一个模型' : ''}${job?.error_code || cleanupState?.lastError ? '<br>' + esc(errors[job?.error_code || cleanupState.lastError] || '清理暂不可用') : ''}</p>`;
+      refreshIcons();
+    }
+    async function refreshCleanup() {
+      if (!isActive() || tab !== 'policy') return;
+      const epoch = lifecycle; cleanupController?.abort(); cleanupController = new AbortController(); clearTimeout(cleanupTimer);
+      const value = await api('/api/conversation-logs/model-cleanup', { signal: cleanupController.signal });
+      if (epoch !== lifecycle || !isActive() || tab !== 'policy') return;
+      cleanupState = value; renderCleanup();
+      if (['pending','running'].includes(value.job?.status)) cleanupTimer = setTimeout(() => run(refreshCleanup), 2000);
+    }
+    async function startCleanup() {
+      if (cleanupBusy || dirty || saving) return;
+      const epoch = lifecycle; cleanupBusy = true; renderCleanup();
+      try {
+        const value = await api('/api/conversation-logs/model-cleanup', { method:'POST', body:JSON.stringify({policy_version:policy.version}) });
+        if (epoch !== lifecycle || !isActive() || tab !== 'policy') return;
+        cleanupState = value; toast('已安排后台清理'); await refreshCleanup();
+      } finally { if (epoch === lifecycle) { cleanupBusy = false; renderCleanup(); } }
+    }
+    async function stopCleanup() {
+      if (cleanupBusy || !cleanupState?.job) return;
+      const epoch = lifecycle, id = cleanupState.job.id; cleanupBusy = true; renderCleanup();
+      try {
+        const value = await api(`/api/conversation-logs/model-cleanup/${id}/cancel`, { method:'POST',body:'{}' });
+        if (epoch !== lifecycle || !isActive() || tab !== 'policy') return;
+        cleanupState = value; clearTimeout(cleanupTimer); renderCleanup();
+      } finally { if (epoch === lifecycle) { cleanupBusy = false; renderCleanup(); } }
+    }
     function updateExcluded() {
       $('excluded-count').textContent = `已排除 ${excluded.size} 位用户`;
       $('selected-users').innerHTML = [...excluded].map(id => `<span>用户 #${id}${tool('x','取消排除用户 ' + id,`data-cl-remove-user="${id}"`)}</span>`).join('');
@@ -169,11 +214,12 @@
       for (const field of ['email','phone','secret','ip','identity','financial','personal','device']) body[field] = data.has(field);
       const epoch = lifecycle;
       saving = true; $('policy-error').textContent = ''; $('policy-form').querySelectorAll('input,button,select,textarea').forEach(node => { node.disabled = true; });
+      renderCleanup();
       try {
         const value = await api('/api/conversation-logs/policy', { method:'PUT',body:JSON.stringify(body) });
         if (!isActive() || epoch !== lifecycle) return; dirty = false; status.policy = value; overview(); renderPolicy(value); toast('保存策略已生效');
       } catch(error) { if (isActive() && epoch === lifecycle && $('policy-error')) $('policy-error').textContent = error.code === 'CONVERSATION_POLICY_CONFLICT' ? '策略已被其他管理员修改，请放弃更改后重新读取' : error.message; }
-      finally { saving = false; if ($('policy-form')) $('policy-form').querySelectorAll('input,button,select,textarea').forEach(node => { node.disabled = false; }); }
+      finally { saving = false; if ($('policy-form')) $('policy-form').querySelectorAll('input,button,select,textarea').forEach(node => { node.disabled = false; }); renderCleanup(); }
     }
     function download(blob, name) { const href = URL.createObjectURL(blob), anchor = document.createElement('a'); anchor.href = href; anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(href),1000); }
     async function reprocess() {
@@ -185,7 +231,7 @@
         if (!isActive() || epoch !== lifecycle || current !== detailSeq || detail?.id !== id || tab !== 'requests') return;
         reprocessing.delete(id); payloads.clear(); detail = row; source = row.masked ? 'masked' : 'original';
         renderDetail(); if (detailTab === 'raw') await loadBodies(current);
-        toast(row.processing_error ? '处理仍有异常，原文已保留' : '重新处理完成', row.processing_error ? 'error' : undefined);
+        toast(row.processing_error ? '处理仍有异常，原文已保留' : row.inspection_warnings?.length ? '可读文本已处理，仍有未检查内容' : '重新处理完成', row.processing_error ? 'error' : undefined);
         await load();
       } finally {
         reprocessing.delete(id);
@@ -194,7 +240,7 @@
     }
     async function switchTab(value) {
       if (!['requests','sessions','collection','policy','push'].includes(value)) return;
-      if (value !== tab) { ++searchSeq; userController?.abort(); clearTimeout(searchTimer); clearDetail(); pushUi.leave(); }
+      if (value !== tab) { ++searchSeq; userController?.abort(); clearTimeout(searchTimer); clearTimeout(cleanupTimer); cleanupController?.abort(); clearDetail(); pushUi.leave(); }
       tab = value;
       for (const id of ['requests','sessions','collection','policy','push']) { $(id).hidden = id !== tab; $('tab-' + id).setAttribute('aria-selected',String(id === tab)); $('tab-' + id).tabIndex = id === tab ? 0 : -1; }
       await load();
@@ -212,6 +258,8 @@
       if (d.clCopy || d.clDownload) return run(async () => { const side = d.clCopy || d.clDownload, value = await loadPayload(side,detailSeq,{ full:true,raw:Boolean(d.clDownload),render:false }); if (!value) return; if (d.clCopy) { await navigator.clipboard.writeText(value.text); toast('已复制原始文本'); } else { const raw = Uint8Array.from(atob(value.base64),ch => ch.charCodeAt(0)); download(new Blob([raw]),`conversation-${detail.id}-${source}-${side}.raw`); } });
       if (d.clRemoveUser) { excluded.delete(Number(d.clRemoveUser)); updateExcluded(); markDirty(); return; }
       const action = d.clAction;
+      if (action === 'cleanup-models') return run(startCleanup);
+      if (action === 'stop-model-cleanup') return run(stopCleanup);
       if (action === 'reprocess') return run(reprocess);
       if (action === 'close-detail') clearDetail();
       if (action === 'reset-filter') { $('filter').reset(); sessionFilter = null; page = 1; run(load); }
@@ -223,7 +271,7 @@
       if (action === 'remove-rule') { node.closest('.cl-custom-rule').remove(); markDirty(); }
       if (action === 'discard-policy') { dirty = false; run(load); }
     }
-    function leave() { ++seq; ++detailSeq; ++searchSeq; ++lifecycle; controller?.abort(); detailController?.abort(); userController?.abort(); pushUi?.leave(); clearTimeout(searchTimer); payloads.clear(); detail = null; report = null; dirty = false; for (const id of ['inspector','list','sessions','collection','policy','metrics','notice']) if ($(id)) $(id).innerHTML = ''; }
+    function leave() { ++seq; ++detailSeq; ++searchSeq; ++lifecycle; controller?.abort(); detailController?.abort(); userController?.abort(); cleanupController?.abort(); clearTimeout(cleanupTimer); cleanupState = null; cleanupBusy = false; pushUi?.leave(); clearTimeout(searchTimer); payloads.clear(); detail = null; report = null; dirty = false; for (const id of ['inspector','list','sessions','collection','policy','metrics','notice']) if ($(id)) $(id).innerHTML = ''; }
     function reset() { leave(); status = null; policy = null; users.clear(); excluded.clear(); sessionFilter = null; page = 1; tab = 'requests'; container.innerHTML = ''; init(); }
     init(); return { load, leave, reset };
   }

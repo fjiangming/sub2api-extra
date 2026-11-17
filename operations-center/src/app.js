@@ -141,7 +141,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationPush, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationPush, conversationCleanup, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -322,11 +322,22 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
     conversationPush?.invalidate();
     res.json(result);
   });
+  api.use('/conversation-logs/model-cleanup', (_req, _res, next) => conversationCleanup ? next() : next(new AppError('CONVERSATION_CLEANUP_UNAVAILABLE', '历史清理后台暂不可用', { status: 503 })));
+  const conversationCleanupLimiter = rateLimit({ windowMs: 60000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false });
+  api.get('/conversation-logs/model-cleanup', (_req, res) => res.json(conversationCleanup.status()));
+  api.post('/conversation-logs/model-cleanup', csrf, conversationCleanupLimiter, (req, res) => {
+    const result = conversationCleanup.request(req.body);
+    conversationPush?.invalidate();
+    res.status(202).json(result);
+  });
+  api.post('/conversation-logs/model-cleanup/:id/cancel', csrf, conversationCleanupLimiter, (req, res) => res.json(conversationCleanup.cancel(req.params.id)));
   api.use('/conversation-logs/push', (_req, _res, next) => conversationPush ? next() : next(new AppError('CONVERSATION_PUSH_UNAVAILABLE', '日志推送暂不可用', { status: 503 })));
   const pushLimiter = rateLimit({ windowMs: 60000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false });
   api.get('/conversation-logs/push/policy', (_req, res) => res.json(conversationPush.policy()));
   api.put('/conversation-logs/push/policy', csrf, pushLimiter, (req, res) => res.json(conversationPush.configure(req.body)));
   api.get('/conversation-logs/push/jobs', (req, res) => res.json(conversationPush.status(req.query)));
+  api.post('/conversation-logs/push/jsonl/flush', csrf, pushLimiter, (req, res) => res.status(202).json(conversationPush.flush()));
+  api.post('/conversation-logs/push/jsonl/:id/retry', csrf, pushLimiter, (req, res) => res.json(conversationPush.retryFile(req.params.id)));
   api.post('/conversation-logs/push/preview', csrf, pushLimiter, (req, res) => res.json(conversationPush.preview(req.body)));
   api.post('/conversation-logs/push/batches', csrf, pushLimiter, (req, res) => res.status(202).json(conversationPush.enqueue(req.body)));
   api.get('/conversation-logs/push/batches/:id', (req, res) => res.json(conversationPush.store.batch(req.params.id)));

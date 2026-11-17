@@ -1,0 +1,103 @@
+'use strict';
+
+const http = require('node:http');
+const https = require('node:https');
+const crypto = require('node:crypto');
+const { Transform } = require('node:stream');
+const { S3Client, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } = require('@aws-sdk/client-s3');
+const { NodeHttpHandler } = require('@smithy/node-http-handler');
+const { failure, failureResult } = require('./conversation-push-transport');
+const { jsonlChunks } = require('./conversation-jsonl-format');
+
+async function session(transport, policy, outerSignal, guard, operation) {
+  const target = policy.s3, baseUrl = new URL(target.endpoint), pinned = new Map();
+  const stop = new AbortController(), abort = () => stop.abort();
+  outerSignal?.addEventListener('abort', abort, { once: true });
+  if (outerSignal?.aborted) stop.abort();
+  const lookup = (host, options, callback) => {
+    const address = pinned.get(host.replace(/^\[|\]$/g, ''));
+    if (!address) return callback(failure('ADDRESS_BLOCKED'));
+    callback(null, options?.all ? [address] : address.address, address.family);
+  };
+  const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 1, lookup });
+  const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 1, lookup });
+  const handler = new NodeHttpHandler({ httpAgent, httpsAgent, connectionTimeout: policy.timeoutSeconds * 1000, socketTimeout: policy.timeoutSeconds * 1000 });
+  const boundedHandler = { metadata: handler.metadata, destroy: () => handler.destroy(), handle: async (request, options) => {
+    const result = await handler.handle(request, options); let bytes = 0;
+    const limit = new Transform({ transform(chunk, _encoding, callback) { bytes += chunk.length; callback(bytes > 65536 ? failure('RESPONSE_TOO_LARGE') : null, chunk); } });
+    result.response.body.on('error', error => limit.destroy(error)); limit.on('close', () => result.response.body.destroy());
+    return { response: { ...result.response, body: result.response.body.pipe(limit) } };
+  } };
+  const client = new S3Client({ endpoint: target.endpoint, region: target.region, forcePathStyle: target.forcePathStyle,
+    credentials: { accessKeyId: target.accessKeyId, secretAccessKey: target.secretAccessKey, ...(target.sessionToken ? { sessionToken: target.sessionToken } : {}) },
+    maxAttempts: 1, followRegionRedirects: false, requestHandler: boundedHandler, requestChecksumCalculation: 'WHEN_REQUIRED' });
+  let requestSignal;
+  client.middlewareStack.add(next => async args => {
+    const host = args.request.hostname.replace(/^\[|\]$/g, ''), base = baseUrl.hostname.replace(/^\[|\]$/g, '');
+    if (host !== base && host !== `${target.bucket}.${base}`) throw failure('ADDRESS_BLOCKED');
+    const address = await transport.resolve(host, policy.allowPrivateNetwork, requestSignal);
+    guard(); if (requestSignal.aborted) throw failure('ABORTED', true);
+    pinned.set(host, address); return next(args);
+  }, { step: 'finalizeRequest', name: 'validateConversationJsonlAddress', priority: 'low' });
+  const request = async command => {
+    guard(); if (stop.signal.aborted) throw failure('ABORTED', true);
+    const controller = new AbortController(), cancel = () => controller.abort(); let timedOut = false;
+    stop.signal.addEventListener('abort', cancel, { once: true }); requestSignal = controller.signal;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, policy.timeoutSeconds * 1000);
+    try { return await client.send(command, { abortSignal: controller.signal }); }
+    catch (error) { if (timedOut) throw failure('TIMEOUT', true); if (controller.signal.aborted) throw failure('ABORTED', true); throw error; }
+    finally { clearTimeout(timer); stop.signal.removeEventListener('abort', cancel); }
+  };
+  try {
+    if (baseUrl.protocol !== 'https:' && !(baseUrl.protocol === 'http:' && policy.allowPrivateNetwork)) throw failure('ADDRESS_BLOCKED');
+    return await operation(request);
+  } catch (error) { return failureResult(error); }
+  finally { outerSignal?.removeEventListener('abort', abort); client.destroy(); httpAgent.destroy(); httpsAgent.destroy(); }
+}
+
+async function sendJsonl(transport, policy, file, envelopes, signal, { guard = () => {}, onCreated = () => {}, beforeComplete = () => {} } = {}) {
+  return session(transport, policy, signal, guard, async request => {
+    const target = { Bucket: policy.s3.bucket, Key: file.object_key };
+    const created = await request(new CreateMultipartUploadCommand({ ...target, ContentType: 'application/x-ndjson', ChecksumAlgorithm: 'SHA256',
+      Metadata: { 'file-id': file.id, 'record-count': String(file.records), 'source': file.source } }));
+    if (!created.UploadId) throw failure('MULTIPART_INVALID');
+    await onCreated(created.UploadId);
+    const upload = { ...target, UploadId: created.UploadId }, parts = [], hash = crypto.createHash('sha256');
+    const buffer = Buffer.allocUnsafe(8 * 1024 ** 2); let offset = 0, bytes = 0, records = 0;
+    const sendPart = async () => {
+      guard(); const body = buffer.subarray(0, offset), checksum = crypto.createHash('sha256').update(body).digest('base64');
+      const part = await request(new UploadPartCommand({ ...upload, PartNumber: parts.length + 1, Body: body, ContentLength: body.length, ChecksumSHA256: checksum }));
+      if (!part.ETag) throw failure('MULTIPART_INVALID');
+      parts.push({ PartNumber: parts.length + 1, ETag: part.ETag, ChecksumSHA256: checksum }); offset = 0;
+    };
+    for await (const envelope of envelopes) {
+      guard(); records++;
+      for (const chunk of jsonlChunks(envelope)) {
+        const source = Buffer.from(chunk); hash.update(source); bytes += source.length;
+        if (bytes > file.bytes) throw failure('JSONL_CONTENT_CHANGED');
+        for (let index = 0; index < source.length;) {
+          const length = Math.min(buffer.length - offset, source.length - index);
+          source.copy(buffer, offset, index, index + length); offset += length; index += length;
+          if (offset === buffer.length) await sendPart();
+        }
+      }
+    }
+    if (offset) await sendPart();
+    if (bytes !== file.bytes || records !== file.records || !parts.length) throw failure('JSONL_CONTENT_CHANGED');
+    await beforeComplete(); guard();
+    const completed = await request(new CompleteMultipartUploadCommand({ ...upload, MultipartUpload: { Parts: parts } }));
+    return { status: 'sent', httpStatus: completed.$metadata.httpStatusCode, bytes, records, sha256: hash.digest('hex') };
+  });
+}
+
+async function abortJsonl(transport, policy, file) {
+  const result = await session(transport, policy, null, () => {}, async request => {
+    const response = await request(new AbortMultipartUploadCommand({ Bucket: policy.s3.bucket, Key: file.object_key, UploadId: file.upload_id }));
+    return { status: 'sent', httpStatus: response.$metadata.httpStatusCode };
+  });
+  // A lost Complete/Abort receipt can leave an already-removed upload ID.
+  if (result.httpStatus === 404) return { status: 'sent', httpStatus: 404 };
+  return result;
+}
+
+module.exports = { sendJsonl, abortJsonl };

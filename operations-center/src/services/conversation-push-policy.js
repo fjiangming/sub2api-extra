@@ -5,6 +5,12 @@ const { z } = require('zod');
 const { AppError } = require('../errors');
 
 const secret = z.string().max(4096).regex(/^[^\r\n]*$/).optional();
+const jsonlDefaults = { maxFileBytes: 10000000000, timezone: 'Asia/Shanghai', flushMinutes: 0 };
+const jsonlSchema = z.object({
+  maxFileBytes: z.number().int().min(1048576).max(10000000000),
+  timezone: z.string().min(1).max(80).refine(value => { try { new Intl.DateTimeFormat('en', { timeZone: value }); return true; } catch { return false; } }),
+  flushMinutes: z.number().int().min(0).max(1440)
+}).strict();
 const policySchema = z.object({
   version: z.number().int().positive(), enabled: z.boolean(), automatic: z.boolean(), source: z.enum(['masked','original']),
   allowPrivateNetwork: z.boolean(), maxAttempts: z.number().int().min(1).max(10),
@@ -13,10 +19,14 @@ const policySchema = z.object({
   webhook: z.object({enabled:z.boolean(),url:z.string().trim().max(2048),token:secret,clearToken:z.boolean().optional()}).strict(),
   s3: z.object({enabled:z.boolean(),endpoint:z.string().trim().max(2048),region:z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9-]+$/),
     bucket:z.string().trim().max(63),prefix:z.string().trim().max(180).regex(/^[A-Za-z0-9._/-]*$/),forcePathStyle:z.boolean(),
-    accessKeyId:secret,secretAccessKey:secret,sessionToken:secret,clearCredentials:z.boolean().optional(),clearSessionToken:z.boolean().optional()}).strict()
+    accessKeyId:secret,secretAccessKey:secret,sessionToken:secret,clearCredentials:z.boolean().optional(),clearSessionToken:z.boolean().optional(),
+    format:z.enum(['json','jsonl']).optional(),jsonl:jsonlSchema.optional()}).strict()
 }).strict();
 const defaults = {version:1,enabled:false,automatic:false,source:'masked',allowPrivateNetwork:false,maxAttempts:5,retrySeconds:30,timeoutSeconds:15,queueLimit:10000,
-  webhook:{enabled:false,url:'',token:''},s3:{enabled:false,endpoint:'',region:'us-east-1',bucket:'',prefix:'conversation-logs',forcePathStyle:true,accessKeyId:'',secretAccessKey:'',sessionToken:''}};
+  webhook:{enabled:false,url:'',token:''},s3:{enabled:false,endpoint:'',region:'us-east-1',bucket:'',prefix:'conversation-logs',forcePathStyle:true,accessKeyId:'',secretAccessKey:'',sessionToken:'',format:'jsonl',jsonl:jsonlDefaults}};
+function normalizePolicy(value) {
+  return {...value,s3:{...value.s3,format:value.s3.format || 'json',jsonl:{...jsonlDefaults,...value.s3.jsonl}}};
+}
 function invalid(message = '推送策略参数无效', code = 'CONVERSATION_PUSH_INVALID', status = 400) { return new AppError(code,message,{status}); }
 function endpoint(value, allowPrivateNetwork, kind) {
   let url; try { url = new URL(value); } catch { throw invalid('请输入完整的推送目标 URL'); }
@@ -27,6 +37,8 @@ function endpoint(value, allowPrivateNetwork, kind) {
 function parsePolicy(input, current) {
   const parsed = policySchema.safeParse(input); if (!parsed.success) throw invalid();
   const value = parsed.data;
+  value.s3.format ??= current.s3.format || 'json';
+  value.s3.jsonl ??= {...jsonlDefaults,...current.s3.jsonl};
   if (value.version !== current.version) throw invalid('推送策略已更新，请重新读取','CONVERSATION_PUSH_CONFLICT',409);
   value.webhook.token = value.webhook.clearToken ? '' : value.webhook.token || current.webhook.token || '';
   for (const key of ['accessKeyId','secretAccessKey','sessionToken']) value.s3[key] = value.s3.clearCredentials ? '' : value.s3[key] || current.s3[key] || '';
@@ -45,11 +57,12 @@ function parsePolicy(input, current) {
 function publicPolicy(value) {
   return {...value,webhook:{enabled:value.webhook.enabled,url:value.webhook.url,tokenConfigured:Boolean(value.webhook.token)},
     s3:{enabled:value.s3.enabled,endpoint:value.s3.endpoint,region:value.s3.region,bucket:value.s3.bucket,prefix:value.s3.prefix,forcePathStyle:value.s3.forcePathStyle,
-      credentialsConfigured:Boolean(value.s3.accessKeyId && value.s3.secretAccessKey),sessionTokenConfigured:Boolean(value.s3.sessionToken)}};
+      credentialsConfigured:Boolean(value.s3.accessKeyId && value.s3.secretAccessKey),sessionTokenConfigured:Boolean(value.s3.sessionToken),format:value.s3.format,jsonl:{...value.s3.jsonl}}};
 }
 function targetHash(policy, destination) {
   const target = policy[destination];
   const identity = destination === 'webhook' ? {url:target.url} : {endpoint:target.endpoint,region:target.region,bucket:target.bucket,prefix:target.prefix,forcePathStyle:target.forcePathStyle};
+  if (destination === 's3' && target.format === 'jsonl') Object.assign(identity,{format:'jsonl',timezone:target.jsonl.timezone});
   return crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex');
 }
-module.exports = {defaults,policySchema,parsePolicy,publicPolicy,targetHash,invalid};
+module.exports = {defaults,jsonlDefaults,normalizePolicy,policySchema,parsePolicy,publicPolicy,targetHash,invalid};

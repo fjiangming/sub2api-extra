@@ -148,10 +148,43 @@ async function main() {
         assert.equal(await page.locator('#cl-source option[value=original]').isDisabled(),true);
         assert.equal(preview.fixture.store.detail(failed.id).original,false);
         await layout(); await page.screenshot({path:path.join(directory,name + '-reprocessed.png'),fullPage:true});
+        const sig = 'ZmljdGlvbmFsLXByb3RvY29sLXNpZ25hdHVyZQ==';
+        const signed = event('signature-ui-' + name,{at:Date.now()+3000,policy_version:preview.fixture.store.policy().version,request:Buffer.from(JSON.stringify({messages:[
+          {role:'assistant',content:[{type:'thinking',thinking:'alice@example.com',signature:sig}]},
+          {role:'user',content:'continue',url:'https://service.example/contact?email=alice@example.com&keep=ok'}
+        ]})).toString('base64')});
+        assert(preview.fixture.store.ingest(signed).accepted);
+        await page.locator('[data-cl-action=reset-filter]').click();await page.locator(`[data-cl-record="${signed.id}"]`).click();
+        await page.locator('.cl-processing').filter({hasText:'可读文本已处理'}).waitFor();
+        await page.locator('#cl-body-request').filter({hasText:'EMAIL_'}).waitFor();
+        const signedText=await page.locator('#cl-body-request').textContent();assert(signedText.includes(sig));assert(!signedText.includes('alice@example.com'));
+        assert(JSON.parse(signedText).messages[1].url.startsWith('https://service.example/contact?email=%3CEMAIL_'));
+        assert.equal(preview.fixture.store.detail(signed.id).processing_error,'');assert(preview.fixture.store.detail(signed.id).original);
+        assert.equal(await page.locator('#cl-source option[value=original]').isDisabled(),false);
+        assert((await page.locator('.cl-processing').textContent()).includes('暂停脱敏推送'));
+        const retrySignature=page.waitForResponse(response=>response.url().endsWith(`/records/${signed.id}/reprocess`)&&response.request().method()==='POST');
+        await page.locator('[data-cl-action=reprocess]').click();assert.equal((await retrySignature).status(),200);
+        await page.waitForFunction(()=>document.querySelector('[data-cl-action=reprocess]')?.disabled===false);
+        assert.deepEqual(preview.fixture.store.detail(signed.id).inspection_warnings,['OPAQUE_SIGNATURE']);
+        await layout();await page.screenshot({path:path.join(directory,name+'-inspection-warning.png'),fullPage:true});
+        const legacy = event('legacy-url-ui-'+name,{at:Date.now()+4000,policy_version:preview.fixture.store.policy().version,
+          request:Buffer.from('{"url":"https://service.example/contact?email=alice%40example.com&keep=ok"}').toString('base64')});
+        assert(preview.fixture.store.ingest(legacy).accepted);
+        // Emulate an old URL failure with an exact retained original, then retry through the real archive process.
+        preview.fixture.store.db.prepare("UPDATE cl_records SET original=?,masked=NULL,processing_error='UNINSPECTABLE_CONTENT',redaction_version=0,redaction_policy_hash='' WHERE id=?")
+          .run(preview.fixture.store.seal({request:legacy.request,response:legacy.response,frames:[]},legacy.id+':original'),legacy.id);
+        await page.locator('[data-cl-action=reset-filter]').click();await page.locator(`[data-cl-record="${legacy.id}"]`).click();
+        await page.locator('.cl-processing').filter({hasText:'UNINSPECTABLE_CONTENT'}).waitFor();
+        const retryUrl=page.waitForResponse(response=>response.url().endsWith(`/records/${legacy.id}/reprocess`)&&response.request().method()==='POST');
+        await page.locator('[data-cl-action=reprocess]').click();assert.equal((await retryUrl).status(),200);
+        await page.locator('#cl-body-request').filter({hasText:'EMAIL_'}).waitFor();
+        await page.waitForFunction(()=>!document.querySelector('.cl-processing'));
+        assert(!preview.fixture.store.detail(legacy.id).original);assert.deepEqual(preview.fixture.store.detail(legacy.id).inspection_warnings,[]);
+        await layout();await page.screenshot({path:path.join(directory,name+'-legacy-link-reprocessed.png'),fullPage:true});
         await page.locator('#logout-button').click(); await page.locator('#login-view').waitFor({state:'visible'});
         assert.equal(await page.locator('#cl-list [data-cl-record]').count(),0); assert.equal(await page.locator('#cl-inspector').innerText(),'选择一条请求查看原始请求与响应');
         assert.deepEqual(errors,[]); assert.deepEqual(external,[]);
-        console.log(name + ': raw bytes, XSS, WS frames, previews, exclusions, model policy save/reload/deny/empty/Kimi, encrypted fallback, retry, late responses and logout passed');
+        console.log(name + ': raw bytes, XSS, WS frames, model gates, fallback, signature warnings, legacy URL retry, late responses and logout passed');
       } finally { await context.close(); }
     }
     console.log('Screenshots: ' + directory);

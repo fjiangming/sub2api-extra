@@ -13,6 +13,12 @@ const transportFailure = Symbol('conversation-push-failure');
 function failure(code, retryable = false, httpStatus = 0) {
   return Object.assign(new Error(code), { [transportFailure]:true, pushCode:code, retryable, httpStatus });
 }
+function failureResult(error) {
+  const trusted = error[transportFailure], status = trusted ? error.httpStatus : error.$metadata?.httpStatusCode;
+  const code = Number.isInteger(status) && status >= 100 && status <= 599 ? status : 0;
+  return {status:'failed',errorCode:trusted ? error.pushCode : code >= 300 && code < 400 ? 'REDIRECT_REJECTED' : code ? 'HTTP_REJECTED' : 'NETWORK_FAILED',
+    httpStatus:code,retryable:trusted ? error.retryable : !code || code===408 || code===429 || code>=500};
+}
 function checkAddress(address, allowPrivate) {
   let ip; try { ip=ipaddr.process(address); } catch { throw failure('ADDRESS_BLOCKED'); }
   const range=ip.range();
@@ -30,6 +36,8 @@ function abortable(operation, signal) {
 }
 class ConversationPushTransport {
   constructor({lookup=dns.lookup}={}) { this.lookup=lookup; }
+  sendJsonl(policy,file,envelopes,signal,hooks) { return require('./conversation-jsonl-transport').sendJsonl(this,policy,file,envelopes,signal,hooks); }
+  abortJsonl(policy,file) { return require('./conversation-jsonl-transport').abortJsonl(this,policy,file); }
   async resolve(host,allowPrivate,signal) {
     host=host.replace(/^\[|\]$/g,'');
     let addresses;
@@ -123,4 +131,4 @@ class ConversationPushTransport {
     }
   }
 }
-module.exports={ConversationPushTransport,checkAddress};
+module.exports={ConversationPushTransport,checkAddress,failure,failureResult};

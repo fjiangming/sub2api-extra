@@ -8,11 +8,15 @@ const path = require('node:path');
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE_PATH || 'playwright');
 const { startPreview } = require('./conversation-logs-live-preview.cjs');
 const { event } = require('../tests/conversation-logs-fixture');
+const { s3Receiver } = require('../tests/conversation-s3-fixture');
 
 async function main() {
   const until=async predicate=>{const deadline=Date.now()+20000;while(!predicate()){assert(Date.now()<deadline,'Timed out waiting for delivery');await new Promise(resolve=>setTimeout(resolve,100));}};
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),'sub2api-push-browser-'));
-  const receipts=[];let mode=200;
+  const receipts=[];let mode=200,rejectJsonlPart=false;
+  const jsonlTarget=await s3Receiver({beforeRequest:(entry,res)=>{
+    if(rejectJsonlPart&&entry.method==='PUT'){res.writeHead(403,{'content-type':'application/xml'});res.end('<Error><Code>AccessDenied</Code></Error>');return false;}
+  }});
   const target=http.createServer((req,res)=>{
     let body='';req.on('data',chunk=>{body+=chunk;});req.on('end',()=>{receipts.push({url:req.url,headers:req.headers,body:JSON.parse(body)});res.writeHead(mode,{'content-type':'application/xml'});res.end(mode===200?'':'<Error><Code>AccessDenied</Code></Error>');});
   });
@@ -24,7 +28,7 @@ async function main() {
     for(const [name,width,height,colorScheme] of [['desktop',1440,1000,'light'],['mobile',390,844,'light'],['narrow',320,740,'light'],['dark',1440,1000,'dark']]) {
       const preview=await startPreview({port:0}),context=await browser.newContext({viewport:{width,height},colorScheme});
       try {
-        const page=await context.newPage(),errors=[],external=[];mode=200;receipts.length=0;
+        const page=await context.newPage(),errors=[],external=[];mode=200;receipts.length=0;rejectJsonlPart=false;jsonlTarget.completed.length=0;jsonlTarget.objects.clear();
         page.on('pageerror',error=>errors.push(error.message));
         page.on('request',request=>{if(!request.url().startsWith(`http://127.0.0.1:${preview.port}/`)&&!/^(blob:|data:)/.test(request.url()))external.push(request.url());});
         const field=name=>page.locator(`#clp-form [name="${name}"]`);
@@ -43,6 +47,7 @@ async function main() {
         await field('enabled').check();await field('automatic').check();await field('allowPrivateNetwork').check();
         await field('webhookEnabled').check();await field('webhookUrl').fill(targetUrl+'/webhook');await field('webhookToken').fill('fictional-webhook-token');
         await field('s3Enabled').check();await field('endpoint').fill(targetUrl);await field('bucket').fill('demo-archive');await field('accessKeyId').fill('fictional-id');await field('secretAccessKey').fill('fictional-secret');
+        await field('s3Format').selectOption('json');
         await page.evaluate(()=>conversationLogsUi.load());assert.equal(await field('webhookToken').inputValue(),'fictional-webhook-token');
         await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
         assert.equal(await field('webhookToken').inputValue(),'');assert.equal(await field('secretAccessKey').inputValue(),'');assert.equal(preview.push.store.list().total,0);
@@ -63,6 +68,23 @@ async function main() {
         mode=200;const failedJobs=preview.push.store.list({status:'failed'}).items;
         for(const job of failedJobs){await page.locator(`[data-clp-retry="${job.id}"]`).click();await until(()=>preview.push.store.list({status:'sent'}).items.some(row=>row.id===job.id));}
         await page.locator('#clp-job-status').selectOption('');await waitJobs('sent',6);
+        await field('s3Format').selectOption('jsonl');await field('endpoint').fill(jsonlTarget.url);await field('webhookEnabled').uncheck();
+        assert.equal(await field('jsonlMaxGB').inputValue(),'10');await field('jsonlTimezone').fill('Asia/Shanghai');
+        await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
+        await page.locator('[data-clp-test=s3]').click();await page.locator('#clp-test-s3').filter({hasText:'连接成功'}).waitFor();
+        assert.equal(JSON.parse(jsonlTarget.completed[0].body.toString()).schema,'sub2api.conversation.test.v1');
+        preview.fixture.store.ingest(event(name+'-jsonl-a',{model:'Opus5'}));preview.fixture.store.ingest(event(name+'-jsonl-b',{model:'Opus5'}));preview.fixture.store.ingest(event(name+'-jsonl-c',{model:'Fable5'}));
+        await until(()=>preview.push.store.list().counts.some(row=>row.status==='buffered'&&row.count===3));
+        await page.locator('[data-clp-action=refresh]').click();await page.locator('#clp-files').filter({hasText:'汇总中'}).waitFor();
+        await layout();await shot('jsonl-configuration');
+        await page.locator('#clp-flush').click();await waitJobs('sent',9);
+        const jsonlFiles=jsonlTarget.completed.filter(file=>JSON.parse(file.body.toString().split('\n')[0]).schema==='sub2api.conversation.v1');
+        assert.equal(jsonlFiles.length,2);assert.deepEqual(jsonlFiles.map(file=>file.body.toString().trimEnd().split('\n').length).sort(),[1,2]);
+        for(const file of jsonlFiles){assert(file.path.endsWith('.jsonl'));for(const line of file.body.toString().trimEnd().split('\n'))assert(!Buffer.from(JSON.parse(line).request,'base64').toString().includes('alice@example.com'));}
+        rejectJsonlPart=true;preview.fixture.store.ingest(event(name+'-jsonl-failed',{model:'Opus5'}));
+        await until(()=>preview.push.store.list().counts.some(row=>row.status==='buffered'&&row.count===1));await page.locator('#clp-flush').click();await waitJobs('failed',1);
+        await page.locator('[data-clp-file-retry]').waitFor();await layout();await shot('jsonl-failed');
+        rejectJsonlPart=false;await page.locator('[data-clp-file-retry]').click();await waitJobs('sent',10);assert.equal(jsonlTarget.uploads.size,0);
         await field('webhookToken').fill('unsaved-sensitive-value');await page.locator('[data-clp-action=refresh]').click();assert.equal(await field('webhookToken').inputValue(),'unsaved-sensitive-value');
         await page.locator('#cl-tab-requests').click();assert.equal(await page.locator('#clp-form').count(),0);
         await page.locator('#cl-tab-push').click();await field('webhookToken').waitFor();assert.equal(await field('webhookToken').inputValue(),'');
@@ -70,10 +92,10 @@ async function main() {
         await layout();await shot('delivered');
         await page.locator('#logout-button').click();await page.locator('#login-view').waitFor({state:'visible'});assert.equal(await page.locator('#clp-form').count(),0);
         assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
-        console.log(name+': config, secret clearing, synthetic connection tests, automatic Webhook/S3, manual preview/idempotency, failure/retry and logout passed');
+        console.log(name+': Webhook/legacy S3, JSONL config/grouping/multipart/flush/file retry, privacy, mobile layout and logout passed');
       } finally {await context.close();await preview.stop();}
     }
     console.log('Screenshots: '+directory);
-  } finally {await browser?.close();await new Promise(resolve=>{target.close(resolve);target.closeAllConnections();});}
+  } finally {await browser?.close();await jsonlTarget.close();await new Promise(resolve=>{target.close(resolve);target.closeAllConnections();});}
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const { z } = require('zod');
 const { modelAllowed } = require('./services/conversation-models');
 const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversation-sensitive');
-const { defaults,parsePolicy,publicPolicy,targetHash,invalid } = require('./services/conversation-push-policy');
+const { defaults,normalizePolicy,parsePolicy,publicPolicy,targetHash,invalid } = require('./services/conversation-push-policy');
 
 const destinations = z.array(z.enum(['webhook','s3'])).min(1).max(2);
 const filterSchema = z.object({search:z.string().max(200).optional(),start:z.string().max(32).optional(),end:z.string().max(32).optional(),
@@ -12,7 +12,7 @@ const filterSchema = z.object({search:z.string().max(200).optional(),start:z.str
   protocol:z.enum(['','JSON','SSE','WebSocket']).optional(),capture:z.enum(['','complete','partial','missing','redaction_failed']).optional()}).strict();
 const previewSchema = z.object({filter:filterSchema,destinations}).strict();
 const enqueueSchema = previewSchema.extend({batchId:z.string().uuid(),previewToken:z.string().regex(/^[a-f0-9]{64}$/)}).strict();
-const columns = 'id,rowid AS cursor_id,user_id,model,at,fingerprint,processed_at,processing_policy_version,processing_error,complete,reason,redaction_version,redaction_policy_hash,original IS NOT NULL AS original,masked IS NOT NULL AS masked';
+const columns = 'id,rowid AS cursor_id,user_id,model,at,fingerprint,processed_at,processing_policy_version,processing_error,complete,reason,redaction_version,redaction_policy_hash,inspection_warnings,original IS NOT NULL AS original,masked IS NOT NULL AS masked';
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function parse(schema,value) { const result=schema.safeParse(value);if(!result.success)throw invalid();return result.data; }
 
@@ -44,7 +44,7 @@ class ConversationPushStore {
     this.db.prepare(`INSERT INTO cl_push_cursor VALUES(1,?,'') ON CONFLICT(singleton) DO UPDATE SET row_id=excluded.row_id,record_id=''
       WHERE cl_push_cursor.row_id!=excluded.row_id OR cl_push_cursor.record_id!=''`).run(row.cursor_id);
   }
-  policy() { const row=this.db.prepare('SELECT * FROM cl_push_policies ORDER BY version DESC LIMIT 1').get();return this.archive.open(row.body,'push-policy:'+row.version); }
+  policy(version) { const row=version?this.db.prepare('SELECT * FROM cl_push_policies WHERE version=?').get(version):this.db.prepare('SELECT * FROM cl_push_policies ORDER BY version DESC LIMIT 1').get();return normalizePolicy(this.archive.open(row.body,'push-policy:'+row.version)); }
   configure(input) {
     return this.db.transaction(()=>{
       const before=this.policy(),after=parsePolicy(input,before);
@@ -58,7 +58,8 @@ class ConversationPushStore {
   allowed(row,policy) { return !policy.excludedUserIds.includes(row.user_id) && modelAllowed(policy,row.model); }
   copyReady(row,source,policy) {
     return Boolean(row.complete && !row.reason && row[source] && (source === 'original' ||
-      !row.processing_error && row.redaction_version === REDACTION_VERSION && row.redaction_policy_hash === redactionPolicyHash(policy)));
+      !row.processing_error && (!row.inspection_warnings || row.inspection_warnings === '[]') &&
+      row.redaction_version === REDACTION_VERSION && row.redaction_policy_hash === redactionPolicyHash(policy)));
   }
   jobId(row,policy,destination) { return hash([row.id,destination,targetHash(policy,destination),this.version(row,policy.source)]); }
   pendingCount() { return this.db.prepare("SELECT COUNT(*) n FROM cl_push_jobs WHERE status IN ('pending','running')").get().n; }
@@ -127,15 +128,16 @@ class ConversationPushStore {
     if(!row)return {cancel:'RECORD_EXPIRED'};
     if(!this.allowed(row,this.archive.policy()))return {cancel:'COLLECTION_EXCLUDED'};
     if(!row[job.source])return {cancel:'COPY_UNAVAILABLE'};
+    if(job.source==='masked' && row.inspection_warnings && row.inspection_warnings!=='[]')return {cancel:'INSPECTION_INCOMPLETE'};
     if(!this.copyReady(row,job.source,this.archive.policy()))return {cancel:!row.complete||row.reason?'INCOMPLETE_CAPTURE':'REDACTION_OUTDATED'};
     if(this.version(row,job.source)!==job.content_version)return {cancel:'CONTENT_CHANGED'};
     return {row};
   }
-  claim() {
+  claim({ single = false } = {}) {
     return this.db.transaction(()=>{
       const policy=this.policy();if(!policy.enabled)return null;
       this.db.prepare("UPDATE cl_push_jobs SET status=CASE WHEN attempts<? THEN 'pending' ELSE 'failed' END,error_code='DELIVERY_UNKNOWN',lease_token='',lease_until=0 WHERE status='running' AND lease_until<=?").run(policy.maxAttempts,this.now());
-      const targets=['webhook','s3'].filter(target=>policy[target].enabled);
+      const targets=['webhook','s3'].filter(target=>policy[target].enabled && !(single && target==='s3' && policy.s3.format==='jsonl'));
       if(!targets.length)return null;
       const candidates=this.db.prepare(`SELECT * FROM cl_push_jobs WHERE status='pending' AND next_at<=? AND destination IN (${targets.map(()=>'?').join(',')}) ORDER BY next_at,created_at,id LIMIT 100`).all(this.now(),...targets);
       for(const job of candidates){
@@ -166,7 +168,7 @@ class ConversationPushStore {
     return {id,status:'pending'};
   }
   cancelBatch(id) {
-    const result=this.db.prepare("UPDATE cl_push_jobs SET status='cancelled',error_code='ADMIN_CANCELLED',lease_token='',lease_until=0,updated_at=? WHERE batch_id=? AND status IN ('pending','running')").run(this.now(),id);
+    const result=this.db.prepare("UPDATE cl_push_jobs SET status='cancelled',error_code='ADMIN_CANCELLED',lease_token='',lease_until=0,updated_at=? WHERE batch_id=? AND status IN ('pending','buffered','running')").run(this.now(),id);
     return {cancelled:result.changes};
   }
   batch(id) {
@@ -175,7 +177,7 @@ class ConversationPushStore {
   }
   list(query={}) {
     const page=Math.max(1,Math.min(1000000,Number(query.page)||1))|0;
-    if(query.status&&!['pending','running','sent','failed','cancelled'].includes(query.status))throw invalid();
+    if(query.status&&!['pending','buffered','running','sent','failed','cancelled'].includes(query.status))throw invalid();
     const where=query.status?' WHERE j.status=?':'',args=query.status?[query.status]:[];
     const total=this.db.prepare('SELECT COUNT(*) n FROM cl_push_jobs j'+where).get(...args).n;
     const items=this.db.prepare(`SELECT j.id,j.record_id,j.destination,j.source,j.batch_id,j.status,j.attempts,j.next_at,j.created_at,j.updated_at,j.error_code,j.http_status,r.model,r.user_id
@@ -184,12 +186,12 @@ class ConversationPushStore {
       batches:this.db.prepare('SELECT id,created_at,matched,eligible,created FROM cl_push_batches ORDER BY created_at DESC LIMIT 10').all()};
   }
   envelope(job) {
-    const fields='id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,processing_error,processing_policy_version,processed_at,capture_version,body_sha256,redaction_version';
+    const fields='id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,processing_error,processing_policy_version,processed_at,capture_version,body_sha256,redaction_version,inspection_warnings';
     const row=this.db.prepare(`SELECT ${fields},${job.source} AS payload FROM cl_records WHERE id=?`).get(job.record_id);
     if(!row?.payload)throw invalid('日志副本不可用','CONVERSATION_PUSH_COPY_UNAVAILABLE',409);
     const {payload,...metadata}=row,raw=this.archive.open(payload,row.id+':'+job.source);
     const checksum=value=>{const bytes=Buffer.from(value,'base64');return {bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')};};
-    return {schema:'sub2api.conversation.v1',delivery_id:job.id,source:job.source,metadata:{...metadata,complete:Boolean(metadata.complete),encoding:job.source==='original'?metadata.encoding:''},
+    return {schema:'sub2api.conversation.v1',delivery_id:job.id,source:job.source,metadata:{...metadata,inspection_warnings:JSON.parse(metadata.inspection_warnings),complete:Boolean(metadata.complete),encoding:job.source==='original'?metadata.encoding:''},
       body_encoding:'base64',request:raw.request,response:raw.response,frames:raw.frames,
       checksums:{request:checksum(raw.request),response:checksum(raw.response),frames:raw.frames.map(frame=>checksum(frame.body))}};
   }

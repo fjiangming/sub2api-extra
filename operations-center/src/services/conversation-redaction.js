@@ -91,9 +91,41 @@ function streamGroup(token, parsed) {
   return null;
 }
 
+function replaceUrls(text, transform, policy, placeholder) {
+  const parts = []; let cursor = 0;
+  const component = (raw, key = '', form = false) => {
+    let value, label;
+    try { value = decodeURIComponent(form ? raw.replaceAll('+', ' ') : raw); label = decodeURIComponent(key.replaceAll('+', ' ')); }
+    catch { throw new Error('UNINSPECTABLE_CONTENT'); }
+    const kind = /^x-amz-|^x-goog-|^(?:sig|signature|se|sp|sv)$/i.test(label) && policy.secret ? 'secret' : fieldKind(label, policy);
+    const next = kind && value ? placeholder(kind, value) : transform(value);
+    return next === value ? raw : encodeURIComponent(next);
+  };
+  const parameters = raw => raw.split('&').map(part => {
+    const equal = part.indexOf('=');
+    return equal < 0 ? component(part, '', true) : part.slice(0, equal + 1) + component(part.slice(equal + 1), part.slice(0, equal), true);
+  }).join('&');
+  for (const match of text.matchAll(/\bhttps?:\/\/[^\s"'<>]+/gi)) {
+    const raw = match[0];
+    try { new URL(raw); } catch { continue; }
+    const [, scheme, authority, path, query = '', fragment = ''] = raw.match(/^([a-z]+:\/\/)([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/i);
+    const at = authority.lastIndexOf('@');
+    const host = at < 0 ? authority : authority.slice(at + 1);
+    const auth = at < 0 ? '' : (policy.secret ? encodeURIComponent(placeholder('secret', authority.slice(0, at))) : transform(authority.slice(0, at))) + '@';
+    const hash = fragment.slice(1), question = hash.indexOf('?');
+    const nextHash = question >= 0 ? hash.slice(0, question + 1) + parameters(hash.slice(question + 1)) : hash.includes('=') ? parameters(hash) : hash.split('/').map(value => component(value)).join('/');
+    parts.push(transform(text.slice(cursor, match.index)), scheme + auth + transform(host) + path.split('/').map(value => component(value)).join('/') +
+      (query ? '?' + parameters(query.slice(1)) : '') + (fragment ? '#' + nextHash : ''));
+    cursor = match.index + raw.length;
+  }
+  if (!parts.length) return transform(text);
+  parts.push(transform(text.slice(cursor))); return parts.join('');
+}
+
 function createRedactor(policy, salt) {
   const hits = new Map();
   const known = new Map();
+  const warnings = new Set();
   const kindFor = token => {
     const schema = token.path.some(field => ['properties','$defs','definitions'].includes(field));
     const kind = fieldKind(token.field, policy) || (!schema && token.path.slice(0, -1).map(field => fieldKind(field, policy)).find(Boolean)) || '';
@@ -105,7 +137,7 @@ function createRedactor(policy, salt) {
     hits.set(replacement, { name: kind, replacement, count: (hits.get(replacement)?.count || 0) + 1 });
     return replacement;
   }
-  function replace(value) {
+  function replaceText(value) {
     let text = value;
     for (const [match, kind] of [...known].sort((a, b) => b[0].length - a[0].length)) {
       if (text.includes(match)) text = text.split(/(<[A-Z]+_[A-F0-9]{12}>)/g).map((part, index) => index % 2 ? part : part.replaceAll(match, (_value, at) => {
@@ -125,6 +157,11 @@ function createRedactor(policy, salt) {
       const next = kind ? placeholder(kind, decoded) : replacePatterns(policy.email ? replaceEmails(decoded, m => placeholder('email', m)) : decoded, policy, placeholder);
       return next === decoded ? all : prefix + encodeURIComponent(next);
     });
+    return text;
+  }
+  function replace(value) {
+    // Inspect URL components without allowing an email match to consume the host, path or parameter name.
+    let text = replaceUrls(value, replaceText, policy, placeholder);
     for (const rule of policy.custom) {
       const count = text.split(rule.from).length - 1;
       if (count) {
@@ -186,7 +223,8 @@ function createRedactor(policy, salt) {
       if (!document.json) continue;
       const parsed = JSON.parse(document.text);
       for (const token of tokens(document.text)) {
-        assertInspectable(token);
+        const warning = assertInspectable(token, parsed, depth);
+        if (warning) { warnings.add(warning); continue; }
         if (protocolField(token, parsed, depth)) continue;
         const kind = kindFor(token);
         if (kind && ['personal','identity','financial','secret','device'].includes(kind) && token.value.length >= (kind === 'personal' ? 2 : 4) && token.value.length <= 4096) {
@@ -219,8 +257,9 @@ function createRedactor(policy, salt) {
         if (document.segments && !segment) throw new Error('UNSAFE_SSE_REPLACEMENT');
         const base = segment ? segment.raw - segment.start : document.start;
         const entry = { ...token, start: base + token.start, end: base + token.end, file };
-        assertInspectable(token);
-        if (protocolField(token, parsed, depth)) {
+        const warning = assertInspectable(token, parsed, depth);
+        if (warning || protocolField(token, parsed, depth)) {
+          if (warning) warnings.add(warning);
           // Numeric IDs are often mistaken for phone numbers. Protocol identities stay exact.
           if (policy.custom.some(rule => token.value.includes(rule.from) && rule.from !== rule.to)) throw new Error('PROTECTED_FIELD_MATCH');
           continue;
@@ -270,7 +309,7 @@ function createRedactor(policy, salt) {
       return text;
     });
   }
-  return { process: redactDocuments, hits: () => [...hits.values()] };
+  return { process: redactDocuments, hits: () => [...hits.values()], warnings: () => [...warnings].sort() };
 }
 
 function maskPayload(raw, policy, salt, encoding = '', { maxOutputBytes = 256 * 1024 * 1024 } = {}) {
@@ -286,12 +325,12 @@ function maskPayload(raw, policy, salt, encoding = '', { maxOutputBytes = 256 * 
     const output = redactor.process(raw.frames.map(frame => decode(frame.body)));
     const frames = raw.frames.map((frame, index) => ({ ...frame, body: Buffer.from(output[index]) }));
     return { payload: { request: frames.find(frame => frame.direction === 'out')?.body || Buffer.alloc(0),
-      response: frames.findLast(frame => frame.direction === 'in')?.body || Buffer.alloc(0), frames }, hits: redactor.hits() };
+      response: frames.findLast(frame => frame.direction === 'in')?.body || Buffer.alloc(0), frames }, hits: redactor.hits(), warnings: redactor.warnings() };
   }
   const inputs = [decode(raw.request), decode(raw.response, encoding)];
   const output = redactor.process(inputs);
   return { payload: { request: Buffer.from(output[0]), response: Buffer.from(output[1]),
-    frames: raw.frames.map((frame, index) => ({ ...frame, body: Buffer.from(output[index + 2]) })) }, hits: redactor.hits() };
+    frames: raw.frames.map((frame, index) => ({ ...frame, body: Buffer.from(output[index + 2]) })) }, hits: redactor.hits(), warnings: redactor.warnings() };
 }
 
 module.exports = { decodeBody, createRedactor, maskPayload, REDACTION_VERSION };

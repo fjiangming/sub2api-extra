@@ -6,7 +6,7 @@ const { default: isIBAN } = require('validator/lib/isIBAN');
 const isIP = require('validator/lib/isIP');
 const crypto = require('node:crypto');
 
-const REDACTION_VERSION = 2;
+const REDACTION_VERSION = 3;
 function redactionPolicyHash(policy) {
   return crypto.createHash('sha256').update(JSON.stringify([REDACTION_VERSION,
     ...['email','phone','secret','ip','identity','financial','personal','device'].map(key => Boolean(policy[key])), policy.custom])).digest('hex');
@@ -28,6 +28,12 @@ function fieldKind(field, policy) {
   return '';
 }
 
+function geminiPartPath(path) {
+  const p = path[0] === 'response' ? path.slice(1) : path;
+  return p.length === 4 && p[0] === 'contents' && Number.isInteger(p[1]) && p[2] === 'parts' && Number.isInteger(p[3]) ||
+    p.length === 5 && p[0] === 'candidates' && Number.isInteger(p[1]) && p[2] === 'content' && p[3] === 'parts' && Number.isInteger(p[4]);
+}
+
 // Keep actual protocol identities; data objects inside tools are handled at a separate depth.
 function protocolField(token, parsed, depth) {
   if (depth) return false;
@@ -36,6 +42,8 @@ function protocolField(token, parsed, depth) {
   const root = p.length === 1 || (p.length === 2 && ['response', 'message', 'item'].includes(p[0]));
   const protocolParent = parent && typeof parent === 'object' && (/^(?:response\.|message\.|function|function_call|function_call_output|custom_tool_call|tool_use|tool_result|text|input_text|output_text|thinking|content_block|image|image_url|document|audio)/.test(parent.type || '') ||
     ['user','assistant','system','developer','tool','model'].includes(parent.role));
+  if (['id','name'].includes(field) && ['functionCall','functionResponse','function_call','function_response'].includes(p.at(-2)) && geminiPartPath(p.slice(0,-2))) return true;
+  if (field === 'name' && p.length === 5 && p[0] === 'tools' && Number.isInteger(p[1]) && ['functionDeclarations','function_declarations'].includes(p[2]) && Number.isInteger(p[3])) return true;
   if (['call_id','tool_call_id','tool_use_id','previous_response_id','item_id','response_id'].includes(field)) {
     return root || protocolParent || p.some(key => ['messages','input','output','tool_calls','content'].includes(key));
   }
@@ -46,15 +54,46 @@ function protocolField(token, parsed, depth) {
   return false;
 }
 
-function assertInspectable(token) {
+function protocolSignature(token, parsed, depth) {
+  const key = normalize(token.field);
+  if (!['signature','thoughtsignature'].includes(key) || depth || token.numeric || !/^[A-Za-z0-9+/=_-]+$/.test(token.value)) return false;
+  let p = token.path, root = parsed;
+  if (p[0] === 'response') { p = p.slice(1); root = parsed.response; }
+  const parent = p.slice(0, -1).reduce((obj, key) => obj?.[key], root);
+  if (key === 'signature') {
+    if (p.length === 2 && p[0] === 'delta' && root?.type === 'content_block_delta' && parent?.type === 'signature_delta') return true;
+    if (parent?.type !== 'thinking') return false;
+    if (p.length === 2 && p[0] === 'content_block' && root?.type === 'content_block_start') return true;
+    if (p.length === 3 && p[0] === 'content' && Number.isInteger(p[1]) && (root?.role === 'assistant' || root?.type === 'message')) return true;
+    if (p.length === 4 && p[0] === 'message' && p[1] === 'content' && Number.isInteger(p[2]) && root?.message?.role === 'assistant') return true;
+    return p.length === 5 && p[0] === 'messages' && Number.isInteger(p[1]) && p[2] === 'content' && Number.isInteger(p[3]) && root?.messages?.[p[1]]?.role === 'assistant';
+  }
+  return geminiPartPath(p.slice(0,-1));
+}
+
+const mediaFields = new Set(['image','imageurl','audio','audiourl','video','videourl','document','file','fileurl','filedata','inlinedata']);
+const mediaValues = new Set(['data','image','audio','video','document','file','imageurl','audiourl','videourl','fileurl']);
+const opaqueFields = new Set(['encryptedcontent','signature','thoughtsignature','encrypteddata','ciphertext','b64json','base64','imagedata','audiodata','filedata','fileid','fileuri','gcsuri']);
+const mediaType = /^(?:(?:input|output)_)?(?:image(?:_url)?|audio(?:_url)?|video(?:_url)?|document|file)$/;
+
+function assertInspectable(token, parsed, depth = 0) {
   const key = normalize(token.field), value = token.value;
-  if (typeof value !== 'string' || !value) return;
-  if (['encryptedcontent','signature','thoughtsignature','encrypteddata','ciphertext','b64json','base64','imagedata','audiodata','filedata','fileid'].includes(key) ||
-    /^data:[^,]*;base64,/i.test(value) ||
-    (['data','image','audio','video','document','file','imageurl','audiourl','videourl','fileurl','url'].includes(key) &&
-      (/^(?:https?:|blob:|file:|data:)/i.test(value) || (value.length >= 80 && /^[A-Za-z0-9+/=_-]+$/.test(value))))) {
+  if (typeof value !== 'string' || !value) return '';
+  // Only known vendor protocol paths may pass through; callers must withhold warned masked copies from export.
+  if (protocolSignature(token, parsed, depth)) return 'OPAQUE_SIGNATURE';
+  if (opaqueFields.has(key) || /^data:[^,]*;base64,/i.test(value) || key === 'url' && /^(?:blob:|file:|data:)/i.test(value)) throw new Error('UNINSPECTABLE_CONTENT');
+  if (!mediaValues.has(key) && !['url','uri'].includes(key)) return '';
+  let node = parsed, media = false;
+  for (const field of token.path.slice(0, -1)) {
+    if (mediaFields.has(normalize(field)) || node && typeof node === 'object' && mediaType.test(node.type || '')) media = true;
+    node = node?.[field];
+  }
+  if (node && typeof node === 'object' && (mediaType.test(node.type || '') || node.mime_type || node.mimeType)) media = true;
+  if ((mediaValues.has(key) || media && ['url','uri'].includes(key)) &&
+      (/^(?:https?:|blob:|file:|data:|gs:|s3:)/i.test(value) || (value.length >= 80 && /^[A-Za-z0-9+/=_-]+$/.test(value)) || media && key === 'data')) {
     throw new Error('UNINSPECTABLE_CONTENT');
   }
+  return '';
 }
 
 function replacePrivateKeys(text, placeholder) {

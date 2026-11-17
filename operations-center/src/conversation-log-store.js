@@ -98,7 +98,8 @@ class ConversationLogStore {
     this.db.transaction(() => {
       const columns = new Set(this.db.pragma('table_info(cl_records)').map(column => column.name));
       for (const [name, definition] of [['processing_error', "TEXT NOT NULL DEFAULT ''"], ['processing_policy_version', 'INTEGER NOT NULL DEFAULT 0'], ['processed_at', 'INTEGER NOT NULL DEFAULT 0'],
-        ['redaction_version','INTEGER NOT NULL DEFAULT 0'], ['redaction_policy_hash',"TEXT NOT NULL DEFAULT ''"], ['capture_version','INTEGER NOT NULL DEFAULT 1'], ['body_sha256',"TEXT NOT NULL DEFAULT ''"]]) {
+        ['redaction_version','INTEGER NOT NULL DEFAULT 0'], ['redaction_policy_hash',"TEXT NOT NULL DEFAULT ''"], ['capture_version','INTEGER NOT NULL DEFAULT 1'], ['body_sha256',"TEXT NOT NULL DEFAULT ''"],
+        ['inspection_warnings',"TEXT NOT NULL DEFAULT '[]'"]]) {
         if (!columns.has(name)) this.db.exec(`ALTER TABLE cl_records ADD COLUMN ${name} ${definition}`);
       }
     })();
@@ -165,14 +166,14 @@ class ConversationLogStore {
     if (existing) { if (existing.fingerprint !== fingerprint) throw invalid('CONVERSATION_ID_CONFLICT', 409); return { ...ack, duplicate: true }; }
     const canFit = bytes => this.usedBytes() + bytes < current.capacity * 1024 ** 3 && this.freeBytes() - bytes >= current.reserve * 1024 ** 3;
     if (!canFit(rawBytes * (policy.mode === 'dual' ? 3 : 1.5) + 4096)) { this.lastError = 'capacity'; return { accepted: false, reason: 'capacity' }; }
-    let original = null, masked = null, hits = [], reason = event.reason, processing_error = '';
+    let original = null, masked = null, hits = [], warnings = [], reason = event.reason, processing_error = '';
     if (rawBytes || !['body_limit', 'memory_limit'].includes(reason)) {
       try {
-        if (policy.mode !== 'original') { const result = maskPayload(raw, policy, this.key, event.encoding, this.processingLimits()); masked = this.seal(pack(result.payload), event.id + ':masked'); hits = result.hits; }
-        if (policy.mode !== 'masked') original = this.seal(pack(raw), event.id + ':original');
+        if (policy.mode !== 'original') { const result = maskPayload(raw, policy, this.key, event.encoding, this.processingLimits()); masked = this.seal(pack(result.payload), event.id + ':masked'); hits = result.hits; warnings = result.warnings; }
+        if (policy.mode !== 'masked' || warnings.length) original = this.seal(pack(raw), event.id + ':original');
       } catch (error) {
         // Explicit operator policy: failed processing retains the exact encrypted source, even in masked mode.
-        original = this.seal(pack(raw), event.id + ':original'); masked = null; hits = []; processing_error = processingError(error);
+        original = this.seal(pack(raw), event.id + ':original'); masked = null; hits = []; warnings = []; processing_error = processingError(error);
       }
     }
     const storedBytes = (original?.length || 0) + (masked?.length || 0) + 2048;
@@ -189,12 +190,12 @@ class ConversationLogStore {
       }
       this.db.prepare(`INSERT INTO cl_records(id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,
       host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,original,masked,hits,bytes,fingerprint,
-      processing_error,processing_policy_version,processed_at,redaction_version,redaction_policy_hash,capture_version,body_sha256) VALUES(@id,@request_id,@user_id,@key_id,@account_id,@session_id,@at,@duration_ms,
+      processing_error,processing_policy_version,processed_at,redaction_version,redaction_policy_hash,capture_version,body_sha256,inspection_warnings) VALUES(@id,@request_id,@user_id,@key_id,@account_id,@session_id,@at,@duration_ms,
       @host,@path,@method,@protocol,@model,@status,@complete,@reason,@policy_version,@mode,@encoding,@original,@masked,@hits,@bytes,@fingerprint,
-      @processing_error,@processing_policy_version,@processed_at,@redaction_version,@redaction_policy_hash,@capture_version,@body_sha256)`)
+      @processing_error,@processing_policy_version,@processed_at,@redaction_version,@redaction_policy_hash,@capture_version,@body_sha256,@inspection_warnings)`)
       .run({ ...metadata, complete: event.complete && !reason ? 1 : 0, reason, mode: policy.mode, original, masked, hits: JSON.stringify(hits), bytes: storedBytes, fingerprint,
         body_sha256: digest, redaction_version: masked ? REDACTION_VERSION : 0, redaction_policy_hash: masked ? redactionPolicyHash(policy) : '',
-        processing_error, processing_policy_version: policy.mode === 'original' ? 0 : policy.version, processed_at: this.now() });
+        inspection_warnings: JSON.stringify(warnings), processing_error, processing_policy_version: policy.mode === 'original' ? 0 : policy.version, processed_at: this.now() });
       this.lastError = null; return ack;
     }).immediate();
     } catch (error) {
@@ -225,13 +226,13 @@ class ConversationLogStore {
           .run(errorCode, policy.version, processedAt, id);
         return;
       }
-      const original = row.mode === 'masked' ? null : row.original;
+      const original = row.mode === 'masked' && !result.warnings.length ? null : row.original;
       // Reserve space for the new encrypted copy before atomically removing a fallback source.
       if (this.usedBytes() + masked.length + 2048 >= policy.capacity * 1024 ** 3 || this.freeBytes() - masked.length - 2048 < policy.reserve * 1024 ** 3) {
         throw new AppError('CONVERSATION_RETRY_CAPACITY', '空间不足，已保留原文，请释放空间后重试', { status: 409 });
       }
-      this.db.prepare(`UPDATE cl_records SET original=?,masked=?,hits=?,bytes=?,processing_error='',processing_policy_version=?,processed_at=?,redaction_version=?,redaction_policy_hash=? WHERE id=?`)
-        .run(original, masked, JSON.stringify(result.hits), (original?.length || 0) + masked.length + 2048, policy.version, processedAt, REDACTION_VERSION, redactionPolicyHash(policy), id);
+      this.db.prepare(`UPDATE cl_records SET original=?,masked=?,hits=?,bytes=?,processing_error='',processing_policy_version=?,processed_at=?,redaction_version=?,redaction_policy_hash=?,inspection_warnings=? WHERE id=?`)
+        .run(original, masked, JSON.stringify(result.hits), (original?.length || 0) + masked.length + 2048, policy.version, processedAt, REDACTION_VERSION, redactionPolicyHash(policy), JSON.stringify(result.warnings), id);
     }).immediate();
     return this.detail(id);
   }
@@ -262,18 +263,19 @@ class ConversationLogStore {
     return { sql: clauses.length ? ' WHERE ' + clauses.join(' AND ') : '', args };
   }
   publicRow(row) {
-    const { original, masked, fingerprint, hits, ...metadata } = row;
+    const { original, masked, fingerprint, hits, inspection_warnings, ...metadata } = row;
+    const warnings = JSON.parse(inspection_warnings || '[]');
     const policy = this.policy(), excluded = policy.excludedUserIds.includes(row.user_id);
     const modelExcluded = !modelAllowed(policy, row.model);
     const outdated = row.mode !== 'original' && (row.redaction_version !== REDACTION_VERSION || row.redaction_policy_hash !== redactionPolicyHash(policy));
-    return { ...metadata, complete: Boolean(row.complete), original: Boolean(original), masked: Boolean(masked), hits: JSON.parse(hits),
-      redaction_outdated: outdated, retry_available: Boolean(original && (row.processing_error || outdated) && !excluded && !modelExcluded), retry_blocked: excluded ? 'user_excluded' : modelExcluded ? 'model_excluded' : !original ? 'no_original' : '' };
+    return { ...metadata, inspection_warnings: warnings, complete: Boolean(row.complete), original: Boolean(original), masked: Boolean(masked), hits: JSON.parse(hits),
+      redaction_outdated: outdated, retry_available: Boolean(original && (row.processing_error || outdated || warnings.length) && !excluded && !modelExcluded), retry_blocked: excluded ? 'user_excluded' : modelExcluded ? 'model_excluded' : !original ? 'no_original' : '' };
   }
   list(query = {}) {
     const page = Math.max(1, Math.min(1000000, Number(query.page) || 1)) | 0, pageSize = 20;
     const filter = this.where(query);
     const summary = this.db.prepare(`SELECT COUNT(*) total,COUNT(DISTINCT request_id) requests,COALESCE(SUM(complete),0) complete,COALESCE(SUM(bytes),0) bytes FROM cl_records${filter.sql}`).get(...filter.args);
-    const columns = "id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,original IS NOT NULL original,masked IS NOT NULL masked,hits,bytes,processing_error,processing_policy_version,processed_at,redaction_version,redaction_policy_hash,capture_version,body_sha256";
+    const columns = "id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,original IS NOT NULL original,masked IS NOT NULL masked,hits,bytes,processing_error,processing_policy_version,processed_at,redaction_version,redaction_policy_hash,capture_version,body_sha256,inspection_warnings";
     const items = this.db.prepare(`SELECT ${columns} FROM cl_records${filter.sql} ORDER BY at DESC,id LIMIT ? OFFSET ?`).all(...filter.args, pageSize, (page - 1) * pageSize).map(row => this.publicRow(row));
     return { items, summary, page, pageSize, pages: Math.ceil(summary.total / pageSize) };
   }

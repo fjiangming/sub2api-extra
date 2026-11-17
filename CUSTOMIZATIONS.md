@@ -1,5 +1,65 @@
 # 个性化功能维护台账
 
+## 2026-11-17：提交对话日志兼容、后台清理与 JSONL 推送
+
+用户授权提交 GitHub。本次选择运营中心对话日志的普通链接 / 协议签名兼容、有限检查与外推门禁、名单外历史后台清理、按日期 / 模型汇总 JSONL 推送，以及对应接口、界面、测试和文档。相关功能共享推送与预览入口，按完整依赖一起提交；活动奖励 / 收入口径、域名、宿主备份、独立演示与图标等其他未提交改动保留本地。维护台账仅暂存本节及上述三个功能章节，不混入其他工作记录。
+
+不修改主站采集器或推理链路，不连接或部署服务器，不自动清理 / 重处理生产历史，不配置或发送真实外部推送。沿用 main 的 Docker images 自动测试和双架构镜像发布流程；提交与发布结果核验后补记。
+
+提交前将实际暂存内容完整导出到独立目录验证：运营中心完整 **500 项测试全部通过，0 失败 / 跳过**（约 104.1 秒），`npm run check` 全部通过；未纳入本次提交的返利收入专项不计入该数量。整理 JSONL 测试末尾空白并复核 39 个暂存文件及相应维护章节，差异空白检查通过。前轮归档 / 历史清理 / 外推页面的桌面、手机、320px 与深色偏好验证记录保留在各功能章节。
+
+## 2026-11-17：兼容普通链接和模型协议签名的对话脱敏
+
+用户要求兼容修复处理异常。本轮只改运营中心的脱敏、归档、管理界面、推送门禁、预览和回归测试，不修改主站采集器或推理链路；不连接、提交、发布或部署生产，不自动重处理历史，保留前轮清理 / JSONL 及其他独立改动。原文始终保留收到的原字节，处理异常与采集完整性独立。
+
+- `operations-center/src/services/conversation-sensitive.js`：脱敏引擎由 2 升至 3；普通 `url` 按实际媒体上下文区分，不再一律失败。只允许确切协议路径中的 Claude thinking / signature_delta 和 Gemini thoughtSignature 原样保留，返回 `OPAQUE_SIGNATURE` 检查警告；任意同名字段、嵌套工具 JSON、明文可疑签名、真正媒体 / 文件 / 加密正文继续原文回退。Gemini 工具声明 / 调用 / 结果的名字及关联 ID 按确切路径保护，工具参数中的个人值照常替换。常规 token 提前返回，不对每个文本扫描媒体祖先。
+- `services/conversation-redaction.js`：独立汇总有限检查警告；保留协议签名原始 JSON token、SSE / WS 帧及顺序，自定义规则冲突仍报错。HTTP URL 用原生解析器只在内存确认结构，按原拼写处理路径、凭据、查询 / fragment 的敏感值，避免邮箱匹配吞掉 host / 路径 / 参数名；不请求外部资源，无法解码的百分号编码回退原文。
+- `src/conversation-log-store.js`：加法迁移 `inspection_warnings`，不扫描 / 改写旧正文；记录与 API 独立提供检查范围，正常处理错误为空也不伪称全部已检查。有限检查在仅脱敏模式仍保存精确加密原文及可读副本，重处理成功且无警告后才移除临时原文；保留版本 CAS、排除名单、空间门禁和原 `complete/reason`。
+- `src/conversation-push-store.js`、`src/conversation-jsonl-store.js`、`public/conversation-push-ui.js`：自动 / 手动预览与发送前拦截含未检查内容的脱敏副本，既有 JSONL 成员最终复核同样取消，分类 `INSPECTION_INCOMPLETE`；不隐式改发原文。显式原文模式沿用原资格，envelope 元数据附检查警告数组，不改正文格式。
+- `public/conversation-logs-ui.js`、`public/index.html`：列表 / 详情独立显示“部分内容未检查”及可读文本已处理，解释签名保持原样且默认暂停脱敏推送；旧异常可一键重处理，仍含警告不会误提示全面检查完成。静态脚本版本更新为 `20261117-inspection-1`，保留清理 CSS 版本及其他脚本变更。
+- `tests/conversation-inspection.test.js`（新增）、`tests/conversation-privacy.test.js`：普通 / 签名 URL、明文 / URL 编码敏感值、跨流 URL、Claude JSON / SSE / WS 签名、Gemini 及工具关联、伪装 / 嵌套 / 实际媒体拦截、自定义冲突、仅脱敏原文保留、历史迁移 / 重处理和推送 / JSONL 门禁；原隐私测试使用新引擎版本。
+- `scripts/conversation-logs-live-preview.cjs`、`conversation-logs-live-browser-check.cjs`、`package.json`：虚构协议签名示例，正式隔离归档进程重处理、有限检查 / 原文保留、旧 URL 异常修复的四种桌面 / 窄屏页面验证；新测试文件纳入语法门禁，无新增生产依赖。
+- `operations-center/README.md`、`docs/conversation-logs.md`、`docs/conversation-integrity-privacy.md`、`docs/conversation-jsonl-push.md`、`docs/conversation-diagnostics-20261117.md`：登记兼容范围、有限检查和默认对外拦截、历史升级 / 保留原文、协议回放限制；保留诊断时生产引擎 2 的原事实。
+
+本地完整 **501 项测试全部通过，0 失败 / 跳过**（约 113.6 秒），包含新增兼容 10 项，专项隐私 / 兼容 / 重处理 25 项也通过；`npm run check` 及相关差异空白检查通过。正式归档页面在 1440 / 390 / 320px 与深色偏好四种场景验证成功，覆盖隔离子进程真实重处理、签名警告 / 原文保留和旧 URL 异常修复，截图目录 `sub2api-conversation-browser-iIwmGL`；原 Webhook / JSON / JSONL 发送、分片、手动上传和文件重试四场景也通过，截图目录 `sub2api-push-browser-S8qckb`。旧引擎副本不会自动取得新资格；无原文的历史仅脱敏记录无法补做检查，真实加密或媒体内容不能仅靠本次兼容称为全部脱敏。
+
+新版隔离预览 `http://127.0.0.1:19934/preview` 已启动（PID 41564），保留既有预览；loopback / 临时 SQLite、虚构数据，推送默认关闭。健康检查正常，API 确认为脱敏引擎 3；独立复核协议签名示例在桌面 / 320px 的无残留 toast 布局，敏感邮箱已替换、签名原样保留、原文可读。截图目录 `sub2api-inspection-preview-2aJ4HS`。未自动启动清理或历史重处理，未连接生产或创建真实推送。
+
+## 2026-11-17：只读排查对话异常并增加历史模型后台清理
+
+用户要求连接服务器排查 `UNINSPECTABLE_CONTENT · 处理策略 v5` 及读取中断，并在运营中心增加按已保存模型名单清理历史日志的按钮，优先不影响正常对话。本轮生产仅只读诊断，没有部署、重启、修改配置、重处理或删除日志；不修改主站源码、采集协议、脱敏规则或资金合同，保留此前 JSONL 推送、备份和域名等独立改动。
+
+- `operations-center/src/conversation-cleanup-store.js`（新增）：原加密归档库新增持久清理任务 / 游标，管理员按当前策略版本显式触发，禁止关闭或空模型名单。复用采集 `modelAllowed` 的别名 / Kimi 匹配，未知模型也删除；固定启动时历史边界，名单语义变化自动暂停，重复点击幂等，删除与计数同事务，支持取消和重启恢复。清除本地推送引用及 JSONL 加密成员元数据，不撤回已推送外部副本。
+- `src/services/conversation-cleanup-service.js`、`conversation-cleanup-worker.js`（新增）、`src/server.js`：独立低优先级按需子进程，96 MiB old-space，读取 64 条元数据 / 最多删 1 条 / 间隔 250ms；锁等待 1ms、忙时退避 1 秒，无任务不启动，故障后重启续办。只读取正文前模型列、不解密正文；仅清理连接关闭加密空闲页覆写，不改主连接设置，不执行 VACUUM / 强制 checkpoint；退出先停止清理再关归档。
+- `src/app.js`：新增管理员任务状态 / 启动 / 停止接口，启动返回 202；沿用 CSRF、限流、策略 CAS 和不可用分类，采集令牌不能调用。
+- `public/conversation-logs-ui.js`、`conversation-logs.css`、`public/index.html`：保存策略末尾新增历史模型清理、进度和停止；未保存草稿禁用，刷新恢复、关闭页面继续，模型变化提示暂停。补充无法检查包含签名 / 普通 URL、同规则重试可能无效，读取中断不必然是业务失败的说明；静态缓存版本 `20261117-cleanup-1`，窄屏可换行。
+- `scripts/conversation-logs-live-preview.cjs`、`conversation-cleanup-browser-check.cjs`（新增）、`package.json`：正式页面预览接入真实清理服务，四种桌面 / 手机 / 窄屏 / 深色偏好流程覆盖保存名单门禁、停止、后台完成、别名 / Kimi / 新记录保留、刷新和布局；截图前回到页面顶部，新增文件进入既有语法门禁。
+- `tests/conversation-cleanup.test.js`（新增）：8 项专项覆盖未知模型、别名、原字节、幂等 / 策略冲突、空名单阻断、模型变更暂停、持久恢复 / 取消、本地推送引用失效、管理员 / CSRF、真实独立清理并发归档与管理 API、进程强杀恢复。主连接 `secure_delete` 保持开启。
+- `operations-center/README.md`、`docs/conversation-logs.md`、`docs/conversation-diagnostics-20261117.md`（新增）：登记入口、范围、停止 / 恢复、名单变化、空间复用及共享资源边界；诊断文档只保留类别和计数，不存正文、链接值、签名或凭据。
+
+生产核对主站实际运行 `v0.2.21002001`（`0e0a989ab10d947dc56a57bc2db807b50e879556`），容器旧镜像 label 不代表原生更新后的二进制；运营中心 revision `e348a855714523600113a006c1e99e88b36158c9`。15 条有限样本分别有 10 条 thinking 签名、8 条 signature_delta、13 条 URL 命中（可重叠）；普通 URL 字段也被现规则保护性拒绝，原文仍加密保留，未放宽脱敏。9 条读取中断 SSE 样本均见顶层 `response.completed` 且 status completed，其中 4 条有 DONE；采集器统一 `read_error` 未保存底层错误，不能把历史全部当成完整，也不能改为强等 EOF 影响用户。v5 为保存 / 处理策略版本，独立脱敏引擎当时为 2。约 10,026 条历史中 4,782 条非名单（2,611 未知模型），不执行生产清理。
+
+本地运营中心完整 **490 项测试全部通过，0 失败 / 跳过**（约 101.1 秒），含新增清理 8 项；`npm run check` 与相关差异空白检查通过。新增清理及原归档浏览器流程各四种场景通过。真实并发测试中的新采集和管理请求均成功，但不将本地结果等同生产零开销保证；后台仍共享 CPU / IO。本轮没有提交、推送、发布或部署，SSH 已正常关闭。
+
+补齐文档后重跑清理页面四种场景全部通过，截图目录 `sub2api-cleanup-browser-u7m9NQ`，已复核桌面 / 320px 布局；专项语法及相关差异空白检查通过。隔离虚构数据预览 `http://127.0.0.1:19933/preview` 已启动（PID 37680），只监听 loopback，使用临时 SQLite，保留既有预览。健康接口正常，管理员清理状态为无任务 / 无错误；未自动删除任何记录。浏览器测试使用环境自带 Playwright 和 Chrome，无新增生产依赖。
+
+## 2026-11-17：按日期和模型汇总 JSONL 并分片推送
+
+用户指出此前逐条 JSON 推送遗漏了接收方要求的按天 / 同模型 JSONL、10 GB 滚动和时间戳文件名，要求现在改造并尽量只修改运营中心。本轮只改 extra 的运营中心源码、界面、测试和文档，不修改主站采集器、服务器、现有归档 / 密钥或真实推送目标；保留其他会话的域名、活动和独立维护记录。推理正常使用仍优先。
+
+- `operations-center/src/services/conversation-push-policy.js`、`src/conversation-push-store.js`：新增 S3 JSON / JSONL 格式、默认 10,000,000,000 字节、IANA 时区和定时上传策略；旧已保存策略继续 JSON，CAS / 加密凭据 / 目标防混 / 原有幂等保留。队列增加 buffered 状态，JSONL 成员不提前视作已送达，取消覆盖汇总中记录，旧逐条发送不争抢 JSONL 任务。
+- `src/conversation-jsonl-store.js`、`services/conversation-jsonl-format.js`（新增）：按日志日期 / 实际模型 / 目标汇总，持久化稳定 key / 成员顺序及加密元数据快照，不复制正文或写明文临时文件。完整 JSONL 行按 UTF-8 字节计数，达到上限、跨日、定时、历史批次、手动或真实磁盘预留不足时可封卷；已汇总成员不占待处理队列上限，无按条数提前切卷。单行超过配置文件上限可见失败，不截断。正文引用失效、排除、脱敏 / 内容更新时整卷取消，仍合格成员重新安排；短事务分批回收、SQL 复核及分页读取避免一次加载整卷元数据；取消中断可恢复，文件租约和终态 CAS 防旧回执。
+- `services/conversation-jsonl-transport.js`、`conversation-jsonl-service.js`（新增）、`conversation-push-transport.js`、`conversation-push-service.js`：AWS SDK SigV4 Multipart Upload，8 MiB 分片、逐片 SHA-256 / 独立超时，完成前核对全部成员、字节与行数，Complete 成功才记送达和整文件摘要。失败保留上传 ID，重试先中止残留，再复用相同 key / 行序 / 字节从头发送；不声称逐片续传或恰好一次。旧 Webhook / JSON 保持兼容。
+- `services/conversation-push-supervisor.js`、`conversation-push-worker.js`（新增）、`src/server.js`：全部正式推送移至独立低优先级子进程，主 API 不组装大文件。256 MiB old-space、宿主 / cgroup / 堆余量准入、短 SQLite 锁等待、故障后 5 秒重启、无同步回退，退出中止网络；大型单条仍有内存要求，后台仍共享宿主资源。
+- `src/app.js`、`public/conversation-push-ui.js`、`conversation-logs.css`、`public/index.html`：管理员 / CSRF / 限流下新增手动上传和整卷重试接口，格式 / 日期时区 / 文件大小 / 定时间隔配置，文件清单、路径、大小、行数与异常，保留原自动 / 历史推送和脱敏门禁；更新静态缓存版本及窄屏布局。
+- `tests/conversation-jsonl.test.js`、`tests/conversation-s3-fixture.js`（新增）、`tests/conversation-push.test.js`：真实 SQLite / HTTP / SDK 签名及分片校验，JSONL 原字节 / Unicode / SSE / WS、分组与滚动、10 GB 计数、真实多分片、未知 Complete 回包同内容重试、取消 / 排除 / 过期 / 脱敏、内存 / 磁盘准入、队列不碎卷、子进程崩溃 / 取消中断恢复、慢上传期间管理 API 可响应与管理鉴权专项。
+- `scripts/conversation-logs-live-preview.cjs`、`conversation-push-browser-check.cjs`、`package.json`：预览沿用真实推送子进程；四种桌面 / 手机 / 窄屏 / 深色偏好场景增加 JSONL 连接诊断、汇总 / 手动上传、整文件失败重试和隐私检查；新文件纳入既有语法与完整测试门禁。不新增生产依赖。
+- `operations-center/README.md`、`docs/conversation-logs.md`、`docs/conversation-jsonl-push.md`（新增）：登记接收方参数、格式与权限、旧配置迁移、日期 / 路径、未满卷提前上传、引用保留期和共享资源边界、幂等 / 分片残留与实际验证范围。
+
+本地最终验证：运营中心完整 **482 项测试全部通过，0 失败 / 跳过**（约 92.4 秒），`npm run check` 及本轮相关差异空白检查通过。Chrome 正式页面流程在 1440 / 390 / 320px 和深色偏好四种场景均通过，覆盖旧 JSON、JSONL 配置 / 分组 / 诊断 / 手动上传 / 文件重试、隐私和退出；截图目录 `sub2api-push-browser-ZKDlbJ`，已复核桌面送达及 320px 配置截图。真实本地 HTTP Multipart 测试发送约 14 MB JSONL，验证两个分片、逐片校验及完整 Request 字节；10 GB 仅用实际字节计数边界测试，不将其当作真实外部大文件验收。
+
+独立虚构数据预览启动于 `http://127.0.0.1:19932/preview`（PID 37652），只监听 loopback / 临时 SQLite，推送默认关闭；`/healthz`、正式管理策略 / jobs API 均正常，推送子进程已就绪。保留既有预览。本轮没有连接生产或真实外部 Bucket，没有创建或改动生产推送策略，没有提交、推送、发布或部署。正式接收验证仍需对方提供 Endpoint / Region / Bucket / 凭据和分片权限，并确认既有单行 envelope、日期时区与原文 / 脱敏约定。
+
 ## 2026-11-17：补贴备注改为包含匹配
 
 用户要求将原 `[补贴]` 前缀改为备注任意位置包含连续“补贴”二字即排除，修改后提交 GitHub；无须方括号或固定位置。活动中心与运营中心统一按字面包含匹配，原到账余额、兑换明细、活动起点与已用次数保留。

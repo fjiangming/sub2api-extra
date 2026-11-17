@@ -1,0 +1,78 @@
+'use strict';
+
+const crypto = require('node:crypto');
+const { AppError } = require('./errors');
+const { modelAllowed, normalizeModel } = require('./services/conversation-models');
+
+function modelPolicyHash(policy) {
+  return crypto.createHash('sha256').update(JSON.stringify([policy.modelFilterEnabled,
+    [...new Set(policy.allowedModels.map(normalizeModel))].sort(), policy.kimiK3Plus])).digest('hex');
+}
+function blocked(code, message) { return new AppError(code, message, { status: 409 }); }
+
+class ConversationCleanupStore {
+  constructor(archive, { now = Date.now } = {}) { this.archive = archive; this.db = archive.db; this.now = now; }
+  initialize() {
+    this.db.pragma('foreign_keys = ON');
+    this.db.exec(`CREATE TABLE IF NOT EXISTS cl_model_cleanups(
+      id TEXT PRIMARY KEY,policy_version INTEGER NOT NULL,model_policy_hash TEXT NOT NULL,status TEXT NOT NULL,
+      upper_rowid INTEGER NOT NULL,cursor_rowid INTEGER NOT NULL DEFAULT 0,scanned INTEGER NOT NULL DEFAULT 0,
+      deleted INTEGER NOT NULL DEFAULT 0,requested_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,error_code TEXT NOT NULL DEFAULT '');
+      CREATE UNIQUE INDEX IF NOT EXISTS cl_model_cleanup_active ON cl_model_cleanups((1)) WHERE status IN ('pending','running');`);
+    return this;
+  }
+  latest() { return this.db.prepare('SELECT * FROM cl_model_cleanups ORDER BY requested_at DESC,rowid DESC LIMIT 1').get() || null; }
+  pending() { return this.db.prepare("SELECT * FROM cl_model_cleanups WHERE status IN ('pending','running') LIMIT 1").get() || null; }
+  request(input) {
+    if (!input || Object.keys(input).some(key => key !== 'policy_version') || !Number.isSafeInteger(input.policy_version)) {
+      throw new AppError('CONVERSATION_INVALID_INPUT', '清理参数无效', { status: 400 });
+    }
+    return this.db.transaction(() => {
+      const policy = this.archive.policy();
+      if (policy.version !== input.policy_version) throw blocked('CONVERSATION_POLICY_CONFLICT', '模型名单已更新，请刷新后重试');
+      if (!policy.modelFilterEnabled || !policy.allowedModels.length && !policy.kimiK3Plus) {
+        throw blocked('CONVERSATION_CLEANUP_MODELS_REQUIRED', '请先保存启用的模型名单，至少选择一个模型');
+      }
+      const existing = this.pending();
+      if (existing) return existing;
+      const id = crypto.randomUUID(), at = this.now();
+      const upper = this.db.prepare('SELECT COALESCE(MAX(rowid),0) n FROM cl_records').get().n;
+      this.db.prepare(`INSERT INTO cl_model_cleanups(id,policy_version,model_policy_hash,status,upper_rowid,requested_at,updated_at)
+        VALUES(?,?,?,'pending',?,?,?)`).run(id, policy.version, modelPolicyHash(policy), upper, at, at);
+      return this.pending();
+    }).immediate();
+  }
+  cancel(id) {
+    if (typeof id !== 'string' || !/^[a-f0-9-]{36}$/.test(id)) throw new AppError('CONVERSATION_INVALID_INPUT', '清理任务无效', { status: 400 });
+    this.db.prepare("UPDATE cl_model_cleanups SET status='cancelled',error_code='',updated_at=? WHERE id=? AND status IN ('pending','running')").run(this.now(), id);
+  }
+  step({ scanSize = 64, maxDeletes = 1 } = {}) {
+    return this.db.transaction(() => {
+      const job = this.pending(); if (!job) return { worked: false };
+      const policy = this.archive.policy();
+      if (modelPolicyHash(policy) !== job.model_policy_hash) {
+        this.db.prepare("UPDATE cl_model_cleanups SET status='paused',error_code='MODEL_POLICY_CHANGED',updated_at=? WHERE id=?").run(this.now(), job.id);
+        return { worked: false };
+      }
+      // These columns precede the body BLOBs; never read/decrypt large payloads to select deletions.
+      const rows = this.db.prepare('SELECT rowid cursor,id,model FROM cl_records WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT ?')
+        .all(job.cursor_rowid, job.upper_rowid, scanSize);
+      let scanned = 0, deleted = 0, cursor = job.cursor_rowid;
+      for (const row of rows) {
+        scanned++; cursor = row.cursor;
+        if (!modelAllowed(policy, row.model)) {
+          if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cl_push_jsonl_members'").get()) {
+            this.db.prepare('DELETE FROM cl_push_jsonl_members WHERE job_id IN (SELECT id FROM cl_push_jobs WHERE record_id=?)').run(row.id);
+          }
+          deleted += this.db.prepare('DELETE FROM cl_records WHERE rowid=? AND id=?').run(row.cursor, row.id).changes;
+          if (deleted >= maxDeletes) break;
+        }
+      }
+      this.db.prepare('UPDATE cl_model_cleanups SET status=?,cursor_rowid=?,scanned=scanned+?,deleted=deleted+?,updated_at=?,error_code=\'\' WHERE id=?')
+        .run(!rows.length || cursor >= job.upper_rowid ? 'done' : 'running', cursor, scanned, deleted, this.now(), job.id);
+      return { worked: rows.length > 0, scanned, deleted };
+    }).immediate();
+  }
+}
+
+module.exports = { ConversationCleanupStore, modelPolicyHash };

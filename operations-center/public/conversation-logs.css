@@ -52,6 +52,9 @@
 .cl-processing strong, .cl-processing span { display: block; }
 .cl-processing .button { flex: 0 0 auto; }
 .cl-model-list { display: flex; flex-direction: column; gap: 8px; font-size: 12px; margin: 14px 0; }
+.cl-model-cleanup { max-width: 940px; }
+.cl-cleanup-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 14px 0; }
+.cl-cleanup-actions .button { min-height: 36px; white-space: normal; text-align: left; }
 .cl-model-list textarea { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; resize: vertical; min-height: 100px; padding: 9px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--surface); font: 12px/1.7 ui-monospace, Consolas, monospace; }
 .clp-section { border-top: 1px solid var(--line); padding-block: 6px 24px; min-width: 0; }
 #cl-push .cl-policy-form { max-width: none; }
@@ -60,6 +63,9 @@
 .clp-options > label:not(.clp-toggle) { display: flex; align-items: center; gap: 10px; font-size: 12px; white-space: nowrap; }
 .clp-targets { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 32px; }
 .clp-fields { display: grid; gap: 14px; margin-block: 4px 14px; }
+.clp-fields[hidden] { display: none; }
+.clp-object-key { display: block; max-width: 360px; overflow-wrap: anywhere; }
+#clp-files-section > .cl-section-heading { flex-wrap: wrap; gap: 12px; }
 .clp-fields label,.clp-pair label,#clp-history .cl-filters > label { display: flex; flex-direction: column; gap: 7px; min-width: 0; font-size: 12px; }
 .clp-pair { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
 .clp-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-block: 12px; min-width: 0; }
