@@ -81,7 +81,7 @@ class ConversationLogStore {
     this.directory = path.join(directory, 'conversation-logs'); this.now = now; this.timezone = timezone;
     this.processingLimits = processingLimits;
     this.freeBytes = freeBytes || (() => { const stat = fs.statfsSync(this.directory); return Number(stat.bavail) * Number(stat.bsize); });
-    this.usedBytes = usedBytes || (() => ['', '-wal', '-shm'].reduce((sum, suffix) => sum + (fs.existsSync(this.file + suffix) ? fs.statSync(this.file + suffix).size : 0), 0));
+    this.usedBytes = usedBytes || (() => this.storageUsage().quotaBytes);
     this.lastContact = 0; this.lastError = null; this.collectorDropped = 0;
   }
   initialize() {
@@ -132,6 +132,28 @@ class ConversationLogStore {
     this.db.pragma('cache_size = -2048');
     this.db.pragma('wal_autocheckpoint = 0');
     return this;
+  }
+  storageUsage() {
+    const size = suffix => {
+      try { return fs.statSync(this.file + suffix).size; }
+      catch (error) { if (error.code === 'ENOENT') return 0; throw error; }
+    };
+    const databaseBytes = size(''), walBytes = size('-wal'), shmBytes = size('-shm');
+    const physicalBytes = databaseBytes + walBytes + shmBytes;
+    let reusableBytes = 0, accountingReady = false;
+    try {
+      const pageSize = this.db.pragma('page_size', { simple: true });
+      const pages = this.db.pragma('page_count', { simple: true });
+      const free = this.db.pragma('freelist_count', { simple: true });
+      if (Number.isSafeInteger(pageSize) && pageSize >= 512 && pageSize <= 65536 &&
+        Number.isSafeInteger(pages) && pages >= 0 && Number.isSafeInteger(free) && free >= 0 && free <= pages) {
+        // Include pending truncation after incremental vacuum; WAL and SHM remain fully charged.
+        reusableBytes = Math.max(0, databaseBytes - (pages - free) * pageSize);
+        accountingReady = true;
+      }
+    } catch { /* Unavailable page statistics fall back to the full physical size. */ }
+    return { physicalBytes, databaseBytes, walBytes, shmBytes, reusableBytes,
+      quotaBytes: physicalBytes - reusableBytes, accountingReady };
   }
   metadataStatus() { return metadataStatus(this.db); }
   backfillMetadata() { return backfillMetadata(this.db); }
@@ -467,7 +489,11 @@ class ConversationLogStore {
     const metadataIndex = this.metadataStatus();
     const counts = this.db.prepare("SELECT COUNT(*) records,COALESCE(SUM(bytes),0) bytes,COALESCE(SUM(complete=0),0) gaps,COALESCE(SUM(processing_error!='' OR reason='redaction_failed'),0) processingFailures,COALESCE(SUM(processing_pending),0) processingPending FROM cl_record_metadata").get();
     if (!metadataIndex.ready) { counts.records = metadataIndex.total; counts.bytes = null; counts.gaps = null; counts.processingFailures = null; counts.processingPending = this.db.prepare('SELECT COUNT(*) n FROM cl_processing').get().n; }
-    return { ...counts, metadataIndex, ...this.liveStatus(), redactionVersion: REDACTION_VERSION, policy: this.policy(), diskBytes: this.usedBytes(), freeBytes: this.freeBytes(), timezone: this.timezone,
+    const policy = this.policy(), storage = this.storageUsage(), quotaBytes = this.usedBytes(), freeBytes = this.freeBytes();
+    storage.quotaBytes = quotaBytes;
+    storage.pauseReason = quotaBytes + 1048576 >= policy.capacity * 1024 ** 3 ? 'capacity'
+      : freeBytes - 1048576 < policy.reserve * 1024 ** 3 ? 'disk_reserve' : '';
+    return { ...counts, metadataIndex, ...this.liveStatus(), redactionVersion: REDACTION_VERSION, policy, diskBytes: storage.physicalBytes, storage, freeBytes, timezone: this.timezone,
       coverage: ['HTTP JSON / SSE (including TLS fingerprint and transport fallbacks)', 'OpenAI pooled WebSocket / passthrough messages'],
       limitations: ['Only bytes consumed by the gateway are observed; early close is marked incomplete.', 'Queue/process failure can lose archives; this archive does not control inference or billing.'] };
     })();

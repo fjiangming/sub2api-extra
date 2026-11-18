@@ -53,6 +53,32 @@ async function main() {
         const csvEvent = page.waitForEvent('download'); await page.locator('[data-cl-action=export]').click(); const csv = await csvEvent;
         assert(fs.readFileSync(await csv.path(),'utf8').includes('request_id'));
         await page.locator('#cl-tab-collection').click(); await page.locator('#cl-collection h2').first().waitFor(); await layout();
+        let spacePause = '';
+        const spaceRoute = async route => {
+          const response = await route.fetch(), value = await response.json(), gib = 1024 ** 3;
+          value.policy.capacity = 30; value.policy.reserve = 10;
+          value.freeBytes = (spacePause === 'disk_reserve' ? 5 : 44) * gib;
+          value.diskBytes = 32 * gib; value.lastError = 'capacity';
+          value.storage = { ...value.storage, physicalBytes: value.diskBytes,
+            quotaBytes: (spacePause === 'capacity' ? 30 : 1) * gib,
+            reusableBytes: (spacePause === 'capacity' ? 2 : 31) * gib, pauseReason: spacePause };
+          await route.fulfill({ response, json: value });
+        };
+        await page.route('**/api/conversation-logs/status', spaceRoute);
+        for (const [reason, notice] of [['', ''], ['capacity', '归档已达容量上限'], ['disk_reserve', '磁盘可用空间不足预留值']]) {
+          spacePause = reason;
+          await page.locator('#cl-tab-collection').click();
+          if (notice) await page.locator('#cl-notice').filter({ hasText: notice }).waitFor();
+          else await page.waitForFunction(() => document.querySelector('#cl-metrics')?.textContent.includes('1.00 GiB') && !document.querySelector('#cl-notice')?.textContent.includes('暂停'));
+          const field = label => page.locator('#cl-collection dt', { hasText: label }).locator('..').locator('dd');
+          await field('文件占用').filter({ hasText: '32.00 GiB' }).waitFor();
+          await field('可复用空间').filter({ hasText: reason === 'capacity' ? '2.00 GiB' : '31.00 GiB' }).waitFor();
+          assert.equal(await field('文件占用').innerText(), '32.00 GiB');
+          assert.equal(await field('可复用空间').innerText(), reason === 'capacity' ? '2.00 GiB' : '31.00 GiB');
+          assert.equal(await field('磁盘可用').innerText(), reason === 'disk_reserve' ? '5.00 GiB' : '44.00 GiB');
+          await layout(); await page.screenshot({ path: path.join(directory, name + '-storage-' + (reason || 'recovered') + '.png'), fullPage: true });
+        }
+        await page.unroute('**/api/conversation-logs/status', spaceRoute);
         await page.locator('#cl-tab-policy').click(); await page.locator('#cl-policy-form').waitFor();
         assert.equal(await page.locator('[name=limit]').count(),0);
         for (const field of ['identity','financial','personal','device']) assert(await page.locator(`#cl-policy-form input[name=${field}]`).isChecked());

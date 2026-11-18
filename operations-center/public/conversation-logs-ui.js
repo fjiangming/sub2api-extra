@@ -20,7 +20,7 @@
     const clearUi = root.ConversationClearUi.create({api,escapeHtml:esc,icon,refreshIcons,isActive,onChanged:() => { clearDetail(); page = 1; run(load); }});
     let cleanupState = null, cleanupBusy = false, cleanupTimer = null, cleanupController = null;
     const num = value => value === null ? '准备中' : new Intl.NumberFormat('zh-CN').format(value || 0);
-    const bytes = value => value >= 1048576 ? (value / 1048576).toFixed(2) + ' MiB' : value >= 1024 ? (value / 1024).toFixed(1) + ' KiB' : num(value) + ' B';
+    const bytes = value => value >= 1073741824 ? (value / 1073741824).toFixed(2) + ' GiB' : value >= 1048576 ? (value / 1048576).toFixed(2) + ' MiB' : value >= 1024 ? (value / 1024).toFixed(1) + ' KiB' : num(value) + ' B';
     const time = value => value ? new Date(value).toLocaleString('zh-CN', { timeZone: status?.timezone || 'Asia/Shanghai', hour12: false }) : '尚无记录';
     const tool = (name, title, attrs = '') => `<button class="icon-button" type="button" title="${esc(title)}" aria-label="${esc(title)}" ${attrs}>${icon(name)}</button>`;
     const endedAbnormally = row => !row.complete && row.upstream_status === 'completed' && row.completion_source !== 'masked' && ['read_error','closed_early','session_closed'].includes(row.reason);
@@ -46,13 +46,19 @@
     }
     function query() { return { ...Object.fromEntries(new FormData($('filter'))), ...(sessionFilter || {}), page: String(page) }; }
     function url(path, params = query()) { return '/api/conversation-logs/' + path + '?' + new URLSearchParams(params); }
+    function storagePause() {
+      return status.storage ? status.storage.pauseReason : status.lastError === 'capacity' ? 'capacity' : '';
+    }
+    function storageNotice() {
+      return ({ capacity: '归档已达容量上限，已暂停新采集', disk_reserve: '磁盘可用空间不足预留值，已暂停新采集' })[storagePause()] || '';
+    }
     function overview() {
-      $('metrics').innerHTML = [['已归档尝试', num(status.records)],['正文完整', status.gaps === null ? '准备中' : num(status.records - status.gaps)],['当前占用', bytes(status.diskBytes)],['排除用户', num(status.policy.excludedUserIds.length)]].map(([label,value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join('');
+      $('metrics').innerHTML = [['已归档尝试', num(status.records)],['正文完整', status.gaps === null ? '准备中' : num(status.records - status.gaps)],['计入容量', bytes(status.storage?.quotaBytes ?? status.diskBytes)],['排除用户', num(status.policy.excludedUserIds.length)]].map(([label,value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join('');
       const preparing = status.metadataIndex?.ready === false;
       $('index-notice').hidden = !preparing;
       $('index-notice').textContent = preparing ? `历史日志索引正在后台准备：${num(status.metadataIndex.indexed)} / ${num(status.metadataIndex.total)} 条。当前列表、会话和汇总仅包含已准备的记录，原始正文保留。` : '';
       container.querySelector('[data-cl-action="export"]').disabled = preparing;
-      $('notice').textContent = !status.configured ? '尚未配置主站采集连接' : !status.policy.enabled ? '对话日志保存已关闭' : status.lastError === 'capacity' ? '空间不足，已停止保存新日志' : !status.lastContact ? '等待主站采集连接' : Date.now() - status.lastContact > 60000 ? '近期未收到主站策略读取，请检查采集连接' : status.collectorVersion !== 2 ? '主站仍为旧采集器，正文可能截断；需要同时升级主站' : '采集连接正常';
+      $('notice').textContent = !status.configured ? '尚未配置主站采集连接' : !status.policy.enabled ? '对话日志保存已关闭' : storageNotice() || (!status.lastContact ? '等待主站采集连接' : Date.now() - status.lastContact > 60000 ? '近期未收到主站策略读取，请检查采集连接' : status.collectorVersion !== 2 ? '主站仍为旧采集器，正文可能截断；需要同时升级主站' : '采集连接正常');
       setPageMeta(`上游请求与响应归档 · ${status.timezone} · 策略 v${status.policy.version}`);
     }
     async function load() {
@@ -184,7 +190,11 @@
     }
     async function loadBodies(current) { await Promise.all(['request','response'].map(side => loadPayload(side,current))); }
     function renderCollection() {
-      $('collection').innerHTML = `<div class="cl-section-heading"><h2>采集状态</h2><span>${status.policy.enabled ? '已启用保存' : '保存已关闭'}</span></div>${facts([['最近策略读取',time(status.lastContact)],['归档尝试',num(status.records)],['不完整 / 缺失',num(status.gaps)],['采集端累计丢弃',num(status.collectorDropped)],['存储占用',bytes(status.diskBytes)],['磁盘可用',bytes(status.freeBytes)],['保存版本',modeNames[status.policy.mode]],['保留时长',status.policy.retention ? status.policy.retention + ' 天' : '永久'],['正文采集',status.collectorVersion === 2 ? '完整正文 · 无单条截断' : '等待新版采集器'],['最近异常',reasons[status.lastError] || status.lastError || '无']])}<div class="cl-notice amber">用户对话优先。内存、队列或存储不足时放弃归档；上游断流只保留实际收到的部分并标记不完整。完整采集不代表模型执行成功。</div>`;
+      const storage = status.storage;
+      const space = [['计入容量',bytes(storage?.quotaBytes ?? status.diskBytes)],['容量上限',bytes(status.policy.capacity * 1073741824)],['文件占用',bytes(status.diskBytes)],
+        ...(storage ? [['可复用空间',bytes(storage.reusableBytes)]] : []),['磁盘可用',bytes(status.freeBytes)]];
+      const lastError = status.lastError === 'capacity' && storage && !storage.pauseReason ? '' : status.lastError;
+      $('collection').innerHTML = `<div class="cl-section-heading"><h2>采集状态</h2><span>${!status.policy.enabled ? '保存已关闭' : storageNotice() || '已启用保存'}</span></div>${facts([['最近策略读取',time(status.lastContact)],['归档尝试',num(status.records)],['不完整 / 缺失',num(status.gaps)],['采集端累计丢弃',num(status.collectorDropped)],...space,['保存版本',modeNames[status.policy.mode]],['保留时长',status.policy.retention ? status.policy.retention + ' 天' : '永久'],['正文采集',status.collectorVersion === 2 ? '完整正文 · 无单条截断' : '等待新版采集器'],['最近异常',reasons[lastError] || lastError || '无']])}<div class="cl-notice amber">用户对话优先。内存、队列或存储不足时放弃归档；上游断流只保留实际收到的部分并标记不完整。完整采集不代表模型执行成功。</div>`;
       const section = document.createElement('section'); section.id = 'cl-history-repair'; section.className = 'clp-section cl-model-cleanup'; $('collection').append(section);
     }
     function renderPolicy(value) {
