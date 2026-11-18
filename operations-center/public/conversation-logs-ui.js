@@ -4,6 +4,7 @@
   const processingErrors = { INVALID_JSON: 'JSON 不完整或格式不兼容', PROTECTED_FIELD_MATCH: '自定义规则会改变结构或关联字段', UNSUPPORTED_ENCODING: '不支持的压缩编码', INVALID_UTF8: '正文含非 UTF-8 字节', DECOMPRESSION_FAILED: '解压失败或超过解压上限', BINARY_MESSAGE_REQUIRES_ORIGINAL_MODE: '二进制消息暂不支持脱敏', UNSAFE_SSE_REPLACEMENT: '替换会改变 SSE 结构', DOCUMENT_TOO_DEEP: 'JSON 嵌套超过处理上限', NESTED_ARGUMENTS_TOO_DEEP: '工具参数嵌套超过处理上限', PROCESSING_FAILED: '处理异常' };
   const modeNames = { dual: '原文 + 脱敏副本', masked: '仅脱敏副本', original: '仅原文' };
   Object.assign(processingErrors, { UNINSPECTABLE_CONTENT: '媒体、外部文件或加密内容无法完整检查', REDACTION_RESOURCE_LIMIT: '脱敏处理达到资源保护上限，原文未截断', REDACTION_MEMORY_PRESSURE: '当前脱敏内存预算不足，原文未截断，可稍后重试', REDACTION_VALUE_LIMIT: '敏感值数量达到处理保护上限，原文未截断' });
+  Object.assign(processingErrors, { PROCESSING_INTERRUPTED: '后台处理连续中断，已保留原文，可重新处理', REDACTION_CAPACITY: '脱敏副本空间不足，已保留原文，可释放空间后重试' });
   reasons.storage_failed = '存储写入失败，未保存新日志';
   reasons.processor_busy = '归档处理繁忙，已跳过新日志';
   reasons.processor_memory = '归档处理内存不足，已跳过新日志';
@@ -23,7 +24,7 @@
     const time = value => value ? new Date(value).toLocaleString('zh-CN', { timeZone: status?.timezone || 'Asia/Shanghai', hour12: false }) : '尚无记录';
     const tool = (name, title, attrs = '') => `<button class="icon-button" type="button" title="${esc(title)}" aria-label="${esc(title)}" ${attrs}>${icon(name)}</button>`;
     const endedAbnormally = row => !row.complete && row.upstream_status === 'completed' && row.completion_source !== 'masked' && ['read_error','closed_early','session_closed'].includes(row.reason);
-    const badge = row => `<span class="cl-badge ${row.complete ? 'green' : 'amber'}">${row.complete ? '完整采集' : endedAbnormally(row) ? '传输采集异常' : row.original || row.masked ? '部分采集' : '正文缺失'}</span>${row.upstream_status === 'completed' ? `<span class="cl-badge green">${row.completion_source === 'masked' ? '副本含完成事件' : '上游已完成'}</span>` : row.upstream_status === 'failed' ? '<span class="cl-badge amber">上游执行失败</span>' : row.upstream_status === 'incomplete' ? '<span class="cl-badge amber">上游未完整完成</span>' : ''}${row.processing_error ? '<span class="cl-badge amber">处理异常</span>' : row.inspection_warnings?.length ? '<span class="cl-badge amber">部分内容未检查</span>' : ''}`;
+    const badge = row => `<span class="cl-badge ${row.complete ? 'green' : 'amber'}">${row.complete ? '完整采集' : endedAbnormally(row) ? '传输结束未确认' : row.original || row.masked ? '部分采集' : '正文缺失'}</span>${row.upstream_status === 'completed' ? `<span class="cl-badge green">${row.completion_source === 'masked' ? '副本含完成事件' : '上游已完成'}</span>` : row.upstream_status === 'failed' ? '<span class="cl-badge amber">上游执行失败</span>' : row.upstream_status === 'incomplete' ? '<span class="cl-badge amber">上游未完整完成</span>' : ''}${row.processing_pending ? '<span class="cl-badge amber">原文已保存 · 待处理</span>' : row.processing_error ? '<span class="cl-badge amber">处理异常</span>' : row.inspection_warnings?.length ? '<span class="cl-badge amber">部分内容未检查</span>' : ''}`;
     const facts = values => `<dl class="cl-facts">${values.map(([key, value]) => `<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl>`;
     const empty = text => `<div class="cl-empty">${esc(text)}</div>`;
     function run(task) { Promise.resolve().then(task).catch(error => { if (error.name !== 'AbortError' && isActive()) { $('notice').textContent = error.message; toast(error.message, 'error'); } }); }
@@ -80,11 +81,11 @@
       $('session-filter').innerHTML = sessionFilter ? `<div class="cl-notice">会话筛选 · 用户 #${sessionFilter.user_id} · Key #${sessionFilter.key_id}${tool('x','清除会话筛选','data-cl-action="clear-session"')}</div>` : '';
       refreshIcons();
       if (detail && !data.items.some(row => row.id === detail.id)) clearDetail();
-      if (detail && policyChanged) await openDetail(detail.id);
+      if (detail && (policyChanged || detail.processing_pending)) await openDetail(detail.id);
       else if (!detail && data.items.length) await openDetail(data.items[0].id);
       } catch(error) { checkCurrent(); throw error; }
       finally {
-        if (current === seq && !signal.aborted && isActive() && status?.metadataIndex?.ready === false) {
+        if (current === seq && !signal.aborted && isActive() && (status?.metadataIndex?.ready === false || status?.processingPending > 0)) {
           indexTimer = setTimeout(() => { if (current === seq && isActive()) run(load); },5000);
         }
       }
@@ -105,10 +106,12 @@
       if (!detail) return;
       const limited = Boolean(detail.inspection_warnings?.length);
       const processingTitle = detail.processing_error ? '处理异常 · ' + (processingErrors[detail.processing_error] || '处理异常') : detail.redaction_outdated ? '脱敏规则已有更新' : '可读文本已处理 · 部分内容未检查';
+      const retained = !detail.original ? '未保留原文，无法重新识别全部敏感信息' : detail.retry_available ? '已保留加密原文，支持按当前规则重处理' : detail.processing_error || detail.redaction_outdated ? '已保留加密原文' : '已保留加密原文，当前规则已处理';
       $('inspector').innerHTML = `<div class="cl-detail-heading"><div><code>${detail.request_id}</code><h2>${esc(detail.model || detail.protocol + ' 请求')}</h2><p>${badge(detail)} · ${esc(detail.protocol)} · ${esc(modeNames[detail.mode])} · 策略 v${detail.policy_version}</p></div>${tool('x','关闭请求详情','data-cl-action="close-detail"')}</div>${facts([['用户 / Key',`#${detail.user_id} / #${detail.key_id}`],['上游账号',detail.account_id ? '#' + detail.account_id : '未提供'],['时间',time(detail.at)],['耗时',num(detail.duration_ms) + ' ms'],['上游 Host',detail.host || '未提供'],['路径',detail.path]])}
+        ${detail.processing_pending ? '<div class="cl-notice cl-processing" role="status">原文已加密保存，等待后台处理；处理完成前暂停推送。</div>' : ''}
         ${detail.reason ? `<div class="cl-notice amber">${esc(reasons[detail.reason] || detail.reason)}</div>` : ''}
         ${detail.upstream_status === 'completed' ? `<div class="cl-notice ${detail.complete ? '' : 'amber'}">${detail.completion_source === 'masked' ? '脱敏副本中有有效完成事件；原文未保留，来源按副本注明。' : '已解析并核对上游应用完成事件。'}${!detail.complete ? ' 原始采集仍标记异常，不能据此证明请求、响应或用户端逐字节完整，也不会放宽推送完整性条件。' : ''} · ${esc(detail.upstream_evidence)}</div>` : ''}
-        ${detail.processing_error || detail.redaction_outdated || limited ? `<div class="cl-notice amber cl-processing" role="status"><div><strong>${esc(processingTitle)}</strong><span>${detail.original ? '已保留加密原文，支持按当前规则重处理' : '未保留原文，无法重新识别全部敏感信息'} · ${esc(detail.processing_error || (limited ? '含未检查内容，暂停脱敏推送' : '旧副本暂停脱敏推送'))} · 处理策略 v${detail.processing_policy_version}</span>${limited ? '<span>部分内容原样保留，其内部未检查；其他可读文本已按该副本规则处理。</span>' : ''}${detail.retry_blocked === 'user_excluded' ? '<span>该用户已排除，不能重新处理</span>' : detail.retry_blocked === 'model_excluded' ? '<span>该模型不在采集名单中，不能重新处理</span>' : ''}</div><button type="button" class="button secondary" data-cl-action="reprocess" title="按当前策略重新处理；成功后按此记录的保存版本保留副本" ${!detail.retry_available || reprocessing.has(detail.id) ? 'disabled' : ''}>${icon('refresh-cw')}${reprocessing.has(detail.id) ? '处理中' : '重新处理'}</button></div>` : detail.processing_policy_version ? `<p class="cl-muted">脱敏策略 v${detail.processing_policy_version} · ${esc(time(detail.processed_at))}</p>` : ''}
+        ${detail.processing_error || detail.redaction_outdated || limited ? `<div class="cl-notice amber cl-processing" role="status"><div><strong>${esc(processingTitle)}</strong><span>${esc(retained)} · ${esc(detail.processing_error || (limited ? '含未检查内容，暂停脱敏推送' : '旧副本暂停脱敏推送'))} · 处理策略 v${detail.processing_policy_version}</span>${limited ? '<span>部分内容原样保留，其内部未检查；其他可读文本已按该副本规则处理。</span>' : ''}${detail.retry_blocked === 'user_excluded' ? '<span>该用户已排除，不能重新处理</span>' : detail.retry_blocked === 'model_excluded' ? '<span>该模型不在采集名单中，不能重新处理</span>' : ''}</div><button type="button" class="button secondary" data-cl-action="reprocess" title="处理失败或规则更新后可重处理；重复处理无法检查图片或解密模型上下文" ${!detail.retry_available || reprocessing.has(detail.id) ? 'disabled' : ''}>${icon('refresh-cw')}${reprocessing.has(detail.id) ? '处理中' : '重新处理'}</button></div>` : detail.processing_policy_version ? `<p class="cl-muted">脱敏策略 v${detail.processing_policy_version} · ${esc(time(detail.processed_at))}</p>` : ''}
         <div class="cl-attempts"><span>请求尝试</span>${detail.attempts.map((row,index) => `<button data-cl-attempt="${row.id}" aria-pressed="${row.id === detail.id}">#${index + 1} · ${row.status || '连接错误'} · 账号 ${row.account_id || '未提供'}</button>`).join('')}</div>
         <div class="cl-detail-tabs" role="tablist" aria-label="请求详情视图">${[['raw','Request / Response'],['frames',`消息 (${detail.frames.length})`],['redactions','脱敏记录']].map(([id,label]) => `<button data-cl-detail="${id}" role="tab" aria-selected="${id === detailTab}">${label}</button>`).join('')}<select id="cl-source" aria-label="日志版本"><option value="masked" ${source === 'masked' ? 'selected' : ''} ${!detail.masked ? 'disabled' : ''}>脱敏副本</option><option value="original" ${source === 'original' ? 'selected' : ''} ${!detail.original ? 'disabled' : ''}>原文</option></select></div><div id="cl-detail-body"></div>`;
       $('source').addEventListener('change', () => { source = $('source').value; payloads.clear(); renderDetailBody(); if (detailTab === 'raw') run(() => loadBodies(detailSeq)); });
@@ -119,15 +122,33 @@
       }
       if (limited) {
         const scope = container.querySelector('.cl-processing > div > span:nth-of-type(2)');
-        const scopes = [['OPAQUE_SIGNATURE','模型协议签名'],['OPAQUE_ENCRYPTED_REASONING','模型加密推理'],['OPAQUE_IMAGE','协议图片']].filter(([code]) => detail.inspection_warnings.includes(code)).map(([,name]) => name).join('、');
-        if (scope) scope.textContent = `${scopes || '不透明协议内容'}原样保留，其内部未检查；其他可读文本已按该副本规则处理。${detail.inspection_warnings.includes('OPAQUE_IMAGE') ? '图片中的文字、人脸及其他敏感信息未识别，外部图片未下载。' : ''}`;
+        const scopes = [['OPAQUE_SIGNATURE','模型协议签名'],['OPAQUE_ENCRYPTED_REASONING','模型加密推理'],['OPAQUE_ENCRYPTED_COMPACTION','模型加密压缩上下文'],['OPAQUE_IMAGE','协议图片']].filter(([code]) => detail.inspection_warnings.includes(code)).map(([,name]) => name).join('、');
+        if (scope) scope.textContent = `${scopes || '不透明协议内容'}原样保留，其内部未检查；其他可读文本已按该副本规则处理。${detail.inspection_warnings.includes('OPAQUE_IMAGE') ? '图片中的文字、人脸及其他敏感信息未识别，外部图片未下载。' : ''}${!detail.processing_error && !detail.redaction_outdated ? '此检查范围提示不代表正文漏存；重复处理无法消除内部检查限制。' : ''}`;
       }
       if (detail.processing_error === 'UNINSPECTABLE_CONTENT') {
         const explanation = document.createElement('span');
-        explanation.textContent = '旧规则可能因协议图片、普通链接、模型协议签名、加密推理或工具业务文件编号触发，可按最新规则重处理。已识别图片原样保留并单独提示检查范围；未识别媒体、外部文件及加密正文仍可能无法检查，原文不会因此丢失。';
+        explanation.textContent = '旧规则可能因协议图片、普通链接、模型协议签名、加密推理、加密压缩上下文或工具业务文件编号触发，可按最新规则重处理。已识别图片和加密上下文原样保留并单独提示检查范围；未识别媒体、外部文件及加密正文仍可能无法检查，原文不会因此丢失。';
         container.querySelector('.cl-processing > div')?.append(explanation);
       }
+      renderTransport();
       renderDetailBody(); refreshIcons();
+    }
+    function renderTransport() {
+      if (!detail.transport_diagnostics && !['transport_error','read_error','closed_early','session_closed'].includes(detail.reason)) return;
+      const block = document.createElement('div'); block.className = 'cl-notice cl-transport';
+      if (!detail.transport_diagnostics) {
+        block.textContent = '此记录未采集底层错误类型和发生侧，无法区分断流、超时或完成后的关闭。重新处理只能检查已保存正文，无法补回缺失字节或还原历史错误。';
+      } else {
+        const kinds = {cancelled:'取消',deadline:'截止时间已到',unexpected_eof:'非正常 EOF',closed:'连接或管道已关闭',timeout:'网络超时',network:'网络错误',other:'其他读取错误'};
+        const heading = document.createElement('strong'); heading.textContent = '传输读取信息'; block.append(heading);
+        for (const [side,label] of [['request','Request'],['response','Response']]) {
+          const value = detail.transport_diagnostics[side],line = document.createElement('p');
+          line.textContent = `${label}：已观察 ${bytes(value.bytes)}；声明长度 ${value.expected_bytes < 0 ? '未知' : bytes(value.expected_bytes)}；${value.eof ? '已读到 EOF' : '未读到 EOF'}${value.error ? '；' + (kinds[value.error] || '未知读取错误') + (value.error_during_close ? '（错误返回时已开始关闭，不代表关闭导致错误）' : '（错误返回时尚未开始关闭）') : ''}。`;
+          block.append(line);
+        }
+        const note = document.createElement('p'); note.textContent = '只记录网关实际读取的字节和错误枚举；关闭时机与完成事件都不能单独证明传输或用户端收齐。'; block.append(note);
+      }
+      container.querySelector('.cl-detail-heading').after(block);
     }
     function pane(side, title) { return `<section class="cl-body-pane"><header><strong>${esc(title)}</strong><span>RAW</span><div>${tool('maximize-2','查看完整 ' + title,`data-cl-full="${side}" hidden`)}${tool('copy','复制 ' + title,`data-cl-copy="${side}" disabled`)}${tool('download','下载 ' + title,`data-cl-download="${side}" disabled`)}</div></header><pre class="cl-raw" tabindex="0"><code id="cl-body-${side}">正在读取</code></pre><footer id="cl-info-${side}"></footer></section>`; }
     function renderDetailBody() {
@@ -172,7 +193,7 @@
         <fieldset><legend>排除用户</legend><div class="cl-user-toolbar"><span id="cl-excluded-count"></span><button class="cl-link" type="button" data-cl-action="clear-users">清空选择</button></div><div id="cl-selected-users" class="cl-selected-users"></div><div class="cl-user-search"><input id="cl-user-search" type="search" aria-label="搜索排除用户" placeholder="输入用户名、邮箱或用户 ID" autocomplete="off">${tool('search','搜索排除用户','data-cl-action="search-users"')}</div><div id="cl-users" role="group" aria-label="不采集的用户"></div><p class="cl-muted">所选用户全部 Key 均不采集，不保存正文、元数据、索引、会话或缺口。保存时也会丢弃尚未入库的请求；历史记录按原保留期处理。</p></fieldset>
         <fieldset><legend>采集模型</legend><label class="cl-setting"><span>仅记录所选模型</span><input name="modelFilterEnabled" type="checkbox" role="switch" ${value.modelFilterEnabled ? 'checked' : ''}></label><label class="cl-model-list">模型名单<textarea name="allowedModels" rows="9" maxlength="20099" aria-label="允许记录的模型" spellcheck="false" placeholder="gpt-6.1-sol&#10;claude-fable-5-1&#10;gemini-carbon">${esc(value.allowedModels.join('\n'))}</textarea></label><label class="cl-setting"><span>Kimi K3 及后续版本</span><input name="kimiK3Plus" type="checkbox" ${value.kimiK3Plus ? 'checked' : ''}></label><p class="cl-muted">按实际上游模型匹配，忽略大小写和空格，兼容 Fable / Opus 简称。名单外或模型无法识别时不新增归档；历史记录保留。空名单且未勾选 Kimi 时不记录任何模型。</p></fieldset>
         <fieldset><legend>保存版本</legend><div class="cl-modes">${Object.entries(modeNames).map(([id,label]) => `<label><input type="radio" name="mode" value="${id}" ${value.mode === id ? 'checked' : ''}>${label}</label>`).join('')}</div><p class="cl-muted">原文含完整敏感内容，仅管理员可读。处理异常或仍有未检查内容时保留加密原文；仅脱敏记录成功且无未检查内容后才移除临时原文。</p></fieldset>
-        <fieldset><legend>脱敏规则</legend><div class="cl-rules">${[['email','邮箱地址'],['phone','电话号码'],['secret','密码、凭据与验证码'],['identity','身份证、护照与证件'],['financial','银行卡与金融账户'],['personal','姓名、地址与个人资料'],['ip','IPv4 / IPv6 地址'],['device','设备与社交标识']].map(([id,label]) => `<label>${label}<input name="${id}" type="checkbox" ${value[id] ? 'checked' : ''}></label>`).join('')}</div><p class="cl-muted">姓名、地址等依赖字段或文字标签识别。已识别协议图片、签名和加密推理原样保留并提示未检查；其他无法处理的媒体、文件或加密内容保留原文并标记异常。</p><div id="cl-custom-rules"></div><button type="button" class="button secondary" data-cl-action="add-rule">${icon('plus')}添加文本规则</button></fieldset>
+        <fieldset><legend>脱敏规则</legend><div class="cl-rules">${[['email','邮箱地址'],['phone','电话号码'],['secret','密码、凭据与验证码'],['identity','身份证、护照与证件'],['financial','银行卡与金融账户'],['personal','姓名、地址与个人资料'],['ip','IPv4 / IPv6 地址'],['device','设备与社交标识']].map(([id,label]) => `<label>${label}<input name="${id}" type="checkbox" ${value[id] ? 'checked' : ''}></label>`).join('')}</div><p class="cl-muted">姓名、地址等依赖字段或文字标签识别。已识别协议图片、签名和加密推理原样保留并提示未检查，加密压缩上下文同样保留；其他无法处理的媒体、文件或加密内容保留原文并标记异常。</p><div id="cl-custom-rules"></div><button type="button" class="button secondary" data-cl-action="add-rule">${icon('plus')}添加文本规则</button></fieldset>
         <fieldset><legend>容量与保留</legend><div class="cl-policy-grid"><label>保留天数（0 为永久）<input name="retention" type="number" min="0" max="365" value="${value.retention}" required></label><label>容量上限 (GiB)<input name="capacity" type="number" min="1" max="1024" value="${value.capacity}" required></label><label>磁盘预留 (GiB)<input name="reserve" type="number" min="0" max="1024" value="${value.reserve}" required></label></div><p class="cl-muted">空间不足时停止保存新日志，保留历史。缩短保留期仍会清理过期记录；永久保留需设为 0。</p></fieldset><p id="cl-policy-error" class="form-error" role="alert"></p><footer><button id="cl-save" class="button primary" type="submit">${icon('save')}保存策略</button><button class="button secondary" type="button" data-cl-action="discard-policy">放弃更改</button></footer></form>`;
       for (const rule of value.custom) addRule(rule);
       updateExcluded();

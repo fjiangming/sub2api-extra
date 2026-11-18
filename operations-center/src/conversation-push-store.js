@@ -12,7 +12,7 @@ const filterSchema = z.object({search:z.string().max(200).optional(),start:z.str
   protocol:z.enum(['','JSON','SSE','WebSocket']).optional(),capture:z.enum(['','complete','partial','missing','redaction_failed']).optional()}).strict();
 const previewSchema = z.object({filter:filterSchema,destinations}).strict();
 const enqueueSchema = previewSchema.extend({batchId:z.string().uuid(),previewToken:z.string().regex(/^[a-f0-9]{64}$/)}).strict();
-const columns = 'id,rowid AS cursor_id,user_id,model,at,fingerprint,processed_at,processing_policy_version,processing_error,complete,reason,redaction_version,redaction_policy_hash,inspection_warnings,original IS NOT NULL AS original,masked IS NOT NULL AS masked';
+const columns = 'id,rowid AS cursor_id,user_id,model,at,fingerprint,processed_at,processing_pending,processing_policy_version,processing_error,complete,reason,redaction_version,redaction_policy_hash,inspection_warnings,original IS NOT NULL AS original,masked IS NOT NULL AS masked';
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function parse(schema,value) { const result=schema.safeParse(value);if(!result.success)throw invalid();return result.data; }
 
@@ -57,7 +57,7 @@ class ConversationPushStore {
   version(row,source) { return hash([row.fingerprint,source,source==='masked'?[row.processed_at,row.processing_policy_version]:0]); }
   allowed(row,policy) { return !policy.excludedUserIds.includes(row.user_id) && modelAllowed(policy,row.model); }
   copyReady(row,source,policy) {
-    return Boolean(row.complete && !row.reason && row[source] && (source === 'original' ||
+    return Boolean(!row.processing_pending && row.complete && !row.reason && row[source] && (source === 'original' ||
       !row.processing_error && (!row.inspection_warnings || row.inspection_warnings === '[]') &&
       row.redaction_version === REDACTION_VERSION && row.redaction_policy_hash === redactionPolicyHash(policy)));
   }
@@ -110,6 +110,8 @@ class ConversationPushStore {
       const archivePolicy=this.archive.policy(),targets=['webhook','s3'].filter(target=>policy[target].enabled);
       let created=0,pending=this.pendingCount();
       for(const row of rows){
+        // Keep the receipt cursor behind unfinished processing; publication must not lose automatic delivery.
+        if (row.processing_pending) return {created,processing:true};
         if(this.allowed(row,archivePolicy)&&this.copyReady(row,policy.source,archivePolicy)){
           const needed=targets.filter(target=>!this.db.prepare('SELECT 1 FROM cl_push_jobs WHERE id=?').get(this.jobId(row,policy,target)));
           if(pending+needed.length>policy.queueLimit)return {created,full:true};

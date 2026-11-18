@@ -8,6 +8,7 @@ class ConversationJsonlService {
   constructor(push, transport, options) {
     this.store = new ConversationJsonlStore(push, options).initialize(); this.transport = transport;
     this.stopping = false; this.active = null; this.lastError = ''; this.lastRun = null;
+    this.canWork = options?.canWork || (() => true);
   }
   invalidate() { this.active?.controller.abort(); }
   async cleanup() {
@@ -21,10 +22,10 @@ class ConversationJsonlService {
     return result.status === 'sent';
   }
   async tick() {
-    if (this.stopping) return false;
+    if (this.stopping || !this.canWork()) return false;
     this.store.reconcile();
     let worked = this.store.cleanupMembers() > 0;
-    for (let index = 0; index < 20 && !this.stopping; index++) {
+    for (let index = 0; index < 20 && !this.stopping && this.canWork(); index++) {
       if (!this.store.assignOne()) break;
       worked = true; await new Promise(resolve => setImmediate(resolve));
     }

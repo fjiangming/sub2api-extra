@@ -32,11 +32,12 @@ test('isolated archive worker preserves v2 bytes, encrypted fallback and authent
   const result = await fetch(f.base + '/api/conversation-logs/ingest', { method: 'POST', headers: f.headers, body: JSON.stringify(row) });
   assert.equal(result.status, 200); assert.equal((await result.json()).body_sha256, row.body_sha256);
   assert.equal(f.store.payload(row.id, 'original', 'request').body.toString('base64'), row.request);
+  await waitFor(() => !f.store.detail(row.id).processing_pending);
   assert(!f.store.payload(row.id, 'masked', 'request').text.includes('alice@example.com'));
   await waitFor(() => !f.archive.busy);
   const bad = event('worker-retry', { response: Buffer.from('{invalid').toString('base64') });
   const failure = await fetch(f.base + '/api/conversation-logs/ingest', { method: 'POST', headers: f.headers, body: JSON.stringify(bad) });
-  assert((await failure.json()).accepted); await waitFor(() => !f.archive.busy);
+  assert((await failure.json()).accepted); await waitFor(() => !f.archive.busy && !f.store.detail(bad.id).processing_pending);
   assert.equal(f.store.detail(bad.id).processing_error, 'INVALID_JSON');
   const login = await fetch(f.base + '/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'admin', password: f.config.adminPassword }) });

@@ -30,6 +30,11 @@ const defaults = { version: 1, enabled: false, mode: 'dual', excludedUserIds: []
   modelFilterEnabled: true, allowedModels: recommendedModels, kimiK3Plus: true,
   custom: [], retention: 7, capacity: 10, reserve: 2, overflow: 'stop', maxBodyBytes: 8388608 };
 const frameSchema = z.object({ direction: z.enum(['in', 'out']), at: z.number().int().nonnegative().safe(), body: z.string(), binary: z.boolean().default(false) }).strict();
+const transportSideSchema = z.object({
+  bytes: z.number().int().nonnegative().safe(), expected_bytes: z.number().int().min(-1).safe(), eof: z.boolean(),
+  error: z.enum(['', 'cancelled', 'deadline', 'unexpected_eof', 'closed', 'timeout', 'network', 'other']), error_during_close: z.boolean()
+}).strict().refine(side => side.error !== '' || !side.error_during_close);
+const transportSchema = z.object({ version: z.literal(1), request: transportSideSchema, response: transportSideSchema }).strict();
 const eventSchema = z.object({
   schema: z.literal(1), id: z.string().regex(/^[a-f0-9]{32}$/), request_id: z.string().regex(/^[a-f0-9]{32}$/),
   user_id: userId, key_id: userId, account_id: z.number().int().nonnegative().safe(),
@@ -40,7 +45,8 @@ const eventSchema = z.object({
   reason: z.enum(['', 'body_limit', 'memory_limit', 'transport_error', 'read_error', 'closed_early', 'session_closed']),
   policy_version: z.number().int().positive(), encoding: z.enum(['', 'identity', 'gzip', 'br', 'deflate', 'zstd', 'unknown']).default(''),
   request: z.string(), response: z.string(), frames: z.array(frameSchema).default([]),
-  capture_version: z.union([z.literal(1),z.literal(2)]).default(1), body_sha256: z.string().regex(/^(?:[a-f0-9]{64})?$/).default('')
+  capture_version: z.union([z.literal(1),z.literal(2)]).default(1), body_sha256: z.string().regex(/^(?:[a-f0-9]{64})?$/).default(''),
+  transport_diagnostics: transportSchema.optional()
 }).strict();
 function invalid(code = 'CONVERSATION_INVALID_INPUT', status = 400) { return new AppError(code, '对话日志参数无效', { status }); }
 function parse(schema, value) { const result = schema.safeParse(value); if (!result.success) throw invalid(); return result.data; }
@@ -103,11 +109,16 @@ class ConversationLogStore {
       for (const [name, definition] of [['processing_error', "TEXT NOT NULL DEFAULT ''"], ['processing_policy_version', 'INTEGER NOT NULL DEFAULT 0'], ['processed_at', 'INTEGER NOT NULL DEFAULT 0'],
         ['redaction_version','INTEGER NOT NULL DEFAULT 0'], ['redaction_policy_hash',"TEXT NOT NULL DEFAULT ''"], ['capture_version','INTEGER NOT NULL DEFAULT 1'], ['body_sha256',"TEXT NOT NULL DEFAULT ''"],
         ['inspection_warnings',"TEXT NOT NULL DEFAULT '[]'"], ['upstream_status',"TEXT NOT NULL DEFAULT 'unknown'"],
-        ['upstream_evidence',"TEXT NOT NULL DEFAULT ''"], ['completion_version','INTEGER NOT NULL DEFAULT 0'], ['completion_source',"TEXT NOT NULL DEFAULT ''"], ['archived_at','INTEGER NOT NULL DEFAULT 0']]) {
+        ['upstream_evidence',"TEXT NOT NULL DEFAULT ''"], ['completion_version','INTEGER NOT NULL DEFAULT 0'], ['completion_source',"TEXT NOT NULL DEFAULT ''"], ['archived_at','INTEGER NOT NULL DEFAULT 0'],
+        ['transport_diagnostics',"TEXT NOT NULL DEFAULT ''"], ['processing_pending','INTEGER NOT NULL DEFAULT 0']]) {
         if (!columns.has(name)) this.db.exec(`ALTER TABLE cl_records ADD COLUMN ${name} ${definition}`);
       }
     })();
     initializeMetadata(this.db);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS cl_processing(record_id TEXT PRIMARY KEY,next_at INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,token TEXT NOT NULL DEFAULT '');
+      CREATE INDEX IF NOT EXISTS cl_processing_due ON cl_processing(next_at,record_id);
+      CREATE TRIGGER IF NOT EXISTS cl_processing_delete AFTER DELETE ON cl_records BEGIN DELETE FROM cl_processing WHERE record_id=OLD.id; END;`);
+    if (!this.db.pragma('table_info(cl_processing)').some(column => column.name === 'token')) this.db.exec("ALTER TABLE cl_processing ADD COLUMN token TEXT NOT NULL DEFAULT ''");
     if (!this.db.prepare('SELECT 1 FROM cl_policies LIMIT 1').get()) this.db.prepare('INSERT INTO cl_policies VALUES(?,?,?)').run(1, this.seal(defaults, 'policy:1'), this.now());
     this.policy();
     try { fs.chmodSync(this.file, 0o600); } catch { /* Windows uses the directory ACL. */ }
@@ -152,7 +163,7 @@ class ConversationLogStore {
       return candidate;
     })();
   }
-  collectorPolicy(dropped = 0, collectorVersion = '') {
+  collectorPolicy(dropped = 0, collectorVersion = '', durableReceipt = false) {
     if (/^\d{1,16}$/.test(String(dropped)) && Number.isSafeInteger(Number(dropped))) this.collectorDropped = Number(dropped);
     this.lastContact = this.now(); const policy = this.policy();
     this.collectorVersion = collectorVersion === '2' ? 2 : 1;
@@ -160,9 +171,11 @@ class ConversationLogStore {
     if (!available) this.lastError = 'capacity';
     else if (this.lastError === 'capacity') this.lastError = null;
     return { version: policy.version, enabled: policy.enabled && available, excluded_user_ids: policy.excludedUserIds, max_body_bytes: policy.maxBodyBytes,
-      capture_version: 2, model_filter_version: 1, model_filter_enabled: policy.modelFilterEnabled, allowed_models: policy.allowedModels, kimi_k3_plus: policy.kimiK3Plus };
+      capture_version: 2, model_filter_version: 1, model_filter_enabled: policy.modelFilterEnabled, allowed_models: policy.allowedModels, kimi_k3_plus: policy.kimiK3Plus,
+      transport_diagnostics_version: 1, durable_receipt_version: durableReceipt ? 1 : 0 };
   }
-  ingest(input) {
+  receive(input) { return this.ingest(input, { deferProcessing: true }); }
+  ingest(input, { deferProcessing = false } = {}) {
     const current = this.policy();
     // The second exclusion gate also discards in-flight events created before an exclusion was saved.
     if (!current.enabled || (Number.isSafeInteger(input?.user_id) && current.excludedUserIds.includes(input.user_id)) || !modelAllowed(current, input?.model)) return { accepted: false };
@@ -170,6 +183,8 @@ class ConversationLogStore {
     if (!policy.enabled || policy.excludedUserIds.includes(event.user_id) || !modelAllowed(policy, event.model)) return { accepted: false };
     if (event.at > this.now() + 60000 || current.retention && event.at < this.now() - current.retention * 86400000) return { accepted: false };
     const raw = { request: b64(event.request), response: b64(event.response), frames: event.frames.map(frame => ({ ...frame, body: b64(frame.body) })) };
+    if (event.transport_diagnostics && (event.capture_version !== 2 || event.protocol === 'WebSocket' || raw.frames.length ||
+      event.transport_diagnostics.request.bytes !== raw.request.length || event.transport_diagnostics.response.bytes !== raw.response.length)) throw invalid();
     const rawBytes = raw.request.length + raw.response.length + raw.frames.reduce((sum, frame) => sum + frame.body.length, 0);
     // The transport safety bound covers the collector's global 64 MiB observation budget, including WS aliases.
     if (rawBytes > 192 * 1024 * 1024) throw invalid('CONVERSATION_RESOURCE_LIMIT', 413);
@@ -180,11 +195,14 @@ class ConversationLogStore {
     const fingerprint = crypto.createHash('sha256').update(JSON.stringify(event.capture_version === 1 ? legacy : event)).digest('hex');
     const existing = this.db.prepare('SELECT fingerprint FROM cl_records WHERE id=?').get(event.id);
     if (existing) { if (existing.fingerprint !== fingerprint) throw invalid('CONVERSATION_ID_CONFLICT', 409); return { ...ack, duplicate: true }; }
+    if (deferProcessing && this.db.prepare('SELECT COUNT(*) n FROM cl_processing').get().n >= 10000) return { accepted: false, reason: 'processor_busy' };
     const canFit = bytes => this.usedBytes() + bytes < current.capacity * 1024 ** 3 && this.freeBytes() - bytes >= current.reserve * 1024 ** 3;
     if (!canFit(rawBytes * (policy.mode === 'dual' ? 3 : 1.5) + 4096)) { this.lastError = 'capacity'; return { accepted: false, reason: 'capacity' }; }
     let original = null, masked = null, hits = [], warnings = [], reason = event.reason, processing_error = '';
-    const limits = this.processingLimits(), completion = inspectCompletion(raw, event, limits);
-    if (rawBytes || !['body_limit', 'memory_limit'].includes(reason)) {
+    const limits = deferProcessing ? null : this.processingLimits();
+    const completion = deferProcessing ? { upstream_status: 'unknown', upstream_evidence: '', completion_version: 0 } : inspectCompletion(raw, event, limits);
+    if (deferProcessing) original = this.seal(pack(raw), event.id + ':original');
+    else if (rawBytes || !['body_limit', 'memory_limit'].includes(reason)) {
       try {
         if (policy.mode !== 'original') { const result = maskPayload(raw, policy, this.key, event.encoding, limits); masked = this.seal(pack(result.payload), event.id + ':masked'); hits = result.hits; warnings = result.warnings; }
         if (policy.mode !== 'masked' || warnings.length) original = this.seal(pack(raw), event.id + ':original');
@@ -202,17 +220,20 @@ class ConversationLogStore {
         latest.retention && event.at < this.now() - latest.retention * 86400000) return { accepted: false };
       const duplicate = this.db.prepare('SELECT fingerprint FROM cl_records WHERE id=?').get(event.id);
       if (duplicate) { if (duplicate.fingerprint !== fingerprint) throw invalid('CONVERSATION_ID_CONFLICT', 409); return { ...ack, duplicate: true }; }
+      if (deferProcessing && this.db.prepare('SELECT COUNT(*) n FROM cl_processing').get().n >= 10000) return { accepted: false, reason: 'processor_busy' };
       if (this.usedBytes() + storedBytes >= latest.capacity * 1024 ** 3 || this.freeBytes() - storedBytes < latest.reserve * 1024 ** 3) {
         this.lastError = 'capacity'; return { accepted: false, reason: 'capacity' };
       }
       this.db.prepare(`INSERT INTO cl_records(id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,
       host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,original,masked,hits,bytes,fingerprint,
-      processing_error,processing_policy_version,processed_at,redaction_version,redaction_policy_hash,capture_version,body_sha256,inspection_warnings,upstream_status,upstream_evidence,completion_version,completion_source,archived_at) VALUES(@id,@request_id,@user_id,@key_id,@account_id,@session_id,@at,@duration_ms,
+      processing_error,processing_policy_version,processed_at,redaction_version,redaction_policy_hash,capture_version,body_sha256,inspection_warnings,upstream_status,upstream_evidence,completion_version,completion_source,archived_at,transport_diagnostics,processing_pending) VALUES(@id,@request_id,@user_id,@key_id,@account_id,@session_id,@at,@duration_ms,
       @host,@path,@method,@protocol,@model,@status,@complete,@reason,@policy_version,@mode,@encoding,@original,@masked,@hits,@bytes,@fingerprint,
-      @processing_error,@processing_policy_version,@processed_at,@redaction_version,@redaction_policy_hash,@capture_version,@body_sha256,@inspection_warnings,@upstream_status,@upstream_evidence,@completion_version,@completion_source,@archived_at)`)
-      .run({ ...metadata, ...completion, completion_source: 'original', archived_at: this.now(), complete: event.complete && !reason ? 1 : 0, reason, mode: policy.mode, original, masked, hits: JSON.stringify(hits), bytes: storedBytes, fingerprint,
+      @processing_error,@processing_policy_version,@processed_at,@redaction_version,@redaction_policy_hash,@capture_version,@body_sha256,@inspection_warnings,@upstream_status,@upstream_evidence,@completion_version,@completion_source,@archived_at,@transport_diagnostics,@processing_pending)`)
+      .run({ ...metadata, ...completion, completion_source: deferProcessing ? '' : 'original', archived_at: this.now(), complete: event.complete && !reason ? 1 : 0, reason, mode: policy.mode, original, masked, hits: JSON.stringify(hits), bytes: storedBytes, fingerprint,
         body_sha256: digest, redaction_version: masked ? REDACTION_VERSION : 0, redaction_policy_hash: masked ? redactionPolicyHash(policy) : '',
-        inspection_warnings: JSON.stringify(warnings), processing_error, processing_policy_version: policy.mode === 'original' ? 0 : policy.version, processed_at: this.now() });
+        transport_diagnostics: event.transport_diagnostics ? JSON.stringify(event.transport_diagnostics) : '',
+        inspection_warnings: JSON.stringify(warnings), processing_pending: Number(deferProcessing), processing_error, processing_policy_version: deferProcessing || policy.mode === 'original' ? 0 : policy.version, processed_at: deferProcessing ? 0 : this.now() });
+      if (deferProcessing) this.db.prepare('INSERT INTO cl_processing(record_id,next_at,token) VALUES(?,?,?)').run(event.id, this.now(), crypto.randomUUID());
       this.lastError = null; return ack;
     }).immediate();
     } catch (error) {
@@ -220,16 +241,74 @@ class ConversationLogStore {
       this.lastError = 'storage_failed'; return { accepted: false, reason: 'storage_failed' };
     }
   }
+  hasPending() { return Boolean(this.db.prepare('SELECT 1 FROM cl_processing LIMIT 1').get()); }
+  claimPending() {
+    return this.db.transaction(() => {
+      const row = this.db.prepare('SELECT record_id,attempts FROM cl_processing WHERE next_at<=? ORDER BY next_at,record_id LIMIT 1').get(this.now());
+      if (!row) return null;
+      if (row.attempts >= 3) { this.failPending(row.record_id, 'PROCESSING_INTERRUPTED'); return null; }
+      this.db.prepare('UPDATE cl_processing SET attempts=attempts+1,next_at=? WHERE record_id=?').run(this.now() + 30000, row.record_id);
+      return row.record_id;
+    }).immediate();
+  }
+  failPending(id, code, token) {
+    if (!['PROCESSING_INTERRUPTED','REDACTION_MEMORY_PRESSURE','PROCESSING_FAILED'].includes(code)) code = 'PROCESSING_FAILED';
+    return this.db.transaction(() => {
+      if (token && this.db.prepare('SELECT token FROM cl_processing WHERE record_id=?').get(id)?.token !== token) return false;
+      this.db.prepare('UPDATE cl_records SET processing_pending=0,processing_error=?,processed_at=? WHERE id=? AND processing_pending=1').run(code, this.now(), id);
+      this.db.prepare('DELETE FROM cl_processing WHERE record_id=?').run(id);
+      return true;
+    }).immediate();
+  }
+  processPending(id, { beforeCommit = () => {} } = {}) {
+    const row = this.db.prepare(`SELECT id,user_id,model,at,mode,protocol,status,encoding,processing_pending FROM cl_records WHERE id=?`).get(id);
+    if (!row?.processing_pending) return false;
+    const marker = this.db.prepare('SELECT token FROM cl_processing WHERE record_id=?').get(id);
+    if (!marker) return false;
+    const permitted = policy => !policy.excludedUserIds.includes(row.user_id) && modelAllowed(policy, row.model) &&
+      (!policy.retention || row.at >= this.now() - policy.retention * 86400000);
+    const policy = this.policy();
+    let result, completion, masked = null, errorCode = '';
+    if (permitted(policy)) {
+      try {
+        row.original = this.db.prepare('SELECT original FROM cl_records WHERE id=? AND processing_pending=1 AND EXISTS(SELECT 1 FROM cl_processing WHERE record_id=? AND token=?)').get(id,id,marker.token)?.original;
+        if (!row.original) return false;
+        const raw = unpack(this.open(row.original, id + ':original')), limits = this.processingLimits();
+        completion = inspectCompletion(raw, row, limits);
+        if (row.mode !== 'original') { result = maskPayload(raw, policy, this.key, row.encoding, limits); masked = this.seal(pack(result.payload), id + ':masked'); }
+      } catch (error) { errorCode = processingError(error); result = undefined; masked = null; }
+    }
+    beforeCommit();
+    return this.db.transaction(() => {
+      const latest = this.policy();
+      if (this.db.prepare('SELECT token FROM cl_processing WHERE record_id=?').get(id)?.token !== marker.token ||
+        !this.db.prepare('SELECT 1 FROM cl_records WHERE id=? AND processing_pending=1').get(id)) return false;
+      if (!permitted(latest)) { this.db.prepare('DELETE FROM cl_records WHERE id=?').run(id); return false; }
+      // Reprocess with newly committed rules rather than publishing a stale masked copy.
+      if (latest.version !== policy.version) { this.db.prepare('UPDATE cl_processing SET next_at=? WHERE record_id=?').run(this.now() + 1000, id); return false; }
+      if (masked && (this.usedBytes() + masked.length + 2048 >= latest.capacity * 1024 ** 3 || this.freeBytes() - masked.length - 2048 < latest.reserve * 1024 ** 3)) {
+        errorCode = 'REDACTION_CAPACITY'; result = undefined; masked = null;
+      }
+      const original = result && row.mode === 'masked' && !result.warnings.length ? null : row.original;
+      this.db.prepare(`UPDATE cl_records SET processing_pending=0,processing_error=?,processing_policy_version=?,processed_at=?,
+        original=?,masked=?,hits=?,inspection_warnings=?,bytes=?,redaction_version=?,redaction_policy_hash=? WHERE id=?`)
+        .run(errorCode, row.mode === 'original' ? 0 : policy.version, this.now(), original, masked, JSON.stringify(result?.hits || []), JSON.stringify(result?.warnings || []),
+          (original?.length || 0) + (masked?.length || 0) + 2048, masked ? REDACTION_VERSION : 0, masked ? redactionPolicyHash(policy) : '', id);
+      if (completion) this.db.prepare("UPDATE cl_records SET upstream_status=@upstream_status,upstream_evidence=@upstream_evidence,completion_version=@completion_version,completion_source='original' WHERE id=@id").run({ id, ...completion });
+      this.db.prepare('DELETE FROM cl_processing WHERE record_id=?').run(id);
+      return true;
+    }).immediate();
+  }
   retry(id, input, { beforeCommit = () => {}, afterCommit = () => {}, detail = true } = {}) {
     const expected = parse(z.object({ policy_version: z.number().int().positive(), processed_at: z.number().int().nonnegative().safe() }).strict(), input);
-    const fields = 'user_id,model,mode,protocol,status,encoding,processed_at,processing_error,redaction_version,redaction_policy_hash,inspection_warnings,hits';
+    const fields = 'user_id,model,mode,protocol,status,encoding,processed_at,processing_pending,processing_error,redaction_version,redaction_policy_hash,inspection_warnings,hits';
     const policy = this.policy(), row = this.db.prepare(`SELECT ${fields},original FROM cl_records WHERE id=?`).get(id);
     const validate = (policy, row) => {
       if (!row) throw invalid('CONVERSATION_NOT_FOUND', 404);
       if (policy.excludedUserIds.includes(row.user_id)) throw new AppError('CONVERSATION_USER_EXCLUDED', '该用户已排除，不能重新处理', { status: 409 });
       if (!modelAllowed(policy, row.model)) throw new AppError('CONVERSATION_MODEL_EXCLUDED', '该模型不在采集名单中，不能重新处理', { status: 409 });
       if (policy.version !== expected.policy_version || row.processed_at !== expected.processed_at) throw new AppError('CONVERSATION_RETRY_CONFLICT', '策略或记录已更新，请刷新后重试', { status: 409 });
-      if (!this.publicRow(row).retry_available) throw new AppError('CONVERSATION_RETRY_UNAVAILABLE', '没有待处理的原文；历史缺失正文无法恢复', { status: 409 });
+      if (!this.publicRow(row).retry_available) throw new AppError('CONVERSATION_RETRY_UNAVAILABLE', '当前规则已处理或未保留原文；重复处理无法检查图片和加密内容，也无法恢复缺失字节', { status: 409 });
     };
     validate(policy, row);
     let result, errorCode = '', completion;
@@ -263,10 +342,10 @@ class ConversationLogStore {
     return detail ? this.detail(id) : undefined;
   }
   analyze(id, expected, { beforeCommit = () => {}, afterCommit = () => {} } = {}) {
-    const policy = this.policy(), row = this.db.prepare(`SELECT user_id,model,bytes,processed_at,protocol,status,encoding,
+    const policy = this.policy(), row = this.db.prepare(`SELECT user_id,model,bytes,processed_at,processing_pending,protocol,status,encoding,
       CASE WHEN original IS NOT NULL THEN original ELSE masked END payload,
       CASE WHEN original IS NOT NULL THEN 'original' WHEN masked IS NOT NULL THEN 'masked' ELSE '' END source FROM cl_records WHERE id=?`).get(id);
-    if (!row || policy.version !== expected.policy_version || row.processed_at !== expected.processed_at || policy.excludedUserIds.includes(row.user_id) || !modelAllowed(policy, row.model)) {
+    if (!row || row.processing_pending || policy.version !== expected.policy_version || row.processed_at !== expected.processed_at || policy.excludedUserIds.includes(row.user_id) || !modelAllowed(policy, row.model)) {
       throw invalid('CONVERSATION_RETRY_CONFLICT', 409);
     }
     const source = row.source;
@@ -291,12 +370,15 @@ class ConversationLogStore {
     }).immediate();
     return true;
   }
-  prune() {
+  prune({ limit = 0 } = {}) {
     const removed = this.db.transaction(() => {
       const { retention } = this.policy();
-      return retention ? this.db.prepare('DELETE FROM cl_records WHERE at<?').run(this.now() - retention * 86400000).changes : 0;
+      if (!retention) return 0;
+      const cutoff = this.now() - retention * 86400000;
+      return limit ? this.db.prepare('DELETE FROM cl_records WHERE id IN (SELECT id FROM cl_records WHERE at<? ORDER BY at,id LIMIT ?)').run(cutoff,limit).changes
+        : this.db.prepare('DELETE FROM cl_records WHERE at<?').run(cutoff).changes;
     }).immediate();
-    if (removed) { this.db.pragma('wal_checkpoint(TRUNCATE)'); this.db.pragma('incremental_vacuum(128)'); }
+    if (removed) { this.db.pragma(limit ? 'wal_checkpoint(PASSIVE)' : 'wal_checkpoint(TRUNCATE)'); this.db.pragma(`incremental_vacuum(${limit ? 32 : 128})`); }
     return removed;
   }
   where(query = {}, indexed = false) {
@@ -324,7 +406,7 @@ class ConversationLogStore {
     const modelExcluded = !modelAllowed(policy, row.model);
     const outdated = row.mode !== 'original' && (row.redaction_version !== REDACTION_VERSION || row.redaction_policy_hash !== redactionPolicyHash(policy));
     return { ...metadata, inspection_warnings: warnings, complete: Boolean(row.complete), original: Boolean(original), masked: Boolean(masked), hits: JSON.parse(hits),
-      redaction_outdated: outdated, retry_available: Boolean(original && (row.processing_error || outdated || warnings.length) && !excluded && !modelExcluded), retry_blocked: excluded ? 'user_excluded' : modelExcluded ? 'model_excluded' : !original ? 'no_original' : '' };
+      redaction_outdated: !row.processing_pending && outdated, retry_available: Boolean(!row.processing_pending && original && (row.processing_error || outdated) && !excluded && !modelExcluded), retry_blocked: row.processing_pending ? 'processing_pending' : excluded ? 'user_excluded' : modelExcluded ? 'model_excluded' : !original ? 'no_original' : '' };
   }
   list(query = {}) {
     return this.db.transaction(() => {
@@ -339,6 +421,8 @@ class ConversationLogStore {
     const row = this.db.prepare('SELECT * FROM cl_record_metadata WHERE id=?').get(id)
       || this.db.prepare('SELECT ' + projection() + ' FROM cl_records WHERE id=?').get(id); if (!row) throw invalid('CONVERSATION_NOT_FOUND', 404);
     const result = this.publicRow(row);
+    const transport = this.db.prepare('SELECT transport_diagnostics FROM cl_records WHERE id=?').get(id)?.transport_diagnostics;
+    result.transport_diagnostics = transport ? JSON.parse(transport) : null;
     result.attempts = this.db.prepare('SELECT id,account_id,status,protocol,at,complete,reason FROM cl_records WHERE request_id=? AND user_id=? AND key_id=? ORDER BY at,id LIMIT 100')
       .all(row.request_id, row.user_id, row.key_id);
     const source = row.masked ? 'masked' : row.original ? 'original' : '';
@@ -381,8 +465,8 @@ class ConversationLogStore {
   status() {
     return this.db.transaction(() => {
     const metadataIndex = this.metadataStatus();
-    const counts = this.db.prepare("SELECT COUNT(*) records,COALESCE(SUM(bytes),0) bytes,COALESCE(SUM(complete=0),0) gaps,COALESCE(SUM(processing_error!='' OR reason='redaction_failed'),0) processingFailures FROM cl_record_metadata").get();
-    if (!metadataIndex.ready) { counts.records = metadataIndex.total; counts.bytes = null; counts.gaps = null; counts.processingFailures = null; }
+    const counts = this.db.prepare("SELECT COUNT(*) records,COALESCE(SUM(bytes),0) bytes,COALESCE(SUM(complete=0),0) gaps,COALESCE(SUM(processing_error!='' OR reason='redaction_failed'),0) processingFailures,COALESCE(SUM(processing_pending),0) processingPending FROM cl_record_metadata").get();
+    if (!metadataIndex.ready) { counts.records = metadataIndex.total; counts.bytes = null; counts.gaps = null; counts.processingFailures = null; counts.processingPending = this.db.prepare('SELECT COUNT(*) n FROM cl_processing').get().n; }
     return { ...counts, metadataIndex, ...this.liveStatus(), redactionVersion: REDACTION_VERSION, policy: this.policy(), diskBytes: this.usedBytes(), freeBytes: this.freeBytes(), timezone: this.timezone,
       coverage: ['HTTP JSON / SSE (including TLS fingerprint and transport fallbacks)', 'OpenAI pooled WebSocket / passthrough messages'],
       limitations: ['Only bytes consumed by the gateway are observed; early close is marked incomplete.', 'Queue/process failure can lose archives; this archive does not control inference or billing.'] };

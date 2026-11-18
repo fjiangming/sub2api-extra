@@ -47,11 +47,12 @@ async function startPreview({port = Number(process.env.CONVERSATION_PREVIEW_PORT
   f.store.collectorPolicy(0,'2');
   const auth = new AuthService(f.config);
   const pushStore = new ConversationPushStore(f.store).initialize();
-  const push = pushTransport ? new ConversationPushService(pushStore,{transport:pushTransport}) : new ConversationPushSupervisor(pushStore);
   const archive = new ConversationArchiveService(f.store);
-  const cleanup = new ConversationCleanupService(f.store,{canWork:() => !archive.busy});
-  const repair = new ConversationRepairService(f.store,{canWork:() => !archive.busy && !cleanup.child});
-  const read = new ConversationReadService(f.store,{configured:true,canWork:() => !archive.busy && !cleanup.child && !repair.child});
+  const canPush = () => archive.idleForHistory;
+  const push = pushTransport ? new ConversationPushService(pushStore,{transport:pushTransport,canWork:canPush}) : new ConversationPushSupervisor(pushStore,{canWork:canPush});
+  const cleanup = new ConversationCleanupService(f.store,{canWork:() => !archive.busy && !archive.processingBusy});
+  const repair = new ConversationRepairService(f.store,{canWork:() => archive.idleForHistory && !cleanup.child});
+  const read = new ConversationReadService(f.store,{configured:true,canWork:() => !archive.busy && !archive.processingBusy && !cleanup.child && !repair.child});
   await archive.start();
   const app = createApp({config:f.config,auth,database:{},conversations:f.store,conversationArchive:archive,conversationRead:read,conversationPush:push,conversationCleanup:cleanup,conversationRepair:repair,messages:f.messages,settings:{getStatus:() => ({setupRequired:false})}});
   const outer = express();
@@ -67,7 +68,7 @@ async function startPreview({port = Number(process.env.CONVERSATION_PREVIEW_PORT
   repair.start();
   read.start();
   let stopped = false;
-  return {port:server.address().port,fixture:f,push,cleanup,repair,read,raw,async stop() { if (stopped) return; stopped = true; await read.stop(); await repair.stop(); await cleanup.stop(); await push.stop(); await archive.stop(); auth.close(); await new Promise(resolve => server.close(resolve)); f.close(); }};
+  return {port:server.address().port,fixture:f,push,archive,cleanup,repair,read,raw,async stop() { if (stopped) return; stopped = true; await read.stop(); await repair.stop(); await cleanup.stop(); await push.stop(); await archive.stop(); auth.close(); await new Promise(resolve => server.close(resolve)); f.close(); }};
 }
 if (require.main === module) startPreview({compatibilityExamples:true}).then(preview => {
   console.log(`Conversation archive formal-page preview (fictional local data): http://127.0.0.1:${preview.port}/preview`);

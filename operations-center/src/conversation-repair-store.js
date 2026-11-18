@@ -53,11 +53,11 @@ class ConversationRepairStore {
       return { worked:false };
     }
     // Select metadata before loading a body. Each task stops at its initial history boundary.
-    const row = this.db.prepare(`SELECT rowid cursor,id,user_id,model,at,archived_at,mode,bytes,processed_at,processing_error,redaction_version,redaction_policy_hash,
+    const row = this.db.prepare(`SELECT rowid cursor,id,user_id,model,at,archived_at,mode,bytes,processed_at,processing_pending,processing_error,redaction_version,redaction_policy_hash,
       completion_version,upstream_status,upstream_evidence,original IS NOT NULL original,masked IS NOT NULL masked FROM cl_records WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT 1`)
       .get(job.cursor_rowid,job.upper_rowid);
     if (!row) { this.db.prepare("UPDATE cl_repairs SET status='done',updated_at=? WHERE id=? AND status IN ('pending','running')").run(this.now(),job.id); return { worked:false }; }
-    const skip = row.archived_at >= job.requested_at || policy.excludedUserIds.includes(row.user_id) || !modelAllowed(policy,row.model) || policy.retention && row.at < this.now() - policy.retention * 86400000;
+    const skip = row.processing_pending || row.archived_at >= job.requested_at || policy.excludedUserIds.includes(row.user_id) || !modelAllowed(policy,row.model) || policy.retention && row.at < this.now() - policy.retention * 86400000;
     const repair = row.original && row.mode !== 'original' && (row.processing_error || row.redaction_version !== REDACTION_VERSION || row.redaction_policy_hash !== redactionPolicyHash(policy));
     const analyze = row.completion_version < COMPLETION_VERSION || row.upstream_status === 'unverified' && row.upstream_evidence === 'resource';
     const finish = counts => this.db.transaction(() => this.advance(job,row,counts)).immediate();

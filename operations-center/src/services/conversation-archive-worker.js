@@ -14,7 +14,7 @@ process.once('message', async settings => {
     const budget = () => processingBudget(settings.memoryBudgetBytes);
     store = new ConversationLogStore(settings.directory, { timezone: settings.timezone,
       processingLimits: () => ({ maxOutputBytes: Math.min(256 * 1024 ** 2, Math.floor(budget() / 8)) }) }).initialize();
-    store.start();
+    store.db.pragma('busy_timeout = 250');
     const app = express(); app.disable('x-powered-by');
     let busy = false;
     app.use((req, res, next) => {
@@ -38,12 +38,14 @@ process.once('message', async settings => {
     });
     app.post('/ingest', (req, res, next) => {
       try {
-        const result = store.ingest(req.body); res.locals.archiveError = result.reason || '';
+        if (settings.role !== 'receive') return res.sendStatus(404);
+        const result = store.receive(req.body); res.locals.archiveError = result.reason || '';
         res.json(result);
       } catch (error) { next(error); }
     });
     app.post('/reprocess/:id', (req, res, next) => {
       try {
+        if (settings.role !== 'process') return res.sendStatus(404);
         const row = store.db.prepare('SELECT bytes FROM cl_records WHERE id=?').get(req.params.id);
         if (row && row.bytes * 8 > budget()) {
           res.locals.archiveError = 'processor_memory';
@@ -65,6 +67,24 @@ process.once('message', async settings => {
     server = http.createServer(app); server.requestTimeout = 20000; server.headersTimeout = 10000;
     server.maxConnections = 2;
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+    process.on('message', message => {
+      if (settings.role !== 'process' || message?.type !== 'step' || busy) return;
+      busy = true;
+      let error = '', id;
+      try {
+        if (message.maintenance && !store.hasPending()) { store.prune({limit:1}); return; }
+        id = store.claimPending();
+        if (id) {
+          const row = store.db.prepare('SELECT r.bytes,p.token FROM cl_records r JOIN cl_processing p ON p.record_id=r.id WHERE r.id=? AND r.processing_pending=1').get(id);
+          if (row && row.bytes * 8 > Math.floor(budget() / 2)) store.failPending(id, 'REDACTION_MEMORY_PRESSURE', row.token);
+          else store.processPending(id);
+        }
+      } catch { error = 'storage_failed'; /* The durable lease permits bounded recovery after an interruption. */ }
+      finally {
+        busy = false;
+        if (process.connected) process.send({ type: 'finished', job: message.job, error }, () => {});
+      }
+    });
     process.send?.({ type: 'ready', port: server.address().port });
     process.once('disconnect', () => { server.close(); store.close(); process.exit(0); });
     process.once('SIGTERM', () => { server.close(); store.close(); process.exit(0); });

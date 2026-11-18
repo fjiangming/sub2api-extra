@@ -130,15 +130,16 @@ class ConversationJsonlStore {
     if (full || file.archive_version !== archivePolicy.version) {
       const row = this.db.prepare(`SELECT r.id,r.user_id,r.model,r.complete,r.reason,r.fingerprint,m.fingerprint expected_fingerprint,
         r.original IS NOT NULL has_original,r.masked IS NOT NULL has_masked,r.processing_error,r.redaction_version,r.redaction_policy_hash,r.inspection_warnings,
-        r.processed_at,m.processed_at expected_processed_at,r.processing_policy_version,m.processing_policy_version expected_processing_version
+        r.processed_at,r.processing_pending,m.processed_at expected_processed_at,r.processing_policy_version,m.processing_policy_version expected_processing_version
         FROM cl_push_jsonl_members m JOIN cl_push_jobs j ON j.id=m.job_id LEFT JOIN cl_records r ON r.id=j.record_id
-        WHERE m.file_id=? AND (r.id IS NULL OR r.model!=? OR r.complete!=1 OR r.reason!='' OR r.fingerprint!=m.fingerprint
+        WHERE m.file_id=? AND (r.id IS NULL OR r.processing_pending=1 OR r.model!=? OR r.complete!=1 OR r.reason!='' OR r.fingerprint!=m.fingerprint
           OR r.user_id IN (SELECT value FROM json_each(?)) OR CASE WHEN ?='original' THEN r.original IS NULL
           ELSE r.masked IS NULL OR r.processing_error!='' OR r.inspection_warnings!='[]' OR r.redaction_version!=? OR r.redaction_policy_hash!=?
             OR r.processed_at!=m.processed_at OR r.processing_policy_version!=m.processing_policy_version END) LIMIT 1`)
         .get(file.id, file.model, JSON.stringify(archivePolicy.excludedUserIds), file.source, REDACTION_VERSION, redactionPolicyHash(archivePolicy));
       if (row) {
         if (!row.id) return 'RECORD_EXPIRED';
+        if (row.processing_pending) return 'PROCESSING_PENDING';
         if (archivePolicy.excludedUserIds.includes(row.user_id) || row.model !== file.model) return 'COLLECTION_EXCLUDED';
         if (!row.complete || row.reason) return 'INCOMPLETE_CAPTURE';
         if (!(file.source === 'original' ? row.has_original : row.has_masked)) return 'COPY_UNAVAILABLE';

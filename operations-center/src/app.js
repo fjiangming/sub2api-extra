@@ -273,7 +273,7 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
     if (!conversations) return next(new AppError('CONVERSATION_UNAVAILABLE', '对话归档暂不可用', { status: 503 }));
     next();
   };
-  app.get('/api/conversation-logs/collector-policy', conversationCollectorAuth, (req, res) => res.json(conversations.collectorPolicy(req.get('x-conversation-dropped'), req.get('x-conversation-collector-version'))));
+  app.get('/api/conversation-logs/collector-policy', conversationCollectorAuth, (req, res) => res.json(conversations.collectorPolicy(req.get('x-conversation-dropped'), req.get('x-conversation-collector-version'), Boolean(conversationArchive))));
   app.post('/api/conversation-logs/ingest', conversationCollectorAuth,
     (req, res, next) => conversationArchive ? conversationArchive.proxy(req, res, next) : next(),
     express.json({ limit: '272mb', strict: true }), asyncRoute(async (req, res) => {

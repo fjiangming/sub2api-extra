@@ -6,7 +6,7 @@ const { default: isIBAN } = require('validator/lib/isIBAN');
 const isIP = require('validator/lib/isIP');
 const crypto = require('node:crypto');
 
-const REDACTION_VERSION = 5;
+const REDACTION_VERSION = 6;
 function redactionPolicyHash(policy) {
   return crypto.createHash('sha256').update(JSON.stringify([REDACTION_VERSION,
     ...['email','phone','secret','ip','identity','financial','personal','device'].map(key => Boolean(policy[key])), policy.custom])).digest('hex');
@@ -42,8 +42,8 @@ function protocolField(token, parsed, depth) {
   const parent = p.slice(0, -1).reduce((obj, key) => obj?.[key], parsed);
   const image = protocolImageContext(p, parsed, depth);
   if (image && (image.tail.length === 1 && field === 'type' || image.kind === 'claude' && image.tail.length === 2 && image.tail[0] === 'source' && ['type','media_type'].includes(field))) return true;
-  if (['id','type','status'].includes(field) && protocolReasoningPath(p.slice(0,-1),parsed,depth)) return true;
-  if (field === 'type' && parent?.type === 'summary_text' && p.at(-3) === 'summary' && Number.isInteger(p.at(-2)) && protocolReasoningPath(p.slice(0,-3),parsed,depth)) return true;
+  if (['id','type','status'].includes(field) && ['reasoning','compaction'].includes(parent?.type) && protocolContextItemPath(p.slice(0,-1),parsed,depth,parent.type)) return true;
+  if (field === 'type' && parent?.type === 'summary_text' && p.at(-3) === 'summary' && Number.isInteger(p.at(-2)) && protocolContextItemPath(p.slice(0,-3),parsed,depth,'reasoning')) return true;
   const root = p.length === 1 || (p.length === 2 && ['response', 'message', 'item'].includes(p[0]));
   const protocolParent = parent && typeof parent === 'object' && (/^(?:response\.|message\.|function|function_call|function_call_output|custom_tool_call|tool_use|tool_result|text|input_text|output_text|thinking|content_block|image|image_url|document|audio)/.test(parent.type || '') ||
     ['user','assistant','system','developer','tool','model'].includes(parent.role));
@@ -76,22 +76,26 @@ function protocolSignature(token, parsed, depth) {
   return geminiPartPath(p.slice(0,-1));
 }
 
-function protocolReasoningPath(path, parsed, depth) {
+function protocolContextItemPath(path, parsed, depth, type) {
   if (depth) return false;
   let p = path, root = parsed;
   if (p.length === 1 && p[0] === 'item') {
-    return ['response.output_item.added','response.output_item.done'].includes(root?.type) && root.item?.type === 'reasoning';
+    return ['response.output_item.added','response.output_item.done'].includes(root?.type) && root.item?.type === type;
   }
   if (p[0] === 'response') {
     if (!['response.create','response.created','response.in_progress','response.completed','response.incomplete','response.failed'].includes(root?.type)) return false;
     p = p.slice(1); root = root.response;
   }
-  if (p.length !== 2 || !Number.isInteger(p[1]) || root?.[p[0]]?.[p[1]]?.type !== 'reasoning') return false;
-  return p[0] === 'input' && (typeof root.model === 'string' || parsed.type === 'response.create') || p[0] === 'output' && root.object === 'response';
+  if (p.length !== 2 || !Number.isInteger(p[1]) || root?.[p[0]]?.[p[1]]?.type !== type) return false;
+  return p[0] === 'input' && (typeof root.model === 'string' || parsed.type === 'response.create') ||
+    p[0] === 'output' && (root.object === 'response' || type === 'compaction' && root.object === 'response.compaction');
 }
 
-function protocolEncryptedReasoning(token, parsed, depth) {
-  return token.field === 'encrypted_content' && !token.numeric && /^[A-Za-z0-9+/=_-]+$/.test(token.value) && protocolReasoningPath(token.path.slice(0,-1),parsed,depth);
+function protocolEncryptedContext(token, parsed, depth) {
+  if (token.field !== 'encrypted_content' || token.numeric || !/^[A-Za-z0-9+/=_-]+$/.test(token.value)) return '';
+  const path = token.path.slice(0,-1), type = path.reduce((value,field) => value?.[field],parsed)?.type;
+  if (!['reasoning','compaction'].includes(type) || !protocolContextItemPath(path,parsed,depth,type)) return '';
+  return type === 'reasoning' ? 'OPAQUE_ENCRYPTED_REASONING' : 'OPAQUE_ENCRYPTED_COMPACTION';
 }
 
 function protocolImageContext(path, parsed, depth) {
@@ -180,7 +184,8 @@ function assertInspectable(token, parsed, depth = 0, toolData = false) {
   if (typeof value !== 'string' || !value) return '';
   // Only known vendor protocol paths may pass through; callers must withhold warned masked copies from export.
   if (protocolSignature(token, parsed, depth)) return 'OPAQUE_SIGNATURE';
-  if (protocolEncryptedReasoning(token, parsed, depth)) return 'OPAQUE_ENCRYPTED_REASONING';
+  const encrypted = protocolEncryptedContext(token, parsed, depth);
+  if (encrypted) return encrypted;
   if (protocolImage(token, parsed, depth)) return 'OPAQUE_IMAGE';
   if (key === 'fileid' && businessFileIdentifier(token, parsed, toolData)) return '';
   if (opaqueFields.has(key) || /^data:[^,]*;base64,/i.test(value) || key === 'url' && /^(?:blob:|file:|data:)/i.test(value)) throw new Error('UNINSPECTABLE_CONTENT');

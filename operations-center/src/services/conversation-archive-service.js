@@ -7,12 +7,20 @@ const os = require('node:os');
 const { fork } = require('node:child_process');
 
 class ConversationArchiveService {
-  constructor(archive, { timeoutMs = 20000, memoryBudgetBytes } = {}) {
+  constructor(archive, { timeoutMs = 20000, memoryBudgetBytes, role = 'receive', canWork = () => true, processingIntervalMs = 250 } = {}) {
     this.archive = archive; this.timeoutMs = timeoutMs; this.memoryBudgetBytes = memoryBudgetBytes;
+    this.role = role; this.canWork = canWork; this.processingIntervalMs = processingIntervalMs;
     this.child = null; this.port = 0; this.busy = ''; this.stopped = false; this.pending = new Set();
     this.secret = crypto.randomBytes(32).toString('hex');
+    if (role === 'receive') this.processor = new ConversationArchiveService(archive, { timeoutMs, memoryBudgetBytes, role: 'process',
+      processingIntervalMs, canWork: () => !this.busy && Date.now() - (this.lastReceive || 0) >= 100 });
   }
+  get processingBusy() { return Boolean(this.processor?.busy); }
+  get processingPending() { try { return this.archive.hasPending(); } catch { return true; } }
+  get idleForHistory() { return !this.busy && !this.processingBusy && !this.processingPending; }
+  reportError(code) { this.lastError = code; if (this.role === 'receive') this.archive.lastError = code; }
   start() {
+    this.processor?.start().catch(() => {});
     if (this.starting) return this.starting;
     if (this.stopped || this.child) return Promise.resolve();
     this.starting = this.spawn().finally(() => { this.starting = null; });
@@ -24,20 +32,22 @@ class ConversationArchiveService {
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true
     });
     this.child = child;
-    try { os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch { /* Not available on every host. */ }
+    try { os.setPriority(child.pid, this.role === 'receive' ? os.constants.priority.PRIORITY_BELOW_NORMAL : os.constants.priority.PRIORITY_LOW); } catch { /* Not available on every host. */ }
     child.on('message', message => {
       if (this.child !== child) return;
       if (message?.type === 'finished' && message.job === this.busy) {
         this.busy = ''; clearTimeout(this.jobTimer);
-        if (['capacity', 'storage_failed', 'processor_memory', 'processor_failed'].includes(message.error)) this.archive.lastError = message.error;
-        else if (!message.error) this.archive.lastError = null;
+        if (this.role === 'receive') this.lastReceive = Date.now();
+        if (['capacity', 'storage_failed', 'processor_memory', 'processor_failed'].includes(message.error)) this.reportError(message.error);
+        else if (!message.error) this.reportError(null);
+        this.schedule();
       }
     });
-    child.on('error', () => { this.archive.lastError = 'processor_failed'; });
+    child.on('error', () => { this.reportError('processor_failed'); });
     child.once('exit', () => {
       if (this.child !== child) return;
       this.child = null; this.port = 0; this.busy = ''; clearTimeout(this.jobTimer);
-      this.archive.lastError = 'processor_failed';
+      this.reportError('processor_failed');
       for (const request of this.pending) request.destroy(new Error('ARCHIVE_PROCESSOR_UNAVAILABLE'));
       if (!this.stopped) {
         this.restartTimer = setTimeout(() => this.start().catch(() => {}), 5000);
@@ -51,23 +61,41 @@ class ConversationArchiveService {
       const ready = message => {
         if (message?.type !== 'ready' || !Number.isInteger(message.port) || message.port < 1 || message.port > 65535 || this.child !== child) return;
         clearTimeout(timer); child.removeListener('error', fail); child.removeListener('exit', fail); child.removeListener('message', ready);
-        this.port = message.port;
+        this.port = message.port; this.schedule();
         resolve();
       };
       child.on('message', ready);
       child.send({ type: 'initialize', directory: path.dirname(this.archive.directory), timezone: this.archive.timezone,
-        secret: this.secret, memoryBudgetBytes: this.memoryBudgetBytes }, error => { if (error) { child.kill('SIGKILL'); fail(); } });
+        secret: this.secret, memoryBudgetBytes: this.memoryBudgetBytes, role: this.role }, error => { if (error) { child.kill('SIGKILL'); fail(); } });
     });
   }
+  schedule() {
+    if (this.role !== 'process' || this.stopped) return;
+    clearTimeout(this.stepTimer);
+    this.stepTimer = setTimeout(() => {
+      if (!this.child?.connected || !this.port || this.busy) return this.schedule();
+      if (!this.canWork()) return this.schedule();
+      const maintenance = !this.processingPending;
+      if (maintenance && Date.now() < (this.nextMaintenance || 0)) return this.schedule();
+      if (maintenance) this.nextMaintenance = Date.now() + 1000;
+      this.busy = crypto.randomBytes(16).toString('hex');
+      const child = this.child;
+      this.jobTimer = setTimeout(() => { this.reportError('processor_failed'); child.kill('SIGKILL'); }, this.timeoutMs);
+      this.jobTimer.unref();
+      child.send({ type: 'step', job: this.busy, maintenance }, () => {});
+    }, this.processingIntervalMs);
+    this.stepTimer.unref();
+  }
   proxy(req, res, next, target = '/ingest', body) {
-    if (!this.child || !this.port || this.busy || this.stopped) {
+    if (target.startsWith('/reprocess/') && this.processor) return this.processor.proxy(req, res, next, target, body);
+    if (!this.child || !this.port || this.busy || this.stopped || !this.canWork()) {
       req.resume();
       return res.status(503).json({ accepted: false, reason: this.busy ? 'processor_busy' : 'processor_failed' });
     }
     this.busy = crypto.randomBytes(16).toString('hex');
     const child = this.child;
     this.jobTimer = setTimeout(() => {
-      this.archive.lastError = 'processor_failed'; child.kill('SIGKILL');
+      this.reportError('processor_failed'); child.kill('SIGKILL');
     }, this.timeoutMs);
     this.jobTimer.unref();
     const headers = { authorization: 'Bearer ' + this.secret, 'content-type': req.get('content-type') || 'application/json', 'x-archive-job': this.busy };
@@ -93,7 +121,8 @@ class ConversationArchiveService {
     if (body) upstream.end(body); else req.pipe(upstream);
   }
   async stop() {
-    this.stopped = true; clearTimeout(this.restartTimer); clearTimeout(this.jobTimer);
+    this.stopped = true; clearTimeout(this.restartTimer); clearTimeout(this.jobTimer); clearTimeout(this.stepTimer);
+    await this.processor?.stop();
     const child = this.child;
     for (const request of this.pending) request.destroy();
     if (child && child.exitCode === null && child.signalCode === null) await new Promise(resolve => {

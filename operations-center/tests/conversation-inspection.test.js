@@ -123,10 +123,13 @@ test('limited inspection persists independently, retains masked-only originals a
   const f=fixture();t.after(()=>f.close());const p=f.store.configure({...f.store.policy(),mode:'masked'});
   const row=event('limited',{policy_version:p.version,request:raw(signed()),complete:false,reason:'read_error'});f.store.ingest(row);
   const before=f.store.detail(row.id);assert.equal(before.processing_error,'');assert.deepEqual(before.inspection_warnings,['OPAQUE_SIGNATURE']);
-  assert(before.original&&before.masked&&before.retry_available);assert(!before.complete);assert.equal(before.reason,'read_error');
+  assert(before.original&&before.masked);assert(!before.retry_available);assert(!before.complete);assert.equal(before.reason,'read_error');
   assert.deepEqual(f.store.list().items[0].inspection_warnings,['OPAQUE_SIGNATURE']);
   assert.equal(f.store.payload(row.id,'original','request').text,signed());assert(!f.store.payload(row.id,'masked','request').text.includes('alice@example.com'));
+  assert.throws(()=>f.store.retry(row.id,expected(f,row.id)),{code:'CONVERSATION_RETRY_UNAVAILABLE'});
+  f.store.configure({...p,email:false});assert(f.store.detail(row.id).retry_available);
   const retried=f.store.retry(row.id,expected(f,row.id));assert(retried.original&&retried.masked);assert.deepEqual(retried.inspection_warnings,['OPAQUE_SIGNATURE']);
+  assert(!retried.retry_available);
   assert(!retried.complete);assert.equal(retried.reason,'read_error');assert(retried.processed_at>before.processed_at);
   assert(!JSON.stringify(retried).includes(signature));
 });
@@ -144,7 +147,7 @@ test('old schema and failed URL/signature history migrate without rewriting orig
   assert.deepEqual(f.store.detail(link.id).inspection_warnings,[]);
   const linkDone=f.store.retry(link.id,expected(f,link.id));assert(!linkDone.original);assert(linkDone.masked);assert.equal(linkDone.processing_error,'');assert.deepEqual(linkDone.inspection_warnings,[]);
   const sigDone=f.store.retry(sig.id,expected(f,sig.id));assert(sigDone.original&&sigDone.masked);assert.equal(sigDone.processing_error,'');assert.deepEqual(sigDone.inspection_warnings,['OPAQUE_SIGNATURE']);
-  assert.equal(f.store.payload(sig.id,'original','request').text,signed());assert.equal(sigDone.redaction_version,5);
+  assert.equal(f.store.payload(sig.id,'original','request').text,signed());assert.equal(sigDone.redaction_version,6);
 });
 
 test('masked push previews, automatic queues and existing JSONL members reject uninspected signatures and images', async t => {
@@ -156,7 +159,7 @@ test('masked push previews, automatic queues and existing JSONL members reject u
   const preview=push.preview({filter:{},destinations:['webhook','s3']});assert.equal(preview.eligible,1);assert.equal(preview.unavailable,2);
   service.jsonl.store.assignOne();const file=service.jsonl.store.db.prepare('SELECT * FROM cl_push_jsonl_files LIMIT 1').get();assert(file);
   const job=push.db.prepare("SELECT * FROM cl_push_jobs WHERE record_id=? AND destination='webhook'").get(normal.id);
-  for(const warning of ['OPAQUE_SIGNATURE','OPAQUE_IMAGE']) {
+  for(const warning of ['OPAQUE_SIGNATURE','OPAQUE_IMAGE','OPAQUE_ENCRYPTED_COMPACTION']) {
     f.store.db.prepare('UPDATE cl_records SET inspection_warnings=? WHERE id=?').run(JSON.stringify([warning]),normal.id);
     assert.equal(push.validJob(job).cancel,'INSPECTION_INCOMPLETE');assert.equal(service.jsonl.store.invalidReason(file,{full:true}),'INSPECTION_INCOMPLETE');
   }

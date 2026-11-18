@@ -7,8 +7,9 @@ const { fork } = require('node:child_process');
 const { ConversationPushService } = require('./conversation-push-service');
 
 class ConversationPushSupervisor extends ConversationPushService {
-  constructor(store, { memoryBudgetBytes } = {}) {
+  constructor(store, { memoryBudgetBytes, canWork = () => true } = {}) {
     super(store); this.child = null; this.ready = false; this.pending = new Map(); this.memoryBudgetBytes = memoryBudgetBytes;
+    this.canWork = canWork;
   }
   send(message) { if (this.child?.connected) this.child.send(message, () => {}); }
   wake() { this.send({ type: 'wake' }); }
@@ -20,11 +21,15 @@ class ConversationPushSupervisor extends ConversationPushService {
       execArgv: ['--max-old-space-size=256', '--max-semi-space-size=8'], stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true
     });
     this.child = child; this.ready = false;
-    try { os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL); } catch { /* Host may not support process priorities. */ }
+    try { os.setPriority(child.pid, os.constants.priority.PRIORITY_LOW); } catch { /* Host may not support process priorities. */ }
     const startupTimer = setTimeout(() => { if (!this.ready) child.kill('SIGKILL'); }, 10000); startupTimer.unref();
     child.on('message', message => {
       if (this.child !== child) return;
-      if (message?.type === 'ready') { clearTimeout(startupTimer); this.ready = true; this.lastError = ''; }
+      if (message?.type === 'ready') {
+        clearTimeout(startupTimer); this.ready = true; this.lastError = '';
+        const priority = () => { let allowed = false; try { allowed = this.canWork(); } catch { /* Pause on unavailable metadata. */ } this.send({type:'priority',allowed}); };
+        priority(); this.priorityTimer = setInterval(priority,250); this.priorityTimer.unref();
+      }
       if (message?.type === 'status') {
         this.lastError = message.lastError || ''; this.lastRun = message.lastRun || null;
         this.jsonl.lastError = message.jsonlError || ''; this.jsonl.lastRun = message.jsonlRun || null;
@@ -33,7 +38,7 @@ class ConversationPushSupervisor extends ConversationPushService {
     });
     child.on('error', () => { this.lastError = 'PUSH_WORKER_UNAVAILABLE'; });
     child.once('exit', () => {
-      clearTimeout(startupTimer); if (this.child !== child) return;
+      clearTimeout(startupTimer); clearInterval(this.priorityTimer); if (this.child !== child) return;
       this.child = null; this.ready = false; this.lastError = 'PUSH_WORKER_UNAVAILABLE';
       for (const pending of this.pending.values()) pending.resolve({ status: 'failed', errorCode: 'PUSH_WORKER_UNAVAILABLE', retryable: true });
       this.pending.clear();
@@ -51,7 +56,7 @@ class ConversationPushSupervisor extends ConversationPushService {
     });
   }
   async stop() {
-    this.stopping = true; clearTimeout(this.restartTimer); const child = this.child;
+    this.stopping = true; clearTimeout(this.restartTimer); clearInterval(this.priorityTimer); const child = this.child;
     if (child && child.exitCode === null && child.signalCode === null) await new Promise(resolve => {
       const timer = setTimeout(() => child.kill('SIGKILL'), 1500);
       child.once('exit', () => { clearTimeout(timer); resolve(); }); this.send({ type: 'stop' });

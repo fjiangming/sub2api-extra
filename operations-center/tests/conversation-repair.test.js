@@ -81,6 +81,23 @@ test('history explicitly upgrades old completion evidence for SSE recorded as JS
   const push = new ConversationPushStore(f.store).initialize();assert(!push.copyReady(push.metadata(row.id),'original',f.store.policy()));
 });
 
+test('explicit background repair recognizes compaction while keeping raw bytes and the original read error', t => {
+  const f = fixture();t.after(() => f.close());f.store.configure({...f.store.policy(),mode:'masked'});
+  const encrypted = 'gAAAAAB_fictional-compaction_1234567890==',item = {type:'compaction',id:'cmp_12345678901234567890',encrypted_content:encrypted};
+  const request = b64(JSON.stringify({model:'gpt-6.1-sol',input:[item,{role:'user',content:'alice@example.com'}]}));
+  const row = old(f,'history-compaction',{request});
+  f.store.db.prepare("UPDATE cl_records SET masked=NULL,processing_error='UNINSPECTABLE_CONTENT',redaction_version=0,inspection_warnings='[]' WHERE id=?").run(row.id);
+  const before = snapshot(f,row.id),store = new ConversationRepairStore(f.store).initialize();assert.equal(store.pending(),null);
+  store.request({policy_version:f.store.policy().version});finish(store);
+  const saved = f.store.detail(row.id);assert.equal(saved.processing_error,'');assert.equal(saved.redaction_version,6);
+  assert.deepEqual(saved.inspection_warnings,['OPAQUE_ENCRYPTED_COMPACTION']);assert(saved.original && saved.masked);
+  assert(!saved.complete);assert.equal(saved.reason,'read_error');assert.equal(saved.upstream_status,'completed');
+  assert.deepEqual(snapshot(f,row.id).original,before.original);assert.equal(f.store.payload(row.id,'original','request').body.toString('base64'),request);
+  const masked = JSON.parse(f.store.payload(row.id,'masked','request').text);assert.deepEqual(masked.input[0],item);assert.match(masked.input[1].content,/^<EMAIL_/);
+  assert.equal(store.latest().repaired,1);assert.equal(store.latest().warnings,1);
+  store.request({policy_version:f.store.policy().version});finish(store);assert.equal(store.latest().repaired,0);
+});
+
 test('excluded users, unselected models, expired logs and missing historical bodies never enter decryption', t => {
   let now = Date.now(); const f = fixture({now:() => now});t.after(() => f.close());
   old(f,'excluded-user',{user_id:3});old(f,'excluded-model',{model:'other-model'});old(f,'expired');old(f,'missing');
@@ -133,7 +150,7 @@ test('bounded crash attempts, persistent cursors and reused SQLite rowids cannot
   f.store.db.prepare('DELETE FROM cl_records WHERE id=?').run(b.id);
   f.store.ingest(event('reused-new'));f.store.db.prepare('UPDATE cl_records SET archived_at=? WHERE id=?').run(job.requested_at,event('reused-new').id);
   const reopened = new ConversationRepairStore(f.store).initialize();finish(reopened);assert.equal(reopened.latest().scanned,2);assert.equal(reopened.latest().skipped,1);
-  assert.equal(f.store.detail(event('reused-new').id).redaction_version,5);
+  assert.equal(f.store.detail(event('reused-new').id).redaction_version,6);
 });
 
 test('administrator authentication, CSRF and current-policy validation protect history endpoints', async t => {

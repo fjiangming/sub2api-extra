@@ -13,10 +13,13 @@ process.once('message', settings => {
     archive = new ConversationLogStore(settings.directory, { timezone: settings.timezone }).initialize();
     archive.db.pragma('busy_timeout = 250');
     const budget = () => processingBudget(settings.memoryBudgetBytes);
-    service = new ConversationPushService(new ConversationPushStore(archive).initialize(), { jsonlOptions: { memoryBudget: budget } });
+    let priorityUntil = 0;
+    service = new ConversationPushService(new ConversationPushStore(archive).initialize(), { jsonlOptions: { memoryBudget: budget },
+      canWork: () => Date.now() < priorityUntil && !archive.hasPending() });
     const report = () => { if (process.connected) process.send({ type: 'status', lastError: service.lastError, lastRun: service.lastRun,
       jsonlError: service.jsonl.lastError, jsonlRun: service.jsonl.lastRun }, () => {}); };
     process.on('message', async message => {
+      if (message?.type === 'priority') priorityUntil = message.allowed === true ? Date.now() + 1000 : 0;
       if (message?.type === 'wake') service.wake();
       if (message?.type === 'invalidate') { service.invalidate(); service.wake(); }
       if (message?.type === 'stop') await stop();

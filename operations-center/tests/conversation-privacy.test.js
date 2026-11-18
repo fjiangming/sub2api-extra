@@ -109,7 +109,7 @@ test('updated rules offer reprocessing for dual copies without a prior error and
   f.store.db.prepare('UPDATE cl_records SET redaction_version=0,redaction_policy_hash=? WHERE id=?').run('', row.id);
   const before = f.store.detail(row.id); assert(before.redaction_outdated); assert(before.retry_available);
   const done = f.store.retry(row.id, { policy_version: f.store.policy().version, processed_at: before.processed_at });
-  assert.equal(done.redaction_version, 5); assert(!done.redaction_outdated); assert(!done.retry_available);
+  assert.equal(done.redaction_version, 6); assert(!done.redaction_outdated); assert(!done.retry_available);
   f.store.configure({ ...f.store.policy(), custom: [{ from: 'ORION-42', to: '<ORDER>' }] });
   assert(f.store.detail(row.id).retry_available);
   const p = f.store.configure({ ...f.store.policy(), mode: 'masked' }), only = event('masked-upgrade', { policy_version: p.version }); f.store.ingest(only);

@@ -3,21 +3,25 @@
 const fields = ['id','request_id','user_id','key_id','account_id','session_id','at','duration_ms','host','path','method','protocol','model','status',
   'complete','reason','policy_version','mode','encoding','original','masked','hits','bytes','processing_error','processing_policy_version','processed_at',
   'redaction_version','redaction_policy_hash','capture_version','body_sha256','inspection_warnings','upstream_status','upstream_evidence',
-  'completion_version','completion_source','archived_at'];
+  'completion_version','completion_source','archived_at','processing_pending'];
 const integers = new Set(['user_id','key_id','account_id','at','duration_ms','status','complete','policy_version','original','masked','bytes',
-  'processing_policy_version','processed_at','redaction_version','capture_version','completion_version','archived_at']);
+  'processing_policy_version','processed_at','redaction_version','capture_version','completion_version','archived_at','processing_pending']);
 const projection = (prefix = '') => fields.map(field => ['original','masked'].includes(field)
   ? `(${prefix}${field} IS NOT NULL) AS ${field}` : prefix + field).join(',');
 
 function initializeMetadata(db) {
+  db.transaction(() => {
   db.exec(`CREATE TABLE IF NOT EXISTS cl_record_metadata(${fields.map(field => field === 'id' ? 'id TEXT PRIMARY KEY' : field + (integers.has(field) ? ' INTEGER' : ' TEXT') + ' NOT NULL').join(',')});
     CREATE INDEX IF NOT EXISTS cl_metadata_time ON cl_record_metadata(at DESC,id);
     CREATE INDEX IF NOT EXISTS cl_metadata_request ON cl_record_metadata(request_id,at);
     CREATE INDEX IF NOT EXISTS cl_metadata_session ON cl_record_metadata(user_id,key_id,session_id,at);`);
+  const columns = new Set(db.pragma('table_info(cl_record_metadata)').map(column => column.name));
+  if (!columns.has('processing_pending')) db.exec('ALTER TABLE cl_record_metadata ADD COLUMN processing_pending INTEGER NOT NULL DEFAULT 0');
   const values = fields.map(field => ['original','masked'].includes(field) ? `(NEW.${field} IS NOT NULL)` : 'NEW.' + field).join(',');
-  for (const operation of ['INSERT','UPDATE']) db.exec(`CREATE TRIGGER IF NOT EXISTS cl_metadata_${operation.toLowerCase()} AFTER ${operation} ON cl_records
+  for (const operation of ['INSERT','UPDATE']) db.exec(`DROP TRIGGER IF EXISTS cl_metadata_${operation.toLowerCase()}; CREATE TRIGGER cl_metadata_${operation.toLowerCase()} AFTER ${operation} ON cl_records
     BEGIN INSERT OR REPLACE INTO cl_record_metadata(${fields}) VALUES(${values}); END;`);
   db.exec('CREATE TRIGGER IF NOT EXISTS cl_metadata_delete AFTER DELETE ON cl_records BEGIN DELETE FROM cl_record_metadata WHERE id=OLD.id; END;');
+  }).immediate();
 }
 
 function metadataStatus(db) {

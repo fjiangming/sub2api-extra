@@ -162,9 +162,8 @@ async function main() {
         assert.equal(preview.fixture.store.detail(signed.id).processing_error,'');assert(preview.fixture.store.detail(signed.id).original);
         assert.equal(await page.locator('#cl-source option[value=original]').isDisabled(),false);
         assert((await page.locator('.cl-processing').textContent()).includes('暂停脱敏推送'));
-        const retrySignature=page.waitForResponse(response=>response.url().endsWith(`/records/${signed.id}/reprocess`)&&response.request().method()==='POST');
-        await page.locator('[data-cl-action=reprocess]').click();assert.equal((await retrySignature).status(),200);
-        await page.waitForFunction(()=>document.querySelector('[data-cl-action=reprocess]')?.disabled===false);
+        assert(await page.locator('[data-cl-action=reprocess]').isDisabled());
+        assert.equal(preview.fixture.store.detail(signed.id).retry_available,false);
         assert.deepEqual(preview.fixture.store.detail(signed.id).inspection_warnings,['OPAQUE_SIGNATURE']);
         await layout();await page.screenshot({path:path.join(directory,name+'-inspection-warning.png'),fullPage:true});
         const legacy = event('legacy-url-ui-'+name,{at:Date.now()+4000,policy_version:preview.fixture.store.policy().version,
@@ -181,10 +180,25 @@ async function main() {
         await page.waitForFunction(()=>!document.querySelector('.cl-processing'));
         assert(!preview.fixture.store.detail(legacy.id).original);assert.deepEqual(preview.fixture.store.detail(legacy.id).inspection_warnings,[]);
         await layout();await page.screenshot({path:path.join(directory,name+'-legacy-link-reprocessed.png'),fullPage:true});
+        preview.archive.processor.canWork = () => false;
+        const pending = event('pending-ui-' + name,{at:Date.now()+5000,policy_version:preview.fixture.store.policy().version});
+        assert(preview.fixture.store.receive(pending).accepted);
+        await page.locator('[data-cl-action=reset-filter]').click(); await page.locator(`[data-cl-record="${pending.id}"]`).click();
+        await page.locator('.cl-processing').filter({hasText:'原文已加密保存'}).waitFor();
+        assert.equal(await page.locator('[data-cl-action=reprocess]').count(),0);
+        assert.equal(await page.locator('#cl-source option[value=masked]').isDisabled(),true);
+        await page.waitForFunction(() => !document.querySelector('#toast-region .toast'));
+        await page.evaluate(() => scrollTo(0,0));
+        await layout(); await page.screenshot({path:path.join(directory,name+'-processing-pending.png'),fullPage:true});
+        preview.archive.processor.canWork = () => true;
+        await page.locator('#cl-body-request').filter({hasText:'EMAIL_'}).waitFor();
+        await page.waitForFunction(() => !document.querySelector('.cl-processing'));
+        assert.equal(await page.locator('#cl-source option[value=original]').isDisabled(),true);
+        assert.equal(preview.fixture.store.detail(pending.id).processing_pending,0);
         await page.locator('#logout-button').click(); await page.locator('#login-view').waitFor({state:'visible'});
         assert.equal(await page.locator('#cl-list [data-cl-record]').count(),0); assert.equal(await page.locator('#cl-inspector').innerText(),'选择一条请求查看原始请求与响应');
         assert.deepEqual(errors,[]); assert.deepEqual(external,[]);
-        console.log(name + ': raw bytes, XSS, WS frames, model gates, fallback, signature warnings, legacy URL retry, late responses and logout passed');
+        console.log(name + ': raw bytes, XSS, WS, model gates, fallback, signature warnings, legacy retry, pending receipt, automatic processing, late responses and logout passed');
       } finally { await context.close(); }
     }
     console.log('Screenshots: ' + directory);

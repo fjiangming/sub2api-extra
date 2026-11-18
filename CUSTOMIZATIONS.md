@@ -1,5 +1,75 @@
 # 个性化功能维护台账
 
+## 2026-11-18：发布对话日志可靠接收与兼容改进
+
+用户本轮明确要求提交 GitHub。将此前已完成的引擎 v6 压缩上下文兼容、检查范围与传输诊断、加密原文持久接收 / 独立处理 / 推送让行及配套测试、预览和文档提交至运营中心 main；配套主站采集收尾、后台重试和受限补读提交至其 dev。此前实现记录中的“不提交 / 推送”仅描述各自当轮状态，本次授权进行源码发布与 GitHub 构建验证。保留全部无关域名、备份、其他模块、旧 Demo 及混合台账修改，不连接、部署或更改服务器。沿用最终 585 项测试、语法检查和三套四布局浏览器验证；实际发布和 Linux 构建结果完成后另行补记。
+
+## 2026-11-18：明确终态后的受限补读与原文完整性
+
+用户同意保留原转发、仅对明确缺口受限后台补读，并要求进一步核对完整性。主站 dev 配套增加最多两条、总时长一秒 / 空闲 200ms 的原始响应收尾，仍共享原 32 项 / 64 MiB 采集预算，保留原超时 / 取消与错误解析上限；实际改动和完整验证登记于主站同日台账。运营中心 main 复用前轮已实现的加密原文事务 / 摘要 ACK / 持久待办 / 独立处理，不为模型失败或非 2xx 响应放宽原始字节校验。仅本地改造与验证，不提交 / 推送、不连接或部署服务器，不修改生产配置、历史或计费，保留全部无关改动。
+
+补读连接占用复核后，配套主站增加同一缓存上游客户端的新请求立即取消旧补读、禁止更早响应启动补读的代次保护；不取消还在原生转发的响应，覆盖小连接池与 HTTP2 共享流。Anthropic-to-chat/responses 的原有流内错误关闭也接入终态通知。普通原生 Anthropic / Gemini 读取到 EOF 的循环保持；Zstd 原生异步预读保持原解码并行度 / 取消 / 关闭，不启动可能抢占字节的第二个原始读取者。等待在途读取结束后重查 EOF / 声明长度 / 错误，不重复读取已结束或已出错的响应。未知封装 / 其他未接入提前结束路径不宣称全面补读。主站 release workflow 增加对应 Linux repository race 门禁，本地 Windows 无 C 编译器，不能代替运行该门禁。
+
+`operations-center/docs/conversation-reliability.md`、`conversation-logs.md`、`conversation-integrity-privacy.md`、`conversation-performance-review.md` 与主站 `CONVERSATION_LOGS.md` / 台账同步更新补读范围、让行、失败原文完整性及待部署核对项；无新增运营中心源码或配置项。协议终态仅能允许后台收尾，不能替代 HTTP 响应结束或真实声明长度验证；用户对话优先仍意味着资源 / 存储故障下允许放弃归档。
+
+配套最终本地验证通过：42 项采集器、52 项 httputil、20 项 requestmodel、673 项 repository 与 268 项相关 service，go vet、gofmt、差异空白检查及 Windows server 编译成功；16 项需外部 PostgreSQL 的集成测试按环境跳过。首次 repository 三项原生 pg_dump mock 因 PATH 缺少 sh 失败，只在测试进程临时加入现有 Git bin 后完整重跑通过，不改产品 / 测试规避。HTTP / TLS / HTTP2 专项覆盖真实字节 / 摘要 ACK、大错误 / 压缩 / 并发读取、空闲中止、意外 EOF、清理计数、同池新请求让行、Zstd 异步读取所有权和其他前台流不受取消；150ms 本地断言不当作生产性能承诺。
+
+当前采集器合成流式首段 P50 关闭 4.623–4.849ms、开启 5.668–5.838ms，总 P50 关闭 16.89–17.35ms、开启 17.80–17.99ms；该基准不经过 repository 新补读封装或完整运营中心处理，不能冒充整套前后性能对照。完整实测与限制登记性能复核。运营中心源码本轮不变，沿用前轮 585 项和三套四布局浏览器验证。未执行 Linux race / CI / 镜像发布或生产性能验证；未提交 / 推送、连接 / 部署服务器、修改生产配置或历史，全部无关改动保留。
+
+最终测试专项将公开 Bind 的全局初始化隔离到同一测试二进制子进程，避免污染其他用例或重复执行；`-count=2` 连续通过，最后 vet / Windows server 编译复核通过。最终无采集的原生公共路径微基准为 256B 约 1.295–1.339us、64KiB 约 4.936–4.981us；该内存 transport 数字没有改造前同轮对照，不作为开启采集或生产延迟证据。
+
+## 2026-11-18：用户对话优先的采集收尾与持久接收
+
+用户明确要求开始改造。运营中心保持 main，配套主站保持 dev，保留所有此前未提交和无关改动；本轮只实现与验证，不提交 / 推送、连接或部署服务器，不改变生产策略、资源配置、计费或原生推理。主站不增加磁盘暂存、不额外读取上游或等待 EOF，不能承诺零资源成本或资源故障下全部采集。
+
+- `operations-center/src/conversation-log-store.js`：正式接收改用 receive，复用原有严格校验 / 用户模型门禁 / 原文字节摘要和幂等键；在一个 FULL 同步 SQLite 事务中提交加密原文、待处理标记与有界持久任务，提交后才 ACK。接收不解析完成事件或脱敏；保留同步 ingest 供原有隔离工具 / 测试使用。后台任务按原保存模式与当前规则处理，失败保留原文，masked 成功且无警告后才移除临时原文；发布前复核排除 / 模型 / 保留期 / 空间 / 当前规则及任务代次。清空 / 删除不能被旧处理复活；内存失败提交也校验代次，不覆盖同 ID 后续重收。待办最多 10,000 条，30 秒持久租约、最多三次中断后明确异常与手动重试。新增 processing_pending / 小任务表和固定异常码；旧密文和历史不全量改写。生产定时保留期改由处理进程每秒最多删除一条，使用有界增量空间回收，永久保留不清理。
+- `src/services/conversation-metadata.js`：源表与紧凑表加默认 0 的处理状态，事务替换同步触发器，状态和详情准确显示原文已保存 / 待处理；无全库正文读取或回填。`src/conversation-repair-store.js` 跳过自动待处理记录，手动 retry / analyze 也不能覆盖该阶段。
+- `src/services/conversation-archive-service.js`、`conversation-archive-worker.js`：独立接收与处理子进程，各自单任务 / 256 MiB old-space / 20 秒期限 / 内存准入 / 退出后 5 秒重启；生产无主线程同步回退。接收优先于处理，处理仅在接收空隙派发，优先级低于接收；单条重处理移到处理进程。进程异常不撤销已提交原文，处理租约允许重启恢复；落库前退出仍可能损失整条。共享 IO / CPU、单行事务及已开始的后台任务无法做到完全抢占。
+- `src/conversation-push-store.js`、`conversation-jsonl-store.js`：原文 / 脱敏推送均拒绝待处理记录，自动游标停在待处理记录前，处理发布后继续，不遗漏或把临时原文外推；保留已有原始完整性 / 检查范围 / 当前规则门禁与清空边界。`services/conversation-push-service.js`、`conversation-jsonl-service.js`、`conversation-push-supervisor.js`、`conversation-push-worker.js`：接收 / 新待办优先，后台心跳有有效期，停止派发后续导出 / 上传，不因每条接收反复中断已发送数据；外部任务进程低优先级。
+- `src/app.js`、`src/server.js`：仅正式独立接收能力广告 durable_receipt_version=1，旧同步工具不假称持久快速 ACK；历史修复 / 元数据准备避让新处理，显式清空仍可后台执行，原鉴权 / CSRF 和采集令牌权限不变。
+- `public/conversation-logs-ui.js`、`public/index.html`：待处理状态、原文仍可读取、禁止重复处理与推送、后台完成自动刷新，新增中断 / 副本空间不足说明和缓存版本；不隐藏原始传输异常。
+- `tests/conversation-reception.test.js`（新增）、`conversation-archive-worker.test.js`：真实接收 / 处理进程分离、已落库重启恢复、字节 / 摘要 / 重复 ACK、三次中断边界、原保存模式 / 原文回退 / 容量、策略竞争 / 代次保护 / 清空防复活、排除前不读正文、两种推送源及游标恢复、导出让行、接收 / health / policy 可用性。`package.json` 纳入语法门禁。
+- `scripts/conversation-logs-live-preview.cjs`、`conversation-logs-live-browser-check.cjs`、`conversation-archive-perf.cjs`：正式隔离预览接入新优先级，四种布局验证待处理与自动发布；性能脚本分别报告接收 ACK 和后台处理耗时，不混为用户对话耗时。全部为虚构 loopback 数据。
+- `operations-center/README.md`、`docs/conversation-logs.md`、`conversation-integrity-privacy.md`、`conversation-performance-review.md`、新增 `conversation-reliability.md`、本台账及主站 `CONVERSATION_LOGS.md` / 台账记录两端升级、兼容和边界。主站源码仅限 conversationlog 包，详情见其同日台账。
+
+最终本地验证：运营中心完整 **585 项测试全部通过，0 失败 / 跳过**（约 134 秒），持久接收专项 19 项，npm run check 通过。正式日志、历史兼容修复、外部推送三套 Chrome 页面流程均在 1440 / 390 / 320px / 深色偏好通过；覆盖原文字节下载、待处理与自动刷新、后台重处理、Webhook / 旧 S3 / JSONL 分组与 multipart / flush / retry / 隐私门禁。截图 `sub2api-conversation-browser-6sKmHi`、`sub2api-repair-browser-fwTelW`、`sub2api-push-browser-YpJ7nK`，待处理桌面 / 320px 已视觉复核；全部为虚构 loopback 数据，没有真实外推。
+
+主站 36 项采集器测试和 requestmodel、两包 vet 与 Windows server 编译通过。最终自查用回归复现并修复收尾期间内存不足时整条归档未丢弃的问题，确认原响应字节 / 错误不变、无残缺发送和预算泄漏；运营中心新增内存失败与同 ID 重收竞争保护并重新通过完整 585 项。相关 Go 文件 gofmt、两仓库相关差异空白检查通过，保留全部无关修改。
+
+性能实测与限制已补入 `docs/conversation-performance-review.md`：约 4.35 MiB 虚构归档先持久接收的 ACK 约 118–154ms，随后后台全部处理约 908–1147ms；同步对照 ACK 约 573–587ms，不能混为用户模型耗时。主站改造后首轮流式结果接近改造前，最终复测首段 P50 5.417–6.316ms，相对原 4.331–4.380ms 约高 1–2ms，总耗时也有波动，不选择性忽略较慢样本或声称零新增延迟。双进程与临时原文增加内存 / 写盘，优先级不是硬隔离。Windows 无 C 编译器，未运行本轮 Linux race / CI / 镜像发布或生产性能验证；本轮未提交 / 推送、连接 / 部署服务器、改生产配置或重写历史。
+
+最终独立虚构数据预览 `http://127.0.0.1:19942/preview` 已启动（PID 53012），仅监听 loopback，healthz 与预览均 200；保留此前 19941 预览，不占用生产地址或凭据。
+
+## 2026-11-18：检查范围说明与传输异常诊断
+
+用户要求说明并修复“部分内容未检查”和固定样本 172 条传输采集异常。本轮延续上轮本地引擎 6 兼容，不重复导出生产正文或改写历史；本地补齐运营中心解释和新版采集器可协商的固定枚举诊断。不提交 / 推送 / 部署，不修改生产配置、计费或用户请求返回行为，保留所有独立改动。历史缺少原始错误细节不能还原；完成事件不能把 read_error 改成完整。
+
+- `operations-center/src/conversation-log-store.js`：当前规则已成功处理的检查范围警告不再单独启用重处理，处理失败 / 规则更新仍可重试；接收可选 transport_diagnostics v1，严格验证枚举、协议及原始字节数，不给旧事件补默认字段或改变旧指纹。采集策略广告能力，源表只加一个默认空标量列，详情按主键单独读取；紧凑元数据 / 列表 / 汇总不加字段、不全库回填、不读正文。保留 complete / reason / 推送门禁与原文。
+- `public/conversation-logs-ui.js`、`conversation-logs.css`、`public/index.html`：有效原文完成证据加读取异常显示“传输结束未确认”，历史缺少错误细节明确注明；新版显示请求 / 响应字节、声明长度、EOF、固定错误枚举和错误返回时的关闭阶段，不把阶段当作因果证据。检查范围说明区分图片 / 签名 / 推理 / 压缩，提示重复处理无法检查不透明内部；传输说明逐段排版，避免移动端继承 notice 的 flex 后挤成窄列，更新脚本和样式缓存。
+- `tests/conversation-transport.test.js`（新增）、`conversation-inspection.test.js`、`scripts/conversation-repair-browser-check.cjs`、`conversation-logs-live-browser-check.cjs`、`package.json`：覆盖旧事件指纹、严格输入 / 字节一致、加法迁移 / 密文不变、重处理保留诊断 / 原错误、紧凑查询不解密和推送仍拒绝；四布局覆盖新旧传输详情、无效重复处理禁用及旧异常修复。新增文件纳入语法检查。
+- `operations-center/README.md`、`docs/conversation-logs.md`、`conversation-integrity-privacy.md`、`conversation-diagnostics-20261118-capture.md`：记录检查限制与历史可修复边界、新旧采集器协商及发布顺序；仅升级运营中心即可改善说明 / 旧异常重处理，新增原始错误信息还需主站微改。主站改动和验证单独记录在其 dev 台账。
+
+本地验证完成：运营中心完整 **566 项测试全部通过，0 失败 / 跳过**（约 127 秒），npm run check 通过；最后界面文案 / 窄屏排版调整后重新通过相关脚本和页面语法及 Chrome 四布局兼容检查。原日志流程四布局也全部通过，覆盖原字节下载、XSS、WS、模型过滤、回退、当前范围警告禁用重复处理、旧 URL / 协议异常重处理及竞态 / 退出。截图 `sub2api-repair-browser-ZbcY2J` / `sub2api-conversation-browser-TJTFga`，桌面与 320px 传输说明已视觉复核；全部使用本地虚构数据，无真实外推。相关差异空白检查通过。主站 29 项采集器测试与 requestmodel、vet 均通过，协商和并发关闭的细节见主站台账；Windows 未运行 Linux race。本轮不自动执行历史任务、不清除真实异常、不宣称图片 / 加密内容已检查或绝对零资源开销。未提交 / 推送 / 部署，生产历史未改写。
+
+## 2026-11-18：最新采集异常只读排查与压缩上下文兼容
+
+用户要求连接服务器分析持续出现的采集异常及能否完全兼容。本轮生产只读诊断，正式代码仅在本地运营中心修复已复现的缺口；不修改 sub2api 采集 / 推理 / 计费，不部署、重启、改配置、删除或重处理线上历史，不调用真实推送 / 模型，不导出正文、图片、凭据或密钥。保留全部无关文件与已有维护记录，未提交 / 推送。
+
+- 线上运营中心已为 `8af2df4` / 脱敏引擎 5 / 完成检查 2，主站实际二进制 `0.2.22002301 / 8a5888d66daf4148e7f92f63df4b7809cb21e8d2`。约 00:01 固定最新 200 条：172 条 read_error、34 条 UNINSPECTABLE_CONTENT、全部有基于原文的完成证据、无正文缺失；升级后请求子集 54 条中 50 条 read_error、10 条内容异常，不能归为旧数据。原文 8 条只读重算摘要全部一致，严格解析均为有效 response.completed；4 条失败重放均触发确切 `input[32].type=compaction` 的 `encrypted_content`。不能把已保存字节一致等同上游传输或下游交付完整，也不能从抽样推广到全库。
+- `operations-center/src/services/conversation-sensitive.js`：引擎 6，复用确切 Responses 上下文项路径检查，补齐 compaction 请求 / JSON compact 结果 / SSE output_item 与终态包装 / WS create；保护协议项 ID / 类型 / 状态与加密值原 JSON 字节，记录独立 OPAQUE_ENCRYPTED_COMPACTION。普通业务对象、内嵌工具 JSON、未知路径 / 加密值、自定义规则冲突继续拦截；加密内部不宣称已脱敏。保留原文、资源限制、传输标记和默认脱敏推送拒绝，不增加用户转发路径工作。
+- `public/conversation-logs-ui.js`、`public/index.html`：增加模型加密压缩上下文检查范围与旧异常说明，更新脚本缓存版本；保留读取异常与应用完成分开展示。
+- `tests/conversation-compatibility.test.js`、`conversation-repair.test.js`、`conversation-inspection.test.js`、`conversation-privacy.test.js`：补充压缩项跨协议 / 原字节 / 关联保护 / 伪装负例 / 自定义冲突 / 单条与显式后台重处理 / 原始 read_error 保留 / webhook、S3、JSONL 旧任务门禁，更新当前引擎断言。
+- `scripts/conversation-repair-browser-check.cjs`：正式页面增加压缩项与旧异常重处理检查，使用本地虚构数据。
+- `operations-center/README.md`、`docs/conversation-logs.md`、`conversation-integrity-privacy.md`、`conversation-diagnostics-20261118-capture.md`：登记当前根因、只读核验、兼容边界、升级后显式重处理与不能承诺全部日志无异常的原因。
+
+诊断使用同版镜像的网络关闭 / 生产卷只读 / query_only 限速独立容器，限制 CPU、内存、PID 和时间并退出清理。核对线上相同 blob 的 capture.go 与流式处理代码：完成事件输出后主动关闭响应，不等待 EOF；采集器将请求 / 响应所有非 EOF 错误合并为 read_error，关闭还可能唤醒并发读取，存在完成后读取错误被标记的路径。历史缺少错误侧 / 枚举 / 顺序，无法逐条确定是取消、超时还是截流；运营中心不能凭完成事件清除原始标记，准确新增遥测需未来微改采集器。真实缺失字节、加密 / 图片内部隐私及正常对话优先下的忙时丢弃不能承诺完美恢复。本地验证和最终生产只读复核完成后补记。
+
+后续完整核验：固定窗口 34 条处理异常全部复现于 compaction（28 条 input[32]、6 条 input[27]），加 4 条截图处理成功记录共 38 条原文，全部原请求 JSON 有效、摘要一致、严格完成事件有效，0 跳过。新版隔离重放首轮因 45 秒期限仅完成 13 条失败记录，随后分 12 / 9 条补完，最终 34 条全部完整处理成功、0 剩余错误；后两批 21 条还直接核对压缩 ID / 类型 / 加密值不变。保留检查范围警告和外推拒绝，生产数据未写入。
+
+本地验证：完整 **562 项测试全部通过，0 失败 / 跳过**（178.2 秒），npm run check 与相关差异空白检查通过；正式页面 Chrome 1440 / 390 / 320px / 深色偏好四组流程全部通过，覆盖压缩项 / 旧异常重处理、原文 / read_error 不变及既有图片 / 后台任务。截图 `sub2api-repair-browser-deSrYh` 的桌面与 320px 详情已视觉复核，没有真实外部流量。无新增依赖，未提交 / 推送 / 部署。
+
+北京时间 00:22:43 最终只读复核：主站与运营中心均 healthy、healthz 200、容器 ID / 启动时间 / 重启次数和版本保持，无 OOM / 诊断容器残留，宿主 load 约 0.73。随后源归档由 7,917 增至 8,094，最新请求约 00:22:32，采集继续；元数据准备 1,591 条。第二个滚动 200 条样本为 143 条 read_error、33 条内容异常、全部有原文完成证据且无正文缺失，没有重复全量正文重放，不与前述固定验证集混算。线上尚未应用本地引擎 6，不能将诊断当作部署结果。
+
 ## 2026-11-17：修复对话日志取消误报与大库查询阻塞
 
 用户授权修复并提交 GitHub。本轮只改运营中心，不修改 sub2api 采集 / 推理 / 计费链路；不连接、重启或部署生产，不修改生产配置或历史。保留域名、备份、图标、演示及其他独立改动。与前轮只读诊断报告一起提交，沿用 main 的现有自动测试 / 双架构镜像发布流程。

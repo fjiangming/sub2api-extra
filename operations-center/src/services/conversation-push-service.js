@@ -7,9 +7,10 @@ const { ConversationJsonlService } = require('./conversation-jsonl-service');
 const { dayAt, objectKey, jsonlBytes } = require('./conversation-jsonl-format');
 
 class ConversationPushService {
-  constructor(store,{transport=new ConversationPushTransport(),jsonlOptions}={}) {
+  constructor(store,{transport=new ConversationPushTransport(),jsonlOptions,canWork=() => true}={}) {
     this.store=store;this.transport=transport;this.stopping=false;this.active=null;this.lastError='';this.lastRun=null;this.testing=false;
-    this.jsonl=new ConversationJsonlService(store,transport,jsonlOptions);
+    this.canWork=canWork;
+    this.jsonl=new ConversationJsonlService(store,transport,{...jsonlOptions,canWork});
   }
   policy() { return publicPolicy(this.store.policy()); }
   configure(input) { const result=this.store.configure(input);this.invalidate();this.wake();return result; }
@@ -48,7 +49,7 @@ class ConversationPushService {
     } finally { this.testing=false;this.testController=null;this.testRun=null; }
   }
   async tick() {
-    if(this.stopping)return false;
+    if(this.stopping||!this.canWork())return false;
     this.store.scanAutomatic();
     const job=this.store.claim({single:true});if(!job)return false;
     const controller=new AbortController();this.active={job,controller};

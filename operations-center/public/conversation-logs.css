@@ -9,6 +9,7 @@
 .cl-root .cl-detail-tabs select { width: 126px; }
 .cl-notice { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--surface-subtle); border-left: 2px solid var(--blue); font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; margin-bottom: 14px; }
 .cl-notice:empty { display: none; }.cl-notice.amber { border-color: var(--amber); color: var(--amber); }
+.cl-transport { display: block; }.cl-transport strong { display: block; }.cl-transport p { margin: 6px 0 0; }
 .cl-metrics { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); padding: 5px 0 22px; gap: 24px; }
 .cl-metrics > div { min-width: 0; border-right: 1px solid var(--line); }.cl-metrics > div:last-child { border: 0; }
 .cl-metrics span { color: var(--muted); display: block; font-size: 12px; margin-bottom: 8px; }.cl-metrics strong { font-size: 23px; font-weight: 600; }

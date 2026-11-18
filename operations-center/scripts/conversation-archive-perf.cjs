@@ -23,18 +23,21 @@ async function measure(isolated) {
       const row = event('perf-' + complex, { request: Buffer.from(input).toString('base64'), response: Buffer.from('{"text":"done"}').toString('base64') });
       const body = JSON.stringify(row), loop = monitorEventLoopDelay({ resolution: 1 }), times = [], probes = [];
       loop.enable(); await delay(20); loop.reset();
-      let finished = false;
+      let finished = false, receiptMs = 0;
       const start = performance.now();
       const saving = fetch(base + '/api/conversation-logs/ingest', { method: 'POST', headers, body })
-        .then(async response => { assert.equal(response.status, 200); assert((await response.json()).accepted); }).finally(() => { finished = true; });
+        .then(async response => { assert.equal(response.status, 200); assert((await response.json()).accepted); receiptMs = performance.now() - start; }).finally(() => { finished = true; });
       do {
         const queuedAt = performance.now(); await delay(5); const at = performance.now();
         const response = await fetch(base + '/api/conversation-logs/collector-policy', { headers });
         assert.equal(response.status, 200); await response.json(); times.push(performance.now() - at); probes.push(performance.now() - queuedAt);
-      } while (!finished);
+        assert(performance.now() - start < 60000, 'background archive exceeded the local benchmark deadline');
+      } while (!finished || isolated && f.store.hasPending());
       await saving; const total = performance.now() - start;
       await delay(10); loop.disable();
-      console.log(JSON.stringify({ isolated, complex, rawMiB: Buffer.byteLength(input) / 1024 ** 2, archiveMs: total,
+      const saved = f.store.detail(row.id);
+      assert.equal(saved.processing_pending,0);
+      console.log(JSON.stringify({ isolated, complex, rawMiB: Buffer.byteLength(input) / 1024 ** 2, receiptMs, processedMs: total, processingError:saved.processing_error, masked:saved.masked,
         policySamples: times.length, policyMaxMs: Math.max(...times), scheduledProbeMaxMs: Math.max(...probes), loopMaxMs: loop.max / 1e6, loopP95Ms: loop.percentile(95) / 1e6 }));
       while (archive?.busy) await delay(10);
     }

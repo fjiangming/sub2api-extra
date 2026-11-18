@@ -18,6 +18,7 @@ const raw = (request = '{}',response = '{}',frames = []) => ({request:Buffer.fro
 const mask = value => maskPayload(value,defaults,Buffer.alloc(32,1));
 const encrypted = 'gAAAAAB_fictional-encrypted-reasoning_12345678901234567890==';
 const reasoning = () => ({type:'reasoning',id:'rs_12345678901234567890',status:'completed',summary:[{type:'summary_text',text:'contact alice@example.com'}],encrypted_content:encrypted});
+const compaction = () => ({type:'compaction',id:'cmp_12345678901234567890',encrypted_content:encrypted,metadata:{email:'alice@example.com'}});
 const imageUrl = 'data:image/png;base64,aGVsbG8=';
 const imageRequest = (image = imageUrl, model = 'gpt-6.1-sol') => ({model,input:[{role:'user',content:[{type:'input_text',text:'contact alice@example.com'},
   {type:'input_image',image_url:image,detail:'auto'}]}]});
@@ -87,6 +88,61 @@ test('encrypted reasoning exemptions do not pass arbitrary keys, paths, nested t
   }
   assert.throws(() => maskPayload(raw(JSON.stringify({model:'gpt-6.1-sol',input:[reasoning()]})),{...defaults,custom:[{from:'fictional-encrypted',to:'changed'}]},Buffer.alloc(32,1)),/PROTECTED_FIELD_MATCH/);
   for (const from of [reasoning().id,'summary_text']) assert.throws(() => maskPayload(raw(JSON.stringify({model:'gpt-6.1-sol',input:[reasoning()]})),{...defaults,custom:[{from,to:'changed'}]},Buffer.alloc(32,1)),/PROTECTED_FIELD_MATCH/);
+});
+
+test('Responses compaction preserves encrypted context and item identity across request, compact response, events and WebSocket', () => {
+  const request = {model:'gpt-6.1-sol',input:[compaction(),{role:'user',content:'contact alice@example.com'}]};
+  const response = {object:'response.compaction',output:[compaction()]};
+  const events = [{type:'response.output_item.added',item:compaction()},{type:'response.output_item.done',item:compaction()},
+    {...terminal(),response:{...terminal().response,output:[compaction()]}}];
+  const results = [mask(raw(JSON.stringify(request),JSON.stringify(response))),mask(raw('{}',sse(events))),
+    ...[{type:'response.create',...request},{type:'response.create',response:{input:request.input}}].map(document => mask(raw('','',[
+      {direction:'out',at:0,binary:false,body:Buffer.from(JSON.stringify(document))},
+      {direction:'in',at:1,binary:false,body:Buffer.from(JSON.stringify(events[1]))}
+    ])))];
+  for (const result of results) {
+    assert.deepEqual(result.warnings,['OPAQUE_ENCRYPTED_COMPACTION']);
+    for (const body of [result.payload.request,result.payload.response,...result.payload.frames.map(frame => frame.body)]) {
+      assert(!body.includes('alice@example.com'));
+      if (body.includes('encrypted_content')) { assert(body.includes(encrypted));assert(body.includes(compaction().id));assert(body.includes('"type":"compaction"')); }
+    }
+  }
+  const parsed = JSON.parse(results[0].payload.request);assert.match(parsed.input[0].metadata.email,/^<EMAIL_/);
+  const business = JSON.parse(mask(raw(JSON.stringify({customer:{type:'compaction',id:'private-customer-id'}}))).payload.request);
+  assert.match(business.customer.id,/^<IDENTITY_/);
+  const lexical = JSON.stringify(request).replace('"encrypted_content":','"encrypted_content" : ').replaceAll('gAAAAAB_','gAAAAAB\\u005f');
+  assert(mask(raw(lexical)).payload.request.toString().includes('"encrypted_content" : "gAAAAAB\\u005f'));
+  const combined = mask(raw(JSON.stringify({...request,input:[reasoning(),compaction(),...imageRequest().input]})));
+  assert.deepEqual(combined.warnings,['OPAQUE_ENCRYPTED_COMPACTION','OPAQUE_ENCRYPTED_REASONING','OPAQUE_IMAGE']);
+});
+
+test('compaction compatibility rejects arbitrary ciphertext, tool impersonation, unknown paths and protected custom replacements', () => {
+  for (const value of [{encrypted_content:encrypted},{...compaction()},{input:[compaction()]},{metadata:{model:'example',input:[compaction()]}},
+    {type:'unknown',item:compaction()},{output:[compaction()]},{object:'unknown',output:[compaction()]},
+    {model:'example',input:[{...compaction(),encrypted_content:'alice@example.com'}]},
+    {model:'example',input:[{...compaction(),encrypted_data:'private-ciphertext'}]},
+    {messages:[{role:'tool',content:JSON.stringify({model:'example',input:[compaction()]})}]}]) {
+    assert.throws(() => mask(raw(JSON.stringify(value))),/UNINSPECTABLE_CONTENT/);
+  }
+  const request = JSON.stringify({model:'gpt-6.1-sol',input:[compaction()]});
+  for (const from of [encrypted,compaction().id,'compaction']) {
+    assert.throws(() => maskPayload(raw(request),{...defaults,custom:[{from,to:'changed'}]},Buffer.alloc(32,1)),/PROTECTED_FIELD_MATCH/);
+  }
+});
+
+test('compaction history can be retried with original ciphertext intact and remains blocked from masked export', t => {
+  const f = fixture();t.after(() => f.close());const policy = f.store.configure({...f.store.policy(),mode:'masked'});
+  const request = JSON.stringify({model:'gpt-6.1-sol',input:[compaction()]}),row = event('legacy-compaction',{policy_version:policy.version,request:Buffer.from(request).toString('base64')});
+  assert(f.store.ingest(row).accepted);
+  const original = f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(row.id).original,saved = f.store.detail(row.id);
+  f.store.db.prepare("UPDATE cl_records SET masked=NULL,processing_error='UNINSPECTABLE_CONTENT',redaction_version=0,inspection_warnings='[]' WHERE id=?").run(row.id);
+  const retried = f.store.retry(row.id,{policy_version:policy.version,processed_at:saved.processed_at});
+  assert.equal(retried.processing_error,'');assert.equal(retried.redaction_version,6);assert(retried.original && retried.masked);
+  assert.deepEqual(retried.inspection_warnings,['OPAQUE_ENCRYPTED_COMPACTION']);assert(retried.complete);assert.equal(retried.reason,'');
+  assert.deepEqual(f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(row.id).original,original);
+  assert.equal(f.store.payload(row.id,'original','request').text,request);
+  assert.equal(JSON.parse(f.store.payload(row.id,'masked','request').text).input[0].encrypted_content,encrypted);
+  const push = new ConversationPushStore(f.store).initialize();assert(!push.copyReady(push.metadata(row.id),'masked',policy));assert(push.copyReady(push.metadata(row.id),'original',policy));
 });
 
 test('Responses protocol images preserve every image byte while readable request and streamed response text is masked', () => {
@@ -193,7 +249,7 @@ test('image history reprocesses explicitly with encrypted originals intact and m
   f.store.db.prepare("UPDATE cl_records SET masked=NULL,processing_error='UNINSPECTABLE_CONTENT',redaction_version=0,inspection_warnings='[]' WHERE id=?").run(row.id);
   assert(!f.store.detail(row.id).masked);assert.equal(f.store.detail(row.id).processing_error,'UNINSPECTABLE_CONTENT');
   const retried = f.store.retry(row.id,{policy_version:policy.version,processed_at:saved.processed_at});
-  assert.equal(retried.processing_error,'');assert.equal(retried.redaction_version,5);assert(retried.original && retried.masked);
+  assert.equal(retried.processing_error,'');assert.equal(retried.redaction_version,6);assert(retried.original && retried.masked);
   assert.deepEqual(retried.inspection_warnings,['OPAQUE_IMAGE']);assert(retried.complete);assert.equal(retried.reason,'');
   assert.deepEqual(f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(row.id).original,original);
   assert.equal(f.store.payload(row.id,'original','request').body.toString('base64'),row.request);

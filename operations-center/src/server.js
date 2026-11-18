@@ -57,22 +57,22 @@ async function main() {
   if (conversationArchive) conversationArchive.start().catch(() => console.warn('conversation processor unavailable: CONVERSATION_PROCESSOR_START_FAILED'));
   let conversationPush = null;
   if (conversations) {
-    try { conversationPush = new ConversationPushSupervisor(new ConversationPushStore(conversations).initialize()); }
+    try { conversationPush = new ConversationPushSupervisor(new ConversationPushStore(conversations).initialize(), { canWork: () => conversationArchive?.idleForHistory }); }
     catch { console.warn('conversation push unavailable: CONVERSATION_PUSH_INITIALIZATION_FAILED'); }
   }
   let conversationCleanup = null;
   if (conversations) {
-    try { conversationCleanup = new ConversationCleanupService(conversations, { canWork: () => !conversationArchive?.busy }); }
+    try { conversationCleanup = new ConversationCleanupService(conversations, { canWork: () => !conversationArchive?.busy && !conversationArchive?.processingBusy }); }
     catch { console.warn('conversation cleanup unavailable: CONVERSATION_CLEANUP_INITIALIZATION_FAILED'); }
   }
   let conversationRepair = null;
   if (conversations) {
-    try { conversationRepair = new ConversationRepairService(conversations,{canWork:() => !conversationArchive?.busy && !conversationCleanup?.child}); }
+    try { conversationRepair = new ConversationRepairService(conversations,{canWork:() => conversationArchive?.idleForHistory && !conversationCleanup?.child}); }
     catch { console.warn('conversation repair unavailable: CONVERSATION_REPAIR_INITIALIZATION_FAILED'); }
   }
   const conversationRead = conversations ? new ConversationReadService(conversations, {
     configured:Boolean(config.conversationLogs?.token),
-    canWork:() => !conversationArchive?.busy && !conversationCleanup?.child && !conversationRepair?.child
+    canWork:() => !conversationArchive?.busy && !conversationArchive?.processingBusy && !conversationCleanup?.child && !conversationRepair?.child
   }) : null;
   const database = createDatabase(config);
   const sub2api = new Sub2ApiClient(config);
