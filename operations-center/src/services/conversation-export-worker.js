@@ -29,7 +29,7 @@ process.once('message',async settings => {
     app.get('/export',async (req,res) => {
       const controller=new AbortController(),signal=controller.signal;
       res.once('close',() => controller.abort());res.once('error',() => controller.abort());
-      let stats={selected:0,exported:0,skipped:{},bytes:0,pauseReason:''},selection,row,lastReport=0;
+      let stats={selected:0,exported:0,skipped:{},fallbacks:0,fallbackReasons:{},bytes:0,pauseReason:''},selection,row,lastReport=0;
       const progress=(force=false) => {
         if (force || Date.now()-lastReport>250) {
           lastReport=Date.now();process.send?.({type:'export-progress',...stats},() => {});
@@ -54,9 +54,9 @@ process.once('message',async settings => {
         selection=data.select(spec);
         stats={...stats,selected:selection.selected,skipped:selection.skipped};progress(true);
         if (!selection.rows.length) throw failure('EMPTY',selection.selected ? '最近所选日志没有可导出的副本，请查看跳过原因' : '当前筛选下没有可导出的日志');
-        const stamp=new Date().toISOString().replace(/[-:.]/g,'');
+        const stamp=new Date().toISOString().replace(/[-:.]/g,''),copyName=spec.source==='masked'?'masked-or-original':'original';
         res.set({'content-type':'application/x-ndjson; charset=utf-8',
-          'content-disposition':`attachment; filename="conversation-latest-${spec.limit}-${spec.source}-${stamp}.jsonl"`,
+          'content-disposition':`attachment; filename="conversation-latest-${spec.limit}-${copyName}-${stamp}.jsonl"`,
           'cache-control':'no-store','x-content-type-options':'nosniff','x-accel-buffering':'no',
           trailer:'x-conversation-export-result'});
         const hash=crypto.createHash('sha256');let sinceCheck=0;
@@ -79,7 +79,9 @@ process.once('message',async settings => {
             pieces.push(bytes);size+=bytes.length;
           }
           if (size) await write(Buffer.concat(pieces,size));
-          data.guard(selection,row);stats.exported++;progress();
+          data.guard(selection,row);stats.exported++;
+          if (envelope.fallback_reason) {stats.fallbacks++;stats.fallbackReasons[envelope.fallback_reason]=(stats.fallbackReasons[envelope.fallback_reason] || 0)+1;}
+          progress();
           // Release this record before admitting the next, and let IPC priority updates run.
           await new Promise(resolve => setImmediate(resolve));
         }

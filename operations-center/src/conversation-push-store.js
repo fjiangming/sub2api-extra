@@ -35,6 +35,11 @@ class ConversationPushStore {
       CREATE INDEX IF NOT EXISTS cl_push_batch ON cl_push_jobs(batch_id,created_at);`);
       this.db.exec(`CREATE TABLE IF NOT EXISTS cl_push_scan_stats(policy_version INTEGER NOT NULL,code TEXT NOT NULL,count INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,PRIMARY KEY(policy_version,code));`);
+      const jobColumns=new Set(this.db.pragma('table_info(cl_push_jobs)').map(column=>column.name));
+      for(const [name,definition] of [['delivery_source',"TEXT NOT NULL DEFAULT ''"],['delivery_fallback_reason',"TEXT NOT NULL DEFAULT ''"],
+        ['delivery_version',"TEXT NOT NULL DEFAULT ''"],['delivery_metadata','BLOB']]) {
+        if(!jobColumns.has(name))this.db.exec(`ALTER TABLE cl_push_jobs ADD COLUMN ${name} ${definition}`);
+      }
       if(!this.db.prepare('SELECT 1 FROM cl_push_policies LIMIT 1').get()) this.db.prepare('INSERT INTO cl_push_policies VALUES(?,?,?)').run(1,this.archive.seal(defaults,'push-policy:1'),this.now());
       if(!this.db.prepare('SELECT 1 FROM cl_push_cursor LIMIT 1').get()) this.setCursor(this.latest());
       this.policy();
@@ -58,15 +63,22 @@ class ConversationPushStore {
   // The archive increments processed_at strictly on every reprocess; metadata scans never load body BLOBs.
   version(row,source) { return hash([row.fingerprint,source,source==='masked'?[row.processed_at,row.processing_policy_version]:0]); }
   allowed(row,policy) { return !policy.excludedUserIds.includes(row.user_id) && modelAllowed(policy,row.model); }
+  copySelection(row,source,policy) {
+    let reason='';
+    if (source === 'masked') {
+      if (row.processing_pending) reason='PROCESSING_PENDING';
+      else if (row.processing_error) reason='PROCESSING_FAILED';
+      else if (!row.masked) reason='COPY_UNAVAILABLE';
+      else if (row.inspection_warnings && row.inspection_warnings !== '[]') reason='INSPECTION_INCOMPLETE';
+      else if (row.redaction_version !== REDACTION_VERSION || row.redaction_policy_hash !== redactionPolicyHash(policy)) reason='REDACTION_OUTDATED';
+      if (!reason) return {source:'masked',fallbackReason:'',blocked:''};
+      if (row.original) return {source:'original',fallbackReason:reason,blocked:''};
+    } else if (source === 'original' && row.original) return {source:'original',fallbackReason:'',blocked:''};
+    return {source:'',fallbackReason:'',blocked:reason || (row.processing_error ? 'PROCESSING_FAILED' : 'COPY_UNAVAILABLE')};
+  }
   blockedReason(row,source,archivePolicy,pushPolicy=this.policy()) {
-    if (row.processing_pending) return 'PROCESSING_PENDING';
     if (pushPolicy.captureScope !== 'all' && (!row.complete || row.reason)) return 'INCOMPLETE_CAPTURE';
-    if (!row[source]) return row.processing_error ? 'PROCESSING_FAILED' : 'COPY_UNAVAILABLE';
-    if (source === 'original') return '';
-    if (row.processing_error) return 'PROCESSING_FAILED';
-    if (row.inspection_warnings && row.inspection_warnings !== '[]') return 'INSPECTION_INCOMPLETE';
-    if (row.redaction_version !== REDACTION_VERSION || row.redaction_policy_hash !== redactionPolicyHash(archivePolicy)) return 'REDACTION_OUTDATED';
-    return '';
+    return this.copySelection(row,source,archivePolicy).blocked;
   }
   copyReady(row,source,policy,pushPolicy=this.policy()) {
     return !this.blockedReason(row,source,policy,pushPolicy);
@@ -86,21 +98,27 @@ class ConversationPushStore {
     const rows=this.db.prepare(`SELECT ${columns} FROM cl_records${where.sql} ORDER BY at,id LIMIT 10001`).all(...where.args);
     if(rows.length>10000)throw invalid('单批最多 10,000 条，请缩小筛选范围');
     const eligible=rows.filter(row=>this.allowed(row,archivePolicy)&&this.copyReady(row,policy.source,archivePolicy,policy));
-    const unavailableReasons={};
+    const unavailableReasons={},fallbackReasons={};
     for(const row of rows)if(this.allowed(row,archivePolicy)) {
       const reason=this.blockedReason(row,policy.source,archivePolicy,policy);
       if(reason)unavailableReasons[reason]=(unavailableReasons[reason]||0)+1;
+      else {
+        const fallback=this.copySelection(row,policy.source,archivePolicy).fallbackReason;
+        if(fallback)fallbackReasons[fallback]=(fallbackReasons[fallback]||0)+1;
+      }
     }
     const token=crypto.createHmac('sha256',this.archive.key).update(JSON.stringify([policy.version,archivePolicy.version,value.filter,targets,eligible.map(row=>[row.id,this.version(row,policy.source)])])).digest('hex');
     const existing=this.db.prepare('SELECT status FROM cl_push_jobs WHERE id=?');
     let duplicates=0;
     for(const row of eligible)for(const target of targets)if(existing.get(this.jobId(row,policy,target)))duplicates++;
     return {policy,targets,eligible,previewToken:token,matched:rows.length,excluded:rows.filter(row=>!this.allowed(row,archivePolicy)).length,
-      unavailable:Object.values(unavailableReasons).reduce((sum,n)=>sum+n,0),unavailableReasons,duplicates,jobs:eligible.length*targets.length-duplicates};
+      unavailable:Object.values(unavailableReasons).reduce((sum,n)=>sum+n,0),unavailableReasons,
+      fallbacks:Object.values(fallbackReasons).reduce((sum,n)=>sum+n,0),fallbackReasons,duplicates,jobs:eligible.length*targets.length-duplicates};
   }
   preview(input) {
     const value=this.selection(input);
-    return {previewToken:value.previewToken,matched:value.matched,eligible:value.eligible.length,excluded:value.excluded,unavailable:value.unavailable,unavailableReasons:value.unavailableReasons,duplicates:value.duplicates,jobs:value.jobs,policyVersion:value.policy.version};
+    return {previewToken:value.previewToken,matched:value.matched,eligible:value.eligible.length,excluded:value.excluded,unavailable:value.unavailable,unavailableReasons:value.unavailableReasons,
+      fallbacks:value.fallbacks,fallbackReasons:value.fallbackReasons,duplicates:value.duplicates,jobs:value.jobs,policyVersion:value.policy.version};
   }
   enqueue(input) {
     const value=parse(enqueueSchema,input),digest=hash(value);
@@ -132,6 +150,9 @@ class ConversationPushStore {
           const needed=targets.filter(target=>!this.db.prepare('SELECT 1 FROM cl_push_jobs WHERE id=?').get(this.jobId(row,policy,target)));
           if(pending+needed.length>policy.queueLimit)return {created,full:true};
           for(const target of needed){created+=this.insert(row,policy,target,'');pending++;}
+          const fallback=this.copySelection(row,policy.source,archivePolicy).fallbackReason;
+          if(needed.length && fallback)this.db.prepare(`INSERT INTO cl_push_scan_stats VALUES(?,?,1,?) ON CONFLICT(policy_version,code)
+            DO UPDATE SET count=count+1,updated_at=excluded.updated_at`).run(policy.version,'ORIGINAL_FALLBACK:'+fallback,this.now());
         } else {
           this.db.prepare(`INSERT INTO cl_push_scan_stats VALUES(?,?,1,?) ON CONFLICT(policy_version,code)
             DO UPDATE SET count=count+1,updated_at=excluded.updated_at`).run(policy.version,reason,this.now());
@@ -147,11 +168,35 @@ class ConversationPushStore {
     if(policy.source!==job.source||targetHash(policy,job.destination)!==job.target_hash)return {cancel:'TARGET_CHANGED'};
     const row=this.metadata(job.record_id);
     if(!row)return {cancel:'RECORD_EXPIRED'};
-    if(!this.allowed(row,this.archive.policy()))return {cancel:'COLLECTION_EXCLUDED'};
-    const reason=this.blockedReason(row,job.source,this.archive.policy(),policy);
+    const archivePolicy=this.archive.policy(),source=job.delivery_source||job.source;
+    if(!this.allowed(row,archivePolicy))return {cancel:'COLLECTION_EXCLUDED'};
+    const reason=this.blockedReason(row,source,archivePolicy,policy);
     if(reason)return {cancel:reason};
-    if(this.version(row,job.source)!==job.content_version)return {cancel:'CONTENT_CHANGED'};
+    if(job.delivery_source==='masked') {
+      const copy=this.copySelection(row,'masked',archivePolicy);
+      if(copy.source!=='masked')return {cancel:copy.fallbackReason||copy.blocked};
+    }
+    if(this.version(row,source)!==(job.delivery_source?job.delivery_version:job.content_version))return {cancel:'CONTENT_CHANGED'};
     return {row};
+  }
+  freezeCopy(job,envelope) {
+    return this.db.transaction(()=>{
+      const current=this.db.prepare('SELECT status,lease_token,delivery_source,delivery_fallback_reason,delivery_version,delivery_metadata FROM cl_push_jobs WHERE id=?').get(job.id);
+      const valid=this.validJob(job),invalidated=()=>invalid('推送任务已变化','CONVERSATION_PUSH_CONFLICT',409);
+      if(current?.status!=='running'||current.lease_token!==job.lease_token||valid.paused||valid.cancel)throw invalidated();
+      if(current.delivery_source) {
+        if(current.delivery_source!==envelope.source||current.delivery_fallback_reason!==(envelope.fallback_reason||''))throw invalidated();
+        Object.assign(job,current);return;
+      }
+      if(!['original','masked'].includes(envelope.source)||!valid.row[envelope.source])throw invalidated();
+      const frozen={delivery_source:envelope.source,delivery_fallback_reason:envelope.fallback_reason||'',
+        delivery_version:this.version(valid.row,envelope.source),delivery_metadata:this.archive.seal(envelope.metadata,'push-metadata:'+job.id)};
+      const result=this.db.prepare(`UPDATE cl_push_jobs SET delivery_source=?,delivery_fallback_reason=?,delivery_version=?,delivery_metadata=?
+        WHERE id=? AND status='running' AND lease_token=? AND delivery_source=''`).run(frozen.delivery_source,frozen.delivery_fallback_reason,
+        frozen.delivery_version,frozen.delivery_metadata,job.id,job.lease_token);
+      if(!result.changes)throw invalidated();
+      Object.assign(job,frozen);
+    }).immediate();
   }
   claim({ single = false } = {}) {
     return this.db.transaction(()=>{
@@ -200,20 +245,43 @@ class ConversationPushStore {
     if(query.status&&!['pending','buffered','running','sent','failed','cancelled'].includes(query.status))throw invalid();
     const where=query.status?' WHERE j.status=?':'',args=query.status?[query.status]:[];
     const total=this.db.prepare('SELECT COUNT(*) n FROM cl_push_jobs j'+where).get(...args).n;
-    const items=this.db.prepare(`SELECT j.id,j.record_id,j.destination,j.source,j.batch_id,j.status,j.attempts,j.next_at,j.created_at,j.updated_at,j.error_code,j.http_status,r.model,r.user_id
+    const items=this.db.prepare(`SELECT j.id,j.record_id,j.destination,j.source,j.delivery_source,j.delivery_fallback_reason,j.batch_id,j.status,j.attempts,j.next_at,j.created_at,j.updated_at,j.error_code,j.http_status,r.model,r.user_id
       FROM cl_push_jobs j JOIN cl_records r ON r.id=j.record_id${where} ORDER BY j.created_at DESC,j.id LIMIT 20 OFFSET ?`).all(...args,(page-1)*20);
+    const stats=this.db.prepare('SELECT code,count,updated_at FROM cl_push_scan_stats WHERE policy_version=? ORDER BY code').all(this.policy().version);
     return {items,page,pages:Math.ceil(total/20),total,counts:this.db.prepare('SELECT status,COUNT(*) count FROM cl_push_jobs GROUP BY status').all(),
-      skipped:this.db.prepare('SELECT code,count,updated_at FROM cl_push_scan_stats WHERE policy_version=? ORDER BY code').all(this.policy().version),
+      skipped:stats.filter(row=>!row.code.startsWith('ORIGINAL_FALLBACK:')),
+      fallbacks:stats.filter(row=>row.code.startsWith('ORIGINAL_FALLBACK:')).map(row=>({...row,code:row.code.slice('ORIGINAL_FALLBACK:'.length)})),
       batches:this.db.prepare('SELECT id,created_at,matched,eligible,created FROM cl_push_batches ORDER BY created_at DESC LIMIT 10').all()};
   }
-  envelope(job) {
+  envelope(job, pinnedCopy) {
     const fields='id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,processing_error,processing_policy_version,processed_at,capture_version,body_sha256,redaction_version,inspection_warnings,upstream_status,upstream_evidence,completion_source,transport_diagnostics';
-    const row=this.db.prepare(`SELECT ${fields},${job.source} AS payload FROM cl_records WHERE id=?`).get(job.record_id);
-    if(!row?.payload)throw invalid('日志副本不可用','CONVERSATION_PUSH_COPY_UNAVAILABLE',409);
-    const {payload,...metadata}=row,raw=this.archive.open(payload,row.id+':'+job.source);
+    const row=this.db.prepare(`SELECT ${fields},processing_pending,redaction_policy_hash,original IS NOT NULL AS original,masked IS NOT NULL AS masked FROM cl_records WHERE id=?`).get(job.record_id);
+    const unavailable=()=>invalid('日志副本不可用','CONVERSATION_PUSH_COPY_UNAVAILABLE',409);
+    if(!row || !this.allowed(row,this.archive.policy()))throw unavailable();
+    const fixed=pinnedCopy || (job.delivery_source?{source:job.delivery_source,fallbackReason:job.delivery_fallback_reason}:null);
+    let copy=fixed || this.copySelection(row,job.source,this.archive.policy());
+    if(copy.blocked || !['masked','original'].includes(copy.source) || !row[copy.source])throw unavailable();
+    const open=source=>{
+      const payload=this.db.prepare(`SELECT ${source} AS payload FROM cl_records WHERE id=?`).get(row.id)?.payload;
+      if(!payload)throw unavailable();
+      const raw=this.archive.open(payload,row.id+':'+source);
+      if(!raw || typeof raw.request!=='string' || typeof raw.response!=='string' || !Array.isArray(raw.frames)
+        || raw.frames.some(frame=>!frame || typeof frame.body!=='string'))throw unavailable();
+      return raw;
+    };
+    let raw;
+    try {raw=open(copy.source);}
+    catch(error) {
+      if(fixed || copy.source!=='masked' || !row.original)throw error;
+      copy={source:'original',fallbackReason:'MASKED_READ_FAILED'};raw=open('original');
+    }
+    const {processing_pending,redaction_policy_hash,original,masked,...metadata}=row;
     const checksum=value=>{const bytes=Buffer.from(value,'base64');return {bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')};};
-    return {schema:'sub2api.conversation.v1',delivery_id:job.id,source:job.source,metadata:{...metadata,transport_diagnostics:metadata.transport_diagnostics?JSON.parse(metadata.transport_diagnostics):null,
-      inspection_warnings:JSON.parse(metadata.inspection_warnings),complete:Boolean(metadata.complete),encoding:job.source==='original'?metadata.encoding:''},
+    return {schema:'sub2api.conversation.v1',delivery_id:job.id,source:copy.source,
+      ...(copy.fallbackReason?{requested_source:job.source,fallback_reason:copy.fallbackReason}:{}),
+      metadata:!pinnedCopy && job.delivery_metadata?this.archive.open(job.delivery_metadata,'push-metadata:'+job.id):
+      {...metadata,transport_diagnostics:metadata.transport_diagnostics?JSON.parse(metadata.transport_diagnostics):null,
+      inspection_warnings:JSON.parse(metadata.inspection_warnings),complete:Boolean(metadata.complete),encoding:copy.source==='original'?metadata.encoding:''},
       body_encoding:'base64',request:raw.request,response:raw.response,frames:raw.frames,
       checksums:{request:checksum(raw.request),response:checksum(raw.response),frames:raw.frames.map(frame=>checksum(frame.body))}};
   }

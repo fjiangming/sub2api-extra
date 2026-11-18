@@ -169,17 +169,22 @@ test('a lost Complete receipt retries byte-identical content at the same key wit
   assert.equal(JSON.parse([...receiver.objects.values()][0].toString()).delivery_id, f.push.list().items[0].id);
 });
 
-test('masked JSONL never falls back to original and a rule change invalidates staged copies', async t => {
+test('masked JSONL includes marked original fallbacks and rebuilds staged copies after rule changes', async t => {
   const receiver = await s3Receiver(); t.after(() => receiver.close()); const f = setup(t);
   f.store.configure({ ...f.store.policy(), mode: 'dual' }); configure(f, receiver.url, { source: 'masked', automatic: true });
   f.store.ingest(event('masked-jsonl')); f.store.ingest(event('bad-mask', { response: Buffer.from('{invalid').toString('base64') }));
-  f.push.scanAutomatic(); await f.service.jsonl.tick(); assert.equal(f.push.list().total, 1);
+  f.push.scanAutomatic(); await f.service.jsonl.tick(); assert.equal(f.push.list().total, 2);
   f.jsonl.flush(); await f.service.jsonl.tick();
-  assert.equal(lines(receiver).length, 1); assert.equal(lines(receiver)[0].source, 'masked');
-  assert(!Buffer.from(lines(receiver)[0].request, 'base64').toString().includes('alice@example.com'));
+  assert.equal(lines(receiver).length, 2);
+  const safe=lines(receiver).find(row=>row.metadata.id===event('masked-jsonl').id),failed=lines(receiver).find(row=>row.metadata.id===event('bad-mask').id);
+  assert.equal(safe.source,'masked');assert(!Buffer.from(safe.request, 'base64').toString().includes('alice@example.com'));
+  assert.equal(failed.source,'original');assert.equal(failed.requested_source,'masked');assert.equal(failed.fallback_reason,'PROCESSING_FAILED');
+  assert.equal(failed.response,Buffer.from('{invalid').toString('base64'));
   f.store.ingest(event('outdated-mask')); f.push.scanAutomatic(); await f.service.jsonl.tick();
   f.store.configure({ ...f.store.policy(), email: !f.store.policy().email }); f.jsonl.flush(); await f.service.jsonl.tick();
-  assert.equal(lines(receiver).length, 1); assert.equal(f.push.list({ status: 'cancelled' }).items[0].error_code, 'REDACTION_OUTDATED');
+  assert.equal(lines(receiver).length, 3);assert(f.jsonl.list().files.some(file=>file.status==='cancelled'&&file.error_code==='REDACTION_OUTDATED'));
+  const outdated=lines(receiver).find(row=>row.metadata.id===event('outdated-mask').id);
+  assert.equal(outdated.source,'original');assert.equal(outdated.fallback_reason,'REDACTION_OUTDATED');assert.equal(outdated.request,event().request);
 });
 
 test('buffered members do not exhaust the pending queue or prematurely split a daily model file', async t => {

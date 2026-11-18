@@ -59,7 +59,10 @@ class ConversationPushService {
     };
     try {
       guard();
-      const result=await this.transport.send(this.store.policy(),job.destination,this.store.envelope(job),controller.signal,{guard});
+      const envelope=this.store.envelope(job);
+      this.store.freezeCopy(job,envelope);
+      guard();
+      const result=await this.transport.send(this.store.policy(),job.destination,envelope,controller.signal,{guard});
       this.store.finish(job,result);this.lastError=result.errorCode||'';this.lastRun=Date.now();
     } catch {
       this.store.finish(job,{status:'failed',errorCode:'DELIVERY_INVALIDATED',retryable:true});

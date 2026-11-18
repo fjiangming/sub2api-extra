@@ -41,6 +41,24 @@ function large(f, seed = 'resume') {
 const puts = receiver => receiver.requests.filter(row => row.method === 'PUT');
 const creates = receiver => receiver.requests.filter(row => row.query.has('uploads'));
 function reject(res, status = 503) { res.writeHead(status, { 'content-type': 'application/xml' }); res.end('<Error><Code>FixtureFailure</Code></Error>'); return false; }
+
+test('original fallback choice, reason and multipart prefix survive a process and database restart',async t=>{
+  let failed=false;
+  const receiver=await s3Receiver({beforeRequest:async(entry,res)=>{
+    if(entry.method==='PUT'&&entry.query.get('partNumber')==='2'&&!failed){failed=true;return reject(res);}
+  }});t.after(()=>receiver.close());
+  const f=setup(t,receiver);f.push.configure({...f.push.policy(),source:'masked'});
+  const row=large(f,'fallback-resume');f.store.db.prepare('UPDATE cl_records SET masked=NULL WHERE id=?').run(row.id);await f.service.jsonl.tick();
+  const file=f.jsonl.list().files[0];assert.equal(file.status,'pending');assert.equal(f.jsonl.get(file.id).uploaded_parts,1);
+  const member=f.jsonl.db.prepare('SELECT payload_source,fallback_reason FROM cl_push_jsonl_members WHERE file_id=?').get(file.id);
+  assert.deepEqual(member,{payload_source:'original',fallback_reason:'COPY_UNAVAILABLE'});
+  await f.restart();f.advance();await f.service.jsonl.tick();
+  assert.equal(f.jsonl.get(file.id).status,'sent');assert.equal(receiver.completed.length,1);
+  assert.equal(puts(receiver).filter(entry=>entry.query.get('partNumber')==='1').length,1);
+  const copy=JSON.parse(receiver.completed[0].body.toString());assert.equal(copy.source,'original');assert.equal(copy.requested_source,'masked');
+  assert.equal(copy.fallback_reason,'COPY_UNAVAILABLE');assert.equal(copy.request,row.request);assert.equal(copy.response,row.response);
+  assert.equal(f.jsonl.get(file.id).bytes,receiver.completed[0].body.length);
+});
 async function until(predicate) {
   const end = Date.now() + 5000;
   while (!predicate()) { assert(Date.now() < end, 'background progress timed out'); await new Promise(resolve => setTimeout(resolve, 20)); }
@@ -159,6 +177,7 @@ test('legacy upload state is cleaned before resuming and schema migration keeps 
   f.jsonl.seal(file.id); f.jsonl.db.prepare("UPDATE cl_push_jsonl_files SET upload_id='legacy' WHERE id=?").run(file.id);
   const snapshot = f.jsonl.db.prepare('SELECT job_id,metadata,fingerprint FROM cl_push_jsonl_members').all();
   f.jsonl.db.exec('DROP TABLE cl_push_jsonl_parts');
+  for (const column of ['payload_source','fallback_reason']) f.jsonl.db.exec(`ALTER TABLE cl_push_jsonl_members DROP COLUMN ${column}`);
   for (const column of ['uploaded_bytes','uploaded_parts','upload_version','pause_reason','first_at']) f.jsonl.db.exec(`ALTER TABLE cl_push_jsonl_files DROP COLUMN ${column}`);
   await f.restart(); assert.deepEqual(f.jsonl.db.prepare('SELECT job_id,metadata,fingerprint FROM cl_push_jsonl_members').all(), snapshot);
   assert.equal(f.jsonl.claim(), null); await f.service.jsonl.tick();

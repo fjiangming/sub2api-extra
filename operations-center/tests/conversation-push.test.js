@@ -82,7 +82,7 @@ test('explicitly including unconfirmed transport preserves raw errors, diagnosti
   configure(f,{captureScope:'complete',source:'masked'});assert.equal(f.push.validJob(masked).cancel,'INCOMPLETE_CAPTURE');
 });
 
-test('preview and automatic skips distinguish privacy gates; all scope never falls back to raw',t=>{
+test('preview and automatic queues use marked original fallbacks and preserve exclusion gates',t=>{
   const f=setup(t);configure(f,{automatic:true,captureScope:'all'});
   const failed=event('skip-failed',{response:Buffer.from('{invalid').toString('base64')}),warning=event('skip-warning'),outdated=event('skip-outdated'),missing=event('skip-missing'),excluded=event('skip-excluded',{user_id:3});
   for(const row of [failed,warning,outdated,missing,excluded])f.store.ingest(row);
@@ -91,14 +91,17 @@ test('preview and automatic skips distinguish privacy gates; all scope never fal
   f.store.db.prepare('UPDATE cl_records SET masked=NULL WHERE id=?').run(missing.id);
   f.store.configure({...f.store.policy(),excludedUserIds:[3]});
   const preview=f.push.preview({filter:{},destinations:['webhook']});
-  assert.equal(preview.eligible,0);assert.equal(preview.excluded,1);
-  assert.deepEqual(preview.unavailableReasons,{PROCESSING_FAILED:1,INSPECTION_INCOMPLETE:1,REDACTION_OUTDATED:1,COPY_UNAVAILABLE:1});
-  f.push.scanAutomatic();f.push.scanAutomatic();assert.equal(f.push.list().total,0);
+  assert.equal(preview.eligible,4);assert.equal(preview.excluded,1);assert.equal(preview.fallbacks,4);
+  assert.deepEqual(preview.unavailableReasons,{});
+  assert.deepEqual(preview.fallbackReasons,{PROCESSING_FAILED:1,INSPECTION_INCOMPLETE:1,REDACTION_OUTDATED:1,COPY_UNAVAILABLE:1});
+  f.push.scanAutomatic();f.push.scanAutomatic();assert.equal(f.push.list().total,4);
   const skipped=Object.fromEntries(f.push.list().skipped.map(row=>[row.code,row.count]));
-  assert.deepEqual(skipped,{COLLECTION_EXCLUDED:1,COPY_UNAVAILABLE:1,INSPECTION_INCOMPLETE:1,PROCESSING_FAILED:1,REDACTION_OUTDATED:1});
+  assert.deepEqual(skipped,{COLLECTION_EXCLUDED:1});
+  const fallbacks=Object.fromEntries(f.push.list().fallbacks.map(row=>[row.code,row.count]));assert.deepEqual(fallbacks,preview.fallbackReasons);
   const pending=event('skip-pending');f.store.receive(pending);assert(f.push.scanAutomatic().processing);
-  assert.equal(f.push.preview({filter:{search:pending.id},destinations:['webhook']}).unavailableReasons.PROCESSING_PENDING,1);
-  assert.equal(f.push.list().total,0);
+  assert.equal(f.push.preview({filter:{search:pending.id},destinations:['webhook']}).fallbackReasons.PROCESSING_PENDING,1);
+  assert.equal(f.push.list().total,4);
+  for(let job;(job=f.push.claim());){const body=f.push.envelope(job);assert.equal(body.source,'original');assert.equal(body.requested_source,'masked');assert(body.fallback_reason);f.push.finish(job,{status:'sent'});}
 });
 
 test('manual batches bind preview to content and policy, deduplicate, and require matching UUID parameters',t=>{
@@ -125,12 +128,12 @@ test('auto queue starts with new logs, resumes across DB restart, and survives r
   configure(f,{automatic:false});f.store.ingest(event('while-paused'));configure(f,{automatic:true});assert.equal(f.push.scanAutomatic().created,0);
 });
 
-test('model and user rules apply to historical and queued jobs, unavailable masked copy never falls back',t=>{
+test('model and user rules apply to historical and queued jobs even with original fallbacks',t=>{
   const f=setup(t);configure(f);
   f.store.ingest(event('permitted',{model:'gpt-6-astra'}));f.store.ingest(event('unselected'));
   f.store.ingest(event('excluded',{user_id:3}));f.store.ingest(event('processing-failed',{model:'gpt-6-astra',response:Buffer.from('{bad').toString('base64')}));
   f.store.configure({...f.store.policy(),modelFilterEnabled:true,allowedModels:['gpt-6-astra'],kimiK3Plus:true,excludedUserIds:[3]});
-  const value=batch(f);assert.equal(value.preview.matched,4);assert.equal(value.preview.excluded,2);assert.equal(value.preview.unavailable,1);assert.equal(value.result.created,1);
+  const value=batch(f);assert.equal(value.preview.matched,4);assert.equal(value.preview.excluded,2);assert.equal(value.preview.unavailable,0);assert.equal(value.preview.fallbacks,1);assert.equal(value.result.created,2);
   f.store.configure({...f.store.policy(),allowedModels:[]});assert.equal(f.push.claim(),null);assert.equal(f.push.list().items[0].error_code,'COLLECTION_EXCLUDED');
 });
 
@@ -145,6 +148,68 @@ test('payload envelope retains exact original bytes, compression, numeric spelli
   f.store.ingest(event('ws',{protocol:'WebSocket',frames}));batch(f,{protocol:'WebSocket'});job=f.push.claim();payload=f.push.envelope(job);assert.deepEqual(payload.frames,frames);
   f.push.finish(job,{status:'sent'});configure(f,{source:'masked'});batch(f,{search:row.id});job=f.push.claim();payload=f.push.envelope(job);
   assert.equal(payload.metadata.encoding,'');assert(!Buffer.from(payload.request,'base64').toString().includes('alice@example.com'));assert(Buffer.from(payload.request,'base64').toString().includes('9007199254740993'));
+});
+
+test('Webhook and individual S3 JSON actually deliver marked originals when masking fails',async t=>{
+  const received=[];
+  const url=await receiver(t,(req,res)=>{const chunks=[];req.on('data',chunk=>chunks.push(chunk));req.on('end',()=>{
+    received.push({method:req.method,body:JSON.parse(Buffer.concat(chunks).toString())});res.writeHead(200);res.end();});});
+  const f=setup(t);configure(f,{allowPrivateNetwork:true,webhook:{enabled:true,url,token:'fictional-token'},
+    s3:{...f.push.policy().s3,enabled:true,format:'json',endpoint:url,region:'us-east-1',bucket:'test-bucket',accessKeyId:'fictional-id',secretAccessKey:'fictional-secret'}});
+  const row=event('fallback-http',{response:Buffer.from('{invalid').toString('base64')});f.store.ingest(row);
+  const value=batch(f,{},['webhook','s3']);assert.equal(value.preview.fallbacks,1);assert.equal(value.result.created,2);
+  const service=new ConversationPushService(f.push);t.after(()=>service.stop());await service.tick();await service.tick();
+  assert.deepEqual(received.map(row=>row.method).sort(),['POST','PUT']);
+  for(const {body} of received){assert.equal(body.source,'original');assert.equal(body.requested_source,'masked');assert.equal(body.fallback_reason,'PROCESSING_FAILED');
+    assert.equal(body.request,row.request);assert.equal(body.response,row.response);assert.equal(body.metadata.processing_error,'INVALID_JSON');}
+  assert.equal(f.push.list({status:'sent'}).total,2);
+  assert(f.push.list().items.every(job=>job.delivery_source==='original'&&job.delivery_fallback_reason==='PROCESSING_FAILED'));
+});
+
+test('original fallback retries keep the same delivery after reprocessing and database restart',async t=>{
+  let now=Date.now();const f=setup(t,{now:()=>now});configure(f,{retrySeconds:5});
+  const row=event('frozen-original');f.store.ingest(row);
+  f.store.db.prepare('UPDATE cl_records SET redaction_version=0 WHERE id=?').run(row.id);batch(f);
+  const sent=[],transport={send:async(_policy,_target,envelope)=>{sent.push(structuredClone(envelope));return sent.length===1?
+    {status:'failed',errorCode:'TIMEOUT',retryable:true}:{status:'sent'};}};
+  const first=new ConversationPushService(f.push,{transport});await first.tick();await first.stop();
+  const frozen=f.push.db.prepare('SELECT * FROM cl_push_jobs').get();assert.equal(frozen.delivery_source,'original');
+  assert(frozen.delivery_metadata);assert(!frozen.delivery_metadata.includes(Buffer.from('upstream.example.com')));
+  f.store.close();f.store=new ConversationLogStore(f.directory,{now:()=>now}).initialize();
+  f.push=new ConversationPushStore(f.store,{now:()=>now}).initialize();
+  f.store.db.prepare('UPDATE cl_records SET redaction_version=?,processed_at=processed_at+1 WHERE id=?')
+    .run(require('../src/services/conversation-sensitive').REDACTION_VERSION,row.id);
+  now+=5000;const retry=new ConversationPushService(f.push,{transport});t.after(()=>retry.stop());await retry.tick();
+  assert.equal(sent.length,2);assert.deepEqual(sent[1],sent[0]);assert.equal(sent[1].source,'original');
+  assert.equal(sent[1].fallback_reason,'REDACTION_OUTDATED');assert.equal(sent[1].request,row.request);
+  assert.equal(f.push.list().items[0].status,'sent');
+});
+
+test('attempted masked deliveries cannot silently change into original on retry',async t=>{
+  let now=Date.now();const f=setup(t,{now:()=>now});configure(f,{retrySeconds:5});
+  const row=event('frozen-masked');f.store.ingest(row);batch(f);const sent=[];
+  const service=new ConversationPushService(f.push,{transport:{send:async(_policy,_target,envelope)=>{
+    sent.push(envelope);return {status:'failed',errorCode:'TIMEOUT',retryable:true};}}});t.after(()=>service.stop());
+  await service.tick();assert.equal(sent[0].source,'masked');assert.equal(f.push.list().items[0].delivery_source,'masked');
+  f.store.db.prepare('UPDATE cl_records SET redaction_version=0 WHERE id=?').run(row.id);now+=5000;
+  assert.equal(await service.tick(),false);assert.equal(sent.length,1);
+  assert.equal(f.push.list().items[0].status,'cancelled');assert.equal(f.push.list().items[0].error_code,'REDACTION_OUTDATED');
+});
+
+test('legacy delivery metadata migration is additive and stale leases cannot freeze the selected copy',t=>{
+  let now=Date.now();const f=setup(t,{now:()=>now});configure(f);f.store.ingest(event('frozen-lease'));batch(f);
+  for(const column of ['delivery_source','delivery_fallback_reason','delivery_version','delivery_metadata']) {
+    f.push.db.exec(`ALTER TABLE cl_push_jobs DROP COLUMN ${column}`);
+  }
+  f.push=new ConversationPushStore(f.store,{now:()=>now}).initialize();
+  assert.equal(f.push.list().total,1);assert.equal(f.push.list().items[0].delivery_source,'');
+  const stale=f.push.claim(),envelope=f.push.envelope(stale);now+=60000;const current=f.push.claim();
+  assert.equal(current.id,stale.id);assert.notEqual(current.lease_token,stale.lease_token);
+  assert.throws(()=>f.push.freezeCopy(stale,envelope),{code:'CONVERSATION_PUSH_CONFLICT'});
+  assert.equal(f.push.list().items[0].delivery_source,'');
+  const body=f.push.envelope(current);f.push.freezeCopy(current,body);
+  assert.equal(f.push.list().items[0].delivery_source,'masked');assert.deepEqual(f.push.envelope(current),body);
+  f.push.cancelBatch(current.batch_id);assert.throws(()=>f.push.freezeCopy(current,body),{code:'CONVERSATION_PUSH_CONFLICT'});
 });
 
 test('leases, bounded retries, explicit retry, content changes and late receipts preserve queue state',t=>{

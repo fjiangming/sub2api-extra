@@ -40,6 +40,10 @@ class ConversationJsonlStore {
       this.db.exec(`CREATE TABLE IF NOT EXISTS cl_push_jsonl_parts(
         file_id TEXT NOT NULL REFERENCES cl_push_jsonl_files(id) ON DELETE CASCADE,number INTEGER NOT NULL,
         bytes INTEGER NOT NULL,etag TEXT NOT NULL,sha256 TEXT NOT NULL,PRIMARY KEY(file_id,number));`);
+      const memberColumns = new Set(this.db.pragma('table_info(cl_push_jsonl_members)').map(row => row.name));
+      for (const name of ['payload_source','fallback_reason']) {
+        if (!memberColumns.has(name)) this.db.exec(`ALTER TABLE cl_push_jsonl_members ADD COLUMN ${name} TEXT NOT NULL DEFAULT ''`);
+      }
     })();
     return this;
   }
@@ -56,10 +60,14 @@ class ConversationJsonlStore {
     backlog.atRisk = Boolean(backlog.expiryAt && backlog.expiryAt <= this.now() + 6 * 3600000);
     return { files, backlog, counts: this.db.prepare('SELECT status,COUNT(*) count FROM cl_push_jsonl_files GROUP BY status').all() };
   }
-  admit(job) {
-    const row = this.db.prepare(`SELECT length(${job.source === 'original' ? 'original' : 'masked'}) bytes FROM cl_records WHERE id=?`).get(job.record_id);
-    if (!row?.bytes) throw Object.assign(new Error('COPY_UNAVAILABLE'), { code: 'COPY_UNAVAILABLE' });
-    if (row.bytes * 6 + 16777216 > this.memoryBudget()) throw Object.assign(new Error('EXPORT_MEMORY'), { code: 'EXPORT_MEMORY' });
+  admit(job, pinnedCopy) {
+    const row = this.db.prepare(`SELECT original IS NOT NULL AS original,masked IS NOT NULL AS masked,length(original) original_bytes,length(masked) masked_bytes,
+      processing_pending,processing_error,inspection_warnings,redaction_version,redaction_policy_hash FROM cl_records WHERE id=?`).get(job.record_id);
+    const copy = row && (pinnedCopy || this.push.copySelection(row, job.source, this.archive.policy()));
+    const bytes = copy && !copy.blocked && row[copy.source + '_bytes'];
+    if (!bytes) throw Object.assign(new Error('COPY_UNAVAILABLE'), { code: 'COPY_UNAVAILABLE' });
+    const budgetBytes = !pinnedCopy && copy.source === 'masked' ? Math.max(bytes, row.original_bytes || 0) : bytes;
+    if (budgetBytes * 6 + 16777216 > this.memoryBudget()) throw Object.assign(new Error('EXPORT_MEMORY'), { code: 'EXPORT_MEMORY' });
   }
   defer(job, code, retryable = true) {
     const policy = this.push.policy(), attempts = job.attempts + 1;
@@ -101,8 +109,9 @@ class ConversationJsonlStore {
         file = this.get(id);
       }
       const cutoff = this.db.prepare('SELECT flush_before FROM cl_push_jsonl_control WHERE singleton=1').get().flush_before;
-      this.db.prepare('INSERT INTO cl_push_jsonl_members VALUES(?,?,?,?,?,?,?)').run(job.id, file.id, file.records, metadata,
-        valid.row.fingerprint, valid.row.processed_at, valid.row.processing_policy_version);
+      this.db.prepare(`INSERT INTO cl_push_jsonl_members(job_id,file_id,ordinal,metadata,fingerprint,processed_at,processing_policy_version,payload_source,fallback_reason)
+        VALUES(?,?,?,?,?,?,?,?,?)`).run(job.id, file.id, file.records, metadata,
+        valid.row.fingerprint, valid.row.processed_at, valid.row.processing_policy_version, envelope.source, envelope.fallback_reason || '');
       this.db.prepare("UPDATE cl_push_jobs SET status='buffered',jsonl_file_id=?,error_code='',updated_at=? WHERE id=?").run(file.id, this.now(), job.id);
       this.db.prepare('UPDATE cl_push_jsonl_files SET bytes=bytes+?,records=records+1,force_flush=MAX(force_flush,?),first_at=CASE WHEN first_at=0 THEN ? ELSE MIN(first_at,?) END,updated_at=? WHERE id=?')
         .run(bytes, Number(Boolean(job.batch_id) || job.created_at <= cutoff), envelope.metadata.at, envelope.metadata.at, this.now(), file.id);
@@ -146,22 +155,23 @@ class ConversationJsonlStore {
     if (full || file.archive_version !== archivePolicy.version) {
       const row = this.db.prepare(`SELECT r.id,r.user_id,r.model,r.complete,r.reason,r.fingerprint,m.fingerprint expected_fingerprint,
         r.original IS NOT NULL has_original,r.masked IS NOT NULL has_masked,r.processing_error,r.redaction_version,r.redaction_policy_hash,r.inspection_warnings,
-        r.processed_at,r.processing_pending,m.processed_at expected_processed_at,r.processing_policy_version,m.processing_policy_version expected_processing_version
+        r.processed_at,r.processing_pending,m.processed_at expected_processed_at,r.processing_policy_version,m.processing_policy_version expected_processing_version,m.payload_source
         FROM cl_push_jsonl_members m JOIN cl_push_jobs j ON j.id=m.job_id LEFT JOIN cl_records r ON r.id=j.record_id
-        WHERE m.file_id=? AND (r.id IS NULL OR r.processing_pending=1 OR r.model!=? OR (?='complete' AND (r.complete!=1 OR r.reason!='')) OR r.fingerprint!=m.fingerprint
-          OR r.user_id IN (SELECT value FROM json_each(?)) OR CASE WHEN ?='original' THEN r.original IS NULL
-          ELSE r.masked IS NULL OR r.processing_error!='' OR r.inspection_warnings!='[]' OR r.redaction_version!=? OR r.redaction_policy_hash!=?
-            OR r.processed_at!=m.processed_at OR r.processing_policy_version!=m.processing_policy_version END) LIMIT 1`)
-        .get(file.id, file.model, policy.captureScope, JSON.stringify(archivePolicy.excludedUserIds), file.source, REDACTION_VERSION, redactionPolicyHash(archivePolicy));
+        WHERE m.file_id=? AND (r.id IS NULL OR r.model!=? OR (?='complete' AND (r.complete!=1 OR r.reason!='')) OR r.fingerprint!=m.fingerprint
+          OR r.user_id IN (SELECT value FROM json_each(?)) OR CASE WHEN COALESCE(NULLIF(m.payload_source,''),?)='original' THEN r.original IS NULL
+          ELSE r.processing_pending=1 OR r.masked IS NULL OR r.processing_error!='' OR r.inspection_warnings!='[]' OR r.redaction_version!=? OR r.redaction_policy_hash!=? END
+          OR (?='masked' AND (r.processed_at!=m.processed_at OR r.processing_policy_version!=m.processing_policy_version))) LIMIT 1`)
+        .get(file.id, file.model, policy.captureScope, JSON.stringify(archivePolicy.excludedUserIds), file.source, REDACTION_VERSION, redactionPolicyHash(archivePolicy), file.source);
       if (row) {
+        const source = row.payload_source || file.source;
         if (!row.id) return 'RECORD_EXPIRED';
-        if (row.processing_pending) return 'PROCESSING_PENDING';
+        if (source === 'masked' && row.processing_pending) return 'PROCESSING_PENDING';
         if (archivePolicy.excludedUserIds.includes(row.user_id) || row.model !== file.model) return 'COLLECTION_EXCLUDED';
         if (policy.captureScope === 'complete' && (!row.complete || row.reason)) return 'INCOMPLETE_CAPTURE';
-        if (!(file.source === 'original' ? row.has_original : row.has_masked)) return 'COPY_UNAVAILABLE';
-        if (file.source === 'masked' && row.inspection_warnings !== '[]') return 'INSPECTION_INCOMPLETE';
+        if (!(source === 'original' ? row.has_original : row.has_masked)) return 'COPY_UNAVAILABLE';
+        if (source === 'masked' && row.inspection_warnings !== '[]') return 'INSPECTION_INCOMPLETE';
         if (row.fingerprint !== row.expected_fingerprint) return 'CONTENT_CHANGED';
-        return file.source === 'masked' && (row.processing_error || row.redaction_version !== REDACTION_VERSION || row.redaction_policy_hash !== redactionPolicyHash(archivePolicy)) ? 'REDACTION_OUTDATED' : 'CONTENT_CHANGED';
+        return source === 'masked' && (row.processing_error || row.redaction_version !== REDACTION_VERSION || row.redaction_policy_hash !== redactionPolicyHash(archivePolicy)) ? 'REDACTION_OUTDATED' : 'CONTENT_CHANGED';
       }
       this.db.prepare('UPDATE cl_push_jsonl_files SET archive_version=? WHERE id=?').run(archivePolicy.version, file.id);
     }
@@ -253,7 +263,7 @@ class ConversationJsonlStore {
   async *envelopes(file, guard, checkpoint = async () => {}) {
     let ordinal = -1;
     while (true) {
-      const members = this.db.prepare(`SELECT m.job_id,m.ordinal,m.metadata,j.* FROM cl_push_jsonl_members m
+      const members = this.db.prepare(`SELECT m.job_id,m.ordinal,m.metadata,m.payload_source,m.fallback_reason,j.* FROM cl_push_jsonl_members m
         LEFT JOIN cl_push_jobs j ON j.id=m.job_id WHERE m.file_id=? AND m.ordinal>? ORDER BY m.ordinal LIMIT 20`).all(file.id, ordinal);
       if (!members.length) break;
       for (const member of members) {
@@ -261,8 +271,9 @@ class ConversationJsonlStore {
         guard(); if (!member.id) throw new Error('DELIVERY_INVALIDATED');
         const valid = this.push.validJob(member);
         if (valid.paused || valid.cancel) throw new Error('DELIVERY_INVALIDATED');
-        this.admit(member);
-        const envelope = this.push.envelope(member);
+        const copy = {source:member.payload_source || member.source,fallbackReason:member.fallback_reason};
+        this.admit(member, copy);
+        const envelope = this.push.envelope(member, copy);
         envelope.metadata = this.archive.open(member.metadata, 'jsonl-metadata:' + member.id);
         yield envelope; ordinal = member.ordinal;
         await new Promise(resolve => setImmediate(resolve));

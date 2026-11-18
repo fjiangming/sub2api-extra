@@ -1,5 +1,26 @@
 # 个性化功能维护台账
 
+## 2026-11-19：发布导出与推送原文回退
+
+用户明确要求提交 GitHub。本次仅发布下一节“导出与推送脱敏不可用时回退原文”对应的运营中心实现、界面、测试、验证脚本和说明到 main；该节的“未提交 / 推送”描述实现当轮状态，本次授权进行源码发布和 GitHub 构建核验。维护台账仅选择本节和该功能节，不夹带附属容器部署记录、域名迁移 / 备份、只读生产报告、其他模块或独立演示等无关本地差异。
+
+沿用刚完成的运营中心完整 629 项测试、npm run check，以及下载 / 推送的四布局 Chrome 验证，不改动已验证源码。提交前核对与 origin/main 一致、暂存范围和差异空白；沿用既有 GitHub Actions 的 Linux 测试、双架构构建与镜像发布。发布结果在本次最终回复提供。本轮不连接、更新或重新配置服务器，不启用外部日志推送，不修改主站源码 / 采集器 / 计费或生产保存策略。
+
+## 2026-11-18：导出与推送脱敏不可用时回退原文
+
+用户明确要求避免因脱敏失败跳过一轮对话，脱敏副本不可用时使用保留的原文导出或推送。本轮仅调整本地运营中心的下载 / Webhook / S3 JSON / JSONL 输出，不修改主站、采集器、计费、归档正文或保存策略，不连接或重新部署服务器，不启用外部推送，不提交 GitHub，保留其他未提交改动。该要求明确改变前述“不回退原文”的旧输出规则；原文可能包含未经替换的敏感信息，页面与数据必须如实说明，不能将原文称作已脱敏。
+
+- `src/conversation-push-store.js`：共享副本选择，正常优先当前有效脱敏副本；处理失败、待处理、缺失、未检查或规则过期且原文可用时回退原文；脱敏密文读取失败也可回退。不绕过用户 / 模型排除及显式传输范围，自动采集队列仍等待未完成后台处理。envelope 保留原字节 / 压缩 / WS 帧与校验，`source` 为实际副本，回退时附 `requested_source=masked`、`fallback_reason`，原处理 / 完整性异常不抹除。预览显示预计回退，自动入队回退与跳过分开统计。两份均不可用不能补造内容。
+- `src/conversation-jsonl-store.js`：仅加法迁移成员的实际副本与回退原因，冻结并持久化每条副本选择；旧成员空值按原文件策略解释，不改已有正常行格式。内存准入按实际 / 潜在回退原文大小评估；复核、上传、重试均使用冻结副本，保留分片 / 字节 / 摘要、取消 / 过期 / 排除及保留期保护，不能在已确认前缀中切换正文。
+- `src/conversation-push-store.js`、`src/services/conversation-push-service.js`：Webhook / 单条 S3 首次发送前也以租约和当前条件复核固定实际副本、回退原因、实际正文版本与加密元数据快照；加法迁移只增加小字段，不复制正文。原文回退的跨进程重试不受后续脱敏恢复影响，已尝试的脱敏副本失效则取消旧任务，不能让同一投递 ID 更换原文；列表提供实际来源，页面区分已固定副本。推送专项覆盖数据库重启、实际字节 / 元数据相等、过期规则、旧表迁移与过期租约，保留排除 / 传输范围与撤销保护。
+- `src/services/conversation-export-worker.js`、`conversation-export-service.js`、`public/conversation-export-ui.js`、`conversation-push-ui.js`、`index.html`：原生下载展示真实回退条数和原因，默认“脱敏优先（不可用则原文）”，说明可能含敏感信息；文件名区分 masked-or-original，推送预览 / 自动入队显示回退，缓存版本更新。回退数量也进入完成回执校验，取消 / 内存 / 断连 / 规则更新仍失败，不假报完整。
+- `tests/conversation-export.test.js`、`conversation-push.test.js`、`conversation-jsonl.test.js`、`conversation-jsonl-resume.test.js`：更新旧不回退断言，补充真实原生下载 / Webhook / 单条 S3 JSON、压缩 SSE / 二进制 WS、坏脱敏密文、原文字节 / 摘要、模型用户排除、预计与实际回退、JSONL 文件规则失效重建、真实多分片跨重启冻结 / 旧表迁移回归。`scripts/conversation-logs-live-browser-check.cjs`、`conversation-push-browser-check.cjs` 与相关说明同步新行为；验证完成后补记结果。
+- `tests/conversation-compatibility.test.js`、`conversation-inspection.test.js`、`conversation-integrity.test.js`、`conversation-reception.test.js`：将 compaction / 图片 / 签名 / 旧规则 / 待处理记录的旧整条拒绝断言调整为明确标记的原文回退，保留已固定脱敏成员失效保护、显式传输范围和自动游标等待。`README.md`、`docs/conversation-logs.md`、`conversation-jsonl-push.md`、`conversation-integrity-privacy.md` 同步输出规则、原文风险、数据边界及重试固定行为；旧历史诊断不作为现行输出规则。
+
+最终验证：运营中心完整 **629 项测试全部通过，0 失败 / 跳过**（约 230 秒），npm run check 和相关差异空白检查通过。覆盖真实原生下载、Webhook / S3、混合 JSONL、多分片跨重启、原文字节 / 摘要、失败回退计数及排除 / 内存 / 取消 / 规则变更保护；新增单条投递专项包括首次原文回退后脱敏恢复及 SQLite 重开仍保持整个 envelope 一致，已尝试脱敏过期时不以相同 ID 更换原文，旧表加法升级与过期租约保护。测试仅用虚构正文与 loopback 接收端，未读取生产正文、请求真实模型或外部 Bucket。
+
+正式 Chrome / Playwright 的下载与推送均通过桌面 1440px、手机 390px、窄屏 320px 和深色偏好完整流程；补齐单条投递重试后重新验证全部推送布局，检查已固定脱敏标签与 JSONL 原文实际回退 / 预览计数。下载截图 `sub2api-conversation-browser-bIm4Lr`、最终推送截图 `sub2api-push-browser-zhcKBp`，两套桌面与窄屏已视觉复核，无新增溢出 / 页面错误 / 外网请求。新独立虚构预览 `http://127.0.0.1:19950/preview`（PID 31988）已启动，healthz / 导出与推送模块均 HTTP 200，确认包含本次回退和固定副本逻辑；保留所有旧预览。无需新增服务器配额或环境变量，升级仅加小型状态列，不复制历史正文；本次未提交 / 推送 GitHub、发布镜像、部署或修改服务器，线上尚未生效。
+
 ## 2026-11-18：提交 JSONL 功能与 1 GiB 内存模板
 
 用户明确要求提交 GitHub，随后追加先在本地修改内存再一起提交。本轮仅将以下“JSONL 下载与筛选下最近 N 条导出”和“JSONL 推送断点恢复、限速与完整性范围”两节对应的运营中心实现、测试、页面、说明及本节资源模板发布到 main。`operations-center/compose.yaml` 内存回退值改为 1g，`.env.example` 同步默认 1g，CPU 保持 1 核；`README.md`、`docs/conversation-logs.md`、`docs/conversation-jsonl-push.md` 说明镜像不能设置宿主配额，既有显式 512m / 自有 Compose 需相应调整并仅重建运营中心才生效。不自动覆盖显式资源值，不修改服务器配置或推送目标。不提交其他模块、域名迁移、部署脚本、只读生产报告、独立演示及混合台账中的无关内容，不连接、部署或重启主站 / 运营中心，不修改 Dockerfile、采集器或计费。以下两节中默认仍 512 MiB 的表述记录前轮状态，最终模板以本节 1 GiB 为准。

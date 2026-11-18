@@ -150,18 +150,19 @@ test('old schema and failed URL/signature history migrate without rewriting orig
   assert.equal(f.store.payload(sig.id,'original','request').text,signed());assert.equal(sigDone.redaction_version,6);
 });
 
-test('masked push previews, automatic queues and existing JSONL members reject uninspected signatures and images', async t => {
+test('masked push uses marked originals for signatures and images and invalidates previously staged masked members', async t => {
   const f=fixture(),push=new ConversationPushStore(f.store).initialize(),service=new ConversationPushService(push);t.after(async()=>{await service.stop();f.close();});
   const p=push.policy();push.configure({...p,enabled:true,automatic:true,source:'masked',webhook:{...p.webhook,enabled:true,url:'https://receiver.example/logs'},s3:{...p.s3,enabled:true,endpoint:'https://s3.example',bucket:'fixture-bucket',accessKeyId:'fictional',secretAccessKey:'fictional'}});
   const normal=event('normal-export'),limited=event('limited-export',{request:raw(signed())}),image=event('image-export',{request:raw(JSON.stringify({model:'example',input:[{role:'user',content:[{type:'input_image',image_url:'data:image/png;base64,aGVsbG8='}]}]}))});
   for(const row of [normal,limited,image])f.store.ingest(row);
-  assert.equal(push.scanAutomatic().created,2);assert(push.list().items.every(row=>row.record_id===normal.id));
-  const preview=push.preview({filter:{},destinations:['webhook','s3']});assert.equal(preview.eligible,1);assert.equal(preview.unavailable,2);
-  service.jsonl.store.assignOne();const file=service.jsonl.store.db.prepare('SELECT * FROM cl_push_jsonl_files LIMIT 1').get();assert(file);
+  assert.equal(push.scanAutomatic().created,6);
+  const preview=push.preview({filter:{},destinations:['webhook','s3']});assert.equal(preview.eligible,3);assert.equal(preview.unavailable,0);assert.equal(preview.fallbacks,2);
+  while(service.jsonl.store.assignOne()){}const file=service.jsonl.store.db.prepare('SELECT * FROM cl_push_jsonl_files LIMIT 1').get();assert(file);
   const job=push.db.prepare("SELECT * FROM cl_push_jobs WHERE record_id=? AND destination='webhook'").get(normal.id);
   for(const warning of ['OPAQUE_SIGNATURE','OPAQUE_IMAGE','OPAQUE_ENCRYPTED_COMPACTION']) {
     f.store.db.prepare('UPDATE cl_records SET inspection_warnings=? WHERE id=?').run(JSON.stringify([warning]),normal.id);
-    assert.equal(push.validJob(job).cancel,'INSPECTION_INCOMPLETE');assert.equal(service.jsonl.store.invalidReason(file,{full:true}),'INSPECTION_INCOMPLETE');
+    assert(!push.validJob(job).cancel);assert.equal(service.jsonl.store.invalidReason(file,{full:true}),'INSPECTION_INCOMPLETE');
+    const fallback=push.envelope(job);assert.equal(fallback.source,'original');assert.equal(fallback.fallback_reason,'INSPECTION_INCOMPLETE');assert.equal(fallback.request,normal.request);
   }
   const current=push.policy();push.configure({...current,source:'original'});
   const input={filter:{},destinations:['webhook']},selected=push.preview(input);assert.equal(selected.eligible,3);

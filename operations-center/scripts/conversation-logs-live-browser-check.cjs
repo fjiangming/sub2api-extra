@@ -67,10 +67,11 @@ async function main() {
         assert.deepEqual(original.map(row=>row.metadata.id),[preview.raw.id,id('signature-case')]);
         assert.equal(original[0].request,preview.raw.request);assert(Buffer.from(original[0].request,'base64').toString().includes('1.2300'));
         await page.locator('#cl-export-limit').fill('3');await page.locator('#cl-export-source').selectOption('masked');
-        const masked=await jsonlDownload();assert.equal(masked.length,2);
-        assert.deepEqual(masked.map(row=>row.metadata.id),[preview.raw.id,id('ws-case')]);
-        for (const row of masked) assert(!Buffer.from(row.request,'base64').toString().includes('alice@example.com'));
-        assert((await page.locator('[data-export-status]').textContent()).includes('部分内容未检查 1 条'));
+        const masked=await jsonlDownload();assert.equal(masked.length,3);
+        assert.deepEqual(masked.map(row=>row.metadata.id),[preview.raw.id,id('signature-case'),id('ws-case')]);
+        for (const row of masked.filter(row=>row.source==='masked')) assert(!Buffer.from(row.request,'base64').toString().includes('alice@example.com'));
+        assert.equal(masked[1].source,'original');assert.equal(masked[1].requested_source,'masked');assert.equal(masked[1].fallback_reason,'INSPECTION_INCOMPLETE');
+        assert((await page.locator('[data-export-status]').textContent()).includes('回退原文 1 条'));
         await page.evaluate(()=>scrollTo(0,0));await layout();await page.screenshot({path:path.join(directory,name+'-export.png'),fullPage:true});
         await page.locator('#cl-export-limit').fill('0');assert.equal(await page.locator('#cl-export-form').evaluate(node=>node.checkValidity()),false);
         await page.locator('#cl-export-limit').fill('1');

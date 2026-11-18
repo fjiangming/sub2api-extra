@@ -19,9 +19,9 @@ class ConversationExportService extends ConversationReadService {
     return Boolean(session && session.expiresAt>Date.now() && (!session.upstreamExpiresAt || session.upstreamExpiresAt>Date.now()));
   }
   publicJob(job) {
-    const {id,status,createdAt,startedAt,endedAt,expiresAt,selected,exported,skipped,bytes,sha256,pauseReason,errorCode,errorMessage}=job;
+    const {id,status,createdAt,startedAt,endedAt,expiresAt,selected,exported,skipped,fallbacks,fallbackReasons,bytes,sha256,pauseReason,errorCode,errorMessage}=job;
     return {id,status,createdAt,startedAt,endedAt,expiresAt,limit:job.spec.limit,source:job.spec.source,
-      selected,exported,skipped,bytes,sha256,pauseReason,errorCode,errorMessage};
+      selected,exported,skipped,fallbacks,fallbackReasons,bytes,sha256,pauseReason,errorCode,errorMessage};
   }
   create(req,input) {
     const spec=parseExport(input),sessionId=req.sessionId;
@@ -32,7 +32,7 @@ class ConversationExportService extends ConversationReadService {
     if (this.current && !terminal(this.current)) throw failure('BUSY','已有下载正在准备或进行中，请等待或取消',409);
     const ticket=crypto.randomBytes(32).toString('base64url'),now=Date.now();
     const job={id:crypto.randomUUID(),sessionId,spec,status:'ready',ticketHash:digest(ticket),createdAt:now,
-      expiresAt:Math.min(now+this.ticketTtlMs,this.auth.sessions.get(sessionId).expiresAt),selected:0,exported:0,skipped:{},bytes:0,pauseReason:''};
+      expiresAt:Math.min(now+this.ticketTtlMs,this.auth.sessions.get(sessionId).expiresAt),selected:0,exported:0,skipped:{},fallbacks:0,fallbackReasons:{},bytes:0,pauseReason:''};
     job.expiryTimer=setTimeout(() => {
       if (job.status!=='ready') return;
       job.status='expired';job.endedAt=Date.now();job.ticketHash='';if (this.current===job) this.current=null;
@@ -107,7 +107,7 @@ class ConversationExportService extends ConversationReadService {
     entry.progressListener=message => {
       if (entry.done) return;
       if (message?.type==='export-progress') {
-        for (const key of ['selected','exported','skipped','pauseReason']) job[key]=message[key];
+        for (const key of ['selected','exported','skipped','fallbacks','fallbackReasons','pauseReason']) job[key]=message[key];
       } else if (message?.type==='export-error') {
         entry.workerError=message;this.fail(entry,message.code,message.message,message.status);
       }
@@ -141,6 +141,8 @@ class ConversationExportService extends ConversationReadService {
         try {
           const summary=JSON.parse(response.trailers['x-conversation-export-result']);
           if (!response.complete || summary.bytes!==job.bytes || !Number.isInteger(summary.exported) || summary.exported<1
+            || !Number.isInteger(summary.fallbacks) || summary.fallbacks<0 || summary.fallbacks>summary.exported
+            || Object.values(summary.fallbackReasons).reduce((sum,count) => sum+count,0)!==summary.fallbacks
             || summary.selected>job.spec.limit || !/^[a-f0-9]{64}$/.test(summary.sha256)
             || summary.exported+Object.values(summary.skipped).reduce((sum,count) => sum+count,0)!==summary.selected) throw new Error('INCOMPLETE');
           entry.summary=summary;entry.res.end();

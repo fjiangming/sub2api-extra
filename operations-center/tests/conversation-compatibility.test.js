@@ -130,7 +130,7 @@ test('compaction compatibility rejects arbitrary ciphertext, tool impersonation,
   }
 });
 
-test('compaction history can be retried with original ciphertext intact and remains blocked from masked export', t => {
+test('compaction history retains ciphertext and falls back to original for uninspected content', t => {
   const f = fixture();t.after(() => f.close());const policy = f.store.configure({...f.store.policy(),mode:'masked'});
   const request = JSON.stringify({model:'gpt-6.1-sol',input:[compaction()]}),row = event('legacy-compaction',{policy_version:policy.version,request:Buffer.from(request).toString('base64')});
   assert(f.store.ingest(row).accepted);
@@ -142,7 +142,7 @@ test('compaction history can be retried with original ciphertext intact and rema
   assert.deepEqual(f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(row.id).original,original);
   assert.equal(f.store.payload(row.id,'original','request').text,request);
   assert.equal(JSON.parse(f.store.payload(row.id,'masked','request').text).input[0].encrypted_content,encrypted);
-  const push = new ConversationPushStore(f.store).initialize();assert(!push.copyReady(push.metadata(row.id),'masked',policy));assert(push.copyReady(push.metadata(row.id),'original',policy));
+  const push = new ConversationPushStore(f.store).initialize();assert.deepEqual(push.copySelection(push.metadata(row.id),'masked',policy),{source:'original',fallbackReason:'INSPECTION_INCOMPLETE',blocked:''});assert(push.copyReady(push.metadata(row.id),'original',policy));
 });
 
 test('Responses protocol images preserve every image byte while readable request and streamed response text is masked', () => {
@@ -240,7 +240,7 @@ test('image compatibility does not allow fake protocol paths, nested tool JSON, 
   assert.deepEqual(unchanged.warnings,['OPAQUE_IMAGE']);
 });
 
-test('image history reprocesses explicitly with encrypted originals intact and masked push eligibility still denied', t => {
+test('image history reprocesses with originals intact and selects a marked raw fallback', t => {
   const f = fixture();t.after(() => f.close());const policy = f.store.configure({...f.store.policy(),mode:'masked'});
   const row = event('image-legacy',{policy_version:policy.version,request:Buffer.from(JSON.stringify(imageRequest())).toString('base64')});
   assert(f.store.ingest(row).accepted);const saved = f.store.detail(row.id);
@@ -254,7 +254,7 @@ test('image history reprocesses explicitly with encrypted originals intact and m
   assert.deepEqual(f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(row.id).original,original);
   assert.equal(f.store.payload(row.id,'original','request').body.toString('base64'),row.request);
   const push = new ConversationPushStore(f.store).initialize();
-  assert(!push.copyReady(push.metadata(row.id),'masked',policy));assert(push.copyReady(push.metadata(row.id),'original',policy));
+  assert.deepEqual(push.copySelection(push.metadata(row.id),'masked',policy),{source:'original',fallbackReason:'INSPECTION_INCOMPLETE',blocked:''});assert(push.copyReady(push.metadata(row.id),'original',policy));
 });
 
 test('business file IDs in real tool results and streamed arguments are consistently masked, while actual references stay protected', () => {
@@ -342,12 +342,12 @@ test('JSON, compressed SSE, chat choices, Claude, Gemini and all incoming WS fra
   frames.push({direction:'in',binary:true,body:Buffer.from([1])}); assert.equal(inspectCompletion(raw('','',frames),{protocol:'WebSocket',status:101}).upstream_evidence,'binary');
 });
 
-test('encrypted reasoning retains exact original in masked mode and stays ineligible for masked export', t => {
+test('encrypted reasoning retains exact original in masked mode for a marked export fallback', t => {
   const f = fixture(); t.after(() => f.close()); const policy = f.store.configure({...f.store.policy(),mode:'masked'});
   const row = event('opaque-reasoning',{policy_version:policy.version,request:Buffer.from(JSON.stringify({model:'gpt-6.1-sol',input:[reasoning()]})).toString('base64')});
   f.store.ingest(row); const saved = f.store.detail(row.id); assert(!saved.processing_error);assert(saved.original && saved.masked);
   assert.deepEqual(saved.inspection_warnings,['OPAQUE_ENCRYPTED_REASONING']);assert.equal(f.store.payload(row.id,'original','request').body.toString('base64'),row.request);
-  const push = new ConversationPushStore(f.store).initialize(); assert(!push.copyReady(push.metadata(row.id),'masked',policy)); assert(push.copyReady(push.metadata(row.id),'original',policy));
+  const push = new ConversationPushStore(f.store).initialize();assert.deepEqual(push.copySelection(push.metadata(row.id),'masked',policy),{source:'original',fallbackReason:'INSPECTION_INCOMPLETE',blocked:''});assert(push.copyReady(push.metadata(row.id),'original',policy));
 });
 
 test('additive completion migration never decodes history at startup or changes archived ciphertext', t => {

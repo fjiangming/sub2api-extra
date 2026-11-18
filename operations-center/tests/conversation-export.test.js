@@ -43,12 +43,15 @@ test('latest N uses stable list ordering, all current filters and no pagination 
   }
   const newest=data.select({limit:1}).rows[0];
   f.store.db.prepare('UPDATE cl_records SET masked=NULL WHERE id=?').run(newest.id);
-  const selected=data.select({limit:1});assert.equal(selected.selected,1);assert.equal(selected.rows.length,0);assert.equal(selected.skipped.COPY_UNAVAILABLE,1);
+  const selected=data.select({limit:1});assert.equal(selected.selected,1);assert.equal(selected.rows.length,1);
+  const fallback=data.envelope(selected,selected.rows[0]);assert.equal(fallback.source,'original');assert.equal(fallback.fallback_reason,'COPY_UNAVAILABLE');
+  f.store.db.prepare('UPDATE cl_records SET original=NULL WHERE id=?').run(newest.id);
+  const missing=data.select({limit:1});assert.equal(missing.rows.length,0);assert.equal(missing.skipped.COPY_UNAVAILABLE,1);
   assert.throws(()=>data.select({filter:{start:'bad'}}),{code:'CONVERSATION_INVALID_INPUT'});
   f.store.db.exec('DELETE FROM cl_record_metadata');assert.throws(()=>data.select({}),{code:'CONVERSATION_EXPORT_HISTORY_PREPARING'});
 });
 
-test('export applies current exclusion and masking gates without raw fallback, while keeping incomplete diagnostics',t=>{
+test('export uses original fallback for unavailable masking, retains diagnostics, and enforces exclusions',t=>{
   const f=fixture();t.after(()=>f.close());
   const states=['safe','failed','warnings','outdated','pending','missing','excluded','partial'];
   for (const name of states) f.store.ingest(event('export-'+name,{user_id:name==='excluded'?7:2,complete:name!=='partial',reason:name==='partial'?'read_error':''}));
@@ -59,11 +62,16 @@ test('export applies current exclusion and masking gates without raw fallback, w
   f.store.db.prepare('UPDATE cl_records SET original=NULL,masked=NULL WHERE id=?').run(id('export-missing'));
   f.store.configure({...f.store.policy(),excludedUserIds:[7]});
   const data=new ConversationExportData(f.store),masked=data.select({limit:100});
-  assert.deepEqual(masked.rows.map(row=>row.id).sort(),[id('export-safe'),id('export-partial')].sort());
-  assert.deepEqual(masked.skipped,{PROCESSING_FAILED:1,INSPECTION_INCOMPLETE:1,REDACTION_OUTDATED:1,PROCESSING_PENDING:1,COPY_UNAVAILABLE:1,COLLECTION_EXCLUDED:1});
+  assert.equal(masked.rows.length,6);
+  assert.deepEqual(masked.skipped,{COPY_UNAVAILABLE:1,COLLECTION_EXCLUDED:1});
+  for (const [name,reason] of [['failed','PROCESSING_FAILED'],['warnings','INSPECTION_INCOMPLETE'],['outdated','REDACTION_OUTDATED'],['pending','PROCESSING_PENDING']]) {
+    const copy=data.envelope(masked,masked.rows.find(row=>row.id===id('export-'+name)));
+    assert.equal(copy.source,'original');assert.equal(copy.requested_source,'masked');assert.equal(copy.fallback_reason,reason);
+    assert.equal(copy.request,event().request);assert.equal(copy.checksums.request.sha256,checksum(Buffer.from(event().request,'base64')));
+  }
   const partial=data.envelope(masked,masked.rows.find(row=>!row.complete));assert.equal(partial.metadata.complete,false);assert.equal(partial.metadata.reason,'read_error');
   assert(!Buffer.from(partial.request,'base64').toString().includes('alice@example.com'));
-  const original=data.select({source:'original'});assert.equal(original.rows.length,5);assert.equal(original.skipped.PROCESSING_PENDING,1);
+  const original=data.select({source:'original'});assert.equal(original.rows.length,6);assert.deepEqual(original.skipped,{COPY_UNAVAILABLE:1,COLLECTION_EXCLUDED:1});
   assert.equal(data.envelope(original,original.rows[0]).source,'original');
   f.store.configure({...f.store.policy(),modelFilterEnabled:true,allowedModels:['other-model'],kimiK3Plus:false});
   assert.equal(data.select({source:'original'}).skipped.COLLECTION_EXCLUDED,8);
@@ -130,14 +138,39 @@ test('real native JSONL download preserves JSON numbers, whitespace, compressed 
   await until(()=>!f.exporter.child);assert(!f.archive.child,'export must not start or restart the collector');
 });
 
-test('masked native export reports skipped latest records without sending originals or backfilling older rows',async t=>{
+test('masked native export preserves latest N with marked original fallbacks and reports actual counts',async t=>{
   const f=await setup(t),at=Date.now()-5000;
   for (let n=0;n<4;n++) f.store.ingest(event('export-mask-'+n,{at:at+n}));
   f.store.db.prepare("UPDATE cl_records SET masked=NULL,processing_error='INVALID_JSON' WHERE id=?").run(id('export-mask-3'));
   const value=await f.start({limit:2}),response=await f.download(value),body=await response.text();assert.equal(response.status,200);
-  assert.equal(lines(body).length,1);assert.equal(lines(body)[0].metadata.id,id('export-mask-2'));assert(!Buffer.from(lines(body)[0].request,'base64').toString().includes('alice@example.com'));
-  const result=await f.done(value.job);assert.equal(result.selected,2);assert.equal(result.exported,1);assert.deepEqual(result.skipped,{PROCESSING_FAILED:1});
+  assert.equal(lines(body).length,2);assert.deepEqual(lines(body).map(row=>row.metadata.id),[id('export-mask-3'),id('export-mask-2')]);
+  assert.equal(lines(body)[0].source,'original');assert.equal(lines(body)[0].requested_source,'masked');assert.equal(lines(body)[0].fallback_reason,'PROCESSING_FAILED');
+  assert.equal(lines(body)[0].request,event().request);assert.equal(lines(body)[1].source,'masked');assert(!Buffer.from(lines(body)[1].request,'base64').toString().includes('alice@example.com'));
+  const result=await f.done(value.job);assert.equal(result.selected,2);assert.equal(result.exported,2);assert.deepEqual(result.skipped,{});
+  assert.equal(result.fallbacks,1);assert.deepEqual(result.fallbackReasons,{PROCESSING_FAILED:1});
+  f.store.db.prepare('UPDATE cl_records SET original=NULL WHERE id=?').run(id('export-mask-3'));
   const empty=await f.start({limit:1});assert.equal((await f.download(empty)).status,409);assert.equal((await f.done(empty.job)).errorCode,'CONVERSATION_EXPORT_EMPTY');
+});
+
+test('corrupted masked ciphertext falls back to exact original bytes with a read failure marker',t=>{
+  const f=fixture();t.after(()=>f.close());const row=event('corrupt-mask');f.store.ingest(row);
+  f.store.db.prepare('UPDATE cl_records SET masked=? WHERE id=?').run(Buffer.from('invalid encrypted copy'),row.id);
+  const data=new ConversationExportData(f.store),selection=data.select({limit:1}),copy=data.envelope(selection,selection.rows[0]);
+  assert.equal(copy.source,'original');assert.equal(copy.fallback_reason,'MASKED_READ_FAILED');assert.equal(copy.requested_source,'masked');
+  assert.equal(copy.request,row.request);assert.equal(copy.response,row.response);
+  assert.equal(copy.checksums.response.sha256,checksum(Buffer.from(row.response,'base64')));
+});
+
+test('original fallbacks preserve compressed SSE and binary WebSocket frames byte for byte',t=>{
+  const f=fixture();t.after(()=>f.close());f.store.configure({...f.store.policy(),mode:'original'});
+  const compressed=zlib.gzipSync(Buffer.from('data: {"message":"alice@example.com"}\n\ndata: [DONE]\n\n'));
+  const rows=[event('fallback-sse',{policy_version:f.store.policy().version,encoding:'gzip',protocol:'SSE',response:compressed.toString('base64')}),
+    event('fallback-ws',{policy_version:f.store.policy().version,protocol:'WebSocket',frames:[{at:2,direction:'in',binary:true,body:Buffer.from([0,255,13,10]).toString('base64')}]})];
+  for(const row of rows)f.store.ingest(row);
+  const data=new ConversationExportData(f.store),selection=data.select({limit:2});assert.equal(selection.rows.length,2);
+  for(const selected of selection.rows){const input=rows.find(row=>row.id===selected.id),copy=data.envelope(selection,selected);
+    assert.equal(copy.source,'original');assert.equal(copy.fallback_reason,'COPY_UNAVAILABLE');assert.equal(copy.request,input.request);
+    assert.equal(copy.response,input.response);assert.deepEqual(copy.frames,input.frames);assert.equal(copy.metadata.encoding,input.encoding);}
 });
 
 test('download tickets require CSRF to create, bind the original live admin session, work without cookies and cannot replay or alter scope',async t=>{

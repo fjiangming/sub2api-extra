@@ -57,6 +57,7 @@ async function main() {
         assert.equal(receipts.length,2);assert(receipts.every(row=>row.body.schema==='sub2api.conversation.test.v1'));
         await layout();await shot('configuration');
         const row=event(name+'-automatic');preview.fixture.store.ingest(row);await waitJobs('sent',2);
+        await page.locator('#clp-jobs').filter({hasText:'已固定脱敏副本'}).waitFor();
         const sent=receipts.filter(item=>item.body.schema==='sub2api.conversation.v1');assert.equal(sent.length,2,JSON.stringify({schemas:receipts.map(item=>item.body.schema),counts:preview.push.store.list().counts}));assert(sent.every(item=>!Buffer.from(item.body.request,'base64').toString().includes('alice@example.com')));
         assert(sent.some(item=>item.headers.authorization?.startsWith('AWS4-HMAC-SHA256')));assert(sent.some(item=>item.headers['idempotency-key']===item.body.delivery_id));
         await page.locator('#clp-history [name=search]').fill(preview.raw.id);await page.locator('#clp-preview').click();await page.locator('#clp-acknowledge').waitFor();
@@ -114,6 +115,15 @@ async function main() {
         const partialBody=jsonlTarget.completed.flatMap(file=>file.body.toString().trimEnd().split('\n').map(JSON.parse)).find(body=>body.metadata?.id===partial.id);
         assert.equal(partialBody.metadata.complete,false);assert.equal(partialBody.metadata.reason,'read_error');assert.equal(partialBody.source,'masked');
         assert(!Buffer.from(partialBody.request,'base64').toString().includes('alice@example.com'));
+        const fallback=event(name+'-original-fallback',{model:'Opus5',response:Buffer.from('{invalid').toString('base64')});preview.fixture.store.ingest(fallback);
+        await until(()=>preview.push.store.list().counts.some(row=>row.status==='buffered'&&row.count===1));
+        await page.locator('#clp-flush').click();await waitJobs('sent',12);
+        const fallbackBody=jsonlTarget.completed.flatMap(file=>file.body.toString().trimEnd().split('\n').map(JSON.parse)).find(body=>body.metadata?.id===fallback.id);
+        assert.equal(fallbackBody.source,'original');assert.equal(fallbackBody.requested_source,'masked');assert.equal(fallbackBody.fallback_reason,'PROCESSING_FAILED');
+        assert.equal(fallbackBody.request,fallback.request);assert.equal(fallbackBody.response,fallback.response);
+        await page.locator('[data-clp-action=refresh]').click();await page.locator('#clp-skipped').filter({hasText:'回退原文'}).waitFor();
+        await page.locator('#clp-history [name=search]').fill(fallback.id);await page.locator('#clp-preview').click();
+        await page.locator('#clp-preview-result').filter({hasText:'回退原文 1 条'}).waitFor();await layout();await shot('original-fallback');
         await field('webhookToken').fill('unsaved-sensitive-value');await page.locator('[data-clp-action=refresh]').click();assert.equal(await field('webhookToken').inputValue(),'unsaved-sensitive-value');
         await page.locator('#cl-tab-requests').click();assert.equal(await page.locator('#clp-form').count(),0);
         await page.locator('#cl-tab-push').click();await field('webhookToken').waitFor();assert.equal(await field('webhookToken').inputValue(),'');

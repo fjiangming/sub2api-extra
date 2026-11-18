@@ -86,7 +86,7 @@ test('permanent retention preserves history, capacity refuses a whole new record
   assert(f.store.ingest(next).accepted);
 });
 
-test('partial records and outdated masked copies cannot enter automatic/manual delivery or escape a queued recheck', t => {
+test('explicit complete scope excludes partial records while outdated masking falls back at queued recheck', t => {
   const f = fixture(); t.after(() => f.close());
   const push = new ConversationPushStore(f.store).initialize();
   push.configure({ ...push.policy(), enabled: true, automatic: true, webhook: { enabled: true, url: 'https://receiver.example/logs' } });
@@ -94,9 +94,10 @@ test('partial records and outdated masked copies cannot enter automatic/manual d
   for (const row of [complete,partial,stale]) f.store.ingest(row);
   f.store.db.prepare('UPDATE cl_records SET redaction_version=0 WHERE id=?').run(stale.id);
   const selected = push.preview({ filter: {}, destinations: ['webhook'] });
-  assert.equal(selected.eligible,1); assert.equal(selected.unavailable,2); assert.equal(push.scanAutomatic().created,1);
+  assert.equal(selected.eligible,2); assert.equal(selected.unavailable,1); assert.equal(selected.fallbacks,1); assert.equal(push.scanAutomatic().created,2);
   f.store.configure({ ...f.store.policy(), identity: false });
-  assert.equal(push.claim(),null); assert.equal(push.list().items[0].error_code,'REDACTION_OUTDATED');
+  for(let n=0;n<2;n++){const job=push.claim();assert(job);const body=push.envelope(job);assert.equal(body.source,'original');assert.equal(body.fallback_reason,'REDACTION_OUTDATED');push.finish(job,{status:'sent'});}
+  assert.equal(push.claim(),null);
   push.configure({ ...push.policy(), source: 'original' });
   assert.equal(push.preview({ filter: {}, destinations: ['webhook'] }).eligible,2);
   assert.equal(push.preview({ filter: { capture: 'partial' }, destinations: ['webhook'] }).eligible,0);

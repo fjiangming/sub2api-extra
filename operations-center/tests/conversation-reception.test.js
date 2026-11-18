@@ -172,14 +172,15 @@ test('interrupted processing has a durable retry bound with an explicit recovera
   assert.equal(f.store.payload(row.id, 'original', 'request').body.toString('base64'), row.request);
 });
 
-for (const source of ['original', 'masked']) test('pending receipts cannot be exported and automatic delivery resumes without skipping: ' + source, t => {
+for (const source of ['original', 'masked']) test('pending receipts permit manual original output while automatic delivery waits without skipping: ' + source, t => {
   const f = fixture(); t.after(() => f.close()); const push = configurePush(f.store, source);
   const first = v2('pending-push-first'), second = v2('pending-push-second');
   f.store.receive(first); f.store.receive(second); f.store.processPending(second.id);
   const cursor = push.db.prepare('SELECT row_id FROM cl_push_cursor').get().row_id;
   assert.equal(push.scanAutomatic().created, 0);
   assert.equal(push.db.prepare('SELECT row_id FROM cl_push_cursor').get().row_id, cursor);
-  assert.equal(push.preview({ filter: { search: first.id }, destinations: ['webhook'] }).eligible, 0);
+  const pending=push.preview({ filter: { search: first.id }, destinations: ['webhook'] });assert.equal(pending.eligible,1);
+  assert.equal(pending.fallbacks,source==='masked'?1:0);
   f.store.processPending(first.id);
   assert.equal(push.scanAutomatic().created, 2); assert.equal(push.scanAutomatic().created, 0);
   assert.equal(push.pendingCount(), 2);
