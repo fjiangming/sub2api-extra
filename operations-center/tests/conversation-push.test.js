@@ -51,6 +51,56 @@ test('push defaults are off; configuration is encrypted, CAS protected, and secr
   assert.throws(()=>configure(f,{s3:{...f.push.policy().s3,enabled:true,endpoint:'https://s3.example/bucket'}}));
 });
 
+test('capture scope and JSONL speed retain defaults and survive older clients omitting new fields',t=>{
+  const f=setup(t);assert.equal(f.push.policy().captureScope,'complete');assert.equal(f.push.policy().s3.jsonl.uploadMiBPerSecond,2);
+  const old=structuredClone(f.push.policy());delete old.captureScope;delete old.s3.jsonl.uploadMiBPerSecond;
+  f.push.db.prepare('UPDATE cl_push_policies SET body=? WHERE version=1').run(f.store.seal(old,'push-policy:1'));
+  assert.equal(f.push.policy().captureScope,'complete');assert.equal(f.push.policy().s3.jsonl.uploadMiBPerSecond,2);
+  configure(f,{captureScope:'all',s3:{...f.push.policy().s3,jsonl:{...f.push.policy().s3.jsonl,uploadMiBPerSecond:0.5}}});
+  const client=structuredClone(f.push.policy());delete client.captureScope;delete client.s3.jsonl.uploadMiBPerSecond;
+  f.push.configure(client);assert.equal(f.push.policy().captureScope,'all');assert.equal(f.push.policy().s3.jsonl.uploadMiBPerSecond,0.5);
+  for(const rate of [0,0.24,64.1,Infinity])assert.throws(()=>configure(f,{s3:{...f.push.policy().s3,jsonl:{...f.push.policy().s3.jsonl,uploadMiBPerSecond:rate}}}));
+  assert.throws(()=>configure(f,{captureScope:'completed-model'}));
+  for(const value of [null,undefined,[],0,'invalid'])assert.throws(()=>f.push.configure(value),{code:'CONVERSATION_PUSH_INVALID'});
+});
+
+test('explicitly including unconfirmed transport preserves raw errors, diagnostics and exact body bytes',t=>{
+  const f=setup(t);f.store.configure({...f.store.policy(),mode:'dual'});configure(f,{automatic:true,source:'original'});
+  const row=event('scope-diagnostics',{capture_version:2,protocol:'SSE',complete:false,reason:'read_error',
+    response:Buffer.from('data: {"type":"response.completed","response":{"id":"resp_scope","object":"response","status":"completed","output":[]}}\n\n').toString('base64')});
+  row.body_sha256=require('../src/conversation-log-store').bodyDigest({request:Buffer.from(row.request,'base64'),response:Buffer.from(row.response,'base64'),frames:[]});
+  row.transport_diagnostics={version:1,request:{bytes:Buffer.from(row.request,'base64').length,expected_bytes:-1,eof:true,error:'',error_during_close:false},
+    response:{bytes:Buffer.from(row.response,'base64').length,expected_bytes:-1,eof:false,error:'cancelled',error_during_close:true}};
+  f.store.ingest(row);const input={filter:{},destinations:['webhook']};
+  assert.equal(f.push.preview(input).eligible,0);assert.deepEqual(f.push.preview(input).unavailableReasons,{INCOMPLETE_CAPTURE:1});
+  configure(f,{captureScope:'all',source:'original'});const original=batch(f).result;assert.equal(original.created,1);
+  const job=f.push.claim(),body=f.push.envelope(job);assert.equal(body.request,row.request);assert.equal(body.response,row.response);
+  assert.equal(body.metadata.complete,false);assert.equal(body.metadata.reason,'read_error');assert.equal(body.metadata.upstream_status,'completed');
+  assert.deepEqual(body.metadata.transport_diagnostics,row.transport_diagnostics);
+  configure(f,{captureScope:'all',source:'masked'});assert.equal(batch(f).result.created,1);
+  const masked=f.push.claim();assert.equal(masked.source,'masked');assert(!Buffer.from(f.push.envelope(masked).request,'base64').toString().includes('alice@example.com'));
+  configure(f,{captureScope:'complete',source:'masked'});assert.equal(f.push.validJob(masked).cancel,'INCOMPLETE_CAPTURE');
+});
+
+test('preview and automatic skips distinguish privacy gates; all scope never falls back to raw',t=>{
+  const f=setup(t);configure(f,{automatic:true,captureScope:'all'});
+  const failed=event('skip-failed',{response:Buffer.from('{invalid').toString('base64')}),warning=event('skip-warning'),outdated=event('skip-outdated'),missing=event('skip-missing'),excluded=event('skip-excluded',{user_id:3});
+  for(const row of [failed,warning,outdated,missing,excluded])f.store.ingest(row);
+  f.store.db.prepare('UPDATE cl_records SET inspection_warnings=? WHERE id=?').run('["OPAQUE_IMAGE"]',warning.id);
+  f.store.db.prepare('UPDATE cl_records SET redaction_version=0 WHERE id=?').run(outdated.id);
+  f.store.db.prepare('UPDATE cl_records SET masked=NULL WHERE id=?').run(missing.id);
+  f.store.configure({...f.store.policy(),excludedUserIds:[3]});
+  const preview=f.push.preview({filter:{},destinations:['webhook']});
+  assert.equal(preview.eligible,0);assert.equal(preview.excluded,1);
+  assert.deepEqual(preview.unavailableReasons,{PROCESSING_FAILED:1,INSPECTION_INCOMPLETE:1,REDACTION_OUTDATED:1,COPY_UNAVAILABLE:1});
+  f.push.scanAutomatic();f.push.scanAutomatic();assert.equal(f.push.list().total,0);
+  const skipped=Object.fromEntries(f.push.list().skipped.map(row=>[row.code,row.count]));
+  assert.deepEqual(skipped,{COLLECTION_EXCLUDED:1,COPY_UNAVAILABLE:1,INSPECTION_INCOMPLETE:1,PROCESSING_FAILED:1,REDACTION_OUTDATED:1});
+  const pending=event('skip-pending');f.store.receive(pending);assert(f.push.scanAutomatic().processing);
+  assert.equal(f.push.preview({filter:{search:pending.id},destinations:['webhook']}).unavailableReasons.PROCESSING_PENDING,1);
+  assert.equal(f.push.list().total,0);
+});
+
 test('manual batches bind preview to content and policy, deduplicate, and require matching UUID parameters',t=>{
   const f=setup(t);configure(f);f.store.ingest(event('manual'));
   const value=batch(f);assert.equal(value.preview.jobs,1);assert.equal(value.result.created,1);

@@ -44,6 +44,7 @@ const { ConversationPushSupervisor } = require('./services/conversation-push-sup
 const { ConversationCleanupService } = require('./services/conversation-cleanup-service');
 const { ConversationRepairService } = require('./services/conversation-repair-service');
 const { ConversationReadService } = require('./services/conversation-read-service');
+const { ConversationExportService } = require('./services/conversation-export-service');
 
 async function main() {
   const settingsStore = new RuntimeSettingsStore(resolveDataDir());
@@ -105,6 +106,10 @@ async function main() {
     onAdminToken: (token, expiresAt) => sub2api.setRuntimeToken(token, expiresAt),
     onAdminTokenCleared: (token) => sub2api.clearRuntimeToken(token)
   });
+  const conversationExport = conversations ? new ConversationExportService(conversations,auth,{
+    canWork:() => conversationArchive?.idleForHistory && !conversationCleanup?.child && !conversationRepair?.child
+      && !conversationRead?.active && !conversationRead?.queue.length && !conversationRead?.draining
+  }) : null;
   const inspector = new SchemaInspector(database.read);
   const billingImportStore = new BillingImportStore(billingRecoveryStore);
   billingImportStore.initialize();
@@ -153,7 +158,7 @@ async function main() {
     sub2api
   });
   const app = createApp({
-    config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationRead, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
+    config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationRead, conversationExport, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
   });
   const server = http.createServer(app);
   server.requestTimeout = 120000;
@@ -182,6 +187,7 @@ async function main() {
     stopping = true;
     console.info(`operations-center shutting down (${signal})`);
     scheduler.stop();
+    await conversationExport?.stop();
     await conversationRead?.stop();
     await conversationCleanup?.stop();
     await conversationRepair?.stop();

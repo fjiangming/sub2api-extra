@@ -3,6 +3,7 @@
 const http = require('node:http');
 const crypto = require('node:crypto');
 const assert = require('node:assert/strict');
+const { parseXmlBody } = require('@aws-sdk/core/protocols');
 
 async function s3Receiver({ beforeRequest } = {}) {
   const uploads = new Map(), objects = new Map(), requests = [], completed = [];
@@ -30,6 +31,14 @@ async function s3Receiver({ beforeRequest } = {}) {
       }
       if (req.method === 'POST') {
         const parts = [...upload.parts.entries()].sort((a, b) => a[0] - b[0]);
+        const xml = await parseXmlBody(body, { utf8Encoder: bytes => Buffer.from(bytes).toString('utf8') });
+        const receipt = Array.isArray(xml.Part) ? xml.Part : [xml.Part];
+        assert.equal(receipt.length, parts.length);
+        for (const [index, [number, part]] of parts.entries()) {
+          assert.equal(Number(receipt[index].PartNumber), number);
+          assert.equal(receipt[index].ETag, '"' + crypto.createHash('md5').update(part).digest('hex') + '"');
+          assert.equal(receipt[index].ChecksumSHA256, crypto.createHash('sha256').update(part).digest('base64'));
+        }
         assert(parts.length); for (const [index, part] of parts.slice(0, -1)) assert(part.length >= 5 * 1024 ** 2, 'Non-final S3 part must be at least 5 MiB: ' + index);
         const content = Buffer.concat(parts.map(([,part]) => part)); objects.set(entry.path, content); completed.push({ path: entry.path, body: content }); uploads.delete(id);
         res.setHeader('content-type', 'application/xml'); res.end(`<CompleteMultipartUploadResult><Location>http://localhost</Location><Bucket>fixture</Bucket><Key>${entry.path}</Key><ETag>"complete"</ETag></CompleteMultipartUploadResult>`); return;

@@ -27,7 +27,8 @@ function setup(t, { now = Date.now, jsonlOptions, supervisor = false, memoryBudg
 function configure(f, url = 'https://storage.example', extra = {}) {
   const current = f.push.policy();
   return f.push.configure({ ...current, enabled: true, source: 'original', allowPrivateNetwork: url.startsWith('http:'), ...extra,
-    s3: { ...current.s3, enabled: true, endpoint: url, bucket: 'incoming-04-20260624', prefix: '', accessKeyId: 'fictional-id', secretAccessKey: 'fictional-secret', ...extra.s3 } });
+    s3: { ...current.s3, enabled: true, endpoint: url, bucket: 'incoming-04-20260624', prefix: '', accessKeyId: 'fictional-id', secretAccessKey: 'fictional-secret', ...extra.s3,
+      jsonl: { ...current.s3.jsonl, uploadMiBPerSecond: 64, ...extra.s3?.jsonl } } });
 }
 function enqueue(f, filter = {}) {
   const input = { filter, destinations: ['s3'] }, preview = f.push.preview(input);
@@ -133,7 +134,7 @@ test('timing and size configuration changes preserve a daily manifest and its pe
   assert.equal(f.push.list().items[0].status, 'sent');
 });
 
-test('failed multipart is never marked sent; retry aborts stale upload and reuses identical object key and bytes', async t => {
+test('failed multipart is never marked sent; retry reuses the upload ID, object key and identical bytes', async t => {
   let rejectPart = true;
   const receiver = await s3Receiver({ beforeRequest: (entry, res) => {
     if (rejectPart && entry.method === 'PUT') { res.writeHead(403, { 'content-type': 'application/xml' }); res.end('<Error><Code>AccessDenied</Code></Error>'); return false; }
@@ -142,7 +143,10 @@ test('failed multipart is never marked sent; retry aborts stale upload and reuse
   const file = f.jsonl.list().files[0]; assert.equal(file.status, 'failed'); assert.equal(f.push.list().items[0].status, 'failed'); assert.equal(receiver.completed.length, 0);
   rejectPart = false; f.jsonl.retry(file.id); await f.service.jsonl.tick();
   assert.equal(f.jsonl.get(file.id).status, 'sent'); assert.equal(receiver.completed[0].path, '/incoming-04-20260624/' + file.object_key);
-  assert(receiver.requests.some(row => row.method === 'DELETE')); assert.equal(receiver.uploads.size, 0);
+  assert(!receiver.requests.some(row => row.method === 'DELETE')); assert.equal(receiver.uploads.size, 0);
+  assert.equal(receiver.requests.filter(row => row.query.has('uploads')).length, 1);
+  const sent = receiver.requests.filter(row => row.method === 'PUT');
+  assert.equal(sent[0].query.get('uploadId'), sent[1].query.get('uploadId')); assert.deepEqual(sent[0].body, sent[1].body);
 });
 
 test('a lost Complete receipt retries byte-identical content at the same key without duplicating lines', async t => {
@@ -157,6 +161,9 @@ test('a lost Complete receipt retries byte-identical content at the same key wit
   const file = f.jsonl.list().files[0]; assert.equal(file.status, 'pending'); assert.equal(receiver.completed.length, 1);
   f.store.db.prepare('UPDATE cl_records SET processed_at=processed_at+1,processing_policy_version=processing_policy_version+1 WHERE id=?').run(row.id);
   now += 5001; await f.service.jsonl.tick();
+  assert.equal(f.jsonl.get(file.id).status, 'pending'); assert.equal(f.jsonl.get(file.id).error_code, 'MULTIPART_RESTART');
+  assert.equal(receiver.completed.length, 1);
+  now += 10001; await f.service.jsonl.tick();
   assert.equal(f.jsonl.get(file.id).status, 'sent'); assert.equal(receiver.completed.length, 2); assert.equal(receiver.objects.size, 1);
   assert.equal(receiver.completed[0].path, receiver.completed[1].path); assert.deepEqual(receiver.completed[0].body, receiver.completed[1].body);
   assert.equal(JSON.parse([...receiver.objects.values()][0].toString()).delivery_id, f.push.list().items[0].id);

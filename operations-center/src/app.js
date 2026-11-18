@@ -142,7 +142,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationRead, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationRead, conversationExport, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -286,6 +286,12 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
     auth.logout(req, res);
     res.status(204).end();
   });
+  // A one-use capability supports native streaming downloads in header-authenticated embeds.
+  app.get('/api/conversation-logs/exports/:id/download', (req,res,next) => {
+    res.set({'cache-control':'no-store','referrer-policy':'no-referrer'});
+    if (!conversationExport) return next(new AppError('CONVERSATION_EXPORT_UNAVAILABLE','日志导出暂不可用',{status:503}));
+    conversationExport.download(req,res,next);
+  });
 
   const announcementLimiter = rateLimit({
     windowMs: 60000, limit: 300, standardHeaders: 'draft-8', legacyHeaders: false
@@ -364,6 +370,12 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.get('/conversation-logs/sessions', readConversation((req, res) => res.json(conversations.sessions(req.query))));
   api.get('/conversation-logs/records', readConversation((req, res) => res.json(conversations.list(req.query))));
   api.get('/conversation-logs/index', readConversation((req, res) => res.json(conversations.exportIndex(req.query))));
+  api.use('/conversation-logs/exports', (_req,_res,next) => conversationExport ? next() : next(new AppError('CONVERSATION_EXPORT_UNAVAILABLE','日志导出暂不可用',{status:503})));
+  const exportLimiter=rateLimit({windowMs:60000,limit:30,standardHeaders:'draft-8',legacyHeaders:false,
+    message:{error:{code:'CONVERSATION_EXPORT_RATE_LIMITED',message:'导出操作过于频繁，请稍后重试'}}});
+  api.post('/conversation-logs/exports',csrf,exportLimiter,(req,res) => res.status(201).json(conversationExport.create(req,req.body)));
+  api.get('/conversation-logs/exports/:id',(req,res) => res.json(conversationExport.status(req,req.params.id)));
+  api.post('/conversation-logs/exports/:id/cancel',csrf,(req,res) => res.json(conversationExport.cancel(req,req.params.id)));
   api.get('/conversation-logs/records/:id', readConversation((req, res) => res.json(conversations.detail(req.params.id))));
   api.post('/conversation-logs/records/:id/reprocess', csrf, rateLimit({ windowMs: 60000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false }),
     (req, res, next) => conversationArchive

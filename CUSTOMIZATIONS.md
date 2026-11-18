@@ -1,5 +1,46 @@
 # 个性化功能维护台账
 
+## 2026-11-18：提交 JSONL 功能与 1 GiB 内存模板
+
+用户明确要求提交 GitHub，随后追加先在本地修改内存再一起提交。本轮仅将以下“JSONL 下载与筛选下最近 N 条导出”和“JSONL 推送断点恢复、限速与完整性范围”两节对应的运营中心实现、测试、页面、说明及本节资源模板发布到 main。`operations-center/compose.yaml` 内存回退值改为 1g，`.env.example` 同步默认 1g，CPU 保持 1 核；`README.md`、`docs/conversation-logs.md`、`docs/conversation-jsonl-push.md` 说明镜像不能设置宿主配额，既有显式 512m / 自有 Compose 需相应调整并仅重建运营中心才生效。不自动覆盖显式资源值，不修改服务器配置或推送目标。不提交其他模块、域名迁移、部署脚本、只读生产报告、独立演示及混合台账中的无关内容，不连接、部署或重启主站 / 运营中心，不修改 Dockerfile、采集器或计费。以下两节中默认仍 512 MiB 的表述记录前轮状态，最终模板以本节 1 GiB 为准。
+
+沿用前轮完整 622 项测试、npm run check 和正式 Chrome 四布局下载 / 推送验证。提交前将 tests/conversation-export.test.js 的票据过期测试窗口延长至 400ms，并增大内存保护用例的首条前缀以确保先观察到真实流式响应，不依赖 IPC 与 HTTP 的调度先后；功能与权限不变。重新验证 19 项导出专项及相关语法，仅用本地 Compose config 解析核验 1 GiB 默认与显式覆盖、CPU 保持 1 核，不调用容器创建或部署。核对暂存范围与空白，保留所有未选中的本地修改。推送后核查当前提交的 GitHub Actions 测试、双架构构建和运营中心镜像发布；具体提交与远端执行结果以本次最终回复为准，不把代码提交当作服务器已更新。
+
+## 2026-11-18：JSONL 下载与筛选下最近 N 条导出
+
+用户追加要求将下载改为 JSONL，并支持最近 N 条。本轮延续既有 JSONL 推送优化，仅修改本地运营中心，不改主站、采集器、计费或原加密存储；不连接、部署、重启或变更服务器，不提交 / 推送 GitHub，保留所有既有无关差异。服务器资源建议仍等待用户确认。
+
+- `src/services/conversation-export-data.js`、`conversation-export-service.js`、`conversation-export-worker.js`（新增）：当前筛选下按列表相同的 at DESC / id 排序固定最近 1–10,000 条，默认 1,000，不受分页影响，不用更老记录填补不可导出的副本；共享推送 envelope 和分块 JSONL 序列化，完整 Request / Response / WS 帧以 Base64 保留原字节及校验摘要、原完整性和异常信息。默认脱敏，不自动回退原文；按当前用户 / 模型排除、待处理、脱敏失败、检查范围和规则版本分类跳过。下载使用独立低优先级、192 MiB old-space 只读子进程，单并发、默认 2 MiB/s、原生背压，无整文件页面 Blob / 多 GB 明文落盘 / 长时间数据库事务。按记录和约 256 KiB 检查点避让采集与交互读取；持续繁忙、内存保护、删改 / 规则变化、取消 / 登出、断连或进程中断均明确失败，不能把部分文件标成完成。最终字节和摘要完成回执由后台生成，只有上游流完整且向浏览器连接发送完成才标记成功，不声称浏览器已写入磁盘。
+- `src/conversation-push-store.js`：仅导出共享严格筛选 schema，不改变已有推送行为。`src/app.js`：新增管理员 + CSRF 创建 / 取消、所属会话状态查询，以及两分钟一次性、绑定原实时会话和固定导出参数的下载票据；支持只有 Session header 的内嵌页，URL 不含管理员 Session，不用 Cookie 作为下载前提。`src/server.js`：独立导出服务生命周期及采集 / 读取优先门禁；无主线程正文读取回退。
+- `public/conversation-export-ui.js`（新增）、`conversation-logs-ui.js`、`conversation-logs.css`、`index.html`：紧凑条数 / 副本设置、JSONL 下载 / 取消、进度及跳过原因，原始单侧 `.raw` 字节诊断下载保持；更新缓存版本。旧 CSV 索引 API 留作兼容，正式批量下载入口使用正文 JSONL。
+- `tests/conversation-export.test.js`（新增）、`scripts/conversation-logs-live-preview.cjs`、`conversation-logs-live-browser-check.cjs`、`package.json`：最近 N 排序 / 筛选 / 分页、逐字节 / 摘要、压缩 / SSE / WS / 部分采集、脱敏门禁 / 排除、真实票据鉴权和重放 / 撤销、内存及采集优先、在途删改 / 取消 / 断连 / 进程退出等专项和正式页面验证，纳入语法检查与隔离虚构预览。
+- `README.md`、`docs/conversation-logs.md`、`docs/conversation-jsonl-push.md` 与本台账：补充最近 N 的范围、跳过计数、JSONL 格式与中断处理，以及只更新运营中心、无新增强制环境变量；现有 512 MiB 默认不变，原建议 1 GiB 经确认后另行实施。
+
+验证：npm run check 通过，运营中心完整 **622 项测试全部通过，0 失败 / 跳过**（约 209 秒），含新增 19 项导出专项。最终将正常进度 IPC 改为每 250ms 至多一次，开始 / 暂停变化 / 失败 / 完成仍立即报告，避免大量小记录逐条上报抢占主进程；该调整后 19 项专项与新增模块语法检查再次通过，包含先输出一条后内存保护仍必须中止文件的情况。相关差异空白检查通过。
+
+正式 Chrome / Playwright 在 1440px、390px、320px 和深色偏好均完整通过，覆盖真实原生 JSONL 下载 / UTF-8 无 BOM / 原字节、分页不影响最近 N、筛选、原文和脱敏副本、跳过检查警告、无效 N、空结果不下载错误响应、采集优先暂停和取消不误下载、原有 raw / WS / 隐私 / 模型门禁 / 重处理 / 待处理 / 退出，无页面脚本错误和外网请求。截图目录 `sub2api-conversation-browser-l9E5Oc`，桌面和 320px 导出已视觉复核；旧“采集单条上限不存在”的页面断言收窄到保存策略表单，避免与新增导出 N 混淆。失败响应不使用浏览器 download 属性强制保存，只有有效附件才启动文件下载。
+
+最新独立预览 `http://127.0.0.1:19949/preview` 已启动（PID 36328），healthz / 页面均为 200，并确认加载新导出模块；保留此前预览。所有验证仅使用临时虚构数据和 loopback 服务，不读取生产正文、请求真实模型或外部 Bucket；共享 CPU / 内存 / IO 有有限成本，不承诺严格零延迟。未提交 / 推送 GitHub、部署、修改服务器配置或应用资源建议。
+
+## 2026-11-18：JSONL 推送断点恢复、限速与完整性范围
+
+用户要求在已有按日期 / 模型分组、10 GB 滚动 JSONL 方案上优化完善，并要求服务器配置等待确认。本轮仅修改本地运营中心，不改主站源码 / 采集器 / 计费，不连接、部署、重启或变更服务器，不提交 / 推送 GitHub，保留所有既有无关差异。
+
+- `src/services/conversation-push-policy.js`：新增 `captureScope`（默认 complete，可明确 all）及 JSONL 上传限速（默认 2 MiB/s，0.25–64），兼容旧加密策略和旧客户端省略新字段，非对象 / 空策略保持明确参数错误；范围和限速不改变目标身份，不触发历史任务重复投递。
+- `src/services/conversation-jsonl-flow.js`（新增）：支持可取消限速流和等待采集优先的检查点。`conversation-jsonl-transport.js`：单缓冲 / 单并发 8 MiB 分片、64 KiB 限速小块，超时增加限速发送预算；校验已确认分片、序列化前缀及整卷行数 / 字节 / SHA-256，复用上传 ID 和 PartNumber，不重复网络上传已确认分片，仍重新读取前缀校验。记录 / 分片间及约 256 KiB 序列化让行，禁止错标 Complete。
+- `src/conversation-jsonl-store.js`：加默认值的轻量列迁移和分片表，持久化 ETag / 大小 / SHA-256 / 进度；上传与回执受 lease / upload ID 保护，过期回执不清新状态。显示积压和保留期风险，到期前六小时提前封卷；取消立即安排残留上传清理，保留期和原归档删除策略不改变。`conversation-jsonl-service.js`：恢复、守护与优先级暂停、404 重建同 key、异常进度中止重建、旧版本上传清理、创建 ACK 无法落库时尽力中止；有限重试，不把未知送达当作成功。
+- `src/conversation-push-store.js`：推送范围对 Webhook / S3 JSON / JSONL 一致生效，all 仍保留原完整性、原因、上游证据与结构化传输诊断，保留待处理 / 脱敏 / 检查范围 / 排除门禁；预览与当前策略自动扫描返回分类跳过统计，不保存额外用户正文，不回退推送原文。
+- `public/conversation-push-ui.js`、`conversation-logs.css`、`index.html`：范围 / 限速配置、分片进度 / 采集优先暂停、积压 / 到期与跳过原因，更新缓存版本；保持原有管理鉴权和操作流程。
+- `compose.yaml`、`.env.example`：内存改为可选 `OPERATIONS_CENTER_MEMORY_LIMIT` 插值，未配置仍 512m，CPU 仍 1 核；仅说明确认后建议设 1g，不执行生产配置或部署。
+- `tests/conversation-jsonl-resume.test.js`（新增）、`conversation-jsonl.test.js`、`conversation-push.test.js`、`conversation-s3-fixture.js`：真实分片 / SQLite 重开续传、ACK 丢失、404 / 进度异常 / 内容变更、让行 / 租约 / 取消 / 排除 / 旧迁移 / 到期、低速超时与字节、范围 / 旧客户端 / 脱敏门禁和跳过原因；接收器结构化校验 Complete 分片清单、ETag 和摘要。`package.json` 纳入新模块 / 测试语法门禁，页面脚本补充新状态和四布局验证。
+- `README.md`、`docs/conversation-jsonl-push.md`、`docs/conversation-logs.md` 与本台账：更新接入、恢复成本、范围、保留期和服务器待确认清单。保留既有加密归档，推送时生成 JSONL，不落地多 GB 明文，不自动延长保留期或在送达后删除归档；共享资源仍有成本，不承诺严格零延迟或未收到字节可恢复。
+
+验证：运营中心完整 **603 项测试全部通过，0 失败 / 跳过**；npm run check 通过。最后非对象参数保护补充后，17 项推送回归及策略语法复核再次通过。新增恢复 / 限速专项 12 项通过，包含真实 SQLite 重开、真实多分片 / SHA / Complete 清单、丢失回执与按优先级暂停，低速 HTTP 实测超过普通 3 秒超时仍正确完成。首轮专项发现取消后的清理会沿用退避，已修正为立即安排并在专项和全套复核通过；模拟失败时 SDK 的流式重试诊断未被隐藏。
+
+正式 Chrome / Playwright 完整推送流程在 1440px、390px、320px 和深色偏好全部通过，含范围 / 限速保存恢复、Webhook / 旧 S3 / JSONL、历史批次、重试、进度 / 暂停 / 积压 / 到期、跳过原因、异常标记保持、XSS 字样转义、退出和无布局溢出；进度 / 到期组合为页面响应夹具，真实传输和恢复另由 HTTP / SQLite 测试覆盖。截图目录 `sub2api-push-browser-TuIUpv`，桌面与 320px 已视觉复核。Compose 使用启用的 profile 仅执行本地 config 解析，确认默认 536870912 字节、覆盖 1073741824 字节且 CPU 均为 1，不调用 Docker 部署。独立虚构数据预览 `http://127.0.0.1:19948/preview` 已启动（PID 24708），healthz / 页面均为 200，不占用既有预览。
+
+相关差异空白检查通过。全部验证仅使用临时虚构数据和 loopback 接收器，没有请求真实模型 / 外部 Bucket、读取生产正文或操作服务器。10 GB 边界为计数测试，实际传输验证为多 MiB，不声称已向对方平台上传 10 GB 或完成生产性能验收。服务器配额、目标凭据 / 权限、推送开关与范围等待用户确认；未提交 / 推送 GitHub 或部署。
+
 ## 2026-11-18：提交对话日志容量恢复修复
 
 用户明确要求“仅提交 github”。本轮只将运营中心容量统计修复、空间 / 暂停状态显示、相关测试 / 页面验证和说明推送 main；维护台账仅选择本节及“清空后容量恢复与空间统计修复”，保留其他模块、部署配置、先前只读报告及混合台账的无关差异。不连接服务器、不部署或重启，不修改主站源码和生产配置，沿用现有 GitHub Actions 双架构镜像构建发布。

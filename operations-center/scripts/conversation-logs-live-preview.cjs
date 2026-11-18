@@ -11,6 +11,7 @@ const { ConversationArchiveService } = require('../src/services/conversation-arc
 const { ConversationCleanupService } = require('../src/services/conversation-cleanup-service');
 const { ConversationRepairService } = require('../src/services/conversation-repair-service');
 const { ConversationReadService } = require('../src/services/conversation-read-service');
+const { ConversationExportService } = require('../src/services/conversation-export-service');
 
 async function startPreview({port = Number(process.env.CONVERSATION_PREVIEW_PORT || 19907),pushTransport,compatibilityExamples = false} = {}) {
   const f = fixture();
@@ -53,8 +54,9 @@ async function startPreview({port = Number(process.env.CONVERSATION_PREVIEW_PORT
   const cleanup = new ConversationCleanupService(f.store,{canWork:() => !archive.busy && !archive.processingBusy});
   const repair = new ConversationRepairService(f.store,{canWork:() => archive.idleForHistory && !cleanup.child});
   const read = new ConversationReadService(f.store,{configured:true,canWork:() => !archive.busy && !archive.processingBusy && !cleanup.child && !repair.child});
+  const exporter = new ConversationExportService(f.store,auth,{canWork:() => archive.idleForHistory && !cleanup.child && !repair.child && !read.active && !read.queue.length && !read.draining});
   await archive.start();
-  const app = createApp({config:f.config,auth,database:{},conversations:f.store,conversationArchive:archive,conversationRead:read,conversationPush:push,conversationCleanup:cleanup,conversationRepair:repair,messages:f.messages,settings:{getStatus:() => ({setupRequired:false})}});
+  const app = createApp({config:f.config,auth,database:{},conversations:f.store,conversationArchive:archive,conversationRead:read,conversationExport:exporter,conversationPush:push,conversationCleanup:cleanup,conversationRepair:repair,messages:f.messages,settings:{getStatus:() => ({setupRequired:false})}});
   const outer = express();
   outer.get('/preview',async (req,res,next) => { try { await auth.login(req,res,{username:f.config.adminUser,password:f.config.adminPassword}); res.redirect('/#conversations'); } catch(error) { next(error); } });
   outer.use(app);
@@ -68,7 +70,7 @@ async function startPreview({port = Number(process.env.CONVERSATION_PREVIEW_PORT
   repair.start();
   read.start();
   let stopped = false;
-  return {port:server.address().port,fixture:f,push,archive,cleanup,repair,read,raw,async stop() { if (stopped) return; stopped = true; await read.stop(); await repair.stop(); await cleanup.stop(); await push.stop(); await archive.stop(); auth.close(); await new Promise(resolve => server.close(resolve)); f.close(); }};
+  return {port:server.address().port,fixture:f,push,archive,cleanup,repair,read,exporter,raw,async stop() { if (stopped) return; stopped = true; await exporter.stop(); await read.stop(); await repair.stop(); await cleanup.stop(); await push.stop(); await archive.stop(); auth.close(); await new Promise(resolve => server.close(resolve)); f.close(); }};
 }
 if (require.main === module) startPreview({compatibilityExamples:true}).then(preview => {
   console.log(`Conversation archive formal-page preview (fictional local data): http://127.0.0.1:${preview.port}/preview`);

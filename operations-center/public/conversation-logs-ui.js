@@ -15,7 +15,7 @@
     let seq = 0, detailSeq = 0, searchSeq = 0, lifecycle = 0, controller = null, detailController = null, userController = null, searchTimer = null, indexTimer = null;
     let payloads = new Map(), excluded = new Set(), users = new Map(), sessionFilter = null, saving = false, dirty = false;
     const reprocessing = new Set();
-    let pushUi = null;
+    let pushUi = null, exportUi = null;
     const repairUi = root.ConversationRepairUi.create({api,escapeHtml:esc,icon,refreshIcons,isActive:() => isActive() && tab === 'collection'});
     const clearUi = root.ConversationClearUi.create({api,escapeHtml:esc,icon,refreshIcons,isActive,onChanged:() => { clearDetail(); page = 1; run(load); }});
     let cleanupState = null, cleanupBusy = false, cleanupTimer = null, cleanupController = null;
@@ -31,9 +31,10 @@
     function init() {
       container.innerHTML = `<div id="cl-notice" class="cl-notice" role="status"></div><div id="cl-metrics" class="cl-metrics"></div><div id="cl-index-notice" class="cl-notice amber" role="status" hidden></div><section id="cl-history-clear" aria-label="清空历史日志"></section>
         <div class="cl-tabs" role="tablist" aria-label="对话日志视图">${[['requests','list-filter','请求日志'],['sessions','messages-square','会话视图'],['collection','radio-tower','采集状态'],['policy','shield-check','保存策略'],['push','send','推送策略']].map(([id, glyph, label]) => `<button id="cl-tab-${id}" role="tab" data-cl-tab="${id}" aria-selected="${id === tab}" aria-controls="cl-${id}" tabindex="${id === tab ? 0 : -1}">${icon(glyph)}${label}</button>`).join('')}</div>
-        <section id="cl-requests" role="tabpanel" aria-labelledby="cl-tab-requests"><form id="cl-filter" class="cl-filters"><label class="cl-search">${icon('search')}<input name="search" aria-label="搜索请求、用户或模型" placeholder="请求 ID、用户 ID、模型" autocomplete="off"></label><input name="start" type="date" aria-label="开始日期"><input name="end" type="date" aria-label="结束日期"><select name="protocol" aria-label="协议"><option value="">全部协议</option><option>JSON</option><option>SSE</option><option>WebSocket</option></select><select name="capture" aria-label="采集完整性"><option value="">全部完整性</option><option value="complete">完整采集</option><option value="partial">部分采集</option><option value="missing">正文缺失</option><option value="redaction_failed">脱敏失败</option></select><button class="button secondary" type="submit">${icon('search')}查询</button>${tool('rotate-ccw','重置筛选','data-cl-action="reset-filter"')}${tool('download','导出筛选索引 CSV','data-cl-action="export"')}</form><div id="cl-session-filter"></div><div class="cl-explorer"><aside class="cl-records"><div id="cl-list"></div><div class="cl-pagination"><span id="cl-page-label"></span><div>${tool('chevron-left','上一页','id="cl-prev"')}${tool('chevron-right','下一页','id="cl-next"')}</div></div></aside><article id="cl-inspector" class="cl-inspector" aria-label="请求详情">${empty('选择一条请求查看原始请求与响应')}</article></div></section>
+        <section id="cl-requests" role="tabpanel" aria-labelledby="cl-tab-requests"><form id="cl-filter" class="cl-filters"><label class="cl-search">${icon('search')}<input name="search" aria-label="搜索请求、用户或模型" placeholder="请求 ID、用户 ID、模型" autocomplete="off"></label><input name="start" type="date" aria-label="开始日期"><input name="end" type="date" aria-label="结束日期"><select name="protocol" aria-label="协议"><option value="">全部协议</option><option>JSON</option><option>SSE</option><option>WebSocket</option></select><select name="capture" aria-label="采集完整性"><option value="">全部完整性</option><option value="complete">完整采集</option><option value="partial">部分采集</option><option value="missing">正文缺失</option><option value="redaction_failed">脱敏失败</option></select><button class="button secondary" type="submit">${icon('search')}查询</button>${tool('rotate-ccw','重置筛选','data-cl-action="reset-filter"')}</form><section id="cl-export" aria-label="导出 JSONL"></section><div id="cl-session-filter"></div><div class="cl-explorer"><aside class="cl-records"><div id="cl-list"></div><div class="cl-pagination"><span id="cl-page-label"></span><div>${tool('chevron-left','上一页','id="cl-prev"')}${tool('chevron-right','下一页','id="cl-next"')}</div></div></aside><article id="cl-inspector" class="cl-inspector" aria-label="请求详情">${empty('选择一条请求查看原始请求与响应')}</article></div></section>
         <section id="cl-sessions" role="tabpanel" aria-labelledby="cl-tab-sessions" hidden></section><section id="cl-collection" role="tabpanel" aria-labelledby="cl-tab-collection" hidden></section><section id="cl-policy" role="tabpanel" aria-labelledby="cl-tab-policy" hidden></section><section id="cl-push" role="tabpanel" aria-labelledby="cl-tab-push" hidden></section>`;
       pushUi = root.ConversationPushUi.create({container:$('push'),api,escapeHtml:esc,icon,refreshIcons,isActive:() => isActive() && tab === 'push'});
+      exportUi = root.ConversationExportUi.create({container:$('export'),api,escapeHtml:esc,icon,refreshIcons,isActive,getFilter:query});
       $('filter').addEventListener('submit', event => { event.preventDefault(); page = 1; run(load); });
       container.removeEventListener('click', handleClick); container.addEventListener('click', handleClick);
       container.querySelector('.cl-tabs').addEventListener('keydown', event => {
@@ -57,7 +58,7 @@
       const preparing = status.metadataIndex?.ready === false;
       $('index-notice').hidden = !preparing;
       $('index-notice').textContent = preparing ? `历史日志索引正在后台准备：${num(status.metadataIndex.indexed)} / ${num(status.metadataIndex.total)} 条。当前列表、会话和汇总仅包含已准备的记录，原始正文保留。` : '';
-      container.querySelector('[data-cl-action="export"]').disabled = preparing;
+      exportUi.setPreparing(preparing);
       $('notice').textContent = !status.configured ? '尚未配置主站采集连接' : !status.policy.enabled ? '对话日志保存已关闭' : storageNotice() || (!status.lastContact ? '等待主站采集连接' : Date.now() - status.lastContact > 60000 ? '近期未收到主站策略读取，请检查采集连接' : status.collectorVersion !== 2 ? '主站仍为旧采集器，正文可能截断；需要同时升级主站' : '采集连接正常');
       setPageMeta(`上游请求与响应归档 · ${status.timezone} · 策略 v${status.policy.version}`);
     }
@@ -331,14 +332,13 @@
       if (action === 'close-detail') clearDetail();
       if (action === 'reset-filter') { $('filter').reset(); sessionFilter = null; page = 1; run(load); }
       if (action === 'clear-session') { sessionFilter = null; page = 1; run(load); }
-      if (action === 'export') run(async () => { const value = await api(url('index')); if (!isActive()) return; download(new Blob(['\ufeff',value.csv],{type:'text/csv;charset=utf-8'}),'conversation-index.csv'); });
       if (action === 'clear-users') { excluded.clear(); updateExcluded(); markDirty(); }
       if (action === 'search-users') run(searchUsers);
       if (action === 'add-rule') { addRule(); markDirty(); }
       if (action === 'remove-rule') { node.closest('.cl-custom-rule').remove(); markDirty(); }
       if (action === 'discard-policy') { dirty = false; run(load); }
     }
-    function leave() { ++seq; ++detailSeq; ++searchSeq; ++lifecycle; controller?.abort(); detailController?.abort(); userController?.abort(); cleanupController?.abort(); clearTimeout(indexTimer); clearTimeout(cleanupTimer); cleanupState = null; cleanupBusy = false; pushUi?.leave(); repairUi.leave(); clearUi.leave(); clearTimeout(searchTimer); payloads.clear(); detail = null; report = null; dirty = false; if ($('index-notice')) $('index-notice').hidden = true; for (const id of ['inspector','list','sessions','collection','policy','metrics','notice','history-clear']) if ($(id)) $(id).innerHTML = ''; }
+    function leave() { ++seq; ++detailSeq; ++searchSeq; ++lifecycle; controller?.abort(); detailController?.abort(); userController?.abort(); cleanupController?.abort(); clearTimeout(indexTimer); clearTimeout(cleanupTimer); cleanupState = null; cleanupBusy = false; pushUi?.leave(); exportUi?.leave(); repairUi.leave(); clearUi.leave(); clearTimeout(searchTimer); payloads.clear(); detail = null; report = null; dirty = false; if ($('index-notice')) $('index-notice').hidden = true; for (const id of ['inspector','list','sessions','collection','policy','metrics','notice','history-clear']) if ($(id)) $(id).innerHTML = ''; }
     function reset() { leave(); status = null; policy = null; users.clear(); excluded.clear(); sessionFilter = null; page = 1; tab = 'requests'; container.innerHTML = ''; init(); }
     init(); return { load, leave, reset };
   }

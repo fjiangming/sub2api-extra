@@ -14,11 +14,14 @@ async function main() {
   try {
     browser = await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? {executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE} : {})});
     for (const [name,width,height,colorScheme] of [['desktop',1440,1000,'light'],['mobile',390,844,'light'],['narrow',320,740,'light'],['dark',1440,1000,'dark']]) {
+      // Keep the same latest-N fixture after the previous layout added its reprocessing examples.
+      preview.fixture.store.db.prepare('DELETE FROM cl_records WHERE at>?').run(preview.raw.at);
       const context = await browser.newContext({viewport:{width,height},colorScheme,acceptDownloads:true});
       try {
-        const page = await context.newPage(), errors = [], external = [];
+        const page = await context.newPage(), errors = [], external = [], downloads = [];
         await page.addInitScript(() => { Object.defineProperty(navigator,'clipboard',{value:{writeText:async text => { window.conversationCopiedText = text; }}}); });
         page.on('pageerror',error => errors.push(error.message));
+        page.on('download',file => downloads.push(file.suggestedFilename()));
         page.on('request',request => { if (!request.url().startsWith(`http://127.0.0.1:${preview.port}/`) && !/^(?:blob:|data:)/.test(request.url())) external.push(request.url()); });
         const layout = async () => {
           const result = await page.evaluate(() => ({overflow:document.documentElement.scrollWidth > innerWidth + 1,controls:[...document.querySelectorAll('#cl-root input,#cl-root select,#cl-root textarea,#cl-root .button')].filter(node => node.getBoundingClientRect().width).filter(node => node.getBoundingClientRect().right > innerWidth + 1).map(node => node.outerHTML)}));
@@ -50,8 +53,43 @@ async function main() {
         await page.locator('#cl-filter [name=search]').fill('NO_MATCH'); await page.locator('#cl-filter [type=submit]').click();
         await page.locator('#cl-list').filter({hasText:'没有记录'}).waitFor();
         await page.locator('[data-cl-action=reset-filter]').click(); await page.locator('[data-cl-record]').first().waitFor();
-        const csvEvent = page.waitForEvent('download'); await page.locator('[data-cl-action=export]').click(); const csv = await csvEvent;
-        assert(fs.readFileSync(await csv.path(),'utf8').includes('request_id'));
+        const jsonlDownload = async () => {
+          const arriving=page.waitForEvent('download');await page.locator('[data-cl-action=export]').click();
+          const file=await arriving;assert(file.suggestedFilename().endsWith('.jsonl'));
+          const bytes=fs.readFileSync(await file.path());assert.equal(bytes.at(-1),10);assert.notEqual(bytes.subarray(0,3).toString('hex'),'efbbbf');
+          await page.locator('[data-export-status]').filter({hasText:'导出已发送'}).waitFor();
+          return bytes.toString().trimEnd().split('\n').map(line=>JSON.parse(line));
+        };
+        // The latest-N selection must ignore the current list page.
+        await page.locator('#cl-next').click();await page.locator('#cl-page-label').filter({hasText:'2 /'}).waitFor();
+        await page.locator('#cl-export-limit').fill('2');await page.locator('#cl-export-source').selectOption('original');
+        const original=await jsonlDownload();assert.equal(original.length,2);
+        assert.deepEqual(original.map(row=>row.metadata.id),[preview.raw.id,id('signature-case')]);
+        assert.equal(original[0].request,preview.raw.request);assert(Buffer.from(original[0].request,'base64').toString().includes('1.2300'));
+        await page.locator('#cl-export-limit').fill('3');await page.locator('#cl-export-source').selectOption('masked');
+        const masked=await jsonlDownload();assert.equal(masked.length,2);
+        assert.deepEqual(masked.map(row=>row.metadata.id),[preview.raw.id,id('ws-case')]);
+        for (const row of masked) assert(!Buffer.from(row.request,'base64').toString().includes('alice@example.com'));
+        assert((await page.locator('[data-export-status]').textContent()).includes('部分内容未检查 1 条'));
+        await page.evaluate(()=>scrollTo(0,0));await layout();await page.screenshot({path:path.join(directory,name+'-export.png'),fullPage:true});
+        await page.locator('#cl-export-limit').fill('0');assert.equal(await page.locator('#cl-export-form').evaluate(node=>node.checkValidity()),false);
+        await page.locator('#cl-export-limit').fill('1');
+        await page.locator('#cl-filter [name=search]').fill(preview.raw.request_id);await page.locator('#cl-filter [type=submit]').click();
+        await page.waitForFunction(()=>document.querySelectorAll('[data-cl-record]').length===1);
+        const filtered=await jsonlDownload();assert.equal(filtered.length,1);assert.equal(filtered[0].metadata.id,preview.raw.id);
+        const beforeEmpty=downloads.length;
+        await page.locator('#cl-filter [name=search]').fill('NO_EXPORT_MATCH');await page.locator('#cl-filter [type=submit]').click();
+        await page.locator('#cl-list').filter({hasText:'没有记录'}).waitFor();await page.locator('[data-cl-action=export]').click();
+        await page.locator('[data-export-status]').filter({hasText:'当前筛选下没有可导出的日志'}).waitFor();
+        assert.equal(downloads.length,beforeEmpty,'an error response became a downloaded file');
+        await page.locator('[data-cl-action=reset-filter]').click();await page.locator('[data-cl-record]').first().waitFor();
+        const canExport=preview.exporter.canWork;preview.exporter.canWork=()=>false;
+        try {
+          await page.locator('[data-cl-action=export]').click();await page.locator('[data-export-status]').filter({hasText:'采集优先，导出已暂停'}).waitFor();
+          assert.equal((await page.request.get(`http://127.0.0.1:${preview.port}/healthz`)).status(),200);
+          await page.locator('[data-export-cancel]').click();await page.locator('[data-export-status]').filter({hasText:'导出已中止'}).waitFor();
+          assert.equal(downloads.length,beforeEmpty,'a cancelled response became a downloaded file');
+        } finally {preview.exporter.canWork=canExport;}
         await page.locator('#cl-tab-collection').click(); await page.locator('#cl-collection h2').first().waitFor(); await layout();
         let spacePause = '';
         const spaceRoute = async route => {
@@ -80,7 +118,7 @@ async function main() {
         }
         await page.unroute('**/api/conversation-logs/status', spaceRoute);
         await page.locator('#cl-tab-policy').click(); await page.locator('#cl-policy-form').waitFor();
-        assert.equal(await page.locator('[name=limit]').count(),0);
+        assert.equal(await page.locator('#cl-policy-form [name=limit]').count(),0);
         for (const field of ['identity','financial','personal','device']) assert(await page.locator(`#cl-policy-form input[name=${field}]`).isChecked());
         await page.locator('[name=retention]').fill('0');
         await page.locator('#cl-user-search').fill('2'); await page.locator('[data-cl-user="2"]').waitFor(); await page.locator('[data-cl-user="2"]').check();

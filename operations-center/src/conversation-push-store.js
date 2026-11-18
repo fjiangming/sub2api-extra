@@ -33,6 +33,8 @@ class ConversationPushStore {
       CREATE INDEX IF NOT EXISTS cl_push_due ON cl_push_jobs(status,next_at);
       CREATE INDEX IF NOT EXISTS cl_push_record ON cl_push_jobs(record_id);
       CREATE INDEX IF NOT EXISTS cl_push_batch ON cl_push_jobs(batch_id,created_at);`);
+      this.db.exec(`CREATE TABLE IF NOT EXISTS cl_push_scan_stats(policy_version INTEGER NOT NULL,code TEXT NOT NULL,count INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,PRIMARY KEY(policy_version,code));`);
       if(!this.db.prepare('SELECT 1 FROM cl_push_policies LIMIT 1').get()) this.db.prepare('INSERT INTO cl_push_policies VALUES(?,?,?)').run(1,this.archive.seal(defaults,'push-policy:1'),this.now());
       if(!this.db.prepare('SELECT 1 FROM cl_push_cursor LIMIT 1').get()) this.setCursor(this.latest());
       this.policy();
@@ -56,10 +58,18 @@ class ConversationPushStore {
   // The archive increments processed_at strictly on every reprocess; metadata scans never load body BLOBs.
   version(row,source) { return hash([row.fingerprint,source,source==='masked'?[row.processed_at,row.processing_policy_version]:0]); }
   allowed(row,policy) { return !policy.excludedUserIds.includes(row.user_id) && modelAllowed(policy,row.model); }
-  copyReady(row,source,policy) {
-    return Boolean(!row.processing_pending && row.complete && !row.reason && row[source] && (source === 'original' ||
-      !row.processing_error && (!row.inspection_warnings || row.inspection_warnings === '[]') &&
-      row.redaction_version === REDACTION_VERSION && row.redaction_policy_hash === redactionPolicyHash(policy)));
+  blockedReason(row,source,archivePolicy,pushPolicy=this.policy()) {
+    if (row.processing_pending) return 'PROCESSING_PENDING';
+    if (pushPolicy.captureScope !== 'all' && (!row.complete || row.reason)) return 'INCOMPLETE_CAPTURE';
+    if (!row[source]) return row.processing_error ? 'PROCESSING_FAILED' : 'COPY_UNAVAILABLE';
+    if (source === 'original') return '';
+    if (row.processing_error) return 'PROCESSING_FAILED';
+    if (row.inspection_warnings && row.inspection_warnings !== '[]') return 'INSPECTION_INCOMPLETE';
+    if (row.redaction_version !== REDACTION_VERSION || row.redaction_policy_hash !== redactionPolicyHash(archivePolicy)) return 'REDACTION_OUTDATED';
+    return '';
+  }
+  copyReady(row,source,policy,pushPolicy=this.policy()) {
+    return !this.blockedReason(row,source,policy,pushPolicy);
   }
   jobId(row,policy,destination) { return hash([row.id,destination,targetHash(policy,destination),this.version(row,policy.source)]); }
   pendingCount() { return this.db.prepare("SELECT COUNT(*) n FROM cl_push_jobs WHERE status IN ('pending','running')").get().n; }
@@ -75,17 +85,22 @@ class ConversationPushStore {
     const where=this.archive.where(value.filter);
     const rows=this.db.prepare(`SELECT ${columns} FROM cl_records${where.sql} ORDER BY at,id LIMIT 10001`).all(...where.args);
     if(rows.length>10000)throw invalid('单批最多 10,000 条，请缩小筛选范围');
-    const eligible=rows.filter(row=>this.allowed(row,archivePolicy)&&this.copyReady(row,policy.source,archivePolicy));
+    const eligible=rows.filter(row=>this.allowed(row,archivePolicy)&&this.copyReady(row,policy.source,archivePolicy,policy));
+    const unavailableReasons={};
+    for(const row of rows)if(this.allowed(row,archivePolicy)) {
+      const reason=this.blockedReason(row,policy.source,archivePolicy,policy);
+      if(reason)unavailableReasons[reason]=(unavailableReasons[reason]||0)+1;
+    }
     const token=crypto.createHmac('sha256',this.archive.key).update(JSON.stringify([policy.version,archivePolicy.version,value.filter,targets,eligible.map(row=>[row.id,this.version(row,policy.source)])])).digest('hex');
     const existing=this.db.prepare('SELECT status FROM cl_push_jobs WHERE id=?');
     let duplicates=0;
     for(const row of eligible)for(const target of targets)if(existing.get(this.jobId(row,policy,target)))duplicates++;
     return {policy,targets,eligible,previewToken:token,matched:rows.length,excluded:rows.filter(row=>!this.allowed(row,archivePolicy)).length,
-      unavailable:rows.filter(row=>this.allowed(row,archivePolicy)&&!this.copyReady(row,policy.source,archivePolicy)).length,duplicates,jobs:eligible.length*targets.length-duplicates};
+      unavailable:Object.values(unavailableReasons).reduce((sum,n)=>sum+n,0),unavailableReasons,duplicates,jobs:eligible.length*targets.length-duplicates};
   }
   preview(input) {
     const value=this.selection(input);
-    return {previewToken:value.previewToken,matched:value.matched,eligible:value.eligible.length,excluded:value.excluded,unavailable:value.unavailable,duplicates:value.duplicates,jobs:value.jobs,policyVersion:value.policy.version};
+    return {previewToken:value.previewToken,matched:value.matched,eligible:value.eligible.length,excluded:value.excluded,unavailable:value.unavailable,unavailableReasons:value.unavailableReasons,duplicates:value.duplicates,jobs:value.jobs,policyVersion:value.policy.version};
   }
   enqueue(input) {
     const value=parse(enqueueSchema,input),digest=hash(value);
@@ -112,10 +127,14 @@ class ConversationPushStore {
       for(const row of rows){
         // Keep the receipt cursor behind unfinished processing; publication must not lose automatic delivery.
         if (row.processing_pending) return {created,processing:true};
-        if(this.allowed(row,archivePolicy)&&this.copyReady(row,policy.source,archivePolicy)){
+        const reason=!this.allowed(row,archivePolicy)?'COLLECTION_EXCLUDED':this.blockedReason(row,policy.source,archivePolicy,policy);
+        if(!reason){
           const needed=targets.filter(target=>!this.db.prepare('SELECT 1 FROM cl_push_jobs WHERE id=?').get(this.jobId(row,policy,target)));
           if(pending+needed.length>policy.queueLimit)return {created,full:true};
           for(const target of needed){created+=this.insert(row,policy,target,'');pending++;}
+        } else {
+          this.db.prepare(`INSERT INTO cl_push_scan_stats VALUES(?,?,1,?) ON CONFLICT(policy_version,code)
+            DO UPDATE SET count=count+1,updated_at=excluded.updated_at`).run(policy.version,reason,this.now());
         }
         this.setCursor(row);
       }
@@ -129,9 +148,8 @@ class ConversationPushStore {
     const row=this.metadata(job.record_id);
     if(!row)return {cancel:'RECORD_EXPIRED'};
     if(!this.allowed(row,this.archive.policy()))return {cancel:'COLLECTION_EXCLUDED'};
-    if(!row[job.source])return {cancel:'COPY_UNAVAILABLE'};
-    if(job.source==='masked' && row.inspection_warnings && row.inspection_warnings!=='[]')return {cancel:'INSPECTION_INCOMPLETE'};
-    if(!this.copyReady(row,job.source,this.archive.policy()))return {cancel:!row.complete||row.reason?'INCOMPLETE_CAPTURE':'REDACTION_OUTDATED'};
+    const reason=this.blockedReason(row,job.source,this.archive.policy(),policy);
+    if(reason)return {cancel:reason};
     if(this.version(row,job.source)!==job.content_version)return {cancel:'CONTENT_CHANGED'};
     return {row};
   }
@@ -185,17 +203,19 @@ class ConversationPushStore {
     const items=this.db.prepare(`SELECT j.id,j.record_id,j.destination,j.source,j.batch_id,j.status,j.attempts,j.next_at,j.created_at,j.updated_at,j.error_code,j.http_status,r.model,r.user_id
       FROM cl_push_jobs j JOIN cl_records r ON r.id=j.record_id${where} ORDER BY j.created_at DESC,j.id LIMIT 20 OFFSET ?`).all(...args,(page-1)*20);
     return {items,page,pages:Math.ceil(total/20),total,counts:this.db.prepare('SELECT status,COUNT(*) count FROM cl_push_jobs GROUP BY status').all(),
+      skipped:this.db.prepare('SELECT code,count,updated_at FROM cl_push_scan_stats WHERE policy_version=? ORDER BY code').all(this.policy().version),
       batches:this.db.prepare('SELECT id,created_at,matched,eligible,created FROM cl_push_batches ORDER BY created_at DESC LIMIT 10').all()};
   }
   envelope(job) {
-    const fields='id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,processing_error,processing_policy_version,processed_at,capture_version,body_sha256,redaction_version,inspection_warnings';
+    const fields='id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,processing_error,processing_policy_version,processed_at,capture_version,body_sha256,redaction_version,inspection_warnings,upstream_status,upstream_evidence,completion_source,transport_diagnostics';
     const row=this.db.prepare(`SELECT ${fields},${job.source} AS payload FROM cl_records WHERE id=?`).get(job.record_id);
     if(!row?.payload)throw invalid('日志副本不可用','CONVERSATION_PUSH_COPY_UNAVAILABLE',409);
     const {payload,...metadata}=row,raw=this.archive.open(payload,row.id+':'+job.source);
     const checksum=value=>{const bytes=Buffer.from(value,'base64');return {bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')};};
-    return {schema:'sub2api.conversation.v1',delivery_id:job.id,source:job.source,metadata:{...metadata,inspection_warnings:JSON.parse(metadata.inspection_warnings),complete:Boolean(metadata.complete),encoding:job.source==='original'?metadata.encoding:''},
+    return {schema:'sub2api.conversation.v1',delivery_id:job.id,source:job.source,metadata:{...metadata,transport_diagnostics:metadata.transport_diagnostics?JSON.parse(metadata.transport_diagnostics):null,
+      inspection_warnings:JSON.parse(metadata.inspection_warnings),complete:Boolean(metadata.complete),encoding:job.source==='original'?metadata.encoding:''},
       body_encoding:'base64',request:raw.request,response:raw.response,frames:raw.frames,
       checksums:{request:checksum(raw.request),response:checksum(raw.response),frames:raw.frames.map(frame=>checksum(frame.body))}};
   }
 }
-module.exports={ConversationPushStore};
+module.exports={ConversationPushStore,filterSchema};

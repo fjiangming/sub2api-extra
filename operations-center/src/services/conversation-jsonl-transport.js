@@ -8,6 +8,9 @@ const { S3Client, CreateMultipartUploadCommand, UploadPartCommand, CompleteMulti
 const { NodeHttpHandler } = require('@smithy/node-http-handler');
 const { failure, failureResult } = require('./conversation-push-transport');
 const { jsonlChunks } = require('./conversation-jsonl-format');
+const { pacedBody } = require('./conversation-jsonl-flow');
+
+const PART_BYTES = 8 * 1024 ** 2;
 
 async function session(transport, policy, outerSignal, guard, operation) {
   const target = policy.s3, baseUrl = new URL(target.endpoint), pinned = new Map();
@@ -39,11 +42,11 @@ async function session(transport, policy, outerSignal, guard, operation) {
     guard(); if (requestSignal.aborted) throw failure('ABORTED', true);
     pinned.set(host, address); return next(args);
   }, { step: 'finalizeRequest', name: 'validateConversationJsonlAddress', priority: 'low' });
-  const request = async command => {
+  const request = async (command, extraMs = 0) => {
     guard(); if (stop.signal.aborted) throw failure('ABORTED', true);
     const controller = new AbortController(), cancel = () => controller.abort(); let timedOut = false;
     stop.signal.addEventListener('abort', cancel, { once: true }); requestSignal = controller.signal;
-    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, policy.timeoutSeconds * 1000);
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, policy.timeoutSeconds * 1000 + extraMs);
     try { return await client.send(command, { abortSignal: controller.signal }); }
     catch (error) { if (timedOut) throw failure('TIMEOUT', true); if (controller.signal.aborted) throw failure('ABORTED', true); throw error; }
     finally { clearTimeout(timer); stop.signal.removeEventListener('abort', cancel); }
@@ -55,23 +58,54 @@ async function session(transport, policy, outerSignal, guard, operation) {
   finally { outerSignal?.removeEventListener('abort', abort); client.destroy(); httpAgent.destroy(); httpsAgent.destroy(); }
 }
 
-async function sendJsonl(transport, policy, file, envelopes, signal, { guard = () => {}, onCreated = () => {}, beforeComplete = () => {} } = {}) {
+async function sendJsonl(transport, policy, file, envelopes, signal, {
+  guard = () => {}, onCreated = () => {}, beforeComplete = () => {}, checkpoint = async () => {},
+  restoredParts = [], onPart = () => {}
+} = {}) {
+  const rate = (policy.s3.jsonl?.uploadMiBPerSecond ?? 2) * 1024 ** 2;
   return session(transport, policy, signal, guard, async request => {
     const target = { Bucket: policy.s3.bucket, Key: file.object_key };
-    const created = await request(new CreateMultipartUploadCommand({ ...target, ContentType: 'application/x-ndjson', ChecksumAlgorithm: 'SHA256',
-      Metadata: { 'file-id': file.id, 'record-count': String(file.records), 'source': file.source } }));
-    if (!created.UploadId) throw failure('MULTIPART_INVALID');
-    await onCreated(created.UploadId);
-    const upload = { ...target, UploadId: created.UploadId }, parts = [], hash = crypto.createHash('sha256');
-    const buffer = Buffer.allocUnsafe(8 * 1024 ** 2); let offset = 0, bytes = 0, records = 0;
+    let uploadId = file.upload_id;
+    if (!uploadId) {
+      await checkpoint();
+      const created = await request(new CreateMultipartUploadCommand({ ...target, ContentType: 'application/x-ndjson', ChecksumAlgorithm: 'SHA256',
+        Metadata: { 'file-id': file.id, 'record-count': String(file.records), 'source': file.source } }));
+      if (!created.UploadId) throw failure('MULTIPART_INVALID');
+      uploadId = created.UploadId; await onCreated(uploadId);
+    }
+    if (restoredParts.length && !file.upload_id) throw failure('MULTIPART_CHECKPOINT_INVALID');
+    let restoredBytes = 0;
+    for (const [index, part] of restoredParts.entries()) {
+      if (part.number !== index + 1 || !Number.isSafeInteger(part.bytes) || part.bytes < 1 || part.bytes > PART_BYTES ||
+        typeof part.etag !== 'string' || !part.etag || part.etag.length > 4096 || !/^[A-Za-z0-9+/]{43}=$/.test(part.sha256) ||
+        restoredBytes + part.bytes > file.bytes || part.bytes !== PART_BYTES && restoredBytes + part.bytes !== file.bytes) throw failure('MULTIPART_CHECKPOINT_INVALID');
+      restoredBytes += part.bytes;
+    }
+    if (restoredParts.length !== (file.uploaded_parts || 0) || restoredBytes !== (file.uploaded_bytes || 0)) throw failure('MULTIPART_CHECKPOINT_INVALID');
+    const upload = { ...target, UploadId: uploadId }, parts = [], hash = crypto.createHash('sha256');
+    const buffer = Buffer.allocUnsafe(PART_BYTES); let offset = 0, bytes = 0, records = 0, sinceYield = 0;
     const sendPart = async () => {
-      guard(); const body = buffer.subarray(0, offset), checksum = crypto.createHash('sha256').update(body).digest('base64');
-      const part = await request(new UploadPartCommand({ ...upload, PartNumber: parts.length + 1, Body: body, ContentLength: body.length, ChecksumSHA256: checksum }));
-      if (!part.ETag) throw failure('MULTIPART_INVALID');
-      parts.push({ PartNumber: parts.length + 1, ETag: part.ETag, ChecksumSHA256: checksum }); offset = 0;
+      await checkpoint(); guard();
+      const body = buffer.subarray(0, offset), checksum = crypto.createHash('sha256').update(body).digest('base64'), number = parts.length + 1;
+      const saved = restoredParts[number - 1];
+      let etag;
+      if (saved) {
+        if (saved.bytes !== body.length || saved.sha256 !== checksum) throw failure('JSONL_CONTENT_CHANGED');
+        etag = saved.etag;
+      } else {
+        const stream = pacedBody(body, rate, signal);
+        try {
+          const part = await request(new UploadPartCommand({ ...upload, PartNumber: number, Body: stream, ContentLength: body.length, ChecksumSHA256: checksum }),
+            Math.ceil(body.length * 1000 / rate));
+          if (!part.ETag) throw failure('MULTIPART_INVALID');
+          etag = part.ETag;
+          await onPart({ number, bytes: body.length, etag, sha256: checksum }, uploadId);
+        } finally { stream.destroy(); }
+      }
+      parts.push({ PartNumber: number, ETag: etag, ChecksumSHA256: checksum }); offset = 0;
     };
     for await (const envelope of envelopes) {
-      guard(); records++;
+      await checkpoint(); guard(); records++;
       for (const chunk of jsonlChunks(envelope)) {
         const source = Buffer.from(chunk); hash.update(source); bytes += source.length;
         if (bytes > file.bytes) throw failure('JSONL_CONTENT_CHANGED');
@@ -80,11 +114,13 @@ async function sendJsonl(transport, policy, file, envelopes, signal, { guard = (
           source.copy(buffer, offset, index, index + length); offset += length; index += length;
           if (offset === buffer.length) await sendPart();
         }
+        sinceYield += source.length;
+        if (sinceYield >= 262144) { sinceYield = 0; await new Promise(resolve => setImmediate(resolve)); await checkpoint(); }
       }
     }
     if (offset) await sendPart();
-    if (bytes !== file.bytes || records !== file.records || !parts.length) throw failure('JSONL_CONTENT_CHANGED');
-    await beforeComplete(); guard();
+    if (bytes !== file.bytes || records !== file.records || !parts.length || restoredParts.length > parts.length) throw failure('JSONL_CONTENT_CHANGED');
+    await checkpoint(); await beforeComplete(); guard();
     const completed = await request(new CompleteMultipartUploadCommand({ ...upload, MultipartUpload: { Parts: parts } }));
     return { status: 'sent', httpStatus: completed.$metadata.httpStatusCode, bytes, records, sha256: hash.digest('hex') };
   });
