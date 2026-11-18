@@ -863,6 +863,7 @@ function createApp(config, overrides = {}) {
       }
       res.json({
         ...publicRun(run),
+        prompt: typeof run.prompt === 'string' ? run.prompt : null,
         validation: publicValidationResult(run, true),
         html: run.output_type === 'html' ? run.output_text : null,
         text: run.output_type === 'text' ? run.output_text : null,

@@ -124,6 +124,28 @@ function when(timestamp) {
   return new Date(timestamp * 1000).toLocaleString('zh-CN', { hour12: false });
 }
 
+function closePrompt() {
+  $('prompt-dialog').close();
+  $('prompt-content').textContent = '';
+  $('prompt-dialog-meta').textContent = '';
+}
+
+function createPromptButton(detail) {
+  const button = document.createElement('button');
+  button.className = 'yzai-pelican-btn';
+  button.type = 'button';
+  button.setAttribute('aria-haspopup', 'dialog');
+  button.setAttribute('aria-controls', 'prompt-dialog');
+  button.innerHTML = '<i data-lucide="file-text" aria-hidden="true"></i><span>查看提示词</span>';
+  button.addEventListener('click', () => {
+    $('prompt-content').textContent = typeof detail.prompt === 'string' && detail.prompt.trim()
+      ? detail.prompt : '该历史记录未保存检测提示词。';
+    $('prompt-dialog-meta').textContent = `${activeGroup()?.name || ''} · ${detail.model || '--'} · ${when(detail.started)}`;
+    $('prompt-dialog').showModal();
+  });
+  return button;
+}
+
 function scheduleDescription(data = state.data) {
   if (data?.schedule_mode === 'interval') {
     const minutes = Number(data.schedule_interval_minutes) || 0;
@@ -394,6 +416,7 @@ function renderHistory(group) {
 
 async function showRecord(run) {
   const requestId = ++state.detailRequest;
+  closePrompt();
   clearPreviewUrls();
   const box = $('result-detail');
   box.classList.remove('yzai-pelican-detail--html');
@@ -431,6 +454,10 @@ async function showRecord(run) {
     loading.remove();
     box.insertAdjacentHTML('beforeend', validationBasisHtml(detail)
       + validationEvidenceHtml(detail.validation, Boolean(detail.review)));
+    const controls = document.createElement('div');
+    controls.className = 'yzai-pelican-controls';
+    controls.append(createPromptButton(detail));
+    box.append(controls);
     refreshIcons();
     if (detail.output_type === 'text') {
       if (detail.text == null) {
@@ -443,8 +470,6 @@ async function showRecord(run) {
       box.append(pre);
       return;
     }
-    const controls = document.createElement('div');
-    controls.className = 'yzai-pelican-controls';
     const title = `${activeGroup()?.name || ''} 检测作品`;
     if (detail.output_type === 'html') {
       if (detail.html == null || !detail.preview_url) {
@@ -475,7 +500,7 @@ async function showRecord(run) {
         }
       });
       controls.append(toggle);
-      box.append(controls, frame);
+      box.append(frame);
       return;
     }
     if (!detail.artifact?.content_url) {
@@ -486,7 +511,6 @@ async function showRecord(run) {
     if (requestId !== state.detailRequest || !$('result-dialog').open) return;
     const url = previewUrl(blob);
     controls.append(createDownload(url, detail.artifact.name));
-    box.append(controls);
     const artifactPreview = createArtifactPreview(blob, url, detail.artifact, title, detail.preview_url);
     if (artifactPreview) {
       box.append(artifactPreview);
@@ -518,6 +542,9 @@ function renderDialog(force) {
   renderHistory(group);
   const run = group.history.find((item) => item.id === state.selectedRunId);
   if (!run) {
+    state.detailRequest += 1;
+    closePrompt();
+    clearPreviewUrls();
     $('result-detail').innerHTML = '<p class="yzai-pelican-empty">暂无检测记录。</p>';
   } else {
     const key = `${run.id}:${run.status}:${run.review?.reviewed_at || ''}`;
@@ -540,18 +567,26 @@ async function openGroup(groupId) {
 }
 
 $('dialog-close').addEventListener('click', () => $('result-dialog').close());
-$('result-dialog').addEventListener('click', (event) => {
-  if (event.target !== $('result-dialog')) return;
-  const bounds = $('result-dialog').getBoundingClientRect();
-  if (event.clientX < bounds.left || event.clientX > bounds.right ||
-      event.clientY < bounds.top || event.clientY > bounds.bottom) {
-    $('result-dialog').close();
-  }
+$('prompt-dialog-close').addEventListener('click', closePrompt);
+$('prompt-dialog').addEventListener('close', () => {
+  $('prompt-content').textContent = '';
+  $('prompt-dialog-meta').textContent = '';
 });
+for (const dialog of [$('result-dialog'), $('prompt-dialog')]) {
+  dialog.addEventListener('click', (event) => {
+    if (event.target !== dialog) return;
+    const bounds = dialog.getBoundingClientRect();
+    if (event.clientX < bounds.left || event.clientX > bounds.right ||
+        event.clientY < bounds.top || event.clientY > bounds.bottom) {
+      dialog.close();
+    }
+  });
+}
 $('result-dialog').addEventListener('close', () => {
   const opener = state.opener;
   const openerGroupId = state.openerGroupId;
   state.detailRequest += 1;
+  closePrompt();
   clearPreviewUrls();
   state.activeGroupId = null;
   state.selectedRunId = null;
@@ -567,6 +602,7 @@ $('result-dialog').addEventListener('close', () => {
 window.DetectorSession.mount(refresh, () => {
   state.data = null;
   state.detailRequest++;
+  closePrompt();
   $('result-dialog').close();
   clearPreviewUrls();
   $('group-grid').replaceChildren();

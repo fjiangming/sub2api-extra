@@ -301,7 +301,7 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   const monitor = runtime.store.getMonitor(config.serviceOwnerId, '1');
   const sharedTest = {
     ...runtime.store.getPlatformTest('openai'),
-    prompt: 'private prompt must never be returned',
+    prompt: 'Historical detection prompt.\nKeep <svg> and "quoted text" unchanged.',
     validation: {
       version: 2,
       normal_threshold: 90,
@@ -377,16 +377,27 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   const sharedPayload = await sharedDetail.json();
   assert.equal(sharedPayload.reasoning_effort, 'xhigh');
   assert.equal(sharedPayload.html, '<!doctype html><html><body>shared</body></html>');
+  assert.equal(sharedPayload.prompt, sharedTest.prompt);
+  assert.notEqual(sharedPayload.prompt, runtime.store.getMonitorTest(monitor).prompt);
   assert.equal(sharedPayload.validation.score, 100);
   assert.equal(sharedPayload.validation.indeterminate, 1);
   assert.equal(sharedPayload.validation.rules[0].label, '公开规则名称');
   assert.equal(sharedPayload.validation.rules[1].indeterminate, true);
   assert.equal('test_snapshot' in sharedPayload, false);
   assert.equal('validation_snapshot' in sharedPayload, false);
-  assert.doesNotMatch(JSON.stringify(sharedPayload), /private prompt|private rule value|private-foot-selector|private-pedal-selector/);
+  assert.doesNotMatch(JSON.stringify(sharedPayload), /private rule value|private-foot-selector|private-pedal-selector/);
+  assert.match(sharedDetail.headers.get('cache-control'), /no-store/);
+  const summaryWithPrompt = await fetch(`${http.baseUrl}/api/results`, { headers: headers(authB) });
+  const summaryPayload = await summaryWithPrompt.json();
+  assert.doesNotMatch(JSON.stringify(summaryPayload), /Historical detection prompt/);
+  assert.equal('prompt' in summaryPayload.groups[0].history[0], false);
   assert.match(sharedPayload.preview_url, /^\/api\/previews\/preview_token_for_service_123456\?ancestors=.+&signature=.+/);
   const forbiddenDetail = await fetch(`${http.baseUrl}/api/results/${sharedRun.id}`, { headers: headers(authC) });
   assert.equal(forbiddenDetail.status, 404);
+  assert.doesNotMatch(await forbiddenDetail.text(), /Historical detection prompt/);
+  const anonymousDetail = await fetch(`${http.baseUrl}/api/results/${sharedRun.id}`);
+  assert.equal(anonymousDetail.status, 401);
+  assert.doesNotMatch(await anonymousDetail.text(), /Historical detection prompt/);
   const anonymousPreview = await fetch(`${http.baseUrl}/api/previews/preview_token_for_service_123456`);
   assert.equal(anonymousPreview.status, 401);
   const forbiddenPreview = await fetch(`${http.baseUrl}/api/previews/preview_token_for_service_123456`, { headers: headers(authC) });

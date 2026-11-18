@@ -188,6 +188,58 @@ async function main() {
     await page.locator('#group-grid .detect-button').first().click();
     await page.frameLocator('#result-detail iframe').locator('svg').waitFor();
     assert.equal(await page.locator('.validation-evidence').getAttribute('open'), null);
+    const promptButton = page.getByRole('button', { name: '查看提示词', exact: true });
+    const sourceButton = page.getByRole('button', { name: '查看源码', exact: true });
+    const iqRunId = await page.locator('#history-list [aria-current="true"]').getAttribute('data-run-id');
+    const expectedPrompt = preview.runtime.store.getRun(Number(iqRunId)).prompt;
+    for (const width of [1440, 390, 320]) {
+      await page.setViewportSize({ width, height: width === 1440 ? 900 : 844 });
+      const promptBounds = await promptButton.boundingBox();
+      const sourceBounds = await sourceButton.boundingBox();
+      assert(promptBounds.x + promptBounds.width <= sourceBounds.x, 'prompt button stays left of source');
+      await promptButton.click();
+      await page.locator('#prompt-dialog[open]').waitFor();
+      assert.equal(await page.locator('#prompt-content').textContent(), expectedPrompt);
+      await fit(page);
+      assert(await page.locator('#prompt-dialog').evaluate(el => {
+        const r = el.getBoundingClientRect();
+        return r.left >= 0 && r.right <= innerWidth && r.top >= 0 && r.bottom <= innerHeight
+          && el.scrollWidth <= el.clientWidth;
+      }));
+      await shot(page, `iq-prompt-${width}`);
+      await page.locator('#prompt-dialog-close').click();
+      assert.equal(await page.locator('#result-dialog').evaluate(el => el.open), true);
+      assert.equal(await page.locator('#prompt-content').textContent(), '');
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const maliciousPrompt = '<img src=x onerror="window.__promptXss=1">\n<script>window.__promptXss=1</script>\n' + 'LongPrompt'.repeat(1200);
+    let mockedPrompt = maliciousPrompt;
+    await page.route(`**/api/results/${iqRunId}`, async route => {
+      const response = await route.fetch();
+      const detail = await response.json();
+      await route.fulfill({ response, json: { ...detail, prompt: mockedPrompt } });
+    });
+    await page.locator(`#history-list [data-run-id="${iqRunId}"]`).click();
+    await page.frameLocator('#result-detail iframe').locator('svg').waitFor();
+    await promptButton.click();
+    assert.equal(await page.locator('#prompt-content').textContent(), maliciousPrompt);
+    assert.equal(await page.locator('#prompt-content img, #prompt-content script').count(), 0);
+    assert.equal(await page.evaluate(() => window.__promptXss), undefined);
+    await page.locator('html').evaluate(el => el.classList.add('dark'));
+    await page.setViewportSize({ width: 320, height: 844 });
+    await fit(page); await shot(page, 'iq-prompt-long-dark');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#prompt-dialog').evaluate(el => el.open), false);
+    assert.equal(await page.locator('#result-dialog').evaluate(el => el.open), true);
+    mockedPrompt = null;
+    await page.locator(`#history-list [data-run-id="${iqRunId}"]`).click();
+    await page.frameLocator('#result-detail iframe').locator('svg').waitFor();
+    await promptButton.click();
+    assert.equal(await page.locator('#prompt-content').textContent(), '该历史记录未保存检测提示词。');
+    await page.keyboard.press('Escape');
+    await page.unroute(`**/api/results/${iqRunId}`);
+    await page.locator('html').evaluate(el => el.classList.remove('dark'));
+    await page.setViewportSize({ width: 1440, height: 900 });
     await page.getByRole('button', { name: '查看源码', exact: true }).click();
     assert.match(await page.locator('#result-detail pre').innerText(), /<!doctype html>/);
     await page.getByRole('button', { name: '查看预览', exact: true }).click();
@@ -379,9 +431,13 @@ async function main() {
     await iqPage.unroute('**/api/results');
     await iqPage.locator('#group-grid .detect-button').first().click();
     await iqPage.frameLocator('#result-detail iframe').locator('svg').waitFor();
+    await iqPage.getByRole('button', { name: '查看提示词', exact: true }).click();
+    await iqPage.locator('#prompt-dialog[open]').waitFor();
     setEnabled(false, true);
     await refreshPage(iqPage, 'iq');
     assert.equal(await iqPage.locator('#result-dialog').evaluate(el => el.open), false);
+    assert.equal(await iqPage.locator('#prompt-dialog').evaluate(el => el.open), false);
+    assert.equal(await iqPage.locator('#prompt-content').textContent(), '');
     setEnabled(false, false);
     await refreshPage(page, 'model');
     await page.getByText('暂无可查看的模型检测分组', { exact: true }).waitFor();
@@ -417,7 +473,7 @@ async function main() {
       if (item.page === '/model-results') assert(!item.api.startsWith('/api/results'), 'model page must not read IQ results');
     }
     assert.deepEqual(errors, []); assert.deepEqual(external, []); assert.equal(preview.outboundCalls, 0);
-    console.log(JSON.stringify({ status: 'PASS', checks: 'Independent IQ/model pages and result requests, no detection-type tabs or fallback, platform sections and dynamically enabled-channel introductions across platforms, official site links, three-channel config and per-group models, Fingerpoint max effort, full rankings/rounds/samples/versions, null analyses, mocked background data updates/history, independent schedules and manual runs, all original probe items/scores/audit rounds, IQ previews/source/history, disabled-group dialog revocation, read-only permissions and expired-session clearing, retry, mobile 390/320, dark mode, escaping and zero paid calls', screenshots: directory, pageErrors: errors, externalRequests: external }, null, 2));
+    console.log(JSON.stringify({ status: 'PASS', checks: 'Independent IQ/model pages and result requests, no detection-type tabs or fallback, platform sections and dynamically enabled-channel introductions across platforms, official site links, three-channel config and per-group models, Fingerpoint max effort, full rankings/rounds/samples/versions, null analyses, mocked background data updates/history, independent schedules and manual runs, all original probe items/scores/audit rounds, IQ previews/source/history and historical prompts, prompt button order, long and missing prompt, nested-dialog Escape, disabled-group dialog revocation, read-only permissions and expired-session clearing, retry, mobile 390/320, dark mode, escaping and zero paid calls', screenshots: directory, pageErrors: errors, externalRequests: external }, null, 2));
   } catch (error) {
     for (const [index, context] of browser.contexts().entries()) {
       const page = context.pages()[0];

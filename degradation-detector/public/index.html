@@ -73,6 +73,21 @@
     </div>
   </dialog>
 
+  <dialog id="prompt-dialog" class="yzai-pelican-modal prompt-dialog" aria-labelledby="prompt-dialog-title" aria-describedby="prompt-dialog-meta">
+    <header class="yzai-pelican-head">
+      <div class="dialog-copy">
+        <h2 id="prompt-dialog-title">检测提示词</h2>
+        <p id="prompt-dialog-meta" class="yzai-pelican-sub"></p>
+      </div>
+      <div class="dialog-actions">
+        <button id="prompt-dialog-close" class="icon-button" type="button" title="关闭提示词" aria-label="关闭提示词">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+    </header>
+    <pre id="prompt-content" class="yzai-pelican-code prompt-content" tabindex="0"></pre>
+  </dialog>
+
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 </body>
 </html>
