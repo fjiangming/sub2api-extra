@@ -40,7 +40,7 @@ class ProviderStore {
 
   configuration() {
     const row = this.db.prepare('SELECT * FROM degradation_provider_settings WHERE id=1').get();
-    return { revision: row.revision, ...JSON.parse(row.config_json) };
+    return { revision: row.revision, platforms: [], ...JSON.parse(row.config_json) };
   }
   group(id, channel) { return this.db.prepare('SELECT * FROM degradation_provider_groups WHERE group_id=? AND channel=?').get(String(id), channel); }
   groups() { return this.db.prepare('SELECT * FROM degradation_provider_groups ORDER BY group_id,channel').all(); }
@@ -51,7 +51,8 @@ class ProviderStore {
   }
   effective(group, configuration = this.configuration()) {
     const channel = configuration.channels[group.channel];
-    const params = { ...channel.defaults, ...(group.override_json ? JSON.parse(group.override_json) : {}) };
+    const platform = configuration.platforms?.find(item => item.id === group.platform);
+    const params = { ...channel.defaults, ...(group.override_json ? JSON.parse(group.override_json) : {}), ...platform?.params };
     if (group.channel === 'testllm' && params.model_source === 'group') {
       params.model = this.inheritedModel(group) || params.model;
     }
@@ -60,12 +61,8 @@ class ProviderStore {
     return { ...params, api_url: provider.api_url.replace(/\/$/, ''), timeout_seconds: channel.timeout_seconds,
       enabled: Boolean(group.enabled && channel.enabled && provider.enabled) };
   }
-  destination(group, configuration) {
-    const value = this.effective(group, configuration);
-    return digest([value.api_url, value.target_url]);
-  }
   revision(group) { return digest([this.effective(group), group.platform, group.key_fingerprint]); }
-  enabled(group) { return this.effective(group).enabled && Boolean(group.key_cipher) && group.key_destination === this.destination(group); }
+  enabled(group) { return this.effective(group).enabled && Boolean(group.key_cipher); }
   visible(groups, channel) {
     return groups.filter(item => {
       const group = this.group(item.id, channel);
@@ -80,12 +77,12 @@ class ProviderStore {
     return this.db.transaction(() => {
       const old = this.configuration();
       if (old.revision !== input.revision) return false;
-      const config = { providers: input.providers, channels: input.channels };
+      const config = { providers: input.providers, channels: input.channels, platforms: input.platforms ?? old.platforms };
       this.db.prepare('UPDATE degradation_provider_settings SET revision=revision+1,config_json=? WHERE id=1').run(JSON.stringify(config));
-      const upsert = this.db.prepare(`INSERT INTO degradation_provider_groups (group_id,channel,platform,group_name,enabled,override_json,key_cipher,key_fingerprint,key_destination)
-        VALUES (@group_id,@channel,@platform,@group_name,@enabled,@override_json,@key_cipher,@key_fingerprint,@key_destination)
+      const upsert = this.db.prepare(`INSERT INTO degradation_provider_groups (group_id,channel,platform,group_name,enabled,override_json,key_cipher,key_fingerprint)
+        VALUES (@group_id,@channel,@platform,@group_name,@enabled,@override_json,@key_cipher,@key_fingerprint)
         ON CONFLICT(group_id,channel) DO UPDATE SET platform=excluded.platform,group_name=excluded.group_name,enabled=excluded.enabled,
-        override_json=excluded.override_json,key_cipher=excluded.key_cipher,key_fingerprint=excluded.key_fingerprint,key_destination=excluded.key_destination`);
+        override_json=excluded.override_json,key_cipher=excluded.key_cipher,key_fingerprint=excluded.key_fingerprint`);
       for (const group of groups) upsert.run(group);
       for (const group of this.groups()) {
         const changed = JSON.stringify(old.channels[group.channel].schedule) !== JSON.stringify(config.channels[group.channel].schedule);

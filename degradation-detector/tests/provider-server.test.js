@@ -79,6 +79,55 @@ test('provider configuration and task writes enforce admin role, CSRF, scope, st
   assert.equal((await send('/api/admin/provider/groups/1/candy/runs', {})).status, 403);
 });
 
+test('shared AI platform settings and changed destinations save through HTTP without resupplying credentials', async t => {
+  const { get, send, runtime, input, admin } = await setup(t);
+  assert.equal((await send('/api/admin/provider-config', input, admin, true, 'PUT')).status, 200);
+  const previous = runtime.providerStore.groups();
+  const next = structuredClone(input); next.revision = 1;
+  next.groups.forEach(group => delete group.key);
+  next.providers.manxue.api_url = 'https://updated.example.com/tests';
+  next.providers.testllm.api_url = 'https://updated-testllm.example.com';
+  next.platforms = ['openai', 'anthropic'].map(id => ({ id, params: {
+    ...next.channels.candy.defaults, target_url: `https://${id}.example.com/v1`, model: `${id}-shared`, reasoning_effort: 'custom-platform-effort'
+  } }));
+  const response = await send('/api/admin/provider-config', next, admin, true, 'PUT');
+  assert.equal(response.status, 200, await response.clone().text());
+  const payload = await response.json();
+  assert.equal(payload.platforms.length, 2);
+  for (const group of payload.groups) for (const channel of channels) {
+    const value = group.configurations[channel];
+    assert.equal(value.model, `${group.platform}-shared`); assert(value.key_configured); assert.equal(value.override, null);
+    assert.equal(runtime.providerStore.group(group.id, channel).key_cipher, previous.find(old => old.group_id === group.id && old.channel === channel).key_cipher);
+  }
+  const reloaded = await (await get('/api/admin/provider-config', admin)).json();
+  assert.deepEqual(reloaded.platforms, payload.platforms);
+  assert.doesNotMatch(JSON.stringify(reloaded), /sk-private|key_cipher|key_context|key_fingerprint|key_destination|key_reconfirm_required/);
+  const queued = await send('/api/admin/provider/groups/1/pelican/runs', {});
+  assert.equal(queued.status, 202);
+  const snapshot = JSON.parse(runtime.providerStore.run((await queued.json()).run.id).snapshot_json);
+  assert.equal(snapshot.api_url, 'https://updated.example.com/tests'); assert.equal(snapshot.target_url, 'https://openai.example.com/v1');
+  assert.equal(snapshot.model, 'openai-shared'); assert.equal(snapshot.reasoning_effort, 'custom-platform-effort');
+});
+
+test('batch detection filters the requested AI platform and retains schema, access and CSRF boundaries', async t => {
+  const { send, runtime, input, admin, user, access } = await setup(t);
+  await send('/api/admin/provider-config', input, admin, true, 'PUT');
+  assert.equal((await send('/api/admin/provider/candy/runs', { platform: 'openai' }, user)).status, 403);
+  assert.equal((await send('/api/admin/provider/candy/runs', { platform: 'openai' }, admin, false)).status, 403);
+  for (const body of [{ platform: '' }, { platform: null }, { platform: 1 }, { platform: 'openai', model: 'forged' }, []]) {
+    assert.equal((await send('/api/admin/provider/candy/runs', body)).status, 400);
+  }
+  assert.equal((await send('/api/admin/provider/candy/runs', { platform: 'missing' })).status, 404);
+  const response = await send('/api/admin/provider/candy/runs', { platform: 'openai' });
+  assert.equal(response.status, 202);
+  assert.deepEqual((await response.json()).runs.map(run => run.group_id), ['1']);
+  assert.equal(runtime.providerStore.counts('2', 'candy').total, 0);
+  const legacy = await send('/api/admin/provider/pelican/runs', {});
+  assert.equal(legacy.status, 202); assert.equal((await legacy.json()).runs.length, 2);
+  access.admin = false;
+  assert.equal((await send('/api/admin/provider/candy/runs', { platform: 'anthropic' })).status, 403);
+});
+
 test('read-only results, details, 24h history and signed sandbox previews recheck current group and platform access', async t => {
   const { get, send, runtime, input, access, user } = await setup(t);
   await send('/api/admin/provider-config', input, undefined, true, 'PUT');

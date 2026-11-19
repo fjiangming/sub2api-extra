@@ -31,8 +31,18 @@ class ProviderDetection {
   prepareConfiguration(body, discovered) {
     const parsed = configurationSchema.safeParse(body);
     if (!parsed.success) throw fail('VALIDATION_ERROR', parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('；').slice(0, 1500));
-    const input = parsed.data;
-    if (input.revision !== this.providerStore.configuration().revision) throw fail('PROVIDER_CONFIG_CONFLICT', '配置已被其他管理员修改，请刷新后重试', 409);
+    const previous = this.providerStore.configuration();
+    const input = { ...parsed.data, platforms: parsed.data.platforms ?? previous.platforms };
+    if (input.revision !== previous.revision) throw fail('PROVIDER_CONFIG_CONFLICT', '配置已被其他管理员修改，请刷新后重试', 409);
+    const changedPlatforms = new Set();
+    const platformIds = new Set();
+    for (const platform of input.platforms) {
+      if (platformIds.has(platform.id)) throw fail('VALIDATION_ERROR', '平台配置不能重复');
+      platformIds.add(platform.id);
+      const old = previous.platforms.find(item => item.id === platform.id);
+      if (JSON.stringify(platform.params) !== JSON.stringify(old?.params)) changedPlatforms.add(platform.id);
+    }
+    for (const old of previous.platforms) if (!platformIds.has(old.id)) changedPlatforms.add(old.id);
     for (const [id, provider] of Object.entries(input.providers)) if (provider.enabled && !provider.api_url) throw fail('VALIDATION_ERROR', `${id} 必须配置检测接口地址`);
     const available = new Map(discovered.map(group => [String(group.id), group]));
     const seen = new Set();
@@ -46,41 +56,42 @@ class ProviderDetection {
       const reusable = old?.platform === found.platform ? old : null;
       const group = {
         group_id: choice.id, channel: choice.channel, platform: found.platform, group_name: found.name,
-        enabled: choice.enabled ? 1 : 0, override_json: choice.override ? JSON.stringify(choice.override) : null,
-        key_cipher: reusable?.key_cipher || null, key_fingerprint: reusable?.key_fingerprint || null, key_destination: reusable?.key_destination || null
+        enabled: choice.enabled ? 1 : 0, override_json: choice.override && !platformIds.has(found.platform) && !changedPlatforms.has(found.platform) ? JSON.stringify(choice.override) : null,
+        key_cipher: reusable?.key_cipher || null, key_fingerprint: reusable?.key_fingerprint || null
       };
       if (choice.key && choice.clear_key) throw fail('VALIDATION_ERROR', '不能同时设置和清除 Key');
-      if (choice.clear_key) { group.key_cipher = null; group.key_fingerprint = null; group.key_destination = null; }
+      if (choice.clear_key) { group.key_cipher = null; group.key_fingerprint = null; }
       if (choice.key) {
         group.key_cipher = this.vault.encrypt(keyContext(choice.channel, choice.id), choice.key);
         group.key_fingerprint = this.vault.fingerprint(choice.key);
-        group.key_destination = this.providerStore.destination(group, input);
       }
       const effective = this.providerStore.effective(group, input);
       if (effective.enabled) {
         const invalid = validateEffective(choice.channel, effective);
         if (invalid) throw fail('VALIDATION_ERROR', `${found.name} / ${names[choice.channel]}：${invalid}`);
         if (!group.key_cipher) throw fail('PROVIDER_KEY_REQUIRED', `${found.name} / ${names[choice.channel]}：请配置分组专用 Key`);
-        if (group.key_destination !== this.providerStore.destination(group, input)) throw fail('PROVIDER_KEY_CONFIRM_REQUIRED', `${found.name}：检测网站或上游地址变更后必须重新填写专用 Key`);
         this.vault.decrypt(keyContext(choice.channel, choice.id), group.key_cipher);
       }
       records.push(group);
     }
     // Include records outside the current administrator's visible groups in duplicate-key protection.
     const fingerprints = new Map();
-    for (const group of [...this.providerStore.groups().filter(group => !seen.has(`${group.channel}:${group.group_id}`)), ...records]) {
+    const omitted = this.providerStore.groups().filter(group => !seen.has(`${group.channel}:${group.group_id}`))
+      .map(group => changedPlatforms.has(group.platform) || platformIds.has(group.platform) ? { ...group, override_json: null } : group);
+    for (const group of [...omitted, ...records]) {
       const effective = this.providerStore.effective(group, input);
       if (effective.enabled) {
         const invalid = validateEffective(group.channel, effective);
         if (invalid) throw fail('VALIDATION_ERROR', `${names[group.channel]}：${invalid}`);
-        if (!group.key_cipher || group.key_destination !== this.providerStore.destination(group, input)) throw fail('PROVIDER_KEY_CONFIRM_REQUIRED', '仍有启用分组未确认新地址的专用 Key；请重新填写或停用该分组');
+        if (!group.key_cipher) throw fail('PROVIDER_KEY_REQUIRED', `${names[group.channel]}：请配置分组专用 Key`);
+        this.vault.decrypt(keyContext(group.channel, group.group_id), group.key_cipher);
       }
       if (!group.key_fingerprint) continue;
       const identity = `${group.channel}:${group.key_fingerprint}`;
       if (fingerprints.has(identity) && fingerprints.get(identity) !== group.group_id) throw fail('PROVIDER_KEY_DUPLICATED', '同一检测类别的不同分组不能共用专用 Key');
       fingerprints.set(identity, group.group_id);
     }
-    return { input, groups: records };
+    return { input, groups: [...records, ...omitted.filter(group => changedPlatforms.has(group.platform) || platformIds.has(group.platform))] };
   }
   enqueue(id, channel, trigger = 'manual') {
     if (this.closed) throw fail('PROVIDER_CLOSED', '检测服务正在关闭', 503);

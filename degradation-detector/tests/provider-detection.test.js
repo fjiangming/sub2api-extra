@@ -6,7 +6,7 @@ const { Store } = require('../src/store');
 const { ProviderStore } = require('../src/provider-store');
 const { ProviderDetection } = require('../src/provider-detection');
 const { CredentialVault } = require('../src/credential-vault');
-const { channels, defaultConfiguration, configurationSchema } = require('../src/provider-config');
+const { channels, defaultConfiguration, configurationSchema, keyContext } = require('../src/provider-config');
 const { cleanReport, conclusion } = require('../src/provider-results');
 const { testConfig } = require('./helpers');
 
@@ -203,12 +203,13 @@ test('ambiguous POST is never retried, restart resumes only saved IDs, and compl
   assert.equal(providers.run(partial.id).conclusion, 'passed');
 });
 
-test('config validation binds keys to destinations, rejects duplicates and cannot change saved config on failure', t => {
+test('config validation retains keys after address edits, rejects duplicates and cannot change saved config on failure', t => {
   const { service, providers } = setup(t);
   const next = input(1);
   next.groups.forEach(group => delete group.key);
   next.channels.candy.defaults.target_url = 'https://other.example.com/v1';
-  assert.throws(() => service.prepareConfiguration(next, groups), /重新填写/);
+  const changed = service.prepareConfiguration(next, groups);
+  assert.equal(changed.groups[0].key_cipher, providers.group('1', 'candy').key_cipher);
   assert.equal(providers.configuration().revision, 1);
   next.channels.candy.defaults.target_url = 'https://relay.example.com/v1';
   next.groups.find(group => group.id === '2' && group.channel === 'candy').key = 'sk-provider-candy-1-1234567890';
@@ -218,6 +219,137 @@ test('config validation binds keys to destinations, rejects duplicates and canno
   const stale = input(0);
   assert.throws(() => service.prepareConfiguration(stale, groups), /其他管理员/);
   assert.throws(() => service.prepareConfiguration({ ...input(1), groups: [...input(1).groups, input(1).groups[0]] }, groups), /重复/);
+});
+
+test('website and upstream edits retain legacy keys including omitted groups, use new destinations and preserve old snapshots', async t => {
+  const posts = [];
+  const { service, providers, store, vault } = setup(t, { request: async (url, options) => {
+    if (options.method === 'POST') {
+      posts.push({ url, body: options.body });
+      return options.body.mode ? { job_id: 'iq-job' } : { id: 'done', status: 'succeeded', candy: { status: 'passed' }, assessment: { quality: 'normal' } };
+    }
+    return { mode: 'iq', engines: { iq: { level: 'high' } } };
+  } });
+  providers.db.prepare("UPDATE degradation_provider_groups SET key_destination='legacy-mismatched-destination'").run();
+  const previous = providers.groups();
+  assert(previous.every(group => providers.enabled(group)), 'old destination metadata must not gate existing credentials');
+  const historical = providers.create(providers.group('2', 'candy'));
+  providers.response(historical.id, { candy: { status: 'passed' } }); providers.finish(historical.id, 'completed');
+  const oldSnapshot = providers.run(historical.id).snapshot_json;
+  const stale = service.enqueue('1', 'candy');
+  const next = input(1); next.groups = [];
+  next.providers.manxue.api_url = 'https://new-manxue.example.com/tests';
+  next.providers.testllm.api_url = 'https://new-testllm.example.com';
+  for (const channel of channels) next.channels[channel].defaults.target_url = 'https://new-relay.example.com/v1';
+  next.channels.testllm.defaults.cache_test = false; next.channels.testllm.defaults.thinking_test = false;
+  const prepared = service.prepareConfiguration(next, groups);
+  assert(providers.save(prepared.input, prepared.groups));
+  new ProviderStore(store);
+  for (const old of previous) {
+    const saved = providers.group(old.group_id, old.channel);
+    assert.equal(saved.key_cipher, old.key_cipher); assert.equal(saved.key_fingerprint, old.key_fingerprint);
+    assert(providers.enabled(saved));
+    assert.equal(vault.decrypt(keyContext(old.channel, old.group_id), saved.key_cipher), `sk-provider-${old.channel}-${old.group_id}-1234567890`);
+  }
+  await service.execute(providers.run(stale.id));
+  assert.equal(providers.run(stale.id).error_code, 'PROVIDER_CONFIG_CHANGED');
+  assert.equal(posts.length, 0);
+  for (const channel of channels) {
+    const run = service.enqueue('1', channel);
+    await service.execute(providers.run(run.id));
+    const saved = providers.run(run.id);
+    assert.equal(saved.status, 'completed');
+    assert.equal(JSON.parse(saved.snapshot_json).target_url, 'https://new-relay.example.com/v1');
+    assert.equal(posts.at(-1).url, channel === 'testllm' ? 'https://new-testllm.example.com/api/detect' : 'https://new-manxue.example.com/tests');
+    assert.equal(posts.at(-1).body.base_url, 'https://new-relay.example.com/v1');
+    assert.equal(posts.at(-1).body.api_key, `sk-provider-${channel}-1-1234567890`);
+  }
+  assert.equal(providers.run(historical.id).snapshot_json, oldSnapshot);
+  assert.equal(store.db.serialize().includes(Buffer.from('sk-provider-candy-1-1234567890')), false);
+});
+
+test('AI platform parameters govern all its groups and detectors while isolating other platforms and retaining credentials', async t => {
+  const posts = [];
+  const { service, providers } = setup(t, { request: async (_url, options) => {
+    if (options.method === 'POST') {
+      posts.push(options.body);
+      return options.body.mode ? { job_id: 'iq-job' } : { id: 'done', status: 'succeeded', candy: { status: 'passed' }, assessment: { quality: 'normal' } };
+    }
+    return { mode: 'iq', engines: { iq: { level: 'high' } } };
+  } });
+  const discovered = [...groups, { id: '3', name: 'GPT third', platform: 'openai' }];
+  const legacy = input(1);
+  for (const channel of channels) {
+    legacy.groups.find(group => group.id === '1' && group.channel === channel).override = { ...legacy.channels[channel].defaults, model: `legacy-${channel}` };
+    legacy.groups.push({ id: '3', channel, enabled: true, override: null, key: `sk-provider-${channel}-3-1234567890` });
+  }
+  let prepared = service.prepareConfiguration(legacy, discovered); providers.save(prepared.input, prepared.groups);
+  const before = providers.groups();
+  const next = { ...providers.configuration(), groups: [], platforms: ['openai', 'anthropic'].map(id => ({ id, params: {
+    ...legacy.channels.candy.defaults, target_url: `https://${id}.example.com/v1`, model: `${id}-shared`, reasoning_effort: `${id}-custom`,
+    service_tier: 'priority', cache_test: false, thinking_test: false
+  } })) };
+  prepared = service.prepareConfiguration(next, discovered); providers.save(prepared.input, prepared.groups);
+  for (const group of discovered) for (const channel of channels) {
+    const saved = providers.group(group.id, channel);
+    assert.equal(saved.override_json, null, 'omitted legacy overrides must be cleared when the platform is unified');
+    assert.equal(saved.key_cipher, before.find(old => old.group_id === group.id && old.channel === channel).key_cipher);
+    const run = service.enqueue(group.id, channel); await service.execute(providers.run(run.id));
+    const snapshot = JSON.parse(providers.run(run.id).snapshot_json);
+    assert.equal(snapshot.model, `${group.platform}-shared`); assert.equal(snapshot.reasoning_effort, `${group.platform}-custom`);
+    assert.equal(snapshot.target_url, `https://${group.platform}.example.com/v1`);
+    assert.equal(posts.at(-1).model, snapshot.model); assert.equal(posts.at(-1).base_url, snapshot.target_url);
+    if (channel === 'testllm') assert.equal(posts.at(-1).protocol, group.platform === 'openai' ? 'gpt' : 'claude');
+    else { assert.equal(posts.at(-1).reasoning_effort, snapshot.reasoning_effort); assert.equal(posts.at(-1).service_tier, 'priority'); }
+  }
+  const another = { ...providers.configuration(), groups: [{ id: '1', channel: 'candy', enabled: true, override: legacy.channels.candy.defaults }] };
+  prepared = service.prepareConfiguration(another, discovered); providers.save(prepared.input, prepared.groups);
+  assert.equal(providers.group('1', 'candy').override_json, null, 'legacy clients cannot replace configured common platform parameters');
+  assert.equal(providers.effective(providers.group('1', 'candy')).model, 'openai-shared');
+});
+
+test('legacy configurations and independent models survive unrelated saves until explicitly applying shared platform parameters', t => {
+  const { service, providers, store } = setup(t);
+  const legacy = input(1); delete legacy.platforms;
+  legacy.groups.forEach(group => delete group.key);
+  legacy.groups[0].override = { ...legacy.channels.candy.defaults, model: 'legacy-group-model' };
+  let prepared = service.prepareConfiguration(legacy, groups); providers.save(prepared.input, prepared.groups);
+  const stored = providers.configuration(); delete stored.revision; delete stored.platforms;
+  providers.db.prepare('UPDATE degradation_provider_settings SET config_json=? WHERE id=1').run(JSON.stringify(stored));
+  assert.deepEqual(new ProviderStore(store).configuration().platforms, []);
+  const originalModel = store.getPlatformTest.bind(store);
+  store.getPlatformTest = (platform, ...args) => platform === 'anthropic' ? { model: 'legacy-inherited-claude' } : originalModel(platform, ...args);
+  const keys = providers.groups().map(group => group.key_cipher);
+  const unchanged = { ...providers.configuration(), groups: [] }; delete unchanged.platforms;
+  unchanged.providers.manxue.api_url = 'https://updated.example.com/tests';
+  prepared = service.prepareConfiguration(unchanged, groups); providers.save(prepared.input, prepared.groups);
+  assert.equal(providers.effective(providers.group('1', 'candy')).model, 'legacy-group-model');
+  assert.equal(providers.effective(providers.group('2', 'testllm')).model, 'legacy-inherited-claude');
+  assert.deepEqual(providers.groups().map(group => group.key_cipher), keys);
+  const unified = { ...providers.configuration(), groups: [], platforms: [{ id: 'openai', params: { ...legacy.channels.candy.defaults, model: 'common-gpt' } }] };
+  prepared = service.prepareConfiguration(unified, groups); providers.save(prepared.input, prepared.groups);
+  assert.equal(providers.effective(providers.group('1', 'candy')).model, 'common-gpt');
+  assert.equal(providers.effective(providers.group('1', 'testllm')).model, 'common-gpt');
+  assert.equal(providers.effective(providers.group('2', 'testllm')).model, 'legacy-inherited-claude');
+});
+
+test('invalid shared platform settings fail atomically and still require valid group credentials', t => {
+  const { service, providers } = setup(t);
+  const before = providers.configuration(); const rows = providers.groups();
+  const next = { ...before, groups: [], platforms: [{ id: 'openai', params: { ...before.channels.candy.defaults } }] };
+  for (const invalid of [
+    { ...next, platforms: [...next.platforms, ...next.platforms] },
+    { ...next, platforms: [{ id: 'openai', params: { ...next.platforms[0].params, target_url: '' } }] },
+    { ...next, platforms: [{ id: 'openai', params: { ...next.platforms[0].params, model: '' } }] },
+    { ...next, platforms: [{ id: 'openai', params: { ...next.platforms[0].params, target_url: 'https://127.0.0.1' } }] },
+    { ...next, platforms: [{ id: 'openai', params: { ...next.platforms[0].params, model_source: 'group' } }] },
+    { ...next, groups: [{ id: '1', channel: 'candy', enabled: true, override: null, clear_key: true }] }
+  ]) {
+    assert.throws(() => service.prepareConfiguration(invalid, groups));
+    assert.deepEqual(providers.configuration(), before); assert.deepEqual(providers.groups(), rows);
+  }
+  providers.db.prepare("UPDATE degradation_provider_groups SET key_cipher='corrupted' WHERE group_id='1' AND channel='candy'").run();
+  assert.throws(() => service.prepareConfiguration(next, groups), { code: 'DETECTION_KEY_UNREADABLE' });
 });
 
 test('independent schedules, key rotation and configuration snapshots preserve historical parameters', async t => {
@@ -283,7 +415,7 @@ test('global edits also validate omitted groups and cache percentages retain zer
   assert.throws(() => service.prepareConfiguration(omitted, groups), /模型/);
   omitted.channels.pelican.defaults.model = 'gpt-6-astra';
   omitted.providers.manxue.api_url = 'https://other.example.com/api';
-  assert.throws(() => service.prepareConfiguration(omitted, groups), /重新填写/);
+  assert.equal(service.prepareConfiguration(omitted, groups).input.providers.manxue.api_url, 'https://other.example.com/api');
   assert.equal(providers.configuration().revision, 1);
   const cache = cleanReport({ mode: 'cache', engines: { cache: { supported: true, total: 4, hit_rate: 0, request_hit_rate: 125 } } }, 'cache');
   assert.equal(cache.hit_rate, 0); assert.equal(cache.request_hit_rate, null);

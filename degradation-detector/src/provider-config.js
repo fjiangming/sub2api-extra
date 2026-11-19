@@ -28,6 +28,11 @@ const groupSchema = z.object({
   id: z.string().min(1).max(100), channel: z.enum(channels), enabled: z.boolean(),
   override: paramsSchema.nullable(), key: z.string().max(8192).optional(), clear_key: z.boolean().optional()
 }).strict();
+const platformParamsSchema = paramsSchema.extend({ model_source: z.literal('default') });
+const platformSchema = z.object({
+  id: z.string().min(1).max(100),
+  params: platformParamsSchema
+}).strict();
 const configurationSchema = z.object({
   revision: z.number().int().nonnegative(),
   providers: z.object({
@@ -35,6 +40,7 @@ const configurationSchema = z.object({
     testllm: z.object({ enabled: z.boolean(), api_url: url }).strict()
   }).strict(),
   channels: z.object({ candy: channelSchema, pelican: channelSchema, testllm: channelSchema }).strict(),
+  platforms: z.array(platformSchema).max(100).optional(),
   groups: z.array(groupSchema).max(6000)
 }).strict();
 
@@ -44,6 +50,7 @@ function defaultConfiguration() {
       manxue: { enabled: false, api_url: 'https://manxue.ai/api/v1/tests' },
       testllm: { enabled: false, api_url: 'https://testllm.ai' }
     },
+    platforms: [],
     channels: Object.fromEntries(channels.map(channel => [channel, {
       enabled: false, timeout_seconds: 900, concurrency: 2,
       defaults: { target_url: '', model: 'gpt-6-astra', model_source: channel === 'testllm' ? 'group' : 'default', protocol: 'auto', reasoning_effort: 'low', service_tier: '', cache_test: true, thinking_test: true },

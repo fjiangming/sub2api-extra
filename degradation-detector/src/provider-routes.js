@@ -32,7 +32,6 @@ function installProviderRoutes(app, runtime, { requireAuth, requireAdmin, requir
           const usable = saved?.platform === group.platform ? saved : null;
           return [channel, {
             enabled: Boolean(usable?.enabled), key_configured: Boolean(usable?.key_cipher), override: usable?.override_json ? JSON.parse(usable.override_json) : null,
-            key_reconfirm_required: Boolean(usable?.key_cipher && usable.key_destination !== store.destination(usable)),
             model: usable ? store.effective(usable).model : null,
             inherited_model: store.inheritedModel({ group_id: String(group.id), platform: group.platform }),
             next_run_at: usable?.next_run_at || null,
@@ -114,8 +113,9 @@ function installProviderRoutes(app, runtime, { requireAuth, requireAdmin, requir
     res.status(202).json({ run: runtime.providerDetection.enqueue(req.params.groupId, req.params.channel) });
   }));
   app.post('/api/admin/provider/:channel/runs', requireAuth, requireAdmin, requireCsrf, runLimiter, handler(async (req, res) => {
-    if (!channels.includes(req.params.channel) || !req.body || Array.isArray(req.body) || Object.keys(req.body).length) throw invalid('批量检测请求无效');
-    const groups = store.visible(await discoverGroups(req, runtime), req.params.channel);
+    if (!channels.includes(req.params.channel) || !req.body || typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).some(key => key !== 'platform')
+      || Object.hasOwn(req.body, 'platform') && (typeof req.body.platform !== 'string' || !req.body.platform || req.body.platform.length > 100)) throw invalid('批量检测请求无效');
+    const groups = store.visible(await discoverGroups(req, runtime), req.params.channel).filter(group => !req.body.platform || group.platform === req.body.platform);
     if (!groups.length) throw missing();
     res.status(202).json({ runs: runtime.store.db.transaction(() => groups.map(group => runtime.providerDetection.enqueue(group.id, req.params.channel)))() });
   }));
