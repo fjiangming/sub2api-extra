@@ -33,6 +33,29 @@ const platformSchema = z.object({
   id: z.string().min(1).max(100),
   params: platformParamsSchema
 }).strict();
+const timeout = z.number().int().min(30).max(1800);
+const commonParams = { target_url: url, model, timeout_seconds: timeout };
+const manxueParamsSchema = z.object({
+  ...commonParams, reasoning_effort: paramsSchema.shape.reasoning_effort, service_tier: paramsSchema.shape.service_tier
+}).strict();
+const testllmParamsSchema = z.object({
+  ...commonParams, protocol: z.enum(['gpt', 'claude']), cache_test: z.boolean(), thinking_test: z.boolean()
+}).strict();
+const scopeFields = {
+  id: z.string().min(1).max(100), enabled: z.boolean(), schedule: modelScheduleSchema,
+  concurrency: z.number().int().min(1).max(4)
+};
+const providerPlatformSchema = z.discriminatedUnion('provider', [
+  z.object({ ...scopeFields, provider: z.literal('manxue'), params: manxueParamsSchema,
+    tests: z.object({ candy: z.boolean(), pelican: z.boolean() }).strict() }).strict(),
+  z.object({ ...scopeFields, id: z.enum(['openai', 'anthropic']), provider: z.literal('testllm'), params: testllmParamsSchema }).strict()
+]);
+const scopedGroupSchema = z.discriminatedUnion('channel', channels.map(channel => groupSchema.extend({
+  channel: z.literal(channel),
+  override: z.union([paramsSchema, channel === 'testllm' ? testllmParamsSchema : manxueParamsSchema]).nullable(),
+  group_enabled: z.boolean().optional(),
+  schedule_override: modelScheduleSchema.nullable().optional()
+})));
 const configurationSchema = z.object({
   revision: z.number().int().nonnegative(),
   providers: z.object({
@@ -41,7 +64,8 @@ const configurationSchema = z.object({
   }).strict(),
   channels: z.object({ candy: channelSchema, pelican: channelSchema, testllm: channelSchema }).strict(),
   platforms: z.array(platformSchema).max(100).optional(),
-  groups: z.array(groupSchema).max(6000)
+  provider_platforms: z.array(providerPlatformSchema).max(200).optional(),
+  groups: z.array(scopedGroupSchema).max(6000)
 }).strict();
 
 function defaultConfiguration() {
@@ -59,10 +83,22 @@ function defaultConfiguration() {
   };
 }
 
+function providerParams(provider, value) {
+  const keys = provider === 'manxue'
+    ? ['target_url', 'model', 'timeout_seconds', 'reasoning_effort', 'service_tier']
+    : ['target_url', 'model', 'timeout_seconds', 'protocol', 'cache_test', 'thinking_test'];
+  return Object.fromEntries(keys.map(key => [key, value[key]]));
+}
+
+function providerPlatform(configuration, provider, platform) {
+  return configuration.provider_platforms?.find(item => item.provider === provider && item.id === platform);
+}
+
 function validateEffective(channel, params) {
   if (!params.target_url || !params.model) return '启用的分组必须有上游地址和模型';
   if (channel === 'testllm' && !['gpt', 'claude'].includes(params.protocol)) return 'TestLLM 目前只支持 GPT / Claude 协议';
   return '';
 }
 
-module.exports = { channels, names, providerFor, digest, keyContext, configurationSchema, defaultConfiguration, validateEffective };
+module.exports = { channels, names, providerFor, digest, keyContext, configurationSchema, defaultConfiguration, validateEffective,
+  providerParams, providerPlatform };

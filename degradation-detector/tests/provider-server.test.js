@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createApp } = require('../src/server');
-const { defaultConfiguration, channels } = require('../src/provider-config');
+const { defaultConfiguration, channels, providerParams } = require('../src/provider-config');
 const { demoResponse } = require('../src/provider-detection');
 const { listen, testConfig } = require('./helpers');
 
@@ -184,4 +184,92 @@ test('disabled categories hide public history while admins retain access; deleti
   assert.equal((await removed.json()).deleted, 1);
   assert(store.run(second.id)); assert(store.run(active.id));
   assert.equal(store.run(active.id).status, 'queued');
+});
+
+function hierarchyInput(payload) {
+  return { revision: payload.revision, providers: payload.providers, channels: payload.channels, platforms: payload.platforms,
+    provider_platforms: payload.hierarchy_platforms,
+    groups: payload.groups.flatMap(group => channels.map(channel => ({ id: group.id, channel,
+      enabled: group.configurations[channel].enabled, override: group.configurations[channel].hierarchy_override,
+      schedule_override: group.configurations[channel].schedule_override }))) };
+}
+
+test('hierarchy conversion preserves legacy category and group differences, credentials, schedules and existing history through HTTP', async t => {
+  const { input, send, get, admin, runtime } = await setup(t);
+  input.channels.pelican.defaults.reasoning_effort = 'legacy-pelican-ultra';
+  input.channels.pelican.timeout_seconds = 120;
+  input.channels.pelican.schedule = { enabled: true, mode: 'interval', times: ['10:30'], interval_minutes: 45 };
+  input.groups.find(group => group.id === '1' && group.channel === 'candy').override = { ...input.channels.candy.defaults, model: 'legacy-special-model' };
+  assert.equal((await send('/api/admin/provider-config', input, admin, true, 'PUT')).status, 200);
+  const store = runtime.providerStore;
+  const previous = store.groups().map(group => ({ ...group, effective: providerParams(group.channel === 'testllm' ? 'testllm' : 'manxue', store.effective(group)), schedule: store.schedule(group) }));
+  const historical = store.create(store.group('1', 'candy')); store.response(historical.id, demoResponse('candy')); store.finish(historical.id, 'completed');
+  const oldSnapshot = store.run(historical.id).snapshot_json;
+  const payload = await (await get('/api/admin/provider-config', admin)).json();
+  assert.equal(payload.provider_platforms.length, 0, 'reading does not write or migrate configuration');
+  assert.equal(payload.hierarchy_platforms.length, 4);
+  assert.equal(payload.groups.find(group => group.id === '1').configurations.candy.hierarchy_override.model, 'legacy-special-model');
+  assert.equal(payload.groups.find(group => group.id === '2').configurations.pelican.hierarchy_override.reasoning_effort, 'legacy-pelican-ultra');
+  assert.equal(payload.groups[0].configurations.pelican.schedule_override.interval_minutes, 45);
+  const converted = await send('/api/admin/provider-config', hierarchyInput(payload), admin, true, 'PUT');
+  assert.equal(converted.status, 200, await converted.clone().text());
+  for (const old of previous) {
+    const group = store.group(old.group_id, old.channel);
+    assert.deepEqual(providerParams(old.channel === 'testllm' ? 'testllm' : 'manxue', store.effective(group)), old.effective);
+    assert.deepEqual(store.schedule(group), old.schedule);
+    assert.equal(group.key_cipher, old.key_cipher);
+    assert.equal(group.next_run_at, old.next_run_at);
+  }
+  assert.equal(store.run(historical.id).snapshot_json, oldSnapshot);
+  const reloaded = await (await get('/api/admin/provider-config', admin)).json();
+  assert.equal(reloaded.hierarchy_platforms.length, 4);
+  assert.equal(reloaded.groups.find(group => group.id === '1').configurations.candy.hierarchy_override.model, 'legacy-special-model');
+  assert.doesNotMatch(JSON.stringify(reloaded), /sk-private|key_cipher|key_fingerprint|key_context/);
+  const publicResult = await (await get('/api/provider-results?channel=pelican')).json();
+  assert.equal(publicResult.groups[0].schedule.interval_minutes, 45);
+  assert.doesNotMatch(JSON.stringify(publicResult), /hierarchy_platforms|override|relay\.example|sk-private/);
+});
+
+test('hierarchy group and batch actions queue all enabled tests only in the requested provider, platform and authorized group', async t => {
+  const { input, send, get, admin, user, runtime } = await setup(t);
+  await send('/api/admin/provider-config', input, admin, true, 'PUT');
+  const payload = await (await get('/api/admin/provider-config', admin)).json();
+  assert.equal((await send('/api/admin/provider-config', hierarchyInput(payload), admin, true, 'PUT')).status, 200);
+  const path = '/api/admin/provider-platforms/manxue/openai/runs';
+  assert.equal((await send(path, {}, user)).status, 403);
+  assert.equal((await send(path, {}, admin, false)).status, 403);
+  for (const body of [[], { model: 'forged' }]) assert.equal((await send(path, body)).status, 400);
+  assert.equal((await send('/api/admin/provider-platforms/other/openai/runs', {})).status, 400);
+  assert.equal((await send('/api/admin/provider-platforms/manxue/openai/groups/2/runs', {})).status, 404);
+  const response = await send(path, {}); assert.equal(response.status, 202);
+  const runs = (await response.json()).runs;
+  assert.deepEqual(runs.map(run => [run.group_id, run.channel]), [['1', 'candy'], ['1', 'pelican']]);
+  assert.equal(runtime.providerStore.counts('2', 'candy').total, 0);
+  assert.equal(runtime.providerStore.counts('1', 'testllm').total, 0);
+  const again = await send('/api/admin/provider-platforms/manxue/openai/groups/1/runs', {});
+  assert.deepEqual((await again.json()).runs.map(run => run.id), runs.map(run => run.id));
+  const testllm = await send('/api/admin/provider-platforms/testllm/anthropic/groups/2/runs', {});
+  assert.deepEqual((await testllm.json()).runs.map(run => [run.group_id, run.channel]), [['2', 'testllm']]);
+});
+
+test('legacy group-only configurations can adopt the hierarchy without filling unused AI platforms or losing explicit overrides', async t => {
+  const { input, send, get, admin, runtime } = await setup(t);
+  for (const channel of channels) {
+    input.channels[channel].defaults.target_url = '';
+    input.groups.find(group => group.id === '1' && group.channel === channel).override = {
+      ...input.channels[channel].defaults, target_url: 'https://only-group.example.com/v1', model_source: 'default'
+    };
+    input.groups.find(group => group.id === '2' && group.channel === channel).enabled = false;
+  }
+  assert.equal((await send('/api/admin/provider-config', input, admin, true, 'PUT')).status, 200);
+  const payload = await (await get('/api/admin/provider-config', admin)).json();
+  assert(payload.hierarchy_platforms.filter(scope => scope.id === 'openai').every(scope => scope.enabled));
+  assert(payload.hierarchy_platforms.filter(scope => scope.id === 'anthropic').every(scope => !scope.enabled));
+  assert(payload.groups.find(group => group.id === '1').configurations.candy.hierarchy_override);
+  const saved = await send('/api/admin/provider-config', hierarchyInput(payload), admin, true, 'PUT');
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal(runtime.providerStore.effective(runtime.providerStore.group('1', 'candy')).target_url, 'https://only-group.example.com/v1');
+  assert(runtime.providerStore.group('1', 'candy').override_json, 'an explicit legacy override stays independent even if it matches the suggested shared value');
+  assert(runtime.providerStore.enabled(runtime.providerStore.group('1', 'candy')));
+  assert.equal(runtime.providerStore.enabled(runtime.providerStore.group('2', 'candy')), false);
 });

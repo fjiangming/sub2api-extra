@@ -2,7 +2,7 @@
 
 const { setImmediate: yieldToRequests } = require('node:timers/promises');
 const { nextScheduledRunAt } = require('./schedule');
-const { defaultConfiguration, channels, providerFor, digest, keyContext } = require('./provider-config');
+const { defaultConfiguration, channels, providerFor, digest, keyContext, providerParams, providerPlatform } = require('./provider-config');
 const { compactResult, conclusion, runSummary } = require('./provider-results');
 
 class ProviderStore {
@@ -31,6 +31,12 @@ class ProviderStore {
       CREATE TABLE IF NOT EXISTS degradation_provider_archives (group_id TEXT NOT NULL, channel TEXT NOT NULL, platform TEXT NOT NULL, count INTEGER NOT NULL, PRIMARY KEY(group_id,channel,platform));
       CREATE TABLE IF NOT EXISTS degradation_provider_throttles (provider TEXT PRIMARY KEY, until_at INTEGER NOT NULL);
     `);
+    if (!this.db.prepare('PRAGMA table_info(degradation_provider_groups)').all().some(column => column.name === 'schedule_json')) {
+      this.db.exec('ALTER TABLE degradation_provider_groups ADD COLUMN schedule_json TEXT');
+    }
+    if (!this.db.prepare('PRAGMA table_info(degradation_provider_groups)').all().some(column => column.name === 'group_enabled')) {
+      this.db.exec('ALTER TABLE degradation_provider_groups ADD COLUMN group_enabled INTEGER NOT NULL DEFAULT 1');
+    }
     this.db.prepare('INSERT OR IGNORE INTO degradation_provider_settings VALUES (1,0,?)').run(JSON.stringify(defaultConfiguration()));
     // A crash between sending a POST and saving its ID must never replay that POST.
     this.db.prepare(`UPDATE degradation_provider_runs SET status='error', conclusion='error', error_code='SERVICE_RESTARTED',
@@ -40,7 +46,7 @@ class ProviderStore {
 
   configuration() {
     const row = this.db.prepare('SELECT * FROM degradation_provider_settings WHERE id=1').get();
-    return { revision: row.revision, platforms: [], ...JSON.parse(row.config_json) };
+    return { revision: row.revision, platforms: [], provider_platforms: [], ...JSON.parse(row.config_json) };
   }
   group(id, channel) { return this.db.prepare('SELECT * FROM degradation_provider_groups WHERE group_id=? AND channel=?').get(String(id), channel); }
   groups() { return this.db.prepare('SELECT * FROM degradation_provider_groups ORDER BY group_id,channel').all(); }
@@ -52,14 +58,47 @@ class ProviderStore {
   effective(group, configuration = this.configuration()) {
     const channel = configuration.channels[group.channel];
     const platform = configuration.platforms?.find(item => item.id === group.platform);
-    const params = { ...channel.defaults, ...(group.override_json ? JSON.parse(group.override_json) : {}), ...platform?.params };
+    const providerId = providerFor(group.channel);
+    const scope = providerPlatform(configuration, providerId, group.platform);
+    const override = group.override_json ? JSON.parse(group.override_json) : {};
+    const params = scope ? { ...scope.params, ...override } : { ...channel.defaults, ...override, ...platform?.params };
     if (group.channel === 'testllm' && params.model_source === 'group') {
       params.model = this.inheritedModel(group) || params.model;
     }
     if (params.protocol === 'auto') params.protocol = group.platform === 'anthropic' ? 'claude' : group.platform === 'openai' ? 'gpt' : 'unsupported';
-    const provider = configuration.providers[providerFor(group.channel)];
-    return { ...params, api_url: provider.api_url.replace(/\/$/, ''), timeout_seconds: channel.timeout_seconds,
-      enabled: Boolean(group.enabled && channel.enabled && provider.enabled) };
+    const provider = configuration.providers[providerId];
+    return { ...(scope ? providerParams(providerId, params) : params), api_url: provider.api_url.replace(/\/$/, ''), timeout_seconds: scope ? params.timeout_seconds : channel.timeout_seconds,
+      enabled: Boolean(group.enabled && group.group_enabled !== 0 && provider.enabled && (scope ? scope.enabled && (scope.tests?.[group.channel] ?? true) : channel.enabled)) };
+  }
+  schedule(group, configuration = this.configuration()) {
+    return group.schedule_json ? JSON.parse(group.schedule_json)
+      : providerPlatform(configuration, providerFor(group.channel), group.platform)?.schedule || configuration.channels[group.channel].schedule;
+  }
+  concurrencyScope(run, configuration = this.configuration()) {
+    const provider = providerFor(run.channel);
+    const scope = providerPlatform(configuration, provider, run.platform);
+    return scope ? { id: `${provider}:${run.platform}`, limit: scope.concurrency }
+      : { id: run.channel, limit: configuration.channels[run.channel].concurrency };
+  }
+  hierarchyPlatforms(discovered, configuration = this.configuration()) {
+    const result = structuredClone(configuration.provider_platforms || []);
+    const available = new Map(discovered.map(group => [String(group.id), group.platform]));
+    const saved = this.groups();
+    for (const id of new Set(discovered.map(group => group.platform))) for (const provider of ['manxue', 'testllm']) {
+      if (provider === 'testllm' && !['openai', 'anthropic'].includes(id) || providerPlatform(configuration, provider, id)) continue;
+      const kinds = channels.filter(channel => providerFor(channel) === provider);
+      const active = saved.filter(group => group.platform === id && available.get(group.group_id) === id && kinds.includes(group.channel)
+        && group.enabled && group.group_enabled && configuration.channels[group.channel].enabled);
+      const channel = active[0]?.channel || kinds.find(channel => configuration.channels[channel].enabled) || kinds[0];
+      const sample = discovered.find(group => group.platform === id);
+      let params = providerParams(provider, this.effective({ group_id: String(sample.id), platform: id, channel, enabled: 0 }, configuration));
+      if ((!params.target_url || !params.model) && active.length) params = providerParams(provider, this.effective(active[0], configuration));
+      result.push({ provider, id, enabled: Boolean(kinds.some(channel => configuration.channels[channel].enabled) && params.target_url && params.model), params,
+        ...(provider === 'manxue' ? { tests: Object.fromEntries(kinds.map(kind => [kind, configuration.channels[kind].enabled])) } : {}),
+        concurrency: Math.min(...kinds.map(kind => configuration.channels[kind].concurrency)),
+        schedule: structuredClone(configuration.channels[channel].schedule) });
+    }
+    return result;
   }
   revision(group) { return digest([this.effective(group), group.platform, group.key_fingerprint]); }
   enabled(group) { return this.effective(group).enabled && Boolean(group.key_cipher); }
@@ -69,24 +108,26 @@ class ProviderStore {
       return group?.platform === item.platform && this.enabled(group);
     });
   }
-  nextAt(channel, from = Date.now(), configuration = this.configuration()) {
-    const schedule = configuration.channels[channel].schedule;
+  nextAt(group, from = Date.now(), configuration = this.configuration()) {
+    const schedule = this.schedule(group, configuration);
     return schedule.enabled ? nextScheduledRunAt({ mode: schedule.mode, times: schedule.times, intervalMinutes: schedule.interval_minutes }, from, this.store.config.scheduleTimezone) : null;
   }
   save(input, groups) {
     return this.db.transaction(() => {
       const old = this.configuration();
       if (old.revision !== input.revision) return false;
-      const config = { providers: input.providers, channels: input.channels, platforms: input.platforms ?? old.platforms };
+      const oldSchedules = new Map(this.groups().map(group => [`${group.channel}:${group.group_id}`, JSON.stringify(this.schedule(group, old))]));
+      const config = { providers: input.providers, channels: input.channels, platforms: input.platforms ?? old.platforms,
+        provider_platforms: input.provider_platforms ?? old.provider_platforms };
       this.db.prepare('UPDATE degradation_provider_settings SET revision=revision+1,config_json=? WHERE id=1').run(JSON.stringify(config));
-      const upsert = this.db.prepare(`INSERT INTO degradation_provider_groups (group_id,channel,platform,group_name,enabled,override_json,key_cipher,key_fingerprint)
-        VALUES (@group_id,@channel,@platform,@group_name,@enabled,@override_json,@key_cipher,@key_fingerprint)
+      const upsert = this.db.prepare(`INSERT INTO degradation_provider_groups (group_id,channel,platform,group_name,enabled,override_json,key_cipher,key_fingerprint,schedule_json,group_enabled)
+        VALUES (@group_id,@channel,@platform,@group_name,@enabled,@override_json,@key_cipher,@key_fingerprint,@schedule_json,@group_enabled)
         ON CONFLICT(group_id,channel) DO UPDATE SET platform=excluded.platform,group_name=excluded.group_name,enabled=excluded.enabled,
-        override_json=excluded.override_json,key_cipher=excluded.key_cipher,key_fingerprint=excluded.key_fingerprint`);
+        override_json=excluded.override_json,key_cipher=excluded.key_cipher,key_fingerprint=excluded.key_fingerprint,schedule_json=excluded.schedule_json,group_enabled=excluded.group_enabled`);
       for (const group of groups) upsert.run(group);
       for (const group of this.groups()) {
-        const changed = JSON.stringify(old.channels[group.channel].schedule) !== JSON.stringify(config.channels[group.channel].schedule);
-        const next = this.enabled(group) ? !group.next_run_at || changed ? this.nextAt(group.channel) : group.next_run_at : null;
+        const changed = oldSchedules.get(`${group.channel}:${group.group_id}`) !== JSON.stringify(this.schedule(group, config));
+        const next = this.enabled(group) ? !group.next_run_at || changed ? this.nextAt(group) : group.next_run_at : null;
         this.db.prepare('UPDATE degradation_provider_groups SET next_run_at=? WHERE group_id=? AND channel=?').run(next, group.group_id, group.channel);
       }
       return true;
@@ -103,7 +144,7 @@ class ProviderStore {
   run(id) { return this.db.prepare('SELECT * FROM degradation_provider_runs WHERE id=?').get(id); }
   queued(limit = 100) { return this.db.prepare("SELECT * FROM degradation_provider_runs WHERE status IN ('queued','running') ORDER BY id LIMIT ?").all(limit); }
   due() { return this.db.prepare('SELECT * FROM degradation_provider_groups WHERE enabled=1 AND next_run_at<=? ORDER BY next_run_at LIMIT 100').all(Date.now()); }
-  advance(group) { this.db.prepare('UPDATE degradation_provider_groups SET next_run_at=? WHERE group_id=? AND channel=?').run(this.nextAt(group.channel), group.group_id, group.channel); }
+  advance(group) { this.db.prepare('UPDATE degradation_provider_groups SET next_run_at=? WHERE group_id=? AND channel=?').run(this.nextAt(group), group.group_id, group.channel); }
   current(run) {
     const group = this.group(run.group_id, run.channel);
     return Boolean(group && this.enabled(group) && group.platform === run.platform && this.revision(group) === run.revision);

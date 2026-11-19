@@ -2,7 +2,7 @@
 
 const { setTimeout: delay } = require('node:timers/promises');
 const { AppError } = require('./errors');
-const { channels, names, configurationSchema, keyContext, providerFor, validateEffective } = require('./provider-config');
+const { channels, names, configurationSchema, keyContext, providerFor, providerPlatform, validateEffective } = require('./provider-config');
 const { cleanManxue, cleanReport, runSummary } = require('./provider-results');
 const { requestReviewJson, resolveReviewAddress } = require('./review-http');
 const { waitForTestLLM } = require('./provider-http');
@@ -32,7 +32,8 @@ class ProviderDetection {
     const parsed = configurationSchema.safeParse(body);
     if (!parsed.success) throw fail('VALIDATION_ERROR', parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('；').slice(0, 1500));
     const previous = this.providerStore.configuration();
-    const input = { ...parsed.data, platforms: parsed.data.platforms ?? previous.platforms };
+    const input = { ...parsed.data, platforms: parsed.data.platforms ?? previous.platforms,
+      provider_platforms: parsed.data.provider_platforms ?? previous.provider_platforms };
     if (input.revision !== previous.revision) throw fail('PROVIDER_CONFIG_CONFLICT', '配置已被其他管理员修改，请刷新后重试', 409);
     const changedPlatforms = new Set();
     const platformIds = new Set();
@@ -43,6 +44,17 @@ class ProviderDetection {
       if (JSON.stringify(platform.params) !== JSON.stringify(old?.params)) changedPlatforms.add(platform.id);
     }
     for (const old of previous.platforms) if (!platformIds.has(old.id)) changedPlatforms.add(old.id);
+    const scopes = new Set();
+    for (const scope of input.provider_platforms) {
+      const identity = `${scope.provider}:${scope.id}`;
+      if (scopes.has(identity)) throw fail('VALIDATION_ERROR', '同一检测平台下的 AI 平台配置不能重复');
+      scopes.add(identity);
+      if (scope.enabled && input.providers[scope.provider].enabled) {
+        const invalid = validateEffective(scope.provider === 'manxue' ? 'candy' : 'testllm', scope.params);
+        if (invalid) throw fail('VALIDATION_ERROR', `${scope.provider} / ${scope.id}：${invalid}`);
+        if (scope.tests && !Object.values(scope.tests).some(Boolean)) throw fail('VALIDATION_ERROR', '启用的满血 AI 平台至少需要选择一项检测');
+      }
+    }
     for (const [id, provider] of Object.entries(input.providers)) if (provider.enabled && !provider.api_url) throw fail('VALIDATION_ERROR', `${id} 必须配置检测接口地址`);
     const available = new Map(discovered.map(group => [String(group.id), group]));
     const seen = new Set();
@@ -54,10 +66,13 @@ class ProviderDetection {
       seen.add(pair);
       const old = this.providerStore.group(choice.id, choice.channel);
       const reusable = old?.platform === found.platform ? old : null;
+      const scoped = providerPlatform(input, providerFor(choice.channel), found.platform);
       const group = {
         group_id: choice.id, channel: choice.channel, platform: found.platform, group_name: found.name,
-        enabled: choice.enabled ? 1 : 0, override_json: choice.override && !platformIds.has(found.platform) && !changedPlatforms.has(found.platform) ? JSON.stringify(choice.override) : null,
-        key_cipher: reusable?.key_cipher || null, key_fingerprint: reusable?.key_fingerprint || null
+        enabled: choice.enabled ? 1 : 0, override_json: choice.override && (scoped || !platformIds.has(found.platform) && !changedPlatforms.has(found.platform)) ? JSON.stringify(choice.override) : null,
+        key_cipher: reusable?.key_cipher || null, key_fingerprint: reusable?.key_fingerprint || null,
+        group_enabled: choice.group_enabled === undefined ? reusable?.group_enabled ?? 1 : choice.group_enabled ? 1 : 0,
+        schedule_json: Object.hasOwn(choice, 'schedule_override') ? choice.schedule_override ? JSON.stringify(choice.schedule_override) : null : reusable?.schedule_json || null
       };
       if (choice.key && choice.clear_key) throw fail('VALIDATION_ERROR', '不能同时设置和清除 Key');
       if (choice.clear_key) { group.key_cipher = null; group.key_fingerprint = null; }
@@ -77,7 +92,7 @@ class ProviderDetection {
     // Include records outside the current administrator's visible groups in duplicate-key protection.
     const fingerprints = new Map();
     const omitted = this.providerStore.groups().filter(group => !seen.has(`${group.channel}:${group.group_id}`))
-      .map(group => changedPlatforms.has(group.platform) || platformIds.has(group.platform) ? { ...group, override_json: null } : group);
+      .map(group => !providerPlatform(input, providerFor(group.channel), group.platform) && (changedPlatforms.has(group.platform) || platformIds.has(group.platform)) ? { ...group, override_json: null } : group);
     for (const group of [...omitted, ...records]) {
       const effective = this.providerStore.effective(group, input);
       if (effective.enabled) {
@@ -130,12 +145,13 @@ class ProviderDetection {
       if (!this.providerStore.current(run)) { this.providerStore.finish(run.id, 'error', '配置已变更或停用，任务已停止', 'PROVIDER_CONFIG_CHANGED'); continue; }
       if (this.active.size >= this.config.concurrency) break;
       if (this.providerStore.throttled(run.channel) && !Object.keys(JSON.parse(run.parts_json)).length) continue;
-      if ([...this.active.values()].filter(item => item.channel === run.channel).length >= config.channels[run.channel].concurrency) continue;
+      const scope = this.providerStore.concurrencyScope(run, config);
+      if ([...this.active.values()].filter(item => item.scope === scope.id).length >= scope.limit) continue;
       const controller = new AbortController();
       const promise = this.execute(run, controller).catch(() => {
         this.providerStore.finish(run.id, 'error', '检测执行异常', 'PROVIDER_INTERNAL');
       }).finally(() => { this.active.delete(run.id); if (!this.closed) this.pump(); });
-      this.active.set(run.id, { channel: run.channel, controller, promise });
+      this.active.set(run.id, { channel: run.channel, scope: scope.id, controller, promise });
     }
   }
   configurationChanged() {

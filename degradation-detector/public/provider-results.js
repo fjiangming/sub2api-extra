@@ -141,8 +141,6 @@
     state.data = data;
     if (dialogState && !dialogState.admin && !data.groups.some(group => group.id === dialogState.group.id)) clearHistory();
     $('page-meta').textContent = `${data.demo ? '演示数据 · ' : ''}第三方检测 · ${stamp(data.server_time)} · Asia/Shanghai`;
-    const schedule = data.schedule;
-    $('p-plan').textContent = schedule.enabled ? schedule.mode === 'daily' ? `每日 ${schedule.times.join(' / ')} · Asia/Shanghai` : `每 ${schedule.interval_minutes} 分钟执行` : '自动计划未启用';
     const options = [...new Set(data.groups.map(group => group.platform))];
     if (!options.includes(state.platform)) state.platform = '';
     const optionSignature = options.join(',');
@@ -168,6 +166,10 @@
     if (!state.data) return;
     const all = state.data.groups;
     const groups = all.filter(group => `${group.name} ${group.latest?.model || group.model}`.toLowerCase().includes(state.query) && (!state.platform || group.platform === state.platform) && (!state.status || group.latest?.conclusion === state.status));
+    const plans = [...new Map(groups.map(group => { const plan = group.schedule || state.data.schedule; return [JSON.stringify(plan), plan]; })).values()];
+    const schedule = plans[0] || state.data.schedule;
+    $('p-plan').textContent = plans.length > 1 ? '按平台 / 分组计划执行'
+      : schedule.enabled ? schedule.mode === 'daily' ? `每日 ${schedule.times.join(' / ')} · ${state.data.timezone}` : `每 ${schedule.interval_minutes} 分钟执行` : '自动计划未启用';
     const stats = [['可见分组', all.length], ['通过 / 正常', all.filter(group => group.latest?.conclusion === 'passed').length], ['未通过 / 疑似降智', all.filter(group => group.latest?.conclusion === 'failed').length], ['异常 / 待检测', all.filter(group => !group.latest || !['passed', 'failed'].includes(group.latest.conclusion)).length]];
     $('p-stats').innerHTML = stats.map(([label, value]) => `<div class="p-stat"><strong>${value}</strong><span>${label}</span></div>`).join('');
     $('p-count').textContent = `${groups.length} 个分组`;

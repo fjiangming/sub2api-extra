@@ -1,7 +1,7 @@
 'use strict';
 
 const { AppError } = require('./errors');
-const { channels, names } = require('./provider-config');
+const { channels, names, providerFor, providerParams, providerPlatform } = require('./provider-config');
 const { runSummary } = require('./provider-results');
 const { publicGroupCacheStats } = require('./group-metrics');
 
@@ -23,16 +23,31 @@ function installProviderRoutes(app, runtime, { requireAuth, requireAdmin, requir
   };
   const adminPayload = async req => {
     const available = await discoverGroups(req, runtime);
+    const configuration = store.configuration();
+    const hierarchy = store.hierarchyPlatforms(available, configuration);
     return {
-      ...store.configuration(), timezone: runtime.config.scheduleTimezone, demo: runtime.config.demoMode, total_concurrency: runtime.config.concurrency,
+      ...configuration, hierarchy_platforms: hierarchy, timezone: runtime.config.scheduleTimezone, demo: runtime.config.demoMode, total_concurrency: runtime.config.concurrency,
       groups: available.map(group => ({
         id: String(group.id), name: group.name, platform: group.platform, rate_multiplier: group.rate_multiplier ?? null,
         configurations: Object.fromEntries(channels.map(channel => {
           const saved = store.group(group.id, channel);
           const usable = saved?.platform === group.platform ? saved : null;
+          const provider = providerFor(channel);
+          const scope = providerPlatform({ provider_platforms: hierarchy }, provider, group.platform);
+          const effective = usable ? store.effective(usable, configuration) : null;
+          const params = effective ? providerParams(provider, effective) : null;
+          const scoped = providerPlatform(configuration, provider, group.platform);
+          // Materialize legacy differences as explicit group settings only when the new form is saved.
+          const independent = usable?.override_json && !configuration.platforms.some(item => item.id === group.platform);
+          const override = usable && scope ? scoped ? usable.override_json ? params : null
+            : independent || JSON.stringify(params) !== JSON.stringify(scope.params) ? params : null : null;
+          const schedule = usable ? store.schedule(usable, configuration) : null;
           return [channel, {
             enabled: Boolean(usable?.enabled), key_configured: Boolean(usable?.key_cipher), override: usable?.override_json ? JSON.parse(usable.override_json) : null,
-            model: usable ? store.effective(usable).model : null,
+            group_enabled: Boolean(usable?.enabled && usable.group_enabled),
+            hierarchy_override: override,
+            schedule_override: usable && scope && (usable.schedule_json || JSON.stringify(schedule) !== JSON.stringify(scope.schedule)) ? schedule : null,
+            model: effective?.model || null,
             inherited_model: store.inheritedModel({ group_id: String(group.id), platform: group.platform }),
             next_run_at: usable?.next_run_at || null,
             latest: usable ? store.history(group.id, channel, Number.MAX_SAFE_INTEGER, 1)[0] || null : null,
@@ -64,7 +79,7 @@ function installProviderRoutes(app, runtime, { requireAuth, requireAdmin, requir
         const history = store.history(group.id, channel, Number.MAX_SAFE_INTEGER, 60);
         return { id: String(group.id), name: group.name, platform: group.platform, rate_multiplier: group.rate_multiplier ?? null,
           cache_stats: metrics ? publicGroupCacheStats(metrics, group.id) : null,
-          model: store.effective(saved).model, next_run_at: saved.next_run_at,
+          model: store.effective(saved).model, schedule: store.schedule(saved), next_run_at: saved.next_run_at,
           history, latest: history[0] || null, ...store.counts(group.id, channel) };
       })
     });
@@ -119,6 +134,18 @@ function installProviderRoutes(app, runtime, { requireAuth, requireAdmin, requir
     if (!groups.length) throw missing();
     res.status(202).json({ runs: runtime.store.db.transaction(() => groups.map(group => runtime.providerDetection.enqueue(group.id, req.params.channel)))() });
   }));
+  const enqueueScope = async (req, res) => {
+    const { provider, platform, groupId } = req.params;
+    if (!['manxue', 'testllm'].includes(provider) || !req.body || typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length) throw invalid('平台检测请求无效');
+    await runtime.auth.refreshUser(req.auth);
+    const available = (await discoverGroups(req, runtime)).filter(group => group.platform === platform && (!groupId || String(group.id) === groupId));
+    const choices = available.flatMap(group => channels.filter(channel => providerFor(channel) === provider).map(channel => ({ group, channel })))
+      .filter(({ group, channel }) => { const saved = store.group(group.id, channel); return saved?.platform === platform && store.enabled(saved); });
+    if (!choices.length) throw missing();
+    res.status(202).json({ runs: runtime.store.db.transaction(() => choices.map(({ group, channel }) => runtime.providerDetection.enqueue(group.id, channel)))() });
+  };
+  app.post('/api/admin/provider-platforms/:provider/:platform/runs', requireAuth, requireAdmin, requireCsrf, runLimiter, handler(enqueueScope));
+  app.post('/api/admin/provider-platforms/:provider/:platform/groups/:groupId/runs', requireAuth, requireAdmin, requireCsrf, runLimiter, handler(enqueueScope));
   app.delete('/api/admin/provider/groups/:groupId/:channel/runs', requireAuth, requireAdmin, requireCsrf, historyLimiter, handler(async (req, res) => {
     await requireGroup(req, req.params.groupId, req.params.channel, true);
     const body = req.body;
