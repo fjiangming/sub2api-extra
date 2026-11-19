@@ -44,10 +44,18 @@ test('provider configuration and task writes enforce admin role, CSRF, scope, st
   assert.equal((await send('/api/admin/provider-config', input, user, true, 'PUT')).status, 403);
   assert.equal((await send('/api/admin/provider-config', input, admin, false, 'PUT')).status, 403);
   assert.equal((await (await get('/api/provider-results')).json()).groups.length, 0);
+  input.channels.pelican.defaults.reasoning_effort = 'custom-pelican-default';
+  input.groups.find(group => group.id === '1' && group.channel === 'pelican').override = {
+    ...input.channels.pelican.defaults, reasoning_effort: 'custom-pelican-group'
+  };
   const saved = await send('/api/admin/provider-config', input, admin, true, 'PUT');
   assert.equal(saved.status, 200, await saved.clone().text());
   const payload = await saved.json();
   assert.equal(payload.revision, 1);
+  assert.equal(payload.channels.pelican.defaults.reasoning_effort, 'custom-pelican-default');
+  assert.equal(payload.groups.find(group => group.id === '1').configurations.pelican.override.reasoning_effort, 'custom-pelican-group');
+  const reloaded = await (await get('/api/admin/provider-config', admin)).json();
+  assert.equal(reloaded.channels.pelican.defaults.reasoning_effort, 'custom-pelican-default');
   assert(payload.groups.every(group => group.configurations.candy.key_configured));
   assert.doesNotMatch(JSON.stringify(payload), /sk-private|key_cipher|key_context|key_fingerprint|key_destination/);
   assert.equal(runtime.store.listEnabledMonitors(runtime.config.serviceOwnerId).length, 0);

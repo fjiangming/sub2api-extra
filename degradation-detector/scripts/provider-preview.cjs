@@ -26,7 +26,7 @@ async function createPreview(port = 19961) {
   }
   const prepared = runtime.providerDetection.prepareConfiguration(input, groups);
   runtime.providerStore.save(prepared.input, prepared.groups);
-  const artwork = fs.readFileSync(path.join(__dirname, 'multi-provider-demo', 'pelican.html'), 'utf8');
+  const artwork = fs.readFileSync(path.join(__dirname, 'provider-preview-artwork.html'), 'utf8');
   for (const group of runtime.providerStore.groups()) {
     for (let i = 0; i < 28; i++) {
       const run = runtime.providerStore.create(group, 'demo');

@@ -11,7 +11,7 @@ try { playwright = require(process.env.PLAYWRIGHT_MODULE || 'playwright'); }
 catch { playwright = require(path.join(os.homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')); }
 
 async function main() {
-  const preview = await createPreview(0);
+  let preview = await createPreview(0);
   const menuServer = http.createServer((_req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.end(`<!doctype html><html><body style="margin:0"><iframe id="detector" src="${preview.baseUrl}/results?demo=readonly" style="width:100%;height:900px;border:0" title="检测结果"></iframe></body></html>`);
@@ -40,6 +40,7 @@ async function main() {
   try {
     browser = await playwright.chromium.launch({ headless: true, executablePath: process.env.CHROME_PATH || 'C:/Program Files/Google/Chrome/Application/chrome.exe' });
     for (const layout of [{ name: 'desktop', width: 1440, dark: false }, { name: 'mobile', width: 390, dark: false }, { name: 'narrow', width: 320, dark: false }, { name: 'dark', width: 1440, dark: true }]) {
+      if (layout.name !== 'desktop') { await preview.close(); preview = await createPreview(0); }
       const context = await browser.newContext({ viewport: { width: layout.width, height: 900 }, colorScheme: layout.dark ? 'dark' : 'light', locale: 'zh-CN' });
       const page = await context.newPage(); watch(page);
       await page.goto(`${preview.baseUrl}/results?demo=readonly`);
@@ -94,6 +95,48 @@ async function main() {
       await admin.goto(`${preview.baseUrl}/admin/config?demo=1`);
       await admin.locator('#pc-connection-form').waitFor();
       assert.equal(await admin.locator('#legacy-config').evaluate(element => element.open), false);
+      for (const channel of ['candy', 'pelican']) {
+        await admin.locator(`[data-pc-channel="${channel}"]`).click();
+        const form = admin.locator('#pc-connection-form');
+        const preset = form.locator('[name="reasoning_effort_preset"]');
+        const custom = form.locator('[name="reasoning_effort"]');
+        assert.deepEqual(await preset.locator('option').evaluateAll(options => options.map(option => option.value)), ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'custom']);
+        await preset.selectOption('ultra');
+        assert.equal(await custom.inputValue(), 'ultra');
+        assert.equal(await custom.isVisible(), false);
+        const selected = await save(admin);
+        assert.equal(selected.channels[channel].defaults.reasoning_effort, 'ultra');
+        await preset.selectOption('custom');
+        assert.equal(await custom.isVisible(), true);
+        await custom.fill('');
+        assert.equal(await form.evaluate(element => element.checkValidity()), false);
+        const effort = `manual-${channel}-${layout.name}`;
+        await custom.fill(effort);
+        const saved = await save(admin);
+        assert.equal(saved.channels[channel].defaults.reasoning_effort, effort);
+        await admin.reload(); await admin.locator('#pc-connection-form').waitFor();
+        await admin.locator(`[data-pc-channel="${channel}"]`).click();
+        assert.equal(await preset.inputValue(), 'custom');
+        assert.equal(await custom.inputValue(), effort);
+        await fit(admin); await shot(admin, `${layout.name}-admin-${channel}-effort`);
+      }
+      await admin.locator('[data-pc-view="groups"]').click();
+      await admin.locator('[data-pc-edit="8"]').click();
+      const pelicanModal = admin.locator('#pc-group-dialog');
+      await pelicanModal.locator('[name="override_enabled"]').check();
+      await pelicanModal.locator('[name="reasoning_effort_preset"]').selectOption('custom');
+      await pelicanModal.locator('[name="reasoning_effort"]').fill(`group-pelican-${layout.name}`);
+      await pelicanModal.getByRole('button', { name: '应用配置' }).click();
+      const pelicanConfig = await save(admin);
+      assert.equal(pelicanConfig.groups.find(group => group.id === '8').configurations.pelican.override.reasoning_effort, `group-pelican-${layout.name}`);
+      await admin.locator('[data-pc-edit="8"]').click();
+      assert.equal(await pelicanModal.locator('[name="reasoning_effort_preset"]').inputValue(), 'custom');
+      assert.equal(await pelicanModal.locator('[name="reasoning_effort"]').inputValue(), `group-pelican-${layout.name}`);
+      await pelicanModal.locator('[name="reasoning_effort"]').focus();
+      await fit(admin); await shot(admin, `${layout.name}-admin-pelican-group-effort`);
+      await admin.locator('#pc-group-cancel').click();
+      await admin.locator('[data-pc-channel="candy"]').click();
+      await admin.locator('[data-pc-view="connection"]').click();
       await fit(admin); await shot(admin, `${layout.name}-admin-connection`);
       if (layout.name === 'desktop') {
         await admin.locator('#pc-connection-form [name="model"]').fill('gpt-candy-browser');
@@ -106,6 +149,8 @@ async function main() {
       await admin.locator('[data-pc-edit="8"]').click();
       const modal = admin.locator('#pc-group-dialog');
       await modal.locator('[name="override_enabled"]').check();
+      await modal.locator('[name="reasoning_effort_preset"]').selectOption('custom');
+      await modal.locator('[name="reasoning_effort"]').fill(`group-candy-${layout.name}`);
       await modal.locator('[name="key"]').focus();
       assert(await modal.locator('[name="key"]').evaluate(input => {
         const bounds = input.getBoundingClientRect();
@@ -121,6 +166,7 @@ async function main() {
         let result = await save(admin);
         const value = result.groups.find(group => group.id === '8').configurations.candy;
         assert.equal(value.override.model, 'gpt-group-browser');
+        assert.equal(value.override.reasoning_effort, 'group-candy-desktop');
         assert.equal(value.key_configured, true);
         assert.doesNotMatch(JSON.stringify(result), /sk-browser/);
         assert.equal(await admin.evaluate(() => JSON.stringify(localStorage).includes('sk-browser')), false);
@@ -128,6 +174,8 @@ async function main() {
         await admin.locator('[data-pc-run="8"]').click();
         await admin.waitForFunction(() => document.querySelector('[data-pc-run="8"]').closest('tr').innerText.includes('通过 / 正常'));
         assert.equal(preview.runtime.providerStore.counts('8', 'candy').total, before + 1);
+        const actualRun = preview.runtime.providerStore.run(preview.runtime.providerStore.history('8', 'candy', Number.MAX_SAFE_INTEGER, 1)[0].id);
+        assert.equal(JSON.parse(actualRun.snapshot_json).reasoning_effort, 'group-candy-desktop');
         assert.equal(preview.runtime.providerStore.counts('2', 'candy').total, 28);
         await admin.locator('[data-pc-view="schedule"]').click();
         const candyPlan = admin.locator('[data-pc-plan="candy"]');
@@ -149,6 +197,7 @@ async function main() {
       await admin.locator('.platform-panel:not([hidden])').waitFor();
       assert.equal(await admin.locator('#save-button').isVisible(), true);
       await adminContext.close();
+      assert.equal(preview.outboundCalls, 0); assert.equal(preview.providerCalls, 0);
     }
     const embeddedContext = await browser.newContext({ viewport: { width: 1440, height: 950 }, locale: 'zh-CN' });
     const embedded = await embeddedContext.newPage(); watch(embedded);

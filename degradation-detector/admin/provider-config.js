@@ -2,6 +2,7 @@
   'use strict';
   const { esc, icon, names, badge, stamp, openHistory, icons } = window.ProviderUI;
   const channels = ['candy', 'pelican', 'testllm'];
+  const reasoningEfforts = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
   const $ = id => document.getElementById(id);
   const state = { data: null, channel: 'candy', view: 'connection', dirty: false, saving: false, query: '', group: null, polling: false };
   let context;
@@ -18,9 +19,23 @@
   const select = (label, name, value, options) => field(label, `<select name="${name}">${options.map(([id, text]) => `<option value="${id}" ${value === id ? 'selected' : ''}>${text}</option>`).join('')}</select>`);
   const check = (label, name, value, extra = '') => `<label class="pc-check"><input type="checkbox" name="${name}" ${value ? 'checked' : ''} ${extra}><span>${label}</span></label>`;
   function dirty() { state.dirty = true; $('pc-save').disabled = state.saving; $('pc-save-label').textContent = '保存更改'; document.querySelectorAll('[data-pc-run],[data-pc-batch]').forEach(button => { button.disabled = true; }); }
-  function paramsFields(params) {
+  function effortField(value, scope) {
+    const custom = !reasoningEfforts.includes(value);
+    const label = `pc-effort-${scope}-label`;
+    return `<div class="pc-field"><span id="${label}">推理程度</span><select name="reasoning_effort_preset" data-pc-effort aria-labelledby="${label}">${[...reasoningEfforts, 'custom'].map(effort => `<option value="${effort}" ${(custom ? 'custom' : value) === effort ? 'selected' : ''}>${effort === 'custom' ? '自定义' : effort}</option>`).join('')}</select><input type="text" name="reasoning_effort" value="${esc(value)}" maxlength="64" required aria-label="自定义推理程度" ${custom ? '' : 'hidden disabled'}></div>`;
+  }
+  function syncEffort(event) {
+    if (!event.target.matches('[data-pc-effort]')) return;
+    const control = event.target.closest('.pc-field').querySelector('[name="reasoning_effort"]');
+    const custom = event.target.value === 'custom';
+    control.hidden = !custom;
+    control.disabled = !custom;
+    if (custom) control.focus();
+    else control.value = event.target.value;
+  }
+  function paramsFields(params, scope = 'defaults') {
     const llm = state.channel === 'testllm';
-    return `<div class="pc-fields">${input('上游 API 地址', 'target_url', params.target_url, 'url', 'maxlength="2048" placeholder="https://api.your-domain.com/v1"')}${input('检测模型', 'model', params.model, 'text', 'maxlength="200"')}${llm ? select('模型来源', 'model_source', params.model_source, [['group', '跟随原有分组检测模型'], ['default', '使用此处指定模型']]) + select('接口协议', 'protocol', params.protocol, [['auto', '跟随分组平台'], ['gpt', 'GPT'], ['claude', 'Claude']]) : select('推理程度', 'reasoning_effort', params.reasoning_effort, (state.channel === 'pelican' ? ['low', 'medium', 'high'] : ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']).map(id => [id, id])) + select('服务档位', 'service_tier', params.service_tier, [['', '默认'], ['priority', 'Fast / priority'], ['ultrafast', 'UltraFast / ultrafast']])}</div>${llm ? `<div class="pc-checks">${check('检测缓存率', 'cache_test', params.cache_test)}${check('检测思考与签名', 'thinking_test', params.thinking_test)}</div>` : ''}`;
+    return `<div class="pc-fields">${input('上游 API 地址', 'target_url', params.target_url, 'url', 'maxlength="2048" placeholder="https://api.your-domain.com/v1"')}${input('检测模型', 'model', params.model, 'text', 'maxlength="200"')}${llm ? select('模型来源', 'model_source', params.model_source, [['group', '跟随原有分组检测模型'], ['default', '使用此处指定模型']]) + select('接口协议', 'protocol', params.protocol, [['auto', '跟随分组平台'], ['gpt', 'GPT'], ['claude', 'Claude']]) : effortField(params.reasoning_effort, scope) + select('服务档位', 'service_tier', params.service_tier, [['', '默认'], ['priority', 'Fast / priority'], ['ultrafast', 'UltraFast / ultrafast']])}</div>${llm ? `<div class="pc-checks">${check('检测缓存率', 'cache_test', params.cache_test)}${check('检测思考与签名', 'thinking_test', params.thinking_test)}</div>` : ''}`;
   }
   function readParams(root, previous) {
     const params = structuredClone(previous);
@@ -104,7 +119,7 @@
     const config = groupEntry(group);
     const params = config.override || entry().defaults;
     $('pc-group-title').textContent = `${group.name} · ${names[state.channel]}`;
-    $('pc-group-body').innerHTML = `${check('使用分组独立参数', 'override_enabled', Boolean(config.override))}<fieldset id="pc-override-fields" ${config.override ? '' : 'disabled'}>${paramsFields(params)}</fieldset><section class="pc-section"><h3>分组专用 Key</h3><p class="pc-note">${config.key_configured ? '已配置，留空保留现有 Key' : '尚未配置'}${config.key_reconfirm_required ? '；地址变更，请重新填写' : ''}</p>${input('更换专用 Key', 'key', config.key || '', 'password', 'maxlength="8192" autocomplete="new-password"')}${check('清除现有 Key', 'clear_key', config.clear_key)}</section><p id="pc-group-error" role="alert" class="p-history-error"></p>`;
+    $('pc-group-body').innerHTML = `${check('使用分组独立参数', 'override_enabled', Boolean(config.override))}<fieldset id="pc-override-fields" ${config.override ? '' : 'disabled'}>${paramsFields(params, 'group')}</fieldset><section class="pc-section"><h3>分组专用 Key</h3><p class="pc-note">${config.key_configured ? '已配置，留空保留现有 Key' : '尚未配置'}${config.key_reconfirm_required ? '；地址变更，请重新填写' : ''}</p>${input('更换专用 Key', 'key', config.key || '', 'password', 'maxlength="8192" autocomplete="new-password"')}${check('清除现有 Key', 'clear_key', config.clear_key)}</section><p id="pc-group-error" role="alert" class="p-history-error"></p>`;
     $('pc-group-dialog').showModal(); icons();
   }
   function applyGroup(event) {
@@ -172,6 +187,7 @@
       }
     });
     root.addEventListener('input', event => {
+      syncEffort(event);
       if (event.target.id === 'pc-group-query') {
         const input = event.target; const position = input.selectionStart;
         state.query = input.value.toLowerCase(); render(); $('pc-group-query').focus(); $('pc-group-query').setSelectionRange(position, position);
@@ -205,6 +221,7 @@
       event.preventDefault(); const id = tabs[index].id; tabs[index].click(); $(id)?.focus();
     });
     $('pc-group-form').addEventListener('submit', applyGroup);
+    $('pc-group-form').addEventListener('input', syncEffort);
     $('pc-group-close').onclick = () => $('pc-group-dialog').close();
     $('pc-group-cancel').onclick = () => $('pc-group-dialog').close();
     $('pc-group-reset').onclick = () => { $('pc-group-form').elements.override_enabled.checked = false; $('pc-override-fields').disabled = true; };

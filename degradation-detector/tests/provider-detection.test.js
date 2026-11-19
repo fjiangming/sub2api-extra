@@ -78,6 +78,53 @@ test('candy and pelican submit the direct benchmark contract, exclude errors and
   assert.equal(conclusion('candy', { candy: { status: 'error' } }), 'error');
 });
 
+test('Manxue reasoning efforts preserve all presets, custom defaults and group overrides in saved settings and requests', async t => {
+  const posts = [];
+  const { service, providers } = setup(t, { request: async (_url, options) => {
+    posts.push(options.body);
+    return options.body.benchmark === 'candy'
+      ? { id: 'candy', status: 'succeeded', candy: { status: 'passed' } }
+      : { id: 'pelican', status: 'succeeded', assessment: { quality: 'normal' } };
+  } });
+  for (const channel of ['candy', 'pelican']) {
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'future-effort-v2']) {
+      const next = input(providers.configuration().revision);
+      next.channels[channel].defaults.reasoning_effort = ` ${effort} `;
+      next.groups.find(group => group.id === '2' && group.channel === channel).override = {
+        ...next.channels[channel].defaults, reasoning_effort: 'group-effort-v3'
+      };
+      const prepared = service.prepareConfiguration(next, groups);
+      assert(providers.save(prepared.input, prepared.groups));
+      assert.equal(providers.configuration().channels[channel].defaults.reasoning_effort, effort);
+      const run = service.enqueue('1', channel);
+      await service.execute(providers.run(run.id));
+      assert.equal(providers.run(run.id).conclusion, 'passed');
+      assert.equal(JSON.parse(providers.run(run.id).snapshot_json).reasoning_effort, effort);
+      assert.equal(posts.at(-1).reasoning_effort, effort);
+      const overridden = service.enqueue('2', channel);
+      await service.execute(providers.run(overridden.id));
+      assert.equal(posts.at(-1).reasoning_effort, 'group-effort-v3');
+      assert.equal(JSON.parse(providers.run(overridden.id).snapshot_json).reasoning_effort, 'group-effort-v3');
+      assert.equal(JSON.parse(providers.run(run.id).snapshot_json).reasoning_effort, effort);
+    }
+  }
+  for (const effort of ['', '   ', 'x'.repeat(65), 'high\ninvalid', null]) {
+    const invalid = input(providers.configuration().revision);
+    invalid.channels.pelican.defaults.reasoning_effort = effort;
+    assert.throws(() => service.prepareConfiguration(invalid, groups), /推理程度|reasoning_effort/);
+  }
+  let rejectedPosts = 0;
+  service.request = async (_url, options) => {
+    rejectedPosts++;
+    assert.equal(options.body.reasoning_effort, 'future-effort-v2');
+    throw Object.assign(new Error('unsupported reasoning effort'), { httpStatus: 400 });
+  };
+  const rejected = service.enqueue('1', 'pelican');
+  await service.execute(providers.run(rejected.id));
+  assert.equal(rejectedPosts, 1, 'an upstream rejection must not retry with a lower effort');
+  assert.equal(providers.run(rejected.id).status, 'error');
+});
+
 test('TestLLM aggregates separate IQ/cache/thinking jobs, persists each remote ID and does not invent latency', async t => {
   const calls = [];
   const { service, providers } = setup(t, {
@@ -167,7 +214,7 @@ test('config validation binds keys to destinations, rejects duplicates and canno
   next.groups.find(group => group.id === '2' && group.channel === 'candy').key = 'sk-provider-candy-1-1234567890';
   assert.throws(() => service.prepareConfiguration(next, groups), /不能共用/);
   const valid = input(1); valid.channels.pelican.defaults.reasoning_effort = 'ultra';
-  assert.throws(() => service.prepareConfiguration(valid, groups), /只支持/);
+  assert.equal(service.prepareConfiguration(valid, groups).input.channels.pelican.defaults.reasoning_effort, 'ultra');
   const stale = input(0);
   assert.throws(() => service.prepareConfiguration(stale, groups), /其他管理员/);
   assert.throws(() => service.prepareConfiguration({ ...input(1), groups: [...input(1).groups, input(1).groups[0]] }, groups), /重复/);
@@ -232,9 +279,9 @@ test('bounded maintenance protects recent samples and active jobs, prunes payloa
 test('global edits also validate omitted groups and cache percentages retain zero without inventing out-of-range rates', t => {
   const { service, providers } = setup(t);
   const omitted = input(1); omitted.groups = [];
-  omitted.channels.pelican.defaults.reasoning_effort = 'ultra';
-  assert.throws(() => service.prepareConfiguration(omitted, groups), /只支持/);
-  omitted.channels.pelican.defaults.reasoning_effort = 'low';
+  omitted.channels.pelican.defaults.model = '';
+  assert.throws(() => service.prepareConfiguration(omitted, groups), /模型/);
+  omitted.channels.pelican.defaults.model = 'gpt-6-astra';
   omitted.providers.manxue.api_url = 'https://other.example.com/api';
   assert.throws(() => service.prepareConfiguration(omitted, groups), /重新填写/);
   assert.equal(providers.configuration().revision, 1);

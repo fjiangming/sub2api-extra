@@ -14,7 +14,8 @@ const model = z.string().trim().max(200).refine(value => !/[\x00-\x1f\x7f]/.test
 const paramsSchema = z.object({
   target_url: url, model, model_source: z.enum(['default', 'group']),
   protocol: z.enum(['auto', 'gpt', 'claude']),
-  reasoning_effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
+  reasoning_effort: z.string().trim().min(1, '请填写推理程度').max(64, '推理程度最多 64 个字符')
+    .refine(value => !/[\x00-\x1f\x7f]/.test(value), '推理程度不能包含控制字符'),
   service_tier: z.enum(['', 'priority', 'ultrafast']),
   cache_test: z.boolean(), thinking_test: z.boolean()
 }).strict();
@@ -53,7 +54,6 @@ function defaultConfiguration() {
 
 function validateEffective(channel, params) {
   if (!params.target_url || !params.model) return '启用的分组必须有上游地址和模型';
-  if (channel === 'pelican' && !['low', 'medium', 'high'].includes(params.reasoning_effort)) return '鹈鹕检测推理程度只支持 low / medium / high';
   if (channel === 'testllm' && !['gpt', 'claude'].includes(params.protocol)) return 'TestLLM 目前只支持 GPT / Claude 协议';
   return '';
 }
