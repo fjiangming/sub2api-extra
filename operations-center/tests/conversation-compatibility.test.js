@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const zlib = require('node:zlib');
-const { availableMemory, processingBudget } = require('../src/services/conversation-memory');
+const { availableMemory, processingBudget, processingBudgets } = require('../src/services/conversation-memory');
 const { maskPayload } = require('../src/services/conversation-redaction');
 const { inspectCompletion } = require('../src/services/conversation-completion');
 const { fixture,event,removeMetadata } = require('./conversation-logs-fixture');
@@ -33,6 +33,16 @@ test('cgroup v2 credits only half of clean inactive cache and retains heap and r
   assert.equal(processingBudget(undefined,withHeap),167 * MiB);
   assert.equal(processingBudget(undefined,{...withHeap,heapStatistics:() => ({heap_size_limit:96 * MiB,used_heap_size:50 * MiB})}),14 * MiB);
   assert.equal(processingBudget(0,withHeap),0); assert.equal(availableMemory(13,dependencies),13);
+});
+
+test('process and heap headroom remain independent while legacy callers retain the stricter budget', () => {
+  const dependencies = {...v2({anon:128},128),heapStatistics:() => ({heap_size_limit:192 * MiB,used_heap_size:48 * MiB})};
+  assert.deepEqual(processingBudgets(undefined,dependencies),{memory:352 * MiB,heap:112 * MiB});
+  assert.equal(processingBudget(undefined,dependencies),112 * MiB);
+  assert.deepEqual(processingBudgets(80 * MiB,dependencies),{memory:48 * MiB,heap:112 * MiB});
+  assert.equal(processingBudget(80 * MiB,dependencies),48 * MiB);
+  assert.deepEqual(processingBudgets(16 * MiB,{...dependencies,heapStatistics:() => ({heap_size_limit:64 * MiB,used_heap_size:48 * MiB})}),
+    {memory:0,heap:0});
 });
 
 test('dirty, shared, active and anonymous memory never receive cache credit', () => {

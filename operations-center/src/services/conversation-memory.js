@@ -38,9 +38,15 @@ function availableMemory(override, { readFile = file => fs.readFileSync(file, 'u
   return Math.max(0, available);
 }
 
-function processingBudget(override, dependencies = {}) {
+function processingBudgets(override, dependencies = {}) {
   const heap = (dependencies.heapStatistics || v8.getHeapStatistics)();
-  return Math.max(0, Math.min(availableMemory(override, dependencies) - 32 * MiB, heap.heap_size_limit - heap.used_heap_size - 32 * MiB));
+  return { memory: Math.max(0, availableMemory(override, dependencies) - 32 * MiB),
+    heap: Math.max(0, heap.heap_size_limit - heap.used_heap_size - 32 * MiB) };
 }
 
-module.exports = { availableMemory, processingBudget };
+function processingBudget(override, dependencies = {}) {
+  const budget = processingBudgets(override, dependencies);
+  return Math.min(budget.memory, budget.heap);
+}
+
+module.exports = { availableMemory, processingBudget, processingBudgets };

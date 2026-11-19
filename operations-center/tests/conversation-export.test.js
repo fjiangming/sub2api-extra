@@ -198,6 +198,46 @@ test('a fresh export of 100 mixed records completes past the eleventh row within
   await until(()=>!f.exporter.child);assert.equal((await fetch(f.base+'/healthz')).status,200);assert(!f.archive.child);
 });
 
+test('a 20.1 MiB copy after 42 records exports all 100 rows with the original 192 MiB heap limit',async t=>{
+  const f=await setup(t,{memoryBudgetBytes:256*1024**2,bytesPerSecond:64*1024**2}),at=Date.now()-10000;
+  const text='x'.repeat(Math.floor(15.075*1024**2))+'\u4e2d\u6587 END_OF_LARGE_REQUEST';
+  const request=Buffer.from(JSON.stringify({messages:[{role:'user',content:text}]})),expected=[];
+  for(let n=0;n<100;n++) {
+    const row=event('export-twenty-'+n,{at:at+n,...(n===57?{request:request.toString('base64')}:{})});
+    assert(f.store.ingest(row).accepted);expected.unshift(row.request_id);
+    if(n>=71 || n===57)f.store.db.prepare("UPDATE cl_records SET inspection_warnings='[\"OPAQUE_IMAGE\"]' WHERE id=?").run(row.id);
+    else if(n>=63 && n<=70)f.store.db.prepare("UPDATE cl_records SET masked=NULL,processing_error='INVALID_JSON' WHERE id=?").run(row.id);
+  }
+  const saved=()=>f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(id('export-twenty-57')).original;
+  const before=checksum(saved());assert.equal((saved().length/1024**2).toFixed(1),'20.1');
+  const value=await f.start({limit:100}),downloading=f.download(value);
+  await until(()=>Boolean(f.exporter.child));assert(f.exporter.child.spawnargs.includes('--max-old-space-size=192'));
+  const response=await downloading;assert.equal(response.status,200);
+  const bytes=Buffer.from(await response.arrayBuffer()),records=lines(bytes),result=await f.done(value.job);
+  assert.equal(result.status,'completed');assert.equal(result.selected,100);assert.equal(result.exported,100);
+  assert.equal(result.fallbacks,38);assert.deepEqual(result.fallbackReasons,{INSPECTION_INCOMPLETE:30,PROCESSING_FAILED:8});
+  assert.deepEqual(records.map(row=>row.request_id),expected);assert.equal(records[42].request,request.toString());
+  assert.equal(result.bytes,bytes.length);assert.equal(result.sha256,checksum(bytes));assert.equal(checksum(saved()),before);
+  await until(()=>!f.exporter.child);assert.equal((await fetch(f.base+'/healthz')).status,200);assert(!f.archive.child);
+});
+
+test('a 24 MiB WebSocket copy retains every large text, empty and binary message in the fixed-size export worker',async t=>{
+  const f=await setup(t,{memoryBudgetBytes:256*1024**2,bytesPerSecond:64*1024**2});
+  const policy=f.store.configure({...f.store.policy(),mode:'original'}),text='x'.repeat(18*1024**2)+'\u4e2d\u6587 END_OF_LARGE_FRAME';
+  const row=event('export-large-websocket',{policy_version:policy.version,method:'WS',protocol:'WebSocket',frames:[
+    {direction:'out',at:0,binary:false,body:Buffer.from(text).toString('base64')},
+    {direction:'in',at:1,binary:false,body:''},{direction:'out',at:2,binary:true,body:Buffer.from([0,255,1]).toString('base64')} ]});
+  assert(f.store.ingest(row).accepted);
+  const copyBytes=f.store.db.prepare('SELECT length(original) n FROM cl_records WHERE id=?').get(row.id).n;
+  assert(copyBytes>=24*1024**2);
+  const value=await f.start({limit:1,source:'original'}),response=await f.download(value);assert.equal(response.status,200);
+  const bytes=Buffer.from(await response.arrayBuffer()),records=lines(bytes),result=await f.done(value.job);
+  assert.deepEqual(records,[{request_id:row.request_id,request:[Buffer.from(row.request,'base64').toString(),text,'data:application/octet-stream;base64,AP8B'],
+    response:[Buffer.from(row.response,'base64').toString(),'']}]);
+  assert.equal(result.status,'completed');assert.equal(result.exported,1);assert.equal(result.sha256,checksum(bytes));
+  await until(()=>!f.exporter.child);assert.equal(f.exporter.current,null);
+});
+
 test('original fallbacks preserve compressed SSE and binary WebSocket frames byte for byte',t=>{
   const f=fixture();t.after(()=>f.close());f.store.configure({...f.store.policy(),mode:'original'});
   const compressed=zlib.gzipSync(Buffer.from('data: {"message":"alice@example.com"}\n\ndata: [DONE]\n\n'));

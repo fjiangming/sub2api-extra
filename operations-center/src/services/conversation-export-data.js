@@ -3,7 +3,8 @@
 const {z} = require('zod');
 const {AppError} = require('../errors');
 const {ConversationPushStore,filterSchema} = require('../conversation-push-store');
-const {processingBudget} = require('./conversation-memory');
+const {processingBudgets} = require('./conversation-memory');
+const {deliveryBodyFromRaw} = require('./conversation-envelope');
 
 const exportSchema = z.object({filter:filterSchema.default({}),source:z.enum(['masked','original']).default('masked'),
   limit:z.number().int().min(1).max(10000).default(1000)}).strict();
@@ -43,18 +44,24 @@ class ConversationExportData {
       if (!current || JSON.stringify(current)!==JSON.stringify(row)) throw failure('RECORD_CHANGED','所选日志已删除或重新处理，本次下载已中止，请重新导出');
     }
   }
-  envelope(selection,row) {
+  envelope(selection,row,format) {
     return this.archive.db.transaction(() => {
       this.guard(selection,row);
       const copy=this.copies.copySelection(row,selection.spec.source,this.archive.policy());
       const sizes=this.archive.db.prepare('SELECT length(original) AS original,length(masked) AS masked FROM cl_records WHERE id=?').get(row.id);
       // One copy is opened at a time; reserve for a possible masked-read fallback, never sum both stored copies.
       const copyBytes=copy.source==='masked' ? Math.max(sizes.masked || 0,sizes.original || 0) : sizes[copy.source] || 0;
-      if (copyBytes*8+1048576>processingBudget(this.memoryBudgetBytes)) {
+      const budget=processingBudgets(this.memoryBudgetBytes);
+      // Ciphertext and decoded Buffers consume process memory, not V8 old-space. Protect both budgets separately.
+      if (copyBytes*8+1048576>budget.memory || copyBytes*4+1048576>budget.heap) {
         throw failure('MEMORY',`单条日志处理内存不足（请求 ID：${row.request_id}，副本约 ${(copyBytes/1024**2).toFixed(1)} MiB），已中止下载且未截断归档；请稍后重试，减少条数不一定有效`);
       }
-      return this.copies.envelope({id:row.id,record_id:row.id,source:selection.spec.source});
+      return this.copies.envelope({id:row.id,record_id:row.id,source:selection.spec.source},undefined,{format});
     })();
+  }
+  record(selection,row) {
+    const envelope=this.envelope(selection,row,(raw,options)=>({body:deliveryBodyFromRaw(raw,options)}));
+    return {body:envelope.body,fallbackReason:envelope.fallback_reason};
   }
 }
 

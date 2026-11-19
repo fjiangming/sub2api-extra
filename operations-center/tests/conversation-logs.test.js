@@ -32,6 +32,21 @@ test('raw archive keeps bytes, unknown fields and numeric spelling; disk bodies 
   assert(!JSON.stringify(f.store.detail(row.id)).includes('alice@example.com'));
 });
 
+test('archive decryption verifies authentication before returning plaintext and rejects tampered or truncated copies', t => {
+  const f=fixture();t.after(()=>f.close());
+  const raw={request:Buffer.from('\u4e2d\u6587\r\n').toString('base64'),response:'',frames:[]},aad='test-record:original';
+  const sealed=f.store.seal(raw,aad),before=Buffer.from(sealed);
+  assert.deepEqual(f.store.open(sealed,aad),raw);
+  assert.throws(()=>f.store.open(sealed,'test-record:masked'));
+  assert.throws(()=>f.store.open(sealed,'another-record:original'));
+  for (const offset of [0,12,28,sealed.length-1]) {
+    const modified=Buffer.from(sealed);modified[offset]^=1;
+    assert.throws(()=>f.store.open(modified,aad));
+  }
+  for (const length of [0,11,27,sealed.length-1]) assert.throws(()=>f.store.open(sealed.subarray(0,length),aad));
+  assert.deepEqual(sealed,before);
+});
+
 for (const protocol of ['responses','chat','claude','gemini','arguments']) test(`split ${protocol} stream masks across fragments without breaking protocol structure`, () => {
   let chunks;
   if (protocol === 'responses') chunks = ['alice@','example.com'].map(delta => ({type:'response.output_text.delta',item_id:'item_safe',delta}));

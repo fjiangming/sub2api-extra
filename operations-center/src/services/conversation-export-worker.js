@@ -10,8 +10,7 @@ const {ConversationLogStore} = require('../conversation-log-store');
 const {AppError} = require('../errors');
 const {ConversationExportData,failure} = require('./conversation-export-data');
 const {jsonlChunks} = require('./conversation-jsonl-format');
-const {deliveryBody} = require('./conversation-envelope');
-const {processingBudget} = require('./conversation-memory');
+const {processingBudgets} = require('./conversation-memory');
 
 process.once('message',async settings => {
   if (settings?.type!=='initialize' || !settings.secret) return process.exit(1);
@@ -71,24 +70,22 @@ process.once('message',async settings => {
           if (!res.write(buffer)) await once(res,'drain',{signal});
           hash.update(buffer);stats.bytes+=buffer.length;sinceCheck+=buffer.length;progress();
         };
-        const prepare=() => {
-          const envelope=data.envelope(selection,row);
-          return {body:deliveryBody(envelope),fallbackReason:envelope.fallback_reason};
-        };
+        const prepare=() => data.record(selection,row);
         const prepareWhenAvailable=async () => {
-          let began=0,attempts=0,failedBudget=0,lastError;
+          let began=0,attempts=0,failedBudget={memory:0,heap:0},lastError;
           try {
             for (;;) {
               await checkpoint();
               if (lastError && Date.now()-began>=memoryWaitMs) throw lastError;
-              const budget=processingBudget(settings.memoryBudgetBytes);
+              const budget=processingBudgets(settings.memoryBudgetBytes);
               // After one recovery attempt, avoid re-reading a large body until the budget actually improves.
-              if (attempts<2 || budget>=failedBudget+1048576) {
+              if (attempts<2 || budget.memory>=failedBudget.memory+1048576 || budget.heap>=failedBudget.heap+1048576) {
                 try {return prepare();}
                 catch(error) {
                   if (!['CONVERSATION_EXPORT_MEMORY','EXPORT_MEMORY'].includes(error.code)) throw error;
                   if (!began) began=Date.now();
-                  lastError=error;attempts++;failedBudget=Math.max(failedBudget,budget);
+                  lastError=error;attempts++;
+                  failedBudget={memory:Math.max(failedBudget.memory,budget.memory),heap:Math.max(failedBudget.heap,budget.heap)};
                 }
               }
               stats.pauseReason='memory_pressure';progress();

@@ -45,8 +45,8 @@ function deliveryBody(envelope, { maxOutputBytes } = {}) {
     (encoding && encoding !== 'identity' ? ';content-encoding=' + encodeURIComponent(encoding) : '') + ';base64,' + body;
   const convert = (body, representation, encoding = '', binary = false) => {
     if (representation === 'utf-8') return body;
-    const wire = Buffer.from(body, 'base64');
     if (binary) return dataUri(body);
+    const wire = Buffer.from(body, 'base64');
     let bytes = wire;
     if (encoding && encoding !== 'identity' && bytes.length) {
       const decompress = { gzip: zlib.gunzipSync, br: zlib.brotliDecompressSync, deflate: zlib.inflateSync, zstd: zlib.zstdDecompressSync }[encoding];
@@ -76,4 +76,12 @@ function deliveryBody(envelope, { maxOutputBytes } = {}) {
   return { ...identity, request: outgoing, response: incoming };
 }
 
-module.exports = { ENVELOPE_VERSION, formatBodies, deliveryBody };
+function deliveryBodyFromRaw(raw, { version = ENVELOPE_VERSION, requestId, encoding = '' }, options) {
+  if (![3, 4].includes(version)) throw new Error('UNSUPPORTED_ENVELOPE_VERSION');
+  // Downloads need the public body only; avoid building unused checksums and intermediate decoded envelopes.
+  return deliveryBody({ schema: 'sub2api.conversation.v' + version, metadata: { request_id: requestId, encoding },
+    request: raw.request, response: raw.response, frames: raw.frames,
+    body_encodings: { request: 'base64', response: 'base64', frames: raw.frames.map(() => 'base64') } }, options);
+}
+
+module.exports = { ENVELOPE_VERSION, formatBodies, deliveryBody, deliveryBodyFromRaw };

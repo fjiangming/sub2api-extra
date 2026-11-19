@@ -254,7 +254,7 @@ class ConversationPushStore {
       fallbacks:stats.filter(row=>row.code.startsWith('ORIGINAL_FALLBACK:')).map(row=>({...row,code:row.code.slice('ORIGINAL_FALLBACK:'.length)})),
       batches:this.db.prepare('SELECT id,created_at,matched,eligible,created FROM cl_push_batches ORDER BY created_at DESC LIMIT 10').all()};
   }
-  envelope(job, pinnedCopy) {
+  envelope(job, pinnedCopy, { format = formatBodies } = {}) {
     const fields='id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,processing_error,processing_policy_version,processed_at,capture_version,body_sha256,redaction_version,inspection_warnings,upstream_status,upstream_evidence,completion_source,transport_diagnostics';
     const row=this.db.prepare(`SELECT ${fields},processing_pending,redaction_policy_hash,original IS NOT NULL AS original,masked IS NOT NULL AS masked FROM cl_records WHERE id=?`).get(job.record_id);
     const unavailable=()=>invalid('日志副本不可用','CONVERSATION_PUSH_COPY_UNAVAILABLE',409);
@@ -283,7 +283,7 @@ class ConversationPushStore {
       inspection_warnings:JSON.parse(metadata.inspection_warnings),complete:Boolean(metadata.complete),encoding:copy.source==='original'?metadata.encoding:''};
     return {schema:'sub2api.conversation.v'+version,delivery_id:job.id,source:copy.source,
       ...(copy.fallbackReason?{requested_source:job.source,fallback_reason:copy.fallbackReason}:{}),
-      metadata:outputMetadata,...formatBodies(raw,{version,encoding:outputMetadata.encoding})};
+      metadata:outputMetadata,...format(raw,{version,encoding:outputMetadata.encoding,requestId:outputMetadata.request_id})};
   }
 }
 module.exports={ConversationPushStore,filterSchema};

@@ -1,5 +1,18 @@
 # 个性化功能维护台账
 
+## 2026-11-19：修复 20.1 MiB 大正文 JSONL 导出误拒绝
+
+用户升级后报告最近 100 条在第 42 条后中止，单条副本约 20.1 MiB。本轮延续既有导出问题修复与 GitHub 提交授权，仅改运营中心，不调整主站、采集器、服务器配置、容器内存或下载堆上限，不连接 / 部署服务器，保留所有无关差异。已用虚构同等大小记录及相同前 42 条回退分布复现：旧路径把副本乘 8 后同时压入 192 MiB old-space，虽大量 Buffer 使用外部内存仍被错误拒绝。未读取生产该请求正文，不能由本地复现断言线上没有其他资源问题。
+
+- `operations-center/src/services/conversation-memory.js`：增加独立总内存 / V8 堆预算，各保留 32 MiB 余量；既有单预算调用仍取两者最小值，原归档 / 脱敏 / 推送保护行为保持。`conversation-export-data.js`：分别按单份最大副本的 8 倍 / 4 倍加 1 MiB 准入；新增直接输出记录入口，保留快照、规则、排除、原文回退与权限校验，不预加载正文或截断 / 跳过大条。`conversation-export-worker.js`：使用直接输出，恢复等待分别观察两份预算，保留一次 GC 重试、最多 5 秒等待和预算未改善时不重复解密。
+- `src/services/conversation-envelope.js`、`src/conversation-push-store.js`：共享内部 formatter 选项，下载由原始副本直接生成现有 `request_id` / `request` / `response`，省去不外发的内部 checksum 和中间正文转换；二进制帧避免无用 Base64 解码。默认推送仍走原路径，v1 / v2 / v3 / v4 及固定任务格式不变。`src/conversation-log-store.js`：AES-GCM 完整认证后，final 无尾字节时省去明文整份复制，损坏、错 AAD 和截断仍拒绝。
+- `tests/conversation-export.test.js`：新增旧路径失败的 20.1 MiB / 100 条场景和 24 MiB WebSocket 场景，验证中文、请求 ID、顺序、全部消息、空帧 / 二进制、回退计数、摘要、密文不变与退出释放，实际导出子进程仍使用 192 MiB old-space；`conversation-export-worker-fixture.cjs`：内存暂停夹具适配独立预算并透传 formatter。`conversation-compatibility.test.js`、`conversation-envelope.test.js`、`conversation-logs.test.js`：覆盖预算独立 / 旧调用兼容、直出与旧路径逐字节一致（文本 / SSE / 压缩 / WS / 无效字节 / v3 / v4）、请求 ID / 解压预算门禁和加密认证拒绝。
+- `docs/conversation-logs.md`：补充独立预算、减少复制、有限恢复及真实资源边界。保持单并发、低优先级、2 MiB/s 默认限速、采集优先和取消 / 会话 / 规则 / 删除保护；无需新增依赖、环境变量或服务器配额。
+
+修复前新增两项真实 HTTP 大条复现均失败，20.1 MiB 例在 42 条后中止；修复后两项通过，临时内存恢复 / 超时 / 取消 / 规则变化四项通过。npm run check 通过；82 项专项通过；标准串行完整 **666 项测试全部通过，0 失败 / 跳过**，约 200 秒，日志 `sub2api-export-large-tests-20261119.log`。
+
+正式 Chrome / Playwright 的 1440px、390px、320px 与深色四布局全部通过，包括实际下载字节 / 请求 ID、原文回退、内存等待、取消、刷新重下、采集优先及既有查看 / 重处理 / 模型门禁流程，无页面脚本错误、外网请求或溢出；截图 `sub2api-conversation-browser-e5rGeg`。沿用前次源码发布授权提交到 main，推送后核验自动测试、双架构运营中心镜像与提交标记，实际结果以本轮最终回复为准；不更新当前服务器。本轮不读取生产正文或请求真实模型 / 外部 Bucket，未承诺任意日志大小或严格零共享资源成本。
+
 ## 2026-11-19：统一满血 AI 思考等级并支持手动输入
 
 用户要求鹈鹕检测与糖果检测列出相同完整等级，并支持手动输入。本轮修改正式服务的默认参数与分组独立参数，不修改原有本地检测、模型身份、计划、历史或计费，保留无关差异。

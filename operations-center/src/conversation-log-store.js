@@ -165,7 +165,8 @@ class ConversationLogStore {
   open(value, aad) {
     const decipher = crypto.createDecipheriv('aes-256-gcm', this.key, value.subarray(0, 12));
     decipher.setAAD(Buffer.from(aad)); decipher.setAuthTag(value.subarray(12, 28));
-    return JSON.parse(Buffer.concat([decipher.update(value.subarray(28)), decipher.final()]).toString('utf8'));
+    const plaintext = decipher.update(value.subarray(28)), tail = decipher.final();
+    return JSON.parse((tail.length ? Buffer.concat([plaintext, tail]) : plaintext).toString('utf8'));
   }
   policy(version) {
     const row = version ? this.db.prepare('SELECT * FROM cl_policies WHERE version=?').get(version) : this.db.prepare('SELECT * FROM cl_policies ORDER BY version DESC LIMIT 1').get();

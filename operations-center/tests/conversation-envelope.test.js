@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
-const { formatBodies, deliveryBody } = require('../src/services/conversation-envelope');
+const { formatBodies, deliveryBody, deliveryBodyFromRaw } = require('../src/services/conversation-envelope');
 const { exportBodyBytes } = require('./conversation-logs-fixture');
 const { jsonlChunks } = require('../src/services/conversation-jsonl-format');
 
@@ -128,4 +128,40 @@ test('decompression memory refusal never changes payload bytes or silently retur
     const legacy={schema:'sub2api.conversation.v'+version,metadata:{encoding:'gzip'},...formatBodies(raw,{version,encoding:'gzip'})};
     assert.equal(deliveryBody(legacy),legacy);
   }
+});
+
+test('direct raw downloads retain the exact shared delivery bytes for text, compression and WebSocket content', () => {
+  const text='\uFEFF{\r\n "n":9007199254740993,"decimal":1.2300,"text":"\u4e2d\u6587 \uD83D\uDE00","literal":"\\n"\r\n}\r\n';
+  const cases=[{raw:{request:encoded(text),response:encoded('data: [DONE]\r\n\r\n'),frames:[]}},
+    {raw:{request:'',response:'',frames:[]}},
+    {raw:{request:encoded([255,192]),response:encoded([0,255]),frames:[]}},
+    {raw:{request:encoded(text),response:encoded(text),frames:[]},encoding:'identity'},
+    {raw:{request:'',response:encoded('invalid compressed data'),frames:[]},encoding:'gzip'},
+    {raw:{request:'',response:encoded('opaque bytes'),frames:[]},encoding:'gzip, br'},
+    {raw:{request:'',response:Buffer.concat([zlib.brotliCompressSync(Buffer.from(text)),Buffer.from('tail')]).toString('base64'),frames:[]},encoding:'br'},
+    {raw:{request:encoded('handshake request'),response:encoded('handshake response'),frames:[
+      {direction:'out',at:0,binary:false,body:encoded(text)}, {direction:'in',at:1,binary:true,body:encoded([0,255,1])},
+      {direction:'out',at:2,binary:false,body:''}, {direction:'in',at:3,binary:false,body:encoded([255,192])}]}}];
+  for (const [encoding,compress] of [['gzip',zlib.gzipSync],['br',zlib.brotliCompressSync],['deflate',zlib.deflateSync],['zstd',zlib.zstdCompressSync]]) {
+    cases.push({raw:{request:encoded(text),response:compress(Buffer.from(text)).toString('base64'),frames:[]},encoding});
+  }
+  for (const version of [3,4]) for (const {raw,encoding=''} of cases) {
+    const before=JSON.stringify(raw),options={version,encoding,requestId};
+    const envelope={schema:'sub2api.conversation.v'+version,metadata:{request_id:requestId,encoding},...formatBodies(raw,options)};
+    assert.equal([...jsonlChunks(deliveryBodyFromRaw(raw,options))].join(''),[...jsonlChunks(deliveryBody(envelope))].join(''));
+    assert.equal(JSON.stringify(raw),before);
+  }
+});
+
+test('direct raw downloads enforce request identity and decompression memory protection without dropping content', () => {
+  const raw={request:'',response:zlib.gzipSync(Buffer.from('x'.repeat(10000))).toString('base64'),frames:[]};
+  const options={version:4,encoding:'gzip',requestId},before=JSON.stringify(raw);
+  for (const value of [undefined,null,'',123,requestId.toUpperCase()]) {
+    assert.throws(()=>deliveryBodyFromRaw(raw,{...options,requestId:value}),{code:'EXPORT_REQUEST_ID'});
+  }
+  for (const maxOutputBytes of [0,100]) assert.throws(()=>deliveryBodyFromRaw(raw,options,{maxOutputBytes}),{code:'EXPORT_MEMORY'});
+  assert.deepEqual(deliveryBodyFromRaw(raw,options,{maxOutputBytes:20000}),{request_id:requestId,request:'',response:'x'.repeat(10000)});
+  assert.deepEqual(deliveryBodyFromRaw(raw,{...options,version:3,requestId:undefined},{maxOutputBytes:20000}),{request:'',response:'x'.repeat(10000)});
+  assert.throws(()=>deliveryBodyFromRaw(raw,{...options,version:5}),/UNSUPPORTED_ENVELOPE_VERSION/);
+  assert.equal(JSON.stringify(raw),before);
 });
