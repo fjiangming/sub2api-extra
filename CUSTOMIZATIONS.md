@@ -1,5 +1,18 @@
 # 个性化功能维护台账
 
+## 2026-11-19：第三方检测结果恢复按模型平台分区
+
+用户要求检测结果页保持原展示形式、按模型平台划分区域。本轮仅调整降智检测结果的布局与对应验证，不连接 / 部署服务器，不修改检测配置、Key、历史、任务或计费；保留全部无关差异。
+
+- `degradation-detector/public/model-result-renderer.js`：沿用原平台分区组件，增加可选区域内容渲染函数，既有降智 / 模型身份页默认结构不变。
+- `public/provider-results.html`、`provider-results.js`、`provider-results.css`：加载并复用原分区组件与样式，按 ChatGPT、Claude、Gemini 等模型平台统一显示图标、标题及组数。糖果 / 鹈鹕在各区使用原卡片与检测柱，TestLLM 在各区使用既有列表；同平台多分组合并、不混排，保留当前顺序、第三方 / 题型页签、筛选、历史及只读权限。平台筛选显示易读名称，卡片不再重复内部平台标识；窄屏标题和数量可换行。
+- `scripts/provider-browser-check.cjs`：补充分区标题、计数、成员归属、非连续同平台多分组合并、搜索 / 平台 / 空状态筛选、糖果 / 鹈鹕 / TestLLM 一致分区及四布局截图验证。多分组样本使用临时虚构 API 响应，不写真实数据。
+- `README.md`：补充模型平台分区与筛选后的展示行为，无新增环境变量、依赖或迁移。
+
+验证：npm run check 通过，完整 **217 项测试（0 失败 / 跳过）**通过。第三方结果正式 Chrome / Playwright 的 1440px、390px、320px、深色四布局全部通过，截图 `sub2api-provider-browser-mJl7cb`，桌面多分组、320px 分区与深色 TestLLM 列表已视觉复核。原降智 / 模型身份浏览器回归四布局也全部通过，截图 `sub2api-model-browser-nYuZeE`，两套浏览器均无脚本错误、外网或真实模型请求。全量、第三方 UI、原页面 UI 日志分别为 `sub2api-provider-platform-zones-tests-20261119.log`、`sub2api-provider-platform-zones-ui-20261119.log`、`sub2api-provider-platform-zones-model-ui-20261119.log`。
+
+独立正式页面预览 `http://127.0.0.1:19967/results?demo=readonly`，使用临时虚构 SQLite，全部真实上游请求禁用，结果页与 healthz 均为 200，保留原端口预览。沿用本会话已有 GitHub 提交授权，仅提交本节对应改动，排除同目录其他后端任务、检测诊断、只读审计、菜单图标及其他任务差异；提交 / 推送结果以最终回复为准，不部署服务器。
+
 ## 2026-11-19：JSONL 推送增加日期下的独立模型目录
 
 用户随后明确要求提交 GitHub。本轮仅发布本节对应的运营中心源码、回归测试、验证脚本和说明到 main，台账只暂存本节，保留其他服务、部署配置、审计报告与独立 Demo 等无关差异。下文“未提交或部署”为实现完成时状态；此次推送后核验 GitHub 自动测试、双架构构建及运营中心镜像提交标记，实际结果以最终回复为准。不连接、更新服务器或触发真实历史推送。

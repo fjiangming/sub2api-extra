@@ -111,13 +111,13 @@
     return `${title}${heading}${run.error ? `<p class="model-notice">${icon('circle-alert')}${html(run.error)}</p>` : ''}${section('全部检测项结果', table, `${scores.length}/${scores.length} 个返回项 · 保留原分值`)}<p class="model-footnote">按接口 scores 中的全部字段逐项列出，包含 0 分、未知字段和空值；网站未给逐项原因时不推测。总分采用接口 total，不自行累加或设定通过阈值。</p>${section('性能与用量', performance)}${section('Token 用量审计', auditHtml)}${block('原始结论、任务状态与扩展字段', fieldList(extras), true)}${block('完整脱敏响应 JSON', `<pre>${html(json(redact(run)))}</pre>`)}<p class="model-footnote">可选字段只在接口返回时展示；指纹模式不伪造完整评分。网站的渠道标签属于其检测结论，不能据此直接判定模型降智。</p>`;
   }
 
-  function platformSections(groups, renderCard) {
+  function platformSections(groups, renderCard, renderContents = members => `<div class="group-grid fp-platform-grid">${members.map(renderCard).join('')}</div>`) {
     const platforms = new Map();
     for (const group of groups) {
       if (!platforms.has(group.platform)) platforms.set(group.platform, []);
       platforms.get(group.platform).push(group);
     }
-    return [...platforms].map(([key, members]) => `<section class="fp-platform-zone" data-platform="${html(key)}"><header class="fp-platform-zone-head"><h2>${icon(({ openai: 'sparkles', anthropic: 'bot', gemini: 'gem', grok: 'orbit' })[key] || 'cpu')}${html(members[0].platform_label || key)}</h2><span>${members.length} 个检测分组</span></header><div class="group-grid fp-platform-grid">${members.map(renderCard).join('')}</div></section>`).join('');
+    return [...platforms].map(([key, members]) => `<section class="fp-platform-zone" data-platform="${html(key)}"><header class="fp-platform-zone-head"><h2>${icon(({ openai: 'sparkles', anthropic: 'bot', gemini: 'gem', grok: 'orbit' })[key] || 'cpu')}${html(members[0].platform_label || key)}</h2><span>${members.length} 个检测分组</span></header>${renderContents(members)}</section>`).join('');
   }
   const percent = value => typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : '不提供';
   function ranking(analysis) {

@@ -26,6 +26,14 @@ async function main() {
     page.on('request', request => { if (/^https?:/.test(request.url()) && ![preview.baseUrl, menuUrl].some(base => request.url().startsWith(base + '/'))) external.push(request.url()); });
   };
   const fit = async page => assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'page must fit viewport');
+  const platformZones = async (page, expected) => {
+    const actual = await page.locator('#p-results-content > .fp-platform-zone').evaluateAll(zones => zones.map(zone => [
+      zone.dataset.platform, zone.querySelector('h2').textContent.trim(),
+      [...zone.querySelectorAll('.p-card-foot [data-group], .p-table [data-group]')].map(button => button.dataset.group),
+      zone.querySelector('.fp-platform-zone-head > span').textContent
+    ]));
+    assert.deepEqual(actual, expected.map(([id, title, ids]) => [id, title, ids, `${ids.length} 个检测分组`]));
+  };
   const shot = (page, name) => page.screenshot({ path: path.join(directory, `${name}.png`), fullPage: true });
   const save = async page => {
     const response = page.waitForResponse(response => new URL(response.url()).pathname === '/api/admin/provider-config' && response.request().method() === 'PUT');
@@ -53,17 +61,35 @@ async function main() {
       const reader = await browser.newContext(options); const page = await reader.newPage(); watch(page);
       await page.goto(`${preview.baseUrl}/results?demo=readonly`); await page.locator('.p-card').first().waitFor();
       assert.equal(await page.locator('.p-card').count(), 3); assert.equal(await page.locator('.p-card').first().locator('.p-bar').count(), 24);
+      const cardZones = [['openai', 'ChatGPT', ['8']], ['anthropic', 'Claude', ['2']], ['gemini', 'Gemini', ['40']]];
+      await platformZones(page, cardZones);
       assert.equal(await page.locator('.p-bar.passed').first().evaluate(element => getComputedStyle(element).backgroundColor), 'rgb(53, 184, 135)');
       await fit(page); await shot(page, `${layout.name}-candy`);
-      await page.locator('#p-search').fill('官Key'); assert.equal(await page.locator('.p-card').count(), 1); await page.locator('#p-search').fill('');
-      await page.locator('#p-status').selectOption('failed'); assert.equal(await page.locator('.p-card').count(), 0); await page.locator('#p-status').selectOption('');
-      await page.locator('[data-channel="pelican"]').click(); await page.locator('.p-card button[data-group="8"]').last().click();
+      const multipleGroups = async route => {
+        const response = await route.fetch(), data = await response.json();
+        data.groups.splice(2, 0, { ...data.groups[0], id: 'preview-second-gpt', name: 'GPT｜备用分组' });
+        await route.fulfill({ response, json: data });
+      };
+      await page.route('**/api/provider-results?channel=candy', multipleGroups);
+      await page.locator('#refresh-button').click(); await page.waitForFunction(() => document.querySelectorAll('.p-card').length === 4);
+      await platformZones(page, [['openai', 'ChatGPT', ['8', 'preview-second-gpt']], ...cardZones.slice(1)]);
+      await fit(page); await shot(page, `${layout.name}-candy-multiple`);
+      await page.unroute('**/api/provider-results?channel=candy', multipleGroups);
+      await page.locator('#refresh-button').click(); await page.waitForFunction(() => document.querySelectorAll('.p-card').length === 3);
+      await page.locator('#p-search').fill('官Key'); assert.equal(await page.locator('.p-card').count(), 1); await platformZones(page, cardZones.slice(0, 1)); await page.locator('#p-search').fill('');
+      await page.locator('#p-platform').selectOption('anthropic'); await platformZones(page, cardZones.slice(1, 2)); await page.locator('#p-platform').selectOption('');
+      await page.locator('#p-status').selectOption('failed'); assert.equal(await page.locator('.p-card').count(), 0); await platformZones(page, []); await page.locator('#p-status').selectOption('');
+      await page.locator('[data-channel="pelican"]').click(); await page.locator('.p-card button[data-group="8"]').last().waitFor();
+      await platformZones(page, cardZones); await shot(page, `${layout.name}-pelican`);
+      await page.locator('.p-card button[data-group="8"]').last().click();
       await page.frameLocator('.p-artwork').locator('svg').waitFor();
       assert.equal(await page.locator('.p-artwork').getAttribute('sandbox'), 'allow-scripts');
       await page.locator('.p-history-detail summary').filter({ hasText: '作品源码' }).click(); assert.match(await page.locator('.p-history-detail').innerText(), /<!doctype html>/);
       await fit(page); await shot(page, `${layout.name}-pelican-detail`); await page.locator('[data-history-close]').click();
       await page.locator('[data-provider="testllm"]').click(); await page.locator('.p-table tbody tr').first().waitFor();
       assert.equal(await page.locator('.p-table tbody tr').count(), 2); assert.match(await page.locator('.p-table').first().innerText(), /极高智商/);
+      await platformZones(page, cardZones.slice(0, 2));
+      await page.locator('#p-platform').selectOption('anthropic'); await platformZones(page, cardZones.slice(1, 2)); await page.locator('#p-platform').selectOption('');
       await fit(page); await shot(page, `${layout.name}-testllm`);
       await page.locator('.p-table').first().getByRole('button', { name: '24小时检测记录' }).click(); await page.locator('.p-history-detail summary').first().waitFor();
       assert.equal(await page.locator('.p-history-tools').isVisible(), false); assert.equal(await page.locator('[data-history-select]').count(), 0);
