@@ -22,7 +22,7 @@
       const cancel=form.querySelector('[data-export-cancel]');cancel.hidden=!running;cancel.disabled=busy;
       form.querySelector('[data-export-warning]').textContent=form.elements.source.value==='original' ? '文件将包含未脱敏原文' : '脱敏不可用时包含原文，可能含敏感信息';
       const skipped=Object.values(job?.skipped || {}).reduce((sum,value) => sum+value,0);
-      const names={ready:'等待下载',running:job?.pauseReason ? '采集优先，导出已暂停' : '正在导出',completed:'导出已发送',cancelled:'导出已中止',expired:'下载链接已过期',failed:'导出失败'};
+      const names={ready:'等待下载',running:job?.pauseReason==='memory_pressure' ? '等待导出内存释放' : job?.pauseReason ? '采集优先，导出已暂停' : '正在导出',completed:'导出已发送',cancelled:'导出已中止',expired:'下载链接已过期',failed:'导出失败'};
       const text=job ? `${names[job.status] || job.status} · 最近 ${num(job.limit)} 条中选中 ${num(job.selected)} 条 · 已导出 ${num(job.exported)} 条${job.fallbacks ? ` · 回退原文 ${num(job.fallbacks)} 条` : ''}${skipped ? ` · 跳过 ${num(skipped)} 条` : ''}` : '';
       const reasons=[...Object.entries(job?.fallbackReasons || {}).map(([code,count]) => `回退原文：${skipNames[code] || code} ${num(count)} 条`),
         ...Object.entries(job?.skipped || {}).map(([code,count]) => `${skipNames[code] || code} ${num(count)} 条`)].join('；');

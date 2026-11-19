@@ -9,9 +9,10 @@ const terminal = job => ['completed','failed','cancelled','expired'].includes(jo
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 
 class ConversationExportService extends ConversationReadService {
-  constructor(archive,auth,{ticketTtlMs=120000,historyTtlMs=600000,bytesPerSecond=2097152,maxPauseMs=30000,...options}={}) {
-    super(archive,{timeoutMs:86400000,maxQueue:1,workerFile:path.join(__dirname,'conversation-export-worker.js'),...options});
-    Object.assign(this,{auth,ticketTtlMs,historyTtlMs,bytesPerSecond,maxPauseMs});
+  constructor(archive,auth,{ticketTtlMs=120000,historyTtlMs=600000,bytesPerSecond=2097152,maxPauseMs=30000,memoryWaitMs=5000,...options}={}) {
+    super(archive,{timeoutMs:86400000,maxQueue:1,workerFile:path.join(__dirname,'conversation-export-worker.js'),
+      workerExecArgv:['--max-old-space-size=192','--max-semi-space-size=4','--expose-gc'],...options});
+    Object.assign(this,{auth,ticketTtlMs,historyTtlMs,bytesPerSecond,maxPauseMs,memoryWaitMs});
     this.needsIndex=false;this.jobs=new Map();this.current=null;
   }
   sessionAlive(job) {
@@ -114,7 +115,7 @@ class ConversationExportService extends ConversationReadService {
     };
     entry.child.on('message',entry.progressListener);
     const upstream=http.request({host:'127.0.0.1',port:this.port,method:'GET',path:'/export',agent:false,
-      headers:{authorization:'Bearer '+this.secret,'x-conversation-export':JSON.stringify({spec:job.spec,bytesPerSecond:this.bytesPerSecond,maxPauseMs:this.maxPauseMs})}});
+      headers:{authorization:'Bearer '+this.secret,'x-conversation-export':JSON.stringify({spec:job.spec,bytesPerSecond:this.bytesPerSecond,maxPauseMs:this.maxPauseMs,memoryWaitMs:this.memoryWaitMs})}});
     entry.upstream=upstream;
     const failed=() => {
       if (!entry.done) this.fail(entry,entry.workerError?.code || 'CONVERSATION_EXPORT_INTERRUPTED',

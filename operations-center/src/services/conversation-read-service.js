@@ -10,8 +10,9 @@ const {AppError} = require('../errors');
 
 class ConversationReadService {
   constructor(archive,{timeoutMs=15000,queueTimeoutMs=5000,backfillTimeoutMs=10000,intervalMs=1000,idleMs=15000,maxQueue=8,
-    configured=false,canWork=() => true,memoryBudgetBytes,workerFile=path.join(__dirname,'conversation-read-worker.js')} = {}) {
-    Object.assign(this,{archive,timeoutMs,queueTimeoutMs,backfillTimeoutMs,intervalMs,idleMs,maxQueue,configured,canWork,memoryBudgetBytes,workerFile});
+    configured=false,canWork=() => true,memoryBudgetBytes,workerFile=path.join(__dirname,'conversation-read-worker.js'),
+    workerExecArgv=['--max-old-space-size=192','--max-semi-space-size=4']} = {}) {
+    Object.assign(this,{archive,timeoutMs,queueTimeoutMs,backfillTimeoutMs,intervalMs,idleMs,maxQueue,configured,canWork,memoryBudgetBytes,workerFile,workerExecArgv});
     this.queue=[];this.child=null;this.port=0;this.active=null;this.stopped=false;this.needsIndex=true;
     this.secret=crypto.randomBytes(32).toString('hex');
   }
@@ -70,7 +71,7 @@ class ConversationReadService {
     return this.starting;
   }
   async spawn() {
-    const child=fork(this.workerFile,[],{execArgv:['--max-old-space-size=192','--max-semi-space-size=4'],stdio:['ignore','ignore','ignore','ipc'],windowsHide:true});
+    const child=fork(this.workerFile,[],{execArgv:this.workerExecArgv,stdio:['ignore','ignore','ignore','ipc'],windowsHide:true});
     this.child=child;this.retiring=false;
     try {os.setPriority(child.pid,os.constants.priority.PRIORITY_BELOW_NORMAL);} catch { /* Not supported on every host. */ }
     this.childExit=new Promise(resolve => {
@@ -106,13 +107,13 @@ class ConversationReadService {
       this.idleTimer=setTimeout(() => {if (!this.active && !this.queue.length && !this.draining) this.killChild();},this.idleMs);this.idleTimer.unref();
       return;
     }
+    const pending=this.queue[0];
     clearTimeout(this.idleTimer);this.draining=true;
     try {
       await this.ensureChild();
       if (!this.stopped && !this.active && this.queue.length) this.send(this.queue.shift());
     } catch(error) {
-      const entry=this.queue[0];
-      if (entry) this.fail(entry,error instanceof AppError ? error.code : 'CONVERSATION_READ_UNAVAILABLE',
+      if (this.queue.includes(pending)) this.fail(pending,error instanceof AppError ? error.code : 'CONVERSATION_READ_UNAVAILABLE',
         error instanceof AppError ? error.message : '日志读取暂不可用，请稍后重试',error instanceof AppError ? error.status : 503);
     } finally {
       this.draining=false;

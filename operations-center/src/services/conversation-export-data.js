@@ -44,11 +44,15 @@ class ConversationExportData {
     }
   }
   envelope(selection,row) {
-    if (row.bytes*8+1048576>processingBudget(this.memoryBudgetBytes)) {
-      throw failure('MEMORY','当前导出内存不足，已中止下载，归档未截断；请缩小范围或稍后重试');
-    }
     return this.archive.db.transaction(() => {
       this.guard(selection,row);
+      const copy=this.copies.copySelection(row,selection.spec.source,this.archive.policy());
+      const sizes=this.archive.db.prepare('SELECT length(original) AS original,length(masked) AS masked FROM cl_records WHERE id=?').get(row.id);
+      // One copy is opened at a time; reserve for a possible masked-read fallback, never sum both stored copies.
+      const copyBytes=copy.source==='masked' ? Math.max(sizes.masked || 0,sizes.original || 0) : sizes[copy.source] || 0;
+      if (copyBytes*8+1048576>processingBudget(this.memoryBudgetBytes)) {
+        throw failure('MEMORY',`单条日志处理内存不足（请求 ID：${row.request_id}，副本约 ${(copyBytes/1024**2).toFixed(1)} MiB），已中止下载且未截断归档；请稍后重试，减少条数不一定有效`);
+      }
       return this.copies.envelope({id:row.id,record_id:row.id,source:selection.spec.source});
     })();
   }

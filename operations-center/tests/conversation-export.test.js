@@ -3,6 +3,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const crypto=require('node:crypto');
+const path=require('node:path');
 const zlib=require('node:zlib');
 const {setTimeout:delay}=require('node:timers/promises');
 const {fixture,event,id,exportBodyBytes}=require('./conversation-logs-fixture');
@@ -13,6 +14,7 @@ const {ConversationArchiveService}=require('../src/services/conversation-archive
 const {AuthService}=require('../src/auth');
 const {createApp}=require('../src/app');
 const {bodyDigest}=require('../src/conversation-log-store');
+const {processingBudget}=require('../src/services/conversation-memory');
 
 async function until(check,ms=10000) {
   const end=Date.now()+ms;
@@ -162,6 +164,40 @@ test('corrupted masked ciphertext falls back to exact original bytes with a read
   assert.equal(copy.checksums.response.sha256,checksum(Buffer.from(row.response,'base64')));
 });
 
+test('export admission budgets the possible copy, not the combined original and masked storage',t=>{
+  const f=fixture();t.after(()=>f.close());
+  const request=Buffer.from(JSON.stringify({text:'x'.repeat(5*1024**2)}));
+  const row=event('export-dual-budget',{request:request.toString('base64')});assert(f.store.ingest(row).accepted);
+  const before=f.store.db.prepare('SELECT original,masked FROM cl_records WHERE id=?').get(row.id);
+  const data=new ConversationExportData(f.store,{memoryBudgetBytes:128*1024**2});
+  const selected=data.select({limit:1});assert(selected.rows[0].bytes*8+1048576>processingBudget(128*1024**2));
+  for(const source of ['original','masked']) {
+    const selection=data.select({limit:1,source}),copy=data.envelope(selection,selection.rows[0]);
+    assert.equal(copy.source,source);assert.deepEqual(exportBodyBytes(copy,'request'),request);
+  }
+  assert.deepEqual(f.store.db.prepare('SELECT original,masked FROM cl_records WHERE id=?').get(row.id),before);
+});
+
+test('a fresh export of 100 mixed records completes past the eleventh row within the unchanged worker heap',async t=>{
+  const f=await setup(t,{memoryBudgetBytes:128*1024**2,bytesPerSecond:64*1024**2}),at=Date.now()-10000;
+  const large=Buffer.from(JSON.stringify({text:'x'.repeat(5*1024**2)})).toString('base64'),expected=[];
+  for(let n=0;n<100;n++) {
+    const row=event('export-hundred-'+n,{at:at+n,...([13,38,63,88].includes(n)?{request:large}:{})});
+    assert(f.store.ingest(row).accepted);expected.unshift(row.request_id);
+  }
+  f.store.db.prepare("UPDATE cl_records SET inspection_warnings='[\"OPAQUE_IMAGE\"]' WHERE id=?").run(id('export-hundred-88'));
+  f.store.db.prepare("UPDATE cl_records SET masked=NULL,processing_error='INVALID_JSON' WHERE id=?").run(id('export-hundred-63'));
+  const before=f.store.db.prepare('SELECT original,masked FROM cl_records WHERE id=?').get(id('export-hundred-88'));
+  const value=await f.start({limit:100}),response=await f.download(value);assert.equal(response.status,200);
+  const bytes=Buffer.from(await response.arrayBuffer()),records=lines(bytes),result=await f.done(value.job);
+  assert.equal(result.status,'completed');assert.equal(result.selected,100);assert.equal(result.exported,100);
+  assert.equal(result.fallbacks,2);assert.deepEqual(result.fallbackReasons,{INSPECTION_INCOMPLETE:1,PROCESSING_FAILED:1});
+  assert.deepEqual(records.map(row=>row.request_id),expected);assert.equal(result.bytes,bytes.length);assert.equal(result.sha256,checksum(bytes));
+  for(const n of [13,38,63,88]) assert.equal(records[99-n].request,Buffer.from(large,'base64').toString());
+  assert.deepEqual(f.store.db.prepare('SELECT original,masked FROM cl_records WHERE id=?').get(id('export-hundred-88')),before);
+  await until(()=>!f.exporter.child);assert.equal((await fetch(f.base+'/healthz')).status,200);assert(!f.archive.child);
+});
+
 test('original fallbacks preserve compressed SSE and binary WebSocket frames byte for byte',t=>{
   const f=fixture();t.after(()=>f.close());f.store.configure({...f.store.policy(),mode:'original'});
   const compressed=zlib.gzipSync(Buffer.from('data: {"message":"alice@example.com"}\n\ndata: [DONE]\n\n'));
@@ -200,8 +236,26 @@ test('expired tickets and cancellation release the single export slot and never 
   assert.equal((await f.download(next)).status,401);
 });
 
+test('cancelling during worker startup cannot fail or overlap the replacement download',async t=>{
+  const f=await setup(t);f.store.ingest(event('export-startup-replacement'));
+  let release,rejected=false,first=true;
+  const gate=new Promise(resolve=>{release=resolve;}),spawn=f.exporter.spawn.bind(f.exporter);
+  f.exporter.spawn=async()=>{
+    if(!first)return spawn();first=false;
+    try {return await spawn();} catch(error) {rejected=true;await gate;throw error;}
+  };
+  t.after(()=>release());
+  const old=await f.start({limit:1}),oldDownload=f.download(old).then(response=>response.arrayBuffer()).catch(()=>{});
+  await until(()=>Boolean(f.exporter.child));await f.cancel(old.job);await until(()=>rejected);
+  const next=await f.start({limit:1}),replacement=f.download(next);
+  await until(()=>f.exporter.queue.some(entry=>entry.job?.id===next.job.id));release();
+  const response=await replacement;assert.equal(response.status,200);assert.equal(lines(await response.text()).length,1);
+  assert.equal((await f.done(next.job)).status,'completed');assert.equal((await f.status(old.job)).status,'cancelled');
+  await oldDownload;await until(()=>!f.exporter.child);assert.equal((await fetch(f.base+'/healthz')).status,200);
+});
+
 test('memory protection refuses isolated export without truncation, changing archive data or synchronous fallback',async t=>{
-  const f=await setup(t,{memoryBudgetBytes:0}),row=event('export-start-memory');f.store.ingest(row);
+  const f=await setup(t,{memoryBudgetBytes:0,memoryWaitMs:150}),row=event('export-start-memory');f.store.ingest(row);
   const before=f.store.db.prepare('SELECT original,masked FROM cl_records WHERE id=?').get(row.id),value=await f.start({});
   assert.equal((await f.download(value)).status,409);assert.equal((await f.done(value.job)).errorCode,'CONVERSATION_EXPORT_MEMORY');assert.equal(f.exporter.child,null);
   assert.deepEqual(f.store.db.prepare('SELECT original,masked FROM cl_records WHERE id=?').get(row.id),before);
@@ -211,6 +265,36 @@ test('memory protection refuses isolated export without truncation, changing arc
   const big=await f.start({limit:1,source:'original'});assert.equal((await f.download(big)).status,409);
   assert.equal((await f.done(big.job)).errorCode,'CONVERSATION_EXPORT_MEMORY');
   assert.deepEqual(f.store.payload(large.id,'original','request').body,raw);assert.equal((await fetch(f.base+'/healthz')).status,200);
+});
+
+for(const action of ['recover','timeout','cancel','policy']) test('temporary export memory pressure can '+action+' without changing the archive or blocking collection',async t=>{
+  const f=await setup(t,{workerFile:path.join(__dirname,'conversation-export-worker-fixture.cjs'),memoryWaitMs:action==='timeout'?2000:5000});
+  let attempts=0;const spawn=f.exporter.spawn.bind(f.exporter);
+  f.exporter.spawn=async()=>{await spawn();f.exporter.child.on('message',message=>{if(message?.type==='fixture-export-prepare')attempts++;});};
+  const row=event('export-pressure-'+action);assert(f.store.ingest(row).accepted);
+  const before=f.store.db.prepare('SELECT original,masked FROM cl_records WHERE id=?').get(row.id);
+  await f.archive.start();
+  const value=await f.start({limit:1}),download=f.download(value).catch(()=>null);
+  await until(()=>f.exporter.jobs.get(value.job.id).pauseReason==='memory_pressure');
+  assert.equal((await fetch(f.base+'/healthz')).status,200);
+  const ingested=await fetch(f.base+'/api/conversation-logs/ingest',{method:'POST',headers:{authorization:'Bearer '+f.token,'content-type':'application/json'},
+    body:JSON.stringify(event('export-pressure-new-'+action))});assert((await ingested.json()).accepted);
+  if(action==='recover')f.exporter.child.send({type:'fixture-release-memory'});
+  else if(action==='cancel')await f.cancel(value.job);
+  else if(action==='policy')f.store.configure({...f.store.policy(),excludedUserIds:[2]});
+  const response=await download;
+  if(action==='recover') {
+    assert.equal(response.status,200);assert.equal(lines(await response.text()).length,1);
+  } else if(response)assert.notEqual(response.status,200);
+  const result=await f.done(value.job);
+  assert.equal(result.status,action==='recover'?'completed':action==='cancel'?'cancelled':'failed');
+  if(action!=='recover') {
+    assert.equal(result.exported,0);assert(!result.sha256);
+    assert.equal(result.errorCode,'CONVERSATION_EXPORT_'+({timeout:'MEMORY',cancel:'CANCELLED',policy:'POLICY_CHANGED'})[action]);
+    assert.equal(attempts,2,'unchanged memory must not repeatedly decrypt the same record');
+  }
+  assert.deepEqual(f.store.db.prepare('SELECT original,masked FROM cl_records WHERE id=?').get(row.id),before);
+  await until(()=>!f.exporter.child);assert.equal(f.exporter.current,null);
 });
 
 test('missing archived request ID explicitly fails download without inventing an ID or modifying saved bodies',async t=>{
@@ -245,7 +329,7 @@ test('sustained collection pressure ends the download explicitly and frees its p
 });
 
 test('memory rejection after an earlier emitted line still fails the file rather than silently succeeding with fewer rows',async t=>{
-  const f=await setup(t,{memoryBudgetBytes:128*1024**2}),policy=f.store.configure({...f.store.policy(),mode:'original'}),at=Date.now()-5000;
+  const f=await setup(t,{memoryBudgetBytes:128*1024**2,memoryWaitMs:150}),policy=f.store.configure({...f.store.policy(),mode:'original'}),at=Date.now()-5000;
   assert(f.store.ingest(event('export-memory-second',{at,policy_version:policy.version,
     request:Buffer.from(JSON.stringify({text:'x'.repeat(10*1024**2)})).toString('base64')})).accepted);
   assert(f.store.ingest(event('export-memory-first',{at:at+1,policy_version:policy.version,

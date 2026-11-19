@@ -99,6 +99,20 @@ async function main() {
           await page.locator('[data-export-cancel]').click();await page.locator('[data-export-status]').filter({hasText:'导出已中止'}).waitFor();
           assert.equal(downloads.length,beforeEmpty,'a cancelled response became a downloaded file');
         } finally {preview.exporter.canWork=canExport;}
+        const exportWorker=preview.exporter.workerFile;
+        preview.exporter.workerFile=path.join(__dirname,'../tests/conversation-export-worker-fixture.cjs');
+        try {
+          await page.locator('[data-cl-action=export]').click();
+          await page.locator('[data-export-status]').filter({hasText:'等待导出内存释放'}).waitFor();
+          assert(!(await page.locator('[data-export-status]').textContent()).includes('采集优先，导出已暂停'));
+          await layout();await page.screenshot({path:path.join(directory,name+'-export-memory.png'),fullPage:true});
+          await page.locator('[data-export-cancel]').click();
+          await page.locator('[data-export-status]').filter({hasText:'导出已中止'}).waitFor();
+        } finally {preview.exporter.workerFile=exportWorker;}
+        await page.reload();await page.locator('[data-cl-record]').first().waitFor();
+        await page.locator('#cl-export-limit').fill('2');await page.locator('#cl-export-source').selectOption('original');
+        const restarted=await jsonlDownload();assert.equal(restarted.length,2);
+        assert.deepEqual(restarted.map(row=>row.request_id),original.map(row=>row.request_id));
         await page.locator('#cl-tab-collection').click(); await page.locator('#cl-collection h2').first().waitFor(); await layout();
         let spacePause = '';
         const spaceRoute = async route => {

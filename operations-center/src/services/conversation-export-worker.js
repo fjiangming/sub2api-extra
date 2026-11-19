@@ -11,6 +11,7 @@ const {AppError} = require('../errors');
 const {ConversationExportData,failure} = require('./conversation-export-data');
 const {jsonlChunks} = require('./conversation-jsonl-format');
 const {deliveryBody} = require('./conversation-envelope');
+const {processingBudget} = require('./conversation-memory');
 
 process.once('message',async settings => {
   if (settings?.type!=='initialize' || !settings.secret) return process.exit(1);
@@ -37,7 +38,7 @@ process.once('message',async settings => {
         }
       };
       try {
-        const {spec,bytesPerSecond,maxPauseMs}=JSON.parse(req.get('x-conversation-export'));
+        const {spec,bytesPerSecond,maxPauseMs,memoryWaitMs=5000}=JSON.parse(req.get('x-conversation-export'));
         let nextSend=performance.now();
         const checkpoint=async () => {
           signal.throwIfAborted();
@@ -49,7 +50,7 @@ process.once('message',async settings => {
             await delay(50,undefined,{signal});
             if (selection) data.guard(selection,row);
           }
-          if (stats.pauseReason) {stats.pauseReason='';progress(true);}
+          if (stats.pauseReason==='archive_busy') {stats.pauseReason='';progress(true);}
         };
         await checkpoint();
         selection=data.select(spec);
@@ -70,18 +71,53 @@ process.once('message',async settings => {
           if (!res.write(buffer)) await once(res,'drain',{signal});
           hash.update(buffer);stats.bytes+=buffer.length;sinceCheck+=buffer.length;progress();
         };
-        for (const selected of selection.rows) {
-          row=selected;await checkpoint();
+        const prepare=() => {
           const envelope=data.envelope(selection,row);
+          return {body:deliveryBody(envelope),fallbackReason:envelope.fallback_reason};
+        };
+        const prepareWhenAvailable=async () => {
+          let began=0,attempts=0,failedBudget=0,lastError;
+          try {
+            for (;;) {
+              await checkpoint();
+              if (lastError && Date.now()-began>=memoryWaitMs) throw lastError;
+              const budget=processingBudget(settings.memoryBudgetBytes);
+              // After one recovery attempt, avoid re-reading a large body until the budget actually improves.
+              if (attempts<2 || budget>=failedBudget+1048576) {
+                try {return prepare();}
+                catch(error) {
+                  if (!['CONVERSATION_EXPORT_MEMORY','EXPORT_MEMORY'].includes(error.code)) throw error;
+                  if (!began) began=Date.now();
+                  lastError=error;attempts++;failedBudget=Math.max(failedBudget,budget);
+                }
+              }
+              stats.pauseReason='memory_pressure';progress();
+              // Only this low-priority process collects, after the failed call has released its body references.
+              await new Promise(resolve => setImmediate(resolve));
+              if (attempts===1) global.gc?.();
+              else await delay(100,undefined,{signal});
+            }
+          } finally {
+            if (stats.pauseReason==='memory_pressure') {stats.pauseReason='';progress(true);}
+          }
+        };
+        // A completed row's decoded strings and iterator must leave scope before admitting the next row.
+        const writeRow=async () => {
+          const record=await prepareWhenAvailable();
           let pieces=[],size=0;
-          for (const chunk of jsonlChunks(deliveryBody(envelope))) {
+          for (const chunk of jsonlChunks(record.body)) {
             const bytes=Buffer.from(chunk);
             if (size && size+bytes.length>65536) {await write(Buffer.concat(pieces,size));pieces=[];size=0;}
             pieces.push(bytes);size+=bytes.length;
           }
           if (size) await write(Buffer.concat(pieces,size));
+          return record.fallbackReason;
+        };
+        for (const selected of selection.rows) {
+          row=selected;await checkpoint();
+          const fallbackReason=await writeRow();
           data.guard(selection,row);stats.exported++;
-          if (envelope.fallback_reason) {stats.fallbacks++;stats.fallbackReasons[envelope.fallback_reason]=(stats.fallbackReasons[envelope.fallback_reason] || 0)+1;}
+          if (fallbackReason) {stats.fallbacks++;stats.fallbackReasons[fallbackReason]=(stats.fallbackReasons[fallbackReason] || 0)+1;}
           progress();
           // Release this record before admitting the next, and let IPC priority updates run.
           await new Promise(resolve => setImmediate(resolve));
