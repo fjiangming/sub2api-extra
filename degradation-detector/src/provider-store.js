@@ -2,7 +2,7 @@
 
 const { setImmediate: yieldToRequests } = require('node:timers/promises');
 const { nextScheduledRunAt } = require('./schedule');
-const { defaultConfiguration, channels, providerFor, digest, keyContext, providerParams, providerPlatform } = require('./provider-config');
+const { defaultConfiguration, channels, providerFor, digest, keyContext, providerParams, providerPlatform, testParams } = require('./provider-config');
 const { compactResult, conclusion, runSummary } = require('./provider-results');
 
 class ProviderStore {
@@ -61,7 +61,7 @@ class ProviderStore {
     const providerId = providerFor(group.channel);
     const scope = providerPlatform(configuration, providerId, group.platform);
     const override = group.override_json ? JSON.parse(group.override_json) : {};
-    const params = scope ? { ...scope.params, ...override } : { ...channel.defaults, ...override, ...platform?.params };
+    const params = scope ? { ...testParams(scope, group.channel), ...override } : { ...channel.defaults, ...override, ...platform?.params };
     if (group.channel === 'testllm' && params.model_source === 'group') {
       params.model = this.inheritedModel(group) || params.model;
     }
@@ -94,9 +94,18 @@ class ProviderStore {
       let params = providerParams(provider, this.effective({ group_id: String(sample.id), platform: id, channel, enabled: 0 }, configuration));
       if ((!params.target_url || !params.model) && active.length) params = providerParams(provider, this.effective(active[0], configuration));
       result.push({ provider, id, enabled: Boolean(kinds.some(channel => configuration.channels[channel].enabled) && params.target_url && params.model), params,
-        ...(provider === 'manxue' ? { tests: Object.fromEntries(kinds.map(kind => [kind, configuration.channels[kind].enabled])) } : {}),
+        ...(provider === 'manxue' ? { tests: Object.fromEntries(kinds.map(kind => [kind, configuration.channels[kind].enabled])),
+          test_params: Object.fromEntries(kinds.map(kind => {
+            const inherited = this.effective({ group_id: String(sample.id), platform: id, channel: kind, enabled: 0 }, configuration);
+            return [kind, { model: inherited.model || params.model, reasoning_effort: inherited.reasoning_effort }];
+          })) } : {}),
         concurrency: Math.min(...kinds.map(kind => configuration.channels[kind].concurrency)),
         schedule: structuredClone(configuration.channels[channel].schedule) });
+    }
+    for (const scope of result) if (scope.provider === 'manxue' && !scope.test_params) {
+      scope.test_params = Object.fromEntries(['candy', 'pelican'].map(channel => [channel, {
+        model: scope.params.model, reasoning_effort: scope.params.reasoning_effort
+      }]));
     }
     return result;
   }

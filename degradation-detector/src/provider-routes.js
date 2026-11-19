@@ -1,7 +1,7 @@
 'use strict';
 
 const { AppError } = require('./errors');
-const { channels, names, providerFor, providerParams, providerPlatform } = require('./provider-config');
+const { channels, names, providerFor, providerParams, providerPlatform, testParams } = require('./provider-config');
 const { runSummary } = require('./provider-results');
 const { publicGroupCacheStats } = require('./group-metrics');
 
@@ -40,7 +40,7 @@ function installProviderRoutes(app, runtime, { requireAuth, requireAdmin, requir
           // Materialize legacy differences as explicit group settings only when the new form is saved.
           const independent = usable?.override_json && !configuration.platforms.some(item => item.id === group.platform);
           const override = usable && scope ? scoped ? usable.override_json ? params : null
-            : independent || JSON.stringify(params) !== JSON.stringify(scope.params) ? params : null : null;
+            : independent || JSON.stringify(params) !== JSON.stringify(testParams(scope, channel)) ? params : null : null;
           const schedule = usable ? store.schedule(usable, configuration) : null;
           return [channel, {
             enabled: Boolean(usable?.enabled), key_configured: Boolean(usable?.key_cipher), override: usable?.override_json ? JSON.parse(usable.override_json) : null,

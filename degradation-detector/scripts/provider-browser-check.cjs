@@ -83,6 +83,7 @@ async function main() {
       assert.equal(await admin.locator('[data-pc-provider]').count(), 2); assert.equal(await admin.locator('#pc-provider-form [name="api_url"]').count(), 1);
       assert.equal(await admin.locator('[data-pc-platform]').count(), 4);
       const form = admin.locator('#pc-platform-form'); const modal = admin.locator('#pc-group-dialog'); const store = preview.runtime.providerStore;
+      const sharedCandy = form.locator('[data-pc-test-params="candy"]'), sharedPelican = form.locator('[data-pc-test-params="pelican"]');
       assert.equal(await form.locator('[name="protocol"]').count(), 0); assert.equal(await form.locator('[name="cache_test"]').count(), 0);
       const originalKeys = store.groups().map(value => value.key_cipher);
       let result = await save(admin);
@@ -101,11 +102,13 @@ async function main() {
       await fit(admin); await shot(admin, `${layout.name}-admin-manxue`);
       const testKey = store.group('8', 'testllm').key_cipher, claudeKey = store.group('2', 'candy').key_cipher;
       const historical = store.history('8', 'candy')[0]; const oldSnapshot = store.run(historical.id).snapshot_json;
-      await form.locator('[name="model"]').fill(`shared-gpt-${layout.name}`);
+      await sharedCandy.locator('[name="model"]').fill(`shared-gpt-${layout.name}`);
+      await sharedPelican.locator('[name="model"]').fill(`shared-pelican-${layout.name}`);
       assert.equal(await candyButton.isDisabled(), true); assert.equal(await pelicanButton.isDisabled(), true);
       await form.locator('[name="target_url"]').fill('https://gpt-relay.example.com/v1');
-      assert.deepEqual(await form.locator('[name="reasoning_effort_preset"] option').evaluateAll(options => options.map(option => option.value)), ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'custom']);
-      await form.locator('[name="reasoning_effort_preset"]').selectOption('ultra');
+      for (const section of [sharedCandy, sharedPelican]) assert.deepEqual(await section.locator('[name="reasoning_effort_preset"] option').evaluateAll(options => options.map(option => option.value)), ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'custom']);
+      await sharedCandy.locator('[name="reasoning_effort_preset"]').selectOption('ultra');
+      await sharedPelican.locator('[name="reasoning_effort_preset"]').selectOption('high');
       await admin.locator('[data-pc-edit="8"]').click();
       await modal.locator('[name="parameter_mode"][value="override"]').check();
       await modal.locator('[name="model"]').fill(`group-gpt-${layout.name}`);
@@ -125,8 +128,15 @@ async function main() {
       assert(await modal.locator('[name="key"]').evaluate(input => { const bounds = input.getBoundingClientRect(); const body = input.closest('.pc-modal-body').getBoundingClientRect(); const footer = input.closest('form').querySelector('footer').getBoundingClientRect(); return bounds.top >= body.top && bounds.bottom <= Math.min(body.bottom, footer.top); }));
       await fit(admin); await shot(admin, `${layout.name}-admin-group`); await modal.getByRole('button', { name: '应用配置' }).click();
       result = await save(admin);
-      assert.equal(scope(result, 'manxue', 'openai').params.reasoning_effort, 'ultra');
-      for (const channel of ['candy', 'pelican']) { const value = store.group('8', channel); assert.equal(JSON.parse(value.override_json).model, `group-gpt-${layout.name}`); assert.equal(store.effective(value).timeout_seconds, 123); }
+      assert.deepEqual(scope(result, 'manxue', 'openai').test_params, {
+        candy: { model: `shared-gpt-${layout.name}`, reasoning_effort: 'ultra' },
+        pelican: { model: `shared-pelican-${layout.name}`, reasoning_effort: 'high' }
+      });
+      assert.equal(JSON.parse(store.group('8', 'candy').override_json).model, `group-gpt-${layout.name}`);
+      assert.equal(store.effective(store.group('8', 'candy')).timeout_seconds, 123);
+      assert.equal(store.group('8', 'pelican').override_json, null);
+      assert.equal(store.effective(store.group('8', 'pelican')).model, `shared-pelican-${layout.name}`);
+      assert.equal(store.effective(store.group('8', 'pelican')).reasoning_effort, 'high');
       assert.equal(store.schedule(store.group('8', 'candy')).interval_minutes, 45);
       assert.equal(store.group('8', 'candy').key_fingerprint, store.group('8', 'pelican').key_fingerprint);
       assert.equal(store.group('8', 'testllm').key_cipher, testKey); assert.equal(store.group('2', 'candy').key_cipher, claudeKey);
@@ -135,15 +145,22 @@ async function main() {
       await admin.reload(); await admin.locator('#pc-platform-form').waitFor();
       await admin.locator('[data-pc-edit="8"]').click(); assert.equal(await modal.locator('[name="key"]').inputValue(), '');
       assert.equal(await modal.locator('[name="model"]').inputValue(), `group-gpt-${layout.name}`);
-      await modal.locator('[name="parameter_mode"][value="individual"]').check();
       await modal.locator('[name="model"]').fill(`candy-gpt-${layout.name}`);
-      await modal.locator('[data-pc-group-channel="pelican"]').click(); await modal.locator('[name="model"]').fill(`pelican-gpt-${layout.name}`);
+      await modal.locator('[data-pc-group-channel="pelican"]').click();
+      assert.equal(await modal.locator('[name="parameter_mode"][value="inherit"]').isChecked(), true);
+      assert.equal(await modal.locator('[name="model"]').inputValue(), `shared-pelican-${layout.name}`);
+      assert.equal(await modal.locator('[name="reasoning_effort_preset"]').inputValue(), 'high');
+      await modal.locator('[name="parameter_mode"][value="override"]').check();
+      await modal.locator('[name="model"]').fill(`pelican-gpt-${layout.name}`);
+      await modal.locator('[name="reasoning_effort_preset"]').selectOption('low');
+      await modal.locator('[name="target_url"]').fill('https://pelican-relay.example.com/v1');
+      await modal.locator('[name="timeout_seconds"]').fill('234');
       await modal.locator('[data-pc-group-channel="candy"]').click(); assert.equal(await modal.locator('[name="model"]').inputValue(), `candy-gpt-${layout.name}`);
       await modal.getByRole('button', { name: '应用配置' }).click();
       const retained = ['candy', 'pelican'].map(channel => store.group('8', channel).key_cipher);
-      await form.locator('[name="reasoning_effort_preset"]').selectOption('custom'); await form.locator('[name="reasoning_effort"]').fill('');
+      await sharedCandy.locator('[name="reasoning_effort_preset"]').selectOption('custom'); await sharedCandy.locator('[name="reasoning_effort"]').fill('');
       assert.equal(await form.evaluate(element => element.checkValidity()), false);
-      await form.locator('[name="reasoning_effort"]').fill(`shared-custom-${layout.name}`);
+      await sharedCandy.locator('[name="reasoning_effort"]').fill(`shared-custom-${layout.name}`);
       await form.locator('[name="target_url"]').fill('https://changed-relay.example.com/v1');
       await admin.locator('#pc-provider-form [name="api_url"]').fill('https://changed-manxue.example.com/tests');
       result = await save(admin);
@@ -170,13 +187,14 @@ async function main() {
         runs.push(...pelicanRuns);
       } finally { detector.pump = pump; detector.pump(); }
       await admin.locator('#pc-reload').click(); await admin.waitForFunction(() => !document.querySelector('[data-pc-channel="candy"]').disabled);
-      for (const value of runs) { const snapshot = JSON.parse(store.run(value.id).snapshot_json); assert.equal(snapshot.model, `${value.channel}-gpt-${layout.name}`); assert.equal(snapshot.reasoning_effort, 'group-custom-effort'); assert.equal(snapshot.target_url, 'https://group-relay.example.com/v1'); assert.equal(snapshot.api_url, 'https://changed-manxue.example.com/tests'); }
+      for (const value of runs) { const snapshot = JSON.parse(store.run(value.id).snapshot_json); assert.equal(snapshot.model, `${value.channel}-gpt-${layout.name}`); assert.equal(snapshot.reasoning_effort, value.channel === 'candy' ? 'group-custom-effort' : 'low'); assert.equal(snapshot.target_url, value.channel === 'candy' ? 'https://group-relay.example.com/v1' : 'https://pelican-relay.example.com/v1'); assert.equal(snapshot.api_url, 'https://changed-manxue.example.com/tests'); }
       assert.equal(store.run(historical.id).snapshot_json, oldSnapshot);
       await admin.locator('[data-pc-edit="8"]').click();
       await modal.locator('[name="parameter_mode"][value="inherit"]').check(); await modal.locator('[name="pelican"]').uncheck();
       await modal.getByText('分组独立检测计划', { exact: true }).click(); await groupPlan.locator('[name="independent_schedule"]').uncheck();
       await modal.getByRole('button', { name: '应用配置' }).click(); result = await save(admin);
       assert.equal(store.group('8', 'candy').override_json, null); assert.equal(store.effective(store.group('8', 'candy')).reasoning_effort, `shared-custom-${layout.name}`);
+      assert.equal(JSON.parse(store.group('8', 'pelican').override_json).model, `pelican-gpt-${layout.name}`, 'restoring candy inheritance must preserve the pelican override');
       assert.equal(store.group('8', 'pelican').enabled, 0);
       assert.equal(await pelicanButton.count(), 0); assert.equal(await candyButton.count(), 1);
       assert.equal(store.schedule(store.group('8', 'candy')).mode, 'daily');
@@ -187,11 +205,14 @@ async function main() {
       await admin.locator('.p-history-detail summary').first().waitFor(); await admin.locator('[data-history-close]').click();
       await admin.locator('[data-pc-enabled="8"]').uncheck(); await admin.locator('[data-pc-enabled="8"]').check();
       await admin.locator('[data-pc-platform="anthropic"]').click();
-      await form.locator('[name="model"]').fill(`claude-manxue-${layout.name}`); await form.locator('[name="target_url"]').fill('https://claude-relay.example.com/v1');
-      await form.locator('[name="reasoning_effort_preset"]').selectOption('high'); result = await save(admin);
+      await sharedCandy.locator('[name="model"]').fill(`claude-manxue-${layout.name}`); await form.locator('[name="target_url"]').fill('https://claude-relay.example.com/v1');
+      await sharedCandy.locator('[name="reasoning_effort_preset"]').selectOption('high');
+      await sharedPelican.locator('[name="model"]').fill(`claude-pelican-${layout.name}`);
+      await sharedPelican.locator('[name="reasoning_effort_preset"]').selectOption('medium'); result = await save(admin);
       assert.equal(await admin.locator('[data-pc-run="2"][data-pc-channel="candy"]').count(), 1);
       assert.equal(await admin.locator('[data-pc-run="2"][data-pc-channel="pelican"]').count(), 1);
-      assert.equal(scope(result, 'manxue', 'openai').params.model, `shared-gpt-${layout.name}`);
+      assert.equal(scope(result, 'manxue', 'openai').test_params.candy.model, `shared-gpt-${layout.name}`);
+      assert.equal(scope(result, 'manxue', 'openai').test_params.pelican.model, `shared-pelican-${layout.name}`);
       assert.equal(store.group('2', 'candy').key_cipher, claudeKey); await fit(admin); await shot(admin, `${layout.name}-admin-claude`);
       await admin.locator('[data-pc-provider="testllm"]').click(); await admin.locator('[data-pc-platform="openai"]').click();
       assert.equal(await admin.locator('[data-pc-platform="gemini"]').count(), 0); assert.equal(await form.locator('[name="reasoning_effort_preset"]').count(), 0);

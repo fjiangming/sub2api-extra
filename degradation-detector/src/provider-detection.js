@@ -2,7 +2,7 @@
 
 const { setTimeout: delay } = require('node:timers/promises');
 const { AppError } = require('./errors');
-const { channels, names, configurationSchema, keyContext, providerFor, providerPlatform, validateEffective } = require('./provider-config');
+const { channels, names, configurationSchema, keyContext, providerFor, providerPlatform, testParams, validateEffective } = require('./provider-config');
 const { cleanManxue, cleanReport, runSummary } = require('./provider-results');
 const { requestReviewJson, resolveReviewAddress } = require('./review-http');
 const { waitForTestLLM } = require('./provider-http');
@@ -50,8 +50,10 @@ class ProviderDetection {
       if (scopes.has(identity)) throw fail('VALIDATION_ERROR', '同一检测平台下的 AI 平台配置不能重复');
       scopes.add(identity);
       if (scope.enabled && input.providers[scope.provider].enabled) {
-        const invalid = validateEffective(scope.provider === 'manxue' ? 'candy' : 'testllm', scope.params);
-        if (invalid) throw fail('VALIDATION_ERROR', `${scope.provider} / ${scope.id}：${invalid}`);
+        for (const channel of channels.filter(channel => providerFor(channel) === scope.provider && (scope.tests?.[channel] ?? true))) {
+          const invalid = validateEffective(channel, testParams(scope, channel));
+          if (invalid) throw fail('VALIDATION_ERROR', `${scope.provider} / ${scope.id} / ${names[channel]}：${invalid}`);
+        }
         if (scope.tests && !Object.values(scope.tests).some(Boolean)) throw fail('VALIDATION_ERROR', '启用的满血 AI 平台至少需要选择一项检测');
       }
     }

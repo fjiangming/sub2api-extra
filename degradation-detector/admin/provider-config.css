@@ -15,6 +15,9 @@
 .pc-level-number { margin-right:10px; }
 .pc-endpoint { max-width:720px; }
 .pc-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px 22px; max-width:960px; margin-top:16px; }
+.pc-question-parameters { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:22px; max-width:960px; margin-top:22px; }
+.pc-question-parameters > section { border-top:1px solid var(--border); padding-top:16px; min-width:0; }
+.pc-question-parameters h4 { margin:0; font-size:13px; }
 .pc-field { display:flex; flex-direction:column; gap:7px; min-width:0; font-size:12px; }
 .pc-field > span,.pc-field > label { color:var(--muted); }
 .pc-field input,.pc-field select { width:100%; min-width:0; max-width:100%; min-height:38px; font:inherit; color:var(--text); border:1px solid var(--border); border-radius:6px; background:var(--surface); padding:8px 10px; }
@@ -91,6 +94,7 @@
 .pc-modal-body > .pc-section { margin-top:22px; padding-bottom:0; }
 .pc-modal .pc-section-head { gap:10px; }
 .pc-modal .pc-segmented label { padding:5px 8px; font-size:11px; }
+.pc-modal .pc-test-tabs { margin-bottom:16px; }
 .pc-group-plan { padding-top:16px; }
 .pc-group-plan > h3 { font-size:12px; margin-bottom:10px; }
 #legacy-config { border-top:1px solid var(--border); padding-top:18px; margin-top:24px; }
@@ -105,6 +109,7 @@
   .pc-actions { gap:6px; }
   .pc-actions .button { font-size:11px; padding:6px 8px; }
   .pc-fields { grid-template-columns:minmax(0,1fr); gap:14px; }
+  .pc-question-parameters { grid-template-columns:minmax(0,1fr); }
   .pc-section-head h3 { font-size:13px; }
   .pc-checks { gap:14px; }
   .pc-group-toolbar .p-search { flex-basis:100%; max-width:none; }

@@ -209,7 +209,8 @@ test('hierarchy conversion preserves legacy category and group differences, cred
   assert.equal(payload.provider_platforms.length, 0, 'reading does not write or migrate configuration');
   assert.equal(payload.hierarchy_platforms.length, 4);
   assert.equal(payload.groups.find(group => group.id === '1').configurations.candy.hierarchy_override.model, 'legacy-special-model');
-  assert.equal(payload.groups.find(group => group.id === '2').configurations.pelican.hierarchy_override.reasoning_effort, 'legacy-pelican-ultra');
+  assert.equal(payload.hierarchy_platforms.find(scope => scope.provider === 'manxue' && scope.id === 'anthropic').test_params.pelican.reasoning_effort, 'legacy-pelican-ultra');
+  assert.equal(payload.groups.find(group => group.id === '2').configurations.pelican.hierarchy_override.timeout_seconds, 120);
   assert.equal(payload.groups[0].configurations.pelican.schedule_override.interval_minutes, 45);
   const converted = await send('/api/admin/provider-config', hierarchyInput(payload), admin, true, 'PUT');
   assert.equal(converted.status, 200, await converted.clone().text());
@@ -228,6 +229,40 @@ test('hierarchy conversion preserves legacy category and group differences, cred
   const publicResult = await (await get('/api/provider-results?channel=pelican')).json();
   assert.equal(publicResult.groups[0].schedule.interval_minutes, 45);
   assert.doesNotMatch(JSON.stringify(publicResult), /hierarchy_platforms|override|relay\.example|sk-private/);
+});
+
+test('question defaults save, reload and enqueue independently through HTTP while older shared scopes remain readable', async t => {
+  const { input, send, get, admin, runtime } = await setup(t);
+  await send('/api/admin/provider-config', input, admin, true, 'PUT');
+  const payload = await (await get('/api/admin/provider-config', admin)).json();
+  const next = hierarchyInput(payload);
+  const scope = next.provider_platforms.find(scope => scope.provider === 'manxue' && scope.id === 'openai');
+  scope.test_params = { candy: { model: 'candy-model', reasoning_effort: 'max' }, pelican: { model: 'pelican-model', reasoning_effort: 'high' } };
+  const saved = await send('/api/admin/provider-config', next, admin, true, 'PUT');
+  assert.equal(saved.status, 200, await saved.clone().text());
+  const reloaded = await (await get('/api/admin/provider-config', admin)).json();
+  assert.deepEqual(reloaded.provider_platforms.find(scope => scope.provider === 'manxue' && scope.id === 'openai').test_params, scope.test_params);
+  for (const channel of ['candy', 'pelican']) {
+    assert.equal(reloaded.groups.find(group => group.id === '1').configurations[channel].hierarchy_override, null);
+    const queued = await send(`/api/admin/provider/groups/1/${channel}/runs`, {});
+    assert.equal(queued.status, 202);
+    const run = (await queued.json()).run;
+    const snapshot = JSON.parse(runtime.providerStore.run(run.id).snapshot_json);
+    assert.equal(snapshot.model, scope.test_params[channel].model);
+    assert.equal(snapshot.reasoning_effort, scope.test_params[channel].reasoning_effort);
+    const publicResults = await (await get(`/api/provider-results?channel=${channel}`)).json();
+    assert.equal(publicResults.groups[0].model, scope.test_params[channel].model);
+  }
+  assert.doesNotMatch(JSON.stringify(reloaded), /sk-private|key_cipher|key_fingerprint/);
+  const legacy = hierarchyInput(reloaded);
+  const oldScope = legacy.provider_platforms.find(scope => scope.provider === 'manxue' && scope.id === 'openai');
+  delete oldScope.test_params; oldScope.params.model = 'legacy-shared-model'; oldScope.params.reasoning_effort = 'low';
+  assert.equal((await send('/api/admin/provider-config', legacy, admin, true, 'PUT')).status, 200);
+  const oldPayload = await (await get('/api/admin/provider-config', admin)).json();
+  const defaults = oldPayload.hierarchy_platforms.find(scope => scope.provider === 'manxue' && scope.id === 'openai').test_params;
+  assert.deepEqual(defaults.candy, { model: 'legacy-shared-model', reasoning_effort: 'low' });
+  assert.deepEqual(defaults.pelican, defaults.candy);
+  assert.equal(oldPayload.provider_platforms.find(scope => scope.provider === 'manxue' && scope.id === 'openai').test_params, undefined, 'GET does not migrate stored legacy scopes');
 });
 
 test('hierarchy group and batch actions queue all enabled tests only in the requested provider, platform and authorized group', async t => {

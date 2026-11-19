@@ -21,7 +21,8 @@
   const groups = () => state.data.groups.filter(group => group.platform === currentAI());
   const groupEnabled = group => kinds().some(channel => group.configurations[channel].group_enabled);
   const hasKey = value => Boolean(value.key || value.key_configured && !value.clear_key);
-  const effective = (group, channel) => ({ ...scope().params, ...group.configurations[channel].override });
+  const inherited = channel => ({ ...scope().params, ...scope().test_params?.[channel] });
+  const effective = (group, channel) => ({ ...inherited(channel), ...group.configurations[channel].override });
   const activeKinds = group => kinds().filter(channel => group.configurations[channel].enabled && (scope().tests?.[channel] ?? true));
   const runnable = (group, channel) => state.data.providers[state.provider].enabled && scope().enabled && groupEnabled(group)
     && activeKinds(group).includes(channel) && hasKey(group.configurations[channel])
@@ -70,7 +71,11 @@
     if (provider) { const value = state.data.providers[state.provider]; value.enabled = provider.elements.provider_enabled.checked; value.api_url = provider.elements.api_url.value.trim(); }
     const form = $('pc-platform-form'); if (!form) return;
     const value = scope(); value.enabled = form.elements.platform_enabled.checked;
-    value.params = readParams(form, value.params);
+    value.params = readParams(form.querySelector('[data-pc-shared-common]'), value.params);
+    value.params.timeout_seconds = Number(form.elements.timeout_seconds.value);
+    if (value.test_params) for (const channel of kinds()) {
+      value.test_params[channel] = readParams(form.querySelector(`[data-pc-test-params="${channel}"]`), value.test_params[channel]);
+    }
     if (value.tests) for (const channel of kinds()) value.tests[channel] = form.elements[channel].checked;
     value.concurrency = Number(form.elements.concurrency.value);
     value.schedule = readPlan(form.querySelector('[data-pc-plan]'), value.schedule);
@@ -78,14 +83,21 @@
   function valid() { return [...document.querySelectorAll('#pc-provider-form,#pc-platform-form')].every(form => form.reportValidity()); }
   function sharedView() {
     const value = scope();
-    return `<form id="pc-platform-form" autocomplete="off"><section class="pc-section pc-shared"><div class="pc-section-head"><div><h3>${esc(platformNames[currentAI()] || currentAI())} 共享检测参数</h3><p class="pc-subtitle">${providerNames[state.provider]} · ${groups().length} 个分组</p></div>${toggle('启用此 AI 平台', 'platform_enabled', value.enabled)}</div>${parameterFields(value.params, 'shared', value.enabled && state.data.providers[state.provider].enabled)}${value.tests ? `<div class="pc-checks">${kinds().map(channel => check(names[channel], channel, value.tests[channel])).join('')}</div>` : ''}<details class="pc-advanced" ${state.advanced.has(`${state.provider}:${currentAI()}`) ? 'open' : ''}><summary>运行设置与自动计划</summary><div class="pc-fields">${input('单次超时（秒）', 'timeout_seconds', value.params.timeout_seconds, 'number', 'required min="30" max="1800"')}${input('平台并发上限', 'concurrency', value.concurrency, 'number', 'required min="1" max="4"')}</div><p class="pc-note">第三方检测总并发上限 ${state.data.total_concurrency} · ${esc(state.data.timezone)}</p>${planFields(value.schedule, 'shared')}</details></section></form>`;
+    const required = value.enabled && state.data.providers[state.provider].enabled;
+    const parameters = state.provider === 'manxue'
+      ? `<div class="pc-fields" data-pc-shared-common>${input('上游 API 地址', 'target_url', value.params.target_url, 'url', `${required ? 'required' : ''} maxlength="2048"`)}${select('服务档位', 'service_tier', value.params.service_tier, [['', '默认'], ['priority', 'Fast / priority'], ['ultrafast', 'UltraFast / ultrafast']])}</div><div class="pc-question-parameters">${kinds().map(channel => `<section data-pc-test-params="${channel}"><h4>${names[channel]}</h4><div class="pc-fields">${input('检测模型', 'model', value.test_params[channel].model, 'text', `${required && value.tests[channel] ? 'required' : ''} maxlength="200"`)}${effortField(value.test_params[channel].reasoning_effort, 'shared-' + channel)}</div></section>`).join('')}</div>`
+      : `<div data-pc-shared-common>${parameterFields(value.params, 'shared', required)}</div>`;
+    return `<form id="pc-platform-form" autocomplete="off"><section class="pc-section pc-shared"><div class="pc-section-head"><div><h3>${esc(platformNames[currentAI()] || currentAI())} 共享检测参数</h3><p class="pc-subtitle">${providerNames[state.provider]} · ${groups().length} 个分组</p></div>${toggle('启用此 AI 平台', 'platform_enabled', value.enabled)}</div>${value.tests ? `<div class="pc-checks">${kinds().map(channel => check(names[channel], channel, value.tests[channel])).join('')}</div>` : ''}${parameters}<details class="pc-advanced" ${state.advanced.has(`${state.provider}:${currentAI()}`) ? 'open' : ''}><summary>运行设置与自动计划</summary><div class="pc-fields">${input('单次超时（秒）', 'timeout_seconds', value.params.timeout_seconds, 'number', 'required min="30" max="1800"')}${input('平台并发上限', 'concurrency', value.concurrency, 'number', 'required min="1" max="4"')}</div><p class="pc-note">第三方检测总并发上限 ${state.data.total_concurrency} · ${esc(state.data.timezone)}</p>${planFields(value.schedule, 'shared')}</details></section></form>`;
   }
   function groupsView() {
     const rows = groups().filter(group => `${group.name} ${group.id}`.toLowerCase().includes(state.query));
     return `<section class="pc-section"><div class="pc-section-head"><h3><span class="pc-level-number">03</span>${esc(platformNames[currentAI()] || currentAI())} 分组 <span class="pc-tag">${groups().filter(groupEnabled).length} / ${groups().length} 已启用</span></h3></div><div class="pc-group-toolbar"><label class="p-search">${icon('search')}<input type="search" id="pc-group-query" value="${esc(state.query)}" placeholder="搜索当前平台分组" aria-label="搜索当前平台分组"></label><div class="pc-actions">${state.provider === 'manxue' ? `<label class="pc-history-channel">记录类别<select id="pc-history-channel">${kinds().map(channel => `<option value="${channel}" ${state.channel === channel ? 'selected' : ''}>${names[channel]}</option>`).join('')}</select></label>` : ''}<button type="button" class="button" data-pc-batch ${state.dirty || state.running || !groups().some(groupRunnable) ? 'disabled' : ''}>${icon('play')}检测本平台分组</button></div></div><div class="pc-table-scroll"><table class="pc-group-table"><thead><tr><th>启用</th><th>分组</th><th>检测项目</th><th>生效模型 / 参数来源</th><th>专用 Key</th><th>上次检测</th><th>操作</th></tr></thead><tbody>${rows.map(group => {
       const active = activeKinds(group); const channel = active[0] || kinds()[0];
       const overrides = kinds().filter(kind => group.configurations[kind].override);
-      const models = [...new Set((active.length ? active : [channel]).map(kind => effective(group, kind).model))];
+      const models = (active.length ? active : [channel]).map(kind => {
+        const params = effective(group, kind);
+        return state.provider === 'manxue' ? `${names[kind]}：${params.model} · 思考 ${params.reasoning_effort} · ${group.configurations[kind].override ? '独立' : '继承'}` : params.model;
+      });
       const configured = kinds().filter(kind => hasKey(group.configurations[kind]));
       return `<tr data-pc-row="${esc(group.id)}"><td>${toggle('', '', groupEnabled(group), `data-pc-enabled="${esc(group.id)}" aria-label="启用 ${esc(group.name)}"`)}</td><td class="pc-group-name"><strong>${esc(group.name)}</strong><small>#${esc(group.id)} · 倍率 ${esc(group.rate_multiplier ?? '—')}</small></td><td data-label="检测项目"><div class="pc-tags">${state.provider === 'manxue' ? active.map(kind => `<span class="pc-tag">${names[kind]}</span>`).join('') || '<span class="p-muted">未选择</span>' : `<span class="pc-tag">推理</span>${effective(group, channel).cache_test ? '<span class="pc-tag">缓存</span>' : ''}${effective(group, channel).thinking_test ? '<span class="pc-tag">思考签名</span>' : ''}`}</div></td><td class="pc-model-cell" data-label="生效模型"><div>${models.map(esc).join('<br>')}<small class="pc-source">${icon(overrides.length ? 'sliders-horizontal' : 'link-2')}${overrides.length ? '分组独立参数' : `继承 ${esc(platformNames[currentAI()] || currentAI())}`}</small></div></td><td data-label="专用 Key"><span class="${configured.length === kinds().length ? 'p-green' : 'p-amber'}">${configured.length === kinds().length ? '已配置' : configured.length ? '部分配置' : '未配置'}</span></td><td data-label="上次检测"><div class="pc-latest">${(active.length ? active : [channel]).map(kind => `<div>${state.provider === 'manxue' ? `<small>${names[kind]}</small>` : ''}${badge(group.configurations[kind].latest)}<small>${stamp(group.configurations[kind].latest?.created_at)}</small></div>`).join('')}</div></td><td class="pc-actions-cell"><div class="pc-row-actions"><div class="pc-run-actions" role="group" aria-label="${esc(group.name)} 立即检测">${active.map(kind => `<button type="button" class="button" data-pc-run="${esc(group.id)}" data-pc-channel="${kind}" title="立即运行${names[kind]}" aria-label="${names[kind]} ${esc(group.name)}" ${state.dirty || state.running || !runnable(group, kind) ? 'disabled' : ''}>${icon('play')}<span>${kind === 'testllm' ? '立即检测' : names[kind]}</span></button>`).join('')}</div><div class="pc-row-tools"><button type="button" class="icon-button" data-pc-edit="${esc(group.id)}" title="分组详细配置" aria-label="配置 ${esc(group.name)}">${icon('sliders-horizontal')}</button><button type="button" class="icon-button" data-pc-history="${esc(group.id)}" title="检测记录" aria-label="查看 ${esc(group.name)} 的记录">${icon('history')}</button><button type="button" class="icon-button" data-pc-delete="${esc(group.id)}" title="清空当前类别历史" aria-label="清空 ${esc(group.name)} 的当前类别历史">${icon('trash-2')}</button></div></div></td></tr>`;
     }).join('') || '<tr><td colspan="7" class="pc-empty">没有匹配的分组</td></tr>'}</tbody></table></div></section>`;
@@ -114,6 +126,9 @@
   }
   function adopt(data) {
     data.provider_platforms = data.hierarchy_platforms;
+    for (const value of data.provider_platforms) if (value.provider === 'manxue' && !value.test_params) {
+      value.test_params = Object.fromEntries(kinds('manxue').map(channel => [channel, { model: value.params.model, reasoning_effort: value.params.reasoning_effort }]));
+    }
     for (const group of data.groups) for (const channel of channels) group.configurations[channel].override = group.configurations[channel].hierarchy_override;
     state.data = data; state.dirty = false; render();
   }
@@ -139,12 +154,11 @@
     capture();
     const entries = kinds().map(channel => group.configurations[channel]);
     const commonKey = entries.every(entry => (entry.key || '') === (entries[0].key || '') && Boolean(entry.clear_key) === Boolean(entries[0].clear_key));
-    const individual = state.provider === 'manxue' && JSON.stringify(entries[0].override) !== JSON.stringify(entries[1].override);
-    state.modal = { id, enabled: groupEnabled(group), channel: kinds()[0], mode: individual ? 'individual' : entries.some(entry => entry.override) ? 'override' : 'inherit',
-      params: structuredClone(entries.find(entry => entry.override)?.override || scope().params), key: commonKey ? entries[0].key || '' : '', clear_key: commonKey && Boolean(entries[0].clear_key),
+    state.modal = { id, enabled: groupEnabled(group), channel: kinds()[0],
+      key: commonKey ? entries[0].key || '' : '', clear_key: commonKey && Boolean(entries[0].clear_key),
       values: Object.fromEntries(kinds().map(channel => { const entry = group.configurations[channel]; return [channel, {
         selected: entry.enabled || !entries.some(value => value.enabled) && (scope().tests?.[channel] ?? true),
-        params: structuredClone(effective(group, channel)), key: commonKey ? '' : entry.key || '', clear_key: !commonKey && Boolean(entry.clear_key),
+        override: Boolean(entry.override), params: structuredClone(effective(group, channel)), key: commonKey ? '' : entry.key || '', clear_key: !commonKey && Boolean(entry.clear_key),
         independent: Boolean(entry.schedule_override), schedule: structuredClone(entry.schedule_override || scope().schedule)
       }]; })) };
     $('pc-group-title').textContent = `${group.name} · ${providerNames[state.provider]} / ${platformNames[currentAI()] || currentAI()}`;
@@ -153,8 +167,9 @@
   function renderGroup() {
     const draft = state.modal; const group = state.data.groups.find(group => group.id === draft.id);
     const openDetails = [...$('pc-group-body').querySelectorAll('details')].map(details => details.open);
-    const value = draft.mode === 'individual' ? draft.values[draft.channel].params : draft.mode === 'inherit' ? scope().params : draft.params;
-    $('pc-group-body').innerHTML = `<section><div class="pc-section-head"><h3>分组配置</h3>${toggle('启用分组', 'group_enabled', draft.enabled)}</div>${state.provider === 'manxue' ? `<div class="pc-checks">${kinds().map(channel => check(names[channel], channel, draft.values[channel].selected)).join('')}</div>` : ''}${input('分组专用 Key', 'key', draft.key, 'password', 'maxlength="8192" autocomplete="new-password" placeholder="留空保留已保存的 Key"')}<p class="pc-note">${kinds().map(channel => `${names[channel]}：${group.configurations[channel].key_configured ? '已配置' : '未配置'}`).join(' · ')}</p>${check('清除本检测平台的分组 Key', 'clear_key', draft.clear_key)}${state.provider === 'manxue' ? `<details class="pc-advanced"><summary>分项 Key</summary>${kinds().map(channel => input(names[channel] + ' Key', 'key_' + channel, draft.values[channel].key, 'password', 'maxlength="8192" autocomplete="new-password" placeholder="留空保留此项 Key"') + check('清除' + names[channel] + ' Key', 'clear_' + channel, draft.values[channel].clear_key)).join('')}</details>` : ''}</section><section class="pc-section"><div class="pc-section-head"><h3>检测参数</h3>${mode('parameter_mode', draft.mode, [['inherit', '继承平台'], ['override', '独立配置'], ...(state.provider === 'manxue' ? [['individual', '分项配置']] : [])])}</div>${draft.mode === 'individual' ? `<nav class="p-tabs pc-test-tabs" role="tablist" aria-label="分项检测参数">${kinds().map(channel => `<button type="button" id="pc-group-test-${channel}" data-pc-group-channel="${channel}" role="tab" aria-controls="pc-override-fields" aria-selected="${draft.channel === channel}" tabindex="${draft.channel === channel ? 0 : -1}">${names[channel]}</button>`).join('')}</nav>` : ''}<fieldset id="pc-override-fields" ${draft.mode === 'inherit' ? 'disabled' : ''}>${parameterFields(value, 'group', draft.enabled, true)}</fieldset></section><details class="pc-advanced"><summary>分组独立检测计划</summary>${kinds().map(channel => { const entry = draft.values[channel]; return `<section class="pc-group-plan" data-pc-group-plan="${channel}"><h3>${names[channel]}</h3>${check('使用独立计划', 'independent_schedule', entry.independent)}<fieldset ${entry.independent ? '' : 'disabled'}>${planFields(entry.schedule, channel)}</fieldset></section>`; }).join('')}</details><p id="pc-group-error" role="alert" class="p-history-error"></p>`;
+    const entry = draft.values[draft.channel];
+    const value = entry.override ? entry.params : inherited(draft.channel);
+    $('pc-group-body').innerHTML = `<section><div class="pc-section-head"><h3>分组配置</h3>${toggle('启用分组', 'group_enabled', draft.enabled)}</div>${state.provider === 'manxue' ? `<div class="pc-checks">${kinds().map(channel => check(names[channel], channel, draft.values[channel].selected)).join('')}</div>` : ''}${input('分组专用 Key', 'key', draft.key, 'password', 'maxlength="8192" autocomplete="new-password" placeholder="留空保留已保存的 Key"')}<p class="pc-note">${kinds().map(channel => `${names[channel]}：${group.configurations[channel].key_configured ? '已配置' : '未配置'}`).join(' · ')}</p>${check('清除本检测平台的分组 Key', 'clear_key', draft.clear_key)}${state.provider === 'manxue' ? `<details class="pc-advanced"><summary>分项 Key</summary>${kinds().map(channel => input(names[channel] + ' Key', 'key_' + channel, draft.values[channel].key, 'password', 'maxlength="8192" autocomplete="new-password" placeholder="留空保留此项 Key"') + check('清除' + names[channel] + ' Key', 'clear_' + channel, draft.values[channel].clear_key)).join('')}</details>` : ''}</section><section class="pc-section"><div class="pc-section-head"><h3>检测参数</h3></div>${state.provider === 'manxue' ? `<nav class="p-tabs pc-test-tabs" role="tablist" aria-label="分项检测参数">${kinds().map(channel => `<button type="button" id="pc-group-test-${channel}" data-pc-group-channel="${channel}" role="tab" aria-controls="pc-override-fields" aria-selected="${draft.channel === channel}" tabindex="${draft.channel === channel ? 0 : -1}">${names[channel]}</button>`).join('')}</nav>` : ''}${mode('parameter_mode', entry.override ? 'override' : 'inherit', [['inherit', state.provider === 'manxue' ? '继承题型默认' : '继承平台'], ['override', '独立配置']])}<fieldset id="pc-override-fields" ${entry.override ? '' : 'disabled'}>${parameterFields(value, 'group', draft.enabled && entry.selected && (scope().tests?.[draft.channel] ?? true), true)}</fieldset></section><details class="pc-advanced"><summary>分组独立检测计划</summary>${kinds().map(channel => { const item = draft.values[channel]; return `<section class="pc-group-plan" data-pc-group-plan="${channel}"><h3>${names[channel]}</h3>${check('使用独立计划', 'independent_schedule', item.independent)}<fieldset ${item.independent ? '' : 'disabled'}>${planFields(item.schedule, channel)}</fieldset></section>`; }).join('')}</details><p id="pc-group-error" role="alert" class="p-history-error"></p>`;
     $('pc-group-body').querySelectorAll('details').forEach((details, index) => { details.open = openDetails[index] || false; });
     syncPlanControls($('pc-group-body')); icons();
   }
@@ -162,8 +177,9 @@
     const draft = state.modal; if (!draft) return;
     const form = $('pc-group-form'); draft.enabled = form.elements.group_enabled.checked;
     draft.key = form.elements.key.value; draft.clear_key = form.elements.clear_key.checked;
-    if (draft.mode === 'override') draft.params = readParams($('pc-override-fields'), draft.params);
-    if (draft.mode === 'individual') draft.values[draft.channel].params = readParams($('pc-override-fields'), draft.values[draft.channel].params);
+    const current = draft.values[draft.channel];
+    if (current.override) current.params = readParams($('pc-override-fields'), current.params);
+    current.override = form.elements.parameter_mode.value === 'override';
     for (const channel of kinds()) {
       const value = draft.values[channel];
       if (state.provider === 'manxue') { value.selected = form.elements[channel].checked; value.key = form.elements['key_' + channel].value; value.clear_key = form.elements['clear_' + channel].checked; }
@@ -184,7 +200,7 @@
     for (const channel of kinds()) {
       const entry = group.configurations[channel]; const value = draft.values[channel];
       entry.enabled = value.selected; entry.group_enabled = draft.enabled;
-      entry.override = draft.mode === 'inherit' ? null : structuredClone(draft.mode === 'override' ? draft.params : value.params);
+      entry.override = value.override ? structuredClone(value.params) : null;
       entry.key = draft.key || value.key; entry.clear_key = draft.clear_key || value.clear_key;
       entry.schedule_override = value.independent ? structuredClone(value.schedule) : null;
     }
@@ -275,7 +291,6 @@
     modalBody.addEventListener('input', syncEffort);
     modalBody.addEventListener('change', event => {
       captureGroup();
-      if (event.target.name === 'parameter_mode') state.modal.mode = event.target.value;
       if (event.target.type === 'checkbox' || event.target.type === 'radio') renderGroup();
     });
     modalBody.addEventListener('click', event => {

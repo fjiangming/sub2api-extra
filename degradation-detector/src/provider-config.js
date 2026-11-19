@@ -38,6 +38,7 @@ const commonParams = { target_url: url, model, timeout_seconds: timeout };
 const manxueParamsSchema = z.object({
   ...commonParams, reasoning_effort: paramsSchema.shape.reasoning_effort, service_tier: paramsSchema.shape.service_tier
 }).strict();
+const manxueTestParamsSchema = manxueParamsSchema.pick({ model: true, reasoning_effort: true });
 const testllmParamsSchema = z.object({
   ...commonParams, protocol: z.enum(['gpt', 'claude']), cache_test: z.boolean(), thinking_test: z.boolean()
 }).strict();
@@ -47,7 +48,8 @@ const scopeFields = {
 };
 const providerPlatformSchema = z.discriminatedUnion('provider', [
   z.object({ ...scopeFields, provider: z.literal('manxue'), params: manxueParamsSchema,
-    tests: z.object({ candy: z.boolean(), pelican: z.boolean() }).strict() }).strict(),
+    tests: z.object({ candy: z.boolean(), pelican: z.boolean() }).strict(),
+    test_params: z.object({ candy: manxueTestParamsSchema, pelican: manxueTestParamsSchema }).strict().optional() }).strict(),
   z.object({ ...scopeFields, id: z.enum(['openai', 'anthropic']), provider: z.literal('testllm'), params: testllmParamsSchema }).strict()
 ]);
 const scopedGroupSchema = z.discriminatedUnion('channel', channels.map(channel => groupSchema.extend({
@@ -94,6 +96,10 @@ function providerPlatform(configuration, provider, platform) {
   return configuration.provider_platforms?.find(item => item.provider === provider && item.id === platform);
 }
 
+function testParams(scope, channel) {
+  return { ...scope.params, ...scope.test_params?.[channel] };
+}
+
 function validateEffective(channel, params) {
   if (!params.target_url || !params.model) return '启用的分组必须有上游地址和模型';
   if (channel === 'testllm' && !['gpt', 'claude'].includes(params.protocol)) return 'TestLLM 目前只支持 GPT / Claude 协议';
@@ -101,4 +107,4 @@ function validateEffective(channel, params) {
 }
 
 module.exports = { channels, names, providerFor, digest, keyContext, configurationSchema, defaultConfiguration, validateEffective,
-  providerParams, providerPlatform };
+  providerParams, providerPlatform, testParams };
