@@ -4,6 +4,7 @@ const { AppError } = require('./errors');
 const { channels, names, providerFor, providerParams, providerPlatform, testParams } = require('./provider-config');
 const { runSummary } = require('./provider-results');
 const { publicGroupCacheStats } = require('./group-metrics');
+const { fittedArtwork } = require('./artwork-preview');
 const { sanitizeReviewDiagnostic } = require('./review-http');
 
 function installProviderRoutes(app, runtime, { requireAuth, requireAdmin, requireCsrf, runLimiter, configLimiter, historyLimiter, discoverGroups, setNoStore, previewHeaders, signedPreview, previewAncestors }) {
@@ -122,7 +123,7 @@ function installProviderRoutes(app, runtime, { requireAuth, requireAdmin, requir
     const html = run.response_json && JSON.parse(run.response_json).result?.html;
     if (!html) throw missing();
     previewHeaders(res, previewAncestors(req, `provider-${run.id}`));
-    res.type('html').send(html);
+    res.type('html').send(req.query.fit === '1' ? fittedArtwork(html) : html);
   };
   app.get('/api/provider-results/:id', requireAuth, handler(detail));
   app.get('/api/admin/provider-results/:id', requireAuth, requireAdmin, handler((req, res) => detail(req, res, true)));

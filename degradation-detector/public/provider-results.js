@@ -39,6 +39,8 @@
     historyDialog.setAttribute('aria-labelledby', 'p-history-title');
     historyDialog.innerHTML = `<header class="p-history-head"><div><h2 id="p-history-title"></h2><p id="p-history-meta"></p></div><div class="p-row"><button type="button" class="icon-button" data-history-refresh title="刷新历史" aria-label="刷新历史">${icon('refresh-cw')}</button><button type="button" class="icon-button" data-history-close title="关闭" aria-label="关闭">${icon('x')}</button></div></header><div class="p-history-tools" hidden><label><input type="checkbox" data-history-select-all><span data-history-select-label>全选已加载</span></label><span class="p-muted" data-history-selection>已选 0 / 100 条</span><div class="p-history-delete-actions"><button type="button" class="button danger" data-history-delete disabled>${icon('trash-2')}删除所选</button><button type="button" class="button danger" data-history-clear>${icon('trash-2')}一键清空</button></div></div><p class="p-history-feedback" role="status" aria-live="polite" hidden></p><div class="p-history-body"><nav class="p-history-list" aria-label="检测记录"></nav><div class="p-history-detail" aria-live="polite"></div></div>`;
     document.body.append(historyDialog);
+    const detail = historyDialog.querySelector('.p-history-detail');
+    detail.tabIndex = 0; detail.setAttribute('aria-label', '检测结果详情');
     historyDialog.querySelector('[data-history-close]').onclick = () => historyDialog.close();
     historyDialog.querySelector('[data-history-refresh]').onclick = () => loadHistory();
     historyDialog.addEventListener('click', event => {
@@ -181,6 +183,8 @@
     const requestId = ++detailRequest;
     renderHistory();
     const target = historyDialog.querySelector('.p-history-detail');
+    target.classList.remove('p-history-detail--artwork');
+    target.scrollTop = 0;
     target.textContent = '正在读取本次结果';
     try {
       const run = await current.api(`${current.admin ? '/api/admin' : '/api'}/provider-results/${id}`, { headers: { 'x-preview-ancestors': ancestors() } });
@@ -201,11 +205,17 @@
         details.append(summary, code); target.append(details);
       }
       if (run.preview_url) {
+        const artwork = target.querySelector('#p-artwork-target').parentElement;
+        artwork.classList.add('p-artwork-section');
+        target.classList.add('p-history-detail--artwork');
+        target.prepend(artwork);
         const frame = document.createElement('iframe');
         frame.className = 'p-artwork'; frame.title = '本次鹈鹕检测作品';
-        frame.sandbox = 'allow-scripts'; frame.referrerPolicy = 'no-referrer'; frame.src = run.preview_url;
+        const source = new URL(run.preview_url, location.href); source.searchParams.set('fit', '1');
+        frame.sandbox = 'allow-scripts'; frame.referrerPolicy = 'no-referrer'; frame.setAttribute('scrolling', 'no'); frame.src = source.href;
         target.querySelector('#p-artwork-target').append(frame);
       }
+      for (const code of target.querySelectorAll('.p-code')) code.tabIndex = 0;
       icons();
     } catch (error) { if (current === dialogState && requestId === detailRequest) target.textContent = error.message; }
   }

@@ -203,6 +203,12 @@ test('locally generated pelican artwork and prompt remain available after classi
     assert.equal(await preview.text(), source);
     assert.match(preview.headers.get('content-security-policy'), /sandbox allow-scripts/);
     assert.match(preview.headers.get('content-security-policy'), /connect-src 'none'/);
+    const fittedUrl = new URL(detail.preview_url, 'http://localhost'); fittedUrl.searchParams.set('fit', '1');
+    const fitted = await get(fittedUrl.pathname + fittedUrl.search, who); assert.equal(fitted.status, 200);
+    const fittedSource = await fitted.text();
+    assert.match(fittedSource, /data-artwork-fit/); assert.match(fittedSource, /HTTP artwork/); assert.match(fittedSource, /window\.artwork = 1/);
+    assert.equal(fitted.headers.get('content-security-policy'), preview.headers.get('content-security-policy'));
+    assert.equal((await (await get(`${prefix}/provider-results/${run.id}`, who)).json()).response.result.html, source);
   }
   const listing = await (await get('/api/provider-results?channel=pelican')).json();
   assert.equal(listing.groups[0].latest.conclusion, 'error'); assert.equal(listing.groups[0].latest.method, PELICAN_METHOD);

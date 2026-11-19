@@ -36,6 +36,23 @@ async function main() {
     assert.deepEqual(actual, expected.map(([id, title, ids]) => [id, title, ids, `${ids.length} 个检测分组`]));
   };
   const shot = (page, name) => page.screenshot({ path: path.join(directory, `${name}.png`), fullPage: true });
+  const fittedPreview = async (page, selector = 'svg') => {
+    const frame = await (await page.locator('.p-artwork').elementHandle()).contentFrame();
+    await frame.waitForFunction(selector => {
+      const root = document.documentElement, scene = document.querySelector(selector);
+      if (!scene || getComputedStyle(root).transform === 'none') return false;
+      const rect = scene.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && rect.left >= -1 && rect.top >= -1 && rect.right <= innerWidth + 1 && rect.bottom <= innerHeight + 1;
+    }, selector);
+    assert.equal(await frame.locator('html').evaluate(element => getComputedStyle(element).overflow), 'hidden');
+    assert.equal(await page.locator('.p-history-detail').evaluate(element => getComputedStyle(element).scrollbarWidth), 'none');
+    assert.equal(await page.locator('.p-artwork').getAttribute('scrolling'), 'no');
+    const box = await page.locator('.p-history').boundingBox(), viewport = page.viewportSize();
+    assert(box.width > viewport.width * 0.94 && box.height > viewport.height * 0.94, 'history must use nearly the full viewport');
+    const stage = await page.locator('.p-artwork').boundingBox(), detail = await page.locator('.p-history-detail').boundingBox();
+    assert(stage.height > detail.height * 0.8 && stage.y >= detail.y && stage.y + stage.height <= detail.y + detail.height + 1, 'complete artwork must fit in the first detail viewport');
+    return frame;
+  };
   const save = async page => {
     const response = page.waitForResponse(response => new URL(response.url()).pathname === '/api/admin/provider-config' && response.request().method() === 'PUT');
     await page.locator('#pc-save').click(); const result = await response;
@@ -85,6 +102,29 @@ async function main() {
       await page.locator('.p-card button[data-group="8"]').last().click();
       await page.frameLocator('.p-artwork').locator('svg').waitFor();
       assert.equal(await page.locator('.p-artwork').getAttribute('sandbox'), 'allow-scripts');
+      await fittedPreview(page); await shot(page, `${layout.name}-pelican-preview-full`);
+      await page.locator('.p-history-detail').focus(); await page.keyboard.press('End');
+      await page.waitForFunction(() => document.querySelector('.p-history-detail').scrollTop > 0);
+      await page.keyboard.press('Home'); await page.waitForFunction(() => document.querySelector('.p-history-detail').scrollTop === 0);
+      const fitStore = preview.runtime.providerStore, fitRun = fitStore.history('8', 'pelican')[0];
+      const fitOriginal = JSON.parse(fitStore.run(fitRun.id).response_json);
+      const tallArtwork = '<!doctype html><html><head><style>body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;background:#edf5f1}main{position:relative;flex:none;width:1200px;height:1600px;background:#fff;border:2px solid #319578;box-sizing:border-box}span{position:absolute;padding:20px;font:24px system-ui}#top{top:0;left:0}#bottom{right:0;bottom:0}</style></head><body><main id="fit-scene"><span id="top">TOP LEFT</span><span id="bottom">BOTTOM RIGHT</span></main><script>window.previewTicks=0;setInterval(()=>window.previewTicks++,50);</script></body></html>';
+      try {
+        fitStore.response(fitRun.id, { ...fitOriginal, result: { ...fitOriginal.result, html: tallArtwork } });
+        await page.locator('[data-history-refresh]').click();
+        await page.frameLocator('.p-artwork').locator('#fit-scene').waitFor();
+        const frame = await fittedPreview(page, '#fit-scene');
+        await frame.waitForFunction(() => window.previewTicks > 1);
+        await frame.locator('#fit-scene').evaluate(element => { element.style.height = '1900px'; });
+        await fittedPreview(page, '#fit-scene');
+        await page.setViewportSize({ width: layout.width > 1000 ? 1100 : layout.width === 320 ? 390 : 320, height: 720 });
+        await fittedPreview(page, '#fit-scene');
+        await page.setViewportSize(options.viewport); await fittedPreview(page, '#fit-scene');
+        await shot(page, `${layout.name}-pelican-preview-tall`);
+      } finally {
+        fitStore.response(fitRun.id, fitOriginal);
+      }
+      await page.locator('[data-history-refresh]').click(); await page.frameLocator('.p-artwork').locator('svg').waitFor(); await fittedPreview(page);
       await page.locator('.p-history-detail summary').filter({ hasText: '作品源码' }).click(); assert.match(await page.locator('.p-history-detail').innerText(), /<!doctype html>/);
       await page.locator('.p-history-detail summary').filter({ hasText: '检测提示词' }).click();
       assert.equal(await page.locator('.p-history-detail summary').filter({ hasText: '检测提示词' }).locator('..').locator('pre').innerText(), PELICAN_PROMPT);
@@ -135,6 +175,7 @@ async function main() {
       await admin.goto(`${preview.baseUrl}/admin/config?demo=1`); await admin.locator('#pc-platform-form').waitFor();
       await admin.locator('#pc-history-channel').selectOption('pelican'); await admin.locator('[data-pc-history="8"]').click();
       await admin.frameLocator('.p-artwork').locator('svg').waitFor();
+      await fittedPreview(admin); await shot(admin, `${layout.name}-admin-pelican-preview-full`);
       await admin.locator('.p-history-detail summary').filter({ hasText: '检测诊断' }).click();
       assert.match(await admin.locator('.p-history-detail').innerText(), /FIXTURE_READ/);
       for (const title of ['作品源码', '检测提示词']) await admin.locator('.p-history-detail summary').filter({ hasText: title }).click();
