@@ -106,6 +106,7 @@ function showView(name) {
 function showError(message) {
   document.querySelectorAll('input[type="password"]').forEach(input => { input.value = ''; });
   window.ModelConfig?.reset();
+  window.ProviderConfig?.reset();
   $('error-message').textContent = message || '页面暂时不可用';
   showView('error');
   refreshIcons();
@@ -1252,6 +1253,7 @@ async function initialize() {
     $('page-meta').textContent = `管理员配置 · ${state.data.schedule_timezone}`;
     render();
     showView('app');
+    await window.ProviderConfig.load();
     refreshIcons();
   } catch (error) {
     showError(error.status === 401
@@ -1355,4 +1357,5 @@ window.addEventListener('beforeunload', (event) => {
 });
 
 window.ModelConfig.connect({ state, api, markDirty, toast, refreshIcons, showError, confirmDeletion });
+window.ProviderConfig.connect({ api, toast, showError });
 initialize();

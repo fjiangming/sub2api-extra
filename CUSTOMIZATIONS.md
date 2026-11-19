@@ -1,5 +1,31 @@
 # 个性化功能维护台账
 
+## 2026-11-19：发布多第三方降智检测
+
+用户明确要求提交 GitHub，并询问服务器升级兼容性与后续配置。本轮发布下节“正式实现多第三方降智检测”对应的正式服务源码、界面、测试、正式页面预览脚本和说明到 main；下节“未提交 / 推送”记录实现当轮状态，本轮已获得源码发布及既有 GitHub Actions 构建核验授权。仅暂存本节及正式实现节，不包含早期独立 Demo、未关联菜单 SVG、其他服务、域名维护及其台账差异，不连接或更新生产服务器。
+
+`degradation-detector/README.md` 补充升级步骤：沿用现有 `.env`、端口、数据卷与 `.credential-key`，新表自动建立，原配置 / Key / 历史和模型身份保留；新服务默认关闭且不自动复制旧凭据，旧计划继续运行，切换后需按需停用以避免重复检测。新第三方需独立启用、配置公网 HTTPS 模型网关、模型、分组专用 Key 与计划，先单组实测；5h 缓存连接可选，通用反代不变，路径白名单需补充。`.github/workflows/docker-publish.yml` 增加降智检测独立 Linux 语法 / 全量测试作业，纳入镜像构建前置检查；使用现有 Node 22 与锁文件，不变更服务依赖或部署配置。
+
+沿用正式页面四布局及旧功能浏览器验收结果。发布前复核正式提交范围、语法、全量测试和差异空白；推送后检查远端提交及检测服务双架构镜像发布，最终结果以本轮回复为准。真实第三方凭据、额度及生产网关端到端测试仍待服务器管理员配置后执行，本轮不发起真实模型请求、不更改计费或部署。
+
+## 2026-11-19：正式实现多第三方降智检测
+
+用户确认 Demo 后明确要求“开始帮我改造实现”。本轮将正式服务的 `/results` 改为满血 AI / TestLLM 结果页，满血 AI 下分糖果 / 鹈鹕；`/admin/config` 沿用独立页面及既有管理员权限。原有自定义检测、HTML 复核与模型身份功能保留，原降智结果增加 `/legacy-results` 入口，不重写旧记录，不自动迁移凭据或发起真实第三方任务。仅本地开发验证，不提交 / 推送、发布镜像或部署；保留无关改动，包括 README 既有菜单 SVG 说明。
+
+- `degradation-detector/src/provider-config.js`、`provider-store.js`：三个类别独立的默认 / 分组覆盖配置、专用 Key、版本检查、固定时间 / 间隔计划及 SQLite 表。凭据沿用 AES-GCM 库并绑定分组和类别，检测网站 / 上游地址变更必须重新填写 Key；历史保存执行时参数和摘要。新服务默认关闭，旧配置不会被自动借用为新凭据。
+- `src/provider-detection.js`、`provider-results.js`、`provider-http.js`：核对当日公开文档 / 前端实际契约后接入满血 AI 直接 `candy` / `pelican` 任务和 TestLLM 的 `iq` / `cache` / `think` 独立任务、SSE 完成事件与报告。限制公网 HTTPS / DNS、固定目标地址、禁止重定向、响应上限与总超时；仅保存结果白名单，屏蔽已知 Key。持久化每个分项编号，已知任务重启续查，不明提交不重发；限流等待与有界只读重连，不把顶层成功视为通过，不虚构首字耗时、缓存或提示词。
+- `src/provider-routes.js`、`server.js`、`scheduler.js`、`maintenance.js`：接入完整配置、列表 / 详情 / 24h 历史、管理员手动 / 批量任务与历史清空；复用实时管理员、CSRF、频率限制和当前可用分组交集。结果与预览再次校验当前平台、分组及启用状态，签名不替代权限，作品保留 sandbox / CSP。纳入启动 / 关闭、空闲维护和分组 / 类别保留策略，保护最近 60 条与活动任务。
+- `public/provider-results.html`、`provider-results.js`、`provider-results.css`：正式多级页签、搜索 / 平台 / 状态筛选、分组倍率、真实 5h 缓存、24 次历史柱与排除异常的近期通过率；TestLLM 按 GPT / Claude 表格、分项结果和 24h 明细呈现。提供历史参数、第三方实际提示词 / 回答 / 作品 / 源码，未返回则明确缺失；前台只读，权限收回时关闭已打开详情。`public/index.html` 增加从旧历史返回第三方结果的入口。
+- `admin/provider-config.js`、`provider-config.css`、`index.html`、`app.js`：独立后台接入 / 分组 / 计划三视图、分组覆盖与凭据状态、单组 / 当前类别批量队列回执、历史清空。新旧配置独立保存，原有检测和模型身份设置置于可展开区域。分组编辑参数区独立滚动、固定独立底栏，支持窄屏完整聚焦 Key 输入；配置 / 原始 Key 不存浏览器 LocalStorage。
+- `tests/provider-detection.test.js`、`provider-server.test.js`、`provider-http.test.js`：新增配置、适配器、重启 / 分项续查、限流 / 超时、隔离 / 清理、权限 / CSRF / 原子保存、24h 游标、签名预览和受限 SSE 验证；`tests/server.test.js` 更新正式新页面资源断言并保留旧页面验收。
+- `scripts/provider-preview.cjs`、`provider-browser-check.cjs`：正式页面的隔离虚构数据预览和四布局验证；`scripts/model-browser-check.cjs` 将旧检测验收入口改为 `/legacy-results`，展开后台兼容区，并支持指定 Chrome 路径。`package.json` 增加 `preview:providers` / `test:providers-ui`；`README.md` 记录契约、专用 Key 流向、计划、旧历史兼容和本地验证，无依赖版本或生产环境变量改动。
+
+首轮验证：完整服务 193 项测试全部通过，0 失败 / 跳过；新页面 Chrome / Playwright 的 1440px、390px、320px、深色场景通过，无页面脚本错误或外网请求，截图 `sub2api-provider-browser-jx1SR3`，桌面前台 / 后台与 320px 分组弹窗已视觉复核。旧自定义检测与三渠道模型身份完整浏览器验收也通过，截图 `sub2api-model-browser-LUDikM`。随后补充配置全量有效性、缺失百分比范围、权限收回时清空详情等复核，最终验证在下方补记。未使用真实第三方凭据或发起付费模型请求，未连接生产数据库。
+
+最终验证：语法检查 **73 个 JavaScript 文件通过**，完整服务 **196 项测试通过，0 失败 / 跳过**；最终继承模型展示复核后，相关服务 / 配置 / 权限 / 传输专项 **27 项再次通过**。新前后台四布局浏览器验收再次全部通过，追加了分组权限撤回清空弹窗、独立上层菜单 iframe 中的签名作品预览，均无页面错误、外部网络或付费模型请求。最终截图目录 `sub2api-provider-browser-gyKUHu`，之前完整截图 `sub2api-provider-browser-0dzc3W` 的桌面 / 深色 TestLLM 与 320px 明细已视觉核对；旧功能回归仍通过。`scripts/model-preview.cjs` 同步旧历史预览输出地址，README 补充反向代理路径白名单。
+
+启动正式页面的独立 loopback 模拟预览 `http://127.0.0.1:19961/results?demo=readonly`（PID **38004**），后台 `/admin/config?demo=1`；healthz / 新页面 HTTP 200，TestLLM 返回两组模拟记录。使用临时 SQLite，真实外部检测和数据下载被禁用；保留原有 Demo 等预览进程。真实第三方凭据、额度与生产上游端到端联调尚未执行，当前线上服务不变，无部署 / 提交 / 推送。
+
 ## 2026-11-19：发布导出与推送请求 ID 修复
 
 用户明确要求提交 GitHub。本次仅发布下述“导出与推送补回网关请求 ID”对应的运营中心实现、界面、测试、页面验证脚本与接入说明到 main；该节“未提交 / 推送”描述实现当轮状态，本次授权源码发布和既有 GitHub Actions 构建核验。维护台账仅暂存本节及该功能节，保留多第三方检测 Demo、附属容器部署、域名迁移 / 备份、只读生产排查、其他模块和独立演示等无关差异。

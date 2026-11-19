@@ -93,7 +93,12 @@ test('admin configuration and shared results enforce role, CSRF, group, and prev
   assert.doesNotMatch(resultsPageHtml, /admin\/config|run-button|立即检测/);
   const publicAssetVersion = resultsPageHtml.match(/\/styles\.css\?v=([a-f0-9]{12})/)?.[1];
   assert.ok(publicAssetVersion);
-  assert.match(resultsPageHtml, new RegExp(`/app\\.js\\?v=${publicAssetVersion}`));
+  assert.match(resultsPageHtml, new RegExp(`/provider-results\\.js\\?v=${publicAssetVersion}`));
+  assert.match(resultsPageHtml, /data-provider="manxue"/);
+  assert.match(resultsPageHtml, /data-provider="testllm"/);
+  const legacyPage = await fetch(`${http.baseUrl}/legacy-results`);
+  assert.equal(legacyPage.status, 200);
+  assert.match(await legacyPage.text(), new RegExp(`/app\\.js\\?v=${publicAssetVersion}`));
   assert.match(resultsPageHtml, new RegExp(`/session\\.js\\?v=${publicAssetVersion}`));
   assert.match(resultsPage.headers.get('cache-control'), /no-store/);
   assert.doesNotMatch(resultsPageHtml, /id="model-pane"|id="model-dialog"|result-tabs|src="\/model-results\.js/);

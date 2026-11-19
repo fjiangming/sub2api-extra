@@ -30,7 +30,7 @@ async function main() {
   Object.assign(combinedResponse, fingerprintComparison(combinedResponse.analysis, combinedResponse.requested_model));
   preview.runtime.modelStore.db.prepare('UPDATE model_runs SET model=? WHERE id=?').run(combinedResponse.requested_model, combinedRun.id);
   preview.runtime.modelStore.updateResponse(combinedRun.id, combinedResponse, 'completed');
-  const browser = await playwright.chromium.launch({ channel: 'chrome', headless: true });
+  const browser = await playwright.chromium.launch({ ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : { channel: 'chrome' }), headless: true });
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sub2api-model-browser-'));
   const errors = [];
   const external = [];
@@ -75,6 +75,7 @@ async function main() {
     const adminContext = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'zh-CN' });
     const admin = await adminContext.newPage(); watch(admin);
     await admin.goto(`${preview.baseUrl}/admin/config?demo=1`);
+    await admin.locator('#legacy-config > summary').click();
     await admin.locator('.platform-panel:not([hidden]) [data-model-enabled]').waitFor();
     const before = await readConfig(admin);
     assert.equal(before.model_schedule.enabled, false);
@@ -106,6 +107,7 @@ async function main() {
     });
     assert.deepEqual(effectiveTests(saved), effectiveTests(before), 'model editing cannot modify effective IQ tests');
     await admin.reload();
+    await admin.locator('#legacy-config > summary').click();
     await admin.locator('#model-schedule-times input').nth(2).waitFor();
     assert.equal(await admin.locator('#model-schedule-enabled').isChecked(), true);
     await admin.locator('#model-schedule-mode-interval').check();
@@ -177,7 +179,7 @@ async function main() {
 
     const userContext = await browser.newContext({ viewport: { width: 1440, height: 900 }, locale: 'zh-CN' });
     const page = await userContext.newPage(); watch(page);
-    await page.goto(`${preview.baseUrl}/results?demo=readonly`);
+    await page.goto(`${preview.baseUrl}/legacy-results?demo=readonly`);
     await page.locator('#group-grid .group-card').first().waitFor();
     await independentPage(page, 'iq');
     assert.equal(await page.locator('#group-grid .group-card').count(), 3);
@@ -373,7 +375,7 @@ async function main() {
     })();
     await page.locator('#model-dialog-close').click();
     const iqPage = await userContext.newPage(); watch(iqPage);
-    await iqPage.goto(`${preview.baseUrl}/results#model`);
+    await iqPage.goto(`${preview.baseUrl}/legacy-results#model`);
     await iqPage.locator('#group-grid .group-card').first().waitFor();
     await independentPage(iqPage, 'iq');
     for (const width of [390, 320]) {
@@ -466,10 +468,10 @@ async function main() {
     await page.locator('#retry-button').click();
     await page.locator('#model-grid .model-card').first().waitFor();
     await independentPage(page, 'model');
-    assert(resultRequests.some(item => item.page === '/results' && item.api === '/api/results'));
+    assert(resultRequests.some(item => item.page === '/legacy-results' && item.api === '/api/results'));
     assert(resultRequests.some(item => item.page === '/model-results' && item.api === '/api/model-results'));
     for (const item of resultRequests) {
-      if (item.page === '/results') assert(!item.api.startsWith('/api/model-results'), 'IQ page must not read model results');
+      if (item.page === '/legacy-results') assert(!item.api.startsWith('/api/model-results'), 'IQ page must not read model results');
       if (item.page === '/model-results') assert(!item.api.startsWith('/api/results'), 'model page must not read IQ results');
     }
     assert.deepEqual(errors, []); assert.deepEqual(external, []); assert.equal(preview.outboundCalls, 0);

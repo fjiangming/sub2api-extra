@@ -2,6 +2,41 @@
 
 降智检测是 Sub2API Extra 的独立服务，包含降智检测和模型身份检测两个独立功能。当前登录用户的短期 Token 只用于校验身份，以及读取该用户通过 `GET /api/v1/groups/available` 有权查看的分组；两类检测均使用管理员单独配置的分组专用 Key，不会读取、创建或消费登录用户的 Key。
 
+## 多第三方降智检测
+
+`/results` 为正式第三方结果页，一级页签为满血 AI / TestLLM，满血 AI 下分糖果、鹈鹕两个页签。`/admin/config` 仍为独立管理页，新增第三方接入、分组 / 模型及检测计划三个视图。原有自定义题目、HTML 复核、计划与历史保留在管理页的“原有检测与模型身份配置”中；原结果通过 `/legacy-results` 查看，原 `/api/results` 等接口保持兼容，模型身份结果继续使用 `/model-results`。新旧计划独立，不会将旧本地检测记录标记为第三方结果或自动重新检测。
+
+新第三方默认关闭。管理员选择服务和检测类别，填写上游公网 HTTPS 基础地址、模型等默认参数，在分组列表开启对应分组并配置该类别的分组专用 Key，再保存配置。分组可覆盖参数；TestLLM 可跟随原有分组检测模型（没有时使用指定的默认模型），或直接指定模型。糖果、鹈鹕和 TestLLM 各有固定时间 / 间隔计划，手动检测不会推迟计划。同一分组和类别最多一个活动任务，单组按钮只检测该组；批量按钮检测当前类别的已启用且有权管理分组。
+
+| 类别 | 实际第三方契约 | 结果呈现 |
+| --- | --- | --- |
+| 满血 AI 糖果 | `POST https://manxue.ai/api/v1/tests`，`benchmark=candy`，按任务 ID 查询 | 分组卡片、最近 24 次历史柱，通过绿色，答案不符红色，异常黄色 |
+| 满血 AI 鹈鹕 | 同一接口，`benchmark=pelican`，第三方直接生成并分类 | 同款卡片；保存本次判定、可用的作品、源码和提示词 |
+| TestLLM | `POST https://testllm.ai/api/detect`，分别提交 `mode=iq/cache/think`；`/api/jobs/:id/events` 等待完成，`/api/reports/:id` 读取报告 | 按 GPT / Claude 分组的列表，独立显示推理等级、测试缓存、推理用时、思考签名和最近 24 小时记录 |
+
+TestLLM 的缓存与思考签名为可选独立请求，启用时每轮最多三个任务。当前公开报告未提供首字耗时，页面不以任务耗时替代；缺失指标展示“未取得”。满血 AI 的顶层 `succeeded` 只表示任务结束，通过以 `candy.status` 或 `assessment.quality` 为准；错误、未知和进行中样本均不进入通过率分母。卡片通过率按显示的最近 24 次实际记录计算。最近 5h 的真实分组缓存与 TestLLM 的单轮测试缓存分开显示。
+
+新检测会将管理员配置的**上游地址、该分组该类别专用 Key 和模型**通过 HTTPS 发送给选定第三方，由第三方访问模型；不发送当前登录用户的 Token。满血 AI 需要支持 Responses 的上游；其鹈鹕分类器基于 gpt-6-astra，其他模型结论仅供参考。此流程独立于下文“只审核既有 HTML”的原有复核契约。专用 Key 使用现有 AES-GCM 凭据库加密，绑定分组及检测类别；页面只返回配置状态，不返回密文或原文，不使用 LocalStorage 存储新配置和 Key。检测网站或上游地址变更后，重新填写 Key 才能启用相关分组。
+
+配置通过 `/api/admin/provider-config` 保存到现有 SQLite，新表与原有历史隔离；带版本检查，避免管理员并发覆盖。每次执行保存实际参数和分项任务编号。重启只续查已知编号，无法确认 POST 是否被接受时不会自动重发；只读查询有界重连，遵守限流等待。公网 DNS 校验、地址固定、重定向拒绝、响应上限和总任务超时继续在服务端执行。详细结果仅保存允许字段并屏蔽已知 Key，HTML 预览沿用权限校验、签名与 sandbox CSP。历史及详细响应使用同一维护策略，按分组和类别分别保留，保护最近 60 条和活动任务。
+
+本地运行 `npm run preview:providers` 可查看正式前后台，默认 `http://127.0.0.1:19961/results?demo=readonly` 和 `/admin/config?demo=1`。预览使用独立临时数据库和虚构结果，所有上游网络请求禁用。`npm run test:providers-ui` 运行真实页面的 Chrome / Playwright 回归，可用 `PLAYWRIGHT_MODULE`、`CHROME_PATH` 指定本机依赖，不添加生产浏览器依赖。
+
+### 从原有版本升级
+
+本次升级沿用现有容器、端口、`.env` 和数据卷 `sub2api-extra_degradation-detector-data`，没有新增必填环境变量。启动时只为第三方配置和记录新增 SQLite 表，不覆盖原有检测配置、专用 Key、历史或模型身份数据。升级前备份完整数据目录，数据库与 `.credential-key` 必须一起保留；继续只运行一个实例，不删除数据卷或重新生成凭据主密钥。
+
+原菜单的 `/results` 地址可直接沿用，升级后显示第三方结果；查看旧记录可增加 `/legacy-results?token={token}&theme={theme}` 菜单。模型身份 `/model-results`、管理员 `/admin/config` 和原有 API 地址不变。**旧检测计划继续运行**，新服务不会自动接管、迁移旧专用 Key 或产生新的第三方任务；如果切换后只需要第三方检测，需在“原有检测与模型身份配置”中停用原降智计划，按需保留模型身份计划。
+
+首次启用按以下顺序配置：
+
+1. 在“第三方接入”启用满血 AI 或 TestLLM，保留默认官方接入地址即可。
+2. 为糖果、鹈鹕、TestLLM 分别设置模型和上游公网 HTTPS 基础地址。该地址应是第三方服务器能够访问的模型网关，不能填 `host.docker.internal`、localhost 或私网地址；本服务访问 Sub2API 做登录校验的 `SUB2API_BASE_URL` 仍可沿用原内网地址。
+3. 在“分组 / 模型”选择检测类别，启用目标分组并填写该类别的分组专用 Key，保存配置。旧 Key 不会自动复制到新检测；可由管理员明确填写该分组已有专用 Key 或新建专用 Key，不同分组不能复用同一 Key。
+4. 先单组手动运行，确认结果后再按需启用每个类别的固定时间或间隔计划。TestLLM 的缓存和思考检测会增加独立模型请求，可按需关闭。
+
+服务器需能通过 HTTPS 访问 `manxue.ai`、`testllm.ai`；模型网关如有访问白名单或防护，还需允许所选第三方的模型请求。通用 `location /` 反向代理无需修改，路径白名单代理需同步下文新增页面、资源和 API 路径。原有 `SUB2API_DATABASE_URL` 继续用于 5h 缓存统计；未配置时可选补充，不影响检测。
+
 ## 权限边界
 
 | 能力 | 管理员 | 普通用户 |
@@ -445,11 +480,13 @@ URL：https://detector.example.com/admin/config?token={token}&theme={theme}
 
 三个入口都兼容 `token` 与 `access_token` 参数名，并在换取本地短期会话后立即从地址栏移除上游 Token。管理入口会先在服务端验证 Token 对应用户确实仍为管理员，再创建本地会话和返回页面。生产环境使用 Secure 和 Partitioned Cookie；反向代理必须保留 HTTPS 协议信息。原 Nginx 若以 `location /` 代理整个服务，无需修改；若只允许指定路径，需将 `/model-results`、`/model-results/`、`/session.js` 及其原有静态 / API 路径一并转发。
 
+使用路径白名单的代理还需放行新的 `/legacy-results`、`/provider-results.js`、`/provider-results.css`、`/admin/provider-config.js`、`/admin/provider-config.css`、`/api/provider-results*`、`/api/provider/*`、`/api/admin/provider-config`、`/api/admin/provider-results*` 和 `/api/admin/provider/*`。同一服务与数据卷即可运行，无新增生产依赖或强制环境变量。
+
 内嵌作品预览的签名绑定用户身份、作品令牌和父页面来源，同一用户在其它标签页登录或重新换取会话后仍可预览。每次访问都重新检查登录状态、分组权限及分组是否启用；其它用户不能复用该签名，退出、删除或清理作品后原链接不能绕过校验。预览链接不包含登录 Token 或会话凭据。
 
 审核失败时可执行 `docker logs --since 30m --tail 200 sub2api-degradation-detector`，查看 `visual_review_failed`：`stage=submit` 表示提交被拒绝，`stage=poll` 表示查询已创建的任务失败；`400/422` 应先查看管理员分组历史中的脱敏审核诊断，核对第三方当前请求协议，`401/403` 需核对鉴权和访问限制，`404` 需核对实际 API 路径，`429` 表示限流，`5xx` 表示审核服务或其代理故障。满血 AI 官方 HTML 接口必须使用本文的新格式，不能只给旧格式增加模型字段，更不能转发分组真实 Key 让第三方重新生成。重定向仍被拒绝，应配置最终的 HTTPS API 地址。增加超时或盲目重试不能修复参数校验失败。
 
-首次部署时结果页为空是正常状态。管理员从独立管理入口保存至少一个平台、分组及其专用 Key 后，该分组才会出现在只读结果页并进入自动调度。
+首次部署时第三方结果页为空是正常状态。管理员从独立管理入口保存并启用第三方、检测类别、分组及其专用 Key 后，该分组才会出现在只读结果页；启用对应类别的自动计划后才进入定时调度。原有自定义检测仍从“原有检测与模型身份配置”管理，其历史入口为 `/legacy-results`。
 
 当前会话、SQLite 写入和调度器按单实例设计，请只运行一个服务副本。数据卷 `sub2api-extra_degradation-detector-data` 必须持久化。
 

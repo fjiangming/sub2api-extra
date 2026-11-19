@@ -67,7 +67,7 @@ async function createPreview(port = 19895) {
 if (require.main === module) {
   createPreview(Number(process.env.PORT || 19895)).then(preview => {
     console.log(`管理员配置：${preview.baseUrl}/admin/config?demo=1`);
-    console.log(`降智检测结果：${preview.baseUrl}/results?demo=readonly`);
+    console.log(`原有降智检测结果：${preview.baseUrl}/legacy-results?demo=readonly`);
     console.log(`模型检测结果：${preview.baseUrl}/model-results?demo=readonly`);
     console.log('独立临时数据，所有上游请求已禁用。');
     for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => preview.close().then(() => process.exit(0)));

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>降智检测</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/provider-results.css">
+  <script src="/vendor/lucide/lucide.min.js" defer></script>
+  <script src="/session.js" defer></script>
+  <script src="/provider-results.js" defer></script>
+</head>
+<body>
+  <div id="loading-view" class="state-view"><span class="spinner" aria-hidden="true"></span><p>正在读取检测结果</p></div>
+  <div id="error-view" class="state-view" hidden><h1>无法打开降智检测</h1><p id="error-message"></p><button id="retry-button" class="button primary" type="button"><i data-lucide="refresh-cw"></i>重试</button></div>
+  <main id="app-view" class="app-shell p-shell" hidden>
+    <header class="page-header">
+      <div class="page-title"><span class="page-mark"><i data-lucide="brain-circuit"></i></span><div><h1>降智检测</h1><p id="page-meta">第三方检测</p></div></div>
+      <div class="header-actions"><span class="user-chip"><i data-lucide="circle-user-round"></i><span id="user-name"></span></span><a class="icon-button" href="/legacy-results" title="原有检测历史" aria-label="原有检测历史"><i data-lucide="history"></i></a><a class="icon-button" href="/model-results" title="模型身份检测" aria-label="模型身份检测"><i data-lucide="scan-search"></i></a><button id="refresh-button" class="icon-button" type="button" title="刷新" aria-label="刷新"><i data-lucide="refresh-cw"></i></button></div>
+    </header>
+    <section id="provider-results">
+      <nav class="p-tabs" aria-label="第三方检测服务" role="tablist"><button id="p-manxue-tab" type="button" role="tab" aria-controls="p-results-panel" data-provider="manxue" aria-selected="true"><span class="p-mark">满</span>满血 AI</button><button id="p-testllm-tab" type="button" role="tab" aria-controls="p-results-panel" data-provider="testllm" aria-selected="false" tabindex="-1"><span class="p-mark p-blue">T</span>TestLLM</button><a id="p-official" href="https://manxue.ai/api" target="_blank" rel="noopener noreferrer">检测官网<i data-lucide="arrow-up-right"></i></a></nav>
+      <section id="p-results-panel" role="tabpanel" aria-labelledby="p-manxue-tab">
+        <div class="p-subbar"><nav id="p-kinds" class="p-segmented" aria-label="满血 AI 检测类别" role="tablist"><button id="p-candy-tab" type="button" role="tab" aria-controls="p-category-panel" data-channel="candy" aria-selected="true"><i data-lucide="candy"></i>糖果检测</button><button id="p-pelican-tab" type="button" role="tab" aria-controls="p-category-panel" data-channel="pelican" aria-selected="false" tabindex="-1"><i data-lucide="bike"></i>鹈鹕检测</button></nav><span id="p-plan" class="p-muted"></span></div>
+        <section id="p-category-panel" role="tabpanel" aria-labelledby="p-candy-tab">
+          <div id="p-stats" class="p-stats"></div>
+          <div class="p-filters"><label class="p-search"><i data-lucide="search"></i><input id="p-search" type="search" placeholder="搜索分组或模型" aria-label="搜索分组或模型"></label><select id="p-platform" aria-label="平台筛选"><option value="">全部平台</option></select><select id="p-status" aria-label="状态筛选"><option value="">全部状态</option><option value="passed">通过 / 正常</option><option value="failed">未通过 / 疑似降智</option><option value="error">检测异常</option><option value="unknown">无法判定</option><option value="running">检测中</option><option value="queued">排队中</option></select><span id="p-count" class="p-muted"></span></div>
+          <div id="p-results-content" aria-live="polite"></div>
+        </section>
+      </section>
+    </section>
+    <footer class="p-results-footer"><span>疑似降智不等于不可用，检测结论仅供参考。</span><a href="/legacy-results">原有检测历史</a></footer>
+  </main>
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

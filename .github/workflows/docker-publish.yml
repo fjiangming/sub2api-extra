@@ -35,6 +35,24 @@ jobs:
         working-directory: operations-center
       - run: npm test
         working-directory: operations-center
+  test-degradation-detector:
+    name: Degradation detector provider and compatibility tests
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.20.0'
+          cache: npm
+          cache-dependency-path: degradation-detector/package-lock.json
+      - run: npm ci
+        working-directory: degradation-detector
+      - run: npm run check
+        working-directory: degradation-detector
+      - run: npm test
+        working-directory: degradation-detector
   test-provider-monitor:
     name: Provider monitor billing sample tests
     runs-on: ubuntu-24.04
@@ -126,7 +144,7 @@ jobs:
   build:
     name: Build ${{ matrix.service }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
-    needs: [test-operations-center, test-provider-monitor, test-recharge-center, test-video-adapter, test-usage-leaderboard, test-activity-center]
+    needs: [test-operations-center, test-degradation-detector, test-provider-monitor, test-recharge-center, test-video-adapter, test-usage-leaderboard, test-activity-center]
     strategy:
       fail-fast: false
       matrix:

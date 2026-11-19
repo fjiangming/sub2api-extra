@@ -20,6 +20,9 @@ const { ModelDetection } = require('./model-detection');
 const { FingerpointData } = require('./fingerpoint-data');
 const { defaultModelPlatform, modelGroupContext, publicModelPlatform } = require('./model-config');
 const { installModelRoutes } = require('./model-routes');
+const { ProviderStore } = require('./provider-store');
+const { ProviderDetection } = require('./provider-detection');
+const { installProviderRoutes } = require('./provider-routes');
 const { Store, publicRun, publicValidationResult } = require('./store');
 const { Sub2ApiClient } = require('./sub2api-client');
 const { publicVisualSettings, storeVisualTest } = require('./visual-config');
@@ -160,7 +163,7 @@ function versionFrontendAssets(html, version) {
     .replaceAll('src="/session.js"', `src="/session.js?v=${version}"`)
     .replaceAll('href="/admin/config.css"', `href="/admin/config.css?v=${version}"`)
     .replaceAll('src="/admin/config.js"', `src="/admin/config.js?v=${version}"`)
-    .replace(/(href|src)="(\/(?:model-results\.(?:js|css)|model-result-renderer\.js|admin\/model-config\.(?:js|css)))"/g, `$1="$2?v=${version}"`);
+    .replace(/(href|src)="(\/(?:model-results\.(?:js|css)|model-result-renderer\.js|provider-results\.(?:js|css)|admin\/(?:model-config|provider-config)\.(?:js|css)))"/g, `$1="$2?v=${version}"`);
 }
 
 function normalizePreviewAncestors(values) {
@@ -185,7 +188,7 @@ function previewSignature(signingKey, userId, token, encodedAncestors) {
     .digest('base64url');
 }
 
-function signedPreviewUrl(req, token, signingKey) {
+function signedPreviewUrl(req, token, signingKey, previewPath) {
   let submitted = [];
   const header = String(req.get('x-preview-ancestors') || '');
   if (header && header.length <= 2048) {
@@ -196,7 +199,7 @@ function signedPreviewUrl(req, token, signingKey) {
     }
   }
   const ancestors = normalizePreviewAncestors(submitted);
-  const path = `/api/previews/${token}`;
+  const path = previewPath || `/api/previews/${token}`;
   if (!ancestors.length) return path;
   const encoded = Buffer.from(JSON.stringify(ancestors)).toString('base64url');
   const signature = previewSignature(signingKey, req.auth.user.id, token, encoded);
@@ -551,6 +554,8 @@ function createRuntime(config, overrides = {}) {
   const modelStore = overrides.modelStore || new ModelStore(store);
   const fingerprintData = overrides.fingerprintData || new FingerpointData({ config, store, modelStore, ...overrides.fingerprintDependencies });
   const modelDetection = overrides.modelDetection || new ModelDetection({ config, store, modelStore, vault, fingerprintData, ...overrides.modelDependencies });
+  const providerStore = overrides.providerStore || new ProviderStore(store);
+  const providerDetection = overrides.providerDetection || new ProviderDetection({ config, providerStore, vault, ...overrides.providerDependencies });
   const sub2api = overrides.sub2api || new Sub2ApiClient(config, overrides.fetchImpl);
   const auth = overrides.auth || new AuthService(config, sub2api);
   const groupMetrics = overrides.groupMetrics || new GroupMetrics(config);
@@ -561,10 +566,10 @@ function createRuntime(config, overrides = {}) {
     vault
   });
   const maintenance = overrides.maintenance || new MaintenanceService({
-    config, store, modelStore, isIdle: () => scheduler.active?.size === 0 && scheduler.queue?.length === 0 && modelDetection.active.size === 0
+    config, store, modelStore, providerStore, isIdle: () => scheduler.active?.size === 0 && scheduler.queue?.length === 0 && modelDetection.active.size === 0 && providerDetection.active.size === 0
   });
-  const scheduler = overrides.scheduler || new Scheduler({ config, store, runner, maintenance, modelDetection });
-  return { config, store, vault, sub2api, auth, groupMetrics, runner, scheduler, maintenance, modelStore, modelDetection, fingerprintData };
+  const scheduler = overrides.scheduler || new Scheduler({ config, store, runner, maintenance, modelDetection, providerDetection });
+  return { config, store, vault, sub2api, auth, groupMetrics, runner, scheduler, maintenance, modelStore, modelDetection, fingerprintData, providerStore, providerDetection };
 }
 
 function createApp(config, overrides = {}) {
@@ -606,6 +611,11 @@ function createApp(config, overrides = {}) {
   const requireAdmin = runtime.auth.adminMiddleware();
   const requireCsrf = runtime.auth.csrfMiddleware();
   installModelRoutes(app, runtime, { requireAuth, requireAdmin, requireCsrf, runLimiter, historyLimiter, discoverGroups, setNoStore });
+  installProviderRoutes(app, runtime, {
+    requireAuth, requireAdmin, requireCsrf, runLimiter, configLimiter, historyLimiter, discoverGroups, setNoStore, previewHeaders,
+    signedPreview: (req, token, previewPath) => signedPreviewUrl(req, token, previewSigningKey, previewPath),
+    previewAncestors: (req, token) => authorizedPreviewAncestors(req, token, previewSigningKey)
+  });
 
   app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
@@ -618,10 +628,11 @@ function createApp(config, overrides = {}) {
     path.join(adminRoot, 'app.js'),
     path.join(adminRoot, 'styles.css'),
     ...['model-results.js', 'model-results.css', 'model-result-renderer.js'].map(file => path.join(publicRoot, file)),
-    ...['model-config.js', 'model-config.css'].map(file => path.join(adminRoot, file))
+    ...['model-config.js', 'model-config.css', 'provider-config.js', 'provider-config.css'].map(file => path.join(adminRoot, file)),
+    ...['provider-results.js', 'provider-results.css'].map(file => path.join(publicRoot, file))
   ]);
   const publicIndexHtml = versionFrontendAssets(
-    fs.readFileSync(path.join(publicRoot, 'index.html'), 'utf8'),
+    fs.readFileSync(path.join(publicRoot, 'provider-results.html'), 'utf8'),
     assetVersion
   );
   const adminIndexHtml = versionFrontendAssets(
@@ -642,6 +653,7 @@ function createApp(config, overrides = {}) {
   };
 
   app.get(['/', '/index.html', '/results', '/results/'], sendHtml(publicIndexHtml));
+  app.get(['/legacy-results', '/legacy-results/'], sendHtml(versionFrontendAssets(fs.readFileSync(path.join(publicRoot, 'index.html'), 'utf8'), assetVersion)));
   app.get(['/model-results', '/model-results/', '/model-results.html'], sendHtml(modelIndexHtml));
 
   const establishAdminEntrySession = async (req, res, next) => {
@@ -686,6 +698,8 @@ function createApp(config, overrides = {}) {
   app.get('/admin/config.css', requireAuth, requireAdmin, sendAdminFile('styles.css'));
   app.get('/admin/model-config.js', requireAuth, requireAdmin, sendAdminFile('model-config.js'));
   app.get('/admin/model-config.css', requireAuth, requireAdmin, sendAdminFile('model-config.css'));
+  app.get('/admin/provider-config.js', requireAuth, requireAdmin, sendAdminFile('provider-config.js'));
+  app.get('/admin/provider-config.css', requireAuth, requireAdmin, sendAdminFile('provider-config.css'));
 
   app.get('/api/previews/:token', requireAuth, async (req, res, next) => {
     try {

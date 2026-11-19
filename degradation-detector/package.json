@@ -10,7 +10,9 @@
     "test": "node --test --test-concurrency=1 tests/*.test.js",
     "check": "node scripts/check.cjs",
     "preview:model": "node scripts/model-preview.cjs",
-    "test:model-ui": "node scripts/model-browser-check.cjs"
+    "test:model-ui": "node scripts/model-browser-check.cjs",
+    "preview:providers": "node scripts/provider-preview.cjs",
+    "test:providers-ui": "node scripts/provider-browser-check.cjs"
   },
   "engines": {
     "node": ">=22.15.0"

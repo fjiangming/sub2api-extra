@@ -9,9 +9,13 @@
   <link rel="stylesheet" href="/admin/config.css">
   <link rel="stylesheet" href="/model-results.css">
   <link rel="stylesheet" href="/admin/model-config.css">
+  <link rel="stylesheet" href="/provider-results.css">
+  <link rel="stylesheet" href="/admin/provider-config.css">
   <script src="/vendor/lucide/lucide.min.js" defer></script>
   <script src="/model-result-renderer.js" defer></script>
   <script src="/admin/model-config.js" defer></script>
+  <script src="/provider-results.js" defer></script>
+  <script src="/admin/provider-config.js" defer></script>
   <script src="/admin/config.js" defer></script>
 </head>
 <body>
@@ -42,12 +46,11 @@
       <div class="header-actions">
         <span class="user-chip"><i data-lucide="shield-check"></i><span id="user-name"></span></span>
         <a class="icon-button" href="/model-results" title="查看模型检测结果" aria-label="查看模型检测结果"><i data-lucide="scan-search"></i></a>
-        <button id="save-button" class="button primary" type="submit" form="config-form">
-          <i data-lucide="save"></i><span>保存配置</span>
-        </button>
       </div>
     </header>
 
+    <section id="provider-config" aria-label="第三方降智检测配置"></section>
+    <details id="legacy-config"><summary>原有检测与模型身份配置</summary>
     <form id="config-form" autocomplete="off">
       <section class="schedule-band" aria-labelledby="schedule-title">
         <div class="section-heading">
@@ -127,8 +130,18 @@
         </div>
         <div id="platform-panels"></div>
       </section>
+      <div class="pc-legacy-save"><button id="save-button" class="button primary" type="submit"><i data-lucide="save"></i><span>保存原有配置</span></button></div>
     </form>
+    </details>
   </main>
+
+  <dialog id="pc-group-dialog" class="pc-modal" aria-labelledby="pc-group-title">
+    <form id="pc-group-form" autocomplete="off">
+      <header><h2 id="pc-group-title">分组配置</h2><button id="pc-group-close" type="button" class="icon-button" title="关闭" aria-label="关闭分组配置"><i data-lucide="x"></i></button></header>
+      <div id="pc-group-body" class="pc-modal-body"></div>
+      <footer><button id="pc-group-reset" type="button" class="button"><i data-lucide="undo-2"></i>恢复默认</button><span></span><button id="pc-group-cancel" type="button" class="button">取消</button><button type="submit" class="button primary"><i data-lucide="check"></i>应用配置</button></footer>
+    </form>
+  </dialog>
 
   <dialog id="group-config-dialog" class="group-config-modal" aria-labelledby="group-config-title">
     <form id="group-config-form">
