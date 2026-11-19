@@ -103,6 +103,12 @@ async function main() {
       const claudeKey = store.group('2', 'candy').key_cipher;
       await admin.locator('[data-pc-view="platforms"]').click();
       await admin.locator('[data-pc-platform="openai"]').click();
+      assert.equal(await admin.locator('[data-pc-unify]').isVisible(), true, 'legacy category defaults also need an explicit unification action');
+      const preserved = await save(admin);
+      assert.deepEqual(preserved.platforms, [], 'merely opening and saving must retain legacy category defaults');
+      assert.equal(store.group('2', 'candy').key_cipher, claudeKey);
+      await admin.locator('[data-pc-unify]').click();
+      assert.equal(await admin.locator('[data-pc-unify]').count(), 0);
       assert(await admin.locator('#pc-history-channel').evaluate(element => {
         const style = getComputedStyle(element);
         const context = document.createElement('canvas').getContext('2d');

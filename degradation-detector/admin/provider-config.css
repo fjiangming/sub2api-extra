@@ -66,6 +66,7 @@
   .pc-actions { gap:6px; }
   .pc-actions .button { font-size:11px; padding:6px 8px; }
   .pc-fields { grid-template-columns:minmax(0,1fr); gap:14px; }
+  .pc-section-head { flex-wrap:wrap; }
   .pc-main-tabs { gap:4px; }
   .pc-main-tabs button { font-size:11px; padding-inline:6px; gap:6px; }
   .pc-main-tabs button svg { width:16px; height:16px; }
