@@ -66,6 +66,7 @@ async function main() {
       assert.equal(await page.locator('.p-table tbody tr').count(), 2); assert.match(await page.locator('.p-table').first().innerText(), /极高智商/);
       await fit(page); await shot(page, `${layout.name}-testllm`);
       await page.locator('.p-table').first().getByRole('button', { name: '24小时检测记录' }).click(); await page.locator('.p-history-detail summary').first().waitFor();
+      assert.equal(await page.locator('.p-history-tools').isVisible(), false); assert.equal(await page.locator('[data-history-select]').count(), 0);
       assert.equal(await page.locator('.p-history-list [data-run-id]').count(), 24); assert.match(await page.locator('.p-history-detail').innerText(), /首字耗时：未取得/);
       await shot(page, `${layout.name}-testllm-detail`);
       if (layout.name === 'desktop') {
@@ -201,8 +202,74 @@ async function main() {
       runs = await run(admin, 'manxue', 'openai'); assert.deepEqual(runs.map(value => value.channel), ['candy']);
       const otherBefore = store.counts('2', 'candy').total; runs = await run(admin, 'manxue', 'openai', null);
       assert.deepEqual(runs.map(value => value.group_id), ['8']); assert.equal(store.counts('2', 'candy').total, otherBefore);
-      await admin.locator('#pc-history-channel').selectOption('candy'); await admin.locator('[data-pc-history="8"]').click();
-      await admin.locator('.p-history-detail summary').first().waitFor(); await admin.locator('[data-history-close]').click();
+      const beforeDelete = store.groups(), configBeforeDelete = store.configuration();
+      const otherHistory = [['2', 'candy'], ['8', 'pelican'], ['8', 'testllm']].map(([id, channel]) => [id, channel, store.counts(id, channel).total]);
+      for (let i = store.counts('8', 'candy').total; i < 105; i++) { const sample = store.create(store.group('8', 'candy')); store.finish(sample.id, 'error', '浏览器删除测试样本'); }
+      store.db.prepare('INSERT INTO degradation_provider_archives VALUES (?,?,?,?)').run('8', 'candy', 'openai', 7);
+      const deletionPump = preview.runtime.providerDetection.pump; preview.runtime.providerDetection.pump = () => {};
+      const activeHistory = store.create(store.group('8', 'candy'));
+      try {
+        await admin.locator('#pc-history-channel').selectOption('candy'); await admin.locator('[data-pc-history="8"]').click();
+        await admin.locator('.p-history-detail summary').first().waitFor();
+        const history = admin.locator('.p-history'), remove = history.locator('[data-history-delete]'), clear = history.locator('[data-history-clear]');
+        const selectAll = history.locator('[data-history-select-all]'), confirmBox = admin.locator('#confirm-dialog');
+        const acceptDelete = async all => {
+          const response = admin.waitForResponse(response => new URL(response.url()).pathname === '/api/admin/provider/groups/8/candy/runs' && response.request().method() === 'DELETE');
+          await (all ? clear : remove).click();
+          assert.match(await confirmBox.locator('#confirm-message').innerText(), /糖果检测/);
+          await confirmBox.locator('#confirm-accept').click();
+          const result = await response; assert.equal(result.status(), 200, await result.text());
+          assert.deepEqual(result.request().postDataJSON(), all ? { all: true } : { ids: checked });
+          await admin.waitForFunction(() => document.querySelector('.p-history-feedback').textContent.includes('已删除') || document.querySelector('.p-history-feedback').textContent.includes('已清空'));
+        };
+        assert.equal(await history.locator('[data-history-select]').count(), 50);
+        assert.equal(await history.locator(`[data-history-select="${activeHistory.id}"]`).isDisabled(), true);
+        assert.equal(await remove.isDisabled(), true);
+        const checked = await history.locator('[data-history-select]:not(:disabled)').evaluateAll(inputs => inputs.slice(0, 2).map(input => Number(input.dataset.historySelect)));
+        for (const id of checked) await history.locator(`[data-history-select="${id}"]`).check();
+        assert.equal(await selectAll.evaluate(input => input.indeterminate), true);
+        await history.locator('[data-run-id]').nth(3).click(); await history.locator('.p-history-detail summary').first().waitFor();
+        assert.equal(await history.locator('[data-history-select]:checked').count(), 2);
+        await remove.click(); await confirmBox.locator('#confirm-cancel').click();
+        await admin.waitForFunction(() => !document.querySelector('[data-history-delete]').disabled);
+        assert.equal(store.counts('8', 'candy').total, 106);
+        await fit(admin); await shot(admin, `${layout.name}-admin-history-selected`);
+        const rejectDelete = route => route.request().method() === 'DELETE'
+          ? route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: { message: '记录已变化，请刷新历史。' } }) }) : route.continue();
+        await admin.route('**/api/admin/provider/groups/8/candy/runs', rejectDelete);
+        await remove.click(); await confirmBox.locator('#confirm-accept').click();
+        await history.locator('.p-history-feedback.p-history-error').waitFor();
+        await history.locator('.p-history-detail summary').first().waitFor();
+        await admin.waitForFunction(() => !document.querySelector('[data-history-delete]').disabled);
+        await admin.unroute('**/api/admin/provider/groups/8/candy/runs', rejectDelete);
+        assert.equal(store.counts('8', 'candy').total, 106); assert.equal(await history.locator('[data-history-select]:checked').count(), 2);
+        await acceptDelete(false);
+        for (const id of checked) assert.equal(store.run(id), undefined);
+        assert.equal(await history.locator('[data-history-select]:checked').count(), 0);
+        while (await history.locator('[data-history-more]').count()) {
+          await history.locator('[data-history-more]').click();
+          await admin.waitForFunction(() => !document.querySelector('[data-history-refresh]').disabled);
+        }
+        assert.equal(await history.locator('[data-history-select]').count(), 104);
+        await selectAll.check(); assert.equal(await history.locator('[data-history-select]:checked').count(), 100);
+        await history.locator('[data-history-select]:not(:checked):not(:disabled)').last().click();
+        assert.equal(await history.locator('[data-history-select]:checked').count(), 100);
+        assert.match(await history.locator('.p-history-feedback').innerText(), /最多勾选/);
+        await selectAll.uncheck(); assert.equal(await remove.isDisabled(), true);
+        store.markRunning(activeHistory.id); await history.locator('[data-history-refresh]').click();
+        await admin.waitForFunction(() => !document.querySelector('[data-history-refresh]').disabled);
+        assert.equal(await history.locator(`[data-history-select="${activeHistory.id}"]`).isDisabled(), true);
+        await clear.click(); assert.equal(await remove.isDisabled(), true); await confirmBox.locator('#confirm-cancel').click();
+        await admin.waitForFunction(() => !document.querySelector('[data-history-clear]').disabled);
+        await acceptDelete(true);
+        assert.equal(store.counts('8', 'candy').total, 1); assert.equal(store.counts('8', 'candy').archived, 0);
+        assert.equal(store.run(activeHistory.id).status, 'running');
+        assert.equal(await clear.isDisabled(), true); assert.equal(await history.locator('[data-history-select]').count(), 1);
+        await fit(admin); await shot(admin, `${layout.name}-admin-history-cleared`);
+        await history.locator('[data-history-close]').click();
+      } finally { store.finish(activeHistory.id, 'error', '测试完成'); preview.runtime.providerDetection.pump = deletionPump; preview.runtime.providerDetection.pump(); }
+      for (const [id, channel, total] of otherHistory) assert.equal(store.counts(id, channel).total, total);
+      assert.deepEqual(store.groups(), beforeDelete); assert.deepEqual(store.configuration(), configBeforeDelete);
       await admin.locator('[data-pc-enabled="8"]').uncheck(); await admin.locator('[data-pc-enabled="8"]').check();
       await admin.locator('[data-pc-platform="anthropic"]').click();
       await sharedCandy.locator('[name="model"]').fill(`claude-manxue-${layout.name}`); await form.locator('[name="target_url"]').fill('https://claude-relay.example.com/v1');
@@ -229,6 +296,17 @@ async function main() {
       runs = await run(admin, 'testllm', 'openai'); assert.deepEqual(runs.map(value => value.channel), ['testllm']);
       const iq = JSON.parse(store.run(runs[0].id).snapshot_json); assert.equal(iq.reasoning_effort, undefined); assert.equal(iq.cache_test, false); assert.equal(iq.thinking_test, false); assert.equal(iq.model, `testllm-gpt-${layout.name}`);
       await fit(admin); await shot(admin, `${layout.name}-admin-testllm`);
+      await admin.locator('[data-pc-history="8"]').click();
+      await admin.waitForFunction(() => !document.querySelector('[data-history-refresh]').disabled);
+      assert.equal(await admin.locator('[data-history-select]:not(:disabled)').count() > 0, true);
+      const clearIQ = admin.waitForResponse(response => new URL(response.url()).pathname === '/api/admin/provider/groups/8/testllm/runs' && response.request().method() === 'DELETE');
+      await admin.locator('[data-history-clear]').click();
+      assert.match(await admin.locator('#confirm-message').innerText(), /TestLLM/);
+      await admin.locator('#confirm-accept').click(); assert.equal((await clearIQ).status(), 200);
+      await admin.waitForFunction(() => document.querySelector('.p-history-detail').textContent.includes('尚无检测记录'));
+      assert.equal(await admin.locator('[data-history-delete]').isDisabled(), true); assert.equal(await admin.locator('[data-history-clear]').isDisabled(), true);
+      assert.equal(store.counts('8', 'testllm').total, 0);
+      await admin.locator('[data-history-close]').click();
       await admin.locator('[data-pc-platform="anthropic"]').click(); assert.equal(await form.locator('[name="protocol"]').inputValue(), 'claude');
       await form.locator('.pc-advanced > summary').click(); await form.locator('[value="interval"]').check();
       await form.locator('[data-plan-interval]').fill('120'); result = await save(admin);

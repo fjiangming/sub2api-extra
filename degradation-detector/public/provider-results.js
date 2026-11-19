@@ -16,6 +16,7 @@
   let dialogState;
   let detailRequest = 0;
   let historyRequest = 0;
+  const canDelete = run => !['queued', 'running'].includes(run.status);
 
   function ancestors() {
     const candidates = [];
@@ -36,22 +37,45 @@
     historyDialog = document.createElement('dialog');
     historyDialog.className = 'p-history';
     historyDialog.setAttribute('aria-labelledby', 'p-history-title');
-    historyDialog.innerHTML = `<header class="p-history-head"><div><h2 id="p-history-title"></h2><p id="p-history-meta"></p></div><div class="p-row"><button type="button" class="icon-button" data-history-refresh title="刷新历史" aria-label="刷新历史">${icon('refresh-cw')}</button><button type="button" class="icon-button" data-history-close title="关闭" aria-label="关闭">${icon('x')}</button></div></header><div class="p-history-body"><nav class="p-history-list" aria-label="检测记录"></nav><div class="p-history-detail" aria-live="polite"></div></div>`;
+    historyDialog.innerHTML = `<header class="p-history-head"><div><h2 id="p-history-title"></h2><p id="p-history-meta"></p></div><div class="p-row"><button type="button" class="icon-button" data-history-refresh title="刷新历史" aria-label="刷新历史">${icon('refresh-cw')}</button><button type="button" class="icon-button" data-history-close title="关闭" aria-label="关闭">${icon('x')}</button></div></header><div class="p-history-tools" hidden><label><input type="checkbox" data-history-select-all><span data-history-select-label>全选已加载</span></label><span class="p-muted" data-history-selection>已选 0 / 100 条</span><div class="p-history-delete-actions"><button type="button" class="button danger" data-history-delete disabled>${icon('trash-2')}删除所选</button><button type="button" class="button danger" data-history-clear>${icon('trash-2')}一键清空</button></div></div><p class="p-history-feedback" role="status" aria-live="polite" hidden></p><div class="p-history-body"><nav class="p-history-list" aria-label="检测记录"></nav><div class="p-history-detail" aria-live="polite"></div></div>`;
     document.body.append(historyDialog);
     historyDialog.querySelector('[data-history-close]').onclick = () => historyDialog.close();
     historyDialog.querySelector('[data-history-refresh]').onclick = () => loadHistory();
     historyDialog.addEventListener('click', event => {
       const button = event.target.closest('button');
+      if (button?.disabled) return;
       if (button?.dataset.runId) selectRun(Number(button.dataset.runId));
       if (button?.hasAttribute('data-history-more')) loadHistory(true);
+      if (button?.hasAttribute('data-history-delete')) deleteResults(false);
+      if (button?.hasAttribute('data-history-clear')) deleteResults(true);
       if (event.target === historyDialog) { const box = historyDialog.getBoundingClientRect(); if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) historyDialog.close(); }
+    });
+    historyDialog.addEventListener('change', event => {
+      const current = dialogState;
+      if (!current?.admin || current.loading || current.deleting) return;
+      if (event.target.hasAttribute('data-history-select-all')) {
+        current.checked = new Set(event.target.checked ? current.runs.filter(canDelete).slice(0, 100).map(run => run.id) : []);
+      } else if (event.target.hasAttribute('data-history-select')) {
+        const id = Number(event.target.dataset.historySelect);
+        if (!current.runs.some(run => run.id === id && canDelete(run))) return;
+        if (event.target.checked && !current.checked.has(id) && current.checked.size >= 100) {
+          event.target.checked = false; historyFeedback('每次最多勾选 100 条记录。', true); return;
+        }
+        if (event.target.checked) current.checked.add(id); else current.checked.delete(id);
+      } else return;
+      updateHistoryActions();
     });
     historyDialog.addEventListener('close', () => { historyRequest++; detailRequest++; dialogState = null; historyDialog.querySelector('.p-history-detail').replaceChildren(); });
   }
   async function openHistory(api, group, channel, options = {}) {
     ensureDialog();
     historyRequest++; detailRequest++;
-    dialogState = { api, group, channel, admin: options.admin === true, window: options.window || '', runs: [], cursor: null, selected: options.runId || null, loading: false };
+    dialogState = { api, group, channel, admin: options.admin === true, window: options.window || '', runs: [], cursor: null, selected: options.runId || null,
+      loading: false, deleting: false, checked: new Set(), total: 0, archived: 0,
+      confirmDeletion: options.confirmDeletion, onDeleted: options.onDeleted, onError: options.onError };
+    historyDialog.querySelector('.p-history-list').replaceChildren();
+    historyDialog.querySelector('.p-history-tools').hidden = !dialogState.admin;
+    historyFeedback(''); updateHistoryActions();
     historyDialog.querySelector('h2').textContent = `${group.name} · ${names[channel]}`;
     historyDialog.querySelector('#p-history-meta').textContent = `${options.window === '24h' ? '最近 24 小时' : '检测历史'} · Asia/Shanghai`;
     historyDialog.querySelector('.p-history-list').textContent = '正在读取记录';
@@ -64,6 +88,7 @@
     const current = dialogState;
     if (!current || current.loading) return;
     current.loading = true;
+    updateHistoryActions();
     const requestId = ++historyRequest;
     const query = new URLSearchParams();
     if (more && current.cursor) query.set('before', current.cursor);
@@ -74,17 +99,80 @@
       if (requestId !== historyRequest || current !== dialogState) return;
       current.runs = more ? [...current.runs, ...data.runs] : data.runs;
       current.cursor = data.next_cursor;
+      current.total = data.total; current.archived = data.archived;
+      const eligible = new Set(current.runs.filter(canDelete).map(run => run.id));
+      current.checked = new Set([...current.checked].filter(id => eligible.has(id)));
+      historyDialog.querySelector('#p-history-meta').textContent = `${current.window === '24h' ? '最近 24 小时' : '检测历史'} · 现存 ${data.total} 条 · 已归档 ${data.archived} 条 · Asia/Shanghai`;
       if (!current.runs.some(run => run.id === current.selected)) current.selected = current.runs[0]?.id || null;
       renderHistory();
       if (current.selected) await selectRun(current.selected);
       else historyDialog.querySelector('.p-history-detail').textContent = current.window ? '最近 24 小时没有检测记录' : '尚无检测记录';
     } catch (error) {
       if (current === dialogState && requestId === historyRequest) historyDialog.querySelector('.p-history-detail').textContent = error.message;
-    } finally { current.loading = false; }
+    } finally { current.loading = false; if (current === dialogState) updateHistoryActions(); }
   }
   function renderHistory() {
     const current = dialogState;
-    historyDialog.querySelector('.p-history-list').innerHTML = current.runs.map(run => `<button type="button" data-run-id="${run.id}" aria-pressed="${current.selected === run.id}">${badge(run)}<small>${stamp(run.created_at)}</small><small>${esc(run.model)}</small></button>`).join('') + (current.cursor ? '<button type="button" data-history-more>加载更多</button>' : '');
+    historyDialog.querySelector('.p-history-list').innerHTML = current.runs.map(run => {
+      const button = `<button type="button" data-run-id="${run.id}" aria-pressed="${current.selected === run.id}" ${current.deleting ? 'disabled' : ''}>${badge(run)}<small>${stamp(run.created_at)}</small><small>${esc(run.model)}</small></button>`;
+      return current.admin ? `<div class="p-history-entry"><label class="p-history-select"><input type="checkbox" data-history-select="${run.id}" aria-label="选择记录 ${run.id}" ${current.checked.has(run.id) ? 'checked' : ''} ${!canDelete(run) || current.deleting || current.loading ? 'disabled' : ''}></label>${button}</div>` : button;
+    }).join('') + (current.cursor ? `<button type="button" data-history-more ${current.loading || current.deleting ? 'disabled' : ''}>加载更多</button>` : '');
+    updateHistoryActions();
+  }
+  function updateHistoryActions() {
+    const current = dialogState; if (!current) return;
+    const busy = current.loading || current.deleting;
+    historyDialog.querySelector('[data-history-refresh]').disabled = busy;
+    const more = historyDialog.querySelector('[data-history-more]'); if (more) more.disabled = busy;
+    if (!current.admin) return;
+    const completed = current.runs.filter(canDelete), eligible = completed.slice(0, 100);
+    const all = historyDialog.querySelector('[data-history-select-all]');
+    all.checked = eligible.length > 0 && eligible.every(run => current.checked.has(run.id));
+    all.indeterminate = !all.checked && current.checked.size > 0;
+    all.disabled = busy || !eligible.length;
+    historyDialog.querySelector('[data-history-select-label]').textContent = completed.length > 100 ? '全选前 100 条' : '全选已加载';
+    historyDialog.querySelector('[data-history-selection]').textContent = `已选 ${current.checked.size} / 100 条`;
+    historyDialog.querySelector('[data-history-delete]').disabled = busy || !current.checked.size;
+    historyDialog.querySelector('[data-history-clear]').disabled = busy || !(current.total > current.runs.filter(run => !canDelete(run)).length || current.archived);
+    const runs = new Map(current.runs.map(run => [run.id, run]));
+    for (const control of historyDialog.querySelectorAll('[data-history-select]')) {
+      const run = runs.get(Number(control.dataset.historySelect));
+      if (!run) { control.disabled = true; continue; }
+      control.checked = current.checked.has(run.id); control.disabled = busy || !canDelete(run);
+    }
+  }
+  function historyFeedback(message, error = false) {
+    const target = historyDialog.querySelector('.p-history-feedback');
+    target.textContent = message; target.hidden = !message; target.classList.toggle('p-history-error', error);
+  }
+  async function deleteResults(all) {
+    const current = dialogState;
+    if (!current?.admin || current.loading || current.deleting || !all && !current.checked.size) return;
+    const ids = [...current.checked];
+    current.deleting = true; renderHistory(); historyFeedback('');
+    try {
+      const message = all ? `清空“${current.group.name}”的${names[current.channel]}全部已结束检测结果及累计记录？排队和检测中的任务将保留。`
+        : `删除“${current.group.name}”的${names[current.channel]}已勾选的 ${ids.length} 条检测结果？`;
+      const accepted = current.confirmDeletion ? await current.confirmDeletion(message, all ? '确认清空' : '确认删除') : confirm(message);
+      if (!accepted || current !== dialogState) return;
+      detailRequest++;
+      historyFeedback(all ? '正在清空检测结果...' : '正在删除所选结果...');
+      const result = await current.api(`/api/admin/provider/groups/${encodeURIComponent(current.group.id)}/${current.channel}/runs`, {
+        method: 'DELETE', body: all ? { all: true } : { ids }, mutation: true
+      });
+      if (current !== dialogState) return;
+      current.checked.clear();
+      await loadHistory();
+      if (current !== dialogState) return;
+      historyFeedback(all ? '已清空已结束检测结果及累计记录。' : `已删除 ${result.deleted} 条检测结果。`);
+      await current.onDeleted?.(result);
+    } catch (error) {
+      if (current === dialogState) { historyFeedback(error.message, true); current.onError?.(error); }
+      if (current === dialogState && current.selected) await selectRun(current.selected);
+    } finally {
+      current.deleting = false;
+      if (current === dialogState) renderHistory();
+    }
   }
   async function selectRun(id) {
     const current = dialogState;

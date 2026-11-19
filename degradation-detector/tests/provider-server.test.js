@@ -194,6 +194,39 @@ function hierarchyInput(payload) {
       schedule_override: group.configurations[channel].schedule_override }))) };
 }
 
+test('selected result deletion is atomic and clearing retains active work, credentials, configuration and other categories', async t => {
+  const { get, send, runtime, input, admin } = await setup(t);
+  await send('/api/admin/provider-config', input, admin, true, 'PUT');
+  const store = runtime.providerStore;
+  const finished = (id, channel, status) => { const run = store.create(store.group(id, channel)); store.finish(run.id, status); return run; };
+  const first = finished('1', 'candy', 'completed'), second = finished('1', 'candy', 'error');
+  const otherGroup = finished('2', 'candy', 'error'), otherChannel = finished('1', 'pelican', 'error');
+  const active = store.create(store.group('1', 'candy')); store.markRunning(active.id);
+  store.db.prepare('INSERT INTO degradation_provider_archives VALUES (?,?,?,?)').run('1', 'candy', 'openai', 7);
+  const configuration = store.configuration(), groups = store.groups();
+  const path = '/api/admin/provider/groups/1/candy/runs';
+  for (const body of [{ ids: [] }, { ids: Array.from({ length: 101 }, (_, index) => index + 1) }, { all: true, ids: [first.id] }]) {
+    assert.equal((await send(path, body, admin, true, 'DELETE')).status, 400);
+  }
+  assert.equal((await send(path, { ids: [first.id] }, admin, false, 'DELETE')).status, 403);
+  for (const id of [otherGroup.id, otherChannel.id, active.id, 999999]) {
+    assert.equal((await send(path, { ids: [first.id, id] }, admin, true, 'DELETE')).status, 409);
+    assert(store.run(first.id), 'a conflicting selection must not partially delete');
+  }
+  const removed = await send(path, { ids: [first.id, second.id, first.id] }, admin, true, 'DELETE');
+  assert.equal(removed.status, 200); assert.equal((await removed.json()).deleted, 2);
+  assert.equal(store.run(first.id), undefined); assert.equal(store.run(second.id), undefined);
+  assert.equal(store.counts('1', 'candy').archived, 7);
+  assert.equal((await get(`/api/admin/provider-results/${first.id}`, admin)).status, 404);
+  const last = finished('2', 'pelican', 'completed');
+  const cleared = await send(path, { all: true }, admin, true, 'DELETE');
+  assert.equal(cleared.status, 200); assert.equal((await cleared.json()).deleted, 0);
+  assert.equal(store.counts('1', 'candy').archived, 0);
+  assert.equal(store.run(active.id).status, 'running');
+  for (const run of [otherGroup, otherChannel, last]) assert(store.run(run.id));
+  assert.deepEqual(store.configuration(), configuration); assert.deepEqual(store.groups(), groups);
+});
+
 test('hierarchy conversion preserves legacy category and group differences, credentials, schedules and existing history through HTTP', async t => {
   const { input, send, get, admin, runtime } = await setup(t);
   input.channels.pelican.defaults.reasoning_effort = 'legacy-pelican-ultra';

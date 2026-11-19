@@ -1357,5 +1357,5 @@ window.addEventListener('beforeunload', (event) => {
 });
 
 window.ModelConfig.connect({ state, api, markDirty, toast, refreshIcons, showError, confirmDeletion });
-window.ProviderConfig.connect({ api, toast, showError });
+window.ProviderConfig.connect({ api, toast, showError, confirmDeletion });
 initialize();

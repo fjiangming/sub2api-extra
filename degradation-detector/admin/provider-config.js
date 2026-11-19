@@ -263,7 +263,10 @@
       } else if (data.pcEdit) openGroup(data.pcEdit);
       else if (data.pcRun) run(data.pcRun, data.pcChannel);
       else if ('pcBatch' in data) run();
-      else if (data.pcHistory) openHistory(context.api, state.data.groups.find(group => group.id === data.pcHistory), state.provider === 'testllm' ? 'testllm' : state.channel, { admin: true });
+      else if (data.pcHistory) openHistory(context.api, state.data.groups.find(group => group.id === data.pcHistory), state.provider === 'testllm' ? 'testllm' : state.channel, {
+        admin: true, confirmDeletion: context.confirmDeletion, onError: handleError,
+        onDeleted: async () => { if (!state.dirty) await load(true).catch(handleError); }
+      });
       else if (data.pcDelete) removeHistory(data.pcDelete);
       else if ('pcAddTime' in data || 'pcRemoveTime' in data) { editTime(button, false); syncPlanControls(root); }
     });
