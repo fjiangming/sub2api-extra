@@ -68,12 +68,14 @@ async function main() {
   }
   let conversationRepair = null;
   if (conversations) {
-    try { conversationRepair = new ConversationRepairService(conversations,{canWork:() => conversationArchive?.idleForHistory && !conversationCleanup?.child}); }
+    try { conversationRepair = new ConversationRepairService(conversations,{canWork:() => conversationArchive?.idleForHistory && !conversationCleanup?.child
+      && !conversationRead?.active && !conversationRead?.queue.length && !conversationRead?.draining
+      && !conversationExport?.active && !conversationExport?.queue.length && !conversationExport?.draining}); }
     catch { console.warn('conversation repair unavailable: CONVERSATION_REPAIR_INITIALIZATION_FAILED'); }
   }
   const conversationRead = conversations ? new ConversationReadService(conversations, {
     configured:Boolean(config.conversationLogs?.token),
-    canWork:() => !conversationArchive?.busy && !conversationArchive?.processingBusy && !conversationCleanup?.child && !conversationRepair?.child
+    canWork:() => !conversationArchive?.busy && !conversationArchive?.processingBusy && !conversationCleanup?.child && !conversationRepair?.busy
   }) : null;
   const database = createDatabase(config);
   const sub2api = new Sub2ApiClient(config);
@@ -107,7 +109,7 @@ async function main() {
     onAdminTokenCleared: (token) => sub2api.clearRuntimeToken(token)
   });
   const conversationExport = conversations ? new ConversationExportService(conversations,auth,{
-    canWork:() => conversationArchive?.idleForHistory && !conversationCleanup?.child && !conversationRepair?.child
+    canWork:() => conversationArchive?.idleForHistory && !conversationCleanup?.child && !conversationRepair?.busy
       && !conversationRead?.active && !conversationRead?.queue.length && !conversationRead?.draining
   }) : null;
   const inspector = new SchemaInspector(database.read);

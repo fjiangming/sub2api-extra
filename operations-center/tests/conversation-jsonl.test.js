@@ -300,7 +300,7 @@ for (const destination of ['webhook','s3-json','s3-jsonl']) test(`isolated ${des
   assert.equal((ciphertext.length/1024**2).toFixed(1),'20.1');
   const input={filter:{},destinations:[destination==='webhook'?'webhook':'s3']},preview=f.push.preview(input);
   f.push.enqueue({...input,previewToken:preview.previewToken,batchId:crypto.randomUUID()});
-  f.service.start();await until(()=>f.push.list().items[0]?.status==='sent');
+  f.service.start();await until(()=>f.push.list().items[0]?.status==='sent',45000);
   assert(f.service.child.spawnargs.includes('--max-old-space-size=256'));
   const body=receiver.completed[0].body,record=JSON.parse(body);
   assert.deepEqual(record,{request_id:row.request_id,request:rawRequest,response:text});

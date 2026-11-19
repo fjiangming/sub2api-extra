@@ -8,6 +8,7 @@ const { ConversationLogStore, defaults } = require('../src/conversation-log-stor
 const { ConversationPushStore } = require('../src/conversation-push-store');
 const { ConversationPushService } = require('../src/services/conversation-push-service');
 const { maskPayload } = require('../src/services/conversation-redaction');
+const { REDACTION_VERSION } = require('../src/services/conversation-sensitive');
 
 const signature = 'ZmljdGlvbmFsLXByb3RvY29sLXNpZ25hdHVyZQ==';
 const signed = () => JSON.stringify({ model:'example-model', messages:[
@@ -147,7 +148,7 @@ test('old schema and failed URL/signature history migrate without rewriting orig
   assert.deepEqual(f.store.detail(link.id).inspection_warnings,[]);
   const linkDone=f.store.retry(link.id,expected(f,link.id));assert(!linkDone.original);assert(linkDone.masked);assert.equal(linkDone.processing_error,'');assert.deepEqual(linkDone.inspection_warnings,[]);
   const sigDone=f.store.retry(sig.id,expected(f,sig.id));assert(sigDone.original&&sigDone.masked);assert.equal(sigDone.processing_error,'');assert.deepEqual(sigDone.inspection_warnings,['OPAQUE_SIGNATURE']);
-  assert.equal(f.store.payload(sig.id,'original','request').text,signed());assert.equal(sigDone.redaction_version,6);
+  assert.equal(f.store.payload(sig.id,'original','request').text,signed());assert.equal(sigDone.redaction_version,REDACTION_VERSION);
 });
 
 test('masked push uses marked originals for signatures and images and invalidates previously staged masked members', async t => {

@@ -10,6 +10,7 @@ const { ConversationArchiveService } = require('../src/services/conversation-arc
 const { ConversationPushStore } = require('../src/conversation-push-store');
 const { AuthService } = require('../src/auth');
 const { createApp } = require('../src/app');
+const { REDACTION_VERSION } = require('../src/services/conversation-sensitive');
 
 const terminal = 'data: {"type":"response.completed","response":{"id":"resp_demo","object":"response","status":"completed","output":[]}}\n\n';
 const b64 = value => Buffer.from(value).toString('base64');
@@ -89,7 +90,7 @@ test('explicit background repair recognizes compaction while keeping raw bytes a
   f.store.db.prepare("UPDATE cl_records SET masked=NULL,processing_error='UNINSPECTABLE_CONTENT',redaction_version=0,inspection_warnings='[]' WHERE id=?").run(row.id);
   const before = snapshot(f,row.id),store = new ConversationRepairStore(f.store).initialize();assert.equal(store.pending(),null);
   store.request({policy_version:f.store.policy().version});finish(store);
-  const saved = f.store.detail(row.id);assert.equal(saved.processing_error,'');assert.equal(saved.redaction_version,6);
+  const saved = f.store.detail(row.id);assert.equal(saved.processing_error,'');assert.equal(saved.redaction_version,REDACTION_VERSION);
   assert.deepEqual(saved.inspection_warnings,['OPAQUE_ENCRYPTED_COMPACTION']);assert(saved.original && saved.masked);
   assert(!saved.complete);assert.equal(saved.reason,'read_error');assert.equal(saved.upstream_status,'completed');
   assert.deepEqual(snapshot(f,row.id).original,before.original);assert.equal(f.store.payload(row.id,'original','request').body.toString('base64'),request);
@@ -150,7 +151,7 @@ test('bounded crash attempts, persistent cursors and reused SQLite rowids cannot
   f.store.db.prepare('DELETE FROM cl_records WHERE id=?').run(b.id);
   f.store.ingest(event('reused-new'));f.store.db.prepare('UPDATE cl_records SET archived_at=? WHERE id=?').run(job.requested_at,event('reused-new').id);
   const reopened = new ConversationRepairStore(f.store).initialize();finish(reopened);assert.equal(reopened.latest().scanned,2);assert.equal(reopened.latest().skipped,1);
-  assert.equal(f.store.detail(event('reused-new').id).redaction_version,6);
+  assert.equal(f.store.detail(event('reused-new').id).redaction_version,REDACTION_VERSION);
 });
 
 test('administrator authentication, CSRF and current-policy validation protect history endpoints', async t => {
@@ -176,14 +177,14 @@ test('isolated history worker yields to live archiving and resumes committed pro
   const app = createApp({config:f.config,database:{},auth,conversations:f.store,conversationArchive:archive,conversationRepair:service,messages:f.messages});
   const server = app.listen(0,'127.0.0.1');await new Promise(resolve => server.once('listening',resolve));t.after(() => new Promise(resolve => {server.close(resolve);server.closeAllConnections();}));
   const base = 'http://127.0.0.1:' + server.address().port,job = service.request({policy_version:f.store.policy().version}).job;
-  await until(() => service.ready);assert.notEqual(service.child.pid,process.pid);assert.equal(service.status().job.scanned,0);
-  permit = true;await until(() => service.status().job.scanned >= 1);permit = false;const oldChild = service.child;oldChild.kill('SIGKILL');
-  await until(() => service.child && service.child !== oldChild && service.ready);assert.equal(service.status().job.id,job.id);assert(service.status().job.scanned >= 1);
+  assert.equal(service.child,null);assert.equal(service.status().job.scanned,0);
+  permit = true;service.wake();await until(() => service.status().job.scanned >= 1);assert.notEqual(service.child.pid,process.pid);permit = false;const oldChild = service.child;oldChild.kill('SIGKILL');
+  await until(() => service.child === null);assert.equal(service.status().job.id,job.id);assert(service.status().job.scanned >= 1);
   for (let i=0;i<3;i++) {
     const start = performance.now();assert.equal((await fetch(base + '/healthz',{signal:AbortSignal.timeout(2000)})).status,200);assert(performance.now() - start < 1000);
     const response = await fetch(base + '/api/conversation-logs/ingest',{method:'POST',headers:{authorization:'Bearer ' + f.token,'content-type':'application/json'},body:JSON.stringify(event('concurrent-history-' + i)),signal:AbortSignal.timeout(3000)});
     assert.equal(response.status,200);assert((await response.json()).accepted);
   }
-  permit = true;await until(() => service.status().job.status === 'done');assert.equal(service.status().job.scanned,10);assert.equal(service.status().job.repaired,10);
+  permit = true;service.wake();await until(() => service.status().job.status === 'done');assert.equal(service.status().job.scanned,10);assert.equal(service.status().job.repaired,10);
   assert.equal(f.store.status().records,13);assert.equal(f.store.db.pragma('secure_delete',{simple:true}),1);
 });

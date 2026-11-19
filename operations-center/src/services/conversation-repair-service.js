@@ -4,6 +4,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { fork } = require('node:child_process');
 const { ConversationRepairStore } = require('../conversation-repair-store');
+const { availableMemory } = require('./conversation-memory');
 
 class ConversationRepairService {
   constructor(archive,{canWork = () => true,memoryBudgetBytes,timeoutMs = 20000,intervalMs = 1000} = {}) {
@@ -11,9 +12,9 @@ class ConversationRepairService {
     this.memoryBudgetBytes = memoryBudgetBytes; this.timeoutMs = timeoutMs; this.intervalMs = intervalMs;
     this.child = null; this.ready = false; this.busy = false; this.stopped = false; this.lastError = '';
   }
-  status() { return {job:this.store.latest(),workerReady:this.ready,lastError:this.lastError}; }
-  request(input) { this.store.request(input); this.wake(); return this.status(); }
-  cancel(id) { this.store.cancel(id); return this.status(); }
+  status(scope = 'compatibility') { return {job:this.store.latest(scope),activeScope:this.store.pending()?.scope || null,policyVersion:this.archive.policy().version,workerReady:this.ready,lastError:this.lastError}; }
+  request(input,scope = 'compatibility') { this.store.request(input,scope); this.wake(); return this.status(scope); }
+  cancel(id,scope = 'compatibility') { this.store.cancel(id,scope); return this.status(scope); }
   start() {
     if (this.timer) return;
     this.timer = setInterval(() => { try { this.wake(); } catch { this.lastError = 'REPAIR_STORAGE_UNAVAILABLE'; } },5000);
@@ -34,7 +35,7 @@ class ConversationRepairService {
     this.nextStep.unref();
   }
   wake() {
-    if (this.child || this.stopped || !this.store.pending()) return;
+    if (this.child || this.stopped || !this.store.pending() || !this.canWork() || availableMemory(this.memoryBudgetBytes) < 96 * 1024 ** 2) return;
     const child = fork(path.join(__dirname,'conversation-repair-worker.js'),[],{
       execArgv:['--max-old-space-size=256','--max-semi-space-size=8'],stdio:['ignore','ignore','ignore','ipc'],windowsHide:true
     });

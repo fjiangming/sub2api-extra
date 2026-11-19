@@ -184,7 +184,7 @@ class ConversationLogStore {
       candidate.allowedModels = [...new Set(candidate.allowedModels.map(normalizeModel))].sort();
       this.db.prepare('INSERT INTO cl_policies VALUES(?,?,?)').run(candidate.version, this.seal(candidate, 'policy:' + candidate.version), this.now());
       return candidate;
-    })();
+    }).immediate();
   }
   collectorPolicy(dropped = 0, collectorVersion = '', durableReceipt = false) {
     if (/^\d{1,16}$/.test(String(dropped)) && Number.isSafeInteger(Number(dropped))) this.collectorDropped = Number(dropped);
@@ -322,7 +322,7 @@ class ConversationLogStore {
       return true;
     }).immediate();
   }
-  retry(id, input, { beforeCommit = () => {}, afterCommit = () => {}, detail = true } = {}) {
+  retry(id, input, { beforeCommit = () => {}, afterCommit = () => {}, detail = true, forceRedaction = false } = {}) {
     const expected = parse(z.object({ policy_version: z.number().int().positive(), processed_at: z.number().int().nonnegative().safe() }).strict(), input);
     const fields = 'user_id,model,mode,protocol,status,encoding,processed_at,processing_pending,processing_error,redaction_version,redaction_policy_hash,inspection_warnings,hits';
     const policy = this.policy(), row = this.db.prepare(`SELECT ${fields},original FROM cl_records WHERE id=?`).get(id);
@@ -331,7 +331,7 @@ class ConversationLogStore {
       if (policy.excludedUserIds.includes(row.user_id)) throw new AppError('CONVERSATION_USER_EXCLUDED', '该用户已排除，不能重新处理', { status: 409 });
       if (!modelAllowed(policy, row.model)) throw new AppError('CONVERSATION_MODEL_EXCLUDED', '该模型不在采集名单中，不能重新处理', { status: 409 });
       if (policy.version !== expected.policy_version || row.processed_at !== expected.processed_at) throw new AppError('CONVERSATION_RETRY_CONFLICT', '策略或记录已更新，请刷新后重试', { status: 409 });
-      if (!this.publicRow(row).retry_available) throw new AppError('CONVERSATION_RETRY_UNAVAILABLE', '当前规则已处理或未保留原文；重复处理无法检查图片和加密内容，也无法恢复缺失字节', { status: 409 });
+      if (!this.publicRow(row).retry_available && !(forceRedaction && row.original && row.mode !== 'original' && !row.processing_pending)) throw new AppError('CONVERSATION_RETRY_UNAVAILABLE', '当前规则已处理或未保留原文；重复处理无法检查图片和加密内容，也无法恢复缺失字节', { status: 409 });
     };
     validate(policy, row);
     let result, errorCode = '', completion;

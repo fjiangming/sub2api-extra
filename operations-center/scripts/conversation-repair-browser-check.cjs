@@ -8,6 +8,7 @@ const { chromium } = require(process.env.PLAYWRIGHT_MODULE_PATH || 'playwright')
 const { startPreview } = require('./conversation-logs-live-preview.cjs');
 const { event } = require('../tests/conversation-logs-fixture');
 const { bodyDigest } = require('../src/conversation-log-store');
+const { REDACTION_VERSION } = require('../src/services/conversation-sensitive');
 
 const b64 = value => Buffer.from(value).toString('base64');
 const terminal = 'data: {"type":"response.completed","response":{"id":"resp_demo","object":"response","status":"completed","output":[]}}\n\n';
@@ -78,7 +79,7 @@ async function main() {
         await page.locator('#cl-body-request').filter({hasText:'EMAIL_'}).waitFor();
         assert.deepEqual(f.store.payload(legacyCompaction.id,'original','request').body,originalCompaction);
         assert(!f.store.detail(legacyCompaction.id).complete);assert.equal(f.store.detail(legacyCompaction.id).reason,'read_error');
-        assert.equal(f.store.detail(legacyCompaction.id).redaction_version,6);
+        assert.equal(f.store.detail(legacyCompaction.id).redaction_version,REDACTION_VERSION);
         assert(await page.locator('[data-cl-action="reprocess"]').isDisabled());await shot('compaction-reprocessed');
         await page.locator(`[data-cl-record="${image.id}"]`).click();
         await page.locator('#cl-body-request').filter({hasText:'EMAIL_'}).waitFor();

@@ -16,6 +16,20 @@
 
 正式页面独立预览 `http://127.0.0.1:19965/admin/config?demo=1`，结果 `/results?demo=readonly`，使用临时虚构 SQLite，所有真实上游请求禁用；保留旧预览。沿用本会话已有 GitHub 发布授权，仅提交本节降智检测功能与相应说明，排除其他任务的台账、菜单图标说明与所有无关差异；推送和自动镜像验证结果以本轮最终回复为准。不连接或部署服务器。
 
+## 2026-11-19：收紧脱敏误判并增加一键历史重新脱敏
+
+用户要求兼容修复上轮单条审计发现的误替换，并在“一键清空历史”旁加入使用最新算法的重新脱敏按钮。本轮仅修改运营中心，不改主站 / 采集器、服务器配额和部署配置，不连接生产执行重处理或部署；保留全部无关差异。
+
+- `operations-center/src/services/conversation-sensitive.js`、新增 `conversation-sensitive-context.js`、`conversation-redaction.js`：引擎升级 v7，精确保护 Claude 原生工具定义 / 选择名称，阻止误学习后全局传播；保留工具业务数据检查。收紧电话 / 金融的数字上下文与数字业务 ID 判断，保留日期、UUID、进程表、技术参数、Git SSH 固定用户、工作目录和回环地址；凭据区分比较符、变量引用、空示例及真实赋值。真实邮箱、人员字段、身份 / 金融 / 设备和凭据继续检查，不整体跳过代码或关闭类别。
+- `src/conversation-repair-store.js`、`conversation-log-store.js`、`services/conversation-repair-service.js`、`app.js`：复用单个持久历史处理队列，新增 redaction scope / 独立状态与取消 API，内部强制从原文重建当前副本；保存策略和算法快照、单调新归档边界、原文 / 模式边界、事务前校验、缺原文 / 仅原文计数、原资源及崩溃保护保持。提交前再次检查插入边界，防清空期间同 ID / 同 processed_at 重归档被旧结果覆盖；保存策略改用 immediate 事务，避免后台并发写导致读事务升级失败。当前无工作许可或不足 96 MiB 可用内存不启动隔离进程；兼容检查和重新脱敏不能同时处理正文。
+- `src/server.js`、`scripts/conversation-logs-live-preview.cjs`：历史任务逐条间隙让查询与下载先执行，不因整个历史任务存活就一直阻塞读取；首次采集 / 处理仍优先。原 256 MiB old-space、默认 1 秒节奏与容量门禁保持，无强行扩容。
+- 新增 `public/conversation-redaction-ui.js`，调整 `conversation-clear-ui.js`、`conversation-repair-ui.js`、`conversation-logs.css`、`index.html`：相邻操作按钮、确认、后台进度、停止、互斥状态、刷新续办及策略暂停，静态缓存版本更新；沿用全历史范围，不受当前筛选影响，不自动撤回外部副本。
+- 新增 `tests/conversation-redaction-context.test.js`、`conversation-history-redaction.test.js`、`scripts/conversation-redaction-browser-check.cjs`；既有 privacy / compatibility / inspection / repair 测试及 repair 浏览器脚本改用当前引擎常量并适配空闲启动。`tests/conversation-jsonl.test.js` 仅将既有 20.1 MiB 隔离进程大文件测试的等待从 15 秒延至 45 秒：单独复核 16.2 秒即完整送达且仅一次尝试，保留字节校验与 256 MiB 堆断言，不修改生产网络超时或推送实现。`package.json` 纳入语法 / 浏览器检查，`docs/conversation-logs.md` 记录范围、原文不可恢复边界及资源影响。测试全部使用虚构数据，不保存生产原文。
+
+验证完成：标准串行完整 **694 项测试全部通过，0 失败 / 跳过**，约 363 秒，日志 `sub2api-redaction-verified-20261119.log`；npm run check 通过。新增 17 项回归覆盖 135 工具 / 421 调用关联、真实敏感值、相邻电话 / 国际固话、低内存启动、旧任务迁移、取消 / 重启、无原文、原文模式、策略 / 引擎变化、同 ID 重归档与保存策略写竞争。新历史脱敏、原清空历史、原兼容检查三套浏览器验收的 1440 / 390 / 320px / 深色四布局全部通过，无脚本错误、外网请求或溢出；实际验证后台任务存在时读取与 JSONL 下载均可完成，原文和新增记录保留。截图分别为 `sub2api-redaction-browser-yOrlO3`、`sub2api-clear-browser-zzxTFB`、`sub2api-repair-browser-ZSrBwi`，桌面与 320px 完成 / 暂停状态已视觉复核。中间复验曾因既有大文件测试 15 秒等待过短失败，按上文只调整该测试等待后单独及最终完整复验通过，未提高生产配额或网络超时。
+
+生产只读审计中的原文未用于测试；无新增依赖、环境变量或手动服务器配置。本地正式页面预览以虚构数据和临时 SQLite 启动，地址 `http://127.0.0.1:20195/preview`，健康检查通过；仅本地回环监听，不连接生产、真实模型或外部存储。请求端口 19965 已有其他服务，保留原服务并清理本轮失败启动 / 诊断进程后改用独立端口。用户随后明确要求提交 GitHub，本轮仅提交本节运营中心功能与对应台账到 main，保留其他服务、部署配置、只读审计报告及独立 Demo 等无关差异；推送后核验自动测试及双架构镜像，实际结果以最终回复为准。不部署服务器，也不执行生产历史重处理。
+
 ## 2026-11-19：减少导出与推送的内存中断
 
 用户要求再次检查导出及推送，尽量避免内存中断。本轮发现此前大正文直出仅用于下载，推送仍有统一堆估算、完整 JSON 字符串 / Buffer 和临时内存错误消耗重试次数等问题。仅修改运营中心，保留主站 / 采集、原加密归档、服务器配额、192 / 256 MiB old-space、默认限速、网络重试上限和全部无关差异；不连接或部署服务器。

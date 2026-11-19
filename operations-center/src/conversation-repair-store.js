@@ -16,51 +16,74 @@ class ConversationRepairStore {
       warnings INTEGER NOT NULL DEFAULT 0,deferred INTEGER NOT NULL DEFAULT 0,errors INTEGER NOT NULL DEFAULT 0,skipped INTEGER NOT NULL DEFAULT 0,
       requested_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,error_code TEXT NOT NULL DEFAULT '');
       CREATE UNIQUE INDEX IF NOT EXISTS cl_repair_active ON cl_repairs((1)) WHERE status IN ('pending','running');`);
+    this.db.transaction(() => {
+      const columns = new Set(this.db.pragma('table_info(cl_repairs)').map(column => column.name));
+      for (const [name, definition] of [['scope', "TEXT NOT NULL DEFAULT 'compatibility'"],['redaction_hash', "TEXT NOT NULL DEFAULT ''"],
+        ['missing_original','INTEGER NOT NULL DEFAULT 0'],['original_only','INTEGER NOT NULL DEFAULT 0'],
+        ['upper_arrival','INTEGER NOT NULL DEFAULT 0'],['boundary_version','INTEGER NOT NULL DEFAULT 0']]) {
+        if (!columns.has(name)) this.db.exec(`ALTER TABLE cl_repairs ADD COLUMN ${name} ${definition}`);
+      }
+      this.db.exec(`CREATE TABLE IF NOT EXISTS cl_push_arrivals(seq INTEGER PRIMARY KEY AUTOINCREMENT,record_id TEXT NOT NULL UNIQUE REFERENCES cl_records(id) ON DELETE CASCADE);
+        CREATE TRIGGER IF NOT EXISTS cl_push_arrival AFTER INSERT ON cl_records BEGIN INSERT INTO cl_push_arrivals(record_id) VALUES(NEW.id); END;`);
+    })();
     return this;
   }
-  latest() { return this.db.prepare('SELECT * FROM cl_repairs ORDER BY requested_at DESC,rowid DESC LIMIT 1').get() || null; }
+  latest(scope) { return (scope ? this.db.prepare('SELECT * FROM cl_repairs WHERE scope=? ORDER BY requested_at DESC,rowid DESC LIMIT 1').get(scope) : this.db.prepare('SELECT * FROM cl_repairs ORDER BY requested_at DESC,rowid DESC LIMIT 1').get()) || null; }
   pending() { return this.db.prepare("SELECT * FROM cl_repairs WHERE status IN ('pending','running') LIMIT 1").get() || null; }
-  request(input) {
+  request(input, scope = 'compatibility') {
+    if (!['compatibility','redaction'].includes(scope)) throw new AppError('CONVERSATION_INVALID_INPUT','历史任务类型无效',{status:400});
     if (!input || Object.keys(input).some(key => key !== 'policy_version') || !Number.isSafeInteger(input.policy_version)) throw new AppError('CONVERSATION_INVALID_INPUT','历史检查参数无效',{status:400});
     return this.db.transaction(() => {
       if (this.archive.policy().version !== input.policy_version) throw new AppError('CONVERSATION_POLICY_CONFLICT','策略已更新，请刷新后重试',{status:409});
-      if (this.pending()) return this.pending();
+      const current = this.pending();
+      if (current) {
+        if (current.scope !== scope) throw new AppError('CONVERSATION_REPAIR_ACTIVE','已有历史检查或重新脱敏任务，请等待完成或先停止',{status:409});
+        return current;
+      }
       const upper = this.db.prepare('SELECT COALESCE(MAX(rowid),0) n FROM cl_records').get().n, at = this.now();
-      this.db.prepare("INSERT INTO cl_repairs(id,policy_version,status,upper_rowid,requested_at,updated_at) VALUES(?,?,'pending',?,?,?)")
-        .run(crypto.randomUUID(), input.policy_version, upper, at, at);
+      const arrival = this.db.prepare("SELECT seq FROM sqlite_sequence WHERE name='cl_push_arrivals'").get()?.seq || 0;
+      this.db.prepare("INSERT INTO cl_repairs(id,policy_version,status,upper_rowid,requested_at,updated_at,scope,redaction_hash,upper_arrival,boundary_version) VALUES(?,?,'pending',?,?,?,?,?,?,1)")
+        .run(crypto.randomUUID(), input.policy_version, upper, at, at, scope, redactionPolicyHash(this.archive.policy()), arrival);
       return this.pending();
     }).immediate();
   }
-  cancel(id) {
+  cancel(id, scope) {
     if (typeof id !== 'string' || !/^[a-f0-9-]{36}$/.test(id)) throw new AppError('CONVERSATION_INVALID_INPUT','历史检查任务无效',{status:400});
-    this.db.prepare("UPDATE cl_repairs SET status='cancelled',updated_at=? WHERE id=? AND status IN ('pending','running')").run(this.now(),id);
+    this.db.prepare("UPDATE cl_repairs SET status='cancelled',updated_at=? WHERE id=? AND (? IS NULL OR scope=?) AND status IN ('pending','running')").run(this.now(),id,scope || null,scope || null);
   }
   check(job) {
     const current = this.pending();
-    if (current?.id !== job.id || this.archive.policy().version !== job.policy_version) throw new AppError('CONVERSATION_REPAIR_CONFLICT','任务已停止或策略已更新',{status:409});
+    const policy = this.archive.policy();
+    if (current?.id !== job.id || policy.version !== job.policy_version || job.redaction_hash && job.redaction_hash !== redactionPolicyHash(policy)) throw new AppError('CONVERSATION_REPAIR_CONFLICT','任务已停止或策略已更新',{status:409});
   }
   advance(job, row, counts = {}) {
     this.check(job);
     this.db.prepare(`UPDATE cl_repairs SET status=?,cursor_rowid=?,current_rowid=0,attempts=0,scanned=scanned+1,
-      analyzed=analyzed+?,repaired=repaired+?,warnings=warnings+?,deferred=deferred+?,errors=errors+?,skipped=skipped+?,updated_at=?,error_code='' WHERE id=?`)
-      .run(row.cursor >= job.upper_rowid ? 'done' : 'running',row.cursor,counts.analyzed || 0,counts.repaired || 0,counts.warnings || 0,counts.deferred || 0,counts.errors || 0,counts.skipped || 0,this.now(),job.id);
+      analyzed=analyzed+?,repaired=repaired+?,warnings=warnings+?,deferred=deferred+?,errors=errors+?,skipped=skipped+?,missing_original=missing_original+?,original_only=original_only+?,updated_at=?,error_code='' WHERE id=?`)
+      .run(row.cursor >= job.upper_rowid ? 'done' : 'running',row.cursor,counts.analyzed || 0,counts.repaired || 0,counts.warnings || 0,counts.deferred || 0,counts.errors || 0,counts.skipped || 0,counts.missing_original || 0,counts.original_only || 0,this.now(),job.id);
   }
   step() {
     const job = this.pending(); if (!job) return { worked:false };
     const policy = this.archive.policy();
-    if (policy.version !== job.policy_version) {
-      this.db.prepare("UPDATE cl_repairs SET status='paused',error_code='POLICY_CHANGED',updated_at=? WHERE id=? AND status IN ('pending','running')").run(this.now(),job.id);
+    if (policy.version !== job.policy_version || job.redaction_hash && job.redaction_hash !== redactionPolicyHash(policy)) {
+      this.db.prepare("UPDATE cl_repairs SET status='paused',error_code=?,updated_at=? WHERE id=? AND status IN ('pending','running')").run(policy.version !== job.policy_version ? 'POLICY_CHANGED' : 'ALGORITHM_CHANGED',this.now(),job.id);
       return { worked:false };
     }
     // Select metadata before loading a body. Each task stops at its initial history boundary.
     const row = this.db.prepare(`SELECT rowid cursor,id,user_id,model,at,archived_at,mode,bytes,processed_at,processing_pending,processing_error,redaction_version,redaction_policy_hash,
-      completion_version,upstream_status,upstream_evidence,original IS NOT NULL original,masked IS NOT NULL masked FROM cl_records WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT 1`)
-      .get(job.cursor_rowid,job.upper_rowid);
+      completion_version,upstream_status,upstream_evidence,original IS NOT NULL original,masked IS NOT NULL masked,
+      CASE WHEN ?=1 THEN EXISTS(SELECT 1 FROM cl_push_arrivals a WHERE a.record_id=cl_records.id AND a.seq>?) ELSE 0 END after_boundary
+      FROM cl_records WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT 1`)
+      .get(job.boundary_version,job.upper_arrival,job.cursor_rowid,job.upper_rowid);
     if (!row) { this.db.prepare("UPDATE cl_repairs SET status='done',updated_at=? WHERE id=? AND status IN ('pending','running')").run(this.now(),job.id); return { worked:false }; }
-    const skip = row.processing_pending || row.archived_at >= job.requested_at || policy.excludedUserIds.includes(row.user_id) || !modelAllowed(policy,row.model) || policy.retention && row.at < this.now() - policy.retention * 86400000;
-    const repair = row.original && row.mode !== 'original' && (row.processing_error || row.redaction_version !== REDACTION_VERSION || row.redaction_policy_hash !== redactionPolicyHash(policy));
-    const analyze = row.completion_version < COMPLETION_VERSION || row.upstream_status === 'unverified' && row.upstream_evidence === 'resource';
+    const skip = row.processing_pending || row.after_boundary || !job.boundary_version && row.archived_at >= job.requested_at || policy.excludedUserIds.includes(row.user_id) || !modelAllowed(policy,row.model) || policy.retention && row.at < this.now() - policy.retention * 86400000;
+    const redaction = job.scope === 'redaction';
+    const repair = row.original && row.mode !== 'original' && (redaction || row.processing_error || row.redaction_version !== REDACTION_VERSION || row.redaction_policy_hash !== redactionPolicyHash(policy));
+    const analyze = !redaction && (row.completion_version < COMPLETION_VERSION || row.upstream_status === 'unverified' && row.upstream_evidence === 'resource');
     const finish = counts => this.db.transaction(() => this.advance(job,row,counts)).immediate();
+    if (!skip && redaction && (!row.original || row.mode === 'original')) {
+      finish(row.mode === 'original' ? {original_only:1} : {missing_original:1});return {worked:true};
+    }
     if (skip || !row.original && !row.masked || !repair && !analyze) { finish({skipped:1}); return {worked:true}; }
     if (row.bytes * 8 > this.memoryBudget() || job.current_rowid === row.cursor && job.attempts >= 3) { finish({deferred:1}); return {worked:true}; }
     this.db.transaction(() => {
@@ -69,8 +92,13 @@ class ConversationRepairStore {
         .run(row.cursor,job.current_rowid === row.cursor ? job.attempts + 1 : 1,this.now(),job.id);
     }).immediate();
     try {
-      const expected = {policy_version:policy.version,processed_at:row.processed_at}, options = {beforeCommit:() => this.check(job)};
-      if (repair) this.archive.retry(row.id,expected,{...options,detail:false,afterCommit:result => this.advance(job,row,{
+      const expected = {policy_version:policy.version,processed_at:row.processed_at}, options = {beforeCommit:() => {
+        this.check(job);
+        if (job.boundary_version && this.db.prepare('SELECT 1 FROM cl_push_arrivals WHERE record_id=? AND seq>?').get(row.id,job.upper_arrival)) {
+          throw new AppError('CONVERSATION_RETRY_CONFLICT','记录已重新归档，留待下一轮处理',{status:409});
+        }
+      }};
+      if (repair) this.archive.retry(row.id,expected,{...options,detail:false,forceRedaction:redaction,afterCommit:result => this.advance(job,row,{
         analyzed:1,repaired:result.processing_error ? 0 : 1,warnings:result.inspection_warnings.length ? 1 : 0,
         deferred:transient.has(result.processing_error) ? 1 : 0,errors:result.processing_error && !transient.has(result.processing_error) ? 1 : 0
       })});

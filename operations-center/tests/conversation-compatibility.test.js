@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const zlib = require('node:zlib');
 const { availableMemory, processingBudget, processingBudgets } = require('../src/services/conversation-memory');
 const { maskPayload } = require('../src/services/conversation-redaction');
+const { REDACTION_VERSION } = require('../src/services/conversation-sensitive');
 const { inspectCompletion } = require('../src/services/conversation-completion');
 const { fixture,event,removeMetadata } = require('./conversation-logs-fixture');
 const { defaults, ConversationLogStore } = require('../src/conversation-log-store');
@@ -147,7 +148,7 @@ test('compaction history retains ciphertext and falls back to original for unins
   const original = f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(row.id).original,saved = f.store.detail(row.id);
   f.store.db.prepare("UPDATE cl_records SET masked=NULL,processing_error='UNINSPECTABLE_CONTENT',redaction_version=0,inspection_warnings='[]' WHERE id=?").run(row.id);
   const retried = f.store.retry(row.id,{policy_version:policy.version,processed_at:saved.processed_at});
-  assert.equal(retried.processing_error,'');assert.equal(retried.redaction_version,6);assert(retried.original && retried.masked);
+  assert.equal(retried.processing_error,'');assert.equal(retried.redaction_version,REDACTION_VERSION);assert(retried.original && retried.masked);
   assert.deepEqual(retried.inspection_warnings,['OPAQUE_ENCRYPTED_COMPACTION']);assert(retried.complete);assert.equal(retried.reason,'');
   assert.deepEqual(f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(row.id).original,original);
   assert.equal(f.store.payload(row.id,'original','request').text,request);
@@ -259,7 +260,7 @@ test('image history reprocesses with originals intact and selects a marked raw f
   f.store.db.prepare("UPDATE cl_records SET masked=NULL,processing_error='UNINSPECTABLE_CONTENT',redaction_version=0,inspection_warnings='[]' WHERE id=?").run(row.id);
   assert(!f.store.detail(row.id).masked);assert.equal(f.store.detail(row.id).processing_error,'UNINSPECTABLE_CONTENT');
   const retried = f.store.retry(row.id,{policy_version:policy.version,processed_at:saved.processed_at});
-  assert.equal(retried.processing_error,'');assert.equal(retried.redaction_version,6);assert(retried.original && retried.masked);
+  assert.equal(retried.processing_error,'');assert.equal(retried.redaction_version,REDACTION_VERSION);assert(retried.original && retried.masked);
   assert.deepEqual(retried.inspection_warnings,['OPAQUE_IMAGE']);assert(retried.complete);assert.equal(retried.reason,'');
   assert.deepEqual(f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(row.id).original,original);
   assert.equal(f.store.payload(row.id,'original','request').body.toString('base64'),row.request);

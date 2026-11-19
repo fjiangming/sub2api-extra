@@ -52,9 +52,9 @@ async function startPreview({port = Number(process.env.CONVERSATION_PREVIEW_PORT
   const canPush = () => archive.idleForHistory;
   const push = pushTransport ? new ConversationPushService(pushStore,{transport:pushTransport,canWork:canPush}) : new ConversationPushSupervisor(pushStore,{canWork:canPush});
   const cleanup = new ConversationCleanupService(f.store,{canWork:() => !archive.busy && !archive.processingBusy});
-  const repair = new ConversationRepairService(f.store,{canWork:() => archive.idleForHistory && !cleanup.child});
-  const read = new ConversationReadService(f.store,{configured:true,canWork:() => !archive.busy && !archive.processingBusy && !cleanup.child && !repair.child});
-  const exporter = new ConversationExportService(f.store,auth,{canWork:() => archive.idleForHistory && !cleanup.child && !repair.child && !read.active && !read.queue.length && !read.draining});
+  const repair = new ConversationRepairService(f.store,{canWork:() => archive.idleForHistory && !cleanup.child && !read.active && !read.queue.length && !read.draining && !exporter.active && !exporter.queue.length && !exporter.draining});
+  const read = new ConversationReadService(f.store,{configured:true,canWork:() => !archive.busy && !archive.processingBusy && !cleanup.child && !repair.busy});
+  const exporter = new ConversationExportService(f.store,auth,{canWork:() => archive.idleForHistory && !cleanup.child && !repair.busy && !read.active && !read.queue.length && !read.draining});
   await archive.start();
   const app = createApp({config:f.config,auth,database:{},conversations:f.store,conversationArchive:archive,conversationRead:read,conversationExport:exporter,conversationPush:push,conversationCleanup:cleanup,conversationRepair:repair,messages:f.messages,settings:{getStatus:() => ({setupRequired:false})}});
   const outer = express();

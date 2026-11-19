@@ -352,6 +352,10 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.get('/conversation-logs/history-repair', (_req, res) => res.json(conversationRepair.status()));
   api.post('/conversation-logs/history-repair', csrf, conversationCleanupLimiter, (req, res) => res.status(202).json(conversationRepair.request(req.body)));
   api.post('/conversation-logs/history-repair/:id/cancel', csrf, conversationCleanupLimiter, (req, res) => res.json(conversationRepair.cancel(req.params.id)));
+  api.use('/conversation-logs/history-redaction', (_req, _res, next) => conversationRepair ? next() : next(new AppError('CONVERSATION_REPAIR_UNAVAILABLE', '历史脱敏后台暂不可用', { status: 503 })));
+  api.get('/conversation-logs/history-redaction', (_req, res) => res.json(conversationRepair.status('redaction')));
+  api.post('/conversation-logs/history-redaction', csrf, conversationCleanupLimiter, (req, res) => res.status(202).json(conversationRepair.request(req.body,'redaction')));
+  api.post('/conversation-logs/history-redaction/:id/cancel', csrf, conversationCleanupLimiter, (req, res) => res.json(conversationRepair.cancel(req.params.id,'redaction')));
   api.use('/conversation-logs/push', (_req, _res, next) => conversationPush ? next() : next(new AppError('CONVERSATION_PUSH_UNAVAILABLE', '日志推送暂不可用', { status: 503 })));
   const pushLimiter = rateLimit({ windowMs: 60000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false });
   api.get('/conversation-logs/push/policy', (_req, res) => res.json(conversationPush.policy()));

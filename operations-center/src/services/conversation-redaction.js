@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 const { REDACTION_VERSION, fieldKind, protocolField, assertInspectable, replacePatterns, toolDataContext } = require('./conversation-sensitive');
+const { contextualFieldKind, technicalNumber } = require('./conversation-sensitive-context');
 
 const emailLocal = /[A-Z0-9.!#$%&'*+/=?^_`{|}~-]/i;
 const emailDomain = /[A-Z0-9](?:[A-Z0-9.-]*[A-Z0-9])?\.[A-Z]{2,}/iy;
@@ -21,6 +22,8 @@ function replaceEmails(text, replace) {
     const domain = emailDomain.exec(text);
     if (!domain) continue;
     const end = emailDomain.lastIndex;
+    if (/(?:ssh|git\+ssh):\/\/git$/i.test(text.slice(Math.max(0, at - 32), at))) continue;
+    if (text.slice(start, at).replace(/^[`'"(]+/, '') === 'git' && (text[end] === ':' || /(?:ssh|git\+ssh):\/\/$/i.test(text.slice(Math.max(0,start - 12),start)))) continue;
     parts.push(text.slice(cursor, start), replace(text.slice(start, end)));
     cursor = search = end;
   }
@@ -105,7 +108,7 @@ function replaceUrls(text, transform, policy, placeholder) {
     try { value = decodeURIComponent(form ? raw.replaceAll('+', ' ') : raw); label = decodeURIComponent(key.replaceAll('+', ' ')); }
     catch { throw new Error('UNINSPECTABLE_CONTENT'); }
     const kind = /^x-amz-|^x-goog-|^(?:sig|signature|se|sp|sv)$/i.test(label) && policy.secret ? 'secret' : fieldKind(label, policy);
-    const next = kind && value ? placeholder(kind, value) : transform(value);
+    const next = kind && value ? placeholder(kind, value) : technicalNumber(label,value) ? value : transform(value);
     return next === value ? raw : encodeURIComponent(next);
   };
   const parameters = raw => raw.split('&').map(part => {
@@ -133,9 +136,9 @@ function createRedactor(policy, salt) {
   const hits = new Map();
   const known = new Map();
   const warnings = new Set();
-  const kindFor = token => {
+  const kindFor = (token, parsed) => {
     const schema = token.path.some(field => ['properties','$defs','definitions'].includes(field));
-    const kind = fieldKind(token.field, policy) || (!schema && token.path.slice(0, -1).map(field => fieldKind(field, policy)).find(Boolean)) || '';
+    const kind = contextualFieldKind(token, parsed, fieldKind(token.field, policy) || (!schema && token.path.slice(0, -1).map(field => fieldKind(field, policy)).find(Boolean)) || '');
     return ['identity','personal','phone'].includes(kind) && policy.email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(token.value) ? 'email' : kind;
   };
   function placeholder(kind, match) {
@@ -161,7 +164,7 @@ function createRedactor(policy, salt) {
       let decoded, label;
       try { decoded = decodeURIComponent(raw); label = decodeURIComponent(key); } catch { return all; }
       const kind = /^x-amz-|^x-goog-|^(?:sig|signature|se|sp|sv)$/i.test(label) && policy.secret ? 'secret' : fieldKind(label, policy);
-      const next = kind ? placeholder(kind, decoded) : replacePatterns(policy.email ? replaceEmails(decoded, m => placeholder('email', m)) : decoded, policy, placeholder);
+      const next = kind ? placeholder(kind, decoded) : technicalNumber(label,decoded) ? decoded : replacePatterns(policy.email ? replaceEmails(decoded, m => placeholder('email', m)) : decoded, policy, placeholder);
       return next === decoded ? all : prefix + encodeURIComponent(next);
     });
     return text;
@@ -234,7 +237,7 @@ function createRedactor(policy, salt) {
         const warning = assertInspectable(token, parsed, depth, context);
         if (warning) { warnings.add(warning); continue; }
         if (protocolField(token, parsed, depth)) continue;
-        const kind = kindFor(token);
+        const kind = kindFor(token, parsed);
         if (kind && ['personal','identity','financial','secret','device'].includes(kind) && token.value.length >= (kind === 'personal' ? 2 : 4) && token.value.length <= 4096) {
           if (known.size >= 256 && !known.has(token.value)) throw resourceLimit('REDACTION_VALUE_LIMIT');
           if (!known.has(token.value)) known.set(token.value, kind);
@@ -279,7 +282,7 @@ function createRedactor(policy, salt) {
           deltas.get(group.key).entries.push(entry); continue;
         }
         let value;
-        const kind = kindFor(token);
+        const kind = kindFor(token, parsed);
         if (kind && token.value) value = placeholder(kind, token.value);
         else if (!token.numeric && /^[\s]*[\[{]/.test(token.value)) value = nested(token.value, depth, context);
         else value = token.numeric ? replacePatterns(token.value, { identity: policy.identity, financial: policy.financial }, placeholder) : replace(token.value);

@@ -6,10 +6,11 @@
     const num = value => new Intl.NumberFormat('zh-CN').format(value || 0);
     const names = {pending:'等待清空历史',running:'正在清空历史',done:'历史清空完成',cancelled:'清空已停止'};
     const errors = {CLEANUP_TIMEOUT:'后台任务超时，将自动续办',CLEANUP_WORKER_UNAVAILABLE:'后台进程暂不可用，将自动续办',CLEANUP_STORAGE_UNAVAILABLE:'存储暂不可用，将稍后重试'};
+    const redactionUi = root.ConversationRedactionUi.create({api,escapeHtml:esc,icon,isActive,onRender:render,onChanged});
     function render() {
       const host = document.getElementById('cl-history-clear'); if (!host || !isActive()) return;
       const job = state?.job, running = active(job), other = state?.activeScope === 'models';
-      host.innerHTML = `<div class="cl-history-actions"><div><button class="button secondary" type="button" data-clear-start ${busy || running || other || !state ? 'disabled' : ''}>${icon('trash-2')}一键清空历史</button>${running ? `<button class="button secondary" type="button" data-clear-stop ${busy ? 'disabled' : ''}>${icon('square')}停止清空</button>` : ''}</div><p class="cl-muted" role="status">${job ? `${esc(names[job.status] || job.status)} · 已删除 ${num(job.deleted)} 条` : '清空全部历史日志，保留新增归档和保存策略'}${other ? ' · 名单外日志清理正在进行' : ''}${job?.error_code || state?.lastError ? '<br>' + esc(errors[job?.error_code || state.lastError] || '后台清理暂不可用') : ''}</p></div>${errorText ? `<p class="cl-notice amber" role="alert">${esc(errorText)}</p>` : ''}`;
+      host.innerHTML = `<div class="cl-history-actions"><div><button class="button secondary" type="button" data-clear-start ${busy || running || other || !state ? 'disabled' : ''}>${icon('trash-2')}一键清空历史</button>${redactionUi.controls(busy || running || other)}${running ? `<button class="button secondary" type="button" data-clear-stop ${busy ? 'disabled' : ''}>${icon('square')}停止清空</button>` : ''}</div><p class="cl-muted" role="status">${job ? `${esc(names[job.status] || job.status)} · 已删除 ${num(job.deleted)} 条` : '清空全部历史日志，保留新增归档和保存策略'}${other ? ' · 名单外日志清理正在进行' : ''}${job?.error_code || state?.lastError ? '<br>' + esc(errors[job?.error_code || state.lastError] || '后台清理暂不可用') : ''}</p>${redactionUi.summary()}</div>${errorText ? `<p class="cl-notice amber" role="alert">${esc(errorText)}</p>` : ''}`;
       refreshIcons();
     }
     function showError(error) {
@@ -50,13 +51,14 @@
     async function load() {
       const host = document.getElementById('cl-history-clear'); if (!host) return;
       host.onclick = event => {
+        redactionUi.handleClick(event);
         if (event.target.closest('[data-clear-start]:not(:disabled)')) command(false);
         if (event.target.closest('[data-clear-stop]:not(:disabled)')) command(true);
       };
       render();
-      try { await refresh(); } catch (error) { showError(error); }
+      await Promise.all([refresh().catch(showError),redactionUi.load()]);
     }
-    function leave() { ++epoch; clearTimeout(timer); controller?.abort(); state = null; busy = false; errorText = ''; }
+    function leave() { ++epoch; clearTimeout(timer); controller?.abort(); state = null; busy = false; errorText = '';redactionUi.leave(); }
     return {load,leave};
   }
   root.ConversationClearUi = {create};

@@ -5,8 +5,9 @@ const isCreditCard = require('validator/lib/isCreditCard');
 const { default: isIBAN } = require('validator/lib/isIBAN');
 const isIP = require('validator/lib/isIP');
 const crypto = require('node:crypto');
+const { credentialValue, machineNumber, phoneCandidate, privateAddress } = require('./conversation-sensitive-context');
 
-const REDACTION_VERSION = 6;
+const REDACTION_VERSION = 7;
 function redactionPolicyHash(policy) {
   return crypto.createHash('sha256').update(JSON.stringify([REDACTION_VERSION,
     ...['email','phone','secret','ip','identity','financial','personal','device'].map(key => Boolean(policy[key])), policy.custom])).digest('hex');
@@ -49,6 +50,9 @@ function protocolField(token, parsed, depth) {
     ['user','assistant','system','developer','tool','model'].includes(parent.role));
   if (['id','name'].includes(field) && ['functionCall','functionResponse','function_call','function_response'].includes(p.at(-2)) && geminiPartPath(p.slice(0,-2))) return true;
   if (field === 'name' && p.length === 5 && p[0] === 'tools' && Number.isInteger(p[1]) && ['functionDeclarations','function_declarations'].includes(p[2]) && Number.isInteger(p[3])) return true;
+  if (field === 'name' && p.length === 3 && p[0] === 'tools' && Number.isInteger(p[1]) &&
+      (parent?.input_schema && typeof parent.input_schema === 'object' || /^(?:custom|(?:computer|bash|text_editor|web_search|web_fetch|code_execution|memory|tool_search_tool_(?:regex|bm25))_\d{8})$/.test(parent?.type || ''))) return true;
+  if (field === 'name' && p.length === 2 && p[0] === 'tool_choice' && ['tool','function','custom'].includes(parent?.type)) return true;
   if (['call_id','tool_call_id','tool_use_id','previous_response_id','item_id','response_id'].includes(field)) {
     return root || protocolParent || p.some(key => ['messages','input','output','tool_calls','content'].includes(key));
   }
@@ -218,10 +222,10 @@ function replacePatterns(value, policy, placeholder) {
     text = replacePrivateKeys(text, placeholder);
     text = text.replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|(?:gh[pousr]_|github_pat_|glpat-)[A-Za-z0-9_-]{15,}|(?:AKIA|ASIA)[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{30,}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|demo_secret_[A-Za-z0-9_]+)\b/g, match => placeholder('secret', match));
     text = text.replace(/\b((?:Bearer|Basic)\s+)([A-Za-z0-9._~+/-]{8,}=*)/gi, (_all, prefix, value) => prefix + placeholder('secret', value));
-    text = text.replace(/(^|[\r\n])((?:Cookie|Set-Cookie):[\t ]*)([^\r\n]+)/gi, (_all, line, prefix, value) => line + prefix + placeholder('secret', value));
-    text = text.replace(/\b([a-z][a-z0-9+.-]{0,31}:\/\/)([^\s/@]{1,1024}@)/gi, (_all, scheme, auth) => scheme + placeholder('secret', auth.slice(0, -1)) + '@');
-    text = text.replace(/((?:password|passwd|pwd|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret|cookie|otp|pin|cvv|验证码|密码|密钥)["']?[\t ]{0,8}[:=：][\t ]{0,8}["']?)([^\s"'&,;<>]{1,4096})/gi,
-      (_all, prefix, secret) => prefix + placeholder('secret', secret));
+    text = text.replace(/(^|[\r\n])((?:Cookie|Set-Cookie):[\t ]*)([^\r\n]+)/gi, (all, line, prefix, value) => credentialValue(value, 'cookie') ? line + prefix + placeholder('secret', value) : all);
+    text = text.replace(/\b([a-z][a-z0-9+.-]{0,31}:\/\/)([^\s/@]{1,1024}@)/gi, (all, scheme, auth) => /^(?:ssh|git\+ssh):/i.test(scheme) && auth === 'git@' ? all : scheme + placeholder('secret', auth.slice(0, -1)) + '@');
+    text = text.replace(/(?<![\w$])((password|passwd|pwd|api[_-]?key|access[_-]?(?:token|key)|refresh[_-]?token|client[_-]?secret|private[_-]?key|token|secret|cookie|otp|pin|cvv|验证码|密码|密钥)["']?[\t ]{0,8}[:=：](?!=)[\t ]{0,8}["']?)([^\s"'&,;<>]{1,4096})/gi,
+      (all, prefix, label, secret) => credentialValue(secret, label) ? prefix + placeholder('secret', secret) : all);
   }
   if (policy.identity) {
     text = text.replace(/(?<![A-Za-z0-9])(?:[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]|[1-9]\d{5}\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3})(?![A-Za-z0-9])/g,
@@ -230,14 +234,14 @@ function replacePatterns(value, policy, placeholder) {
   }
   if (policy.financial) {
     text = text.replace(/\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){11,30}\b/g, match => isIBAN(match) ? placeholder('financial', match) : match);
-    text = text.replace(/(?<![\w])\d(?:[ -]?\d){12,18}(?![\w])/g, match => isCreditCard(match) ? placeholder('financial', match) : match);
+    text = text.replace(/(?<![\w])\d(?:[ -]?\d){12,18}(?![\w])/g, (match, at, source) => !machineNumber(source, at, match) && isCreditCard(match) ? placeholder('financial', match) : match);
   }
   if (policy.ip) {
-    text = text.replace(/(?<![\w:])(?:[A-Fa-f0-9]{0,4}:){2,7}[A-Fa-f0-9:.]{0,45}(?:%[A-Za-z0-9_.-]{1,32})?(?![\w:])/g, match => isIP(match.split('%')[0], 6) ? placeholder('ip', match) : match);
-    text = text.replace(/\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g, match => placeholder('ip', match));
+    text = text.replace(/(?<![\w:])(?:[A-Fa-f0-9]{0,4}:){2,7}[A-Fa-f0-9:.]{0,45}(?:%[A-Za-z0-9_.-]{1,32})?(?![\w:])/g, match => isIP(match.split('%')[0], 6) && privateAddress(match) ? placeholder('ip', match) : match);
+    text = text.replace(/\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g, match => privateAddress(match) ? placeholder('ip', match) : match);
   }
   if (policy.device) text = text.replace(/\b(?:[A-Fa-f0-9]{2}[:-]){5}[A-Fa-f0-9]{2}\b/g, match => placeholder('device', match));
-  if (policy.phone) text = text.replace(/(?<![\w])\+?\d[\d ()-]{6,}\d(?![\w])/g, match => placeholder('phone', match));
+  if (policy.phone) text = text.replace(/(?<![\w])\+?\d(?:[ ()-]{0,2}\d){6,14}(?![\w])/g, (match, at, source) => phoneCandidate(match, at, source) ? placeholder('phone', match) : match);
   // Labels handle identifiers without universal syntax, including deliberately invalid/test IDs.
   const labels = /((?:身份证(?:号|号码)?|证件号|护照(?:号|号码)?|社保号|税号|passport|ssn|national[_ ]?id|银行卡(?:号)?|银行账号|收款账号|iban|card[_ ]?number|姓名|名字|住址|地址|出生日期|生日|经度|纬度|imei|imsi|微信号|qq号)["']?[\t ]{0,8}[:=：][\t ]{0,8}["']?)([^\s"'，。；;<>]{1,256})/gi;
   text = text.replace(labels, (all, prefix, sensitive) => {
