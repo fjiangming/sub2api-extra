@@ -9,6 +9,7 @@ const { NodeHttpHandler } = require('@smithy/node-http-handler');
 const { failure, failureResult } = require('./conversation-push-transport');
 const { jsonlChunks } = require('./conversation-jsonl-format');
 const { pacedBody } = require('./conversation-jsonl-flow');
+const { deliveryBody } = require('./conversation-envelope');
 
 const PART_BYTES = 8 * 1024 ** 2;
 
@@ -54,7 +55,7 @@ async function session(transport, policy, outerSignal, guard, operation) {
   try {
     if (baseUrl.protocol !== 'https:' && !(baseUrl.protocol === 'http:' && policy.allowPrivateNetwork)) throw failure('ADDRESS_BLOCKED');
     return await operation(request);
-  } catch (error) { return failureResult(error); }
+  } catch (error) { return failureResult(error.code === 'EXPORT_MEMORY' ? failure('EXPORT_MEMORY', true) : error); }
   finally { outerSignal?.removeEventListener('abort', abort); client.destroy(); httpAgent.destroy(); httpsAgent.destroy(); }
 }
 
@@ -106,7 +107,7 @@ async function sendJsonl(transport, policy, file, envelopes, signal, {
     };
     for await (const envelope of envelopes) {
       await checkpoint(); guard(); records++;
-      for (const chunk of jsonlChunks(envelope)) {
+      for (const chunk of jsonlChunks(deliveryBody(envelope))) {
         const source = Buffer.from(chunk); hash.update(source); bytes += source.length;
         if (bytes > file.bytes) throw failure('JSONL_CONTENT_CHANGED');
         for (let index = 0; index < source.length;) {

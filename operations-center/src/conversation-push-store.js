@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { z } = require('zod');
 const { modelAllowed } = require('./services/conversation-models');
 const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversation-sensitive');
+const { ENVELOPE_VERSION, formatBodies } = require('./services/conversation-envelope');
 const { defaults,normalizePolicy,parsePolicy,publicPolicy,targetHash,invalid } = require('./services/conversation-push-policy');
 
 const destinations = z.array(z.enum(['webhook','s3'])).min(1).max(2);
@@ -37,7 +38,7 @@ class ConversationPushStore {
         updated_at INTEGER NOT NULL,PRIMARY KEY(policy_version,code));`);
       const jobColumns=new Set(this.db.pragma('table_info(cl_push_jobs)').map(column=>column.name));
       for(const [name,definition] of [['delivery_source',"TEXT NOT NULL DEFAULT ''"],['delivery_fallback_reason',"TEXT NOT NULL DEFAULT ''"],
-        ['delivery_version',"TEXT NOT NULL DEFAULT ''"],['delivery_metadata','BLOB']]) {
+        ['delivery_version',"TEXT NOT NULL DEFAULT ''"],['delivery_metadata','BLOB'],['envelope_version','INTEGER NOT NULL DEFAULT 1']]) {
         if(!jobColumns.has(name))this.db.exec(`ALTER TABLE cl_push_jobs ADD COLUMN ${name} ${definition}`);
       }
       if(!this.db.prepare('SELECT 1 FROM cl_push_policies LIMIT 1').get()) this.db.prepare('INSERT INTO cl_push_policies VALUES(?,?,?)').run(1,this.archive.seal(defaults,'push-policy:1'),this.now());
@@ -83,11 +84,11 @@ class ConversationPushStore {
   copyReady(row,source,policy,pushPolicy=this.policy()) {
     return !this.blockedReason(row,source,policy,pushPolicy);
   }
-  jobId(row,policy,destination) { return hash([row.id,destination,targetHash(policy,destination),this.version(row,policy.source)]); }
+  jobId(row,policy,destination) { return hash([row.id,destination,targetHash(policy,destination),this.version(row,policy.source),ENVELOPE_VERSION]); }
   pendingCount() { return this.db.prepare("SELECT COUNT(*) n FROM cl_push_jobs WHERE status IN ('pending','running')").get().n; }
   insert(row,policy,destination,batchId) {
-    return this.db.prepare(`INSERT OR IGNORE INTO cl_push_jobs(id,record_id,destination,target_hash,source,content_version,batch_id,status,next_at,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,'pending',?,?,?)`).run(this.jobId(row,policy,destination),row.id,destination,targetHash(policy,destination),policy.source,this.version(row,policy.source),batchId,this.now(),this.now(),this.now()).changes;
+    return this.db.prepare(`INSERT OR IGNORE INTO cl_push_jobs(id,record_id,destination,target_hash,source,content_version,batch_id,status,next_at,created_at,updated_at,envelope_version)
+      VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?)`).run(this.jobId(row,policy,destination),row.id,destination,targetHash(policy,destination),policy.source,this.version(row,policy.source),batchId,this.now(),this.now(),this.now(),ENVELOPE_VERSION).changes;
   }
   selection(input) {
     const value=parse(previewSchema,input),policy=this.policy(),archivePolicy=this.archive.policy();
@@ -107,7 +108,7 @@ class ConversationPushStore {
         if(fallback)fallbackReasons[fallback]=(fallbackReasons[fallback]||0)+1;
       }
     }
-    const token=crypto.createHmac('sha256',this.archive.key).update(JSON.stringify([policy.version,archivePolicy.version,value.filter,targets,eligible.map(row=>[row.id,this.version(row,policy.source)])])).digest('hex');
+    const token=crypto.createHmac('sha256',this.archive.key).update(JSON.stringify([policy.version,archivePolicy.version,value.filter,targets,eligible.map(row=>[row.id,this.version(row,policy.source)]),ENVELOPE_VERSION])).digest('hex');
     const existing=this.db.prepare('SELECT status FROM cl_push_jobs WHERE id=?');
     let duplicates=0;
     for(const row of eligible)for(const target of targets)if(existing.get(this.jobId(row,policy,target)))duplicates++;
@@ -245,7 +246,7 @@ class ConversationPushStore {
     if(query.status&&!['pending','buffered','running','sent','failed','cancelled'].includes(query.status))throw invalid();
     const where=query.status?' WHERE j.status=?':'',args=query.status?[query.status]:[];
     const total=this.db.prepare('SELECT COUNT(*) n FROM cl_push_jobs j'+where).get(...args).n;
-    const items=this.db.prepare(`SELECT j.id,j.record_id,j.destination,j.source,j.delivery_source,j.delivery_fallback_reason,j.batch_id,j.status,j.attempts,j.next_at,j.created_at,j.updated_at,j.error_code,j.http_status,r.model,r.user_id
+    const items=this.db.prepare(`SELECT j.id,j.record_id,j.destination,j.source,j.delivery_source,j.delivery_fallback_reason,j.envelope_version,j.batch_id,j.status,j.attempts,j.next_at,j.created_at,j.updated_at,j.error_code,j.http_status,r.model,r.user_id
       FROM cl_push_jobs j JOIN cl_records r ON r.id=j.record_id${where} ORDER BY j.created_at DESC,j.id LIMIT 20 OFFSET ?`).all(...args,(page-1)*20);
     const stats=this.db.prepare('SELECT code,count,updated_at FROM cl_push_scan_stats WHERE policy_version=? ORDER BY code').all(this.policy().version);
     return {items,page,pages:Math.ceil(total/20),total,counts:this.db.prepare('SELECT status,COUNT(*) count FROM cl_push_jobs GROUP BY status').all(),
@@ -276,14 +277,13 @@ class ConversationPushStore {
       copy={source:'original',fallbackReason:'MASKED_READ_FAILED'};raw=open('original');
     }
     const {processing_pending,redaction_policy_hash,original,masked,...metadata}=row;
-    const checksum=value=>{const bytes=Buffer.from(value,'base64');return {bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')};};
-    return {schema:'sub2api.conversation.v1',delivery_id:job.id,source:copy.source,
-      ...(copy.fallbackReason?{requested_source:job.source,fallback_reason:copy.fallbackReason}:{}),
-      metadata:!pinnedCopy && job.delivery_metadata?this.archive.open(job.delivery_metadata,'push-metadata:'+job.id):
+    const version=job.envelope_version ?? ENVELOPE_VERSION;
+    const outputMetadata=!pinnedCopy && job.delivery_metadata?this.archive.open(job.delivery_metadata,'push-metadata:'+job.id):
       {...metadata,transport_diagnostics:metadata.transport_diagnostics?JSON.parse(metadata.transport_diagnostics):null,
-      inspection_warnings:JSON.parse(metadata.inspection_warnings),complete:Boolean(metadata.complete),encoding:copy.source==='original'?metadata.encoding:''},
-      body_encoding:'base64',request:raw.request,response:raw.response,frames:raw.frames,
-      checksums:{request:checksum(raw.request),response:checksum(raw.response),frames:raw.frames.map(frame=>checksum(frame.body))}};
+      inspection_warnings:JSON.parse(metadata.inspection_warnings),complete:Boolean(metadata.complete),encoding:copy.source==='original'?metadata.encoding:''};
+    return {schema:'sub2api.conversation.v'+version,delivery_id:job.id,source:copy.source,
+      ...(copy.fallbackReason?{requested_source:job.source,fallback_reason:copy.fallbackReason}:{}),
+      metadata:outputMetadata,...formatBodies(raw,{version,encoding:outputMetadata.encoding})};
   }
 }
 module.exports={ConversationPushStore,filterSchema};

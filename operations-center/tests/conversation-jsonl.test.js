@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const { fixture, event, rawRequest, rawResponse } = require('./conversation-logs-fixture');
+const { fixture, event, rawRequest, rawResponse, exportBodyBytes } = require('./conversation-logs-fixture');
 const { s3Receiver } = require('./conversation-s3-fixture');
 const { ConversationPushStore } = require('../src/conversation-push-store');
 const { ConversationPushService } = require('../src/services/conversation-push-service');
@@ -68,10 +68,10 @@ test('historical files group by date and model, preserve raw HTTP/SSE/WS bytes a
   await f.service.jsonl.tick(); await f.service.jsonl.tick(); await f.service.jsonl.tick();
   assert.equal(receiver.objects.size, 3); assert.equal(f.push.list().counts.find(row => row.status === 'sent').count, 4);
   const received = lines(receiver); assert.equal(received.length, 4);
-  for (const value of received) assert.equal(Buffer.from(value.request, 'base64').toString(), rawRequest);
-  assert(received.some(value => Buffer.from(value.response, 'base64').toString() === rawResponse));
-  assert(received.some(value => Buffer.from(value.response, 'base64').toString() === sse));
-  assert.deepEqual(received.find(value => value.metadata.protocol === 'WebSocket').frames, frames);
+  for (const value of received) {assert.deepEqual(Object.keys(value),['request','response']);if(!Array.isArray(value.request))assert.equal(value.request,rawRequest);}
+  assert(received.some(value => value.response === rawResponse));
+  assert(received.some(value => value.response === sse));
+  assert.deepEqual(received.find(value => Array.isArray(value.request)),{request:[rawRequest,'data:application/octet-stream;base64,AP8K'],response:[rawResponse]});
   const opus = receiver.completed.find(file => file.path.startsWith('/incoming-04-20260624/2026-06-25/Opus5-'));
   assert.equal(opus.body.toString().trimEnd().split('\n').length, 2);
   assert.match(opus.path, /Opus5-2026-06-25-\d{8}T\d{9}Z-[a-f0-9]{16}\.jsonl$/);
@@ -80,12 +80,12 @@ test('historical files group by date and model, preserve raw HTTP/SSE/WS bytes a
 
 test('rolling uses encoded UTF-8 bytes and never splits or truncates a log record', async t => {
   const receiver = await s3Receiver(); t.after(() => receiver.close());
-  const f = setup(t, { jsonlOptions: { maxFileBytes: 5000 } }); configure(f, receiver.url);
+  const f = setup(t, { jsonlOptions: { maxFileBytes: 900 } }); configure(f, receiver.url);
   for (let index = 0; index < 4; index++) f.store.ingest(event('rolling-' + index)); enqueue(f);
   for (let index = 0; index < 8; index++) await f.service.jsonl.tick();
   assert(receiver.completed.length >= 2); assert.equal(lines(receiver).length, 4);
-  for (const file of receiver.completed) { assert(file.body.length <= 5000); assert(file.body.at(-1) === 10); }
-  for (const row of lines(receiver)) assert.equal(Buffer.from(row.request, 'base64').toString(), rawRequest);
+  for (const file of receiver.completed) { assert(file.body.length <= 900); assert(file.body.at(-1) === 10); }
+  for (const row of lines(receiver)) assert.equal(row.request, rawRequest);
   assert.equal(new Set(receiver.completed.map(file => file.path)).size, receiver.completed.length);
 });
 
@@ -97,6 +97,27 @@ test('planner rolls at the actual 10 GB counter without 32-bit overflow', t => {
   f.store.ingest(event('ten-gb-second')); f.push.scanAutomatic(); assert(f.jsonl.assignOne());
   assert.equal(f.jsonl.get(file.id).status, 'pending'); assert.equal(f.jsonl.get(file.id).bytes, 9999999999);
   assert.equal(f.jsonl.list().files.length, 2);
+});
+
+test('an open legacy daily file is sealed before text records and both versions upload unchanged', async t => {
+  let now=Date.now();const receiver=await s3Receiver();t.after(()=>receiver.close());
+  const f=setup(t,{now:()=>now});configure(f,receiver.url,{automatic:true});
+  const old=event('old-daily',{at:now,model:'Opus5'});f.store.ingest(old);f.push.scanAutomatic();
+  f.push.db.prepare('UPDATE cl_push_jobs SET envelope_version=1 WHERE record_id=?').run(old.id);
+  assert(f.jsonl.assignOne());const legacy=f.jsonl.list().files[0];
+  assert.equal(legacy.status,'open');assert.equal(legacy.envelope_version,1);
+  const before=[];for await(const body of f.jsonl.envelopes(f.jsonl.get(legacy.id),()=>{},async()=>{})) before.push(body);
+  const legacyBytes=Buffer.from(before.map(body=>JSON.stringify(body)+'\n').join(''));
+  now+=10;const next=event('text-daily',{at:now,model:'Opus5'});f.store.ingest(next);assert.equal(f.push.scanAutomatic().created,1);
+  assert(f.jsonl.assignOne());assert.equal(f.jsonl.get(legacy.id).status,'pending');
+  const text=f.jsonl.list().files.find(file=>file.id!==legacy.id);assert.equal(text.envelope_version,3);assert.equal(text.status,'open');
+  assert.equal(text.day,legacy.day);assert.equal(text.model,legacy.model);assert.notEqual(text.object_key,legacy.object_key);
+  await f.service.jsonl.tick();assert.equal(receiver.completed.length,1);assert.deepEqual(receiver.completed[0].body,legacyBytes);
+  assert.equal(f.jsonl.get(legacy.id).sha256,crypto.createHash('sha256').update(legacyBytes).digest('hex'));
+  f.jsonl.flush();await f.service.jsonl.tick();assert.equal(receiver.completed.length,2);
+  const received=lines(receiver);assert.equal(received[0].schema,'sub2api.conversation.v1');assert.deepEqual(Object.keys(received[1]),['request','response']);
+  assert.equal(received[0].request,old.request);assert.equal(received[1].request,rawRequest);
+  assert.equal(f.push.list({status:'sent'}).total,2);
 });
 
 test('today stays open until flush or timezone rollover; a timer can flush low-volume logs', async t => {
@@ -120,7 +141,7 @@ test('real multipart upload uses bounded 8 MiB parts, per-part checksums and fin
   await f.service.jsonl.tick();
   const parts = receiver.requests.filter(row => row.method === 'PUT');
   assert.equal(parts.length, 2); assert.equal(parts[0].body.length, 8 * 1024 ** 2); assert(parts[1].body.length < parts[0].body.length);
-  assert.deepEqual(Buffer.from(lines(receiver)[0].request, 'base64'), request);
+  assert.deepEqual(exportBodyBytes(lines(receiver)[0],'request'), request);
   const file = f.jsonl.list().files[0]; assert.equal(file.status, 'sent'); assert.equal(file.bytes, receiver.completed[0].body.length);
   assert.equal(file.sha256, crypto.createHash('sha256').update(receiver.completed[0].body).digest('hex'));
 });
@@ -166,7 +187,7 @@ test('a lost Complete receipt retries byte-identical content at the same key wit
   now += 10001; await f.service.jsonl.tick();
   assert.equal(f.jsonl.get(file.id).status, 'sent'); assert.equal(receiver.completed.length, 2); assert.equal(receiver.objects.size, 1);
   assert.equal(receiver.completed[0].path, receiver.completed[1].path); assert.deepEqual(receiver.completed[0].body, receiver.completed[1].body);
-  assert.equal(JSON.parse([...receiver.objects.values()][0].toString()).delivery_id, f.push.list().items[0].id);
+  assert.deepEqual(JSON.parse([...receiver.objects.values()][0].toString()),{request:rawRequest,response:rawResponse});
 });
 
 test('masked JSONL includes marked original fallbacks and rebuilds staged copies after rule changes', async t => {
@@ -176,15 +197,15 @@ test('masked JSONL includes marked original fallbacks and rebuilds staged copies
   f.push.scanAutomatic(); await f.service.jsonl.tick(); assert.equal(f.push.list().total, 2);
   f.jsonl.flush(); await f.service.jsonl.tick();
   assert.equal(lines(receiver).length, 2);
-  const safe=lines(receiver).find(row=>row.metadata.id===event('masked-jsonl').id),failed=lines(receiver).find(row=>row.metadata.id===event('bad-mask').id);
-  assert.equal(safe.source,'masked');assert(!Buffer.from(safe.request, 'base64').toString().includes('alice@example.com'));
-  assert.equal(failed.source,'original');assert.equal(failed.requested_source,'masked');assert.equal(failed.fallback_reason,'PROCESSING_FAILED');
-  assert.equal(failed.response,Buffer.from('{invalid').toString('base64'));
+  const safe=lines(receiver).find(row=>row.response!=='{invalid'),failed=lines(receiver).find(row=>row.response==='{invalid');
+  assert.deepEqual(Object.keys(safe),['request','response']);assert(!safe.request.includes('alice@example.com'));
+  assert.equal(failed.request,rawRequest);
+  assert.equal(failed.response,'{invalid');
   f.store.ingest(event('outdated-mask')); f.push.scanAutomatic(); await f.service.jsonl.tick();
   f.store.configure({ ...f.store.policy(), email: !f.store.policy().email }); f.jsonl.flush(); await f.service.jsonl.tick();
   assert.equal(lines(receiver).length, 3);assert(f.jsonl.list().files.some(file=>file.status==='cancelled'&&file.error_code==='REDACTION_OUTDATED'));
-  const outdated=lines(receiver).find(row=>row.metadata.id===event('outdated-mask').id);
-  assert.equal(outdated.source,'original');assert.equal(outdated.fallback_reason,'REDACTION_OUTDATED');assert.equal(outdated.request,event().request);
+  const outdated=lines(receiver).find(row=>row.request===rawRequest&&row.response===rawResponse);
+  assert.deepEqual(Object.keys(outdated),['request','response']);
 });
 
 test('buffered members do not exhaust the pending queue or prematurely split a daily model file', async t => {
@@ -204,7 +225,8 @@ test('exclusion after staging discards the old file and requeues only permitted 
   f.store.ingest(event('allow', { user_id: 2 })); f.store.ingest(event('deny', { user_id: 3 })); f.push.scanAutomatic(); await f.service.jsonl.tick();
   f.store.configure({ ...f.store.policy(), excludedUserIds: [3] }); f.jsonl.flush();
   await f.service.jsonl.tick(); await f.service.jsonl.tick();
-  assert.equal(lines(receiver).length, 1); assert.equal(lines(receiver)[0].metadata.user_id, 2);
+  assert.equal(lines(receiver).length, 1); assert.deepEqual(Object.keys(lines(receiver)[0]),['request','response']);
+  assert.equal(f.push.list({status:'sent'}).items[0].user_id,2);
   assert(f.jsonl.list().files.some(file => file.status === 'cancelled')); assert.equal(f.push.list({ status: 'cancelled' }).items[0].error_code, 'COLLECTION_EXCLUDED');
 });
 
@@ -250,7 +272,7 @@ test('production supervisor uploads in a child, recovers after a crash and keeps
   const child = f.service.child; child.kill('SIGKILL'); await until(() => f.service.child && f.service.child !== child && f.service.ready);
   f.service.flush(); await until(() => f.jsonl.get(original.id).status === 'sent');
   assert.equal(lines(receiver).length, 1); assert.equal(f.service.status({}).workerReady, true);
-  assert.equal(Buffer.from(lines(receiver)[0].request, 'base64').toString(), rawRequest);
+  assert.equal(lines(receiver)[0].request, rawRequest);
 });
 
 test('administrator policy requests finish while the production child is waiting on an S3 part', async t => {

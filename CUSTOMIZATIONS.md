@@ -1,5 +1,44 @@
 # 个性化功能维护台账
 
+## 2026-11-19：发布精简正文与后台解压
+
+用户明确要求提交 GitHub。本次仅将下述“精简对外正文并后台解压”和“导出与推送直接输出解码文本”涉及的运营中心实现、界面、测试、验证脚本和接入说明发布到 main；最终新输出仅有 request / response，阶段性的 v2 表示保留为兼容旧任务的内部路径。以下实现记录中的“未提交 / 推送”描述当轮状态，本次授权源码发布及 GitHub 构建核验。维护台账只暂存本节与这两节，保留附属容器部署、生产只读排查、域名迁移 / 备份、其他模块和独立演示等无关本地差异。
+
+沿用刚完成的 npm run check、运营中心完整 642 项测试（0 失败 / 跳过）及下载 / 推送两套正式 Chrome 四布局验证，不改已验证源码。提交前核对 origin/main、暂存范围及差异空白，提交后核查现有 GitHub Actions 的 Linux 测试、双架构镜像构建和发布。无需新增服务器配置；本轮不连接、更新、重启或重新配置服务器，不启用外部日志推送，不修改主站、采集器、原加密归档、脱敏引擎或计费。具体提交与远端结果以本次最终回复为准。
+
+## 2026-11-19：精简对外正文并后台解压
+
+用户确认继续修改：新下载 / 新投递的 JSON 仅保留 `request`、`response`，去除外发 schema、用户元数据、来源、处理状态和摘要。运营中心内部继续保留这些信息及脱敏 / 原文回退、排除、范围与恢复保护；不改主站、采集器、加密归档、计费，不提交 / 推送或部署，不读取用户真实下载正文，保留无关改动。
+
+- `src/services/conversation-envelope.js`：内部表示版本升为 3，仅用于稳定任务身份和序列化选择，不出现在新外发正文。普通两侧保留原 UTF-8 字符串，JSON / SSE 不解析重排。gzip / br / deflate / zstd 在独立后台受内存预算限制解压，保留 BOM 与数值写法；检查压缩输入消费长度，无法解压 / 非法文本 / 真正二进制以明确的 `data:application/octet-stream[;content-encoding=...];base64,...` 字符串保存完整原字节，不截断或跳过。内存不足明确失败，不因预算变化改成另一份输出。WS 两侧为按各自方向排序的消息字符串数组，非空原两侧正文作为首项，帧正文均保留；时间 / binary 等采集元数据留内部。
+- `src/conversation-jsonl-store.js`、`src/services/conversation-push-transport.js`、`conversation-jsonl-transport.js`、`conversation-export-worker.js`：只在对外序列化处投影精简正文，分卷字节 / 摘要按实际输出计算；副本冻结、回退统计、Webhook 幂等头、S3 key / 元数据、上传分片 / 校验仍用内部状态。已有 v1 / v2 排队、重试和文件继续精确旧格式，不与新格式混卷，不自动重发历史；沿用既有格式版本列，不复制历史正文。
+- `public/conversation-push-ui.js`、`index.html`：说明两字段正文、压缩解码和无法解码字节表示，实际副本在本地状态查看，更新输出模块缓存版本；前轮导出按钮的文本正文标识保留。`scripts/conversation-logs-live-browser-check.cjs`、`conversation-push-browser-check.cjs`：实际下载 / HTTP / S3 / JSONL 检查仅两键，以虚构正文和本地任务状态核验顺序、回退及原诊断，幂等标识从请求头检查，保留原始单侧下载校验。
+- `tests/conversation-envelope.test.js`、`conversation-logs-fixture.js`：覆盖四种压缩、BOM / 数值精度 / SSE 不变、WS 双向及空帧 / 二进制、坏压缩 / 未消费尾部 / 非法 UTF-8 无损回退、内存不足不切换输出、旧 v1 / v2 原样序列化；共享读取辅助同时兼容内部表示和两字段正文。`conversation-export.test.js`、`conversation-push.test.js`、`conversation-jsonl.test.js`、`conversation-jsonl-resume.test.js`：真实下载 / HTTP / S3 解压正文、精简字段、内部回退 / 完整性状态保持，以及旧 v1 / v2 重开与续传字节一致；滚动用例按精简后的实际行字节调整测试上限，S3 key 断言解析 pathname 以兼容 SDK 查询参数。
+- `README.md`、`docs/conversation-logs.md`、`conversation-jsonl-push.md`：统一新的两字段接收规则、WS 数组 / 特殊字节 data URI、后台解压和预算不足中止、内外诊断 / 回退边界、旧任务升级 / 重试 / 封卷 / 续传及幂等约定。现有 1 GiB / 1 核配置与限速不变，无新增强制服务器配置。
+
+验证：npm run check 与运营中心完整 **642 项测试全部通过，0 失败 / 跳过**（约 175 秒），差异空白检查通过。真实 HTTP / S3 校验外发恰好两字段、gzip SSE 完整文本、幂等头 / key 与原归档不变；四种压缩、异常字节、WS 空帧 / 二进制和内存不足均有专项。旧 v1 / v2 单条重试以及真实多分片跨重开续传保持旧版本和已确认前缀，不重复上传首片。
+
+正式 Chrome / Playwright 的下载和推送两套流程均在 1440px、390px、320px、深色偏好完整通过，无页面脚本错误、外网请求或布局溢出；截图目录 `sub2api-conversation-browser-k8lpk4`、`sub2api-push-browser-d6oSrd`，两套桌面及 320px 均已视觉复核。仅使用临时虚构数据及 loopback 接收器，没有读取生产正文、调用真实模型或外部 Bucket，不将本地验证当作生产性能实测。
+
+新独立预览 `http://127.0.0.1:19952/preview` 已启动（PID 26776），healthz 200，已核验新静态模块；保留已有预览。未提交 / 推送 GitHub、发布镜像、连接或部署服务器，线上尚未生效；本次解压和精简只在运营中心独立后台，不改变主站请求路径、采集器、原加密归档或脱敏引擎。
+
+## 2026-11-19：导出与推送直接输出解码文本
+
+用户要求下载和推送直接使用已解码内容。本轮仅修改本地运营中心的输出表示，不改变主站、采集器、加密归档、脱敏 / 原文回退和计费，不连接或部署服务器、不提交 / 推送 GitHub，不读取或转换用户下载文件中的真实正文，保留全部无关改动。
+
+- `src/services/conversation-envelope.js`（新增）、`src/conversation-push-store.js`：新导出 / 新推送统一 `sub2api.conversation.v2`，严格有效 UTF-8 的 Request / Response / 文本 WS 帧直接输出字符串，不 JSON.parse / 重排正文，保留大整数、数值写法、BOM、换行、SSE 分隔和原字段；每侧 / 每帧标记编码。压缩响应、二进制帧及无效 UTF-8 保留完整 Base64 并列原因，不强行转换或插入替换字符，不解压、不截断。校验摘要始终针对可按标记还原的原始字节，副本回退及异常标记保持。
+- `src/conversation-push-store.js`、`src/conversation-jsonl-store.js`：仅加法增加任务和文件的 envelope 版本，已有任务默认 v1，新任务显式 v2；新批次 ID 和预览票据包含表示版本。单条重试与跨重启保持原版本，同日 / 同模型旧开放卷遇新版本先封卷，不混合格式，不改变已确认前缀。旧 v1 汇总 / 分片继续精确旧序列化，不重写历史正文或强制全量回填。
+- `tests/conversation-envelope.test.js`（新增）、`tests/conversation-logs-fixture.js`：增加编码 / 原字节消费辅助，覆盖文本精确还原、JSONL 单行、Unicode / BOM / SSE / 数字写法、压缩 / 无效 UTF-8 / 二进制回退、空正文和 v1 兼容。
+- `tests/conversation-export.test.js`、`conversation-push.test.js`、`conversation-jsonl.test.js`、`conversation-jsonl-resume.test.js`、`conversation-inspection.test.js`：更新真实下载 / Webhook / S3 JSON / JSONL 的文本断言，保留脱敏、原文回退和摘要验证。新增两种单条目标在旧表升级后 v1 重试整体相等、新历史批次使用 v2，以及旧日卷遇新版本先封卷且完整字节 / 摘要不变。真实分片用例将虚构大文本从 7 MiB 调为 9 MiB，保持去掉 Base64 膨胀后仍跨越第二片；覆盖已有首片成功、删除版本列模拟旧表后迁移重开、沿用原上传 ID 与不重复上传首片。
+- `public/conversation-export-ui.js`、`conversation-push-ui.js`、`index.html`：导出按钮标明文本正文，推送说明保留无损二进制例外，更新两项静态缓存版本。`scripts/conversation-logs-live-browser-check.cjs`、`conversation-push-browser-check.cjs` 同步 v2 / 文本读取断言，原始 `.raw` 字节下载仍独立校验；推送等待超时附不含正文与凭据的队列 / 文件状态诊断，不延长等待窗口或隐藏失败。`package.json` 将新增模块与测试纳入语法检查。
+- `README.md`、`docs/conversation-logs.md`、`conversation-jsonl-push.md`：同步 v2 字符串及逐字段编码、JSONL 转义、原字节摘要、原文回退、旧任务 / 续传升级和手动历史重发边界。现有 1 GiB / 1 核、下载 / 上传限速、独立低优先级进程、内存保护和采集优先保持，无新增强制服务器配置。
+
+验证：运营中心完整 **635 项测试全部通过，0 失败 / 跳过**（约 172 秒），npm run check 通过。包含 4 项新表示测试、2 项新增旧格式升级 / 封卷集成，以及真实下载 / HTTP / S3 / 多分片 / SQLite 重开、字节及摘要、脱敏回退、排除 / 取消 / 内存 / 采集优先保护。无主站源码、采集器、归档 / 脱敏引擎或依赖版本变更。
+
+正式 Chrome / Playwright 的下载及推送均完整通过 1440px、390px、320px 和深色模式，实际接收常规 Request / Response / 文本 WS 为 v2 字符串，原始单侧下载仍逐字节一致，原文回退与完整性异常保留，无最终页面脚本错误、外网请求或新增布局溢出。首轮推送手机布局在原文回退阶段有一次 20 秒等待超时；保留失败事实，补充诊断后重跑四种布局全部通过，未确定或宣称已修复该次瞬时超时的根因。截图目录 `sub2api-conversation-browser-sIhwUd`、`sub2api-push-browser-eM9uvS`，两套桌面和 320px 截图均已视觉复核。
+
+已启动独立虚构数据预览 `http://127.0.0.1:19951/preview`（PID 43012），healthz 200，新静态模块包含文本正文标识；保留此前预览。所有验证仅临时虚构数据与 loopback 接收器，无生产正文、真实模型或外部 Bucket；不把本地测试等同生产性能实测。本轮未提交 / 推送 GitHub、发布镜像、连接 / 部署或变更服务器，线上尚未生效。
+
 ## 2026-11-19：发布导出与推送原文回退
 
 用户明确要求提交 GitHub。本次仅发布下一节“导出与推送脱敏不可用时回退原文”对应的运营中心实现、界面、测试、验证脚本和说明到 main；该节的“未提交 / 推送”描述实现当轮状态，本次授权进行源码发布和 GitHub 构建核验。维护台账仅选择本节和该功能节，不夹带附属容器部署记录、域名迁移 / 备份、只读生产报告、其他模块或独立演示等无关本地差异。

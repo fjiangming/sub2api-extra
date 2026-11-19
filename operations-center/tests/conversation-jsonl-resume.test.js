@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
-const { fixture, event } = require('./conversation-logs-fixture');
+const { fixture, event, exportBodyBytes } = require('./conversation-logs-fixture');
 const { s3Receiver } = require('./conversation-s3-fixture');
 const { ConversationLogStore } = require('../src/conversation-log-store');
 const { ConversationPushStore } = require('../src/conversation-push-store');
@@ -35,7 +35,7 @@ function setup(t, receiver, options = {}) {
   return f;
 }
 function large(f, seed = 'resume') {
-  const request = Buffer.from(JSON.stringify({ model: 'Opus5', messages: [{ role: 'user', content: 'x'.repeat(7 * 1024 ** 2) }] }));
+  const request = Buffer.from(JSON.stringify({ model: 'Opus5', messages: [{ role: 'user', content: 'x'.repeat(9 * 1024 ** 2) }] }));
   const row = event(seed, { model: 'Opus5', request: request.toString('base64') }); f.store.ingest(row); f.enqueue(); return row;
 }
 const puts = receiver => receiver.requests.filter(row => row.method === 'PUT');
@@ -55,8 +55,8 @@ test('original fallback choice, reason and multipart prefix survive a process an
   await f.restart();f.advance();await f.service.jsonl.tick();
   assert.equal(f.jsonl.get(file.id).status,'sent');assert.equal(receiver.completed.length,1);
   assert.equal(puts(receiver).filter(entry=>entry.query.get('partNumber')==='1').length,1);
-  const copy=JSON.parse(receiver.completed[0].body.toString());assert.equal(copy.source,'original');assert.equal(copy.requested_source,'masked');
-  assert.equal(copy.fallback_reason,'COPY_UNAVAILABLE');assert.equal(copy.request,row.request);assert.equal(copy.response,row.response);
+  const copy=JSON.parse(receiver.completed[0].body.toString());assert.deepEqual(Object.keys(copy),['request','response']);
+  assert.deepEqual(exportBodyBytes(copy,'request'),Buffer.from(row.request,'base64'));assert.deepEqual(exportBodyBytes(copy,'response'),Buffer.from(row.response,'base64'));
   assert.equal(f.jsonl.get(file.id).bytes,receiver.completed[0].body.length);
 });
 async function until(predicate) {
@@ -64,18 +64,24 @@ async function until(predicate) {
   while (!predicate()) { assert(Date.now() < end, 'background progress timed out'); await new Promise(resolve => setTimeout(resolve, 20)); }
 }
 
-test('confirmed multipart progress survives database reopen and skips the first network part', async t => {
+for (const legacyVersion of [1,2]) test(`legacy v${legacyVersion} multipart progress survives upgrade and skips the first network part`, async t => {
   let fail = true;
   const receiver = await s3Receiver({ beforeRequest: (entry, res) => fail && entry.query.get('partNumber') === '2' ? reject(res) : undefined });
   t.after(() => receiver.close()); const f = setup(t, receiver); const row = large(f);
+  f.push.db.prepare('UPDATE cl_push_jobs SET envelope_version=?').run(legacyVersion);
   await f.service.jsonl.tick(); const file = f.jsonl.list().files[0], saved = f.jsonl.get(file.id);
   assert.equal(saved.status, 'pending'); assert.equal(saved.uploaded_parts, 1); assert.equal(saved.uploaded_bytes, 8 * 1024 ** 2);
   assert.equal(f.jsonl.parts(saved).length, 1); assert.equal(receiver.completed.length, 0);
+  if(legacyVersion===1) {
+    f.push.db.exec('ALTER TABLE cl_push_jobs DROP COLUMN envelope_version');
+    f.jsonl.db.exec('ALTER TABLE cl_push_jsonl_files DROP COLUMN envelope_version');
+  }
   await f.restart(); fail = false; f.advance(); await f.service.jsonl.tick();
   const done = f.jsonl.get(file.id); assert.equal(done.status, 'sent'); assert.equal(done.uploaded_parts, 2);
   assert.equal(creates(receiver).length, 1); assert.deepEqual(puts(receiver).map(row => row.query.get('partNumber')), ['1','2','2']);
   assert(puts(receiver).every(entry => entry.query.get('uploadId') === saved.upload_id));
-  assert.equal(JSON.parse(receiver.completed[0].body).request, row.request);
+  assert.equal(JSON.parse(receiver.completed[0].body).request,legacyVersion===1?row.request:Buffer.from(row.request,'base64').toString());
+  assert.equal(JSON.parse(receiver.completed[0].body).schema,'sub2api.conversation.v'+legacyVersion);
   assert.equal(done.sha256, crypto.createHash('sha256').update(receiver.completed[0].body).digest('hex'));
   assert.equal(f.jsonl.parts(done).length, 0);
 });

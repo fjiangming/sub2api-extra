@@ -27,4 +27,12 @@ function fixture(options = {}) {
 function removeMetadata(store) {
   store.db.exec('DROP TRIGGER cl_metadata_insert; DROP TRIGGER cl_metadata_update; DROP TRIGGER cl_metadata_delete; DROP TABLE cl_record_metadata');
 }
-module.exports = {fixture,event,id,rawRequest,rawResponse,removeMetadata};
+function exportBodyBytes(envelope, side, index) {
+  const value = side === 'frames' ? envelope.frames[index].body : envelope[side];
+  if (!envelope.schema && !envelope.body_encoding && typeof value === 'string') return value.startsWith('data:application/octet-stream;') ?
+    Buffer.from(value.slice(value.indexOf(',')+1),'base64') : Buffer.from(value,'utf8');
+  const encoding = side === 'frames' ? envelope.body_encodings?.frames[index] : envelope.body_encodings?.[side];
+  if (!encoding && envelope.body_encoding !== 'base64' || encoding && !['utf-8','base64'].includes(encoding)) throw new Error('Unknown exported body encoding');
+  return Buffer.from(value, encoding === 'utf-8' ? 'utf8' : 'base64');
+}
+module.exports = {fixture,event,id,rawRequest,rawResponse,removeMetadata,exportBodyBytes};

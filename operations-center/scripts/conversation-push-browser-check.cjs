@@ -39,7 +39,12 @@ async function main() {
           assert.equal(result.overflow,false,name+' overflow');assert.deepEqual(result.controls,[]);
         };
         const waitJobs=async(status,count)=>{
-          await until(()=>preview.push.store.list().counts.some(row=>row.status===status&&row.count===count));
+          try {await until(()=>preview.push.store.list().counts.some(row=>row.status===status&&row.count===count));}
+          catch(error) {
+            const state=preview.push.status({}),files=state.jsonl.files.map(({id,status,records,error_code,pause_reason})=>({id,status,records,error_code,pause_reason}));
+            error.message+=` (${name}, expected ${status}=${count}): `+JSON.stringify({counts:state.counts,files,workerReady:state.workerReady,lastError:state.lastError,
+              message:await page.locator('#clp-message').textContent()});throw error;
+          }
           await page.locator('[data-clp-action=refresh]').click();
         };
         await page.goto(`http://127.0.0.1:${preview.port}/preview`);await page.locator('#cl-tab-push').click();await field('enabled').waitFor();
@@ -58,8 +63,10 @@ async function main() {
         await layout();await shot('configuration');
         const row=event(name+'-automatic');preview.fixture.store.ingest(row);await waitJobs('sent',2);
         await page.locator('#clp-jobs').filter({hasText:'已固定脱敏副本'}).waitFor();
-        const sent=receipts.filter(item=>item.body.schema==='sub2api.conversation.v1');assert.equal(sent.length,2,JSON.stringify({schemas:receipts.map(item=>item.body.schema),counts:preview.push.store.list().counts}));assert(sent.every(item=>!Buffer.from(item.body.request,'base64').toString().includes('alice@example.com')));
-        assert(sent.some(item=>item.headers.authorization?.startsWith('AWS4-HMAC-SHA256')));assert(sent.some(item=>item.headers['idempotency-key']===item.body.delivery_id));
+        const sent=receipts.filter(item=>Object.hasOwn(item.body,'request'));assert.equal(sent.length,2);
+        for(const item of sent){assert.deepEqual(Object.keys(item.body),['request','response']);assert(!item.body.request.includes('alice@example.com'));}
+        assert(sent.some(item=>item.headers.authorization?.startsWith('AWS4-HMAC-SHA256')));
+        assert(sent.some(item=>preview.push.store.list().items.some(job=>job.id===item.headers['idempotency-key'])));
         await page.locator('#clp-history [name=search]').fill(preview.raw.id);await page.locator('#clp-preview').click();await page.locator('#clp-acknowledge').waitFor();
         assert.equal(await page.locator('#clp-enqueue').isDisabled(),true);await page.locator('#clp-acknowledge').check();await layout();await shot('preview');
         await page.locator('#clp-enqueue').dblclick();await waitJobs('sent',4);assert.equal(preview.push.store.list().batches.length,1);
@@ -97,14 +104,15 @@ async function main() {
         } finally {await page.unroute(stateRoute);}
         await page.locator('[data-clp-action=refresh]').click();
         await page.locator('#clp-flush').click();await waitJobs('sent',9);
-        const jsonlFiles=jsonlTarget.completed.filter(file=>JSON.parse(file.body.toString().split('\n')[0]).schema==='sub2api.conversation.v1');
+        const jsonlFiles=jsonlTarget.completed.filter(file=>Object.hasOwn(JSON.parse(file.body.toString().split('\n')[0]),'request'));
         assert.equal(jsonlFiles.length,2);assert.deepEqual(jsonlFiles.map(file=>file.body.toString().trimEnd().split('\n').length).sort(),[1,2]);
-        for(const file of jsonlFiles){assert(file.path.endsWith('.jsonl'));for(const line of file.body.toString().trimEnd().split('\n'))assert(!Buffer.from(JSON.parse(line).request,'base64').toString().includes('alice@example.com'));}
+        for(const file of jsonlFiles){assert(file.path.endsWith('.jsonl'));for(const line of file.body.toString().trimEnd().split('\n')){const body=JSON.parse(line);assert.deepEqual(Object.keys(body),['request','response']);assert(!body.request.includes('alice@example.com'));}}
         rejectJsonlPart=true;preview.fixture.store.ingest(event(name+'-jsonl-failed',{model:'Opus5'}));
         await until(()=>preview.push.store.list().counts.some(row=>row.status==='buffered'&&row.count===1));await page.locator('#clp-flush').click();await waitJobs('failed',1);
         await page.locator('[data-clp-file-retry]').waitFor();await layout();await shot('jsonl-failed');
         rejectJsonlPart=false;await page.locator('[data-clp-file-retry]').click();await waitJobs('sent',10);assert.equal(jsonlTarget.uploads.size,0);
-        const partial=event(name+'-scope-partial',{complete:false,reason:'read_error',model:'Opus5'});preview.fixture.store.ingest(partial);
+        const partial=event(name+'-scope-partial',{complete:false,reason:'read_error',model:'Opus5',
+          request:Buffer.from(JSON.stringify({model:'Opus5',input:'alice@example.com',marker:'partial-'+name})).toString('base64')});preview.fixture.store.ingest(partial);
         await until(()=>preview.push.store.list().skipped.some(row=>row.code==='INCOMPLETE_CAPTURE'));
         await page.locator('[data-clp-action=refresh]').click();await page.locator('#clp-skipped').filter({hasText:'传输完整性未确认'}).waitFor();
         await page.locator('#clp-history [name=search]').fill(partial.id);await page.locator('#clp-preview').click();
@@ -112,15 +120,15 @@ async function main() {
         await field('captureScope').selectOption('all');await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
         await page.locator('#clp-preview').click();await page.locator('#clp-acknowledge').waitFor();await page.locator('#clp-acknowledge').check();
         await page.locator('#clp-enqueue').click();await waitJobs('sent',11);
-        const partialBody=jsonlTarget.completed.flatMap(file=>file.body.toString().trimEnd().split('\n').map(JSON.parse)).find(body=>body.metadata?.id===partial.id);
-        assert.equal(partialBody.metadata.complete,false);assert.equal(partialBody.metadata.reason,'read_error');assert.equal(partialBody.source,'masked');
-        assert(!Buffer.from(partialBody.request,'base64').toString().includes('alice@example.com'));
+        const partialBody=jsonlTarget.completed.flatMap(file=>file.body.toString().trimEnd().split('\n').map(JSON.parse)).find(body=>body.request?.includes('partial-'+name));
+        assert.deepEqual(Object.keys(partialBody),['request','response']);assert(!partialBody.request.includes('alice@example.com'));
+        assert.equal(preview.fixture.store.db.prepare('SELECT reason FROM cl_records WHERE id=?').get(partial.id).reason,'read_error');
         const fallback=event(name+'-original-fallback',{model:'Opus5',response:Buffer.from('{invalid').toString('base64')});preview.fixture.store.ingest(fallback);
         await until(()=>preview.push.store.list().counts.some(row=>row.status==='buffered'&&row.count===1));
         await page.locator('#clp-flush').click();await waitJobs('sent',12);
-        const fallbackBody=jsonlTarget.completed.flatMap(file=>file.body.toString().trimEnd().split('\n').map(JSON.parse)).find(body=>body.metadata?.id===fallback.id);
-        assert.equal(fallbackBody.source,'original');assert.equal(fallbackBody.requested_source,'masked');assert.equal(fallbackBody.fallback_reason,'PROCESSING_FAILED');
-        assert.equal(fallbackBody.request,fallback.request);assert.equal(fallbackBody.response,fallback.response);
+        const fallbackBody=jsonlTarget.completed.flatMap(file=>file.body.toString().trimEnd().split('\n').map(JSON.parse)).find(body=>body.response==='{invalid');
+        assert.deepEqual(Object.keys(fallbackBody),['request','response']);
+        assert.equal(fallbackBody.request,Buffer.from(fallback.request,'base64').toString());assert.equal(fallbackBody.response,Buffer.from(fallback.response,'base64').toString());
         await page.locator('[data-clp-action=refresh]').click();await page.locator('#clp-skipped').filter({hasText:'回退原文'}).waitFor();
         await page.locator('#clp-history [name=search]').fill(fallback.id);await page.locator('#clp-preview').click();
         await page.locator('#clp-preview-result').filter({hasText:'回退原文 1 条'}).waitFor();await layout();await shot('original-fallback');

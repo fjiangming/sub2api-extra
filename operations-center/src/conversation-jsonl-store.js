@@ -5,6 +5,7 @@ const { targetHash, invalid } = require('./services/conversation-push-policy');
 const { dayAt, objectKey, jsonlBytes } = require('./services/conversation-jsonl-format');
 const { modelAllowed } = require('./services/conversation-models');
 const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversation-sensitive');
+const { deliveryBody } = require('./services/conversation-envelope');
 
 class ConversationJsonlStore {
   constructor(push, { maxFileBytes, memoryBudget = () => Infinity } = {}) {
@@ -34,7 +35,7 @@ class ConversationJsonlStore {
         INSERT OR IGNORE INTO cl_push_jsonl_control VALUES(1,0);`);
       const columns = new Set(this.db.pragma('table_info(cl_push_jsonl_files)').map(row => row.name));
       for (const [name, definition] of [['upload_version','INTEGER NOT NULL DEFAULT 0'],['uploaded_bytes','INTEGER NOT NULL DEFAULT 0'],
-        ['uploaded_parts','INTEGER NOT NULL DEFAULT 0'],['pause_reason',"TEXT NOT NULL DEFAULT ''"],['first_at','INTEGER NOT NULL DEFAULT 0']]) {
+        ['uploaded_parts','INTEGER NOT NULL DEFAULT 0'],['pause_reason',"TEXT NOT NULL DEFAULT ''"],['first_at','INTEGER NOT NULL DEFAULT 0'],['envelope_version','INTEGER NOT NULL DEFAULT 1']]) {
         if (!columns.has(name)) this.db.exec(`ALTER TABLE cl_push_jsonl_files ADD COLUMN ${name} ${definition}`);
       }
       this.db.exec(`CREATE TABLE IF NOT EXISTS cl_push_jsonl_parts(
@@ -51,7 +52,7 @@ class ConversationJsonlStore {
   get(id) { return this.db.prepare('SELECT * FROM cl_push_jsonl_files WHERE id=?').get(id); }
   list() {
     const files = this.db.prepare(`SELECT id,model,day,object_key,source,status,bytes,records,attempts,created_at,updated_at,error_code,http_status,sha256,
-      uploaded_bytes,uploaded_parts,pause_reason,first_at
+      uploaded_bytes,uploaded_parts,pause_reason,first_at,envelope_version
       FROM cl_push_jsonl_files ORDER BY created_at DESC,id DESC LIMIT 30`).all();
     const backlog = this.db.prepare(`SELECT COUNT(*) files,COALESCE(SUM(bytes),0) bytes,COALESCE(SUM(records),0) records,
       MIN(NULLIF(first_at,0)) firstAt,MIN(created_at) queuedAt FROM cl_push_jsonl_files WHERE status IN ('open','pending','running','failed')`).get();
@@ -83,10 +84,10 @@ class ConversationJsonlStore {
       this.db.prepare("UPDATE cl_push_jobs SET status='cancelled',error_code=?,updated_at=? WHERE id=? AND status='pending'").run(valid.cancel, this.now(), job.id);
       return true;
     }
-    let envelope;
-    try { this.admit(job); envelope = this.push.envelope(job); }
+    let envelope, bytes;
+    try { this.admit(job); envelope = this.push.envelope(job); bytes = jsonlBytes(deliveryBody(envelope)); }
     catch (error) { this.defer(job, error.code === 'EXPORT_MEMORY' ? 'EXPORT_MEMORY' : 'COPY_UNAVAILABLE'); return true; }
-    const bytes = jsonlBytes(envelope), limit = this.maxFileBytes ?? policy.s3.jsonl.maxFileBytes;
+    const limit = this.maxFileBytes ?? policy.s3.jsonl.maxFileBytes;
     if (bytes > limit) { this.defer(job, 'JSONL_RECORD_TOO_LARGE', false); return true; }
     const day = dayAt(envelope.metadata.at, policy.s3.jsonl.timezone);
     const metadata = this.archive.seal(envelope.metadata, 'jsonl-metadata:' + job.id);
@@ -100,12 +101,13 @@ class ConversationJsonlStore {
       if (current?.status !== 'pending' || this.push.policy().version !== policy.version || this.push.validJob(job).cancel) return true;
       let file = this.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE target_hash=? AND source=? AND model=? AND day=? AND status='open'")
         .get(job.target_hash, job.source, envelope.metadata.model, day);
+      if (file && file.envelope_version !== job.envelope_version) { this.seal(file.id); file = null; }
       if (file && file.bytes + bytes > limit) { this.seal(file.id); file = null; }
       if (!file) {
         const id = crypto.randomBytes(16).toString('hex'), at = this.now();
-        this.db.prepare(`INSERT INTO cl_push_jsonl_files(id,target_hash,source,model,day,object_key,policy_version,archive_version,status,created_at,updated_at)
-          VALUES(?,?,?,?,?,?,?,?,'open',?,?)`).run(id, job.target_hash, job.source, envelope.metadata.model, day,
-          objectKey(policy.s3.prefix, day, envelope.metadata.model, at, id), policy.version, this.archive.policy().version, at, at);
+        this.db.prepare(`INSERT INTO cl_push_jsonl_files(id,target_hash,source,model,day,object_key,policy_version,archive_version,status,created_at,updated_at,envelope_version)
+          VALUES(?,?,?,?,?,?,?,?,'open',?,?,?)`).run(id, job.target_hash, job.source, envelope.metadata.model, day,
+          objectKey(policy.s3.prefix, day, envelope.metadata.model, at, id), policy.version, this.archive.policy().version, at, at, job.envelope_version);
         file = this.get(id);
       }
       const cutoff = this.db.prepare('SELECT flush_before FROM cl_push_jsonl_control WHERE singleton=1').get().flush_before;
@@ -149,8 +151,8 @@ class ConversationJsonlStore {
     if (policy.source !== file.source || policy.s3.format !== 'jsonl' || targetHash(policy, 's3') !== file.target_hash) return 'TARGET_CHANGED';
     const archivePolicy = this.archive.policy();
     if (!modelAllowed(archivePolicy, file.model)) return 'COLLECTION_EXCLUDED';
-    const counts = this.db.prepare(`SELECT COUNT(*) total,SUM(CASE WHEN j.status IN ('buffered','failed') AND j.jsonl_file_id=m.file_id THEN 1 ELSE 0 END) valid
-      FROM cl_push_jsonl_members m LEFT JOIN cl_push_jobs j ON j.id=m.job_id WHERE m.file_id=?`).get(file.id);
+    const counts = this.db.prepare(`SELECT COUNT(*) total,SUM(CASE WHEN j.status IN ('buffered','failed') AND j.jsonl_file_id=m.file_id AND j.envelope_version=? THEN 1 ELSE 0 END) valid
+      FROM cl_push_jsonl_members m LEFT JOIN cl_push_jobs j ON j.id=m.job_id WHERE m.file_id=?`).get(file.envelope_version,file.id);
     if (counts.total !== file.records || counts.valid !== file.records) return 'DELIVERY_INVALIDATED';
     if (full || file.archive_version !== archivePolicy.version) {
       const row = this.db.prepare(`SELECT r.id,r.user_id,r.model,r.complete,r.reason,r.fingerprint,m.fingerprint expected_fingerprint,
@@ -268,7 +270,7 @@ class ConversationJsonlStore {
       if (!members.length) break;
       for (const member of members) {
         await checkpoint();
-        guard(); if (!member.id) throw new Error('DELIVERY_INVALIDATED');
+        guard(); if (!member.id || member.envelope_version !== file.envelope_version) throw new Error('DELIVERY_INVALIDATED');
         const valid = this.push.validJob(member);
         if (valid.paused || valid.cancel) throw new Error('DELIVERY_INVALIDATED');
         const copy = {source:member.payload_source || member.source,fallbackReason:member.fallback_reason};

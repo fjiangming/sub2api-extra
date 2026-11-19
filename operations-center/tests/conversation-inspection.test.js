@@ -162,13 +162,13 @@ test('masked push uses marked originals for signatures and images and invalidate
   for(const warning of ['OPAQUE_SIGNATURE','OPAQUE_IMAGE','OPAQUE_ENCRYPTED_COMPACTION']) {
     f.store.db.prepare('UPDATE cl_records SET inspection_warnings=? WHERE id=?').run(JSON.stringify([warning]),normal.id);
     assert(!push.validJob(job).cancel);assert.equal(service.jsonl.store.invalidReason(file,{full:true}),'INSPECTION_INCOMPLETE');
-    const fallback=push.envelope(job);assert.equal(fallback.source,'original');assert.equal(fallback.fallback_reason,'INSPECTION_INCOMPLETE');assert.equal(fallback.request,normal.request);
+    const fallback=push.envelope(job);assert.equal(fallback.source,'original');assert.equal(fallback.fallback_reason,'INSPECTION_INCOMPLETE');assert.equal(fallback.request,Buffer.from(normal.request,'base64').toString());
   }
   const current=push.policy();push.configure({...current,source:'original'});
   const input={filter:{},destinations:['webhook']},selected=push.preview(input);assert.equal(selected.eligible,3);
   push.enqueue({...input,previewToken:selected.previewToken,batchId:crypto.randomUUID()});
   const original=push.db.prepare("SELECT * FROM cl_push_jobs WHERE record_id=? AND source='original'").get(limited.id),envelope=push.envelope(original);
-  assert.deepEqual(envelope.metadata.inspection_warnings,['OPAQUE_SIGNATURE']);assert.equal(Buffer.from(envelope.request,'base64').toString(),signed());
+  assert.deepEqual(envelope.metadata.inspection_warnings,['OPAQUE_SIGNATURE']);assert.equal(envelope.request,signed());
   const imageJob=push.db.prepare("SELECT * FROM cl_push_jobs WHERE record_id=? AND source='original'").get(image.id),imageEnvelope=push.envelope(imageJob);
-  assert.deepEqual(imageEnvelope.metadata.inspection_warnings,['OPAQUE_IMAGE']);assert.equal(imageEnvelope.request,image.request);
+  assert.deepEqual(imageEnvelope.metadata.inspection_warnings,['OPAQUE_IMAGE']);assert.equal(imageEnvelope.request,Buffer.from(image.request,'base64').toString());
 });

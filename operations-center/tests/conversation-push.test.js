@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const http = require('node:http');
 const zlib = require('node:zlib');
-const { fixture,event,rawRequest,rawResponse } = require('./conversation-logs-fixture');
+const { fixture,event,rawRequest,rawResponse,exportBodyBytes } = require('./conversation-logs-fixture');
 const { ConversationLogStore } = require('../src/conversation-log-store');
 const { ConversationPushStore } = require('../src/conversation-push-store');
 const { ConversationPushService } = require('../src/services/conversation-push-service');
@@ -74,11 +74,11 @@ test('explicitly including unconfirmed transport preserves raw errors, diagnosti
   f.store.ingest(row);const input={filter:{},destinations:['webhook']};
   assert.equal(f.push.preview(input).eligible,0);assert.deepEqual(f.push.preview(input).unavailableReasons,{INCOMPLETE_CAPTURE:1});
   configure(f,{captureScope:'all',source:'original'});const original=batch(f).result;assert.equal(original.created,1);
-  const job=f.push.claim(),body=f.push.envelope(job);assert.equal(body.request,row.request);assert.equal(body.response,row.response);
+  const job=f.push.claim(),body=f.push.envelope(job);assert.deepEqual(exportBodyBytes(body,'request'),Buffer.from(row.request,'base64'));assert.deepEqual(exportBodyBytes(body,'response'),Buffer.from(row.response,'base64'));
   assert.equal(body.metadata.complete,false);assert.equal(body.metadata.reason,'read_error');assert.equal(body.metadata.upstream_status,'completed');
   assert.deepEqual(body.metadata.transport_diagnostics,row.transport_diagnostics);
   configure(f,{captureScope:'all',source:'masked'});assert.equal(batch(f).result.created,1);
-  const masked=f.push.claim();assert.equal(masked.source,'masked');assert(!Buffer.from(f.push.envelope(masked).request,'base64').toString().includes('alice@example.com'));
+  const masked=f.push.claim();assert.equal(masked.source,'masked');assert(!f.push.envelope(masked).request.includes('alice@example.com'));
   configure(f,{captureScope:'complete',source:'masked'});assert.equal(f.push.validJob(masked).cancel,'INCOMPLETE_CAPTURE');
 });
 
@@ -141,13 +141,14 @@ test('payload envelope retains exact original bytes, compression, numeric spelli
   const f=setup(t);configure(f,{source:'original'});
   const compressed=zlib.gzipSync(Buffer.from(rawResponse)),row=event('gzip',{response:compressed.toString('base64'),encoding:'gzip'});f.store.ingest(row);batch(f);
   let job=f.push.claim(),payload=f.push.envelope(job);
-  assert.equal(Buffer.from(payload.request,'base64').toString(),rawRequest);assert.deepEqual(Buffer.from(payload.response,'base64'),compressed);
+  assert.equal(payload.request,rawRequest);assert.deepEqual(exportBodyBytes(payload,'response'),compressed);
+  assert.equal(payload.body_encodings.response,'base64');assert.equal(payload.body_encoding_reasons.response,'COMPRESSED_CONTENT');
   assert.equal(payload.metadata.encoding,'gzip');assert.equal(payload.checksums.response.sha256,crypto.createHash('sha256').update(compressed).digest('hex'));
   f.push.finish(job,{status:'sent'});
   const frames=[{direction:'out',at:0,binary:true,body:Buffer.from([0,255,13,10]).toString('base64')}];
   f.store.ingest(event('ws',{protocol:'WebSocket',frames}));batch(f,{protocol:'WebSocket'});job=f.push.claim();payload=f.push.envelope(job);assert.deepEqual(payload.frames,frames);
   f.push.finish(job,{status:'sent'});configure(f,{source:'masked'});batch(f,{search:row.id});job=f.push.claim();payload=f.push.envelope(job);
-  assert.equal(payload.metadata.encoding,'');assert(!Buffer.from(payload.request,'base64').toString().includes('alice@example.com'));assert(Buffer.from(payload.request,'base64').toString().includes('9007199254740993'));
+  assert.equal(payload.metadata.encoding,'');assert(!payload.request.includes('alice@example.com'));assert(payload.request.includes('9007199254740993'));
 });
 
 test('Webhook and individual S3 JSON actually deliver marked originals when masking fails',async t=>{
@@ -160,8 +161,8 @@ test('Webhook and individual S3 JSON actually deliver marked originals when mask
   const value=batch(f,{},['webhook','s3']);assert.equal(value.preview.fallbacks,1);assert.equal(value.result.created,2);
   const service=new ConversationPushService(f.push);t.after(()=>service.stop());await service.tick();await service.tick();
   assert.deepEqual(received.map(row=>row.method).sort(),['POST','PUT']);
-  for(const {body} of received){assert.equal(body.source,'original');assert.equal(body.requested_source,'masked');assert.equal(body.fallback_reason,'PROCESSING_FAILED');
-    assert.equal(body.request,row.request);assert.equal(body.response,row.response);assert.equal(body.metadata.processing_error,'INVALID_JSON');}
+  for(const {body} of received){assert.deepEqual(Object.keys(body),['request','response']);
+    assert.equal(body.request,Buffer.from(row.request,'base64').toString());assert.equal(body.response,'{invalid');}
   assert.equal(f.push.list({status:'sent'}).total,2);
   assert(f.push.list().items.every(job=>job.delivery_source==='original'&&job.delivery_fallback_reason==='PROCESSING_FAILED'));
 });
@@ -181,7 +182,7 @@ test('original fallback retries keep the same delivery after reprocessing and da
     .run(require('../src/services/conversation-sensitive').REDACTION_VERSION,row.id);
   now+=5000;const retry=new ConversationPushService(f.push,{transport});t.after(()=>retry.stop());await retry.tick();
   assert.equal(sent.length,2);assert.deepEqual(sent[1],sent[0]);assert.equal(sent[1].source,'original');
-  assert.equal(sent[1].fallback_reason,'REDACTION_OUTDATED');assert.equal(sent[1].request,row.request);
+  assert.equal(sent[1].fallback_reason,'REDACTION_OUTDATED');assert.equal(sent[1].request,Buffer.from(row.request,'base64').toString());
   assert.equal(f.push.list().items[0].status,'sent');
 });
 
@@ -194,6 +195,57 @@ test('attempted masked deliveries cannot silently change into original on retry'
   f.store.db.prepare('UPDATE cl_records SET redaction_version=0 WHERE id=?').run(row.id);now+=5000;
   assert.equal(await service.tick(),false);assert.equal(sent.length,1);
   assert.equal(f.push.list().items[0].status,'cancelled');assert.equal(f.push.list().items[0].error_code,'REDACTION_OUTDATED');
+});
+
+for (const legacyVersion of [1,2]) test(`legacy v${legacyVersion} Webhook and S3 retries stay identical while new batches use body-only JSON`,async t=>{
+  let now=Date.now();const f=setup(t,{now:()=>now});
+  configure(f,{source:'original',retrySeconds:5,s3:{...f.push.policy().s3,enabled:true,format:'json',endpoint:'https://s3.example/',
+    bucket:'test-bucket',accessKeyId:'test-id',secretAccessKey:'test-secret'}});
+  const row=event('legacy-body-retry');f.store.ingest(row);batch(f,{},['webhook','s3']);
+  for(const job of f.push.db.prepare('SELECT * FROM cl_push_jobs').all()) {
+    const parts=[job.record_id,job.destination,job.target_hash,job.content_version];if(legacyVersion===2)parts.push(2);
+    const legacyId=crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');
+    f.push.db.prepare('UPDATE cl_push_jobs SET id=?,envelope_version=? WHERE id=?').run(legacyId,legacyVersion,job.id);
+  }
+  const received={webhook:[],s3:[]},transport={send:async(_policy,destination,envelope)=>{
+    const attempts=received[destination];attempts.push(structuredClone(envelope));
+    return attempts.length===1?{status:'failed',errorCode:'TIMEOUT',retryable:true}:{status:'sent'};
+  }};
+  const before=new ConversationPushService(f.push,{transport});await before.tick();await before.tick();await before.stop();
+  assert.equal(f.push.list().total,2);
+  if(legacyVersion===1)f.push.db.exec('ALTER TABLE cl_push_jobs DROP COLUMN envelope_version');
+  f.store.close();f.store=new ConversationLogStore(f.directory,{now:()=>now}).initialize();
+  f.push=new ConversationPushStore(f.store,{now:()=>now}).initialize();
+  assert(f.push.list().items.every(job=>job.envelope_version===legacyVersion));
+  now+=5001;const after=new ConversationPushService(f.push,{transport});t.after(()=>after.stop());await after.tick();await after.tick();
+  for(const attempts of Object.values(received)) {
+    assert.equal(attempts.length,2);assert.deepEqual(attempts[1],attempts[0]);
+    assert.equal(attempts[1].schema,'sub2api.conversation.v'+legacyVersion);
+    assert.equal(attempts[1].request,legacyVersion===1?row.request:rawRequest);
+    assert.equal(attempts[1].response,legacyVersion===1?row.response:rawResponse);
+  }
+  const next=batch(f,{},['webhook','s3']);assert.equal(next.result.created,2);
+  await after.tick();await after.tick();
+  for(const attempts of Object.values(received)) {
+    assert.equal(attempts.length,3);assert.equal(attempts[2].schema,'sub2api.conversation.v3');
+    assert.equal(attempts[2].body_encoding,'utf-8');assert.equal(attempts[2].request,rawRequest);
+    assert.notEqual(attempts[2].delivery_id,attempts[1].delivery_id);
+  }
+});
+
+test('Webhook and S3 send only request and decompressed response while idempotency stays in headers and object keys',async t=>{
+  const received=[];const url=await receiver(t,(req,res)=>{let text='';req.on('data',chunk=>text+=chunk);req.on('end',()=>{
+    received.push({body:JSON.parse(text),headers:req.headers,url:req.url});res.writeHead(200);res.end();});});
+  const f=setup(t);configure(f,{source:'original',allowPrivateNetwork:true,webhook:{enabled:true,url,token:'fictional-token'},
+    s3:{...f.push.policy().s3,enabled:true,format:'json',endpoint:url,region:'us-east-1',bucket:'test-bucket',accessKeyId:'fictional-id',secretAccessKey:'fictional-secret'}});
+  const text='data: {"id":9007199254740993,"n":1.2300}\r\n\r\ndata: [DONE]\r\n\r\n';
+  const row=event('compressed-http',{encoding:'gzip',response:zlib.gzipSync(Buffer.from(text)).toString('base64')});f.store.ingest(row);batch(f,{},['webhook','s3']);
+  const service=new ConversationPushService(f.push);t.after(()=>service.stop());await service.tick();await service.tick();
+  assert.equal(received.length,2);for(const delivery of received)assert.deepEqual(delivery.body,{request:rawRequest,response:text});
+  const jobs=f.push.list({status:'sent'}).items;
+  assert(received.some(delivery=>jobs.some(job=>delivery.headers['idempotency-key']===job.id)));
+  assert(received.some(delivery=>jobs.some(job=>new URL(delivery.url,url).pathname.endsWith(job.id+'.json'))));
+  assert.deepEqual(f.store.payload(row.id,'original','response',{decodeText:false}).body,Buffer.from(row.response,'base64'));
 });
 
 test('legacy delivery metadata migration is additive and stale leases cannot freeze the selected copy',t=>{
@@ -325,5 +377,5 @@ test('push admin endpoints enforce authentication, CSRF and collector separation
   const body={filter:{},destinations:['webhook'],batchId:crypto.randomUUID(),previewToken:preview.previewToken};
   assert.equal((await request('conversation-logs/push/batches','POST',headers,body)).status,403);
   assert.equal((await request('conversation-logs/push/batches','POST',writes,body)).status,202);
-  await worker.running;assert.equal(sent[1].schema,'sub2api.conversation.v1');assert.equal(f.push.list().items[0].status,'sent');
+  await worker.running;assert.equal(sent[1].schema,'sub2api.conversation.v3');assert.equal(f.push.list().items[0].status,'sent');
 });

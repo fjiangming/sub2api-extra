@@ -6,10 +6,10 @@
   function create({container,api,escapeHtml:esc,icon,refreshIcons,isActive,getFilter}) {
     let job=null,busy=false,preparing=false,timer=null,controller=null,epoch=0,frame=null,errorText='';
     const num=value => new Intl.NumberFormat('zh-CN').format(value || 0);
-    container.innerHTML=`<form id="cl-export-form" class="cl-export-form" aria-label="导出对话日志 JSONL">
+    container.innerHTML=`<form id="cl-export-form" class="cl-export-form" aria-label="导出对话日志 JSONL（文本正文）">
       <label>最近条数<input id="cl-export-limit" name="limit" type="number" min="1" max="10000" step="1" value="1000" required></label>
       <label>导出副本<select id="cl-export-source" name="source"><option value="masked">脱敏优先（不可用则原文）</option><option value="original">原文（含敏感信息）</option></select></label>
-      <button class="icon-button" type="submit" data-cl-action="export" title="导出最近 N 条 JSONL" aria-label="导出最近 N 条 JSONL">${icon('download')}</button>
+      <button class="icon-button" type="submit" data-cl-action="export" title="导出最近 N 条 JSONL（文本正文）" aria-label="导出最近 N 条 JSONL（文本正文）">${icon('download')}</button>
       <button class="icon-button" type="button" data-export-cancel title="取消导出" aria-label="取消导出" hidden>${icon('square')}</button>
       <span data-export-warning class="cl-muted">脱敏不可用时包含原文，可能含敏感信息</span></form>
       <p data-export-status class="cl-export-status" role="status" aria-live="polite"></p>`;

@@ -5,7 +5,7 @@ const assert=require('node:assert/strict');
 const crypto=require('node:crypto');
 const zlib=require('node:zlib');
 const {setTimeout:delay}=require('node:timers/promises');
-const {fixture,event,id}=require('./conversation-logs-fixture');
+const {fixture,event,id,exportBodyBytes}=require('./conversation-logs-fixture');
 const {ConversationExportData,parseExport}=require('../src/services/conversation-export-data');
 const {ConversationExportService}=require('../src/services/conversation-export-service');
 const {ConversationReadService}=require('../src/services/conversation-read-service');
@@ -67,10 +67,10 @@ test('export uses original fallback for unavailable masking, retains diagnostics
   for (const [name,reason] of [['failed','PROCESSING_FAILED'],['warnings','INSPECTION_INCOMPLETE'],['outdated','REDACTION_OUTDATED'],['pending','PROCESSING_PENDING']]) {
     const copy=data.envelope(masked,masked.rows.find(row=>row.id===id('export-'+name)));
     assert.equal(copy.source,'original');assert.equal(copy.requested_source,'masked');assert.equal(copy.fallback_reason,reason);
-    assert.equal(copy.request,event().request);assert.equal(copy.checksums.request.sha256,checksum(Buffer.from(event().request,'base64')));
+    assert.deepEqual(exportBodyBytes(copy,'request'),Buffer.from(event().request,'base64'));assert.equal(copy.checksums.request.sha256,checksum(Buffer.from(event().request,'base64')));
   }
   const partial=data.envelope(masked,masked.rows.find(row=>!row.complete));assert.equal(partial.metadata.complete,false);assert.equal(partial.metadata.reason,'read_error');
-  assert(!Buffer.from(partial.request,'base64').toString().includes('alice@example.com'));
+  assert(!partial.request.includes('alice@example.com'));
   const original=data.select({source:'original'});assert.equal(original.rows.length,6);assert.deepEqual(original.skipped,{COPY_UNAVAILABLE:1,COLLECTION_EXCLUDED:1});
   assert.equal(data.envelope(original,original.rows[0]).source,'original');
   f.store.configure({...f.store.policy(),modelFilterEnabled:true,allowedModels:['other-model'],kimiK3Plus:false});
@@ -80,7 +80,7 @@ test('export uses original fallback for unavailable masking, retains diagnostics
 test('snapshot guards reject reprocessing, clearing and rule changes and never mutate ciphertext',t=>{
   const f=fixture();t.after(()=>f.close());const row=event('export-snapshot');f.store.ingest(row);
   const data=new ConversationExportData(f.store),selection=data.select({source:'original'}),before=f.store.db.prepare('SELECT original,masked FROM cl_records WHERE id=?').get(row.id);
-  assert.equal(data.envelope(selection,selection.rows[0]).request,row.request);
+  assert.deepEqual(exportBodyBytes(data.envelope(selection,selection.rows[0]),'request'),Buffer.from(row.request,'base64'));
   assert.deepEqual(f.store.db.prepare('SELECT original,masked FROM cl_records WHERE id=?').get(row.id),before);
   f.store.db.prepare('UPDATE cl_records SET processed_at=processed_at+1 WHERE id=?').run(row.id);
   assert.throws(()=>data.envelope(selection,selection.rows[0]),{code:'CONVERSATION_EXPORT_RECORD_CHANGED'});
@@ -110,7 +110,7 @@ async function setup(t,options={}) {
     download:value=>fetch(base+value.downloadUrl),cancel:job=>fetch(endpoint+'/'+job.id+'/cancel',{method:'POST',headers,body:'{}'})};
 }
 
-test('real native JSONL download preserves JSON numbers, whitespace, compressed SSE, WS frames, all statuses and SHA-256 without main-thread decryption',async t=>{
+test('native JSONL contains only two body fields, decompresses SSE, retains WS messages and verifies the whole download',async t=>{
   const f=await setup(t),at=Date.now()-5000;
   const compressed=zlib.gzipSync(Buffer.from('data: {"type":"error","message":"example"}\n\ndata: [DONE]\n\n'));
   const rows=[event('export-http',{at}),event('export-sse',{at:at+1,protocol:'SSE',encoding:'gzip',response:compressed.toString('base64'),status:502,complete:false,reason:'read_error'}),
@@ -126,14 +126,13 @@ test('real native JSONL download preserves JSON numbers, whitespace, compressed 
   const response=await f.download(value);assert.equal(response.status,200);assert.match(response.headers.get('content-type'),/application\/x-ndjson/);
   assert.match(response.headers.get('content-disposition'),/\.jsonl"$/);assert.equal(response.headers.get('cache-control'),'no-store');
   const body=Buffer.from(await response.arrayBuffer()),records=lines(body);assert(body.at(-1)===10);assert.notEqual(body.subarray(0,3).toString('hex'),'efbbbf');
-  assert.deepEqual(records.map(row=>row.metadata.id),rows.toReversed().map(row=>row.id));
-  for (const record of records) {
-    const input=rows.find(row=>row.id===record.metadata.id);assert.equal(record.schema,'sub2api.conversation.v1');assert.equal(record.source,'original');
-    assert.equal(record.request,input.request);assert.equal(record.response,input.response);assert.deepEqual(record.frames,input.frames);
-    for (const side of ['request','response']) assert.deepEqual(record.checksums[side],{bytes:Buffer.byteLength(input[side],'base64'),sha256:checksum(Buffer.from(input[side],'base64'))});
-  }
-  assert.equal(records[1].metadata.complete,false);assert.equal(records[1].metadata.reason,'read_error');assert.equal(records[1].metadata.status,502);
-  assert.deepEqual(records[1].metadata.transport_diagnostics,transport.transport_diagnostics);
+  assert.equal(records.length,3);for(const record of records)assert.deepEqual(Object.keys(record),['request','response']);
+  assert.deepEqual(records[0],{request:[Buffer.from(rows[2].request,'base64').toString(),'{ "id":9007199254740993,"n":1.2300 }'],
+    response:[Buffer.from(rows[2].response,'base64').toString(),'data:application/octet-stream;base64,AP8ByA==']});
+  assert.equal(records[1].request,Buffer.from(transport.request,'base64').toString());assert.equal(records[1].response,zlib.gunzipSync(compressed).toString());
+  assert.deepEqual(records[2],{request:Buffer.from(rows[0].request,'base64').toString(),response:Buffer.from(rows[0].response,'base64').toString()});
+  const saved=f.store.db.prepare('SELECT complete,reason,status,transport_diagnostics FROM cl_records WHERE id=?').get(transport.id);
+  assert.equal(saved.complete,0);assert.equal(saved.reason,'read_error');assert.equal(saved.status,502);assert.deepEqual(JSON.parse(saved.transport_diagnostics),transport.transport_diagnostics);
   const result=await f.done(value.job);assert.equal(result.status,'completed');assert.equal(result.bytes,body.length);assert.equal(result.sha256,checksum(body));assert.equal(result.exported,3);
   await until(()=>!f.exporter.child);assert(!f.archive.child,'export must not start or restart the collector');
 });
@@ -143,9 +142,8 @@ test('masked native export preserves latest N with marked original fallbacks and
   for (let n=0;n<4;n++) f.store.ingest(event('export-mask-'+n,{at:at+n}));
   f.store.db.prepare("UPDATE cl_records SET masked=NULL,processing_error='INVALID_JSON' WHERE id=?").run(id('export-mask-3'));
   const value=await f.start({limit:2}),response=await f.download(value),body=await response.text();assert.equal(response.status,200);
-  assert.equal(lines(body).length,2);assert.deepEqual(lines(body).map(row=>row.metadata.id),[id('export-mask-3'),id('export-mask-2')]);
-  assert.equal(lines(body)[0].source,'original');assert.equal(lines(body)[0].requested_source,'masked');assert.equal(lines(body)[0].fallback_reason,'PROCESSING_FAILED');
-  assert.equal(lines(body)[0].request,event().request);assert.equal(lines(body)[1].source,'masked');assert(!Buffer.from(lines(body)[1].request,'base64').toString().includes('alice@example.com'));
+  assert.equal(lines(body).length,2);for(const row of lines(body))assert.deepEqual(Object.keys(row),['request','response']);
+  assert.equal(lines(body)[0].request,Buffer.from(event().request,'base64').toString());assert(!lines(body)[1].request.includes('alice@example.com'));
   const result=await f.done(value.job);assert.equal(result.selected,2);assert.equal(result.exported,2);assert.deepEqual(result.skipped,{});
   assert.equal(result.fallbacks,1);assert.deepEqual(result.fallbackReasons,{PROCESSING_FAILED:1});
   f.store.db.prepare('UPDATE cl_records SET original=NULL WHERE id=?').run(id('export-mask-3'));
@@ -157,7 +155,7 @@ test('corrupted masked ciphertext falls back to exact original bytes with a read
   f.store.db.prepare('UPDATE cl_records SET masked=? WHERE id=?').run(Buffer.from('invalid encrypted copy'),row.id);
   const data=new ConversationExportData(f.store),selection=data.select({limit:1}),copy=data.envelope(selection,selection.rows[0]);
   assert.equal(copy.source,'original');assert.equal(copy.fallback_reason,'MASKED_READ_FAILED');assert.equal(copy.requested_source,'masked');
-  assert.equal(copy.request,row.request);assert.equal(copy.response,row.response);
+  assert.deepEqual(exportBodyBytes(copy,'request'),Buffer.from(row.request,'base64'));assert.deepEqual(exportBodyBytes(copy,'response'),Buffer.from(row.response,'base64'));
   assert.equal(copy.checksums.response.sha256,checksum(Buffer.from(row.response,'base64')));
 });
 
@@ -169,8 +167,8 @@ test('original fallbacks preserve compressed SSE and binary WebSocket frames byt
   for(const row of rows)f.store.ingest(row);
   const data=new ConversationExportData(f.store),selection=data.select({limit:2});assert.equal(selection.rows.length,2);
   for(const selected of selection.rows){const input=rows.find(row=>row.id===selected.id),copy=data.envelope(selection,selected);
-    assert.equal(copy.source,'original');assert.equal(copy.fallback_reason,'COPY_UNAVAILABLE');assert.equal(copy.request,input.request);
-    assert.equal(copy.response,input.response);assert.deepEqual(copy.frames,input.frames);assert.equal(copy.metadata.encoding,input.encoding);}
+    assert.equal(copy.source,'original');assert.equal(copy.fallback_reason,'COPY_UNAVAILABLE');assert.deepEqual(exportBodyBytes(copy,'request'),Buffer.from(input.request,'base64'));
+    assert.deepEqual(exportBodyBytes(copy,'response'),Buffer.from(input.response,'base64'));assert.deepEqual(copy.frames,input.frames);assert.equal(copy.metadata.encoding,input.encoding);}
 });
 
 test('download tickets require CSRF to create, bind the original live admin session, work without cookies and cannot replay or alter scope',async t=>{
@@ -184,7 +182,8 @@ test('download tickets require CSRF to create, bind the original live admin sess
   assert(!JSON.stringify(value).includes(f.session.sessionToken));assert(!JSON.stringify(value.job).includes('ticket'));
   const altered=await fetch(f.base+value.downloadUrl.replace(/ticket=.+/,'ticket=bad'));assert.equal(altered.status,401);
   const response=await fetch(f.base+value.downloadUrl+'&source=original&limit=10000');assert.equal(response.status,200);
-  assert.equal(lines(await response.text())[0].source,'masked');await f.done(value.job);
+  const downloaded=lines(await response.text())[0];assert.deepEqual(Object.keys(downloaded),['request','response']);
+  assert(!downloaded.request.includes('alice@example.com'));await f.done(value.job);
   assert.equal((await f.download(value)).status,401);
   const revoked=await f.start({limit:1});
   await fetch(f.base+'/api/auth/logout',{method:'POST',headers:f.headers});assert.equal((await f.download(revoked)).status,401);

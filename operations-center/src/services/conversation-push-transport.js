@@ -8,6 +8,7 @@ const { Transform } = require('node:stream');
 const ipaddr = require('ipaddr.js');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { NodeHttpHandler } = require('@smithy/node-http-handler');
+const { deliveryBody } = require('./conversation-envelope');
 const transportFailure = Symbol('conversation-push-failure');
 
 function failure(code, retryable = false, httpStatus = 0) {
@@ -73,7 +74,7 @@ class ConversationPushTransport {
     try {
       const target=policy[destination],url=new URL(destination==='s3'?target.endpoint:target.url);
       if(url.protocol!=='https:' && !(url.protocol==='http:' && policy.allowPrivateNetwork))throw failure('ADDRESS_BLOCKED');
-      const body=Buffer.from(JSON.stringify(envelope));
+      const body=Buffer.from(JSON.stringify(deliveryBody(envelope)));
       guard();
       if(destination==='webhook') {
         await validate(url.hostname);
@@ -119,6 +120,7 @@ class ConversationPushTransport {
       }
       return {status:'sent',httpStatus};
     } catch(error) {
+      if(error.code==='EXPORT_MEMORY')return {status:'failed',errorCode:'EXPORT_MEMORY',retryable:true};
       if(timedOut)return {status:'failed',errorCode:'TIMEOUT',retryable:true};
       if(controller.signal.aborted)return {status:'failed',errorCode:'ABORTED',retryable:true};
       const trusted=error[transportFailure],code=trusted?error.httpStatus:error.$metadata?.httpStatusCode;

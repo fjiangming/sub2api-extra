@@ -10,6 +10,7 @@ const {ConversationLogStore} = require('../conversation-log-store');
 const {AppError} = require('../errors');
 const {ConversationExportData,failure} = require('./conversation-export-data');
 const {jsonlChunks} = require('./conversation-jsonl-format');
+const {deliveryBody} = require('./conversation-envelope');
 
 process.once('message',async settings => {
   if (settings?.type!=='initialize' || !settings.secret) return process.exit(1);
@@ -73,7 +74,7 @@ process.once('message',async settings => {
           row=selected;await checkpoint();
           const envelope=data.envelope(selection,row);
           let pieces=[],size=0;
-          for (const chunk of jsonlChunks(envelope)) {
+          for (const chunk of jsonlChunks(deliveryBody(envelope))) {
             const bytes=Buffer.from(chunk);
             if (size && size+bytes.length>65536) {await write(Buffer.concat(pieces,size));pieces=[];size=0;}
             pieces.push(bytes);size+=bytes.length;
@@ -90,6 +91,7 @@ process.once('message',async settings => {
         res.addTrailers({'x-conversation-export-result':JSON.stringify(stats)});res.end();
       } catch(error) {
         progress(true);
+        if (error.code==='EXPORT_MEMORY') error=failure('MEMORY','当前解压内存不足，下载已中止，原始归档未截断；请稍后重试');
         const safe=error instanceof AppError;
         const value={code:safe ? error.code : 'CONVERSATION_EXPORT_UNAVAILABLE',
           message:safe ? error.message : '导出中断，文件可能不完整，请重新导出',status:safe ? error.status : 503};
