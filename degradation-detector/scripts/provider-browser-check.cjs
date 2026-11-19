@@ -48,7 +48,10 @@ async function main() {
     assert.equal(await page.locator('.p-history-detail').evaluate(element => getComputedStyle(element).scrollbarWidth), 'none');
     assert.equal(await page.locator('.p-artwork').getAttribute('scrolling'), 'no');
     const box = await page.locator('.p-history').boundingBox(), viewport = page.viewportSize();
-    assert(box.width > viewport.width * 0.94 && box.height > viewport.height * 0.94, 'history must use nearly the full viewport');
+    const sideGap = viewport.width <= 650 ? 16 : 24;
+    assert(box.width <= 1080 && box.height <= 760, 'history must retain the original desktop width and a bounded height');
+    assert(box.x >= sideGap - 1 && viewport.width - box.x - box.width >= sideGap - 1, 'history must leave space on both sides');
+    assert(box.y >= 47 && viewport.height - box.y - box.height >= 47, 'history must leave space above and below');
     const stage = await page.locator('.p-artwork').boundingBox(), detail = await page.locator('.p-history-detail').boundingBox();
     assert(stage.height > detail.height * 0.8 && stage.y >= detail.y && stage.y + stage.height <= detail.y + detail.height + 1, 'complete artwork must fit in the first detail viewport');
     return frame;
@@ -117,6 +120,10 @@ async function main() {
         await frame.waitForFunction(() => window.previewTicks > 1);
         await frame.locator('#fit-scene').evaluate(element => { element.style.height = '1900px'; });
         await fittedPreview(page, '#fit-scene');
+        if (layout.width > 1000) {
+          await page.setViewportSize({ width: 1920, height: 1080 });
+          await fittedPreview(page, '#fit-scene');
+        }
         await page.setViewportSize({ width: layout.width > 1000 ? 1100 : layout.width === 320 ? 390 : 320, height: 720 });
         await fittedPreview(page, '#fit-scene');
         await page.setViewportSize(options.viewport); await fittedPreview(page, '#fit-scene');
