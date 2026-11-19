@@ -33,6 +33,8 @@ coverage/
 # Mac / Windows temp files
 .DS_Store
 Thumbs.db
+__pycache__/
+*.py[cod]
 
 # Runtime data directory at the top level of each feature module
 /*/data/
@@ -55,6 +57,7 @@ Thumbs.db
 /operations-center-demo/
 /usage-leaderboard-demo/
 /merged-images.png
+/crab-bicycle/
 /operations-center/tests/profile-preview.js
 /usage-leaderboard/scripts/preview.js
 /usage-leaderboard/scripts/preview-admin.js

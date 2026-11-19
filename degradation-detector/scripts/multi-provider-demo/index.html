@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="light dark">
+  <title>降智检测 · 多平台 Demo</title>
+  <link rel="icon" href="/detector-icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/demo.css">
+  <script src="/vendor/lucide.min.js" defer></script>
+  <script src="/pelican-source.js" defer></script>
+  <script src="/demo.js" defer></script>
+</head>
+<body>
+  <div class="preview-bar">
+    <div class="preview-inner">
+      <span class="preview-label"><span class="preview-dot"></span>交互 Demo<span class="preview-divider">/</span><span class="muted">模拟数据</span></span>
+      <nav class="preview-nav" aria-label="Demo 页面">
+        <a href="/results" data-preview="results">前台结果</a>
+        <a href="/admin/config" data-preview="admin">后台配置</a>
+      </nav>
+    </div>
+  </div>
+  <main id="app" class="app-shell"></main>
+  <dialog id="detail-dialog" class="detail-dialog" aria-labelledby="dialog-title">
+    <header class="dialog-header">
+      <div><p id="dialog-kicker" class="eyebrow"></p><h2 id="dialog-title"></h2><p id="dialog-subtitle" class="muted"></p></div>
+      <button class="icon-button" data-close title="关闭" aria-label="关闭详情"><i data-lucide="x" aria-hidden="true"></i></button>
+    </header>
+    <div id="dialog-body" class="dialog-body"></div>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

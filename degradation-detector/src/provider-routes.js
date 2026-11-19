@@ -4,6 +4,7 @@ const { AppError } = require('./errors');
 const { channels, names, providerFor, providerParams, providerPlatform, testParams } = require('./provider-config');
 const { runSummary } = require('./provider-results');
 const { publicGroupCacheStats } = require('./group-metrics');
+const { sanitizeReviewDiagnostic } = require('./review-http');
 
 function installProviderRoutes(app, runtime, { requireAuth, requireAdmin, requireCsrf, runLimiter, configLimiter, historyLimiter, discoverGroups, setNoStore, previewHeaders, signedPreview, previewAncestors }) {
   const store = runtime.providerStore;
@@ -105,10 +106,15 @@ function installProviderRoutes(app, runtime, { requireAuth, requireAdmin, requir
   const detail = async (req, res, admin = false) => {
     const run = await requireRun(req, admin);
     const snapshot = JSON.parse(run.snapshot_json);
-    const response = run.response_json ? JSON.parse(run.response_json) : null;
+    const storedResponse = run.response_json ? JSON.parse(run.response_json) : null;
+    const { diagnostic, ...publicResponse } = storedResponse || {};
+    const response = storedResponse ? publicResponse : null;
+    const summary = runSummary(run);
     const path = `${admin ? '/api/admin' : '/api'}/provider-results/${run.id}/preview`;
-    res.json({ ...runSummary(run), response,
-      settings: { model: run.model, protocol: snapshot.protocol || null, reasoning_effort: snapshot.reasoning_effort || null, service_tier: snapshot.service_tier || null, cache_test: snapshot.cache_test ?? null, thinking_test: snapshot.thinking_test ?? null },
+    res.json({ ...summary, response,
+      settings: { model: run.model, protocol: snapshot.protocol || null, reasoning_effort: snapshot.reasoning_effort || null, service_tier: snapshot.service_tier || null, cache_test: snapshot.cache_test ?? null, thinking_test: snapshot.thinking_test ?? null,
+        ...(run.channel === 'pelican' ? { execution_method: snapshot.execution_method || summary.method || 'remote_pelican' } : {}) },
+      ...(admin && diagnostic ? { diagnostic: sanitizeReviewDiagnostic(diagnostic) } : {}),
       preview_url: response?.result?.html ? signedPreview(req, `provider-${run.id}`, path) : null });
   };
   const preview = async (req, res, admin = false) => {

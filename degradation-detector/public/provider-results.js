@@ -190,6 +190,16 @@
       const iq = current.channel === 'testllm';
       const summary = iq ? levels[run.iq?.level] || '未取得结果' : labels[run.conclusion];
       target.innerHTML = `<div class="p-card-head"><h3>本次检测结果</h3>${badge(run)}</div><dl class="p-detail-metrics"><div><dt>${iq ? '推理等级' : '检测判定'}</dt><dd>${esc(summary)}</dd></div><div><dt>任务总耗时</dt><dd>${run.duration_ms == null ? '进行中' : seconds(run.duration_ms / 1000)}</dd></div><div><dt>${iq ? '测试缓存' : '输出 Token'}</dt><dd>${iq ? cache(run) : run.output_tokens ?? '未取得'}</dd></div></dl>${run.reason ? `<section><h3>判定说明</h3><p>${esc(run.reason)}</p></section>` : ''}${response?.assessment?.reason ? `<section><h3>第三方判定</h3><p>${esc(response.assessment.reason)}</p></section>` : ''}${iq ? `<section><h3>分项结果</h3><p>推理用时：${seconds(run.iq?.duration)}\nToken 缓存率：${cache(run)}\n请求数缓存率：${percent(run.cache?.request_hit_rate)}\n思考与签名：${special(run)}\n首字耗时：未取得</p>${Object.entries(run.errors || {}).map(([mode, message]) => `<p class="p-history-error">${esc(mode)}：${esc(message)}</p>`).join('')}</section>` : ''}${response?.candy?.answer != null ? `<section><h3>检测回答</h3><pre class="p-code">${esc(response.candy.answer)}</pre></section>` : ''}${run.preview_url ? '<section><h3>作品预览</h3><div id="p-artwork-target"></div></section>' : ''}<details><summary>本次检测参数</summary><pre class="p-code">${esc(JSON.stringify(settings, null, 2))}</pre></details><details><summary>检测提示词</summary><pre class="p-code">${esc(response?.prompt || '第三方未返回本次提示词')}</pre></details>${response?.result?.html ? `<details><summary>作品源码</summary><pre class="p-code">${esc(response.result.html)}</pre></details>` : ''}<details><summary>第三方结果</summary><pre class="p-code">${esc(response ? JSON.stringify(response, null, 2) : '详细响应已清理或尚未返回')}</pre></details><p class="p-muted">${stamp(run.created_at)} · ${esc(run.model)} · 执行时参数</p>`;
+      if (run.method === 'local_html') {
+        const method = document.createElement('p');
+        method.className = 'p-muted'; method.textContent = '本地生成 · HTML 源码分类';
+        target.querySelector('.p-card-head').after(method);
+      }
+      if (current.admin && run.diagnostic) {
+        const details = document.createElement('details'), summary = document.createElement('summary'), code = document.createElement('pre');
+        summary.textContent = '检测诊断'; code.className = 'p-code'; code.textContent = JSON.stringify(run.diagnostic, null, 2);
+        details.append(summary, code); target.append(details);
+      }
       if (run.preview_url) {
         const frame = document.createElement('iframe');
         frame.className = 'p-artwork'; frame.title = '本次鹈鹕检测作品';

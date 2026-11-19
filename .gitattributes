@@ -1,0 +1,6 @@
+# Reviewed deployment snapshots must retain the bytes recorded in validation.json.
+operations-center/integrations/multi-domain/original-files/*.conf -text
+operations-center/integrations/multi-domain/original-files/migrated-services.conf whitespace=-blank-at-eol
+
+# Blank context lines are part of the reviewed unified diff.
+operations-center/integrations/multi-domain/original-files/changes.diff -text whitespace=-blank-at-eol

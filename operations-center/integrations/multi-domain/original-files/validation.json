@@ -1,0 +1,131 @@
+{
+  "generated_at": "2026-11-08T05:59:58.239949+00:00",
+  "purpose": "Reviewed aliases plus explicit canvas model-API CORS; backup manifest records installation",
+  "applied": false,
+  "original_sites": [
+    {
+      "file": "migrated-services.conf",
+      "old_host": "aihub.fo2.us.ci",
+      "added_hosts": [
+        "yunhop.cc",
+        "www.yunhop.cc"
+      ],
+      "business_attribute_differences": 0
+    },
+    {
+      "file": "migrated-services.conf",
+      "old_host": "aihub.fo1.us.ci",
+      "added_hosts": [
+        "newapi.yunhop.cc"
+      ],
+      "business_attribute_differences": 0
+    },
+    {
+      "file": "migrated-services.conf",
+      "old_host": "cpa.fjmooo.cn",
+      "added_hosts": [
+        "cpa.yunhop.cc"
+      ],
+      "business_attribute_differences": 0
+    },
+    {
+      "file": "migrated-services.conf",
+      "old_host": "monitor.fo2.us.ci",
+      "added_hosts": [
+        "monitor.yunhop.cc"
+      ],
+      "business_attribute_differences": 0
+    },
+    {
+      "file": "migrated-services.conf",
+      "old_host": "subopc.fo2.us.ci",
+      "added_hosts": [
+        "subopc.yunhop.cc"
+      ],
+      "business_attribute_differences": 0
+    },
+    {
+      "file": "migrated-services.conf",
+      "old_host": "detector.fo2.us.ci",
+      "added_hosts": [
+        "detector.yunhop.cc"
+      ],
+      "business_attribute_differences": 0
+    },
+    {
+      "file": "recharge-center.conf",
+      "old_host": "aihubpay.fo2.us.ci",
+      "added_hosts": [
+        "aihubpay.yunhop.cc"
+      ],
+      "business_attribute_differences": 0
+    },
+    {
+      "file": "usage-leaderboard.conf",
+      "old_host": "aihubrank.fo2.us.ci",
+      "added_hosts": [
+        "aihubrank.yunhop.cc"
+      ],
+      "business_attribute_differences": 0
+    },
+    {
+      "file": "infinite-canvas.conf",
+      "old_host": "canvas.fo2.us.ci",
+      "added_hosts": [
+        "canvas.yunhop.cc"
+      ],
+      "business_attribute_differences": 0
+    }
+  ],
+  "excluded_services": [
+    "3X-UI",
+    "subscription-manager",
+    "Xray",
+    "Eshop",
+    "Syncthing"
+  ],
+  "complete_original_business_trees_equal": true,
+  "baseline_sha256": {
+    "/etc/nginx/conf.d/infinite-canvas.conf": "c83f0aeb88825fbbcf86af2a39acac37ec7355fc593fe269e6924fb3b289a09d",
+    "/etc/nginx/conf.d/migrated-services.conf": "521587b29d77e1263ce72b5f83f10449f45829204e7826a343e6da50bc91f72c",
+    "/etc/nginx/conf.d/recharge-center.conf": "4023e7b79e68cef5939c80171124efb738c129c01b7897de605421e227bffc4d",
+    "/etc/nginx/conf.d/usage-leaderboard.conf": "45d02eae36b01a17ec93692a97996c9805d382ed1e05cf24f4c49c26be36297d",
+    "/etc/nginx/conf.d/yunhop-services.conf": null,
+    "/etc/nginx/nginx.conf": "b569b8330a307cd88795ca792d3d04ad1d9222a36ff8a908c3b43744c334d666",
+    "/etc/nginx/snippets/aihub-maintenance-switch.conf": "41c21561148c0a454df3a60a4b94e4c6c92f38eac601109d6b2158783c4dd132",
+    "/etc/nginx/snippets/canvas-api-cors.conf": null,
+    "/etc/nginx/snippets/infinite-canvas-main.conf": "e4d9ccbdf3c0c419787a192ca42f834445bfbe94c40863cf1044744271deac68",
+    "/etc/nginx/snippets/sub2api-main-proxy.conf": null,
+    "/etc/nginx/snippets/yunhop-proxy.conf": null,
+    "/etc/nginx/snippets/yunhop-tls.conf": "212ee20d3f14310006d5eb54aadac87155846345e52c856557ff765151dca500"
+  },
+  "candidate_sha256": {
+    "/etc/nginx/conf.d/migrated-services.conf": "01ea47e65735e6947c50eecbe8a434b9e99556a3c86ef74114a7675673a401fb",
+    "/etc/nginx/conf.d/recharge-center.conf": "4023e7b79e68cef5939c80171124efb738c129c01b7897de605421e227bffc4d",
+    "/etc/nginx/conf.d/usage-leaderboard.conf": "45d02eae36b01a17ec93692a97996c9805d382ed1e05cf24f4c49c26be36297d",
+    "/etc/nginx/conf.d/infinite-canvas.conf": "12f7f5bb49830b0521961cdbce173122f2e3970ceab46eb51f5c35b3e68ce074",
+    "/etc/nginx/snippets/yunhop-tls.conf": "212ee20d3f14310006d5eb54aadac87155846345e52c856557ff765151dca500",
+    "/etc/nginx/snippets/sub2api-main-proxy.conf": "1886de668f16abc24468b08043a4fdebc73bc6879665a9043ec68b3234806d3d",
+    "/etc/nginx/snippets/canvas-api-cors.conf": "005a2266cdd1155d89493939275c090d23025e706bb658323d2d293fe3e2ab3f",
+    "/etc/nginx/conf.d/yunhop-services.conf": null,
+    "/etc/nginx/snippets/yunhop-proxy.conf": null
+  },
+  "canvas_cors": {
+    "origins": [
+      "https://aihub.fo2.us.ci",
+      "https://aihubdirect.fo2.us.ci",
+      "https://epoint2api.fjmooo.cn",
+      "https://yunhop.cc",
+      "https://www.yunhop.cc",
+      "https://canvas.fo2.us.ci",
+      "https://canvas.yunhop.cc"
+    ],
+    "paths": [
+      "/v1/",
+      "/v1beta/"
+    ],
+    "credentials_allowed": false,
+    "api_key_authentication_required": true,
+    "non_cors_proxy_and_security_directives_equal": true
+  }
+}

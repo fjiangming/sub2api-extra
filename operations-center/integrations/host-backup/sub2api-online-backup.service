@@ -1,0 +1,18 @@
+[Unit]
+Description=Online business backup without conversation bodies
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/libexec/sub2api-online-backup/vps_backup.py run
+ExecStopPost=/usr/bin/python3 /usr/local/libexec/sub2api-online-backup/vps_backup.py finalize
+TimeoutStartSec=1800
+TimeoutStopSec=180
+KillMode=control-group
+Nice=15
+IOSchedulingClass=idle
+CPUWeight=20
+IOWeight=20
+MemoryMax=768M
+UMask=0077

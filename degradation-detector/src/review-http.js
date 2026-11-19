@@ -3,6 +3,7 @@
 const dns = require('dns').promises;
 const https = require('https');
 const net = require('net');
+const { readEventStream } = require('./sub2api-client');
 
 const ipv4Blocked = new net.BlockList();
 for (const [address, prefix] of [
@@ -49,7 +50,7 @@ function sanitizeReviewDiagnostic(value, secrets = []) {
       .replace(/\s+/g, ' ').trim().slice(0, limit);
   };
   const result = {};
-  if (['prepare', 'submit', 'poll'].includes(value.stage)) result.stage = value.stage;
+  if (['prepare', 'generate', 'submit', 'poll'].includes(value.stage)) result.stage = value.stage;
   if (Number.isInteger(value.http_status) && value.http_status >= 300 && value.http_status <= 599) {
     result.http_status = value.http_status;
   }
@@ -113,7 +114,22 @@ async function resolveReviewAddress(url, signal, lookup = dns.lookup) {
   }
 }
 
-async function requestReviewJson(value, { method, body, apiKey, signal, taskKey, maxResponseBytes = 256 * 1024, secrets = [] }, dependencies = {}) {
+async function readReviewJson(response, maxResponseBytes) {
+  const chunks = [];
+  let length = 0;
+  for await (const chunk of response) {
+    length += chunk.length;
+    if (length > maxResponseBytes) throw new ReviewError('REVIEW_RESPONSE_TOO_LARGE');
+    chunks.push(chunk);
+  }
+  let result;
+  try { result = JSON.parse(Buffer.concat(chunks, length).toString('utf8')); }
+  catch { throw new ReviewError('REVIEW_RESPONSE_INVALID'); }
+  if (!result || typeof result !== 'object' || Array.isArray(result)) throw new ReviewError('REVIEW_RESPONSE_INVALID');
+  return result;
+}
+
+async function requestReview(value, { method, body, apiKey, signal, taskKey, maxResponseBytes = 256 * 1024, secrets = [], accept = 'application/json' }, dependencies, read) {
   const url = reviewUrl(value);
   const address = await resolveReviewAddress(url, signal, dependencies.lookup);
   const raw = body == null ? null : Buffer.from(JSON.stringify(body));
@@ -127,7 +143,8 @@ async function requestReviewJson(value, { method, body, apiKey, signal, taskKey,
       autoSelectFamily: false,
       family: address.family,
       headers: {
-        accept: 'application/json',
+        accept,
+        'accept-encoding': 'identity',
         ...(raw ? { 'content-type': 'application/json', 'content-length': raw.length } : {}),
         ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
         ...(method === 'POST' && taskKey ? { 'Idempotency-Key': taskKey } : {})
@@ -144,18 +161,7 @@ async function requestReviewJson(value, { method, body, apiKey, signal, taskKey,
           throw error;
         }
         if (Number(response.headers['content-length'] || 0) > maxResponseBytes) throw new ReviewError('REVIEW_RESPONSE_TOO_LARGE');
-        const chunks = [];
-        let length = 0;
-        for await (const chunk of response) {
-          length += chunk.length;
-          if (length > maxResponseBytes) throw new ReviewError('REVIEW_RESPONSE_TOO_LARGE');
-          chunks.push(chunk);
-        }
-        let result;
-        try { result = JSON.parse(Buffer.concat(chunks, length).toString('utf8')); }
-        catch { throw new ReviewError('REVIEW_RESPONSE_INVALID'); }
-        if (!result || typeof result !== 'object' || Array.isArray(result)) throw new ReviewError('REVIEW_RESPONSE_INVALID');
-        resolve(result);
+        resolve(await read(response, maxResponseBytes));
       } catch (error) {
         response.destroy();
         reject(error);
@@ -166,4 +172,22 @@ async function requestReviewJson(value, { method, body, apiKey, signal, taskKey,
   });
 }
 
-module.exports = { ReviewError, publicAddress, requestReviewJson, resolveReviewAddress, reviewUrl, sanitizeReviewDiagnostic };
+function requestReviewJson(value, options, dependencies = {}) {
+  return requestReview(value, options, dependencies, readReviewJson);
+}
+
+function requestReviewEvents(value, options, onEvent, dependencies = {}) {
+  return requestReview(value, { ...options, accept: 'text/event-stream' }, dependencies, async (response, maxBytes) => {
+    try {
+      if (String(response.headers['content-type'] || '').toLowerCase().includes('text/event-stream')) {
+        return await readEventStream({ body: response }, maxBytes, onEvent);
+      }
+      const payload = await readReviewJson(response, maxBytes);
+      if (payload.error) return await onEvent({ type: 'error', error: payload.error });
+      if (payload.object !== 'response' || !payload.status) throw new ReviewError('REVIEW_RESPONSE_INVALID');
+      return await onEvent({ type: `response.${payload.status}`, response: payload });
+    } finally { response.destroy(); }
+  });
+}
+
+module.exports = { ReviewError, publicAddress, requestReviewJson, requestReviewEvents, resolveReviewAddress, reviewUrl, sanitizeReviewDiagnostic };

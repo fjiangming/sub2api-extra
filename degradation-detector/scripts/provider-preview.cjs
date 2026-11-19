@@ -13,6 +13,7 @@ async function createPreview(port = 19961) {
   const deny = async () => { providerCalls++; throw new Error('Provider preview cannot access the network'); };
   runtime.providerDetection.request = deny;
   runtime.providerDetection.events = deny;
+  runtime.providerDetection.generate = deny;
   runtime.providerDetection.resolve = deny;
   const groups = [{ id: '8', name: 'GPT｜不降智｜官Key', platform: 'openai' }, { id: '2', name: 'Claude｜企业', platform: 'anthropic' }, { id: '40', name: 'Gemini｜专属定制', platform: 'gemini' }];
   const input = { revision: 0, ...defaultConfiguration(), groups: [] };

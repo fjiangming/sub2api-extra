@@ -17,7 +17,9 @@ function setup(t, dependencies = {}) {
   const config = testConfig(t);
   const store = new Store(config);
   const providers = new ProviderStore(store);
-  const service = new ProviderDetection({ config, providerStore: providers, vault: new CredentialVault(config), resolve: async () => ({}), pollMs: 1, ...dependencies });
+  const generations = [];
+  const service = new ProviderDetection({ config, providerStore: providers, vault: new CredentialVault(config), resolve: async () => ({}), pollMs: 1,
+    generate: async options => { generations.push(options); return { html: '<!doctype html><html><body>hierarchy artwork</body></html>' }; }, ...dependencies });
   const initial = { revision: 0, ...defaultConfiguration(), groups: [] };
   for (const provider of Object.values(initial.providers)) provider.enabled = true;
   for (const channel of channels) {
@@ -33,7 +35,7 @@ function setup(t, dependencies = {}) {
     return value;
   };
   t.after(async () => { await service.close(); store.close(); });
-  return { config, store, providers, service, save, input, hierarchy };
+  return { config, store, providers, service, save, input, hierarchy, generations };
 }
 
 test('provider-specific platform schemas separate parameters and reject duplicates and unsupported TestLLM platforms', t => {
@@ -67,10 +69,10 @@ test('provider-specific platform schemas separate parameters and reject duplicat
 
 test('provider and AI platform settings, group overrides and actual submitted parameters stay isolated', async t => {
   const posts = [];
-  const { service, providers, hierarchy, save, input } = setup(t, { request: async (url, options) => {
+  const { service, providers, hierarchy, save, input, generations } = setup(t, { request: async (url, options) => {
     if (options.method === 'POST') {
       posts.push({ url, body: options.body });
-      return options.body.mode ? { job_id: 'iq' } : { id: 'done', status: 'succeeded', candy: { status: 'passed' }, assessment: { quality: 'normal' } };
+      return options.body.mode ? { job_id: 'iq' } : { id: 'done', benchmark: options.body.benchmark, status: 'succeeded', candy: { status: 'passed' }, assessment: { quality: 'normal' } };
     }
     return { mode: 'iq', engines: { iq: { level: 'excellent' } } };
   } });
@@ -91,12 +93,13 @@ test('provider and AI platform settings, group overrides and actual submitted pa
     const snapshot = JSON.parse(providers.run(run.id).snapshot_json);
     const provider = channel === 'testllm' ? 'testllm' : 'manxue';
     assert.equal(snapshot.model, group.id === '1' && channel === 'pelican' ? 'group-model' : `${provider}-${group.platform}`);
-    assert.equal(posts.at(-1).body.model, snapshot.model);
-    assert.equal(posts.at(-1).body.api_key, `sk-hierarchy-${channel}-${group.id}`);
+    const submitted = channel === 'pelican' ? generations.at(-1).snapshot : posts.at(-1).body;
+    assert.equal(submitted.model, snapshot.model);
+    assert.equal(channel === 'pelican' ? generations.at(-1).key : submitted.api_key, `sk-hierarchy-${channel}-${group.id}`);
     assert.equal(snapshot.timeout_seconds, group.id === '1' && channel === 'pelican' ? 123 : 900);
     assert.equal(providers.run(run.id).status, 'completed');
     if (channel === 'testllm') { assert.equal(snapshot.reasoning_effort, undefined); assert.equal(posts.at(-1).body.protocol, group.platform === 'anthropic' ? 'claude' : 'gpt'); }
-    else { assert.equal(snapshot.cache_test, undefined); assert.equal(posts.at(-1).body.reasoning_effort, 'custom-effort'); }
+    else { assert.equal(snapshot.cache_test, undefined); assert.equal(submitted.reasoning_effort, 'custom-effort'); }
     historical.push(providers.run(run.id).snapshot_json);
   }
   const changed = input();
@@ -114,9 +117,9 @@ test('provider and AI platform settings, group overrides and actual submitted pa
 
 test('each question submits its own AI platform model and effort, with independent group inheritance and preserved history', async t => {
   const posts = [];
-  const { service, providers, hierarchy, input, save, store } = setup(t, { request: async (_url, options) => {
+  const { service, providers, hierarchy, input, save, store, generations } = setup(t, { request: async (_url, options) => {
     posts.push(options.body);
-    return { id: options.body.benchmark, status: 'succeeded', candy: { status: 'passed' }, assessment: { quality: 'normal' } };
+    return { id: options.body.benchmark, benchmark: options.body.benchmark, status: 'succeeded', candy: { status: 'passed' }, assessment: { quality: 'normal' } };
   } });
   const value = hierarchy();
   for (const scope of value.provider_platforms.filter(scope => scope.provider === 'manxue')) {
@@ -136,8 +139,9 @@ test('each question submits its own AI platform model and effort, with independe
     const expected = group.id === '1' && channel === 'pelican'
       ? { model: 'group-pelican', reasoning_effort: 'low' }
       : { model: `${group.platform}-${channel}`, reasoning_effort: channel === 'candy' ? 'candy-custom' : 'high' };
-    assert.equal(posts.at(-1).benchmark, channel);
-    assert.equal(posts.at(-1).model, expected.model); assert.equal(posts.at(-1).reasoning_effort, expected.reasoning_effort);
+    assert.equal(posts.at(-1).benchmark, channel === 'pelican' ? 'html' : channel);
+    const submitted = channel === 'pelican' ? generations.at(-1).snapshot : posts.at(-1);
+    assert.equal(submitted.model, expected.model); assert.equal(submitted.reasoning_effort, expected.reasoning_effort);
     assert.equal(providers.run(run.id).model, expected.model);
     assert.equal(JSON.parse(providers.run(run.id).snapshot_json).reasoning_effort, expected.reasoning_effort);
     snapshots.push(providers.run(run.id).snapshot_json);

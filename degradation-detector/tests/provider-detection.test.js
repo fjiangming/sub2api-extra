@@ -26,11 +26,13 @@ function setup(t, dependencies = {}) {
   const store = new Store(config);
   const providers = new ProviderStore(store);
   const vault = new CredentialVault(config);
-  const service = new ProviderDetection({ config, providerStore: providers, vault, resolve: async () => ({}), pollMs: 1, ...dependencies });
+  const generations = [];
+  const service = new ProviderDetection({ config, providerStore: providers, vault, resolve: async () => ({}), pollMs: 1,
+    generate: async options => { generations.push(options); return { html: '<!doctype html><html><body>local artwork</body></html>', output_tokens: 42 }; }, ...dependencies });
   const prepared = service.prepareConfiguration(input(), groups);
   providers.save(prepared.input, prepared.groups);
   t.after(async () => { await service.close(); store.close(); });
-  return { config, store, providers, vault, service };
+  return { config, store, providers, vault, service, generations };
 }
 
 test('provider config is opt-in, strict, independent and rejects unsafe URLs and duplicate schedules', () => {
@@ -49,13 +51,13 @@ test('provider config is opt-in, strict, independent and rejects unsafe URLs and
   assert.equal(configurationSchema.safeParse(value).success, false);
 });
 
-test('candy and pelican submit the direct benchmark contract, exclude errors and never infer a pass from succeeded', async t => {
+test('candy keeps direct generation and pelican submits locally saved HTML without leaking the generation key', async t => {
   const calls = [];
   const { service, providers, store } = setup(t, { request: async (url, options) => {
     calls.push({ url, ...options });
     if (options.method === 'POST') return { id: options.body.benchmark, status: 'running' };
     if (url.endsWith('candy')) return { id: 'candy', status: 'succeeded', candy: { status: 'incorrect', answer: 'wrong sk-provider-candy-1-1234567890', duration_ms: 1000 }, api_key: 'echo-key' };
-    return { id: 'pelican', status: 'succeeded', assessment: { quality: 'normal', reason: '正常' }, result: { html: '<html><body>sample</body></html>' }, headers: { authorization: 'secret' } };
+    return { id: 'html', benchmark: 'html', status: 'succeeded', assessment: { quality: 'normal', reason: '正常' }, result: { html: '<html><body>untrusted echoed source</body></html>' }, headers: { authorization: 'secret' } };
   } });
   const candy = service.enqueue('1', 'candy');
   const pelican = service.enqueue('1', 'pelican');
@@ -70,7 +72,14 @@ test('candy and pelican submit the direct benchmark contract, exclude errors and
   assert.equal(posts[0].body.benchmark, 'candy');
   assert.equal(posts[0].body.reasoning_effort, 'low');
   assert.equal(posts[0].apiKey, undefined);
-  assert.equal(posts[1].body.html, undefined, 'pelican is direct generation, not old HTML review');
+  assert.equal(posts[1].body.benchmark, 'html');
+  assert.equal(posts[1].body.html, '<!doctype html><html><body>local artwork</body></html>');
+  assert.equal(posts[1].body.api_key, 'not-used-for-html-classification');
+  assert.equal(posts[1].apiKey, undefined);
+  const result = JSON.parse(providers.run(pelican.id).response_json);
+  assert.equal(result.result.html, posts[1].body.html, 'classification must not overwrite the generated source');
+  assert.equal(result.result.output_tokens, 42);
+  assert.match(result.prompt, /鹈鹕骑自行车/);
   assert.equal(store.db.serialize().includes(Buffer.from('sk-provider-candy-1-1234567890')), false);
   assert.doesNotMatch(providers.run(candy.id).response_json, /echo-key/);
   assert.equal(conclusion('candy', { status: 'succeeded' }), 'unknown');
@@ -80,11 +89,11 @@ test('candy and pelican submit the direct benchmark contract, exclude errors and
 
 test('Manxue reasoning efforts preserve all presets, custom defaults and group overrides in saved settings and requests', async t => {
   const posts = [];
-  const { service, providers } = setup(t, { request: async (_url, options) => {
+  const { service, providers, generations } = setup(t, { request: async (_url, options) => {
     posts.push(options.body);
     return options.body.benchmark === 'candy'
       ? { id: 'candy', status: 'succeeded', candy: { status: 'passed' } }
-      : { id: 'pelican', status: 'succeeded', assessment: { quality: 'normal' } };
+      : { id: 'pelican', benchmark: 'html', status: 'succeeded', assessment: { quality: 'normal' } };
   } });
   for (const channel of ['candy', 'pelican']) {
     for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'future-effort-v2']) {
@@ -100,10 +109,10 @@ test('Manxue reasoning efforts preserve all presets, custom defaults and group o
       await service.execute(providers.run(run.id));
       assert.equal(providers.run(run.id).conclusion, 'passed');
       assert.equal(JSON.parse(providers.run(run.id).snapshot_json).reasoning_effort, effort);
-      assert.equal(posts.at(-1).reasoning_effort, effort);
+      assert.equal(channel === 'pelican' ? generations.at(-1).snapshot.reasoning_effort : posts.at(-1).reasoning_effort, effort);
       const overridden = service.enqueue('2', channel);
       await service.execute(providers.run(overridden.id));
-      assert.equal(posts.at(-1).reasoning_effort, 'group-effort-v3');
+      assert.equal(channel === 'pelican' ? generations.at(-1).snapshot.reasoning_effort : posts.at(-1).reasoning_effort, 'group-effort-v3');
       assert.equal(JSON.parse(providers.run(overridden.id).snapshot_json).reasoning_effort, 'group-effort-v3');
       assert.equal(JSON.parse(providers.run(run.id).snapshot_json).reasoning_effort, effort);
     }
@@ -114,9 +123,9 @@ test('Manxue reasoning efforts preserve all presets, custom defaults and group o
     assert.throws(() => service.prepareConfiguration(invalid, groups), /推理程度|reasoning_effort/);
   }
   let rejectedPosts = 0;
-  service.request = async (_url, options) => {
+  service.generate = async ({ snapshot }) => {
     rejectedPosts++;
-    assert.equal(options.body.reasoning_effort, 'future-effort-v2');
+    assert.equal(snapshot.reasoning_effort, 'future-effort-v2');
     throw Object.assign(new Error('unsupported reasoning effort'), { httpStatus: 400 });
   };
   const rejected = service.enqueue('1', 'pelican');
@@ -223,10 +232,10 @@ test('config validation retains keys after address edits, rejects duplicates and
 
 test('website and upstream edits retain legacy keys including omitted groups, use new destinations and preserve old snapshots', async t => {
   const posts = [];
-  const { service, providers, store, vault } = setup(t, { request: async (url, options) => {
+  const { service, providers, store, vault, generations } = setup(t, { request: async (url, options) => {
     if (options.method === 'POST') {
       posts.push({ url, body: options.body });
-      return options.body.mode ? { job_id: 'iq-job' } : { id: 'done', status: 'succeeded', candy: { status: 'passed' }, assessment: { quality: 'normal' } };
+      return options.body.mode ? { job_id: 'iq-job' } : { id: 'done', benchmark: options.body.benchmark, status: 'succeeded', candy: { status: 'passed' }, assessment: { quality: 'normal' } };
     }
     return { mode: 'iq', engines: { iq: { level: 'high' } } };
   } });
@@ -261,8 +270,8 @@ test('website and upstream edits retain legacy keys including omitted groups, us
     assert.equal(saved.status, 'completed');
     assert.equal(JSON.parse(saved.snapshot_json).target_url, 'https://new-relay.example.com/v1');
     assert.equal(posts.at(-1).url, channel === 'testllm' ? 'https://new-testllm.example.com/api/detect' : 'https://new-manxue.example.com/tests');
-    assert.equal(posts.at(-1).body.base_url, 'https://new-relay.example.com/v1');
-    assert.equal(posts.at(-1).body.api_key, `sk-provider-${channel}-1-1234567890`);
+    assert.equal(channel === 'pelican' ? generations.at(-1).snapshot.target_url : posts.at(-1).body.base_url, 'https://new-relay.example.com/v1');
+    assert.equal(channel === 'pelican' ? generations.at(-1).key : posts.at(-1).body.api_key, `sk-provider-${channel}-1-1234567890`);
   }
   assert.equal(providers.run(historical.id).snapshot_json, oldSnapshot);
   assert.equal(store.db.serialize().includes(Buffer.from('sk-provider-candy-1-1234567890')), false);
@@ -270,10 +279,10 @@ test('website and upstream edits retain legacy keys including omitted groups, us
 
 test('AI platform parameters govern all its groups and detectors while isolating other platforms and retaining credentials', async t => {
   const posts = [];
-  const { service, providers } = setup(t, { request: async (_url, options) => {
+  const { service, providers, generations } = setup(t, { request: async (_url, options) => {
     if (options.method === 'POST') {
       posts.push(options.body);
-      return options.body.mode ? { job_id: 'iq-job' } : { id: 'done', status: 'succeeded', candy: { status: 'passed' }, assessment: { quality: 'normal' } };
+      return options.body.mode ? { job_id: 'iq-job' } : { id: 'done', benchmark: options.body.benchmark, status: 'succeeded', candy: { status: 'passed' }, assessment: { quality: 'normal' } };
     }
     return { mode: 'iq', engines: { iq: { level: 'high' } } };
   } });
@@ -298,9 +307,10 @@ test('AI platform parameters govern all its groups and detectors while isolating
     const snapshot = JSON.parse(providers.run(run.id).snapshot_json);
     assert.equal(snapshot.model, `${group.platform}-shared`); assert.equal(snapshot.reasoning_effort, `${group.platform}-custom`);
     assert.equal(snapshot.target_url, `https://${group.platform}.example.com/v1`);
-    assert.equal(posts.at(-1).model, snapshot.model); assert.equal(posts.at(-1).base_url, snapshot.target_url);
+    const submitted = channel === 'pelican' ? generations.at(-1).snapshot : posts.at(-1);
+    assert.equal(submitted.model, snapshot.model); assert.equal(channel === 'pelican' ? submitted.target_url : submitted.base_url, snapshot.target_url);
     if (channel === 'testllm') assert.equal(posts.at(-1).protocol, group.platform === 'openai' ? 'gpt' : 'claude');
-    else { assert.equal(posts.at(-1).reasoning_effort, snapshot.reasoning_effort); assert.equal(posts.at(-1).service_tier, 'priority'); }
+    else { assert.equal(submitted.reasoning_effort, snapshot.reasoning_effort); assert.equal(submitted.service_tier, 'priority'); }
   }
   const another = { ...providers.configuration(), groups: [{ id: '1', channel: 'candy', enabled: true, override: legacy.channels.candy.defaults }] };
   prepared = service.prepareConfiguration(another, discovered); providers.save(prepared.input, prepared.groups);

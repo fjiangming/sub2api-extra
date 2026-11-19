@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const { createPreview } = require('./provider-preview.cjs');
+const { PELICAN_PROMPT } = require('../src/provider-config');
 let playwright;
 try { playwright = require(process.env.PLAYWRIGHT_MODULE || 'playwright'); }
 catch { playwright = require(path.join(os.homedir(), '.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright')); }
@@ -85,7 +86,33 @@ async function main() {
       await page.frameLocator('.p-artwork').locator('svg').waitFor();
       assert.equal(await page.locator('.p-artwork').getAttribute('sandbox'), 'allow-scripts');
       await page.locator('.p-history-detail summary').filter({ hasText: '作品源码' }).click(); assert.match(await page.locator('.p-history-detail').innerText(), /<!doctype html>/);
+      await page.locator('.p-history-detail summary').filter({ hasText: '检测提示词' }).click();
+      assert.equal(await page.locator('.p-history-detail summary').filter({ hasText: '检测提示词' }).locator('..').locator('pre').innerText(), PELICAN_PROMPT);
+      assert.match(await page.locator('.p-history-detail').innerText(), /本地生成 · HTML 源码分类/);
       await fit(page); await shot(page, `${layout.name}-pelican-detail`); await page.locator('[data-history-close]').click();
+      const artifactStore = preview.runtime.providerStore;
+      const savedArtifact = JSON.parse(artifactStore.run(artifactStore.history('8', 'pelican')[0].id).response_json);
+      const legacyArtifact = artifactStore.create(artifactStore.group('8', 'pelican'), 'demo');
+      const legacySnapshot = JSON.parse(legacyArtifact.snapshot_json); delete legacySnapshot.execution_method; delete legacySnapshot.prompt;
+      artifactStore.db.prepare('UPDATE degradation_provider_runs SET snapshot_json=? WHERE id=?').run(JSON.stringify(legacySnapshot), legacyArtifact.id);
+      const legacyResult = { ...savedArtifact, prompt: '旧任务原始提示词' }; delete legacyResult.method;
+      artifactStore.response(legacyArtifact.id, legacyResult); artifactStore.finish(legacyArtifact.id, 'completed');
+      const failedArtifact = artifactStore.create(artifactStore.group('8', 'pelican'), 'demo');
+      artifactStore.response(failedArtifact.id, { ...savedArtifact, status: 'failed', assessment: null,
+        diagnostic: { stage: 'poll', provider_code: 'FIXTURE_READ', provider_message: '虚构分类失败 [REDACTED] [URL]' } });
+      artifactStore.finish(failedArtifact.id, 'error', 'HTML 分类失败，保留已生成作品');
+      await page.locator('.p-card button[data-group="8"]').last().click(); await page.frameLocator('.p-artwork').locator('svg').waitFor();
+      assert.match(await page.locator('.p-history-detail').innerText(), /检测异常/);
+      assert.equal(await page.locator('.p-history-detail summary').filter({ hasText: '检测诊断' }).count(), 0);
+      for (const title of ['作品源码', '检测提示词']) await page.locator('.p-history-detail summary').filter({ hasText: title }).click();
+      assert.equal(await page.locator('.p-history-detail summary').filter({ hasText: '作品源码' }).locator('..').locator('pre').innerText(), savedArtifact.result.html);
+      assert.equal(await page.locator('.p-history-detail summary').filter({ hasText: '检测提示词' }).locator('..').locator('pre').innerText(), PELICAN_PROMPT);
+      await fit(page); await shot(page, `${layout.name}-pelican-classification-failed`);
+      await page.locator(`.p-history-list [data-run-id="${legacyArtifact.id}"]`).click(); await page.frameLocator('.p-artwork').locator('svg').waitFor();
+      assert.doesNotMatch(await page.locator('.p-history-detail').innerText(), /本地生成 · HTML 源码分类/);
+      await page.locator('.p-history-detail summary').filter({ hasText: '检测提示词' }).click();
+      assert.equal(await page.locator('.p-history-detail summary').filter({ hasText: '检测提示词' }).locator('..').locator('pre').innerText(), '旧任务原始提示词');
+      await page.locator('[data-history-close]').click();
       await page.locator('[data-provider="testllm"]').click(); await page.locator('.p-table tbody tr').first().waitFor();
       assert.equal(await page.locator('.p-table tbody tr').count(), 2); assert.match(await page.locator('.p-table').first().innerText(), /极高智商/);
       await platformZones(page, cardZones.slice(0, 2));
@@ -106,6 +133,15 @@ async function main() {
 
       const adminContext = await browser.newContext(options); const admin = await adminContext.newPage(); watch(admin);
       await admin.goto(`${preview.baseUrl}/admin/config?demo=1`); await admin.locator('#pc-platform-form').waitFor();
+      await admin.locator('#pc-history-channel').selectOption('pelican'); await admin.locator('[data-pc-history="8"]').click();
+      await admin.frameLocator('.p-artwork').locator('svg').waitFor();
+      await admin.locator('.p-history-detail summary').filter({ hasText: '检测诊断' }).click();
+      assert.match(await admin.locator('.p-history-detail').innerText(), /FIXTURE_READ/);
+      for (const title of ['作品源码', '检测提示词']) await admin.locator('.p-history-detail summary').filter({ hasText: title }).click();
+      assert.equal(await admin.locator('.p-history-detail summary').filter({ hasText: '作品源码' }).locator('..').locator('pre').innerText(), savedArtifact.result.html);
+      assert.equal(await admin.locator('.p-history-detail summary').filter({ hasText: '检测提示词' }).locator('..').locator('pre').innerText(), PELICAN_PROMPT);
+      await fit(admin); await shot(admin, `${layout.name}-admin-pelican-diagnostic`);
+      await admin.locator('[data-history-close]').click(); await admin.locator('#pc-history-channel').selectOption('candy');
       assert.equal(await admin.locator('#legacy-config').evaluate(element => element.open), false);
       assert.equal(await admin.locator('[data-pc-provider]').count(), 2); assert.equal(await admin.locator('#pc-provider-form [name="api_url"]').count(), 1);
       assert.equal(await admin.locator('[data-pc-platform]').count(), 4);

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>对话日志 Demo · Sub2API 运营中心</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/demo/demo.css">
+  <script src="/vendor/lucide.js" defer></script>
+  <script src="/vendor/echarts.js" defer></script>
+  <script src="/demo/fixture.js" defer></script>
+  <script src="/demo/demo.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="module-header">
+      <div class="brand"><div class="brand-mark small" aria-hidden="true"><i data-lucide="chart-no-axes-combined"></i></div><div><strong>Sub2API</strong><span>运营中心</span></div></div>
+      <nav class="module-tabs" aria-label="模块导航">
+        <span class="module-tab cl-static"><i data-lucide="layout-dashboard"></i>运营概览</span>
+        <span class="module-tab cl-static"><i data-lucide="chart-no-axes-column-increasing"></i>用量统计</span>
+        <span class="module-tab cl-static"><i data-lucide="timer"></i>慢请求</span>
+        <span class="module-tab cl-static"><i data-lucide="circle-alert"></i>错误分析</span>
+        <button class="module-tab active" data-nav="requests" aria-current="page"><i data-lucide="messages-square"></i>对话日志</button>
+        <span class="module-tab cl-static"><i data-lucide="globe"></i>域名访问</span>
+      </nav>
+      <div class="header-account"><span class="cl-demo-badge">DEMO</span><span class="user-chip"><i data-lucide="circle-user-round"></i><span>管理员</span></span></div>
+    </header>
+    <div class="workspace">
+      <header class="topbar">
+        <div><h1>对话日志</h1><p>上游请求与响应归档</p></div>
+        <div class="topbar-actions"><span class="connection-state" id="connection-state"><span class="status-dot ok"></span><span>模拟采集正常</span></span><button class="icon-button" id="refresh" aria-label="刷新演示数据" title="刷新演示数据"><i data-lucide="refresh-cw"></i></button><button class="button secondary cl-policy-shortcut" data-nav="policy"><i data-lucide="sliders-horizontal"></i><span>保存策略</span></button></div>
+      </header>
+      <main class="content cl-content">
+        <div class="cl-demo-bar"><span><i data-lucide="flask-conical"></i>交互预览 · 全部为模拟数据</span><label>演示场景<select id="scenario" aria-label="演示场景"><option value="normal">正常采集</option><option value="interrupted">采集中断</option><option value="unconfigured">尚未接入</option></select></label></div>
+        <section class="cl-overview" aria-label="当前筛选统计"><div class="cl-metrics" id="metrics"></div><div class="cl-mini-chart"><div><span>采集趋势</span><span>北京时间 · 今天</span></div><div id="trend" role="img" aria-label="今天模拟请求采集趋势"></div></div></section>
+        <div class="cl-view-tabs" role="tablist" aria-label="对话日志视图">
+          <button id="tab-requests" role="tab" data-nav="requests" aria-selected="true" aria-controls="view-requests"><i data-lucide="list-filter"></i>请求日志<span id="request-count">32</span></button>
+          <button id="tab-sessions" role="tab" data-nav="sessions" aria-selected="false" aria-controls="view-sessions" tabindex="-1"><i data-lucide="messages-square"></i>会话视图</button>
+          <button id="tab-collection" role="tab" data-nav="collection" aria-selected="false" aria-controls="view-collection" tabindex="-1"><i data-lucide="radio-tower"></i>采集状态<span class="cl-tab-dot"></span></button>
+          <button id="tab-policy" role="tab" data-nav="policy" aria-selected="false" aria-controls="view-policy" tabindex="-1"><i data-lucide="shield-check"></i>保存策略</button>
+        </div>
+        <div id="coverage-banner" class="cl-notice amber" role="status" hidden></div>
+        <section id="view-requests" role="tabpanel" aria-labelledby="tab-requests">
+          <div class="cl-filters">
+            <label class="cl-search"><i data-lucide="search"></i><input id="search" aria-label="搜索请求、用户或模型" placeholder="搜索请求 ID、用户、模型…" autocomplete="off"></label>
+            <select id="date-filter" aria-label="时间范围"><option value="today">今天</option><option value="7">近 7 天</option><option value="all">全部演示记录</option></select>
+            <select id="platform-filter" aria-label="平台"><option value="all">全部平台</option><option>OpenAI</option><option>Anthropic</option><option>Gemini</option></select>
+            <select id="protocol-filter" aria-label="协议"><option value="all">全部协议</option><option>JSON</option><option>SSE</option><option>WebSocket</option></select>
+            <select id="capture-filter" aria-label="采集完整性"><option value="all">全部完整性</option><option value="complete">完整采集</option><option value="partial">正文不完整</option><option value="missing">正文缺失</option><option value="redaction_failed">脱敏失败</option><option value="retry">含重试</option></select>
+            <button class="icon-button" id="reset-filters" aria-label="重置筛选" title="重置筛选"><i data-lucide="rotate-ccw"></i></button>
+          </div>
+          <div class="cl-explorer" id="explorer">
+            <aside class="cl-records" aria-label="请求列表"><div class="cl-list-heading"><span id="list-label"></span><button class="icon-button" id="export-index" aria-label="导出筛选后的请求索引 CSV" title="导出请求索引 CSV"><i data-lucide="download"></i></button></div><div id="request-list" class="cl-request-list"></div><div class="cl-pagination"><span id="page-label"></span><div><button class="icon-button" id="prev-page" aria-label="上一页" title="上一页"><i data-lucide="chevron-left"></i></button><button class="icon-button" id="next-page" aria-label="下一页" title="下一页"><i data-lucide="chevron-right"></i></button></div></div></aside>
+            <article id="inspector" class="cl-inspector" aria-label="请求详情"></article>
+          </div>
+        </section>
+        <section id="view-sessions" role="tabpanel" aria-labelledby="tab-sessions" hidden></section>
+        <section id="view-collection" role="tabpanel" aria-labelledby="tab-collection" hidden></section>
+        <section id="view-policy" role="tabpanel" aria-labelledby="tab-policy" hidden>
+          <div class="cl-policy-heading"><div><h2>保存策略</h2><span id="policy-current"></span></div><span id="policy-dirty" class="cl-badge amber" hidden>有未保存更改</span></div>
+          <div class="cl-policy-layout">
+            <form id="policy-form" class="cl-policy-form">
+              <div class="cl-setting-row"><div><strong>保存对话日志</strong><span>仅作用于之后生成的模拟记录</span></div><label class="cl-switch"><input id="policy-enabled" type="checkbox" role="switch" aria-label="保存对话日志" checked><span></span></label></div>
+              <fieldset><legend>排除用户</legend><div class="cl-exclusion-heading"><span id="excluded-user-count" class="cl-badge"></span><button id="clear-excluded-users" class="cl-link" type="button">清空选择</button></div><div class="cl-search cl-user-search"><i data-lucide="search"></i><input id="excluded-user-search" type="search" aria-label="搜索排除用户" placeholder="搜索用户名或用户 ID" autocomplete="off"></div><div id="excluded-users" class="cl-user-list" role="group" aria-label="不采集的用户"></div><p class="cl-field-note">覆盖所选用户的全部 API Key，不保存正文、消息、元数据或索引，也不生成采集缺口。保存后对后续请求生效，历史归档保留。</p></fieldset>
+              <fieldset><legend>保存版本</legend><div class="cl-modes"><label><input type="radio" name="mode" value="dual" checked><span>原文 + 脱敏副本</span></label><label><input type="radio" name="mode" value="masked"><span>仅脱敏副本</span></label><label><input type="radio" name="mode" value="original"><span>仅原文</span></label></div><p id="mode-note" class="cl-field-note"></p></fieldset>
+              <fieldset><legend>脱敏规则</legend><div class="cl-rule-list"><label><span><strong>邮箱地址</strong><small>linyuan@example.com</small></span><code>&lt;EMAIL_1&gt;</code><input id="rule-email" type="checkbox" checked></label><label><span><strong>电话号码</strong><small>+1-202-555-0148</small></span><code>&lt;PHONE_1&gt;</code><input id="rule-phone" type="checkbox" checked></label><label><span><strong>正文中的密钥</strong><small>demo_secret_alpha_2026</small></span><code>&lt;SECRET_1&gt;</code><input id="rule-secret" type="checkbox" checked></label><label><span><strong>IP 地址</strong><small>198.51.100.24</small></span><code>&lt;IP_1&gt;</code><input id="rule-ip" type="checkbox"></label></div><p class="cl-field-note">相同值在请求、响应及后续轮次中使用相同占位符。</p><div id="custom-rules"></div><div class="cl-custom-add"><input id="custom-from" aria-label="自定义规则原文" placeholder="匹配文本，例如 ORION-42" maxlength="120"><input id="custom-to" aria-label="自定义规则替换值" placeholder="替换为，例如 <PROJECT_1>" maxlength="80"><button class="icon-button" id="add-rule" type="button" aria-label="添加替换规则" title="添加规则"><i data-lucide="plus"></i></button></div><p id="custom-error" class="form-error" role="alert" hidden></p></fieldset>
+              <fieldset><legend>保留与容量</legend><div class="cl-retention-fields"><label>保留天数<div class="cl-input-unit"><input id="policy-retention" type="number" min="1" max="365" value="7" required><span>天</span></div></label><label>存储上限<div class="cl-input-unit"><input id="policy-capacity" type="number" min="1" max="1024" value="10" required><span>GiB</span></div></label><label>最小可用空间<div class="cl-input-unit"><input id="policy-reserve" type="number" min="1" max="1024" value="2" required><span>GiB</span></div></label></div><label class="cl-overflow-label">达到存储上限<select id="policy-overflow"><option value="stop">停止保存新正文，记录采集缺口</option><option value="evict">淘汰最早日志后继续保存</option></select></label></fieldset>
+              <div class="cl-policy-fixed"><i data-lucide="link"></i><span>保留消息顺序、角色和工具调用关联；脱敏失败的正文不入库。</span></div>
+              <div class="cl-policy-actions"><span id="policy-feedback" role="status">设置仅保存在本机浏览器</span><button class="button secondary" id="restore-policy" type="button"><i data-lucide="rotate-ccw"></i>恢复默认</button><button class="button primary" type="submit"><i data-lucide="save"></i>保存策略</button></div>
+            </form>
+            <aside class="cl-policy-preview" aria-label="脱敏预览"><div class="cl-preview-heading"><h3>脱敏预览</h3><span id="preview-hit-count" class="cl-badge green"></span></div><div class="cl-segmented" role="group" aria-label="预览样例"><button data-preview="request" aria-pressed="true">Request</button><button data-preview="response" aria-pressed="false">Response</button></div><div class="cl-preview-label"><span>处理前</span><span>原始样例</span></div><pre id="preview-before" class="cl-preview-code"></pre><div class="cl-preview-label"><span>处理后</span><span id="preview-version-label"></span></div><pre id="preview-after" class="cl-preview-code"></pre><div class="cl-preview-assurance"><i data-lucide="check"></i><span id="preview-assurance"></span></div></aside>
+          </div>
+        </section>
+        <footer class="cl-page-footer"><span><i data-lucide="database"></i>独立演示归档</span><span id="footer-meta">数据截至 2026-11-15 15:30 · 北京时间</span></footer>
+      </main>
+    </div>
+  </div>
+  <dialog id="payload-dialog" class="cl-dialog"><header><div><span id="full-subtitle"></span><h2 id="full-title"></h2></div><div><button class="icon-button" id="full-copy" aria-label="复制完整正文" title="复制正文"><i data-lucide="copy"></i></button><button class="icon-button" id="full-download" aria-label="下载完整正文" title="下载正文"><i data-lucide="download"></i></button><button class="icon-button" data-close="payload-dialog" aria-label="关闭完整正文" title="关闭"><i data-lucide="x"></i></button></div></header><pre class="cl-full-code"><code id="full-code"></code></pre></dialog>
+  <dialog id="metadata-dialog" class="cl-dialog cl-metadata-dialog"><header><h2>归档信息</h2><button class="icon-button" data-close="metadata-dialog" aria-label="关闭归档信息" title="关闭"><i data-lucide="x"></i></button></header><div id="metadata-body"></div></dialog>
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+</body>
+</html>

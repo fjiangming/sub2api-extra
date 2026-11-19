@@ -30,6 +30,8 @@ docker compose --env-file compose.services.env up -d --no-build --no-deps infini
 
 入口为 `https://aihub.fo2.us.ci/canvas/`，无尾斜杠的 `/canvas` 会补齐。画布与主站使用相同 origin；渠道的 API Base URL 填 `https://aihub.fo2.us.ci`，Key 仍使用用户自己的 Sub2API API Key。不要把 UI 的 `/canvas/` 前缀填进模型接口地址。
 
+新增主站 `https://yunhop.cc` 的菜单目前仍打开上述旧域画布；接口地址可以填 `https://yunhop.cc/`，使用本人 Sub2API API Key。服务器模型 API 已按[多域名配置](../operations-center/integrations/multi-domain/original-files/README.md)补齐明确来源的跨域兼容，不需要迁移旧画布浏览器数据。自行部署新别名时不能只添加 DNS / server_name，还须验证带 Authorization 的 OPTIONS 预检及 API Key 鉴权；来源白名单仅限主站 / 画布，登录管理接口不在范围内。
+
 将[子目录 Nginx 片段](docs/nginx-subpath.conf.example)安装到 `/etc/nginx/snippets/infinite-canvas-main.conf`，仅在现有 `server_name aihub.fo2.us.ci;` 所在 server 增加 `include /etc/nginx/snippets/infinite-canvas-main.conf;`，检查配置后平滑重载。需要使用带子目录支持的新 fork 镜像；反代去除 URL 前缀并把 HTML 的 base 改成 `/canvas/`，同一容器仍支持原独立域名。页面资源、配置页、项目深链接和本地插件均位于前缀下，主站 API 继续走原 `/v1/`。
 
 原菜单通过主站管理员 API 保留 ID、标签、图标、排序和可见性，仅将原独立域名入口改为同域地址。入口会清除附加的登录参数，不建立新的登录或作品同步。

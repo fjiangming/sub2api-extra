@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>降智检测配置 · 分层交互 Demo</title>
+  <link rel="icon" href="/detector-icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/demo.css">
+  <script src="/vendor/lucide.min.js" defer></script>
+  <script src="/demo.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="page-header">
+      <div class="page-title"><img src="/detector-icon.svg" alt="" width="38" height="38"><div><h1>降智检测配置</h1><p><span class="demo-label">交互 Demo</span><span id="save-state">示例配置</span></p></div></div>
+      <div class="header-actions">
+        <button type="button" class="icon-button" data-theme-toggle title="切换主题" aria-label="切换主题"><i data-lucide="sun-moon"></i></button>
+        <button type="button" class="icon-button" data-reload title="重新读取已保存配置" aria-label="重新读取已保存配置"><i data-lucide="refresh-cw"></i></button>
+        <button type="button" class="button primary" data-save><i data-lucide="save"></i>保存配置</button>
+      </div>
+    </header>
+    <div id="configuration"></div>
+    <footer class="page-footer"><span>演示数据 · Asia/Shanghai</span><button type="button" class="text-button" data-reset><i data-lucide="rotate-ccw"></i>恢复示例配置</button></footer>
+  </main>
+  <dialog id="group-dialog" class="drawer" aria-labelledby="group-title">
+    <form id="group-form" autocomplete="off">
+      <header class="dialog-header"><div><p id="group-path" class="breadcrumb"></p><h2 id="group-title"></h2></div><button type="button" class="icon-button" data-group-close title="关闭" aria-label="关闭分组配置"><i data-lucide="x"></i></button></header>
+      <div id="group-body" class="dialog-body"></div>
+      <footer class="dialog-footer"><button type="button" class="button" data-group-close>取消</button><button type="submit" class="button primary"><i data-lucide="check"></i>应用到分组</button></footer>
+    </form>
+  </dialog>
+  <dialog id="history-dialog" class="history-dialog" aria-labelledby="history-title">
+    <header class="dialog-header"><div><p id="history-path" class="breadcrumb"></p><h2 id="history-title"></h2></div><button type="button" class="icon-button" data-history-close title="关闭" aria-label="关闭检测记录"><i data-lucide="x"></i></button></header>
+    <div id="history-body" class="dialog-body"></div>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

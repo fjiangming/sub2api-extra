@@ -4,26 +4,38 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { AppError } = require('./errors');
 const { channels, names, configurationSchema, keyContext, providerFor, providerPlatform, testParams, validateEffective } = require('./provider-config');
 const { cleanManxue, cleanReport, runSummary } = require('./provider-results');
-const { requestReviewJson, resolveReviewAddress } = require('./review-http');
+const { requestReviewJson, resolveReviewAddress, ReviewError, sanitizeReviewDiagnostic } = require('./review-http');
 const { waitForTestLLM } = require('./provider-http');
+const { generatePelican, PELICAN_METHOD, PELICAN_PROMPT } = require('./provider-pelican');
+const { manxueHtmlBody } = require('./visual-review');
 
 const fail = (code, message, status = 400) => new AppError(code, message, { status });
 const remoteId = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value) ? value : null;
 function failure(error, stage) {
   const code = error.code || error.message;
   if (code === 'PROVIDER_CONFIG_CHANGED') return '配置已变更或停用，任务已停止';
+  if (code === 'PROVIDER_ARTIFACT_MISSING') return '已生成作品不可读取，为避免重复调用模型，任务已停止';
+  if (stage === 'generate') {
+    if (code === 'PROVIDER_SUBMISSION_UNKNOWN') return '作品生成请求结果未知，为避免重复调用模型，任务已停止';
+    if (error.httpStatus === 401 || error.httpStatus === 403) return '作品生成鉴权失败，请检查分组专用 Key；未自动重发';
+    if (['REVIEW_TIMEOUT', 'PROVIDER_TIMEOUT'].includes(code) || ['AbortError', 'TimeoutError'].includes(error.name)) return '作品生成超时，未提交分类；未自动重发模型请求';
+    if (code === 'PROVIDER_GENERATION_INCOMPLETE' || code === 'PROVIDER_GENERATION_FAILED') return '模型响应未完整完成，未提交分类；未自动重发模型请求';
+    if (code === 'REVIEW_INPUT_TOO_LARGE') return '完整作品超过 1 MiB 的分类上限，未截断或提交';
+    return '作品生成失败，未提交分类；未自动重发模型请求';
+  }
   if (error.httpStatus === 429) return '第三方限流，已暂停该服务的新提交；本次未自动重发';
   if (stage === 'submit') return '提交未取得可确认的任务编号，未自动重发；请核对第三方任务后再检测';
   if (error.httpStatus === 404) return '第三方任务已失效或不存在，保留已取得的结果';
   if (code === 'REVIEW_URL_UNSAFE') return '检测服务或上游地址未通过公网校验';
   if (['REVIEW_TIMEOUT', 'PROVIDER_TIMEOUT'].includes(code) || error.name === 'AbortError' || error.name === 'TimeoutError') return '检测超时，保留已取得的结果；未重复提交';
   if (code === 'PROVIDER_REMOTE_FAILED') return '第三方检测失败，保留已取得的结果';
+  if (code === 'PROVIDER_NO_VERDICT') return 'HTML 源码分类未返回有效判定，保留已生成作品';
   return '第三方响应异常或不符合接入协议，保留已取得的结果';
 }
 
 class ProviderDetection {
-  constructor({ config, providerStore, vault, request = requestReviewJson, events = waitForTestLLM, resolve = resolveReviewAddress, pollMs = 3000 }) {
-    Object.assign(this, { config, providerStore, vault, request, events, resolve, pollMs });
+  constructor({ config, providerStore, vault, request = requestReviewJson, events = waitForTestLLM, generate = generatePelican, resolve = resolveReviewAddress, pollMs = 3000 }) {
+    Object.assign(this, { config, providerStore, vault, request, events, generate, resolve, pollMs });
     this.active = new Map();
     this.timer = null;
     this.closed = false;
@@ -167,6 +179,71 @@ class ProviderDetection {
     for (const task of this.active.values()) task.controller.abort();
     await Promise.allSettled([...this.active.values()].map(task => task.promise));
   }
+  async executePelican({ run, snapshot, key, signal, response, check, json, read, setStage }) {
+    const store = this.providerStore;
+    let generation = JSON.parse(store.run(run.id).parts_json).generation;
+    setStage('generate');
+    if (!generation) {
+      Object.assign(response, cleanManxue({ status: 'running', phase: 'generating', method: PELICAN_METHOD, prompt: snapshot.prompt }, [key]));
+      store.db.transaction(() => {
+        store.response(run.id, response);
+        store.part(run.id, 'generation', { state: 'submitting' });
+      })();
+      const result = await this.generate({ snapshot, key, signal, maxResponseBytes: this.config.maxResponseBytes, taskKey: `degradation-pelican-${run.id}-generate` });
+      check();
+      Object.assign(response, cleanManxue({ ...response, result, phase: 'classifying' }, [key]));
+      manxueHtmlBody(response.result?.html);
+      store.db.transaction(() => {
+        store.response(run.id, response);
+        store.part(run.id, 'generation', { state: 'done' });
+      })();
+      generation = { state: 'done' };
+    }
+    if (generation.state === 'submitting') throw new Error('PROVIDER_SUBMISSION_UNKNOWN');
+    if (generation.state !== 'done' || !response.result?.html || !response.prompt) throw new Error('PROVIDER_ARTIFACT_MISSING');
+    setStage('submit');
+    let part = JSON.parse(store.run(run.id).parts_json).pelican;
+    if (part?.state === 'done') return;
+    if (part?.state === 'submitting') throw new Error('PROVIDER_SUBMISSION_UNKNOWN');
+    let data;
+    if (!part?.remote_id) {
+      setStage('submit');
+      check();
+      if (store.throttled(run.channel)) throw new Error('PROVIDER_THROTTLED');
+      const body = manxueHtmlBody(response.result.html);
+      store.part(run.id, 'pelican', { state: 'submitting', benchmark: 'html' });
+      data = await json(snapshot.api_url, { method: 'POST', body, taskKey: `degradation-pelican-${run.id}-classify` });
+      const id = remoteId(data.id);
+      if (!id) throw new Error('PROVIDER_RESPONSE_INVALID');
+      part = { state: 'submitted', benchmark: 'html', remote_id: id };
+      store.part(run.id, 'pelican', part);
+      setStage('poll');
+      if (data.benchmark != null && data.benchmark !== 'html') throw new Error('PROVIDER_TASK_MISMATCH');
+      if (data.status == null) data = null;
+    }
+    setStage('poll');
+    while (true) {
+      check();
+      if (!data) data = await read(() => json(`${snapshot.api_url}/${part.remote_id}`, { method: 'GET' }));
+      if (data.id !== part.remote_id || data.benchmark != null && data.benchmark !== 'html') throw new Error('PROVIDER_TASK_MISMATCH');
+      if (data.status === 'succeeded') {
+        if (data.benchmark !== 'html' || !['normal', 'degraded'].includes(data.assessment?.quality)) throw new Error('PROVIDER_NO_VERDICT');
+        response.assessment = cleanManxue(data, [key]).assessment;
+        response.status = 'succeeded'; response.phase = 'complete';
+        store.db.transaction(() => {
+          store.response(run.id, response);
+          store.part(run.id, 'pelican', { ...part, state: 'done' });
+        })();
+        return;
+      }
+      if (['failed', 'error', 'cancelled', 'canceled'].includes(data.status)) {
+        throw new ReviewError('PROVIDER_REMOTE_FAILED', { diagnostic: { provider_code: data.error?.code, provider_message: typeof data.error === 'string' ? data.error : data.error?.message } });
+      }
+      if (!['queued', 'pending', 'running'].includes(data.status)) throw new Error('PROVIDER_RESPONSE_INVALID');
+      await delay(this.pollMs, undefined, { signal });
+      data = null;
+    }
+  }
   async execute(original, controller = new AbortController()) {
     const store = this.providerStore;
     if (!store.current(original)) { store.finish(original.id, 'error', '配置已变更或停用，任务已停止', 'PROVIDER_CONFIG_CHANGED'); return; }
@@ -178,6 +255,7 @@ class ProviderDetection {
     const timeout = setTimeout(() => controller.abort(new Error('PROVIDER_TIMEOUT')), remaining);
     const signal = controller.signal;
     let stage = 'prepare';
+    let key;
     const response = JSON.parse(run.response_json || '{}');
     try {
       if (this.config.demoMode) {
@@ -187,7 +265,7 @@ class ProviderDetection {
       }
       await this.resolve(new URL(snapshot.api_url), signal);
       await this.resolve(new URL(snapshot.target_url), signal);
-      const key = this.vault.decrypt(snapshot.key_context, snapshot.key_cipher);
+      key = this.vault.decrypt(snapshot.key_context, snapshot.key_cipher);
       const check = () => {
         signal.throwIfAborted();
         if (!store.current(run)) throw new Error('PROVIDER_CONFIG_CHANGED');
@@ -204,6 +282,12 @@ class ProviderDetection {
           }
         }
       };
+      if (run.channel === 'pelican' && snapshot.execution_method === PELICAN_METHOD) {
+        await this.executePelican({ run, snapshot, key, signal, response, check, json, read, setStage: value => { stage = value; } });
+        check();
+        store.finish(run.id, 'completed');
+        return;
+      }
       const modes = run.channel === 'testllm' ? ['iq', ...(snapshot.cache_test ? ['cache'] : []), ...(snapshot.thinking_test ? ['think'] : [])] : [run.channel];
       for (const mode of modes) {
         let part = JSON.parse(store.run(run.id).parts_json)[mode];
@@ -269,9 +353,14 @@ class ProviderDetection {
       store.finish(run.id, run.channel === 'testllm' && !response.iq ? 'error' : 'completed', partial ? '部分检测未取得结果，详见各项记录' : '');
     } catch (error) {
       if (this.closed) return;
-      if (error.httpStatus === 429 || error.httpStatus === 503) store.throttle(providerFor(run.channel), error.retryAfterSeconds || 60);
+      if (stage !== 'generate' && (error.httpStatus === 429 || error.httpStatus === 503)) store.throttle(providerFor(run.channel), error.retryAfterSeconds || 60);
       const changed = !store.current(run);
       const cause = changed ? new Error('PROVIDER_CONFIG_CHANGED') : signal.aborted ? signal.reason || error : error;
+      if (run.channel === 'pelican' && snapshot.execution_method === PELICAN_METHOD) {
+        response.status = 'failed';
+        response.diagnostic = sanitizeReviewDiagnostic({ ...cause.diagnostic, stage, http_status: cause.httpStatus }, [key]);
+        store.response(run.id, response);
+      }
       store.finish(run.id, 'error', failure(cause, changed ? 'poll' : stage), typeof cause.code === 'string' ? cause.code : /^PROVIDER_[A-Z_]+$/.test(cause.message) ? cause.message : 'PROVIDER_FAILED');
     } finally { clearTimeout(timeout); }
   }
@@ -279,7 +368,7 @@ class ProviderDetection {
 
 function demoResponse(channel) {
   if (channel === 'candy') return { status: 'succeeded', candy: { status: 'passed', answer: '9', duration_ms: 42000, input_tokens: 4300, output_tokens: 1000 }, prompt: null };
-  if (channel === 'pelican') return { status: 'succeeded', assessment: { quality: 'normal', label: '正常', reason: '演示作品，非真实检测' }, result: { html: '<!doctype html><html><body><h1>演示作品</h1><p>未调用第三方检测</p></body></html>' }, prompt: null };
+  if (channel === 'pelican') return { status: 'succeeded', method: PELICAN_METHOD, assessment: { quality: 'normal', label: '正常', reason: '演示作品，非真实检测' }, result: { html: '<!doctype html><html><body><h1>演示作品</h1><p>未调用第三方检测</p></body></html>' }, prompt: PELICAN_PROMPT };
   return { iq: { level: 'excellent', duration: 18.2, timeout: false }, cache: { supported: true, total: 4, hit_rate: 87.5, request_hit_rate: 75, duration: 6 }, think: { has_thinking: true, has_signature: true, duration: 3.2 } };
 }
 

@@ -1,0 +1,42 @@
+{
+  "backup_root": "/root/syncthing/backups",
+  "work_root": "/var/tmp/sub2api-online-backup",
+  "lock_file": "/run/lock/vps-full-backup.lock",
+  "reserve_gib": 10,
+  "export_budget_gib": 4,
+  "max_backup_gib": 40,
+  "keep": 7,
+  "maintenance_file": "/run/sub2api-backup-maintenance.json",
+  "expected_containers": [
+    "sub2api", "sub2api-postgres", "sub2api-redis", "postgres", "redis",
+    "sub2api-activity-center", "sub2api-recharge-center", "sub2api-operations-center",
+    "sub2api-degradation-detector", "sub2api-provider-monitor", "sub2api-usage-leaderboard",
+    "sub2api-infinite-canvas", "syncthing", "eshop-sync-tool", "cli-proxy-api", "new-api"
+  ],
+  "expected_units": ["nginx.service", "x-ui.service", "3x-sub.service"],
+  "health_urls": ["http://127.0.0.1:9000/health"],
+  "postgres": {"sub2api-postgres": "sub2api", "postgres": "new-api"},
+  "redis": ["sub2api-redis", "redis"],
+  "paths": [
+    "/root/sub2api-deploy", "/root/sub2api-extra", "/root/new-api", "/root/cpa",
+    "/root/syncthing", "/opt/sync-tool", "/usr/local/x-ui", "/etc/x-ui",
+    "/etc/3x-sub", "/etc/ssl/3x-ui", "/etc/nginx", "/etc/systemd/system",
+    "/usr/local/libexec/sub2api-online-backup", "/etc/sub2api-online-backup.json",
+    "/usr/local/libexec/docker-log-archiver.py", "/root/BACKUP-RESTORE.md"
+  ],
+  "required_paths": [
+    "/root/sub2api-deploy/.env", "/root/sub2api-extra", "/etc/x-ui/x-ui.db",
+    "/root/syncthing/config/config.xml", "/opt/sync-tool/data/config.json"
+  ],
+  "exclude_paths": [
+    "/root/sub2api-deploy/postgres_data", "/root/sub2api-deploy/redis_data",
+    "/root/sub2api-deploy/backups", "/root/sub2api-extra/backups",
+    "/root/syncthing/backups", "/root/syncthing/config/index-v2", "/www/docker-log-archive"
+  ],
+  "conversation_directories": [
+    "/var/lib/docker/volumes/sub2api-extra_operations-center-data/_data/conversation-logs"
+  ],
+  "runtime_files": [
+    {"container": "sub2api", "path": "/app/sub2api", "target": "runtime/sub2api.binary"}
+  ]
+}

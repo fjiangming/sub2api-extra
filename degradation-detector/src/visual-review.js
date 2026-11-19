@@ -33,6 +33,10 @@ function prepareReviewHtml(source) {
   return html;
 }
 
+function manxueHtmlBody(html, model = 'gpt-6-astra') {
+  return { benchmark: 'html', base_url: 'https://example.com/v1', api_key: 'not-used-for-html-classification', model, html: prepareReviewHtml(html) };
+}
+
 function reviewHttpReason(status) {
   if ([400, 422].includes(status)) return '视觉审核请求参数不符合接口要求，无法判定';
   if (status === 401) return '视觉审核鉴权失败，请管理员检查审核专用 Key，无法判定';
@@ -109,7 +113,7 @@ class VisualReviewer {
         benchmark: visual.benchmark,
         html: reviewHtml,
         // HTML classification validates these placeholders without contacting an upstream.
-        ...(classifier ? { base_url: 'https://example.com/v1', api_key: 'not-used-for-html-classification', model: visual.model } : {}),
+        ...(classifier ? manxueHtmlBody(reviewHtml, visual.model) : {}),
         ...(visual.protocol === 'html_review' && visual.model ? { model: visual.model } : {}),
         ...(visual.protocol === 'html_review' && visual.instructions ? { instructions: visual.instructions } : {})
       });
@@ -177,4 +181,4 @@ function combineReview(deterministic, visual, review) {
   };
 }
 
-module.exports = { VisualReviewer, combineReview, prepareReviewHtml, reviewFailure };
+module.exports = { VisualReviewer, combineReview, prepareReviewHtml, manxueHtmlBody, reviewFailure };

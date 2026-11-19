@@ -20,8 +20,10 @@ function cleanManxue(data, secrets = []) {
   const assessment = object(data.assessment) ? { quality: text(data.assessment.quality, 40), label: cleanText(data.assessment.label, 100), reason: cleanText(data.assessment.reason, 4000) } : null;
   return {
     status: text(data.status, 30), phase: text(data.phase, 50), candy, assessment,
-    result: object(data.result) ? { html: cleanText(data.result.html, 2 * 1024 * 1024), duration_ms: number(data.result.duration_ms), input_tokens: number(data.result.input_tokens), output_tokens: number(data.result.output_tokens) } : null,
-    prompt: cleanText(data.prompt, 100000)
+    result: object(data.result) ? { html: cleanText(data.result.html, 2 * 1024 * 1024), duration_ms: number(data.result.duration_ms), input_tokens: number(data.result.input_tokens), output_tokens: number(data.result.output_tokens),
+      ...(data.method === 'local_html' ? { first_token_ms: number(data.result.first_token_ms) } : {}) } : null,
+    prompt: cleanText(data.prompt ?? data.result?.prompt, 100000),
+    ...(data.method === 'local_html' ? { method: 'local_html' } : {})
   };
 }
 
@@ -58,6 +60,7 @@ function runSummary(row) {
 function compactResult(channel, response) {
   if (channel === 'testllm') return { iq: response?.iq || null, cache: response?.cache || null, think: response?.think || null, errors: response?.errors || {} };
   return { answer: text(response?.candy?.answer, 500), assessment: response?.assessment || null,
+    ...(response?.method === 'local_html' ? { method: 'local_html' } : {}),
     input_tokens: response?.candy?.input_tokens ?? response?.result?.input_tokens ?? null,
     output_tokens: response?.candy?.output_tokens ?? response?.result?.output_tokens ?? null };
 }

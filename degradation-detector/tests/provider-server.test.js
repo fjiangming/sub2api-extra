@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { createApp } = require('../src/server');
-const { defaultConfiguration, channels, providerParams } = require('../src/provider-config');
+const { defaultConfiguration, channels, providerParams, PELICAN_PROMPT, PELICAN_METHOD } = require('../src/provider-config');
 const { demoResponse } = require('../src/provider-detection');
 const { listen, testConfig } = require('./helpers');
 
@@ -163,6 +163,57 @@ test('read-only results, details, 24h history and signed sandbox previews rechec
   access.platform = 'openai'; access.visible = false;
   assert.equal((await get(detail.preview_url)).status, 404, 'signed URL does not bypass current permissions');
   assert.equal((await get('/api/provider/groups/1/pelican/runs')).status, 404);
+});
+
+test('locally generated pelican artwork and prompt remain available after classification failure, with diagnostics restricted to administrators', async t => {
+  const { get, send, runtime, input, admin, user, access } = await setup(t);
+  await send('/api/admin/provider-config', input, admin, true, 'PUT');
+  const detector = runtime.providerDetection, store = runtime.providerStore;
+  const source = '<!doctype html><html><body><svg><text>HTTP artwork</text></svg><script>window.artwork = 1;</script></body></html>';
+  let generations = 0, submissions = 0;
+  detector.resolve = async () => ({});
+  detector.generate = async ({ snapshot }) => {
+    generations++; assert.equal(snapshot.prompt, PELICAN_PROMPT);
+    return { html: source, input_tokens: 100, output_tokens: 2000, first_token_ms: 30, duration_ms: 300 };
+  };
+  detector.request = async (_url, options) => {
+    assert.equal(options.method, 'POST'); submissions++;
+    assert.equal(options.body.benchmark, 'html'); assert.equal(options.body.html, source);
+    assert.doesNotMatch(JSON.stringify(options.body), /sk-private|relay\.example/);
+    return { id: 'fixture-failed', benchmark: 'html', status: 'failed', error: {
+      code: 'UPSTREAM_READ', message: 'fixture read failed sk-private-pelican-1-123456 https://private.example.com/api'
+    } };
+  };
+  const run = detector.enqueue('1', 'pelican'); await detector.execute(store.run(run.id));
+  assert.equal(generations, 1); assert.equal(submissions, 1);
+  for (const [prefix, who] of [['/api', user], ['/api/admin', admin]]) {
+    const response = await get(`${prefix}/provider-results/${run.id}`, who); assert.equal(response.status, 200);
+    const detail = await response.json();
+    assert.equal(detail.conclusion, 'error'); assert.equal(detail.status, 'error');
+    assert.equal(detail.method, PELICAN_METHOD); assert.equal(detail.settings.execution_method, PELICAN_METHOD);
+    assert.equal(detail.response.prompt, PELICAN_PROMPT); assert.equal(detail.response.result.html, source);
+    assert.equal(detail.output_tokens, 2000); assert.equal(detail.response.result.first_token_ms, 30);
+    assert.equal(detail.response.diagnostic, undefined);
+    if (who === admin) {
+      assert.equal(detail.diagnostic.stage, 'poll'); assert.equal(detail.diagnostic.provider_code, 'UPSTREAM_READ');
+      assert.match(detail.diagnostic.provider_message, /fixture read failed/);
+    } else assert.equal(detail.diagnostic, undefined);
+    assert.doesNotMatch(JSON.stringify(detail), /sk-private|private\.example|relay\.example|key_cipher/);
+    const preview = await get(detail.preview_url, who); assert.equal(preview.status, 200);
+    assert.equal(await preview.text(), source);
+    assert.match(preview.headers.get('content-security-policy'), /sandbox allow-scripts/);
+    assert.match(preview.headers.get('content-security-policy'), /connect-src 'none'/);
+  }
+  const listing = await (await get('/api/provider-results?channel=pelican')).json();
+  assert.equal(listing.groups[0].latest.conclusion, 'error'); assert.equal(listing.groups[0].latest.method, PELICAN_METHOD);
+  assert.doesNotMatch(JSON.stringify(listing), /fixture read failed|diagnostic|HTTP artwork/);
+  assert.equal((await get(`/api/admin/provider-results/${run.id}`, user)).status, 403);
+  store.db.prepare("UPDATE degradation_provider_runs SET snapshot_json='{}',response_json=NULL,parts_json='{}' WHERE id=?").run(run.id);
+  const retired = await (await get(`/api/provider-results/${run.id}`)).json();
+  assert.equal(retired.method, PELICAN_METHOD); assert.equal(retired.settings.execution_method, PELICAN_METHOD);
+  assert.equal(retired.response, null); assert.equal(retired.preview_url, null);
+  access.visible = false;
+  assert.equal((await get(`/api/provider-results/${run.id}`)).status, 404);
 });
 
 test('disabled categories hide public history while admins retain access; deletion never crosses group/category or active jobs', async t => {

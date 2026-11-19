@@ -2,7 +2,7 @@
 
 const { setImmediate: yieldToRequests } = require('node:timers/promises');
 const { nextScheduledRunAt } = require('./schedule');
-const { defaultConfiguration, channels, providerFor, digest, keyContext, providerParams, providerPlatform, testParams } = require('./provider-config');
+const { defaultConfiguration, channels, providerFor, digest, keyContext, providerParams, providerPlatform, testParams, PELICAN_METHOD, PELICAN_PROMPT } = require('./provider-config');
 const { compactResult, conclusion, runSummary } = require('./provider-results');
 
 class ProviderStore {
@@ -145,7 +145,8 @@ class ProviderStore {
   create(group, trigger = 'manual') {
     const active = this.db.prepare("SELECT * FROM degradation_provider_runs WHERE group_id=? AND channel=? AND status IN ('queued','running')").get(group.group_id, group.channel);
     if (active) return active;
-    const snapshot = { ...this.effective(group), key_cipher: group.key_cipher, key_context: keyContext(group.channel, group.group_id) };
+    const snapshot = { ...this.effective(group), key_cipher: group.key_cipher, key_context: keyContext(group.channel, group.group_id),
+      ...(group.channel === 'pelican' ? { execution_method: PELICAN_METHOD, prompt: PELICAN_PROMPT } : {}) };
     const result = this.db.prepare(`INSERT INTO degradation_provider_runs (group_id,platform,channel,model,trigger_type,status,conclusion,revision,snapshot_json,created_at)
       VALUES (?,?,?,?,?,'queued','queued',?,?,?)`).run(group.group_id, group.platform, group.channel, snapshot.model, trigger, this.revision(group), JSON.stringify(snapshot), Date.now());
     return this.run(result.lastInsertRowid);
