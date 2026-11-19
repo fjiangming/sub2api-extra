@@ -99,7 +99,10 @@ class ConversationJsonlStore {
       if (current?.status !== 'pending' || this.push.policy().version !== policy.version || this.push.validJob(job).cancel) return true;
       let file = this.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE target_hash=? AND source=? AND model=? AND day=? AND status='open'")
         .get(job.target_hash, job.source, envelope.metadata.model, day);
-      if (file && file.envelope_version !== job.envelope_version) { this.seal(file.id); file = null; }
+      if (file && (file.envelope_version !== job.envelope_version ||
+        file.object_key !== objectKey(policy.s3.prefix, file.day, file.model, file.created_at, file.id))) {
+        this.seal(file.id); file = null;
+      }
       if (file && file.bytes + bytes > limit) { this.seal(file.id); file = null; }
       if (!file) {
         const id = crypto.randomBytes(16).toString('hex'), at = this.now();

@@ -1,5 +1,7 @@
 'use strict';
 
+const crypto = require('node:crypto');
+
 function dayAt(at, timezone) {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(at);
   const value = Object.fromEntries(parts.map(part => [part.type, part.value]));
@@ -8,8 +10,9 @@ function dayAt(at, timezone) {
 
 function objectKey(prefix, day, model, at, id) {
   const name = model.normalize('NFKC').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120) || 'unknown-model';
+  const directory = name === model && !['.', '..'].includes(name) ? name : `${name}-${crypto.createHash('sha256').update(model).digest('hex').slice(0, 16)}`;
   const stamp = new Date(at).toISOString().replace(/[-:.]/g, '');
-  return [prefix, day, `${name}-${day}-${stamp}-${id.slice(0, 16)}.jsonl`].filter(Boolean).join('/');
+  return [prefix, day, directory, `${name}-${day}-${stamp}-${id.slice(0, 16)}.jsonl`].filter(Boolean).join('/');
 }
 
 // Encode one JSON value in bounded pieces; a JSONL record always ends with one LF.

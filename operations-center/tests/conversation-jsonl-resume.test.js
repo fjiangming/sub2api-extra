@@ -90,11 +90,14 @@ async function until(predicate) {
   while (!predicate()) { assert(Date.now() < end, 'background progress timed out'); await new Promise(resolve => setTimeout(resolve, 20)); }
 }
 
-for (const legacyVersion of [1,2,3]) test(`legacy v${legacyVersion} multipart progress survives upgrade and skips the first network part`, async t => {
+for (const legacyVersion of [1,2,3,4]) test(`legacy v${legacyVersion} multipart progress and flat key survive upgrade and skip the first network part`, async t => {
   let fail = true;
   const receiver = await s3Receiver({ beforeRequest: (entry, res) => fail && entry.query.get('partNumber') === '2' ? reject(res) : undefined });
   t.after(() => receiver.close()); const f = setup(t, receiver); const row = large(f);
   f.push.db.prepare('UPDATE cl_push_jobs SET envelope_version=?').run(legacyVersion);
+  assert(f.jsonl.assignOne());
+  const planned = f.jsonl.list().files[0], legacyKey = `${planned.day}/${planned.object_key.split('/').at(-1)}`;
+  f.jsonl.db.prepare('UPDATE cl_push_jsonl_files SET object_key=? WHERE id=?').run(legacyKey, planned.id);
   await f.service.jsonl.tick(); const file = f.jsonl.list().files[0], saved = f.jsonl.get(file.id);
   assert.equal(saved.status, 'pending'); assert.equal(saved.uploaded_parts, 1); assert.equal(saved.uploaded_bytes, 8 * 1024 ** 2);
   assert.equal(f.jsonl.parts(saved).length, 1); assert.equal(receiver.completed.length, 0);
@@ -106,9 +109,12 @@ for (const legacyVersion of [1,2,3]) test(`legacy v${legacyVersion} multipart pr
   const done = f.jsonl.get(file.id); assert.equal(done.status, 'sent'); assert.equal(done.uploaded_parts, 2);
   assert.equal(creates(receiver).length, 1); assert.deepEqual(puts(receiver).map(row => row.query.get('partNumber')), ['1','2','2']);
   assert(puts(receiver).every(entry => entry.query.get('uploadId') === saved.upload_id));
+  assert.equal(done.object_key, legacyKey); assert.equal(receiver.completed[0].path, '/test-bucket/' + legacyKey);
+  assert(receiver.requests.every(entry => entry.path === '/test-bucket/' + legacyKey));
   assert.equal(JSON.parse(receiver.completed[0].body).request,legacyVersion===1?row.request:Buffer.from(row.request,'base64').toString());
   const received=JSON.parse(receiver.completed[0].body);
-  if(legacyVersion===3)assert.deepEqual(Object.keys(received),['request','response']);
+  if(legacyVersion===4) { assert.deepEqual(Object.keys(received),['request_id','request','response']); assert.equal(received.request_id,row.request_id); }
+  else if(legacyVersion===3)assert.deepEqual(Object.keys(received),['request','response']);
   else {assert.equal(received.schema,'sub2api.conversation.v'+legacyVersion);assert.equal(received.metadata.request_id,row.request_id);}
   assert.equal(done.sha256, crypto.createHash('sha256').update(receiver.completed[0].body).digest('hex'));
   assert.equal(f.jsonl.parts(done).length, 0);

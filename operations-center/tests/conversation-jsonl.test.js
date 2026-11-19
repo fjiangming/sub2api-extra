@@ -9,7 +9,7 @@ const { ConversationPushStore } = require('../src/conversation-push-store');
 const { ConversationPushService } = require('../src/services/conversation-push-service');
 const { ConversationPushSupervisor } = require('../src/services/conversation-push-supervisor');
 const { ConversationPushTransport } = require('../src/services/conversation-push-transport');
-const { jsonlChunks, jsonlBytes, dayAt } = require('../src/services/conversation-jsonl-format');
+const { jsonlChunks, jsonlBytes, dayAt, objectKey } = require('../src/services/conversation-jsonl-format');
 const { deliveryBody } = require('../src/services/conversation-envelope');
 const { AuthService } = require('../src/auth');
 const { createApp } = require('../src/app');
@@ -57,15 +57,31 @@ test('streamed JSONL equals JSON.stringify, preserving escapes and surrogate pai
   assert.deepEqual(JSON.parse(text), envelope); assert.equal(text.split('\n').length, 2);
 });
 
+test('JSONL object keys use date and distinct safe model directories with optional target prefixes', () => {
+  const day = '2026-06-25', at = Date.parse('2026-06-25T08:00:00Z'), id = '0123456789abcdef0123456789abcdef';
+  const file = 'Opus5.5-2026-06-25-20260625T080000000Z-0123456789abcdef.jsonl';
+  assert.equal(objectKey('', day, 'Opus5.5', at, id), `${day}/Opus5.5/${file}`);
+  assert.equal(objectKey('partner/logs', day, 'Opus5.5', at, id), `partner/logs/${day}/Opus5.5/${file}`);
+  const models = ['Gemini carbon', 'Gemini/carbon', 'Gemini_carbon', '.', '..', '', 'unknown-model', 'Opus5.5', '\uff2fpus5.5', 'x'.repeat(121), 'x'.repeat(122)];
+  const directories = models.map(model => {
+    const key = objectKey('', day, model, at, id), segments = key.split('/');
+    assert.equal(segments.length, 3); assert.equal(segments[0], day);
+    assert.match(segments[1], /^[A-Za-z0-9._-]+$/); assert(!['.', '..'].includes(segments[1]));
+    assert.equal(objectKey('', day, model, at, id), key);
+    return segments[1];
+  });
+  assert.equal(new Set(directories).size, models.length);
+});
+
 test('historical files group by date and model, preserve raw HTTP/SSE/WS bytes and use unique timestamped paths', async t => {
   const receiver = await s3Receiver(); t.after(() => receiver.close());
   const f = setup(t); configure(f, receiver.url);
   const at = Date.parse('2026-06-25T10:00:00Z'), sse = 'data: {"delta":"one\\ntwo","n":1.2300}\r\n\r\ndata: [DONE]\r\n\r\n';
   const frames = [{ direction: 'out', at: 0, binary: true, body: Buffer.from([0, 255, 10]).toString('base64') }];
-  f.store.ingest(event('group-http', { at, model: 'Opus5' }));
-  f.store.ingest(event('group-sse', { at: at + 1, request_id:event('group-http').request_id, model: 'Opus5', protocol: 'SSE', response: Buffer.from(sse).toString('base64') }));
+  f.store.ingest(event('group-http', { at, model: 'Opus5.5' }));
+  f.store.ingest(event('group-sse', { at: at + 1, request_id:event('group-http').request_id, model: 'Opus5.5', protocol: 'SSE', response: Buffer.from(sse).toString('base64') }));
   f.store.ingest(event('group-ws', { at, model: 'Fable5', protocol: 'WebSocket', frames }));
-  f.store.ingest(event('group-next-day', { at: at + 86400000, model: 'Opus5' })); enqueue(f);
+  f.store.ingest(event('group-next-day', { at: at + 86400000, model: 'Opus5.5' })); enqueue(f);
   await f.service.jsonl.tick(); await f.service.jsonl.tick(); await f.service.jsonl.tick();
   assert.equal(receiver.objects.size, 3); assert.equal(f.push.list().counts.find(row => row.status === 'sent').count, 4);
   const received = lines(receiver); assert.equal(received.length, 4);
@@ -74,10 +90,35 @@ test('historical files group by date and model, preserve raw HTTP/SSE/WS bytes a
   assert(received.some(value => value.response === rawResponse));
   assert(received.some(value => value.response === sse));
   assert.deepEqual(received.find(value => Array.isArray(value.request)),{request_id:event('group-ws').request_id,request:[rawRequest,'data:application/octet-stream;base64,AP8K'],response:[rawResponse]});
-  const opus = receiver.completed.find(file => file.path.startsWith('/incoming-04-20260624/2026-06-25/Opus5-'));
+  const opus = receiver.completed.find(file => file.path.startsWith('/incoming-04-20260624/2026-06-25/Opus5.5/'));
+  assert(opus); assert(receiver.completed.some(file => file.path.startsWith('/incoming-04-20260624/2026-06-25/Fable5/')));
+  assert(receiver.completed.some(file => file.path.startsWith('/incoming-04-20260624/2026-06-26/Opus5.5/')));
   assert.equal(opus.body.toString().trimEnd().split('\n').length, 2);
-  assert.match(opus.path, /Opus5-2026-06-25-\d{8}T\d{9}Z-[a-f0-9]{16}\.jsonl$/);
+  assert.match(opus.path, /\/Opus5\.5\/Opus5\.5-2026-06-25-\d{8}T\d{9}Z-[a-f0-9]{16}\.jsonl$/);
   assert.equal(f.jsonl.db.prepare('SELECT COUNT(*) n FROM cl_push_jsonl_members').get().n, 0);
+});
+
+test('a legacy open daily file is sealed without changing its key before new records use a model directory', async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close());
+  const at = Date.parse('2026-06-25T08:00:00Z'), f = setup(t, { now: () => at });
+  configure(f, receiver.url, { automatic: true, s3: { prefix: 'partner/logs' } });
+  const first = event('old-layout', { at, model: 'Opus5.5' });
+  f.store.ingest(first); f.push.scanAutomatic(); assert(f.jsonl.assignOne());
+  const old = f.jsonl.list().files[0], legacyKey = `partner/logs/${old.day}/${old.object_key.split('/').at(-1)}`;
+  f.jsonl.db.prepare('UPDATE cl_push_jsonl_files SET object_key=? WHERE id=?').run(legacyKey, old.id);
+  const next = event('new-layout', { at: at + 1, model: 'Opus5.5' });
+  f.store.ingest(next); f.push.scanAutomatic(); assert(f.jsonl.assignOne());
+  assert.equal(f.jsonl.get(old.id).status, 'pending'); assert.equal(f.jsonl.get(old.id).object_key, legacyKey);
+  assert.equal(f.jsonl.get(old.id).records, 1);
+  const current = f.jsonl.list().files.find(file => file.id !== old.id);
+  assert.equal(current.status, 'open'); assert.equal(current.records, 1);
+  assert(current.object_key.startsWith('partner/logs/2026-06-25/Opus5.5/'));
+  f.jsonl.flush(); await f.service.jsonl.tick(); await f.service.jsonl.tick();
+  assert.equal(receiver.completed.length, 2);
+  assert(receiver.completed.some(file => file.path === '/incoming-04-20260624/' + legacyKey));
+  assert(receiver.completed.some(file => file.path === '/incoming-04-20260624/' + current.object_key));
+  assert.deepEqual(lines(receiver).map(body => body.request_id).sort(), [first.request_id, next.request_id].sort());
+  for (const body of lines(receiver)) { assert.equal(body.request, rawRequest); assert.equal(body.response, rawResponse); }
 });
 
 test('rolling uses encoded UTF-8 bytes and never splits or truncates a log record', async t => {

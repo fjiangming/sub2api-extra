@@ -83,6 +83,7 @@ async function main() {
         assert.equal(preview.push.store.policy().s3.jsonl.uploadMiBPerSecond,1.5);
         await page.locator('[data-clp-test=s3]').click();await page.locator('#clp-test-s3').filter({hasText:'连接成功'}).waitFor();
         assert.equal(JSON.parse(jsonlTarget.completed[0].body.toString()).schema,'sub2api.conversation.test.v1');
+        assert(jsonlTarget.completed[0].path.includes('/test/test-'));
         preview.fixture.store.ingest(event(name+'-jsonl-a',{model:'Opus5'}));preview.fixture.store.ingest(event(name+'-jsonl-b',{model:'Opus5'}));preview.fixture.store.ingest(event(name+'-jsonl-c',{model:'Fable5'}));
         await until(()=>preview.push.store.list().counts.some(row=>row.status==='buffered'&&row.count===3));
         await page.locator('[data-clp-action=refresh]').click();await page.locator('#clp-files').filter({hasText:'汇总中'}).waitFor();
@@ -92,7 +93,7 @@ async function main() {
         await page.route(stateRoute,async route=>{
           const response=await route.fetch(),body=await response.json(),value=body.data||body;
           const file=value.jsonl.files[0];file.status='running';file.bytes=10000000000;file.uploaded_bytes=8388608;file.uploaded_parts=1;file.pause_reason='archive_busy';
-          file.model='<img src=x onerror=alert(1)>';file.object_key='2026-06-25/'+ 'Opus5-'.repeat(12)+'.jsonl';
+          file.model='<img src=x onerror=alert(1)>';file.object_key='2026-06-25/Opus5/'+ 'Opus5-'.repeat(12)+'.jsonl';
           Object.assign(value.jsonl.backlog,{atRisk:true,expiryAt:Date.now()+3600000});
           await route.fulfill({response,json:body});
         });
@@ -106,6 +107,7 @@ async function main() {
         await page.locator('#clp-flush').click();await waitJobs('sent',9);
         const jsonlFiles=jsonlTarget.completed.filter(file=>Object.hasOwn(JSON.parse(file.body.toString().split('\n')[0]),'request'));
         assert.equal(jsonlFiles.length,2);assert.deepEqual(jsonlFiles.map(file=>file.body.toString().trimEnd().split('\n').length).sort(),[1,2]);
+        for(const file of jsonlFiles)assert.match(file.path,/^\/demo-archive\/conversation-logs\/\d{4}-\d{2}-\d{2}\/(Opus5|Fable5)\/\1-\d{4}-\d{2}-\d{2}-\d{8}T\d{9}Z-[a-f0-9]{16}\.jsonl$/);
         const jsonlIds=[];
         for(const file of jsonlFiles){assert(file.path.endsWith('.jsonl'));for(const line of file.body.toString().trimEnd().split('\n')){const body=JSON.parse(line);assert.deepEqual(Object.keys(body),['request_id','request','response']);jsonlIds.push(body.request_id);assert(!body.request.includes('alice@example.com'));}}
         assert.deepEqual(jsonlIds.sort(),['a','b','c'].map(suffix=>event(name+'-jsonl-'+suffix).request_id).sort());
