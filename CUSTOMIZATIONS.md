@@ -25,6 +25,24 @@
 
 独立正式页面预览 `http://127.0.0.1:20008/results?demo=readonly&test=pelican`，临时虚构 SQLite、真实上游请求禁用，healthz 200；保留旧端口预览。沿用本会话已有 GitHub 提交授权，仅提交本节对应改动与说明，保留运营中心等其他任务差异；提交 / 推送结果以最终回复为准，不部署服务器。
 
+## 2026-11-20：确认送达后后台清理本地归档
+
+用户随后明确要求提交 GitHub。本次仅提交本节对应的运营中心源码、测试、验证脚本、文档与维护台账到 `main`，并按本次提交核对自动测试、双架构构建及镜像发布结果；不连接或更新服务器，不触发真实推送或清理。下文未提交说明为实现完成时的状态，发布结果以本次最终回复为准。
+
+用户要求确认外部推送成功后删除本地生成文件及已推送日志。本轮只修改运营中心；现有 JSONL 为流式分片，无 10 GB 明文暂存文件。新增显式送达后清理开关，旧配置默认关闭，不因镜像升级擅自删除历史；开启后后台处理已确认送达的合格历史及新日志。原文 / 脱敏正文都删除，只留有界轻量送达凭证。不连接或部署服务器，不执行真实数据删除或外部推送。
+
+- `src/conversation-push-cleanup-store.js`：增加持久候选队列、送达凭证、后台清理及回收；同条全部已有任务和当前启用目标须确认 2xx，JSONL 须整卷 Complete 成功且摘要 / 字节进度完整，当前内容版本一致；失败 / 待发 / 取消 / 回执不明、正在处理或读取时保留。逐条短事务、有限批次及时间预算，SQLite 闲页渐进回收与零等待 checkpoint，不运行全量 VACUUM。凭证 / 幂等标记限期、分批清理，不保留请求 / 响应正文或用户资料。
+- `services/conversation-local-retention.js`、`conversation-log-store.js`、`conversation-read-service.js`：增加正文读取 / 导出跨进程租约，成功 / 失败 / 取消释放，异常退出后到期；采集重放用轻量指纹继续幂等，不重新保存或发送已清理的相同数据。新数据与不同 ID 不受影响。
+- `conversation-push-store.js`、`services/conversation-push-policy.js`、`conversation-push-service.js`、`conversation-push-worker.js`、`conversation-push-supervisor.js`、`server.js`、`scripts/conversation-logs-live-preview.cjs`：策略兼容旧客户端，送达记录与轻量凭证统一查询；清理在原独立低优先级推送进程运行，采集、下载、查看、历史维护优先，错误只重试本地清理，不重放已成功推送。
+
+- `public/conversation-push-ui.js`、`public/index.html`：增加本地保留开关、删除范围说明、后台统计及送达凭证状态，静态版本更新；不再给已清理凭证展示已删除的用户身份。`package.json` 纳入新增模块和测试的语法检查。`tests/conversation-push-cleanup.test.js` 与 `scripts/conversation-push-browser-check.cjs` 覆盖策略兼容、真实分片回执、跨进程保护、空间回收、幂等及四布局交互；仅使用虚构数据与 loopback 接收器。`docs/conversation-jsonl-push.md`、`docs/conversation-logs.md` 同步开关、历史范围、失败 / 取消保护、凭证 30 天 / 约 10 万条有界保留和 SQLite 渐进回收边界。
+
+验证：`npm run check` 通过；标准串行完整 **711 项测试全部通过，0 失败 / 跳过**，约 241 秒，包含新增 14 项送达清理测试。覆盖两份正文 / 索引删除、多目标失败 / 取消 / 缺回执保护、版本变更、旧记录 / 重启恢复、读取 / 导出租约、清理事务回滚、配额 / 物理空间回收、轻量凭证修剪、真实分片 Complete 回执丢失，以及独立子进程与并发采集。首次全量暴露的旧 v1 结构迁移依赖已通过改为查询时合并凭证解决，不创建持久视图，也未放宽旧分片回归断言；最终 v1–v4 原 key 与分片续传均通过。
+
+正式 Chrome / Playwright 的 1440px、390px、320px 和深色四布局全部通过，无页面脚本错误、外部请求或页面溢出；覆盖默认关闭、保存开启、实际发送后删除、送达记录 / 批次统计保留及重复采集去重。截图 `sub2api-push-browser-TM6bqN`，桌面与 320px 已视觉复核。检查、最终全量和浏览器日志分别为 `sub2api-delivered-cleanup-check-20261120.log`、`sub2api-delivered-cleanup-tests-final-20261120.log`、`sub2api-delivered-cleanup-ui-20261120.log`，均在本机临时目录；测试只使用虚构正文和 loopback 接收器。
+
+本轮未提交 / 推送 GitHub，未连接或更新服务器，也未操作真实历史或外部存储。后续仅更新运营中心镜像并在推送策略显式开启即可；无新增主站改动、依赖、环境变量或内存配额要求。共享磁盘 IO / SQLite 短写锁仍有成本，不承诺严格零影响；不会让主站推理同步等待清理。
+
 ## 2026-11-20：汇总发布整个工程的必要维护文件
 
 用户明确要求将工程下必要文件一并提交 GitHub，不限于最近的鹈鹕改造。本轮据此汇总此前保留在本地的源码、配置、测试、文档与开发演示，提交并推送既有 `origin/main`；此前各节的“不提交”或“仅提交本功能”描述为当轮完成时的状态，本次以新的完整发布授权为准。保留已有实现与历史记录，不连接或部署服务器，不修改生产数据、凭据或资金。

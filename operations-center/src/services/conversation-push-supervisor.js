@@ -7,9 +7,9 @@ const { fork } = require('node:child_process');
 const { ConversationPushService } = require('./conversation-push-service');
 
 class ConversationPushSupervisor extends ConversationPushService {
-  constructor(store, { memoryBudgetBytes, canWork = () => true } = {}) {
+  constructor(store, { memoryBudgetBytes, canWork = () => true, canCleanup = () => true } = {}) {
     super(store); this.child = null; this.ready = false; this.pending = new Map(); this.memoryBudgetBytes = memoryBudgetBytes;
-    this.canWork = canWork;
+    this.canWork = canWork; this.canCleanup = canCleanup;
   }
   send(message) { if (this.child?.connected) this.child.send(message, () => {}); }
   wake() { this.send({ type: 'wake' }); }
@@ -27,12 +27,13 @@ class ConversationPushSupervisor extends ConversationPushService {
       if (this.child !== child) return;
       if (message?.type === 'ready') {
         clearTimeout(startupTimer); this.ready = true; this.lastError = '';
-        const priority = () => { let allowed = false; try { allowed = this.canWork(); } catch { /* Pause on unavailable metadata. */ } this.send({type:'priority',allowed}); };
+        const priority = () => { let allowed = false,cleanupAllowed = false; try { allowed = this.canWork(); cleanupAllowed = allowed && this.canCleanup(); } catch { /* Pause on unavailable metadata. */ } this.send({type:'priority',allowed,cleanupAllowed}); };
         priority(); this.priorityTimer = setInterval(priority,250); this.priorityTimer.unref();
       }
       if (message?.type === 'status') {
         this.lastError = message.lastError || ''; this.lastRun = message.lastRun || null;
         this.jsonl.lastError = message.jsonlError || ''; this.jsonl.lastRun = message.jsonlRun || null;
+        this.cleanupError = message.cleanupError || '';
       }
       if (message?.type === 'test-result') { const pending = this.pending.get(message.id); if (pending) { this.pending.delete(message.id); pending.resolve(message.result); } }
     });

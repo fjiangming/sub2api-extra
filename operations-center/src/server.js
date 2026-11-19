@@ -58,7 +58,11 @@ async function main() {
   if (conversationArchive) conversationArchive.start().catch(() => console.warn('conversation processor unavailable: CONVERSATION_PROCESSOR_START_FAILED'));
   let conversationPush = null;
   if (conversations) {
-    try { conversationPush = new ConversationPushSupervisor(new ConversationPushStore(conversations).initialize(), { canWork: () => conversationArchive?.idleForHistory }); }
+    try { conversationPush = new ConversationPushSupervisor(new ConversationPushStore(conversations).initialize(), {
+      canWork: () => conversationArchive?.idleForHistory,
+      canCleanup: () => !conversationCleanup?.child && !conversationRepair?.busy && !conversationRead?.active && !conversationRead?.queue.length && !conversationRead?.draining
+        && !conversationExport?.active && !conversationExport?.queue.length && !conversationExport?.draining
+    }); }
     catch { console.warn('conversation push unavailable: CONVERSATION_PUSH_INITIALIZATION_FAILED'); }
   }
   let conversationCleanup = null;

@@ -7,6 +7,7 @@ const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversat
 const { ENVELOPE_VERSION, formatBodies, formatDeliveryBodies } = require('./services/conversation-envelope');
 const { processingBudgets } = require('./services/conversation-memory');
 const { defaults,normalizePolicy,parsePolicy,publicPolicy,targetHash,invalid } = require('./services/conversation-push-policy');
+const { ConversationPushCleanupStore, historyColumns, historySource } = require('./conversation-push-cleanup-store');
 
 const destinations = z.array(z.enum(['webhook','s3'])).min(1).max(2);
 const filterSchema = z.object({search:z.string().max(200).optional(),start:z.string().max(32).optional(),end:z.string().max(32).optional(),
@@ -39,13 +40,14 @@ class ConversationPushStore {
         updated_at INTEGER NOT NULL,PRIMARY KEY(policy_version,code));`);
       const jobColumns=new Set(this.db.pragma('table_info(cl_push_jobs)').map(column=>column.name));
       for(const [name,definition] of [['delivery_source',"TEXT NOT NULL DEFAULT ''"],['delivery_fallback_reason',"TEXT NOT NULL DEFAULT ''"],
-        ['delivery_version',"TEXT NOT NULL DEFAULT ''"],['delivery_metadata','BLOB'],['envelope_version','INTEGER NOT NULL DEFAULT 1']]) {
+        ['delivery_version',"TEXT NOT NULL DEFAULT ''"],['delivery_metadata','BLOB'],['envelope_version','INTEGER NOT NULL DEFAULT 1'],['jsonl_file_id',"TEXT NOT NULL DEFAULT ''"]]) {
         if(!jobColumns.has(name))this.db.exec(`ALTER TABLE cl_push_jobs ADD COLUMN ${name} ${definition}`);
       }
       if(!this.db.prepare('SELECT 1 FROM cl_push_policies LIMIT 1').get()) this.db.prepare('INSERT INTO cl_push_policies VALUES(?,?,?)').run(1,this.archive.seal(defaults,'push-policy:1'),this.now());
       if(!this.db.prepare('SELECT 1 FROM cl_push_cursor LIMIT 1').get()) this.setCursor(this.latest());
       this.policy();
     })();
+    this.cleanup = new ConversationPushCleanupStore(this).initialize();
     return this;
   }
   latest() { return {cursor_id:this.db.prepare("SELECT seq FROM sqlite_sequence WHERE name='cl_push_arrivals'").get()?.seq || 0,id:''}; }
@@ -88,6 +90,7 @@ class ConversationPushStore {
   jobId(row,policy,destination) { return hash([row.id,destination,targetHash(policy,destination),this.version(row,policy.source),ENVELOPE_VERSION]); }
   pendingCount() { return this.db.prepare("SELECT COUNT(*) n FROM cl_push_jobs WHERE status IN ('pending','running')").get().n; }
   insert(row,policy,destination,batchId) {
+    if (this.db.prepare('SELECT 1 FROM cl_push_receipts WHERE id=?').get(this.jobId(row,policy,destination))) return 0;
     return this.db.prepare(`INSERT OR IGNORE INTO cl_push_jobs(id,record_id,destination,target_hash,source,content_version,batch_id,status,next_at,created_at,updated_at,envelope_version)
       VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?)`).run(this.jobId(row,policy,destination),row.id,destination,targetHash(policy,destination),policy.source,this.version(row,policy.source),batchId,this.now(),this.now(),this.now(),ENVELOPE_VERSION).changes;
   }
@@ -110,7 +113,7 @@ class ConversationPushStore {
       }
     }
     const token=crypto.createHmac('sha256',this.archive.key).update(JSON.stringify([policy.version,archivePolicy.version,value.filter,targets,eligible.map(row=>[row.id,this.version(row,policy.source)]),ENVELOPE_VERSION])).digest('hex');
-    const existing=this.db.prepare('SELECT status FROM cl_push_jobs WHERE id=?');
+    const existing=this.db.prepare(`SELECT status FROM ${historySource} WHERE id=?`);
     let duplicates=0;
     for(const row of eligible)for(const target of targets)if(existing.get(this.jobId(row,policy,target)))duplicates++;
     return {policy,targets,eligible,previewToken:token,matched:rows.length,excluded:rows.filter(row=>!this.allowed(row,archivePolicy)).length,
@@ -149,7 +152,7 @@ class ConversationPushStore {
         if (row.processing_pending) return {created,processing:true};
         const reason=!this.allowed(row,archivePolicy)?'COLLECTION_EXCLUDED':this.blockedReason(row,policy.source,archivePolicy,policy);
         if(!reason){
-          const needed=targets.filter(target=>!this.db.prepare('SELECT 1 FROM cl_push_jobs WHERE id=?').get(this.jobId(row,policy,target)));
+          const needed=targets.filter(target=>!this.db.prepare(`SELECT 1 FROM ${historySource} WHERE id=?`).get(this.jobId(row,policy,target)));
           if(pending+needed.length>policy.queueLimit)return {created,full:true};
           for(const target of needed){created+=this.insert(row,policy,target,'');pending++;}
           const fallback=this.copySelection(row,policy.source,archivePolicy).fallbackReason;
@@ -241,17 +244,21 @@ class ConversationPushStore {
   }
   batch(id) {
     const row=this.db.prepare('SELECT id,created_at,matched,eligible,created FROM cl_push_batches WHERE id=?').get(id);if(!row)throw invalid('批次不存在','CONVERSATION_PUSH_NOT_FOUND',404);
-    return {...row,counts:this.db.prepare('SELECT status,COUNT(*) count FROM cl_push_jobs WHERE batch_id=? GROUP BY status').all(id)};
+    return {...row,counts:this.historyCounts(id)};
+  }
+  historyCounts(batchId) {
+    const where=batchId?' WHERE batch_id=?':'',args=batchId?[batchId,batchId]:[];
+    return this.db.prepare(`SELECT status,SUM(count) count FROM (SELECT status,COUNT(*) count FROM cl_push_jobs${where} GROUP BY status
+      UNION ALL SELECT 'sent',COUNT(*) count FROM cl_push_receipts${where}) GROUP BY status HAVING SUM(count)>0`).all(...args);
   }
   list(query={}) {
     const page=Math.max(1,Math.min(1000000,Number(query.page)||1))|0;
     if(query.status&&!['pending','buffered','running','sent','failed','cancelled'].includes(query.status))throw invalid();
     const where=query.status?' WHERE j.status=?':'',args=query.status?[query.status]:[];
-    const total=this.db.prepare('SELECT COUNT(*) n FROM cl_push_jobs j'+where).get(...args).n;
-    const items=this.db.prepare(`SELECT j.id,j.record_id,j.destination,j.source,j.delivery_source,j.delivery_fallback_reason,j.envelope_version,j.batch_id,j.status,j.attempts,j.next_at,j.created_at,j.updated_at,j.error_code,j.http_status,r.model,r.user_id
-      FROM cl_push_jobs j JOIN cl_records r ON r.id=j.record_id${where} ORDER BY j.created_at DESC,j.id LIMIT 20 OFFSET ?`).all(...args,(page-1)*20);
+    const total=this.db.prepare('SELECT COUNT(*) n FROM cl_push_jobs j'+where).get(...args).n + (!query.status || query.status==='sent'?this.db.prepare('SELECT COUNT(*) n FROM cl_push_receipts').get().n:0);
+    const items=this.db.prepare(`SELECT ${historyColumns} FROM ${historySource} j${where} ORDER BY j.created_at DESC,j.id LIMIT 20 OFFSET ?`).all(...args,(page-1)*20);
     const stats=this.db.prepare('SELECT code,count,updated_at FROM cl_push_scan_stats WHERE policy_version=? ORDER BY code').all(this.policy().version);
-    return {items,page,pages:Math.ceil(total/20),total,counts:this.db.prepare('SELECT status,COUNT(*) count FROM cl_push_jobs GROUP BY status').all(),
+    return {items,page,pages:Math.ceil(total/20),total,counts:this.historyCounts(),
       skipped:stats.filter(row=>!row.code.startsWith('ORIGINAL_FALLBACK:')),
       fallbacks:stats.filter(row=>row.code.startsWith('ORIGINAL_FALLBACK:')).map(row=>({...row,code:row.code.slice('ORIGINAL_FALLBACK:'.length)})),
       batches:this.db.prepare('SELECT id,created_at,matched,eligible,created FROM cl_push_batches ORDER BY created_at DESC LIMIT 10').all()};

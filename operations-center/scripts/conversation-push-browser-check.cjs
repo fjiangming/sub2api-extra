@@ -49,6 +49,7 @@ async function main() {
         };
         await page.goto(`http://127.0.0.1:${preview.port}/preview`);await page.locator('#cl-tab-push').click();await field('enabled').waitFor();
         assert.equal(await field('enabled').isChecked(),false);assert.equal(await page.locator('#clp-preview').isDisabled(),true);
+        assert.equal(await field('deleteAfterPush').isChecked(),false);
         assert.equal(await field('captureScope').inputValue(),'complete');assert.equal(await field('jsonlUploadRate').inputValue(),'2');
         await field('enabled').check();await field('automatic').check();await field('allowPrivateNetwork').check();
         await field('webhookEnabled').check();await field('webhookUrl').fill(targetUrl+'/webhook');await field('webhookToken').fill('fictional-webhook-token');
@@ -140,6 +141,17 @@ async function main() {
         await page.locator('#cl-tab-requests').click();assert.equal(await page.locator('#clp-form').count(),0);
         await page.locator('#cl-tab-push').click();await field('webhookToken').waitFor();assert.equal(await field('webhookToken').inputValue(),'');
         assert.equal(await field('captureScope').inputValue(),'all');assert.equal(await field('jsonlUploadRate').inputValue(),'1.5');
+        const retained=event(name+'-cleanup-original',{model:'Opus5',response:Buffer.from('{invalid').toString('base64')});preview.fixture.store.ingest(retained);
+        await until(()=>preview.push.store.list().counts.some(row=>row.status==='buffered'&&row.count===1));
+        await page.locator('#clp-flush').click();await waitJobs('sent',13);
+        assert(preview.fixture.store.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(retained.id));
+        await field('deleteAfterPush').check();await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
+        await until(()=>!preview.fixture.store.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(retained.id));
+        await page.locator('[data-clp-action=refresh]').click();await page.locator('#clp-cleanup').filter({hasText:'已清理'}).waitFor();
+        await page.locator('#clp-jobs').filter({hasText:'送达成功，本地已清理'}).waitFor();
+        assert.equal(preview.push.store.list().total,13);assert.equal(preview.push.store.list({status:'sent'}).total,13);
+        assert(preview.fixture.store.ingest(retained).duplicate);assert(!preview.fixture.store.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(retained.id));
+        assert.equal(await field('deleteAfterPush').isChecked(),true);await layout();await shot('delivered-cleanup');
         const safe=await page.evaluate(async()=>JSON.stringify(await(await fetch('/api/conversation-logs/push/policy')).json()));assert(!safe.includes('fictional-webhook-token'));assert(!safe.includes('fictional-secret'));
         await layout();await shot('delivered');
         await page.locator('#logout-button').click();await page.locator('#login-view').waitFor({state:'visible'});assert.equal(await page.locator('#clp-form').count(),0);

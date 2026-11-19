@@ -50,7 +50,8 @@ async function startPreview({port = Number(process.env.CONVERSATION_PREVIEW_PORT
   const pushStore = new ConversationPushStore(f.store).initialize();
   const archive = new ConversationArchiveService(f.store);
   const canPush = () => archive.idleForHistory;
-  const push = pushTransport ? new ConversationPushService(pushStore,{transport:pushTransport,canWork:canPush}) : new ConversationPushSupervisor(pushStore,{canWork:canPush});
+  const canCleanup = () => !cleanup.child && !repair.busy && !read.active && !read.queue.length && !read.draining && !exporter.active && !exporter.queue.length && !exporter.draining;
+  const push = pushTransport ? new ConversationPushService(pushStore,{transport:pushTransport,canWork:canPush,canCleanup}) : new ConversationPushSupervisor(pushStore,{canWork:canPush,canCleanup});
   const cleanup = new ConversationCleanupService(f.store,{canWork:() => !archive.busy && !archive.processingBusy});
   const repair = new ConversationRepairService(f.store,{canWork:() => archive.idleForHistory && !cleanup.child && !read.active && !read.queue.length && !read.draining && !exporter.active && !exporter.queue.length && !exporter.draining});
   const read = new ConversationReadService(f.store,{configured:true,canWork:() => !archive.busy && !archive.processingBusy && !cleanup.child && !repair.busy});

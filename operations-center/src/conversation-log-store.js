@@ -12,6 +12,7 @@ const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversat
 const { recommendedModels, normalizeModel, modelAllowed } = require('./services/conversation-models');
 const { inspectCompletion } = require('./services/conversation-completion');
 const { projection, initializeMetadata, metadataStatus, backfillMetadata } = require('./services/conversation-metadata');
+const { initializeLocalRetention } = require('./services/conversation-local-retention');
 
 const userId = z.number().int().positive().safe();
 const policySchema = z.object({
@@ -115,6 +116,7 @@ class ConversationLogStore {
       }
     })();
     initializeMetadata(this.db);
+    initializeLocalRetention(this.db);
     this.db.exec(`CREATE TABLE IF NOT EXISTS cl_processing(record_id TEXT PRIMARY KEY,next_at INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,token TEXT NOT NULL DEFAULT '');
       CREATE INDEX IF NOT EXISTS cl_processing_due ON cl_processing(next_at,record_id);
       CREATE TRIGGER IF NOT EXISTS cl_processing_delete AFTER DELETE ON cl_records BEGIN DELETE FROM cl_processing WHERE record_id=OLD.id; END;`);
@@ -216,7 +218,7 @@ class ConversationLogStore {
     const ack = { accepted: true, id: event.id, body_sha256: digest };
     const { capture_version, body_sha256, ...legacy } = event;
     const fingerprint = crypto.createHash('sha256').update(JSON.stringify(event.capture_version === 1 ? legacy : event)).digest('hex');
-    const existing = this.db.prepare('SELECT fingerprint FROM cl_records WHERE id=?').get(event.id);
+    const existing = this.db.prepare('SELECT fingerprint FROM cl_records WHERE id=? UNION ALL SELECT fingerprint FROM cl_delivered_records WHERE id=? LIMIT 1').get(event.id,event.id);
     if (existing) { if (existing.fingerprint !== fingerprint) throw invalid('CONVERSATION_ID_CONFLICT', 409); return { ...ack, duplicate: true }; }
     if (deferProcessing && this.db.prepare('SELECT COUNT(*) n FROM cl_processing').get().n >= 10000) return { accepted: false, reason: 'processor_busy' };
     const canFit = bytes => this.usedBytes() + bytes < current.capacity * 1024 ** 3 && this.freeBytes() - bytes >= current.reserve * 1024 ** 3;
@@ -241,7 +243,7 @@ class ConversationLogStore {
       const latest = this.policy();
       if (!latest.enabled || latest.excludedUserIds.includes(event.user_id) || !modelAllowed(latest, event.model) ||
         latest.retention && event.at < this.now() - latest.retention * 86400000) return { accepted: false };
-      const duplicate = this.db.prepare('SELECT fingerprint FROM cl_records WHERE id=?').get(event.id);
+      const duplicate = this.db.prepare('SELECT fingerprint FROM cl_records WHERE id=? UNION ALL SELECT fingerprint FROM cl_delivered_records WHERE id=? LIMIT 1').get(event.id,event.id);
       if (duplicate) { if (duplicate.fingerprint !== fingerprint) throw invalid('CONVERSATION_ID_CONFLICT', 409); return { ...ack, duplicate: true }; }
       if (deferProcessing && this.db.prepare('SELECT COUNT(*) n FROM cl_processing').get().n >= 10000) return { accepted: false, reason: 'processor_busy' };
       if (this.usedBytes() + storedBytes >= latest.capacity * 1024 ** 3 || this.freeBytes() - storedBytes < latest.reserve * 1024 ** 3) {

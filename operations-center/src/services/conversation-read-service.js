@@ -7,6 +7,7 @@ const os = require('node:os');
 const {fork} = require('node:child_process');
 const {availableMemory} = require('./conversation-memory');
 const {AppError} = require('../errors');
+const {holdPayloads} = require('./conversation-local-retention');
 
 class ConversationReadService {
   constructor(archive,{timeoutMs=15000,queueTimeoutMs=5000,backfillTimeoutMs=10000,intervalMs=1000,idleMs=15000,maxQueue=8,
@@ -35,6 +36,7 @@ class ConversationReadService {
   finish(entry) {
     if (entry.done) return;
     entry.done=true;clearTimeout(entry.timer);clearInterval(entry.monitor);
+    entry.releasePayloads?.();
     entry.res?.removeListener('close',entry.cancel);
     this.queue=this.queue.filter(value => value!==entry);
     if (this.active===entry) this.active=null;
@@ -51,6 +53,10 @@ class ConversationReadService {
   proxy(req,res,_next,target) {
     if (this.stopped || this.queue.length>=this.maxQueue) return res.status(503).json({error:{code:'CONVERSATION_READ_BUSY',message:'日志读取繁忙，请稍后重试'}});
     const entry={req,res,target};
+    if (target === '/export' || /^\/records\/[^/?]+/.test(target)) {
+      try { entry.releasePayloads=holdPayloads(this.archive.db); }
+      catch { return res.status(503).json({error:{code:'CONVERSATION_READ_BUSY',message:'日志读取繁忙，请稍后重试'}}); }
+    }
     entry.cancel=() => {
       if (entry.done) return;
       if (this.active===entry && !res.writableEnded) {entry.upstream?.destroy();this.killChild();}
