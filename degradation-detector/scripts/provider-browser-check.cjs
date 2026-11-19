@@ -35,14 +35,14 @@ async function main() {
     return result.json();
   };
   const scope = (data, provider, id) => data.provider_platforms.find(value => value.provider === provider && value.id === id);
-  const run = async (page, provider, platform, group = '8') => {
-    const suffix = group ? `/groups/${group}/runs` : '/runs';
-    const response = page.waitForResponse(response => new URL(response.url()).pathname === `/api/admin/provider-platforms/${provider}/${platform}${suffix}` && response.request().method() === 'POST');
-    await page.locator(group ? `[data-pc-run="${group}"]` : '[data-pc-batch]').click();
+  const run = async (page, provider, platform, group = '8', channel = provider === 'manxue' ? 'candy' : 'testllm') => {
+    const url = group ? `/api/admin/provider/groups/${group}/${channel}/runs` : `/api/admin/provider-platforms/${provider}/${platform}/runs`;
+    const response = page.waitForResponse(response => new URL(response.url()).pathname === url && response.request().method() === 'POST');
+    await page.locator(group ? `[data-pc-run="${group}"][data-pc-channel="${channel}"]` : '[data-pc-batch]').click();
     const result = await response; assert.equal(result.status(), 202, await result.text());
     const data = await result.json();
-    await page.waitForFunction(() => document.querySelector('[data-pc-batch]') && !document.querySelector('[data-pc-batch]').disabled);
-    return data.runs;
+    await page.waitForFunction(() => document.getElementById('pc-save') && !document.getElementById('pc-save').disabled);
+    return group ? [data.run] : data.runs;
   };
   let browser;
   try {
@@ -87,10 +87,22 @@ async function main() {
       const originalKeys = store.groups().map(value => value.key_cipher);
       let result = await save(admin);
       assert.equal(result.provider_platforms.length, 6); assert.deepEqual(store.groups().filter(value => value.key_cipher).map(value => value.key_cipher), originalKeys);
+      const candyButton = admin.locator('[data-pc-run="8"][data-pc-channel="candy"]');
+      const pelicanButton = admin.locator('[data-pc-run="8"][data-pc-channel="pelican"]');
+      assert.equal(await candyButton.innerText(), '糖果检测'); assert.equal(await pelicanButton.innerText(), '鹈鹕检测');
+      assert.equal(await candyButton.isEnabled(), true); assert.equal(await pelicanButton.isEnabled(), true);
+      const pelicanKey = store.group('8', 'pelican').key_cipher;
+      try {
+        store.db.prepare("UPDATE degradation_provider_groups SET key_cipher=NULL WHERE group_id='8' AND channel='pelican'").run();
+        await admin.locator('#pc-reload').click(); await admin.waitForFunction(() => document.querySelector('[data-pc-channel="pelican"]').disabled);
+        assert.equal(await candyButton.isEnabled(), true); assert.equal(await pelicanButton.isDisabled(), true);
+      } finally { store.db.prepare("UPDATE degradation_provider_groups SET key_cipher=? WHERE group_id='8' AND channel='pelican'").run(pelicanKey); }
+      await admin.locator('#pc-reload').click(); await admin.waitForFunction(() => !document.querySelector('[data-pc-channel="pelican"]').disabled);
       await fit(admin); await shot(admin, `${layout.name}-admin-manxue`);
       const testKey = store.group('8', 'testllm').key_cipher, claudeKey = store.group('2', 'candy').key_cipher;
       const historical = store.history('8', 'candy')[0]; const oldSnapshot = store.run(historical.id).snapshot_json;
       await form.locator('[name="model"]').fill(`shared-gpt-${layout.name}`);
+      assert.equal(await candyButton.isDisabled(), true); assert.equal(await pelicanButton.isDisabled(), true);
       await form.locator('[name="target_url"]').fill('https://gpt-relay.example.com/v1');
       assert.deepEqual(await form.locator('[name="reasoning_effort_preset"] option').evaluateAll(options => options.map(option => option.value)), ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'custom']);
       await form.locator('[name="reasoning_effort_preset"]').selectOption('ultra');
@@ -137,7 +149,27 @@ async function main() {
       result = await save(admin);
       assert.deepEqual(['candy', 'pelican'].map(channel => store.group('8', channel).key_cipher), retained);
       assert.equal(store.effective(store.group('8', 'candy')).model, `candy-gpt-${layout.name}`);
-      let runs = await run(admin, 'manxue', 'openai'); assert.deepEqual(runs.map(value => value.channel), ['candy', 'pelican']);
+      const detector = preview.runtime.providerDetection, pump = detector.pump;
+      const untouched = [['8', 'testllm'], ['2', 'candy'], ['2', 'pelican']].map(([id, channel]) => [id, channel, store.counts(id, channel).total]);
+      const pelicanBefore = store.counts('8', 'pelican').total;
+      let runs;
+      detector.pump = () => {};
+      try {
+        runs = await run(admin, 'manxue', 'openai'); assert.deepEqual(runs.map(value => value.channel), ['candy']);
+        assert.equal(store.counts('8', 'pelican').total, pelicanBefore, 'candy must not enqueue pelican');
+        assert.equal(await candyButton.isDisabled(), true); assert.equal(await pelicanButton.isEnabled(), true);
+        const candyBefore = store.counts('8', 'candy').total;
+        const pelicanRuns = await run(admin, 'manxue', 'openai', '8', 'pelican');
+        assert.deepEqual(pelicanRuns.map(value => value.channel), ['pelican']);
+        assert.equal(store.counts('8', 'candy').total, candyBefore, 'pelican must not enqueue candy');
+        assert.equal(await candyButton.isDisabled(), true); assert.equal(await pelicanButton.isDisabled(), true);
+        store.markRunning(pelicanRuns[0].id);
+        await admin.locator('#pc-reload').click(); await admin.waitForFunction(() => document.querySelector('.pc-latest').textContent.includes('检测中'));
+        assert.equal(await pelicanButton.isDisabled(), true);
+        for (const [id, channel, total] of untouched) assert.equal(store.counts(id, channel).total, total);
+        runs.push(...pelicanRuns);
+      } finally { detector.pump = pump; detector.pump(); }
+      await admin.locator('#pc-reload').click(); await admin.waitForFunction(() => !document.querySelector('[data-pc-channel="candy"]').disabled);
       for (const value of runs) { const snapshot = JSON.parse(store.run(value.id).snapshot_json); assert.equal(snapshot.model, `${value.channel}-gpt-${layout.name}`); assert.equal(snapshot.reasoning_effort, 'group-custom-effort'); assert.equal(snapshot.target_url, 'https://group-relay.example.com/v1'); assert.equal(snapshot.api_url, 'https://changed-manxue.example.com/tests'); }
       assert.equal(store.run(historical.id).snapshot_json, oldSnapshot);
       await admin.locator('[data-pc-edit="8"]').click();
@@ -146,6 +178,7 @@ async function main() {
       await modal.getByRole('button', { name: '应用配置' }).click(); result = await save(admin);
       assert.equal(store.group('8', 'candy').override_json, null); assert.equal(store.effective(store.group('8', 'candy')).reasoning_effort, `shared-custom-${layout.name}`);
       assert.equal(store.group('8', 'pelican').enabled, 0);
+      assert.equal(await pelicanButton.count(), 0); assert.equal(await candyButton.count(), 1);
       assert.equal(store.schedule(store.group('8', 'candy')).mode, 'daily');
       runs = await run(admin, 'manxue', 'openai'); assert.deepEqual(runs.map(value => value.channel), ['candy']);
       const otherBefore = store.counts('2', 'candy').total; runs = await run(admin, 'manxue', 'openai', null);
@@ -156,11 +189,15 @@ async function main() {
       await admin.locator('[data-pc-platform="anthropic"]').click();
       await form.locator('[name="model"]').fill(`claude-manxue-${layout.name}`); await form.locator('[name="target_url"]').fill('https://claude-relay.example.com/v1');
       await form.locator('[name="reasoning_effort_preset"]').selectOption('high'); result = await save(admin);
+      assert.equal(await admin.locator('[data-pc-run="2"][data-pc-channel="candy"]').count(), 1);
+      assert.equal(await admin.locator('[data-pc-run="2"][data-pc-channel="pelican"]').count(), 1);
       assert.equal(scope(result, 'manxue', 'openai').params.model, `shared-gpt-${layout.name}`);
       assert.equal(store.group('2', 'candy').key_cipher, claudeKey); await fit(admin); await shot(admin, `${layout.name}-admin-claude`);
       await admin.locator('[data-pc-provider="testllm"]').click(); await admin.locator('[data-pc-platform="openai"]').click();
       assert.equal(await admin.locator('[data-pc-platform="gemini"]').count(), 0); assert.equal(await form.locator('[name="reasoning_effort_preset"]').count(), 0);
       assert.equal(await form.locator('[name="service_tier"]').count(), 0); assert.equal(await form.locator('[name="protocol"]').inputValue(), 'gpt');
+      assert.equal(await admin.locator('[data-pc-run="8"]').count(), 1);
+      assert.equal(await admin.locator('[data-pc-run="8"]').getAttribute('data-pc-channel'), 'testllm');
       await form.locator('[name="model"]').fill(`testllm-gpt-${layout.name}`); await form.locator('[name="target_url"]').fill('https://iq-relay.example.com/v1');
       await form.locator('[name="cache_test"]').uncheck(); await form.locator('[name="thinking_test"]').uncheck();
       await admin.locator('#pc-provider-form [name="api_url"]').fill('https://changed-testllm.example.com');
