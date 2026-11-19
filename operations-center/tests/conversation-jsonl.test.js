@@ -151,6 +151,24 @@ test('real multipart upload uses bounded 8 MiB parts, per-part checksums and fin
   assert.equal(file.sha256, crypto.createHash('sha256').update(receiver.completed[0].body).digest('hex'));
 });
 
+test('single deliveries wait while JSONL owns the push worker instead of retaining two decoded bodies',async t=>{
+  let unblock,entered;
+  const held=new Promise(resolve=>{unblock=resolve;}),ready=new Promise(resolve=>{entered=resolve;});
+  const receiver=await s3Receiver({beforeRequest:async entry=>{
+    if(entry.method==='PUT'&&entry.query.has('uploadId')){entered();await held;}
+  }});t.after(()=>receiver.close());t.after(()=>unblock());
+  const f=setup(t);configure(f,receiver.url,{webhook:{enabled:true,url:receiver.url+'/logs',token:''}});
+  const row=event('serialized-destinations');f.store.ingest(row);
+  const input={filter:{},destinations:['webhook','s3']},preview=f.push.preview(input);
+  f.push.enqueue({...input,previewToken:preview.previewToken,batchId:crypto.randomUUID()});
+  const sending=f.service.jsonl.tick();await ready;
+  assert(f.service.jsonl.active);assert.equal(await f.service.tick(),false);
+  assert.equal(f.push.list().items.find(job=>job.destination==='webhook').status,'pending');
+  assert.equal(receiver.requests.filter(entry=>entry.path==='/logs').length,0);
+  unblock();await sending;assert.equal(await f.service.tick(),true);
+  assert.equal(receiver.completed.length,2);assert(f.push.list().items.every(job=>job.status==='sent'));
+});
+
 test('timing and size configuration changes preserve a daily manifest and its pending records', async t => {
   let now = Date.now(); const receiver = await s3Receiver(); t.after(() => receiver.close()); const f = setup(t, { now: () => now });
   configure(f, receiver.url, { automatic: true }); f.store.ingest(event('settings', { at: now })); f.push.scanAutomatic(); await f.service.jsonl.tick();
@@ -261,13 +279,33 @@ test('restart preserves frozen metadata and manifest while lost upload leases re
   assert.equal(f.jsonl.finish(leased, { status: 'failed', errorCode: 'LATE' }), 0);
 });
 
-test('resource admission and an oversized single line fail visibly without truncating the archive', async t => {
+test('memory admission defers without exhausting attempts while an oversized single line still fails without truncation', async t => {
   const f = setup(t, { jsonlOptions: { memoryBudget: () => 0 } }); configure(f, 'https://storage.example', { maxAttempts: 1 });
   const row = event('memory'); f.store.ingest(row); enqueue(f); await f.service.jsonl.tick();
   assert.equal(f.push.list().items[0].error_code, 'EXPORT_MEMORY'); assert.equal(f.jsonl.list().files.length, 0);
+  assert.equal(f.push.list().items[0].status,'pending');assert.equal(f.push.list().items[0].attempts,0);
   assert.equal(f.store.payload(row.id, 'original', 'request').body.toString(), rawRequest);
-  f.jsonl.memoryBudget = () => Infinity; f.jsonl.maxFileBytes = 1; f.push.retry(f.push.list().items[0].id); await f.service.jsonl.tick();
+  f.jsonl.memoryBudget = () => Infinity; f.jsonl.maxFileBytes = 1; f.push.db.prepare('UPDATE cl_push_jobs SET next_at=0').run(); await f.service.jsonl.tick();
   assert.equal(f.push.list().items[0].error_code, 'JSONL_RECORD_TOO_LARGE'); assert.equal(f.store.payload(row.id, 'original', 'request').body.toString(), rawRequest);
+});
+
+for (const destination of ['webhook','s3-json','s3-jsonl']) test(`isolated ${destination} push delivers a 20.1 MiB copy with the unchanged 256 MiB heap`,async t=>{
+  const receiver=await s3Receiver();t.after(()=>receiver.close());
+  const f=setup(t,{supervisor:true,memoryBudgetBytes:256*1024**2});
+  configure(f,receiver.url,{webhook:{enabled:destination==='webhook',url:receiver.url+'/logs',token:''},
+    s3:{enabled:destination!=='webhook',format:destination==='s3-json'?'json':'jsonl'}});
+  const text='x'.repeat(Math.floor(15.075*1024**2))+'\u4e2d\u6587 END_OF_LARGE_RESPONSE';
+  const row=event('push-large-'+destination,{response:Buffer.from(text).toString('base64')});assert(f.store.ingest(row).accepted);
+  const ciphertext=f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(row.id).original;
+  assert.equal((ciphertext.length/1024**2).toFixed(1),'20.1');
+  const input={filter:{},destinations:[destination==='webhook'?'webhook':'s3']},preview=f.push.preview(input);
+  f.push.enqueue({...input,previewToken:preview.previewToken,batchId:crypto.randomUUID()});
+  f.service.start();await until(()=>f.push.list().items[0]?.status==='sent');
+  assert(f.service.child.spawnargs.includes('--max-old-space-size=256'));
+  const body=receiver.completed[0].body,record=JSON.parse(body);
+  assert.deepEqual(record,{request_id:row.request_id,request:rawRequest,response:text});
+  assert.equal(f.push.list().items[0].attempts,1);
+  assert.deepEqual(f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(row.id).original,ciphertext);
 });
 
 test('JSONL planning fails invalid request IDs visibly without buffering or uploading incomplete lines',async t=>{

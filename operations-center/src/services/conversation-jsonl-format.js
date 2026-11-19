@@ -48,4 +48,4 @@ function jsonlBytes(envelope) {
   return bytes;
 }
 
-module.exports = { dayAt, objectKey, jsonlChunks, jsonlBytes };
+module.exports = { dayAt, objectKey, jsonChunks, jsonlChunks, jsonlBytes };

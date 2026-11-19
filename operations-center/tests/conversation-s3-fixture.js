@@ -15,7 +15,16 @@ async function s3Receiver({ beforeRequest } = {}) {
     const reject = (status, code) => { res.writeHead(status, { 'content-type': 'application/xml' }); res.end(`<Error><Code>${code}</Code></Error>`); };
     try {
       if (beforeRequest && await beforeRequest(entry, res) === false) return;
+      if(entry.path==='/logs') {
+        assert.equal(Number(req.headers['content-length']),body.length);
+        completed.push({path:entry.path,body});res.writeHead(204);res.end();return;
+      }
       assert(req.headers.authorization?.startsWith('AWS4-HMAC-SHA256 '));
+      if(req.method==='PUT'&&!url.searchParams.has('uploadId')) {
+        assert.equal(req.headers['x-amz-checksum-sha256'],crypto.createHash('sha256').update(body).digest('base64'));
+        assert.equal(Number(req.headers['content-length']),body.length);
+        objects.set(entry.path,body);completed.push({path:entry.path,body});res.setHeader('ETag','"single"');res.end();return;
+      }
       if (req.method === 'POST' && url.searchParams.has('uploads')) {
         const id = crypto.randomUUID(); uploads.set(id, { path: entry.path, parts: new Map() });
         res.setHeader('content-type', 'application/xml'); res.end(`<InitiateMultipartUploadResult><Bucket>fixture</Bucket><Key>${entry.path}</Key><UploadId>${id}</UploadId></InitiateMultipartUploadResult>`); return;

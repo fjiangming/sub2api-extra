@@ -1,5 +1,23 @@
 # 个性化功能维护台账
 
+## 2026-11-19：减少导出与推送的内存中断
+
+用户要求再次检查导出及推送，尽量避免内存中断。本轮发现此前大正文直出仅用于下载，推送仍有统一堆估算、完整 JSON 字符串 / Buffer 和临时内存错误消耗重试次数等问题。仅修改运营中心，保留主站 / 采集、原加密归档、服务器配额、192 / 256 MiB old-space、默认限速、网络重试上限和全部无关差异；不连接或部署服务器。
+
+- `operations-center/src/services/conversation-envelope.js`、`src/conversation-push-store.js`：v3 / v4 推送也由原始副本直接生成相同正文，避免不外发的摘要和重复解码；v1 / v2 保持原格式。增加共享单副本准入，分别预留总内存和堆，另留 16 MiB 发送开销，仅独立推送进程允许一次 GC 恢复。内存错误返回 pending 并扣回本次尝试，保留其他错误的原次数、租约、退避、副本冻结和原文回退。
+- `src/conversation-jsonl-store.js`：规划 / 上传复用直出和单副本预算；内存不足不耗尽次数或漏行，卷上传保留 UploadId、已确认分片和成员，延后自动重试。生成器及 `src/services/conversation-jsonl-transport.js` 换行后释放上一条正文，保留单个 8 MiB 分片、前缀校验和最终摘要。
+- `src/services/conversation-push-transport.js`、`conversation-jsonl-format.js`：Webhook / 单条 S3 JSON 用共享有界 JSON 分块，先计算 Content-Length / SHA-256，再背压发送；避免完整 JSON 字符串 / 发送 Buffer，输出字节、幂等键、签名及 DNS 限制保持。约 256 KiB 让行并复核取消 / 规则，退出销毁流；Webhook 必须写完正文并收到成功响应才能报告成功。
+- `conversation-push-service.js`、`conversation-push-worker.js`、`conversation-push-supervisor.js`：单条与 JSONL 正文任务互相避让，独立推送进程启用 GC 和独立预算，不提高堆上限。`conversation-export-service.js`、`conversation-export-worker.js`：导出临时内存窗口从 5 秒延长至 30 秒，启动前同样等待，不提前启动进程；支持取消 / 会话失效，队列超时覆盖等待及启动，原恢复门禁保持。
+- `tests/conversation-envelope.test.js`、`conversation-push.test.js`、`conversation-jsonl.test.js`、`conversation-jsonl-resume.test.js`、`conversation-export.test.js`：增加 / 更新格式一致性、三目标 20.1 MiB 隔离进程推送、连续内存不足不耗尽次数及恢复、分片保留续传、超过旧 5 秒窗口、启动前恢复 / 取消。`conversation-s3-fixture.js` 增加校验字节长度 / 摘要的虚构 Webhook 和单条 S3 接收，不访问真实外部目标。说明文档与本台账记录资源边界和自动恢复行为。
+
+`src/services/conversation-jsonl-service.js`：在异步上传清理后再次复核优先级，活动上传期间拒绝重复 tick，避免空档抢占单条发送；真实接收器增加同进程两种目标互相避让验证。`public/conversation-push-ui.js`、`public/index.html`：内存结果说明正文与进度保留，刷新静态版本；不把旧 failed 任务误称为自动恢复。`docs/conversation-logs.md`、`docs/conversation-jsonl-push.md`：说明 30 秒等待、自动退避不耗网络次数、旧失败任务需手动重试和真实资源边界。远端 HTTP / SDK 错误不能伪装成本地内存错误，沿用网络上限。
+
+验证：npm run check 通过，标准串行运营中心完整 **677 项测试全部通过，0 失败 / 跳过**，约 228 秒，日志 `sub2api-delivery-memory-full-20261119.log`。包含三个目标的真实 256 MiB old-space 子进程各自完整推送 20.1 MiB 副本、连续内存不足后恢复、已确认分片不重复上传、同进程任务避让、导出超过旧 5 秒窗口后恢复、启动前取消 / 恢复、未写完不能误报成功和外部错误不能绕过重试上限；旧各版本字节 / 重启 / 脱敏回退回归保持。早期 120 项专项通过，随后新增两项错误回执专项通过；最终全量已纳入全部新增项。
+
+正式 Chrome / Playwright 下载与推送两套 1440px、390px、320px、深色布局全部通过，无页面脚本错误、外网请求或溢出，截图分别为 `sub2api-conversation-browser-0mTkFB`、`sub2api-push-browser-szfNxm`。只使用临时虚构 SQLite 和 loopback 接收器，未读取生产正文、请求真实模型或外部 Bucket。沿用既有提交授权仅发布本节对应的运营中心改动和台账，GitHub 自动构建及镜像结果以最终回复为准，未部署或修改服务器。
+
+原文和每条完整解密仍需有限内存，极大单条 / 持续低内存无法承诺绝不失败；优先保证主站可用，不移除 OOM 保护或自动扩容。资源不足导致等待 / 排队不等于已经送达，仍需最终完成回执。
+
 ## 2026-11-19：按 AI 平台共享第三方检测参数并保留地址变更后的 Key
 
 用户明确要求取消“检测网站或上游地址变更必须重填 Key”，并澄清平台指 Sub2API 的 ChatGPT / Claude 等 AI 平台。本轮沿用 GitHub 提交授权，调整正式独立管理页面、配置及批量任务，不部署服务器，保留无关差异。

@@ -37,7 +37,7 @@ process.once('message',async settings => {
         }
       };
       try {
-        const {spec,bytesPerSecond,maxPauseMs,memoryWaitMs=5000}=JSON.parse(req.get('x-conversation-export'));
+        const {spec,bytesPerSecond,maxPauseMs,memoryWaitMs=30000}=JSON.parse(req.get('x-conversation-export'));
         let nextSend=performance.now();
         const checkpoint=async () => {
           signal.throwIfAborted();

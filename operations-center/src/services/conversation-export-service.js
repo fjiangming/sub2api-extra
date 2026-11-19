@@ -3,17 +3,32 @@
 const http = require('node:http');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const {setTimeout:delay} = require('node:timers/promises');
 const {ConversationReadService} = require('./conversation-read-service');
 const {parseExport,failure} = require('./conversation-export-data');
+const {availableMemory} = require('./conversation-memory');
 const terminal = job => ['completed','failed','cancelled','expired'].includes(job.status);
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 
 class ConversationExportService extends ConversationReadService {
-  constructor(archive,auth,{ticketTtlMs=120000,historyTtlMs=600000,bytesPerSecond=2097152,maxPauseMs=30000,memoryWaitMs=5000,...options}={}) {
-    super(archive,{timeoutMs:86400000,maxQueue:1,workerFile:path.join(__dirname,'conversation-export-worker.js'),
+  constructor(archive,auth,{ticketTtlMs=120000,historyTtlMs=600000,bytesPerSecond=2097152,maxPauseMs=30000,memoryWaitMs=30000,...options}={}) {
+    super(archive,{timeoutMs:86400000,queueTimeoutMs:memoryWaitMs+5500,maxQueue:1,workerFile:path.join(__dirname,'conversation-export-worker.js'),
       workerExecArgv:['--max-old-space-size=192','--max-semi-space-size=4','--expose-gc'],...options});
     Object.assign(this,{auth,ticketTtlMs,historyTtlMs,bytesPerSecond,maxPauseMs,memoryWaitMs});
     this.needsIndex=false;this.jobs=new Map();this.current=null;
+  }
+  async ensureChild() {
+    const entry=this.queue[0],job=entry?.job || this.current,began=Date.now();
+    try {
+      while (availableMemory(this.memoryBudgetBytes)<96*1024**2) {
+        if (this.stopped || !entry || entry.done || !this.queue.includes(entry)) throw failure('CANCELLED','导出已取消',409);
+        if (!job || !this.sessionAlive(job)) throw failure('AUTH_REQUIRED','登录已失效，下载已中止',401);
+        if (Date.now()-began>=this.memoryWaitMs) throw failure('MEMORY','等待导出内存超时，归档未截断，请稍后重试',409);
+        job.pauseReason='memory_pressure';await delay(100);
+      }
+      if (entry?.done) throw failure('CANCELLED','导出已取消',409);
+      return await super.ensureChild();
+    } finally {if (job?.pauseReason==='memory_pressure')job.pauseReason='';}
   }
   sessionAlive(job) {
     const session=this.auth.sessions.get(job.sessionId);

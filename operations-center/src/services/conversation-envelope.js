@@ -84,4 +84,12 @@ function deliveryBodyFromRaw(raw, { version = ENVELOPE_VERSION, requestId, encod
     body_encodings: { request: 'base64', response: 'base64', frames: raw.frames.map(() => 'base64') } }, options);
 }
 
-module.exports = { ENVELOPE_VERSION, formatBodies, deliveryBody, deliveryBodyFromRaw };
+function formatDeliveryBodies(raw, options) {
+  if (![3, 4].includes(options.version)) return formatBodies(raw, options);
+  const body = deliveryBodyFromRaw(raw, options);
+  // Keep routing metadata separate while reusing the decoded public body without another conversion.
+  return { body_encoding: 'utf-8', body_encodings: { request: 'utf-8', response: 'utf-8', frames: [] },
+    request: body.request, response: body.response, frames: [] };
+}
+
+module.exports = { ENVELOPE_VERSION, formatBodies, deliveryBody, deliveryBodyFromRaw, formatDeliveryBodies };

@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
-const { formatBodies, deliveryBody, deliveryBodyFromRaw } = require('../src/services/conversation-envelope');
+const { formatBodies, deliveryBody, deliveryBodyFromRaw, formatDeliveryBodies } = require('../src/services/conversation-envelope');
 const { exportBodyBytes } = require('./conversation-logs-fixture');
 const { jsonlChunks } = require('../src/services/conversation-jsonl-format');
 
@@ -149,7 +149,12 @@ test('direct raw downloads retain the exact shared delivery bytes for text, comp
     const before=JSON.stringify(raw),options={version,encoding,requestId};
     const envelope={schema:'sub2api.conversation.v'+version,metadata:{request_id:requestId,encoding},...formatBodies(raw,options)};
     assert.equal([...jsonlChunks(deliveryBodyFromRaw(raw,options))].join(''),[...jsonlChunks(deliveryBody(envelope))].join(''));
+    const optimized={...envelope,...formatDeliveryBodies(raw,options)};
+    assert.equal([...jsonlChunks(deliveryBody(optimized))].join(''),[...jsonlChunks(deliveryBody(envelope))].join(''));
     assert.equal(JSON.stringify(raw),before);
+  }
+  for (const version of [1,2]) for (const {raw,encoding=''} of cases) {
+    assert.deepEqual(formatDeliveryBodies(raw,{version,encoding}),formatBodies(raw,{version,encoding}));
   }
 });
 

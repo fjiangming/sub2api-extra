@@ -5,12 +5,13 @@ const { publicPolicy, invalid } = require('./conversation-push-policy');
 const { ConversationPushTransport } = require('./conversation-push-transport');
 const { ConversationJsonlService } = require('./conversation-jsonl-service');
 const { dayAt, objectKey, jsonlBytes } = require('./conversation-jsonl-format');
+const { processingBudgets } = require('./conversation-memory');
 
 class ConversationPushService {
-  constructor(store,{transport=new ConversationPushTransport(),jsonlOptions,canWork=() => true}={}) {
+  constructor(store,{transport=new ConversationPushTransport(),jsonlOptions,canWork=() => true,memoryBudget=processingBudgets}={}) {
     this.store=store;this.transport=transport;this.stopping=false;this.active=null;this.lastError='';this.lastRun=null;this.testing=false;
-    this.canWork=canWork;
-    this.jsonl=new ConversationJsonlService(store,transport,{...jsonlOptions,canWork});
+    this.canWork=canWork;this.memoryBudget=memoryBudget;
+    this.jsonl=new ConversationJsonlService(store,transport,{memoryBudget,...jsonlOptions,canWork:()=>canWork()&&!this.active&&!this.testing});
   }
   policy() { return publicPolicy(this.store.policy()); }
   configure(input) { const result=this.store.configure(input);this.invalidate();this.wake();return result; }
@@ -49,7 +50,7 @@ class ConversationPushService {
     } finally { this.testing=false;this.testController=null;this.testRun=null; }
   }
   async tick() {
-    if(this.stopping||!this.canWork())return false;
+    if(this.stopping||this.active||this.testing||this.jsonl.active||!this.canWork())return false;
     this.store.scanAutomatic();
     const job=this.store.claim({single:true});if(!job)return false;
     const controller=new AbortController();this.active={job,controller};
@@ -59,14 +60,15 @@ class ConversationPushService {
     };
     try {
       guard();
-      const envelope=this.store.envelope(job);
+      const envelope=this.store.delivery(job,undefined,this.memoryBudget);
       this.store.freezeCopy(job,envelope);
       guard();
       const result=await this.transport.send(this.store.policy(),job.destination,envelope,controller.signal,{guard});
       this.store.finish(job,result);this.lastError=result.errorCode||'';this.lastRun=Date.now();
-    } catch {
-      this.store.finish(job,{status:'failed',errorCode:'DELIVERY_INVALIDATED',retryable:true});
-      this.lastError='DELIVERY_INVALIDATED';
+    } catch (error) {
+      const code=['EXPORT_MEMORY','EXPORT_REQUEST_ID'].includes(error.code)?error.code:'DELIVERY_INVALIDATED';
+      this.store.finish(job,{status:'failed',errorCode:code,retryable:code!=='EXPORT_REQUEST_ID'});
+      this.lastError=code;
     } finally { this.active=null; }
     return true;
   }

@@ -52,6 +52,23 @@ test('push defaults are off; configuration is encrypted, CAS protected, and secr
   assert.throws(()=>configure(f,{s3:{...f.push.policy().s3,enabled:true,endpoint:'https://s3.example/bucket'}}));
 });
 
+test('memory deferrals preserve the single-delivery retry allowance and recover automatically',async t=>{
+  let now=Date.now(),budget=0,calls=0;
+  const f=setup(t,{now:()=>now});configure(f,{source:'original',maxAttempts:1,retrySeconds:5});
+  const row=event('single-memory-recovery');f.store.ingest(row);batch(f);
+  const before=f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(row.id).original;
+  const service=new ConversationPushService(f.push,{memoryBudget:()=>budget,transport:{send:async()=>{calls++;return {status:'sent'};}}});
+  t.after(()=>service.stop());
+  for(let n=0;n<4;n++) {
+    await service.tick();const job=f.push.list().items[0];
+    assert.equal(job.status,'pending');assert.equal(job.attempts,0);assert.equal(job.error_code,'EXPORT_MEMORY');
+    assert.equal(calls,0);now+=5001;
+  }
+  budget=Infinity;await service.tick();assert.equal(f.push.list().items[0].status,'sent');assert.equal(calls,1);
+  assert.equal(f.push.list().items[0].attempts,1);
+  assert.deepEqual(f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(row.id).original,before);
+});
+
 test('capture scope and JSONL speed retain defaults and survive older clients omitting new fields',t=>{
   const f=setup(t);assert.equal(f.push.policy().captureScope,'complete');assert.equal(f.push.policy().s3.jsonl.uploadMiBPerSecond,2);
   const old=structuredClone(f.push.policy());delete old.captureScope;delete old.s3.jsonl.uploadMiBPerSecond;
@@ -336,6 +353,28 @@ test('webhook stable idempotency and bearer, sanitized failures, redirect refusa
   mode=401;assert.equal((await transport.send(policy,'webhook',envelope)).retryable,false);
   mode=0;assert.equal((await transport.send(policy,'webhook',envelope)).errorCode,'TIMEOUT');
   const controller=new AbortController(),pending=transport.send(policy,'webhook',envelope,controller.signal);controller.abort();assert.equal((await pending).errorCode,'ABORTED');
+});
+
+test('a Webhook success response cannot mark an interrupted large body as fully sent',async t=>{
+  let received=0;
+  const url=await receiver(t,(req,res)=>{
+    req.on('error',()=>{});req.on('data',chunk=>{received+=chunk.length;});
+    req.once('data',()=>{res.writeHead(204);res.end();});req.resume();
+  });
+  const envelope={delivery_id:'early-ack',request:'x'.repeat(8*1024**2)};
+  const result=await new ConversationPushTransport().send(localPolicy(url),'webhook',envelope);
+  assert.equal(result.status,'failed');assert(received>0);assert(received<Buffer.byteLength(JSON.stringify(envelope)));
+});
+
+test('remote S3 errors cannot impersonate local memory pressure or bypass the network retry limit',async t=>{
+  const url=await receiver(t,(req,res)=>{req.resume();req.on('end',()=>{
+    res.writeHead(403,{'content-type':'application/xml'});
+    res.end('<Error><Code>AccessDenied</Code><code>EXPORT_MEMORY</code><Message>fixture</Message></Error>');
+  });});
+  const policy=localPolicy(url,{s3:{enabled:true,endpoint:url,region:'us-east-1',bucket:'test-bucket',prefix:'',forcePathStyle:true,
+    accessKeyId:'test-key',secretAccessKey:'test-secret'}});
+  const result=await new ConversationPushTransport().send(policy,'s3',{delivery_id:'remote-memory'});
+  assert.equal(result.errorCode,'HTTP_REJECTED');assert.equal(result.httpStatus,403);assert.equal(result.retryable,false);
 });
 
 test('S3 uses SDK signing, one stable object per delivery, bounded error response and no redirects',async t=>{

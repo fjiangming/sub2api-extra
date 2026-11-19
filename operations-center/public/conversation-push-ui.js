@@ -4,7 +4,7 @@
   const errors={TIMEOUT:'目标响应超时',ABORTED:'发送已中止',DNS_FAILED:'目标域名解析失败',ADDRESS_BLOCKED:'目标地址不被允许',REDIRECT_REJECTED:'目标返回重定向',HTTP_REJECTED:'目标拒绝请求',NETWORK_FAILED:'连接失败',RESPONSE_TOO_LARGE:'目标响应过大',DELIVERY_UNKNOWN:'上次送达结果未确认',COLLECTION_EXCLUDED:'用户或模型已排除',TARGET_CHANGED:'推送目标或副本已更改',CONTENT_CHANGED:'日志副本已更新',COPY_UNAVAILABLE:'所选副本不可用',RECORD_EXPIRED:'日志已过期',ADMIN_CANCELLED:'管理员取消',DELIVERY_INVALIDATED:'发送条件已变化',ATTEMPTS_EXHAUSTED:'已达重试上限',QUEUE_FAILED:'队列暂不可用'};
   function create({container,api,escapeHtml:esc,icon,refreshIcons,isActive}) {
     Object.assign(errors,{INCOMPLETE_CAPTURE:'传输完整性未确认，当前范围不推送',INSPECTION_INCOMPLETE:'含未检查内容，暂停脱敏推送',REDACTION_OUTDATED:'脱敏规则已更新，需重新处理',PROCESSING_PENDING:'原文已保存，等待后台处理',PROCESSING_FAILED:'脱敏处理异常，需重新处理'});
-    Object.assign(errors,{JSONL_RECORD_TOO_LARGE:'单条日志超过文件上限，正文未截断',JSONL_CONTENT_CHANGED:'文件内容校验不一致',JSONL_QUEUE_FAILED:'JSONL 队列暂不可用',EXPORT_MEMORY:'后台内存不足，请稍后重试',EXPORT_CAPACITY:'可用空间不足，未增加汇总数据',MULTIPART_INVALID:'分片上传回执无效',PUSH_WORKER_UNAVAILABLE:'推送后台暂不可用'});
+    Object.assign(errors,{JSONL_RECORD_TOO_LARGE:'单条日志超过文件上限，正文未截断',JSONL_CONTENT_CHANGED:'文件内容校验不一致',JSONL_QUEUE_FAILED:'JSONL 队列暂不可用',EXPORT_MEMORY:'后台内存暂不足，正文与进度保留',EXPORT_CAPACITY:'可用空间不足，未增加汇总数据',MULTIPART_INVALID:'分片上传回执无效',PUSH_WORKER_UNAVAILABLE:'推送后台暂不可用'});
     Object.assign(errors,{MULTIPART_RESTART:'远端上传已失效，将沿原路径重建',MULTIPART_CHECKPOINT_INVALID:'分片进度校验异常，将重建上传'});
     Object.assign(errors,{MASKED_READ_FAILED:'脱敏副本读取失败',EXPORT_REQUEST_ID:'归档请求 ID 缺失或无效，请检查对应日志'});
     const fileStates={open:'汇总中',pending:'待上传',running:'上传中',sent:'已送达',failed:'失败',cancelled:'已取消'};

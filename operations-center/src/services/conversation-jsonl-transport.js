@@ -55,7 +55,7 @@ async function session(transport, policy, outerSignal, guard, operation) {
   try {
     if (baseUrl.protocol !== 'https:' && !(baseUrl.protocol === 'http:' && policy.allowPrivateNetwork)) throw failure('ADDRESS_BLOCKED');
     return await operation(request);
-  } catch (error) { return failureResult(['EXPORT_MEMORY','EXPORT_REQUEST_ID'].includes(error.code) ? failure(error.code, error.code === 'EXPORT_MEMORY') : error); }
+  } catch (error) { return failureResult(!error.$metadata?.httpStatusCode && ['EXPORT_MEMORY','EXPORT_REQUEST_ID'].includes(error.code) ? failure(error.code, error.code === 'EXPORT_MEMORY') : error); }
   finally { outerSignal?.removeEventListener('abort', abort); client.destroy(); httpAgent.destroy(); httpsAgent.destroy(); }
 }
 
@@ -105,7 +105,7 @@ async function sendJsonl(transport, policy, file, envelopes, signal, {
       }
       parts.push({ PartNumber: number, ETag: etag, ChecksumSHA256: checksum }); offset = 0;
     };
-    for await (const envelope of envelopes) {
+    for await (let envelope of envelopes) {
       await checkpoint(); guard(); records++;
       for (const chunk of jsonlChunks(deliveryBody(envelope))) {
         const source = Buffer.from(chunk); hash.update(source); bytes += source.length;
@@ -118,6 +118,7 @@ async function sendJsonl(transport, policy, file, envelopes, signal, {
         sinceYield += source.length;
         if (sinceYield >= 262144) { sinceYield = 0; await new Promise(resolve => setImmediate(resolve)); await checkpoint(); }
       }
+      envelope = null;
     }
     if (offset) await sendPart();
     if (bytes !== file.bytes || records !== file.records || !parts.length || restoredParts.length > parts.length) throw failure('JSONL_CONTENT_CHANGED');

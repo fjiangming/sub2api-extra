@@ -24,7 +24,7 @@ class ConversationJsonlService {
     return result.status === 'sent';
   }
   async tick() {
-    if (this.stopping || !this.canWork()) return false;
+    if (this.stopping || this.active || !this.canWork()) return false;
     this.store.reconcile();
     let worked = this.store.cleanupMembers() > 0;
     for (let index = 0; index < 20 && !this.stopping && this.canWork(); index++) {
@@ -33,6 +33,7 @@ class ConversationJsonlService {
     }
     this.store.sealDue();
     if (await this.cleanup()) worked = true;
+    if (this.stopping || !this.canWork()) return worked;
     const file = this.store.claim(); if (!file) return worked;
     const controller = new AbortController(); this.active = { file, controller };
     const policy = this.store.push.policy(), archiveVersion = this.store.archive.policy().version;

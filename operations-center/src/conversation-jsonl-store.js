@@ -6,9 +6,10 @@ const { dayAt, objectKey, jsonlBytes } = require('./services/conversation-jsonl-
 const { modelAllowed } = require('./services/conversation-models');
 const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversation-sensitive');
 const { deliveryBody } = require('./services/conversation-envelope');
+const { processingBudgets } = require('./services/conversation-memory');
 
 class ConversationJsonlStore {
-  constructor(push, { maxFileBytes, memoryBudget = () => Infinity } = {}) {
+  constructor(push, { maxFileBytes, memoryBudget = processingBudgets } = {}) {
     this.push = push; this.archive = push.archive; this.db = push.db; this.now = push.now;
     this.maxFileBytes = maxFileBytes; this.memoryBudget = memoryBudget;
   }
@@ -62,18 +63,12 @@ class ConversationJsonlStore {
     return { files, backlog, counts: this.db.prepare('SELECT status,COUNT(*) count FROM cl_push_jsonl_files GROUP BY status').all() };
   }
   admit(job, pinnedCopy) {
-    const row = this.db.prepare(`SELECT original IS NOT NULL AS original,masked IS NOT NULL AS masked,length(original) original_bytes,length(masked) masked_bytes,
-      processing_pending,processing_error,inspection_warnings,redaction_version,redaction_policy_hash FROM cl_records WHERE id=?`).get(job.record_id);
-    const copy = row && (pinnedCopy || this.push.copySelection(row, job.source, this.archive.policy()));
-    const bytes = copy && !copy.blocked && row[copy.source + '_bytes'];
-    if (!bytes) throw Object.assign(new Error('COPY_UNAVAILABLE'), { code: 'COPY_UNAVAILABLE' });
-    const budgetBytes = !pinnedCopy && copy.source === 'masked' ? Math.max(bytes, row.original_bytes || 0) : bytes;
-    if (budgetBytes * 6 + 16777216 > this.memoryBudget()) throw Object.assign(new Error('EXPORT_MEMORY'), { code: 'EXPORT_MEMORY' });
+    this.push.admit(job,pinnedCopy,this.memoryBudget());
   }
   defer(job, code, retryable = true) {
-    const policy = this.push.policy(), attempts = job.attempts + 1;
+    const policy = this.push.policy(), memory=code==='EXPORT_MEMORY', attempts = job.attempts + Number(!memory);
     this.db.prepare(`UPDATE cl_push_jobs SET status=?,attempts=?,error_code=?,next_at=?,updated_at=? WHERE id=? AND status='pending'`)
-      .run(retryable && attempts < policy.maxAttempts ? 'pending' : 'failed', attempts, code, this.now() + policy.retrySeconds * 1000, this.now(), job.id);
+      .run(memory || retryable && attempts < policy.maxAttempts ? 'pending' : 'failed', attempts, code, this.now() + policy.retrySeconds * 1000, this.now(), job.id);
   }
   assignOne() {
     const policy = this.push.policy(); if (!this.enabled(policy)) return false;
@@ -85,7 +80,7 @@ class ConversationJsonlStore {
       return true;
     }
     let envelope, bytes;
-    try { this.admit(job); envelope = this.push.envelope(job); bytes = jsonlBytes(deliveryBody(envelope)); }
+    try { envelope = this.push.delivery(job,undefined,this.memoryBudget); bytes = jsonlBytes(deliveryBody(envelope)); }
     catch (error) {
       const code = ['EXPORT_MEMORY','EXPORT_REQUEST_ID'].includes(error.code) ? error.code : 'COPY_UNAVAILABLE';
       this.defer(job, code, code !== 'EXPORT_REQUEST_ID'); return true;
@@ -277,25 +272,25 @@ class ConversationJsonlStore {
         const valid = this.push.validJob(member);
         if (valid.paused || valid.cancel) throw new Error('DELIVERY_INVALIDATED');
         const copy = {source:member.payload_source || member.source,fallbackReason:member.fallback_reason};
-        this.admit(member, copy);
-        const envelope = this.push.envelope(member, copy);
+        let envelope = this.push.delivery(member, copy, this.memoryBudget);
         envelope.metadata = this.archive.open(member.metadata, 'jsonl-metadata:' + member.id);
-        yield envelope; ordinal = member.ordinal;
+        yield envelope; envelope = null; ordinal = member.ordinal;
         await new Promise(resolve => setImmediate(resolve));
       }
     }
   }
   finish(file, result) {
-    const policy = this.push.policy(), retry = result.retryable && file.attempts < policy.maxAttempts;
+    const policy = this.push.policy(), memory=result.errorCode==='EXPORT_MEMORY', attempts=Math.max(0,file.attempts-Number(memory));
+    const retry = memory || result.retryable && attempts < policy.maxAttempts;
     const status = retry ? 'pending' : result.status;
     return this.db.transaction(() => {
-      const changed = this.db.prepare(`UPDATE cl_push_jsonl_files SET status=?,error_code=?,http_status=?,sha256=?,next_at=?,lease_token='',lease_until=0,pause_reason='',updated_at=?,
+      const changed = this.db.prepare(`UPDATE cl_push_jsonl_files SET status=?,attempts=?,error_code=?,http_status=?,sha256=?,next_at=?,lease_token='',lease_until=0,pause_reason='',updated_at=?,
         upload_id=CASE WHEN ?='sent' THEN '' ELSE upload_id END WHERE id=? AND status='running' AND lease_token=?`)
-        .run(status, result.errorCode || '', result.httpStatus || 0, result.sha256 || '', this.now() + Math.min(3600000, policy.retrySeconds * 1000 * 2 ** Math.max(0, file.attempts - 1)),
+        .run(status, attempts, result.errorCode || '', result.httpStatus || 0, result.sha256 || '', this.now() + Math.min(3600000, policy.retrySeconds * 1000 * 2 ** Math.max(0, attempts - 1)),
           this.now(), status, file.id, file.lease_token).changes;
       if (!changed) return 0;
-      this.db.prepare("UPDATE cl_push_jobs SET status=?,error_code=?,http_status=?,updated_at=? WHERE jsonl_file_id=? AND status='buffered'")
-        .run(status === 'sent' ? 'sent' : status === 'failed' ? 'failed' : 'buffered', result.errorCode || '', result.httpStatus || 0, this.now(), file.id);
+      this.db.prepare("UPDATE cl_push_jobs SET status=?,attempts=?,error_code=?,http_status=?,updated_at=? WHERE jsonl_file_id=? AND status='buffered'")
+        .run(status === 'sent' ? 'sent' : status === 'failed' ? 'failed' : 'buffered', attempts, result.errorCode || '', result.httpStatus || 0, this.now(), file.id);
       return changed;
     }).immediate();
   }

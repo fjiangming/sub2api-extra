@@ -4,11 +4,13 @@ const http = require('node:http');
 const https = require('node:https');
 const dns = require('node:dns/promises');
 const crypto = require('node:crypto');
-const { Transform } = require('node:stream');
+const { Transform, Readable } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 const ipaddr = require('ipaddr.js');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { NodeHttpHandler } = require('@smithy/node-http-handler');
 const { deliveryBody } = require('./conversation-envelope');
+const { jsonChunks } = require('./conversation-jsonl-format');
 const transportFailure = Symbol('conversation-push-failure');
 
 function failure(code, retryable = false, httpStatus = 0) {
@@ -35,6 +37,19 @@ function abortable(operation, signal) {
     Promise.resolve(operation).then(resolve,reject).finally(()=>signal.removeEventListener('abort',abort));
   });
 }
+async function jsonBody(value, guard, signal) {
+  const hash=crypto.createHash('sha256');let length=0,sinceYield=0;
+  async function* chunks() {
+    for (const piece of jsonChunks(value)) {
+      if(signal.aborted)throw failure('ABORTED',true);
+      const bytes=Buffer.from(piece);yield bytes;sinceYield+=bytes.length;
+      if(sinceYield>=262144){sinceYield=0;await new Promise(resolve=>setImmediate(resolve));guard();}
+    }
+    guard();
+  }
+  for await (const bytes of chunks()){length+=bytes.length;hash.update(bytes);}
+  return {length,checksum:hash.digest('base64'),stream:()=>Readable.from(chunks(),{objectMode:false,highWaterMark:65536})};
+}
 class ConversationPushTransport {
   constructor({lookup=dns.lookup}={}) { this.lookup=lookup; }
   sendJsonl(policy,file,envelopes,signal,hooks) { return require('./conversation-jsonl-transport').sendJsonl(this,policy,file,envelopes,signal,hooks); }
@@ -56,7 +71,7 @@ class ConversationPushTransport {
     let timedOut=false;
     const timer=setTimeout(()=>{timedOut=true;controller.abort();},policy.timeoutSeconds*1000);
     const pinned=new Map(),agents=[];
-    let client,httpStatus=0;
+    let client,httpStatus=0,bodyStream,preparing=true;
     const validate=async host=>{
       const address=await this.resolve(host,policy.allowPrivateNetwork,controller.signal);
       guard();
@@ -74,22 +89,25 @@ class ConversationPushTransport {
     try {
       const target=policy[destination],url=new URL(destination==='s3'?target.endpoint:target.url);
       if(url.protocol!=='https:' && !(url.protocol==='http:' && policy.allowPrivateNetwork))throw failure('ADDRESS_BLOCKED');
-      const body=Buffer.from(JSON.stringify(deliveryBody(envelope)));
+      const body=await jsonBody(deliveryBody(envelope),guard,controller.signal);
+      preparing=false;
       guard();
       if(destination==='webhook') {
         await validate(url.hostname);
         await new Promise((resolve,reject)=>{
+          let accepted=false,written=false;
+          const complete=()=>{if(accepted&&written)resolve();};
           const headers={'content-type':'application/json','content-length':body.length,'idempotency-key':envelope.delivery_id};
           if(target.token)headers.authorization='Bearer '+target.token;
           const request=(url.protocol==='https:'?https:http).request(url,{method:'POST',headers,agent:url.protocol==='https:'?httpsAgent:httpAgent,signal:controller.signal},response=>{
             const status=response.statusCode;
             httpStatus=status;
             response.destroy();
-            if(status>=200&&status<300)resolve();
+            if(status>=200&&status<300){accepted=true;complete();}
             else reject(failure(status>=300&&status<400?'REDIRECT_REJECTED':'HTTP_REJECTED',status===408||status===429||status>=500,status));
           });
           request.on('error',reject);
-          request.end(body);
+          bodyStream=body.stream();pipeline(bodyStream,request,{signal:controller.signal}).then(()=>{written=true;complete();},reject);
         });
       } else {
         const handler=new NodeHttpHandler({httpAgent,httpsAgent,connectionTimeout:policy.timeoutSeconds*1000,socketTimeout:policy.timeoutSeconds*1000});
@@ -114,14 +132,15 @@ class ConversationPushTransport {
         },{step:'finalizeRequest',name:'validateConversationPushAddress',priority:'low'});
         const date=new Date(envelope.metadata?.at||Date.now()).toISOString().slice(0,10);
         const key=[target.prefix,date,envelope.delivery_id+'.json'].filter(Boolean).join('/');
-        const result=await client.send(new PutObjectCommand({Bucket:target.bucket,Key:key,Body:body,ContentType:'application/json',
-          Metadata:{'delivery-id':envelope.delivery_id},ChecksumSHA256:crypto.createHash('sha256').update(body).digest('base64')}),{abortSignal:controller.signal});
+        bodyStream=body.stream();
+        const result=await client.send(new PutObjectCommand({Bucket:target.bucket,Key:key,Body:bodyStream,ContentLength:body.length,ContentType:'application/json',
+          Metadata:{'delivery-id':envelope.delivery_id},ChecksumSHA256:body.checksum}),{abortSignal:controller.signal});
         httpStatus=result.$metadata.httpStatusCode;
       }
       return {status:'sent',httpStatus};
     } catch(error) {
-      if(error.code==='EXPORT_REQUEST_ID')return {status:'failed',errorCode:'EXPORT_REQUEST_ID',retryable:false};
-      if(error.code==='EXPORT_MEMORY')return {status:'failed',errorCode:'EXPORT_MEMORY',retryable:true};
+      if(preparing&&error.code==='EXPORT_REQUEST_ID')return {status:'failed',errorCode:'EXPORT_REQUEST_ID',retryable:false};
+      if(preparing&&error.code==='EXPORT_MEMORY')return {status:'failed',errorCode:'EXPORT_MEMORY',retryable:true};
       if(timedOut)return {status:'failed',errorCode:'TIMEOUT',retryable:true};
       if(controller.signal.aborted)return {status:'failed',errorCode:'ABORTED',retryable:true};
       const trusted=error[transportFailure],code=trusted?error.httpStatus:error.$metadata?.httpStatusCode;
@@ -130,6 +149,7 @@ class ConversationPushTransport {
         httpStatus:status,retryable:trusted?error.retryable:(!status||status===408||status===429||status>=500)};
     } finally {
       clearTimeout(timer);outerSignal?.removeEventListener('abort',abort);
+      bodyStream?.destroy();
       client?.destroy();for(const agent of agents)agent.destroy();
     }
   }

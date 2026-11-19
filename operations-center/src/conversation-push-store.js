@@ -4,7 +4,8 @@ const crypto = require('node:crypto');
 const { z } = require('zod');
 const { modelAllowed } = require('./services/conversation-models');
 const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversation-sensitive');
-const { ENVELOPE_VERSION, formatBodies } = require('./services/conversation-envelope');
+const { ENVELOPE_VERSION, formatBodies, formatDeliveryBodies } = require('./services/conversation-envelope');
+const { processingBudgets } = require('./services/conversation-memory');
 const { defaults,normalizePolicy,parsePolicy,publicPolicy,targetHash,invalid } = require('./services/conversation-push-policy');
 
 const destinations = z.array(z.enum(['webhook','s3'])).min(1).max(2);
@@ -220,9 +221,10 @@ class ConversationPushStore {
     })();
   }
   finish(job,{status,errorCode='',httpStatus=0,retryable=false}) {
-    const policy=this.policy(),retry=retryable&&job.attempts<policy.maxAttempts;
-    return this.db.prepare("UPDATE cl_push_jobs SET status=?,error_code=?,http_status=?,next_at=?,lease_token='',lease_until=0,updated_at=? WHERE id=? AND status='running' AND lease_token=?")
-      .run(retry?'pending':status,errorCode,httpStatus,this.now()+Math.min(3600000,policy.retrySeconds*1000*2**Math.max(0,job.attempts-1)),this.now(),job.id,job.lease_token).changes;
+    const policy=this.policy(),memory=errorCode==='EXPORT_MEMORY',attempts=Math.max(0,job.attempts-Number(memory));
+    const retry=memory||retryable&&attempts<policy.maxAttempts;
+    return this.db.prepare("UPDATE cl_push_jobs SET status=?,attempts=?,error_code=?,http_status=?,next_at=?,lease_token='',lease_until=0,updated_at=? WHERE id=? AND status='running' AND lease_token=?")
+      .run(retry?'pending':status,attempts,errorCode,httpStatus,this.now()+Math.min(3600000,policy.retrySeconds*1000*2**Math.max(0,attempts-1)),this.now(),job.id,job.lease_token).changes;
   }
   retry(id) {
     const job=this.db.prepare('SELECT * FROM cl_push_jobs WHERE id=?').get(id);
@@ -253,6 +255,29 @@ class ConversationPushStore {
       skipped:stats.filter(row=>!row.code.startsWith('ORIGINAL_FALLBACK:')),
       fallbacks:stats.filter(row=>row.code.startsWith('ORIGINAL_FALLBACK:')).map(row=>({...row,code:row.code.slice('ORIGINAL_FALLBACK:'.length)})),
       batches:this.db.prepare('SELECT id,created_at,matched,eligible,created FROM cl_push_batches ORDER BY created_at DESC LIMIT 10').all()};
+  }
+  admit(job, pinnedCopy, budget = processingBudgets()) {
+    const row=this.db.prepare(`SELECT original IS NOT NULL AS original,masked IS NOT NULL AS masked,length(original) original_bytes,length(masked) masked_bytes,
+      processing_pending,processing_error,inspection_warnings,redaction_version,redaction_policy_hash FROM cl_records WHERE id=?`).get(job.record_id);
+    const fixed=pinnedCopy || (job.delivery_source ? {source:job.delivery_source} : null);
+    const copy=row && (fixed || this.copySelection(row,job.source,this.archive.policy()));
+    const bytes=copy && !copy.blocked && row[copy.source+'_bytes'];
+    if (!bytes) throw Object.assign(new Error('COPY_UNAVAILABLE'),{code:'COPY_UNAVAILABLE'});
+    const size=!fixed && copy.source==='masked' ? Math.max(bytes,row.original_bytes || 0) : bytes;
+    const budgets=typeof budget==='number' ? {memory:budget,heap:budget} : budget;
+    const heapFactor=[1,2].includes(job.envelope_version) ? 8 : 4;
+    if (size*8+16777216>budgets.memory || size*heapFactor+16777216>budgets.heap) {
+      throw Object.assign(new Error('EXPORT_MEMORY'),{code:'EXPORT_MEMORY'});
+    }
+  }
+  delivery(job, pinnedCopy, memoryBudget = processingBudgets) {
+    const prepare=()=>{this.admit(job,pinnedCopy,memoryBudget());return this.envelope(job,pinnedCopy,{format:formatDeliveryBodies});};
+    try { return prepare(); }
+    catch (error) {
+      if (error.code!=='EXPORT_MEMORY' || typeof global.gc!=='function') throw error;
+    }
+    // Only isolated push workers expose GC; release the failed preparation before one recovery attempt.
+    global.gc();return prepare();
   }
   envelope(job, pinnedCopy, { format = formatBodies } = {}) {
     const fields='id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,processing_error,processing_policy_version,processed_at,capture_version,body_sha256,redaction_version,inspection_warnings,upstream_status,upstream_evidence,completion_source,transport_diagnostics';

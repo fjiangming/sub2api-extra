@@ -59,6 +59,32 @@ test('original fallback choice, reason and multipart prefix survive a process an
   assert.deepEqual(exportBodyBytes(copy,'request'),Buffer.from(row.request,'base64'));assert.deepEqual(exportBodyBytes(copy,'response'),Buffer.from(row.response,'base64'));
   assert.equal(f.jsonl.get(file.id).bytes,receiver.completed[0].body.length);
 });
+
+test('memory pressure between records preserves confirmed parts and retries beyond the network attempt limit',async t=>{
+  let f,pressure=false;
+  const receiver=await s3Receiver({beforeRequest:entry=>{
+    if(entry.method==='PUT'&&entry.query.get('partNumber')==='1') {pressure=true;f.jsonl.memoryBudget=()=>0;}
+  }});t.after(()=>receiver.close());
+  f=setup(t,receiver);f.push.configure({...f.push.policy(),maxAttempts:1});
+  const first=large(f,'memory-first'),second=event('memory-second',{model:'Opus5'});f.store.ingest(second);f.enqueue();
+  f.push.db.prepare('UPDATE cl_push_jobs SET created_at=created_at+1 WHERE record_id=?').run(second.id);
+  await f.service.jsonl.tick();assert(pressure);
+  const file=f.jsonl.list().files[0],initial=f.jsonl.get(file.id);
+  assert.equal(initial.status,'pending');assert.equal(initial.error_code,'EXPORT_MEMORY');assert.equal(initial.attempts,0);
+  assert.equal(initial.uploaded_parts,1);assert(initial.upload_id);assert.equal(receiver.completed.length,0);
+  for(let n=0;n<3;n++) {
+    f.advance();await f.service.jsonl.tick();const saved=f.jsonl.get(file.id);
+    assert.equal(saved.status,'pending');assert.equal(saved.attempts,0);assert.equal(saved.upload_id,initial.upload_id);
+    assert.equal(saved.uploaded_parts,1);assert.equal(receiver.completed.length,0);
+  }
+  f.jsonl.memoryBudget=()=>Infinity;f.advance();await f.service.jsonl.tick();
+  assert.equal(f.jsonl.get(file.id).status,'sent');assert.equal(creates(receiver).length,1);
+  assert.equal(puts(receiver).filter(entry=>entry.query.get('partNumber')==='1').length,1);
+  const records=receiver.completed[0].body.toString().trimEnd().split('\n').map(line=>JSON.parse(line));
+  assert.deepEqual(records.map(row=>row.request_id),[first.request_id,second.request_id]);
+  assert.deepEqual(exportBodyBytes(records[0],'request'),Buffer.from(first.request,'base64'));
+  assert.equal(f.jsonl.get(file.id).attempts,1);
+});
 async function until(predicate) {
   const end = Date.now() + 5000;
   while (!predicate()) { assert(Date.now() < end, 'background progress timed out'); await new Promise(resolve => setTimeout(resolve, 20)); }

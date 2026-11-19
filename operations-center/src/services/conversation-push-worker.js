@@ -3,7 +3,7 @@
 const { ConversationLogStore } = require('../conversation-log-store');
 const { ConversationPushStore } = require('../conversation-push-store');
 const { ConversationPushService } = require('./conversation-push-service');
-const { processingBudget } = require('./conversation-memory');
+const { processingBudgets } = require('./conversation-memory');
 
 process.once('message', settings => {
   if (settings?.type !== 'initialize') return process.exit(1);
@@ -12,9 +12,9 @@ process.once('message', settings => {
   try {
     archive = new ConversationLogStore(settings.directory, { timezone: settings.timezone }).initialize();
     archive.db.pragma('busy_timeout = 250');
-    const budget = () => processingBudget(settings.memoryBudgetBytes);
+    const budget = () => processingBudgets(settings.memoryBudgetBytes);
     let priorityUntil = 0;
-    service = new ConversationPushService(new ConversationPushStore(archive).initialize(), { jsonlOptions: { memoryBudget: budget },
+    service = new ConversationPushService(new ConversationPushStore(archive).initialize(), { memoryBudget: budget,
       canWork: () => Date.now() < priorityUntil && !archive.hasPending() });
     const report = () => { if (process.connected) process.send({ type: 'status', lastError: service.lastError, lastRun: service.lastRun,
       jsonlError: service.jsonl.lastError, jsonlRun: service.jsonl.lastRun }, () => {}); };

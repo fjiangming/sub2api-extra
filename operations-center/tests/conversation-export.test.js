@@ -307,6 +307,34 @@ test('memory protection refuses isolated export without truncation, changing arc
   assert.deepEqual(f.store.payload(large.id,'original','request').body,raw);assert.equal((await fetch(f.base+'/healthz')).status,200);
 });
 
+test('the default memory window recovers after more than five seconds instead of interrupting the download',async t=>{
+  const f=await setup(t,{workerFile:path.join(__dirname,'conversation-export-worker-fixture.cjs')});
+  const row=event('export-long-memory-wait');f.store.ingest(row);
+  const value=await f.start({limit:1}),downloading=f.download(value);
+  await until(()=>f.exporter.jobs.get(value.job.id).pauseReason==='memory_pressure');
+  await delay(5200);assert.equal(f.exporter.jobs.get(value.job.id).status,'running');
+  assert.equal((await fetch(f.base+'/healthz')).status,200);
+  f.exporter.child.send({type:'fixture-release-memory'});
+  const response=await downloading;assert.equal(response.status,200);
+  assert.equal(lines(await response.text())[0].request_id,row.request_id);
+  assert.equal((await f.done(value.job)).status,'completed');await until(()=>!f.exporter.child);
+});
+
+for(const action of ['recover','cancel']) test('export startup memory pressure can '+action+' without starting a worker prematurely',async t=>{
+  const f=await setup(t,{memoryBudgetBytes:0,memoryWaitMs:2000}),row=event('export-startup-memory-'+action);f.store.ingest(row);
+  const value=await f.start({limit:1}),downloading=f.download(value);
+  await until(()=>f.exporter.jobs.get(value.job.id).pauseReason==='memory_pressure');
+  assert.equal(f.exporter.child,null);assert.equal((await fetch(f.base+'/healthz')).status,200);
+  if(action==='recover')f.exporter.memoryBudgetBytes=128*1024**2;
+  else await f.cancel(value.job);
+  const response=await downloading;
+  if(action==='recover') {
+    assert.equal(response.status,200);assert.equal(lines(await response.text())[0].request_id,row.request_id);
+    assert.equal((await f.done(value.job)).status,'completed');
+  } else {assert.notEqual(response.status,200);assert.equal((await f.done(value.job)).status,'cancelled');}
+  await until(()=>!f.exporter.draining&&!f.exporter.child);
+});
+
 for(const action of ['recover','timeout','cancel','policy']) test('temporary export memory pressure can '+action+' without changing the archive or blocking collection',async t=>{
   const f=await setup(t,{workerFile:path.join(__dirname,'conversation-export-worker-fixture.cjs'),memoryWaitMs:action==='timeout'?2000:5000});
   let attempts=0;const spawn=f.exporter.spawn.bind(f.exporter);
