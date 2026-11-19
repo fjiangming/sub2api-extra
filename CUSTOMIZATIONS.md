@@ -1,5 +1,24 @@
 # 个性化功能维护台账
 
+## 2026-11-19：发布导出与推送请求 ID 修复
+
+用户明确要求提交 GitHub。本次仅发布下述“导出与推送补回网关请求 ID”对应的运营中心实现、界面、测试、页面验证脚本与接入说明到 main；该节“未提交 / 推送”描述实现当轮状态，本次授权源码发布和既有 GitHub Actions 构建核验。维护台账仅暂存本节及该功能节，保留多第三方检测 Demo、附属容器部署、域名迁移 / 备份、只读生产排查、其他模块和独立演示等无关差异。
+
+沿用前轮 npm run check、完整 653 项测试（0 失败 / 跳过）及下载 / 推送两套正式 Chrome 四布局验证；不改已验证产品源码。提交前核对 origin/main、暂存范围、格式版本兼容与差异空白，提交后核查 Linux 测试、双架构原生构建和运营中心镜像发布。新下载 / 新任务均输出 request_id / request / response，旧任务继续原格式和续传字节，无自动历史重发。无需修改服务器配置；本轮不连接、更新、重启或重新配置服务器，不修改主站 / 采集器、加密归档、脱敏引擎或计费，不启用真实外部推送。具体提交与远端结果以本次最终回复为准。
+
+## 2026-11-19：导出与推送补回网关请求 ID
+
+用户要求核对导出缺少 requestid 的原因，并保证推送也带上。定位采集 schema 已验证 `request_id`，源表和紧凑元数据均保存，内部输出元数据也已读取；遗漏发生在前轮只投影 request / response 的对外精简层，因此下载、Webhook、S3 JSON 和 JSONL 一并受影响。本轮仅改本地运营中心输出，不改主站、采集器、归档正文、脱敏引擎或计费，不连接 / 部署服务器、不提交 / 推送 GitHub，保留无关改动。
+
+- `operations-center/src/services/conversation-envelope.js`：新输出统一仅有 `request_id`、`request`、`response`，请求 ID 精确取已保存的网关字段，不改写正文内的厂商 ID 或同名字段；HTTP / SSE / 压缩 / WS / 二进制、脱敏与原文回退使用同一路径。内部表示版本升为 4，继续精确支持 v1 / v2 / v3；旧 v3 仍投影两字段，旧任务 ID、固定副本和分片字节保持。同请求不同尝试逐条输出，不按 request_id 去重；历史重新下载即带 ID，旧推送需重新预览安排新任务，升级不重置自动游标、不自动重发历史。
+- `src/services/conversation-export-data.js`、`conversation-export-worker.js`：将请求 ID 纳入既有导出快照与变更检查；无效 / 缺失 ID 明确中止并返回专用错误，不能静默省略或用归档 / 投递 / 上游 ID 替代。`src/services/conversation-push-transport.js`、`conversation-jsonl-transport.js`、`src/conversation-jsonl-store.js`、`src/services/conversation-jsonl-service.js`：同类错误映射为 `EXPORT_REQUEST_ID` 且不自动网络重试，不假报完成，清理已知未完成分片；JSONL 分卷、行字节及摘要沿用共享投影，包含新增字段，无历史正文回写或数据库结构迁移。
+- `tests/conversation-envelope.test.js`、`conversation-export.test.js`、`conversation-push.test.js`、`conversation-jsonl.test.js`、`conversation-jsonl-resume.test.js`：核对真实下载 / HTTP / S3 JSON / JSONL 的三字段与保存 ID 相等；覆盖原文、脱敏、回退、压缩 SSE、WS、同 ID 多尝试不丢行、缺失 / 无效 ID 明确失败且正文不变、下载中 ID 变化中止、异常冻结元数据阻止 Complete 并清理上传。旧 v1 / v2 / v3 重试、同日旧卷封卷与新卷隔离、数据库重开及真实多分片续传保持旧字节和已确认首片。
+- `public/conversation-push-ui.js`、`index.html`：同步请求 ID 输出说明、异常提示及推送模块缓存版本。`scripts/conversation-logs-live-browser-check.cjs`、`conversation-push-browser-check.cjs`：实际下载 / 推送逐条核对 request_id，保留虚构数据、各布局、原 `.raw` 字节、回退及诊断验证。`README.md`、`docs/conversation-logs.md`、`conversation-jsonl-push.md`：同步三字段示例、ID 语义、重复尝试、旧任务升级与异常边界。本轮无需新增服务器环境变量、内存或 CPU 配额修改，只需后续授权升级运营中心才生效。
+
+已验证：五组导出 / 推送 / JSONL 专项 **101 项全部通过，0 失败 / 跳过**，npm run check 通过，完整 **653 项测试全部通过，0 失败 / 跳过**（约 183 秒）。首轮正式页面下载验证通过桌面、390px 和 320px，深色场景在脚本直接修改临时夹具策略时遇到一次 SQLITE_BUSY；修改 `scripts/conversation-logs-live-browser-check.cjs` 的四处夹具策略设置，统一在读策略前以短 immediate 外层事务取得写锁，避免与既有后台子进程争用时升级读事务，并保留失败检查，不改产品的配置 / 归档逻辑；调整后单独语法检查通过。仅使用临时虚构数据和 loopback 接收器，未读取生产正文、请求真实模型或外部 Bucket，不将本地验证当作生产性能实测。
+
+最终正式 Chrome / Playwright 的下载、推送两套完整流程均通过桌面 1440px、390px、320px 和深色偏好，实际外发 / 下载请求 ID 与保存值逐条一致，包含脱敏、原文回退和显式传输范围，未发现页面脚本错误、外网请求或新增布局溢出。截图目录 `sub2api-conversation-browser-egTMp0`、`sub2api-push-browser-orAYyQ`，两套桌面及 320px 已视觉复核。新增独立虚构数据预览 `http://127.0.0.1:19953/preview`（PID 49080），healthz / 推送模块均为 HTTP 200，确认包含请求 ID 输出说明和错误提示；保留旧预览。相关差异空白检查通过，产品源码在完整测试后没有再修改。本轮未提交 / 推送 GitHub、发布镜像或部署服务器，线上尚未生效；无新增服务器配置要求。
+
 ## 2026-11-19：发布精简正文与后台解压
 
 用户明确要求提交 GitHub。本次仅将下述“精简对外正文并后台解压”和“导出与推送直接输出解码文本”涉及的运营中心实现、界面、测试、验证脚本和接入说明发布到 main；最终新输出仅有 request / response，阶段性的 v2 表示保留为兼容旧任务的内部路径。以下实现记录中的“未提交 / 推送”描述当轮状态，本次授权源码发布及 GitHub 构建核验。维护台账只暂存本节与这两节，保留附属容器部署、生产只读排查、域名迁移 / 备份、其他模块和独立演示等无关本地差异。

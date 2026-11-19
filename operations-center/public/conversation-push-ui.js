@@ -6,7 +6,7 @@
     Object.assign(errors,{INCOMPLETE_CAPTURE:'传输完整性未确认，当前范围不推送',INSPECTION_INCOMPLETE:'含未检查内容，暂停脱敏推送',REDACTION_OUTDATED:'脱敏规则已更新，需重新处理',PROCESSING_PENDING:'原文已保存，等待后台处理',PROCESSING_FAILED:'脱敏处理异常，需重新处理'});
     Object.assign(errors,{JSONL_RECORD_TOO_LARGE:'单条日志超过文件上限，正文未截断',JSONL_CONTENT_CHANGED:'文件内容校验不一致',JSONL_QUEUE_FAILED:'JSONL 队列暂不可用',EXPORT_MEMORY:'后台内存不足，请稍后重试',EXPORT_CAPACITY:'可用空间不足，未增加汇总数据',MULTIPART_INVALID:'分片上传回执无效',PUSH_WORKER_UNAVAILABLE:'推送后台暂不可用'});
     Object.assign(errors,{MULTIPART_RESTART:'远端上传已失效，将沿原路径重建',MULTIPART_CHECKPOINT_INVALID:'分片进度校验异常，将重建上传'});
-    Object.assign(errors,{MASKED_READ_FAILED:'脱敏副本读取失败'});
+    Object.assign(errors,{MASKED_READ_FAILED:'脱敏副本读取失败',EXPORT_REQUEST_ID:'归档请求 ID 缺失或无效，请检查对应日志'});
     const fileStates={open:'汇总中',pending:'待上传',running:'上传中',sent:'已送达',failed:'失败',cancelled:'已取消'};
     const $=id=>container.querySelector('#clp-'+id),base='/api/conversation-logs/push/';
     let policy=null,dirty=false,busy=false,mounted=false,epoch=0,controller=null,jobsController=null,jobsSeq=0,timer=null,page=1,preview=null,batchBody=null;
@@ -53,7 +53,7 @@
         <div class="clp-pair">${field('accessKeyId',`Access Key · ${value.s3.credentialsConfigured?'已设置':'未设置'}`,'','password','maxlength="4096" autocomplete="new-password" placeholder="留空保留现有值"')}${field('secretAccessKey','Secret Key','','password','maxlength="4096" autocomplete="new-password" placeholder="留空保留现有值"')}</div>${field('sessionToken',`Session Token · ${value.s3.sessionTokenConfigured?'已设置':'未设置'}`,'','password','maxlength="4096" autocomplete="new-password" placeholder="可选，留空保留现有值"')}</div>
         <div class="clp-actions"><label class="clp-check"><input type="checkbox" name="forcePathStyle" ${value.s3.forcePathStyle?'checked':''}>Path Style</label><label class="clp-check"><input type="checkbox" name="clearSessionToken">清除 Session Token</label><label class="clp-check"><input type="checkbox" name="clearCredentials">清除全部凭据</label><button type="button" class="button secondary" data-clp-test="s3">${icon('plug-zap')}测试连接</button></div><div id="clp-test-s3" class="cl-muted" role="status"></div></fieldset></div>
         <fieldset><legend>发送设置</legend><div class="cl-policy-grid">${field('maxAttempts','最大尝试次数',value.maxAttempts,'number','required min="1" max="10"')}${field('retrySeconds','首次重试间隔（秒）',value.retrySeconds,'number','required min="5" max="3600"')}${field('timeoutSeconds','发送超时（秒）',value.timeoutSeconds,'number','required min="3" max="60"')}${field('queueLimit','待发送任务上限',value.queueLimit,'number','required min="100" max="50000"')}</div>${toggle('allowPrivateNetwork','允许私有网络目标 / HTTP',value.allowPrivateNetwork)}</fieldset>
-        <p class="cl-muted">JSON 仅包含请求与返回正文。压缩内容会解压；无法解码的字节以 data URI 保留。脱敏副本不可用时使用原文，可能含敏感信息，实际来源在本地推送记录中查看。关闭推送会暂停队列，已经发出的内容无法撤回。</p>
+        <p class="cl-muted">每条数据包含请求 ID、请求正文和返回正文。压缩内容会解压；无法解码的字节以 data URI 保留。脱敏副本不可用时使用原文，可能含敏感信息，实际来源在本地推送记录中查看。关闭推送会暂停队列，已经发出的内容无法撤回。</p>
         <footer><button type="submit" class="button" id="clp-save">${icon('save')}保存推送策略</button><button type="button" class="button secondary" data-clp-action="discard">放弃更改</button><span id="clp-dirty" class="cl-muted"></span></footer></form>`;
       $('form').addEventListener('input',markDirty);$('form').addEventListener('change',markDirty);
       $('form').addEventListener('submit',event=>{event.preventDefault();run(save);});

@@ -9,6 +9,7 @@ const { exportBodyBytes } = require('./conversation-logs-fixture');
 const { jsonlChunks } = require('../src/services/conversation-jsonl-format');
 
 const encoded = value => Buffer.from(value).toString('base64');
+const requestId = '0123456789abcdef0123456789abcdef';
 function verify(envelope, side, input, index) {
   const bytes = exportBodyBytes(envelope, side, index);
   assert.deepEqual(bytes, Buffer.from(input, 'base64'));
@@ -56,19 +57,19 @@ test('legacy formatting retains the exact old property order and Base64 payload 
   assert.deepEqual(Object.keys(envelope),['body_encoding','request','response','frames','checksums']);
   assert.equal(envelope.body_encoding,'base64');assert.equal(envelope.request,raw.request);assert.equal(envelope.response,raw.response);
   assert(!envelope.body_encodings);verify(envelope,'request',raw.request);verify(envelope,'response',raw.response);
-  assert.throws(()=>formatBodies(raw,{version:4}),/UNSUPPORTED_ENVELOPE_VERSION/);
+  assert.throws(()=>formatBodies(raw,{version:5}),/UNSUPPORTED_ENVELOPE_VERSION/);
 });
 
 function current(raw, encoding = '') {
-  return {schema:'sub2api.conversation.v3',delivery_id:'private-id',source:'original',metadata:{encoding,user_id:123},...formatBodies(raw,{encoding})};
+  return {schema:'sub2api.conversation.v4',delivery_id:'private-id',source:'original',metadata:{request_id:requestId,encoding,user_id:123},...formatBodies(raw,{encoding})};
 }
 
-test('public JSON has exactly two fields and preserves compressed text without parsing vendor JSON', () => {
+test('public JSON retains the gateway request ID and exact compressed text with only three fields', () => {
   const text='\uFEFF{\r\n "id":9007199254740993,"n":1.2300,"text":"\u4e2d\u6587"\r\n}\r\n';
   for (const [encoding,compress] of [['gzip',zlib.gzipSync],['br',zlib.brotliCompressSync],['deflate',zlib.deflateSync],['zstd',zlib.zstdCompressSync]]) {
     const raw={request:encoded(text),response:compress(Buffer.from(text)).toString('base64'),frames:[]};
     const envelope=current(raw,encoding),body=deliveryBody(envelope);
-    assert.deepEqual(body,{request:text,response:text});assert.deepEqual(Object.keys(body),['request','response']);
+    assert.deepEqual(body,{request_id:requestId,request:text,response:text});assert.deepEqual(Object.keys(body),['request_id','request','response']);
     assert.deepEqual(JSON.parse([...jsonlChunks(body)].join('')),body);
     assert.equal(envelope.metadata.user_id,123);assert.equal(envelope.response,raw.response);
   }
@@ -81,16 +82,38 @@ test('public WebSocket sides preserve every message, empty frames, binary bytes 
     {direction:'out',at:2,binary:false,body:''},
     {direction:'in',at:3,binary:false,body:encoded('data: [DONE]\r\n\r\n')}]};
   const body=deliveryBody(current(raw));
-  assert.deepEqual(body,{request:['handshake request','{ "n":1.2300 }',''],
+  assert.deepEqual(body,{request_id:requestId,request:['handshake request','{ "n":1.2300 }',''],
     response:['handshake response','data:application/octet-stream;base64,AP8B','data: [DONE]\r\n\r\n']});
-  assert.deepEqual(Object.keys(body),['request','response']);
+  assert.deepEqual(Object.keys(body),['request_id','request','response']);
+});
+
+test('new delivery never substitutes vendor, archive or delivery IDs for a missing gateway request ID', () => {
+  const raw={request:encoded('{"request_id":"vendor-request"}'),response:encoded('{"id":"resp_supplier"}'),frames:[]};
+  for(const value of [undefined,null,'','resp_supplier','0123456789abcdef',requestId.toUpperCase(),123]) {
+    const envelope=current(raw);envelope.metadata.request_id=value;envelope.metadata.id=requestId;
+    assert.throws(()=>deliveryBody(envelope),{code:'EXPORT_REQUEST_ID'});
+  }
+  const missing=current(raw);delete missing.metadata;assert.throws(()=>deliveryBody(missing),{code:'EXPORT_REQUEST_ID'});
+  assert.deepEqual(deliveryBody(current(raw)),{request_id:requestId,request:Buffer.from(raw.request,'base64').toString(),response:'{"id":"resp_supplier"}'});
+});
+
+test('legacy v3 preserves its exact two-field delivery bytes even when gateway metadata contains a request ID', () => {
+  const raw={request:encoded(' {"n":1.2300}\r\n'),response:encoded('data: [DONE]\r\n\r\n'),frames:[]};
+  const envelope={...current(raw),schema:'sub2api.conversation.v3',...formatBodies(raw,{version:3})};
+  assert.equal(JSON.stringify(deliveryBody(envelope)),JSON.stringify({request:' {"n":1.2300}\r\n',response:'data: [DONE]\r\n\r\n'}));
+  delete envelope.metadata.request_id;
+  assert.deepEqual(Object.keys(deliveryBody(envelope)),['request','response']);
+  const ws={...envelope,...formatBodies({...raw,frames:[{direction:'out',at:0,binary:false,body:''}]},{version:3})};
+  assert.deepEqual(deliveryBody(ws),{request:[' {"n":1.2300}\r\n',''],response:['data: [DONE]\r\n\r\n']});
 });
 
 test('invalid text, damaged compression, unknown encoding and unconsumed tails retain original wire bytes', () => {
   const bad=encoded([255,192]);
-  assert.equal(deliveryBody(current({request:bad,response:'',frames:[]})).request,'data:application/octet-stream;base64,'+bad);
+  const binary=deliveryBody(current({request:bad,response:'',frames:[]}));
+  assert.equal(binary.request,'data:application/octet-stream;base64,'+bad);assert.equal(binary.request_id,requestId);
   for(const [encoding,bytes] of [['gzip',Buffer.from('broken')],['br',Buffer.concat([zlib.brotliCompressSync(Buffer.from('hello')),Buffer.from('tail')])],['unknown',Buffer.from('opaque')]]) {
     const body=deliveryBody(current({request:'',response:bytes.toString('base64'),frames:[]},encoding));
+    assert.equal(body.request_id,requestId);
     assert.equal(body.response,`data:application/octet-stream;content-encoding=${encoding};base64,${bytes.toString('base64')}`);
     assert.deepEqual(Buffer.from(body.response.split(',')[1],'base64'),bytes);
   }

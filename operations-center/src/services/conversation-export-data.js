@@ -7,7 +7,7 @@ const {processingBudget} = require('./conversation-memory');
 
 const exportSchema = z.object({filter:filterSchema.default({}),source:z.enum(['masked','original']).default('masked'),
   limit:z.number().int().min(1).max(10000).default(1000)}).strict();
-const fields = 'id,user_id,model,at,bytes,archived_at,policy_version,processed_at,processing_pending,processing_policy_version,processing_error,complete,reason,redaction_version,redaction_policy_hash,inspection_warnings,original,masked,body_sha256';
+const fields = 'id,request_id,user_id,model,at,bytes,archived_at,policy_version,processed_at,processing_pending,processing_policy_version,processing_error,complete,reason,redaction_version,redaction_policy_hash,inspection_warnings,original,masked,body_sha256';
 const failure = (code,message,status=409) => new AppError('CONVERSATION_EXPORT_'+code,message,{status});
 function parseExport(input) {
   const result = exportSchema.safeParse(input);

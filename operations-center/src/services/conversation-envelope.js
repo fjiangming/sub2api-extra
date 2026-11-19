@@ -5,10 +5,10 @@ const { isUtf8 } = require('node:buffer');
 const zlib = require('node:zlib');
 const { processingBudget } = require('./conversation-memory');
 
-const ENVELOPE_VERSION = 3;
+const ENVELOPE_VERSION = 4;
 
 function formatBodies(raw, { version = ENVELOPE_VERSION, encoding = '' } = {}) {
-  if (![1, 2, ENVELOPE_VERSION].includes(version)) throw new Error('UNSUPPORTED_ENVELOPE_VERSION');
+  if (![1, 2, 3, ENVELOPE_VERSION].includes(version)) throw new Error('UNSUPPORTED_ENVELOPE_VERSION');
   const convert = (value, reason = '') => {
     const bytes = Buffer.from(value, 'base64');
     const checksum = { bytes: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
@@ -32,7 +32,15 @@ function formatBodies(raw, { version = ENVELOPE_VERSION, encoding = '' } = {}) {
 }
 
 function deliveryBody(envelope, { maxOutputBytes } = {}) {
-  if (envelope.schema !== 'sub2api.conversation.v3') return envelope;
+  if (!['sub2api.conversation.v3', 'sub2api.conversation.v4'].includes(envelope.schema)) return envelope;
+  const identity = {};
+  if (envelope.schema === 'sub2api.conversation.v4') {
+    const requestId = envelope.metadata?.request_id;
+    if (typeof requestId !== 'string' || !/^[a-f0-9]{32}$/.test(requestId)) {
+      throw Object.assign(new Error('EXPORT_REQUEST_ID'), { code: 'EXPORT_REQUEST_ID' });
+    }
+    identity.request_id = requestId;
+  }
   const dataUri = (body, encoding = '') => 'data:application/octet-stream' +
     (encoding && encoding !== 'identity' ? ';content-encoding=' + encodeURIComponent(encoding) : '') + ';base64,' + body;
   const convert = (body, representation, encoding = '', binary = false) => {
@@ -59,13 +67,13 @@ function deliveryBody(envelope, { maxOutputBytes } = {}) {
   };
   const request = convert(envelope.request, envelope.body_encodings.request);
   const response = convert(envelope.response, envelope.body_encodings.response, envelope.metadata.encoding);
-  if (!envelope.frames.length) return { request, response };
+  if (!envelope.frames.length) return { ...identity, request, response };
   const outgoing = request ? [request] : [], incoming = response ? [response] : [];
   envelope.frames.forEach((frame, index) => {
     const body = convert(frame.body, envelope.body_encodings.frames[index], '', frame.binary);
     (frame.direction === 'out' ? outgoing : incoming).push(body);
   });
-  return { request: outgoing, response: incoming };
+  return { ...identity, request: outgoing, response: incoming };
 }
 
 module.exports = { ENVELOPE_VERSION, formatBodies, deliveryBody };

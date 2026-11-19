@@ -11,6 +11,7 @@ const { ConversationPushStore } = require('../src/conversation-push-store');
 const { ConversationPushService } = require('../src/services/conversation-push-service');
 const { ConversationPushTransport,checkAddress } = require('../src/services/conversation-push-transport');
 const { publicPolicy } = require('../src/services/conversation-push-policy');
+const { deliveryBody } = require('../src/services/conversation-envelope');
 const { AuthService } = require('../src/auth');
 const { createApp } = require('../src/app');
 
@@ -161,7 +162,7 @@ test('Webhook and individual S3 JSON actually deliver marked originals when mask
   const value=batch(f,{},['webhook','s3']);assert.equal(value.preview.fallbacks,1);assert.equal(value.result.created,2);
   const service=new ConversationPushService(f.push);t.after(()=>service.stop());await service.tick();await service.tick();
   assert.deepEqual(received.map(row=>row.method).sort(),['POST','PUT']);
-  for(const {body} of received){assert.deepEqual(Object.keys(body),['request','response']);
+  for(const {body} of received){assert.deepEqual(Object.keys(body),['request_id','request','response']);assert.equal(body.request_id,row.request_id);
     assert.equal(body.request,Buffer.from(row.request,'base64').toString());assert.equal(body.response,'{invalid');}
   assert.equal(f.push.list({status:'sent'}).total,2);
   assert(f.push.list().items.every(job=>job.delivery_source==='original'&&job.delivery_fallback_reason==='PROCESSING_FAILED'));
@@ -197,18 +198,18 @@ test('attempted masked deliveries cannot silently change into original on retry'
   assert.equal(f.push.list().items[0].status,'cancelled');assert.equal(f.push.list().items[0].error_code,'REDACTION_OUTDATED');
 });
 
-for (const legacyVersion of [1,2]) test(`legacy v${legacyVersion} Webhook and S3 retries stay identical while new batches use body-only JSON`,async t=>{
+for (const legacyVersion of [1,2,3]) test(`legacy v${legacyVersion} Webhook and S3 retries stay identical while new batches include the gateway request ID`,async t=>{
   let now=Date.now();const f=setup(t,{now:()=>now});
   configure(f,{source:'original',retrySeconds:5,s3:{...f.push.policy().s3,enabled:true,format:'json',endpoint:'https://s3.example/',
     bucket:'test-bucket',accessKeyId:'test-id',secretAccessKey:'test-secret'}});
   const row=event('legacy-body-retry');f.store.ingest(row);batch(f,{},['webhook','s3']);
   for(const job of f.push.db.prepare('SELECT * FROM cl_push_jobs').all()) {
-    const parts=[job.record_id,job.destination,job.target_hash,job.content_version];if(legacyVersion===2)parts.push(2);
+    const parts=[job.record_id,job.destination,job.target_hash,job.content_version];if(legacyVersion>=2)parts.push(legacyVersion);
     const legacyId=crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');
     f.push.db.prepare('UPDATE cl_push_jobs SET id=?,envelope_version=? WHERE id=?').run(legacyId,legacyVersion,job.id);
   }
-  const received={webhook:[],s3:[]},transport={send:async(_policy,destination,envelope)=>{
-    const attempts=received[destination];attempts.push(structuredClone(envelope));
+  const received={webhook:[],s3:[]},serialized={webhook:[],s3:[]},transport={send:async(_policy,destination,envelope)=>{
+    const attempts=received[destination];attempts.push(structuredClone(envelope));serialized[destination].push(JSON.stringify(deliveryBody(envelope)));
     return attempts.length===1?{status:'failed',errorCode:'TIMEOUT',retryable:true}:{status:'sent'};
   }};
   const before=new ConversationPushService(f.push,{transport});await before.tick();await before.tick();await before.stop();
@@ -224,16 +225,22 @@ for (const legacyVersion of [1,2]) test(`legacy v${legacyVersion} Webhook and S3
     assert.equal(attempts[1].request,legacyVersion===1?row.request:rawRequest);
     assert.equal(attempts[1].response,legacyVersion===1?row.response:rawResponse);
   }
+  for(const payloads of Object.values(serialized)) {
+    assert.equal(payloads[1],payloads[0]);
+    if(legacyVersion===3)assert.deepEqual(JSON.parse(payloads[1]),{request:rawRequest,response:rawResponse});
+    else assert.equal(JSON.parse(payloads[1]).metadata.request_id,row.request_id);
+  }
   const next=batch(f,{},['webhook','s3']);assert.equal(next.result.created,2);
   await after.tick();await after.tick();
   for(const attempts of Object.values(received)) {
-    assert.equal(attempts.length,3);assert.equal(attempts[2].schema,'sub2api.conversation.v3');
+    assert.equal(attempts.length,3);assert.equal(attempts[2].schema,'sub2api.conversation.v4');
     assert.equal(attempts[2].body_encoding,'utf-8');assert.equal(attempts[2].request,rawRequest);
     assert.notEqual(attempts[2].delivery_id,attempts[1].delivery_id);
   }
+  for(const payloads of Object.values(serialized))assert.deepEqual(JSON.parse(payloads[2]),{request_id:row.request_id,request:rawRequest,response:rawResponse});
 });
 
-test('Webhook and S3 send only request and decompressed response while idempotency stays in headers and object keys',async t=>{
+test('Webhook and S3 send the gateway request ID with exact decompressed bodies and retain delivery idempotency',async t=>{
   const received=[];const url=await receiver(t,(req,res)=>{let text='';req.on('data',chunk=>text+=chunk);req.on('end',()=>{
     received.push({body:JSON.parse(text),headers:req.headers,url:req.url});res.writeHead(200);res.end();});});
   const f=setup(t);configure(f,{source:'original',allowPrivateNetwork:true,webhook:{enabled:true,url,token:'fictional-token'},
@@ -241,11 +248,23 @@ test('Webhook and S3 send only request and decompressed response while idempoten
   const text='data: {"id":9007199254740993,"n":1.2300}\r\n\r\ndata: [DONE]\r\n\r\n';
   const row=event('compressed-http',{encoding:'gzip',response:zlib.gzipSync(Buffer.from(text)).toString('base64')});f.store.ingest(row);batch(f,{},['webhook','s3']);
   const service=new ConversationPushService(f.push);t.after(()=>service.stop());await service.tick();await service.tick();
-  assert.equal(received.length,2);for(const delivery of received)assert.deepEqual(delivery.body,{request:rawRequest,response:text});
+  assert.equal(received.length,2);for(const delivery of received)assert.deepEqual(delivery.body,{request_id:row.request_id,request:rawRequest,response:text});
   const jobs=f.push.list({status:'sent'}).items;
   assert(received.some(delivery=>jobs.some(job=>delivery.headers['idempotency-key']===job.id)));
   assert(received.some(delivery=>jobs.some(job=>new URL(delivery.url,url).pathname.endsWith(job.id+'.json'))));
   assert.deepEqual(f.store.payload(row.id,'original','response',{decodeText:false}).body,Buffer.from(row.response,'base64'));
+});
+
+test('invalid archived request IDs fail both Webhook and S3 once without sending or network retries',async t=>{
+  let requests=0;const url=await receiver(t,(_req,res)=>{requests++;res.writeHead(200);res.end();});
+  const f=setup(t);configure(f,{source:'original',allowPrivateNetwork:true,webhook:{enabled:true,url,token:'fictional-token'},
+    s3:{...f.push.policy().s3,enabled:true,format:'json',endpoint:url,region:'us-east-1',bucket:'test-bucket',accessKeyId:'fictional-id',secretAccessKey:'fictional-secret'}});
+  const row=event('push-invalid-id');assert(f.store.ingest(row).accepted);
+  f.store.db.prepare("UPDATE cl_records SET request_id='resp_supplier' WHERE id=?").run(row.id);batch(f,{},['webhook','s3']);
+  const service=new ConversationPushService(f.push);t.after(()=>service.stop());await service.tick();await service.tick();
+  assert.equal(requests,0);assert.equal(f.push.list({status:'failed'}).total,2);
+  for(const job of f.push.list().items){assert.equal(job.error_code,'EXPORT_REQUEST_ID');assert.equal(job.attempts,1);}
+  assert.equal(await service.tick(),false);assert.equal(requests,0);
 });
 
 test('legacy delivery metadata migration is additive and stale leases cannot freeze the selected copy',t=>{
@@ -377,5 +396,5 @@ test('push admin endpoints enforce authentication, CSRF and collector separation
   const body={filter:{},destinations:['webhook'],batchId:crypto.randomUUID(),previewToken:preview.previewToken};
   assert.equal((await request('conversation-logs/push/batches','POST',headers,body)).status,403);
   assert.equal((await request('conversation-logs/push/batches','POST',writes,body)).status,202);
-  await worker.running;assert.equal(sent[1].schema,'sub2api.conversation.v3');assert.equal(f.push.list().items[0].status,'sent');
+  await worker.running;assert.equal(sent[1].schema,'sub2api.conversation.v4');assert.equal(f.push.list().items[0].status,'sent');
 });

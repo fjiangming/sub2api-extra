@@ -86,7 +86,10 @@ class ConversationJsonlStore {
     }
     let envelope, bytes;
     try { this.admit(job); envelope = this.push.envelope(job); bytes = jsonlBytes(deliveryBody(envelope)); }
-    catch (error) { this.defer(job, error.code === 'EXPORT_MEMORY' ? 'EXPORT_MEMORY' : 'COPY_UNAVAILABLE'); return true; }
+    catch (error) {
+      const code = ['EXPORT_MEMORY','EXPORT_REQUEST_ID'].includes(error.code) ? error.code : 'COPY_UNAVAILABLE';
+      this.defer(job, code, code !== 'EXPORT_REQUEST_ID'); return true;
+    }
     const limit = this.maxFileBytes ?? policy.s3.jsonl.maxFileBytes;
     if (bytes > limit) { this.defer(job, 'JSONL_RECORD_TOO_LARGE', false); return true; }
     const day = dayAt(envelope.metadata.at, policy.s3.jsonl.timezone);

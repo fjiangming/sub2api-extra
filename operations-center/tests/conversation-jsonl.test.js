@@ -10,6 +10,7 @@ const { ConversationPushService } = require('../src/services/conversation-push-s
 const { ConversationPushSupervisor } = require('../src/services/conversation-push-supervisor');
 const { ConversationPushTransport } = require('../src/services/conversation-push-transport');
 const { jsonlChunks, jsonlBytes, dayAt } = require('../src/services/conversation-jsonl-format');
+const { deliveryBody } = require('../src/services/conversation-envelope');
 const { AuthService } = require('../src/auth');
 const { createApp } = require('../src/app');
 
@@ -62,16 +63,17 @@ test('historical files group by date and model, preserve raw HTTP/SSE/WS bytes a
   const at = Date.parse('2026-06-25T10:00:00Z'), sse = 'data: {"delta":"one\\ntwo","n":1.2300}\r\n\r\ndata: [DONE]\r\n\r\n';
   const frames = [{ direction: 'out', at: 0, binary: true, body: Buffer.from([0, 255, 10]).toString('base64') }];
   f.store.ingest(event('group-http', { at, model: 'Opus5' }));
-  f.store.ingest(event('group-sse', { at: at + 1, model: 'Opus5', protocol: 'SSE', response: Buffer.from(sse).toString('base64') }));
+  f.store.ingest(event('group-sse', { at: at + 1, request_id:event('group-http').request_id, model: 'Opus5', protocol: 'SSE', response: Buffer.from(sse).toString('base64') }));
   f.store.ingest(event('group-ws', { at, model: 'Fable5', protocol: 'WebSocket', frames }));
   f.store.ingest(event('group-next-day', { at: at + 86400000, model: 'Opus5' })); enqueue(f);
   await f.service.jsonl.tick(); await f.service.jsonl.tick(); await f.service.jsonl.tick();
   assert.equal(receiver.objects.size, 3); assert.equal(f.push.list().counts.find(row => row.status === 'sent').count, 4);
   const received = lines(receiver); assert.equal(received.length, 4);
-  for (const value of received) {assert.deepEqual(Object.keys(value),['request','response']);if(!Array.isArray(value.request))assert.equal(value.request,rawRequest);}
+  for (const value of received) {assert.deepEqual(Object.keys(value),['request_id','request','response']);if(!Array.isArray(value.request))assert.equal(value.request,rawRequest);}
+  assert.deepEqual(received.map(value=>value.request_id).sort(),['group-http','group-http','group-ws','group-next-day'].map(seed=>event(seed).request_id).sort());
   assert(received.some(value => value.response === rawResponse));
   assert(received.some(value => value.response === sse));
-  assert.deepEqual(received.find(value => Array.isArray(value.request)),{request:[rawRequest,'data:application/octet-stream;base64,AP8K'],response:[rawResponse]});
+  assert.deepEqual(received.find(value => Array.isArray(value.request)),{request_id:event('group-ws').request_id,request:[rawRequest,'data:application/octet-stream;base64,AP8K'],response:[rawResponse]});
   const opus = receiver.completed.find(file => file.path.startsWith('/incoming-04-20260624/2026-06-25/Opus5-'));
   assert.equal(opus.body.toString().trimEnd().split('\n').length, 2);
   assert.match(opus.path, /Opus5-2026-06-25-\d{8}T\d{9}Z-[a-f0-9]{16}\.jsonl$/);
@@ -99,24 +101,27 @@ test('planner rolls at the actual 10 GB counter without 32-bit overflow', t => {
   assert.equal(f.jsonl.list().files.length, 2);
 });
 
-test('an open legacy daily file is sealed before text records and both versions upload unchanged', async t => {
+for(const legacyVersion of [1,2,3]) test(`an open v${legacyVersion} daily file is sealed before v4 records and uploads unchanged`, async t => {
   let now=Date.now();const receiver=await s3Receiver();t.after(()=>receiver.close());
   const f=setup(t,{now:()=>now});configure(f,receiver.url,{automatic:true});
   const old=event('old-daily',{at:now,model:'Opus5'});f.store.ingest(old);f.push.scanAutomatic();
-  f.push.db.prepare('UPDATE cl_push_jobs SET envelope_version=1 WHERE record_id=?').run(old.id);
+  f.push.db.prepare('UPDATE cl_push_jobs SET envelope_version=? WHERE record_id=?').run(legacyVersion,old.id);
   assert(f.jsonl.assignOne());const legacy=f.jsonl.list().files[0];
-  assert.equal(legacy.status,'open');assert.equal(legacy.envelope_version,1);
+  assert.equal(legacy.status,'open');assert.equal(legacy.envelope_version,legacyVersion);
   const before=[];for await(const body of f.jsonl.envelopes(f.jsonl.get(legacy.id),()=>{},async()=>{})) before.push(body);
-  const legacyBytes=Buffer.from(before.map(body=>JSON.stringify(body)+'\n').join(''));
+  const legacyBytes=Buffer.from(before.map(body=>JSON.stringify(deliveryBody(body))+'\n').join(''));
   now+=10;const next=event('text-daily',{at:now,model:'Opus5'});f.store.ingest(next);assert.equal(f.push.scanAutomatic().created,1);
   assert(f.jsonl.assignOne());assert.equal(f.jsonl.get(legacy.id).status,'pending');
-  const text=f.jsonl.list().files.find(file=>file.id!==legacy.id);assert.equal(text.envelope_version,3);assert.equal(text.status,'open');
+  const text=f.jsonl.list().files.find(file=>file.id!==legacy.id);assert.equal(text.envelope_version,4);assert.equal(text.status,'open');
   assert.equal(text.day,legacy.day);assert.equal(text.model,legacy.model);assert.notEqual(text.object_key,legacy.object_key);
   await f.service.jsonl.tick();assert.equal(receiver.completed.length,1);assert.deepEqual(receiver.completed[0].body,legacyBytes);
   assert.equal(f.jsonl.get(legacy.id).sha256,crypto.createHash('sha256').update(legacyBytes).digest('hex'));
   f.jsonl.flush();await f.service.jsonl.tick();assert.equal(receiver.completed.length,2);
-  const received=lines(receiver);assert.equal(received[0].schema,'sub2api.conversation.v1');assert.deepEqual(Object.keys(received[1]),['request','response']);
-  assert.equal(received[0].request,old.request);assert.equal(received[1].request,rawRequest);
+  const received=lines(receiver);
+  if(legacyVersion===3)assert.deepEqual(Object.keys(received[0]),['request','response']);
+  else assert.equal(received[0].schema,'sub2api.conversation.v'+legacyVersion);
+  assert.deepEqual(received[1],{request_id:next.request_id,request:rawRequest,response:rawResponse});
+  assert.equal(received[0].request,legacyVersion===1?old.request:rawRequest);
   assert.equal(f.push.list({status:'sent'}).total,2);
 });
 
@@ -187,7 +192,7 @@ test('a lost Complete receipt retries byte-identical content at the same key wit
   now += 10001; await f.service.jsonl.tick();
   assert.equal(f.jsonl.get(file.id).status, 'sent'); assert.equal(receiver.completed.length, 2); assert.equal(receiver.objects.size, 1);
   assert.equal(receiver.completed[0].path, receiver.completed[1].path); assert.deepEqual(receiver.completed[0].body, receiver.completed[1].body);
-  assert.deepEqual(JSON.parse([...receiver.objects.values()][0].toString()),{request:rawRequest,response:rawResponse});
+  assert.deepEqual(JSON.parse([...receiver.objects.values()][0].toString()),{request_id:row.request_id,request:rawRequest,response:rawResponse});
 });
 
 test('masked JSONL includes marked original fallbacks and rebuilds staged copies after rule changes', async t => {
@@ -198,14 +203,15 @@ test('masked JSONL includes marked original fallbacks and rebuilds staged copies
   f.jsonl.flush(); await f.service.jsonl.tick();
   assert.equal(lines(receiver).length, 2);
   const safe=lines(receiver).find(row=>row.response!=='{invalid'),failed=lines(receiver).find(row=>row.response==='{invalid');
-  assert.deepEqual(Object.keys(safe),['request','response']);assert(!safe.request.includes('alice@example.com'));
+  assert.deepEqual(Object.keys(safe),['request_id','request','response']);assert.equal(safe.request_id,event('masked-jsonl').request_id);assert(!safe.request.includes('alice@example.com'));
+  assert.equal(failed.request_id,event('bad-mask').request_id);
   assert.equal(failed.request,rawRequest);
   assert.equal(failed.response,'{invalid');
   f.store.ingest(event('outdated-mask')); f.push.scanAutomatic(); await f.service.jsonl.tick();
   f.store.configure({ ...f.store.policy(), email: !f.store.policy().email }); f.jsonl.flush(); await f.service.jsonl.tick();
   assert.equal(lines(receiver).length, 3);assert(f.jsonl.list().files.some(file=>file.status==='cancelled'&&file.error_code==='REDACTION_OUTDATED'));
   const outdated=lines(receiver).find(row=>row.request===rawRequest&&row.response===rawResponse);
-  assert.deepEqual(Object.keys(outdated),['request','response']);
+  assert.deepEqual(Object.keys(outdated),['request_id','request','response']);assert.equal(outdated.request_id,event('outdated-mask').request_id);
 });
 
 test('buffered members do not exhaust the pending queue or prematurely split a daily model file', async t => {
@@ -225,7 +231,7 @@ test('exclusion after staging discards the old file and requeues only permitted 
   f.store.ingest(event('allow', { user_id: 2 })); f.store.ingest(event('deny', { user_id: 3 })); f.push.scanAutomatic(); await f.service.jsonl.tick();
   f.store.configure({ ...f.store.policy(), excludedUserIds: [3] }); f.jsonl.flush();
   await f.service.jsonl.tick(); await f.service.jsonl.tick();
-  assert.equal(lines(receiver).length, 1); assert.deepEqual(Object.keys(lines(receiver)[0]),['request','response']);
+  assert.equal(lines(receiver).length, 1); assert.deepEqual(Object.keys(lines(receiver)[0]),['request_id','request','response']);assert.equal(lines(receiver)[0].request_id,event('allow').request_id);
   assert.equal(f.push.list({status:'sent'}).items[0].user_id,2);
   assert(f.jsonl.list().files.some(file => file.status === 'cancelled')); assert.equal(f.push.list({ status: 'cancelled' }).items[0].error_code, 'COLLECTION_EXCLUDED');
 });
@@ -262,6 +268,30 @@ test('resource admission and an oversized single line fail visibly without trunc
   assert.equal(f.store.payload(row.id, 'original', 'request').body.toString(), rawRequest);
   f.jsonl.memoryBudget = () => Infinity; f.jsonl.maxFileBytes = 1; f.push.retry(f.push.list().items[0].id); await f.service.jsonl.tick();
   assert.equal(f.push.list().items[0].error_code, 'JSONL_RECORD_TOO_LARGE'); assert.equal(f.store.payload(row.id, 'original', 'request').body.toString(), rawRequest);
+});
+
+test('JSONL planning fails invalid request IDs visibly without buffering or uploading incomplete lines',async t=>{
+  const receiver=await s3Receiver();t.after(()=>receiver.close());const f=setup(t);configure(f,receiver.url);
+  const row=event('jsonl-missing-id');assert(f.store.ingest(row).accepted);
+  f.store.db.prepare("UPDATE cl_records SET request_id='' WHERE id=?").run(row.id);enqueue(f);
+  await f.service.jsonl.tick();
+  const job=f.push.list().items[0];assert.equal(job.status,'failed');assert.equal(job.error_code,'EXPORT_REQUEST_ID');assert.equal(job.attempts,1);
+  assert.equal(f.jsonl.list().files.length,0);assert.equal(receiver.requests.length,0);
+  assert.equal(f.store.payload(row.id,'original','request').body.toString(),rawRequest);
+});
+
+test('an invalid frozen request ID blocks multipart completion and cleans up the unfinished upload',async t=>{
+  let now=Date.now();const receiver=await s3Receiver();t.after(()=>receiver.close());const f=setup(t,{now:()=>now});configure(f,receiver.url);
+  const row=event('jsonl-invalid-frozen-id');f.store.ingest(row);enqueue(f);assert(f.jsonl.assignOne());
+  const member=f.jsonl.db.prepare('SELECT job_id,metadata FROM cl_push_jsonl_members').get();
+  const metadata=f.store.open(member.metadata,'jsonl-metadata:'+member.job_id);delete metadata.request_id;
+  f.jsonl.db.prepare('UPDATE cl_push_jsonl_members SET metadata=? WHERE job_id=?').run(f.store.seal(metadata,'jsonl-metadata:'+member.job_id),member.job_id);
+  f.jsonl.seal(f.jsonl.list().files[0].id);await f.service.jsonl.tick();
+  const file=f.jsonl.list().files[0];assert.equal(file.status,'failed');assert.equal(file.error_code,'EXPORT_REQUEST_ID');assert.equal(file.attempts,1);
+  assert.equal(receiver.completed.length,0);assert.equal(receiver.requests.filter(entry=>entry.method==='PUT').length,0);
+  assert.equal(f.jsonl.get(file.id).upload_version,0);now+=3600001;await f.service.jsonl.tick();
+  assert.equal(receiver.uploads.size,0);assert.equal(f.jsonl.get(file.id).upload_id,'');assert.equal(f.jsonl.get(file.id).attempts,1);
+  assert.equal(f.store.db.prepare('SELECT request_id FROM cl_records WHERE id=?').get(row.id).request_id,row.request_id);
 });
 
 test('production supervisor uploads in a child, recovers after a crash and keeps API-side work responsive', async t => {

@@ -11,6 +11,9 @@ const {event,id} = require('../tests/conversation-logs-fixture');
 async function main() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(),'sub2api-conversation-browser-'));
   const preview = await startPreview({port:0}); let browser;
+  // Reserve the fixture writer before reading policy while background workers are active.
+  const configureFixture = patch => preview.fixture.store.db.transaction(() =>
+    preview.fixture.store.configure({...preview.fixture.store.policy(),...patch})).immediate();
   try {
     browser = await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? {executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE} : {})});
     for (const [name,width,height,colorScheme] of [['desktop',1440,1000,'light'],['mobile',390,844,'light'],['narrow',320,740,'light'],['dark',1440,1000,'dark']]) {
@@ -64,13 +67,16 @@ async function main() {
         await page.locator('#cl-next').click();await page.locator('#cl-page-label').filter({hasText:'2 /'}).waitFor();
         await page.locator('#cl-export-limit').fill('2');await page.locator('#cl-export-source').selectOption('original');
         const original=await jsonlDownload();assert.equal(original.length,2);
-        for(const row of original)assert.deepEqual(Object.keys(row),['request','response']);
+        for(const row of original)assert.deepEqual(Object.keys(row),['request_id','request','response']);
+        assert.deepEqual(original.map(row=>row.request_id),[preview.raw.request_id,event('signature-case').request_id]);
         assert.equal(original[1].request,preview.fixture.store.payload(id('signature-case'),'original','request').body.toString());
         assert.equal(original[0].request,Buffer.from(preview.raw.request,'base64').toString());assert(original[0].request.includes('1.2300'));
         assert(original[0].request.includes('9007199254740993'));
         await page.locator('#cl-export-limit').fill('3');await page.locator('#cl-export-source').selectOption('masked');
         const masked=await jsonlDownload();assert.equal(masked.length,3);
-        for(const row of masked)assert.deepEqual(Object.keys(row),['request','response']);
+        for(const row of masked)assert.deepEqual(Object.keys(row),['request_id','request','response']);
+        const expectedIds=preview.fixture.store.db.prepare('SELECT request_id FROM cl_record_metadata ORDER BY at DESC,id LIMIT 3').all().map(row=>row.request_id);
+        assert.deepEqual(masked.map(row=>row.request_id),expectedIds);
         assert(!masked[0].request.includes('alice@example.com'));assert(!JSON.stringify(masked[2]).includes('alice@example.com'));
         assert.equal(masked[1].request,original[1].request);assert(Array.isArray(masked[2].request));assert(Array.isArray(masked[2].response));
         assert((await page.locator('[data-export-status]').textContent()).includes('回退原文 1 条'));
@@ -79,7 +85,7 @@ async function main() {
         await page.locator('#cl-export-limit').fill('1');
         await page.locator('#cl-filter [name=search]').fill(preview.raw.request_id);await page.locator('#cl-filter [type=submit]').click();
         await page.waitForFunction(()=>document.querySelectorAll('[data-cl-record]').length===1);
-        const filtered=await jsonlDownload();assert.equal(filtered.length,1);assert.equal(filtered[0].request,masked[0].request);
+        const filtered=await jsonlDownload();assert.equal(filtered.length,1);assert.equal(filtered[0].request,masked[0].request);assert.equal(filtered[0].request_id,preview.raw.request_id);
         const beforeEmpty=downloads.length;
         await page.locator('#cl-filter [name=search]').fill('NO_EXPORT_MATCH');await page.locator('#cl-filter [type=submit]').click();
         await page.locator('#cl-list').filter({hasText:'没有记录'}).waitFor();await page.locator('[data-cl-action=export]').click();
@@ -177,17 +183,17 @@ async function main() {
         await page.waitForFunction(() => document.getElementById('cl-body-response')?.textContent.includes('END_OF_FULL_RESPONSE'));
         assert.equal(await page.locator('#cl-body-response').textContent(),largeText);
         await page.locator('[data-cl-full=response]').waitFor({state:'hidden'});
-        const failedPolicy = preview.fixture.store.configure({...preview.fixture.store.policy(),mode:'masked',custom:[{from:'call_demo',to:'broken'}]});
+        const failedPolicy = configureFixture({mode:'masked',custom:[{from:'call_demo',to:'broken'}]});
         const failed = event('retry-ui-' + name,{at:Date.now()+2000,policy_version:failedPolicy.version}); preview.fixture.store.ingest(failed);
         await page.locator('[data-cl-action=reset-filter]').click(); await page.locator(`[data-cl-record="${failed.id}"]`).click();
         await page.locator('.cl-processing').filter({hasText:'PROTECTED_FIELD_MATCH'}).waitFor();
         await page.locator('#cl-body-response').filter({hasText:'alice@example.com'}).waitFor();
         await layout(); await page.screenshot({path:path.join(directory,name + '-processing-error.png'),fullPage:true});
-        preview.fixture.store.configure({...preview.fixture.store.policy(),modelFilterEnabled:true,allowedModels:['gpt-6.1-sol'],kimiK3Plus:false});
+        configureFixture({modelFilterEnabled:true,allowedModels:['gpt-6.1-sol'],kimiK3Plus:false});
         await page.locator('[data-cl-action=reset-filter]').click();
         await page.locator('.cl-processing').filter({hasText:'该模型不在采集名单中'}).waitFor();
         assert(await page.locator('[data-cl-action=reprocess]').isDisabled());
-        preview.fixture.store.configure({...preview.fixture.store.policy(),modelFilterEnabled:false});
+        configureFixture({modelFilterEnabled:false});
         await page.locator('[data-cl-action=reset-filter]').click();
         await page.waitForFunction(() => document.querySelector('[data-cl-action=reprocess]')?.disabled === false);
         const firstAttempt = preview.fixture.store.detail(failed.id).processed_at;
@@ -195,7 +201,7 @@ async function main() {
         await page.waitForFunction(() => document.querySelector('[data-cl-action=reprocess]')?.disabled === false);
         assert(preview.fixture.store.detail(failed.id).processed_at > firstAttempt);
         assert(preview.fixture.store.detail(failed.id).original);
-        preview.fixture.store.configure({...preview.fixture.store.policy(),custom:[]});
+        configureFixture({custom:[]});
         await page.locator('[data-cl-action=reset-filter]').click();
         await page.locator(`[data-cl-record="${failed.id}"][aria-pressed=true]`).waitFor();
         // Hold the mutation response to check duplicate clicks and late-response isolation.

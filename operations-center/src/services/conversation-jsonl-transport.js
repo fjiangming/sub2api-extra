@@ -55,7 +55,7 @@ async function session(transport, policy, outerSignal, guard, operation) {
   try {
     if (baseUrl.protocol !== 'https:' && !(baseUrl.protocol === 'http:' && policy.allowPrivateNetwork)) throw failure('ADDRESS_BLOCKED');
     return await operation(request);
-  } catch (error) { return failureResult(error.code === 'EXPORT_MEMORY' ? failure('EXPORT_MEMORY', true) : error); }
+  } catch (error) { return failureResult(['EXPORT_MEMORY','EXPORT_REQUEST_ID'].includes(error.code) ? failure(error.code, error.code === 'EXPORT_MEMORY') : error); }
   finally { outerSignal?.removeEventListener('abort', abort); client.destroy(); httpAgent.destroy(); httpsAgent.destroy(); }
 }
 

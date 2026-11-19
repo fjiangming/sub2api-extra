@@ -92,6 +92,7 @@ process.once('message',async settings => {
       } catch(error) {
         progress(true);
         if (error.code==='EXPORT_MEMORY') error=failure('MEMORY','当前解压内存不足，下载已中止，原始归档未截断；请稍后重试');
+        if (error.code==='EXPORT_REQUEST_ID') error=failure('REQUEST_ID','归档请求 ID 缺失或无效，下载已中止，请检查对应日志');
         const safe=error instanceof AppError;
         const value={code:safe ? error.code : 'CONVERSATION_EXPORT_UNAVAILABLE',
           message:safe ? error.message : '导出中断，文件可能不完整，请重新导出',status:safe ? error.status : 503};

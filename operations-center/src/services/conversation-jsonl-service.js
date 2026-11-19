@@ -65,7 +65,7 @@ class ConversationJsonlService {
       if (uploadId && result.httpStatus === 404) {
         this.store.clearUpload(file.id, uploadId, file.lease_token);
         Object.assign(result, { errorCode: 'MULTIPART_RESTART', retryable: true });
-      } else if (uploadId && ['MULTIPART_CHECKPOINT_INVALID','JSONL_CONTENT_CHANGED'].includes(result.errorCode)) {
+      } else if (uploadId && ['MULTIPART_CHECKPOINT_INVALID','JSONL_CONTENT_CHANGED','EXPORT_REQUEST_ID'].includes(result.errorCode)) {
         this.store.abandonUpload(file, uploadId);
         if (result.errorCode === 'MULTIPART_CHECKPOINT_INVALID') result.retryable = true;
       }

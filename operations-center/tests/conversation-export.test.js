@@ -110,10 +110,10 @@ async function setup(t,options={}) {
     download:value=>fetch(base+value.downloadUrl),cancel:job=>fetch(endpoint+'/'+job.id+'/cancel',{method:'POST',headers,body:'{}'})};
 }
 
-test('native JSONL contains only two body fields, decompresses SSE, retains WS messages and verifies the whole download',async t=>{
+test('native JSONL retains stored request IDs and every attempt, decompresses SSE and preserves WS messages',async t=>{
   const f=await setup(t),at=Date.now()-5000;
   const compressed=zlib.gzipSync(Buffer.from('data: {"type":"error","message":"example"}\n\ndata: [DONE]\n\n'));
-  const rows=[event('export-http',{at}),event('export-sse',{at:at+1,protocol:'SSE',encoding:'gzip',response:compressed.toString('base64'),status:502,complete:false,reason:'read_error'}),
+  const rows=[event('export-http',{at}),event('export-sse',{at:at+1,request_id:event('export-http').request_id,protocol:'SSE',encoding:'gzip',response:compressed.toString('base64'),status:502,complete:false,reason:'read_error'}),
     event('export-ws',{at:at+2,method:'WS',protocol:'WebSocket',status:101,frames:[{at:0,direction:'out',binary:false,body:Buffer.from('{ "id":9007199254740993,"n":1.2300 }').toString('base64')},
       {at:1,direction:'in',binary:true,body:Buffer.from([0,255,1,200]).toString('base64')}]})];
   const transport=rows[1];transport.capture_version=2;
@@ -121,16 +121,18 @@ test('native JSONL contains only two body fields, decompresses SSE, retains WS m
     response:{bytes:compressed.length,expected_bytes:-1,eof:false,error:'cancelled',error_during_close:true}};
   transport.body_sha256=bodyDigest({request:Buffer.from(transport.request,'base64'),response:compressed,frames:[]});
   for (const row of rows) assert(f.store.ingest(row).accepted);
+  for (const row of rows) assert.equal(f.store.db.prepare('SELECT request_id FROM cl_records WHERE id=?').get(row.id).request_id,row.request_id);
   const value=await f.start({limit:3,source:'original'});
   f.store.open=()=>assert.fail('main process decrypted an export body');
   const response=await f.download(value);assert.equal(response.status,200);assert.match(response.headers.get('content-type'),/application\/x-ndjson/);
   assert.match(response.headers.get('content-disposition'),/\.jsonl"$/);assert.equal(response.headers.get('cache-control'),'no-store');
   const body=Buffer.from(await response.arrayBuffer()),records=lines(body);assert(body.at(-1)===10);assert.notEqual(body.subarray(0,3).toString('hex'),'efbbbf');
-  assert.equal(records.length,3);for(const record of records)assert.deepEqual(Object.keys(record),['request','response']);
-  assert.deepEqual(records[0],{request:[Buffer.from(rows[2].request,'base64').toString(),'{ "id":9007199254740993,"n":1.2300 }'],
+  assert.equal(records.length,3);for(const record of records)assert.deepEqual(Object.keys(record),['request_id','request','response']);
+  assert.deepEqual(records.map(record=>record.request_id),rows.toReversed().map(row=>row.request_id));assert.equal(new Set(records.map(record=>record.request_id)).size,2);
+  assert.deepEqual(records[0],{request_id:rows[2].request_id,request:[Buffer.from(rows[2].request,'base64').toString(),'{ "id":9007199254740993,"n":1.2300 }'],
     response:[Buffer.from(rows[2].response,'base64').toString(),'data:application/octet-stream;base64,AP8ByA==']});
   assert.equal(records[1].request,Buffer.from(transport.request,'base64').toString());assert.equal(records[1].response,zlib.gunzipSync(compressed).toString());
-  assert.deepEqual(records[2],{request:Buffer.from(rows[0].request,'base64').toString(),response:Buffer.from(rows[0].response,'base64').toString()});
+  assert.deepEqual(records[2],{request_id:rows[0].request_id,request:Buffer.from(rows[0].request,'base64').toString(),response:Buffer.from(rows[0].response,'base64').toString()});
   const saved=f.store.db.prepare('SELECT complete,reason,status,transport_diagnostics FROM cl_records WHERE id=?').get(transport.id);
   assert.equal(saved.complete,0);assert.equal(saved.reason,'read_error');assert.equal(saved.status,502);assert.deepEqual(JSON.parse(saved.transport_diagnostics),transport.transport_diagnostics);
   const result=await f.done(value.job);assert.equal(result.status,'completed');assert.equal(result.bytes,body.length);assert.equal(result.sha256,checksum(body));assert.equal(result.exported,3);
@@ -142,7 +144,8 @@ test('masked native export preserves latest N with marked original fallbacks and
   for (let n=0;n<4;n++) f.store.ingest(event('export-mask-'+n,{at:at+n}));
   f.store.db.prepare("UPDATE cl_records SET masked=NULL,processing_error='INVALID_JSON' WHERE id=?").run(id('export-mask-3'));
   const value=await f.start({limit:2}),response=await f.download(value),body=await response.text();assert.equal(response.status,200);
-  assert.equal(lines(body).length,2);for(const row of lines(body))assert.deepEqual(Object.keys(row),['request','response']);
+  assert.equal(lines(body).length,2);for(const row of lines(body))assert.deepEqual(Object.keys(row),['request_id','request','response']);
+  assert.deepEqual(lines(body).map(row=>row.request_id),[event('export-mask-3').request_id,event('export-mask-2').request_id]);
   assert.equal(lines(body)[0].request,Buffer.from(event().request,'base64').toString());assert(!lines(body)[1].request.includes('alice@example.com'));
   const result=await f.done(value.job);assert.equal(result.selected,2);assert.equal(result.exported,2);assert.deepEqual(result.skipped,{});
   assert.equal(result.fallbacks,1);assert.deepEqual(result.fallbackReasons,{PROCESSING_FAILED:1});
@@ -182,7 +185,7 @@ test('download tickets require CSRF to create, bind the original live admin sess
   assert(!JSON.stringify(value).includes(f.session.sessionToken));assert(!JSON.stringify(value.job).includes('ticket'));
   const altered=await fetch(f.base+value.downloadUrl.replace(/ticket=.+/,'ticket=bad'));assert.equal(altered.status,401);
   const response=await fetch(f.base+value.downloadUrl+'&source=original&limit=10000');assert.equal(response.status,200);
-  const downloaded=lines(await response.text())[0];assert.deepEqual(Object.keys(downloaded),['request','response']);
+  const downloaded=lines(await response.text())[0];assert.deepEqual(Object.keys(downloaded),['request_id','request','response']);assert.equal(downloaded.request_id,event('export-auth').request_id);
   assert(!downloaded.request.includes('alice@example.com'));await f.done(value.job);
   assert.equal((await f.download(value)).status,401);
   const revoked=await f.start({limit:1});
@@ -208,6 +211,17 @@ test('memory protection refuses isolated export without truncation, changing arc
   const big=await f.start({limit:1,source:'original'});assert.equal((await f.download(big)).status,409);
   assert.equal((await f.done(big.job)).errorCode,'CONVERSATION_EXPORT_MEMORY');
   assert.deepEqual(f.store.payload(large.id,'original','request').body,raw);assert.equal((await fetch(f.base+'/healthz')).status,200);
+});
+
+test('missing archived request ID explicitly fails download without inventing an ID or modifying saved bodies',async t=>{
+  const f=await setup(t),row=event('export-missing-id');assert(f.store.ingest(row).accepted);
+  const before=f.store.db.prepare('SELECT original,masked FROM cl_records WHERE id=?').get(row.id);
+  f.store.db.prepare("UPDATE cl_records SET request_id='' WHERE id=?").run(row.id);
+  const value=await f.start({source:'original',limit:1}),response=await f.download(value);assert.equal(response.status,409);
+  assert.equal((await response.json()).error.code,'CONVERSATION_EXPORT_REQUEST_ID');
+  const result=await f.done(value.job);assert.equal(result.status,'failed');assert.equal(result.errorCode,'CONVERSATION_EXPORT_REQUEST_ID');assert.equal(result.exported,0);assert(!result.sha256);
+  assert.deepEqual(f.store.db.prepare('SELECT original,masked FROM cl_records WHERE id=?').get(row.id),before);
+  assert.equal((await fetch(f.base+'/healthz')).status,200);
 });
 
 test('export yields to collection and interactive reads while health and durable ingestion stay responsive',async t=>{
@@ -241,7 +255,7 @@ test('memory rejection after an earlier emitted line still fails the file rather
   assert.equal(result.status,'failed');assert.equal(result.errorCode,'CONVERSATION_EXPORT_MEMORY');assert.equal(result.exported,1);assert(!result.sha256);
 });
 
-for (const change of ['policy','record','delete','cancel','logout','disconnect','worker-death']) test('in-flight '+change+' interrupts only the export and cannot be reported as a complete file',async t=>{
+for (const change of ['policy','record','request-id','delete','cancel','logout','disconnect','worker-death']) test('in-flight '+change+' interrupts only the export and cannot be reported as a complete file',async t=>{
   const f=await setup(t,{bytesPerSecond:128*1024}),policy=f.store.configure({...f.store.policy(),mode:'original'});
   const row=event('export-race-'+change,{policy_version:policy.version,request:Buffer.from(JSON.stringify({text:'x'.repeat(512*1024)})).toString('base64')});assert(f.store.ingest(row).accepted);
   const value=await f.start({limit:1,source:'original'}),controller=new AbortController();
@@ -250,6 +264,7 @@ for (const change of ['policy','record','delete','cancel','logout','disconnect',
   const child=f.exporter.child;
   if (change==='policy') f.store.configure({...f.store.policy(),excludedUserIds:[2]});
   else if (change==='record') f.store.db.prepare('UPDATE cl_records SET processed_at=processed_at+1 WHERE id=?').run(row.id);
+  else if (change==='request-id') f.store.db.prepare('UPDATE cl_records SET request_id=? WHERE id=?').run(id('changed-request'),row.id);
   else if (change==='delete') f.store.db.prepare('DELETE FROM cl_records WHERE id=?').run(row.id);
   else if (change==='cancel') await f.cancel(value.job);
   else if (change==='logout') await fetch(f.base+'/api/auth/logout',{method:'POST',headers:f.headers});
@@ -258,6 +273,6 @@ for (const change of ['policy','record','delete','cancel','logout','disconnect',
   await rejected;await until(()=>!f.exporter.child);
   const job=f.exporter.jobs.get(value.job.id);assert.notEqual(job.status,'completed');assert(job.errorCode);assert(!job.sha256);
   if (change==='policy') assert.equal(job.errorCode,'CONVERSATION_EXPORT_POLICY_CHANGED');
-  if (['record','delete'].includes(change)) assert.equal(job.errorCode,'CONVERSATION_EXPORT_RECORD_CHANGED');
+  if (['record','request-id','delete'].includes(change)) assert.equal(job.errorCode,'CONVERSATION_EXPORT_RECORD_CHANGED');
   assert.equal((await fetch(f.base+'/healthz')).status,200);assert(!f.archive.child,'export failure touched collector lifecycle');
 });

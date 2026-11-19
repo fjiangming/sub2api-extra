@@ -120,6 +120,7 @@ class ConversationPushTransport {
       }
       return {status:'sent',httpStatus};
     } catch(error) {
+      if(error.code==='EXPORT_REQUEST_ID')return {status:'failed',errorCode:'EXPORT_REQUEST_ID',retryable:false};
       if(error.code==='EXPORT_MEMORY')return {status:'failed',errorCode:'EXPORT_MEMORY',retryable:true};
       if(timedOut)return {status:'failed',errorCode:'TIMEOUT',retryable:true};
       if(controller.signal.aborted)return {status:'failed',errorCode:'ABORTED',retryable:true};

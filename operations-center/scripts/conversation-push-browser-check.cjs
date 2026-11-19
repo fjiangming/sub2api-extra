@@ -64,7 +64,7 @@ async function main() {
         const row=event(name+'-automatic');preview.fixture.store.ingest(row);await waitJobs('sent',2);
         await page.locator('#clp-jobs').filter({hasText:'已固定脱敏副本'}).waitFor();
         const sent=receipts.filter(item=>Object.hasOwn(item.body,'request'));assert.equal(sent.length,2);
-        for(const item of sent){assert.deepEqual(Object.keys(item.body),['request','response']);assert(!item.body.request.includes('alice@example.com'));}
+        for(const item of sent){assert.deepEqual(Object.keys(item.body),['request_id','request','response']);assert.equal(item.body.request_id,row.request_id);assert(!item.body.request.includes('alice@example.com'));}
         assert(sent.some(item=>item.headers.authorization?.startsWith('AWS4-HMAC-SHA256')));
         assert(sent.some(item=>preview.push.store.list().items.some(job=>job.id===item.headers['idempotency-key'])));
         await page.locator('#clp-history [name=search]').fill(preview.raw.id);await page.locator('#clp-preview').click();await page.locator('#clp-acknowledge').waitFor();
@@ -106,7 +106,9 @@ async function main() {
         await page.locator('#clp-flush').click();await waitJobs('sent',9);
         const jsonlFiles=jsonlTarget.completed.filter(file=>Object.hasOwn(JSON.parse(file.body.toString().split('\n')[0]),'request'));
         assert.equal(jsonlFiles.length,2);assert.deepEqual(jsonlFiles.map(file=>file.body.toString().trimEnd().split('\n').length).sort(),[1,2]);
-        for(const file of jsonlFiles){assert(file.path.endsWith('.jsonl'));for(const line of file.body.toString().trimEnd().split('\n')){const body=JSON.parse(line);assert.deepEqual(Object.keys(body),['request','response']);assert(!body.request.includes('alice@example.com'));}}
+        const jsonlIds=[];
+        for(const file of jsonlFiles){assert(file.path.endsWith('.jsonl'));for(const line of file.body.toString().trimEnd().split('\n')){const body=JSON.parse(line);assert.deepEqual(Object.keys(body),['request_id','request','response']);jsonlIds.push(body.request_id);assert(!body.request.includes('alice@example.com'));}}
+        assert.deepEqual(jsonlIds.sort(),['a','b','c'].map(suffix=>event(name+'-jsonl-'+suffix).request_id).sort());
         rejectJsonlPart=true;preview.fixture.store.ingest(event(name+'-jsonl-failed',{model:'Opus5'}));
         await until(()=>preview.push.store.list().counts.some(row=>row.status==='buffered'&&row.count===1));await page.locator('#clp-flush').click();await waitJobs('failed',1);
         await page.locator('[data-clp-file-retry]').waitFor();await layout();await shot('jsonl-failed');
@@ -121,13 +123,13 @@ async function main() {
         await page.locator('#clp-preview').click();await page.locator('#clp-acknowledge').waitFor();await page.locator('#clp-acknowledge').check();
         await page.locator('#clp-enqueue').click();await waitJobs('sent',11);
         const partialBody=jsonlTarget.completed.flatMap(file=>file.body.toString().trimEnd().split('\n').map(JSON.parse)).find(body=>body.request?.includes('partial-'+name));
-        assert.deepEqual(Object.keys(partialBody),['request','response']);assert(!partialBody.request.includes('alice@example.com'));
+        assert.deepEqual(Object.keys(partialBody),['request_id','request','response']);assert.equal(partialBody.request_id,partial.request_id);assert(!partialBody.request.includes('alice@example.com'));
         assert.equal(preview.fixture.store.db.prepare('SELECT reason FROM cl_records WHERE id=?').get(partial.id).reason,'read_error');
         const fallback=event(name+'-original-fallback',{model:'Opus5',response:Buffer.from('{invalid').toString('base64')});preview.fixture.store.ingest(fallback);
         await until(()=>preview.push.store.list().counts.some(row=>row.status==='buffered'&&row.count===1));
         await page.locator('#clp-flush').click();await waitJobs('sent',12);
         const fallbackBody=jsonlTarget.completed.flatMap(file=>file.body.toString().trimEnd().split('\n').map(JSON.parse)).find(body=>body.response==='{invalid');
-        assert.deepEqual(Object.keys(fallbackBody),['request','response']);
+        assert.deepEqual(Object.keys(fallbackBody),['request_id','request','response']);assert.equal(fallbackBody.request_id,fallback.request_id);
         assert.equal(fallbackBody.request,Buffer.from(fallback.request,'base64').toString());assert.equal(fallbackBody.response,Buffer.from(fallback.response,'base64').toString());
         await page.locator('[data-clp-action=refresh]').click();await page.locator('#clp-skipped').filter({hasText:'回退原文'}).waitFor();
         await page.locator('#clp-history [name=search]').fill(fallback.id);await page.locator('#clp-preview').click();
