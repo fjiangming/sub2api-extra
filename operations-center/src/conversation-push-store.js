@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const { z } = require('zod');
+const { DateTime } = require('luxon');
 const { modelAllowed } = require('./services/conversation-models');
 const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversation-sensitive');
 const { ENVELOPE_VERSION, formatBodies, formatDeliveryBodies } = require('./services/conversation-envelope');
@@ -29,6 +30,10 @@ class ConversationPushStore {
       CREATE TABLE IF NOT EXISTS cl_push_cursor(singleton INTEGER PRIMARY KEY CHECK(singleton=1),row_id INTEGER NOT NULL,record_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cl_push_arrivals(seq INTEGER PRIMARY KEY AUTOINCREMENT,record_id TEXT NOT NULL UNIQUE REFERENCES cl_records(id) ON DELETE CASCADE);
       CREATE TRIGGER IF NOT EXISTS cl_push_arrival AFTER INSERT ON cl_records BEGIN INSERT INTO cl_push_arrivals(record_id) VALUES(NEW.id); END;
+      CREATE TABLE IF NOT EXISTS cl_push_auto_waiting(record_id TEXT PRIMARY KEY REFERENCES cl_records(id) ON DELETE CASCADE,at INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS cl_push_auto_waiting_due ON cl_push_auto_waiting(at,record_id);
+      CREATE TRIGGER IF NOT EXISTS cl_push_auto_waiting_delete AFTER DELETE ON cl_records
+        BEGIN DELETE FROM cl_push_auto_waiting WHERE record_id=OLD.id; END;
       CREATE TABLE IF NOT EXISTS cl_push_batches(id TEXT PRIMARY KEY,digest TEXT NOT NULL,created_at INTEGER NOT NULL,matched INTEGER NOT NULL,eligible INTEGER NOT NULL,created INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS cl_push_jobs(id TEXT PRIMARY KEY,record_id TEXT NOT NULL REFERENCES cl_records(id) ON DELETE CASCADE,
         destination TEXT NOT NULL,target_hash TEXT NOT NULL,source TEXT NOT NULL,content_version TEXT NOT NULL,batch_id TEXT NOT NULL,
@@ -142,23 +147,38 @@ class ConversationPushStore {
       return this.batch(value.batchId);
     })();
   }
+  automaticCutoff(policy=this.policy()) {
+    return policy.automaticMode === 'previous_day' ? DateTime.fromMillis(this.now(),{zone:policy.s3.jsonl.timezone}).startOf('day').toMillis() : null;
+  }
+  automaticStatus() {
+    const policy=this.policy(),cutoff=this.automaticCutoff(policy);
+    const waiting=this.db.prepare('SELECT COUNT(*) count FROM cl_push_auto_waiting').get().count;
+    const ready=cutoff === null ? waiting : this.db.prepare('SELECT COUNT(*) count FROM cl_push_auto_waiting WHERE at<?').get(cutoff).count;
+    return {waiting,ready,mode:policy.automaticMode,timezone:policy.s3.jsonl.timezone};
+  }
+  automaticBacklog() {
+    const policy=this.policy();
+    if (!policy.enabled || !policy.automatic || !policy.s3.enabled) return false;
+    const cutoff=this.automaticCutoff(policy);
+    if (this.db.prepare(`SELECT 1 FROM cl_push_auto_waiting${cutoff === null ? '' : ' WHERE at<?'} LIMIT 1`).get(...(cutoff === null ? [] : [cutoff]))) return true;
+    return cutoff !== null && Boolean(this.db.prepare(`SELECT 1 FROM cl_push_arrivals a LEFT JOIN cl_record_metadata m ON m.id=a.record_id
+      WHERE a.seq>(SELECT row_id FROM cl_push_cursor WHERE singleton=1) AND (m.at IS NULL OR m.at<?) LIMIT 1`).get(cutoff));
+  }
   scanAutomatic() {
     return this.db.transaction(()=>{
       const policy=this.policy();
       if(!policy.enabled||!policy.automatic){this.setCursor(this.latest());return {created:0};}
-      const cursor=this.db.prepare('SELECT * FROM cl_push_cursor WHERE singleton=1').get();
-      const rows=this.db.prepare(`SELECT a.seq AS cursor_id,${columns.split(',').map(column=>'m.'+column).join(',')}
-        FROM cl_push_arrivals a LEFT JOIN cl_record_metadata m ON m.id=a.record_id WHERE a.seq>? ORDER BY a.seq LIMIT 50`).all(cursor.row_id);
+      const cutoff=this.automaticCutoff(policy);
       const archivePolicy=this.archive.policy(),targets=['webhook','s3'].filter(target=>policy[target].enabled);
       let created=0,pending=this.pendingCount();
-      for(const row of rows){
-        if (!row.id || !row.fingerprint) return {created,preparing:true};
+      const publish=row=>{
+        if (!row.id || !row.fingerprint) return 'preparing';
         // Keep the receipt cursor behind unfinished processing; publication must not lose automatic delivery.
-        if (row.processing_pending) return {created,processing:true};
+        if (row.processing_pending) return 'processing';
         const reason=!this.allowed(row,archivePolicy)?'COLLECTION_EXCLUDED':this.blockedReason(row,policy.source,archivePolicy,policy);
         if(!reason){
           const needed=targets.filter(target=>!this.db.prepare(`SELECT 1 FROM ${historySource} WHERE id=?`).get(this.jobId(row,policy,target)));
-          if(pending+needed.length>policy.queueLimit)return {created,full:true};
+          if(pending+needed.length>policy.queueLimit)return 'full';
           for(const target of needed){created+=this.insert(row,policy,target,'');pending++;}
           const fallback=this.copySelection(row,policy.source,archivePolicy).fallbackReason;
           if(needed.length && fallback)this.db.prepare(`INSERT INTO cl_push_scan_stats VALUES(?,?,1,?) ON CONFLICT(policy_version,code)
@@ -166,6 +186,29 @@ class ConversationPushStore {
         } else {
           this.db.prepare(`INSERT INTO cl_push_scan_stats VALUES(?,?,1,?) ON CONFLICT(policy_version,code)
             DO UPDATE SET count=count+1,updated_at=excluded.updated_at`).run(policy.version,reason,this.now());
+        }
+        return '';
+      };
+      // Keep only references while waiting for the next calendar day, so late arrivals can pass today's records.
+      const waiting=this.db.prepare(`SELECT w.record_id waiting_id,${columns.split(',').map(column=>'m.'+column).join(',')}
+        FROM cl_push_auto_waiting w LEFT JOIN cl_record_metadata m ON m.id=w.record_id
+        ${cutoff === null ? '' : 'WHERE w.at<?'} ORDER BY w.at,w.record_id LIMIT 50`).all(...(cutoff === null ? [] : [cutoff]));
+      for (const row of waiting) {
+        if (cutoff !== null && row.at >= cutoff) {
+          this.db.prepare('UPDATE cl_push_auto_waiting SET at=? WHERE record_id=?').run(row.at,row.waiting_id); continue;
+        }
+        const blocked=publish(row); if (blocked) return {created,[blocked]:true};
+        this.db.prepare('DELETE FROM cl_push_auto_waiting WHERE record_id=?').run(row.waiting_id);
+      }
+      const cursor=this.db.prepare('SELECT * FROM cl_push_cursor WHERE singleton=1').get();
+      const rows=this.db.prepare(`SELECT a.seq AS cursor_id,${columns.split(',').map(column=>'m.'+column).join(',')}
+        FROM cl_push_arrivals a LEFT JOIN cl_record_metadata m ON m.id=a.record_id WHERE a.seq>? ORDER BY a.seq LIMIT ?`).all(cursor.row_id,50-waiting.length);
+      for (const row of rows) {
+        if (!row.id || !row.fingerprint) return {created,preparing:true};
+        if (cutoff !== null && row.at >= cutoff) {
+          this.db.prepare('INSERT OR IGNORE INTO cl_push_auto_waiting(record_id,at) VALUES(?,?)').run(row.id,row.at);
+        } else {
+          const blocked=publish(row); if (blocked) return {created,[blocked]:true};
         }
         this.setCursor(row);
       }

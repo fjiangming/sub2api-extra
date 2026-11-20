@@ -50,14 +50,39 @@ async function main() {
         await page.goto(`http://127.0.0.1:${preview.port}/preview`);await page.locator('#cl-tab-push').click();await field('enabled').waitFor();
         assert.equal(await field('enabled').isChecked(),false);assert.equal(await page.locator('#clp-preview').isDisabled(),true);
         assert.equal(await field('deleteAfterPush').isChecked(),false);
+        assert.equal(await page.locator('#clp-automatic-options').isVisible(),false);
+        assert.equal(await field('automaticMode').isDisabled(),true);
         assert.equal(await field('captureScope').inputValue(),'complete');assert.equal(await field('jsonlUploadRate').inputValue(),'2');
         await field('enabled').check();await field('automatic').check();await field('allowPrivateNetwork').check();
+        assert.equal(await field('automaticMode').inputValue(),'realtime');
+        await field('automaticMode').selectOption('previous_day');
         await field('webhookEnabled').check();await field('webhookUrl').fill(targetUrl+'/webhook');await field('webhookToken').fill('fictional-webhook-token');
         await field('s3Enabled').check();await field('endpoint').fill(targetUrl);await field('bucket').fill('demo-archive');await field('accessKeyId').fill('fictional-id');await field('secretAccessKey').fill('fictional-secret');
         await field('s3Format').selectOption('json');
         await page.evaluate(()=>conversationLogsUi.load());assert.equal(await field('webhookToken').inputValue(),'fictional-webhook-token');
         await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
         assert.equal(await field('webhookToken').inputValue(),'');assert.equal(await field('secretAccessKey').inputValue(),'');assert.equal(preview.push.store.list().total,0);
+        assert.equal(preview.push.store.policy().automaticMode,'previous_day');
+        await page.locator('#clp-automatic-status').filter({hasText:'次日 00:00 起 · Asia/Shanghai'}).waitFor();
+        await page.reload();await page.locator('#cl-tab-push').click();await field('automaticMode').waitFor();
+        assert.equal(await field('automaticMode').inputValue(),'previous_day');
+        const scheduleRoute='**/api/conversation-logs/push/jobs?*';
+        await page.route(scheduleRoute,async route=>{
+          const response=await route.fetch(),value=await response.json();
+          Object.assign(value.automatic,{waiting:12,ready:2});await route.fulfill({response,json:value});
+        });
+        await page.locator('[data-clp-action=refresh]').click();
+        await page.locator('#clp-automatic-status').filter({hasText:'待自动核对 12 条，已到日期 2 条'}).waitFor();
+        await layout();await shot('daily-configuration');
+        await page.unroute(scheduleRoute);
+        await field('automatic').uncheck();assert.equal(await page.locator('#clp-automatic-options').isVisible(),false);
+        await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
+        assert.equal(preview.push.store.policy().automaticMode,'previous_day');
+        await field('automatic').check();assert.equal(await field('automaticMode').inputValue(),'previous_day');
+        await field('automaticMode').selectOption('realtime');
+        await page.locator('[data-clp-action=refresh]').click();assert.equal(await field('automaticMode').inputValue(),'realtime');
+        await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
+        assert.equal(preview.push.store.policy().automaticMode,'realtime');
         await page.locator('[data-clp-test=webhook]').click();await page.locator('#clp-test-webhook').filter({hasText:'连接成功'}).waitFor();
         await page.locator('[data-clp-test=s3]').click();await page.locator('#clp-test-s3').filter({hasText:'连接成功'}).waitFor();
         assert.equal(receipts.length,2);assert(receipts.every(row=>row.body.schema==='sub2api.conversation.test.v1'));
@@ -179,7 +204,7 @@ async function main() {
         await layout();await shot('delivered');
         await page.locator('#logout-button').click();await page.locator('#login-view').waitFor({state:'visible'});assert.equal(await page.locator('#clp-form').count(),0);
         assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
-        console.log(name+': Webhook/legacy S3, JSONL config/rate/scope/grouping/resume/progress/pause/backlog/skips, privacy, layout and logout passed');
+        console.log(name+': automatic schedule/save/reload/waiting/drafts, Webhook/legacy S3, JSONL config/rate/scope/grouping/resume/progress/pause/backlog/skips, privacy, layout and logout passed');
       } finally {await context.close();await preview.stop();}
     }
     console.log('Screenshots: '+directory);

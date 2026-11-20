@@ -14,6 +14,7 @@ const jsonlSchema = z.object({
 }).strict();
 const policySchema = z.object({
   version: z.number().int().positive(), enabled: z.boolean(), automatic: z.boolean(), source: z.enum(['masked','original']),
+  automaticMode: z.enum(['realtime','previous_day']),
   captureScope: z.enum(['complete','all']).default('complete'),
   deleteAfterPush: z.boolean(),
   allowPrivateNetwork: z.boolean(), maxAttempts: z.number().int().min(1).max(10),
@@ -25,10 +26,10 @@ const policySchema = z.object({
     accessKeyId:secret,secretAccessKey:secret,sessionToken:secret,clearCredentials:z.boolean().optional(),clearSessionToken:z.boolean().optional(),
     format:z.enum(['json','jsonl']).optional(),jsonl:jsonlSchema.optional()}).strict()
 }).strict();
-const defaults = {version:1,enabled:false,automatic:false,source:'masked',captureScope:'complete',deleteAfterPush:false,allowPrivateNetwork:false,maxAttempts:5,retrySeconds:30,timeoutSeconds:15,queueLimit:10000,
+const defaults = {version:1,enabled:false,automatic:false,automaticMode:'realtime',source:'masked',captureScope:'complete',deleteAfterPush:false,allowPrivateNetwork:false,maxAttempts:5,retrySeconds:30,timeoutSeconds:15,queueLimit:10000,
   webhook:{enabled:false,url:'',token:''},s3:{enabled:false,endpoint:'',region:'us-east-1',bucket:'',prefix:'conversation-logs',forcePathStyle:true,accessKeyId:'',secretAccessKey:'',sessionToken:'',format:'jsonl',jsonl:jsonlDefaults}};
 function normalizePolicy(value) {
-  return {captureScope:'complete',deleteAfterPush:false,...value,s3:{...value.s3,format:value.s3.format || 'json',jsonl:{...jsonlDefaults,...value.s3.jsonl}}};
+  return {automaticMode:'realtime',captureScope:'complete',deleteAfterPush:false,...value,s3:{...value.s3,format:value.s3.format || 'json',jsonl:{...jsonlDefaults,...value.s3.jsonl}}};
 }
 function invalid(message = '推送策略参数无效', code = 'CONVERSATION_PUSH_INVALID', status = 400) { return new AppError(code,message,{status}); }
 function endpoint(value, allowPrivateNetwork, kind) {
@@ -39,7 +40,8 @@ function endpoint(value, allowPrivateNetwork, kind) {
 }
 function parsePolicy(input, current) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw invalid();
-  const candidate = {...input,captureScope:input.captureScope ?? current.captureScope ?? 'complete',deleteAfterPush:input.deleteAfterPush ?? current.deleteAfterPush ?? false};
+  const candidate = {...input,automaticMode:input.automaticMode === undefined ? current.automaticMode ?? 'realtime' : input.automaticMode,
+    captureScope:input.captureScope ?? current.captureScope ?? 'complete',deleteAfterPush:input.deleteAfterPush ?? current.deleteAfterPush ?? false};
   if (input.s3?.jsonl) candidate.s3 = {...input.s3,jsonl:{...jsonlDefaults,...current.s3.jsonl,...input.s3.jsonl}};
   const parsed = policySchema.safeParse(candidate); if (!parsed.success) throw invalid();
   const value = parsed.data;

@@ -16,7 +16,7 @@ class ConversationPushService {
   policy() { return publicPolicy(this.store.policy()); }
   configure(input) { const result=this.store.configure(input);this.invalidate();this.wake();return result; }
   invalidate() { this.active?.controller.abort();this.testController?.abort();this.jsonl.invalidate(); }
-  status(query) { return {...this.store.list(query),jsonl:this.jsonl.store.list(),cleanup:{...this.store.cleanup.status(),error:this.cleanupError},lastError:this.jsonl.lastError||this.lastError,lastRun:this.jsonl.lastRun||this.lastRun,enabled:this.store.policy().enabled}; }
+  status(query) { return {...this.store.list(query),automatic:this.store.automaticStatus(),jsonl:this.jsonl.store.list(),cleanup:{...this.store.cleanup.status(),error:this.cleanupError},lastError:this.jsonl.lastError||this.lastError,lastRun:this.jsonl.lastRun||this.lastRun,enabled:this.store.policy().enabled}; }
   maintain() {
     if (this.stopping || this.active || this.testing || this.jsonl.active || !this.canWork() || !this.canCleanup() || this.store.now()<this.nextCleanup) return;
     this.nextCleanup=this.store.now()+1000;

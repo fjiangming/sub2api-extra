@@ -47,7 +47,8 @@
       policy=value;
       $('state').textContent=`${value.enabled?'已启用':'已关闭'} · v${value.version}`;
       $('config').innerHTML=`<form id="clp-form" class="cl-policy-form" autocomplete="off">${toggle('enabled','启用日志推送',value.enabled)}
-        <div class="clp-options">${toggle('automatic','自动推送新日志',value.automatic)}<label>推送副本<select name="source"><option value="masked" ${value.source==='masked'?'selected':''}>脱敏优先（不可用则原文）</option><option value="original" ${value.source==='original'?'selected':''}>原文（可能含敏感信息）</option></select></label><label>推送范围<select name="captureScope"><option value="complete" ${value.captureScope!=='all'?'selected':''}>仅传输完整</option><option value="all" ${value.captureScope==='all'?'selected':''}>包含传输未确认</option></select></label></div>
+        <div class="clp-options">${toggle('automatic','自动推送新日志',value.automatic)}<label id="clp-automatic-options">自动推送方式<select name="automaticMode"><option value="realtime" ${value.automaticMode!=='previous_day'?'selected':''}>实时推送</option><option value="previous_day" ${value.automaticMode==='previous_day'?'selected':''}>推送前一天</option></select></label><label>推送副本<select name="source"><option value="masked" ${value.source==='masked'?'selected':''}>脱敏优先（不可用则原文）</option><option value="original" ${value.source==='original'?'selected':''}>原文（可能含敏感信息）</option></select></label><label>推送范围<select name="captureScope"><option value="complete" ${value.captureScope!=='all'?'selected':''}>仅传输完整</option><option value="all" ${value.captureScope==='all'?'selected':''}>包含传输未确认</option></select></label></div>
+        <div id="clp-automatic-status" class="cl-notice" role="status"></div>
         <div class="clp-targets"><fieldset><legend>Webhook</legend>${toggle('webhookEnabled','启用 Webhook',value.webhook.enabled)}<div class="clp-fields">${field('webhookUrl','接收 URL',value.webhook.url,'url','maxlength="2048" placeholder="https://receiver.example/logs"')}${field('webhookToken',`Bearer Token · ${value.webhook.tokenConfigured?'已设置':'未设置'}`,'','password','maxlength="4096" autocomplete="new-password" placeholder="留空保留现有值"')}</div>
         <div class="clp-actions"><label class="clp-check"><input type="checkbox" name="clearToken">清除现有 Token</label><button type="button" class="button secondary" data-clp-test="webhook">${icon('plug-zap')}测试连接</button></div><div id="clp-test-webhook" class="cl-muted" role="status"></div></fieldset>
         <fieldset><legend>S3 兼容存储</legend>${toggle('s3Enabled','启用 S3',value.s3.enabled)}<div class="clp-fields">${field('endpoint','Endpoint',value.s3.endpoint,'url','maxlength="2048" placeholder="https://s3.example.com"')}<div class="clp-pair">${field('bucket','Bucket',value.s3.bucket,'text','maxlength="63"')}${field('region','Region',value.s3.region,'text','required maxlength="64"')}</div>${field('prefix','对象前缀',value.s3.prefix,'text','maxlength="180"')}
@@ -70,6 +71,8 @@
       if(!$('form'))return;
       $('form').querySelectorAll('input,select,button').forEach(node=>{node.disabled=busy;});
       $('form').querySelectorAll('[data-clp-test]').forEach(node=>{node.disabled=busy||dirty||!policy[node.dataset.clpTest].enabled;});
+      $('automatic-options').hidden=!$('form').elements.automatic.checked;
+      $('form').elements.automaticMode.disabled=busy||!$('form').elements.automatic.checked;
       $('jsonl-options').hidden=$('form').elements.s3Format.value!=='jsonl';
       $('flush').disabled=busy||dirty||!policy.enabled||!policy.s3.enabled||policy.s3.format!=='jsonl';
       $('dirty').textContent=dirty?'有未保存的更改':'';
@@ -78,7 +81,7 @@
     }
     function body() {
       const data=new FormData($('form')),text=name=>String(data.get(name)||''),yes=name=>data.has(name);
-      return {version:policy.version,enabled:yes('enabled'),automatic:yes('automatic'),source:text('source'),captureScope:text('captureScope'),deleteAfterPush:yes('deleteAfterPush'),allowPrivateNetwork:yes('allowPrivateNetwork'),
+      return {version:policy.version,enabled:yes('enabled'),automatic:yes('automatic'),automaticMode:$('form').elements.automaticMode.value,source:text('source'),captureScope:text('captureScope'),deleteAfterPush:yes('deleteAfterPush'),allowPrivateNetwork:yes('allowPrivateNetwork'),
         maxAttempts:Number(data.get('maxAttempts')),retrySeconds:Number(data.get('retrySeconds')),timeoutSeconds:Number(data.get('timeoutSeconds')),queueLimit:Number(data.get('queueLimit')),
         webhook:{enabled:yes('webhookEnabled'),url:text('webhookUrl'),token:text('webhookToken'),clearToken:yes('clearToken')},
         s3:{enabled:yes('s3Enabled'),endpoint:text('endpoint'),region:text('region'),bucket:text('bucket'),prefix:text('prefix'),forcePathStyle:yes('forcePathStyle'),
@@ -131,6 +134,10 @@
       return `<tr><td><strong>${esc(file.model||'未提供模型')}</strong><small>${esc(file.day)}</small></td><td><code class="clp-object-key">${esc(file.object_key)}</code></td><td>${number(file.records)} 条<small>${esc(size(file.bytes))}</small><progress class="clp-progress" max="${file.bytes||1}" value="${uploaded}" aria-label="已确认上传进度"></progress><small>${esc(size(uploaded))} / ${esc(size(file.bytes))} · ${number(file.uploaded_parts)} 个分片</small></td><td><span class="cl-badge ${file.status==='sent'?'green':['failed','cancelled'].includes(file.status)?'amber':''}">${fileStates[file.status]||esc(file.status)}</span><small>${esc(['sent','cancelled'].includes(file.status)?'':paused)}</small><small>${esc(errors[file.error_code]||file.error_code||'')}</small></td><td>${file.status==='failed'?tool('rotate-cw','继续上传此 JSONL 文件',`data-clp-file-retry="${esc(file.id)}"`):''}</td></tr>`;
     }
     function renderJobs(value) {
+      const automatic=value.automatic;
+      const schedule=automatic?.mode==='previous_day'?`次日 00:00 起 · ${automatic.timezone}`:'实时安排 · JSONL 沿用汇总及定时设置';
+      $('automatic-status').hidden=!policy.automatic&&!automatic?.waiting;
+      $('automatic-status').textContent=[policy.enabled&&policy.automatic?schedule:'自动计划已暂停',automatic?.waiting?`待自动核对 ${number(automatic.waiting)} 条，已到日期 ${number(automatic.ready)} 条`:''].filter(Boolean).join(' · ');
       const index=value.metadataIndex;
       $('index').textContent=index&&!index.ready?`历史推送准备中 · 已就绪 ${number(index.indexed)} / ${number(index.total)} 条，后台会继续处理`:'';
       const cleanup=value.cleanup;

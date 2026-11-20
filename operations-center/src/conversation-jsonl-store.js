@@ -129,12 +129,13 @@ class ConversationJsonlStore {
   sealDue() {
     const policy = this.push.policy(); if (!this.enabled(policy)) return 0;
     const backlog = this.db.prepare("SELECT 1 FROM cl_push_jobs WHERE destination='s3' AND status='pending' AND target_hash=? LIMIT 1").get(targetHash(policy, 's3'));
+    const automaticBacklog = this.push.automaticBacklog();
     let count = 0;
     const retention = this.archive.policy().retention;
     for (const file of this.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE status='open'").all()) {
       const elapsed = policy.s3.jsonl.flushMinutes && this.now() - file.created_at >= policy.s3.jsonl.flushMinutes * 60000;
       const expiring = retention && file.first_at && file.first_at + retention * 86400000 <= this.now() + 6 * 3600000;
-      if (elapsed || expiring || !backlog && (file.force_flush || file.day !== dayAt(this.now(), policy.s3.jsonl.timezone))) count += this.seal(file.id);
+      if (elapsed || expiring || !backlog && (file.force_flush || !automaticBacklog && file.day !== dayAt(this.now(), policy.s3.jsonl.timezone))) count += this.seal(file.id);
     }
     return count;
   }
