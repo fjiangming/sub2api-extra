@@ -31,9 +31,15 @@ async function main() {
     for(const [name,width,height,colorScheme] of [['desktop',1440,1000,'light'],['mobile',390,844,'light'],['narrow',320,740,'light'],['dark',1440,1000,'dark']]) {
       const preview=await startPreview({port:0}),context=await browser.newContext({viewport:{width,height},colorScheme});
       try {
-        const page=await context.newPage(),errors=[],external=[];mode=200;receipts.length=0;rejectJsonlPart=false;jsonlTarget.completed.length=0;jsonlTarget.objects.clear();
+        const page=await context.newPage(),errors=[],external=[],writes=[];mode=200;receipts.length=0;rejectJsonlPart=false;jsonlTarget.completed.length=0;jsonlTarget.objects.clear();
         page.on('pageerror',error=>errors.push(error.message));
-        page.on('request',request=>{if(!request.url().startsWith(`http://127.0.0.1:${preview.port}/`)&&!/^(blob:|data:)/.test(request.url()))external.push(request.url());});
+        page.on('request',request=>{if(!request.url().startsWith(`http://127.0.0.1:${preview.port}/`)&&!/^(blob:|data:)/.test(request.url()))external.push(request.url());
+          const url=new URL(request.url());if(url.pathname.startsWith('/api/conversation-logs/push/')&&!url.pathname.includes('/test/')&&['POST','PUT'].includes(request.method()))writes.push(Date.now());});
+        const writeBudget=async reserve=>{
+          while(writes.filter(at=>at>Date.now()-61000).length+reserve>30){
+            const first=writes.find(at=>at>Date.now()-61000);await new Promise(resolve=>setTimeout(resolve,Math.max(1,first+61000-Date.now())));
+          }
+        };
         const names={webhookEnabled:'platformEnabled',webhookUrl:'platformUrl',webhookToken:'platformToken',s3Enabled:'platformEnabled',endpoint:'platformEndpoint',bucket:'platformBucket',accessKeyId:'platformAccessKey',secretAccessKey:'platformSecretKey',s3Format:'platformFormat',jsonlMaxGB:'platformMaxGB',jsonlTimezone:'platformTimezone',jsonlUploadRate:'platformRate'};
         const field=name=>page.locator(`#clp-form [name="${names[name]||name}"]`);
         const view=async name=>page.locator(`[data-clp-view="${name}"]`).click();
@@ -81,6 +87,28 @@ async function main() {
         await page.evaluate(()=>conversationLogsUi.load());assert.equal(await field('webhookToken').inputValue(),'fictional-webhook-token');
         await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
         await edit('s3');assert.equal(await field('secretAccessKey').inputValue(),'');await edit('webhook');assert.equal(await field('webhookToken').inputValue(),'');assert.equal(preview.push.store.list().total,0);
+        await edit('s3');await page.locator('[data-clpp-toggle=s3]').uncheck();
+        assert.equal(await field('platformEnabled').isChecked(),false);
+        await page.locator('[data-clpp-save]').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
+        assert.equal(preview.push.store.policy().s3.enabled,false);
+        await edit('s3');await page.locator('[data-clpp-toggle=s3]').check();
+        assert.equal(await field('platformEnabled').isChecked(),true);
+        await page.locator('[data-clpp-save]').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
+        assert.equal(preview.push.store.policy().s3.enabled,true);
+        await edit('s3');const savedName=await field('platformName').inputValue();
+        await field('platformName').fill('Unsaved platform');await page.locator('[data-clpp-close]').click();
+        assert.equal(await page.locator('#clpp-editor').isVisible(),false);
+        await edit('s3');assert.equal(await field('platformName').inputValue(),'Unsaved platform');
+        const rateCount=await page.locator('#clpp-rates tr').count();
+        await page.locator('[data-clpp-add-rate]').click();await page.locator('#clpp-rates tr').last().locator('[data-model]').fill('button-audit');
+        await page.locator('#clpp-rates tr').last().locator('[data-price]').fill('123');
+        await page.locator(`[data-clpp-rate-remove="${rateCount}"]`).click();assert.equal(await page.locator('#clpp-rates tr').count(),rateCount);
+        await page.locator('[data-clp-action=discard]').click();await page.waitForFunction(()=>document.querySelector('#clp-dirty').textContent==='');
+        await edit('s3');assert.equal(await field('platformName').inputValue(),savedName);
+        await page.locator('#clpp-type').selectOption('s3');await page.locator('[data-clpp-add]').click();
+        const unsavedPlatform=await page.locator('[data-clpp-remove]').last().getAttribute('data-clpp-remove');
+        await page.locator(`[data-clpp-remove="${unsavedPlatform}"]`).click();assert.equal(await page.locator(`[data-clpp-remove="${unsavedPlatform}"]`).count(),0);
+        await page.locator('[data-clp-action=discard]').click();await page.waitForFunction(()=>document.querySelector('#clp-dirty').textContent==='');
         assert.equal(preview.push.store.policy().automaticMode,'previous_day');
         await page.locator('#clp-automatic-status').filter({hasText:'次日 00:00 起 · Asia/Shanghai'}).waitFor();
         await page.reload();await page.locator('#cl-tab-push').click();await field('automaticMode').waitFor();
@@ -244,10 +272,12 @@ async function main() {
         rejectReplica=false;await page.locator('[data-clp-file-retry]').click();await waitJobs('sent',15);
         await until(()=>!preview.fixture.store.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(replicated.id));
         await view('billing');await page.locator('#clp-bill-model').fill('gpt-6.2-sol');await page.locator('[data-clp-action=bill-filter]').click();
+        await page.waitForFunction(()=>{const rows=[...document.querySelectorAll('#clp-billing tbody tr')];return rows.length===2&&rows.every(row=>row.cells[1].textContent==='gpt-6.2-sol');});
         await page.locator('#clp-billing').filter({hasText:'80000'}).waitFor();
         assert.equal(await page.locator('#clp-billing tbody tr').count(),2);
         assert.equal(await page.locator('#clp-billing img').count(),0);await layout();await shot('billing-models');
-        await page.locator('[data-clp-bill-view=detail]').click();await page.locator('#clp-billing').filter({hasText:'已计费'}).waitFor();
+        await page.locator('[data-clp-bill-view=detail]').click();await page.waitForFunction(()=>document.querySelector('#clp-billing thead th').textContent.includes('送达时间'));
+        await page.locator('#clp-billing').filter({hasText:'已计费'}).waitFor();
         assert.equal(await page.locator('#clp-billing tbody tr').count(),2);await layout();await shot('billing-detail');
         const oldAmount=preview.push.store.billing.report({model:'gpt-6.2-sol'}).summary.amount;
         await edit(replicaId);await page.locator('#clpp-rates tr').filter({has:page.locator('[data-model][value="gpt-6.2-sol"]')}).locator('[data-price]').fill('100000');
@@ -268,7 +298,7 @@ async function main() {
         await startPricing();await until(()=>preview.push.store.pricing.status()?.status==='done');
         await page.locator('[data-clp-action=bill-refresh]').click();await page.locator('#clp-bill-pricing').filter({hasText:'已补记 0 项'}).waitFor();
         assert.equal(preview.push.store.billing.report({model:'gpt-6.2-sol'}).summary.amount,oldAmount);await layout();await shot('billing-priced');
-        const pricingPolicy=preview.push.store.policy();
+        await writeBudget(5);const pricingPolicy=preview.push.store.policy();
         preview.push.store.db.transaction(()=>{
           for(let i=0;i<605;i++)preview.push.store.billing.record({id:name+'-background-'+i,platformId:'s3',model:'Opus5',bytes:1000000,
             deliveryId:name+'-background-'+i,sha256:'b'.repeat(64),logDate:'2026-11-20',historical:true,policy:pricingPolicy});
@@ -278,7 +308,11 @@ async function main() {
         await until(()=>preview.push.store.pricing.status().updated>0);
         await page.locator('[data-clp-action=bill-refresh]').click();await page.locator('[data-clp-action=bill-stop]').waitFor();
         assert(await page.locator('[data-clp-action=bill-price]').isDisabled());await layout();await shot('billing-progress');
-        await page.locator('[data-clp-action=bill-stop]').click();await page.locator('#clp-bill-pricing').filter({hasText:'补记已停止'}).waitFor();
+        const cancelPricing=page.waitForResponse(response=>response.url().endsWith('/billing/price/'+backgroundId+'/cancel')&&response.request().method()==='POST');
+        await page.locator('[data-clp-action=bill-stop]').click();const cancelledPricing=await cancelPricing;
+        assert.equal(cancelledPricing.status(),200,await cancelledPricing.text());
+        assert.equal((await cancelledPricing.json()).job.status,'cancelled');
+        await page.locator('#clp-bill-pricing').filter({hasText:'补记已停止'}).waitFor();
         const stopped=preview.push.store.pricing.status();assert.equal(stopped.status,'cancelled');assert(stopped.updated>0&&stopped.updated<605);
         await startPricing();await page.locator('#clp-message').filter({hasText:'补记任务已提交'}).waitFor();
         assert.notEqual(preview.push.store.pricing.status().id,backgroundId);
@@ -287,11 +321,36 @@ async function main() {
         assert.equal(preview.push.store.pricing.status().updated+stopped.updated,605);
         await page.locator('#cl-tab-push').click();await view('billing');
         await page.locator('#clp-bill-pricing').filter({hasText:'补记已完成'}).waitFor();await layout();await shot('billing-background-complete');
+        await page.locator('[data-clp-bill-view=detail]').click();
+        await page.waitForFunction(()=>!document.querySelector('#clp-bill-next').disabled);
+        const pageResponse=(kind,number)=>page.waitForResponse(response=>{
+          const url=new URL(response.url());return url.pathname===`/api/conversation-logs/push/${kind}`&&url.searchParams.get('page')===String(number);
+        });
+        let nextPage=pageResponse('billing',2);await page.locator('#clp-bill-next').click();assert.equal((await(await nextPage).json()).page,2);
+        await page.locator('#clp-bill-pages').filter({hasText:'2 /'}).waitFor();
+        nextPage=pageResponse('billing',1);await page.locator('#clp-bill-prev').click();assert.equal((await(await nextPage).json()).page,1);
+        await writeBudget(6);await preview.push.stop();await view('platforms');await field('automatic').uncheck();await field('deleteAfterPush').uncheck();
+        await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
+        const buttonEvents=Array.from({length:25},(_,index)=>event(name+'-button-'+index,{model:'ButtonAudit'}));
+        for(const item of buttonEvents)preview.fixture.store.ingest(item);
+        await view('jobs');await page.locator('#clp-history [name=search]').fill('ButtonAudit');await page.locator('#clp-preview').click();
+        await page.locator('#clp-acknowledge').check();await page.locator('#clp-enqueue').click();
+        await until(()=>preview.push.store.list().counts.some(row=>row.status==='pending'&&row.count===50));await refresh();
+        nextPage=pageResponse('jobs',2);await page.locator('#clp-next').click();assert.equal((await(await nextPage).json()).page,2);
+        await page.locator('#clp-pages').filter({hasText:'2 /'}).waitFor();
+        nextPage=pageResponse('jobs',1);await page.locator('#clp-prev').click();assert.equal((await(await nextPage).json()).page,1);
+        const cancelledBatch=preview.push.store.list().batches.find(row=>row.created===50);
+        assert(cancelledBatch);await page.locator(`[data-clp-cancel="${cancelledBatch.id}"]`).click();
+        await until(()=>preview.push.store.list().counts.some(row=>row.status==='cancelled'&&row.count===50));
+        for(const item of buttonEvents)assert(preview.fixture.store.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(item.id));
+        await page.locator('#clp-job-status').selectOption('cancelled');await page.locator('[data-clp-retry]').first().click();
+        await until(()=>preview.push.store.list().counts.some(row=>row.status==='pending'&&row.count===1));
+        assert.equal(preview.push.store.list({status:'cancelled'}).total,49);await layout();await shot('buttons-cancel-retry');
         const safe=await page.evaluate(async()=>JSON.stringify(await(await fetch('/api/conversation-logs/push/policy')).json()));assert(!safe.includes('fictional-webhook-token'));assert(!safe.includes('fictional-secret'));
         await layout();await shot('delivered');
         await page.locator('#logout-button').click();await page.locator('#login-view').waitFor({state:'visible'});assert.equal(await page.locator('#clp-form').count(),0);
         assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
-        console.log(name+': multi-platform S3/JSONL/Webhook, drafts, independent rates, failed replica/retry/cleanup, immutable billing, automatic batches/cancel/background progress, schedule/resume/privacy/layout/logout passed');
+        console.log(name+': platform enable/disable/close/discard/remove, rate add/remove, pagination, batch cancel/retry, multi-platform S3/JSONL/Webhook, drafts, independent rates, failed replica/retry/cleanup, immutable billing, automatic batches/cancel/background progress, schedule/resume/privacy/layout/logout passed');
       } finally {await context.close();await preview.stop();}
     }
     console.log('Screenshots: '+directory);
