@@ -11,9 +11,7 @@ const { AppError } = require('./errors');
 const { isTransientModelFailure, isUncertainModelFailure } = require('./sub2api-client');
 const { evaluateOutput, imageDimensions } = require('./validation');
 const { VisualReviewer, combineReview, reviewFailure } = require('./visual-review');
-
-const MODEL_REQUEST_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
-const MODEL_RECOVERY_DELAYS_MS = [10000, 30000, 60000];
+const { withModelRecovery, MODEL_REQUEST_RETRY_DELAYS_MS } = require('./model-request-recovery');
 
 function wait(delayMs, signal) {
   return require('timers/promises').setTimeout(delayMs, undefined, { signal });
@@ -435,124 +433,37 @@ class DetectionRunner {
   }
 
   async callModelWithRetry(test, apiKey, context = {}) {
-    const configuredBudget = Number(this.config.requestTimeoutMs);
-    const budgetMs = Number.isFinite(configuredBudget) && configuredBudget > 0
-      ? configuredBudget
-      : 30 * 60 * 1000;
-    const recoveryLimit = Math.max(0, Math.min(3, this.config.recoveryRetries ?? 2));
-    const recoveryDeadline = this.now() + (this.config.recoveryTimeoutMs || budgetMs);
-    const deadline = Math.min(this.now() + budgetMs, recoveryDeadline);
-    let retryAttempts = 0;
-    let recoveryAttempts = 0;
-    let unknownRecoveries = 0;
-    let lastError = null;
-    const attempts = [];
-    let sessionId = test.api === 'responses' ? crypto.randomUUID() : null;
     const ensureCurrent = () => {
       if (this.closed || context.signal?.aborted) throw new AppError('DETECTION_CANCELLED', '检测已停止，不再提交后续请求', { status: 409 });
       context.ensureCurrent?.();
     };
-    const record = () => context.onAttempts?.(attempts);
-
-    while (true) {
+    return withModelRecovery(async ({ timeoutMs, sessionId }) => {
+      const payload = await this.callModel(test, apiKey, {
+        timeoutMs,
+        headers: sessionId ? { 'session-id': sessionId } : undefined,
+        context
+      });
       ensureCurrent();
-      const remainingMs = (recoveryAttempts > 0 ? recoveryDeadline : deadline) - this.now();
-      if (remainingMs <= 0 && lastError) {
-        lastError.retryAttempts = retryAttempts;
-        lastError.recoveryAttempts = recoveryAttempts;
-        throw lastError;
+      if (payload?.error) {
+        const failure = new AppError('MODEL_RESPONSE_FAILED', payload.error.message || '模型响应失败', { status: 502,
+          details: { upstreamCode: String(payload.error.code || payload.error.type || '').slice(0, 80) } });
+        failure.recoverable = isTransientModelFailure(failure.details.upstreamCode, failure.message);
+        failure.outcomeUnknown = isUncertainModelFailure(failure.details.upstreamCode, failure.message);
+        throw failure;
       }
-      const attempt = { number: attempts.length + 1, kind: attempts.length === 0 ? 'initial' : attempts.at(-1).next_action,
-        started_at: this.now(), state: 'running' };
-      attempts.push(attempt);
-      record();
-      try {
-        const payload = await this.callModel(test, apiKey, {
-          timeoutMs: Math.max(1, Math.min(budgetMs, remainingMs)),
-          headers: sessionId ? { 'session-id': sessionId } : undefined,
-          context
-        });
-        ensureCurrent();
-        if (payload?.error) {
-          const failure = new AppError('MODEL_RESPONSE_FAILED', payload.error.message || '模型响应失败', { status: 502,
-            details: { upstreamCode: String(payload.error.code || payload.error.type || '').slice(0, 80) } });
-          failure.recoverable = isTransientModelFailure(failure.details.upstreamCode, failure.message);
-          failure.outcomeUnknown = isUncertainModelFailure(failure.details.upstreamCode, failure.message);
-          throw failure;
-        }
-        const stopReason = test.api === 'chat_completions' ? payload?.choices?.[0]?.finish_reason
-          : test.api === 'anthropic_messages' ? payload?.stop_reason : payload?.candidates?.[0]?.finishReason;
-        if (['length', 'max_tokens', 'MAX_TOKENS', 'content_filter', 'SAFETY'].includes(stopReason)) {
-          throw new AppError('MODEL_RESPONSE_INCOMPLETE', `模型响应未完整完成（${stopReason}），未保存残缺输出`, { status: 502 });
-        }
-        if (test.api && ['text', 'html', 'file'].includes(test.output_type) && !responseText(payload, test.api).trim()) {
-          const failure = new AppError('MODEL_RESPONSE_EMPTY', '模型没有返回文本内容', { status: 502 });
-          failure.recoverable = true;
-          throw failure;
-        }
-        Object.assign(attempt, { state: 'completed', finished_at: this.now() });
-        record();
-        if (retryAttempts > 0 || recoveryAttempts > 0) {
-          console.info(JSON.stringify({
-            event: 'model_request_retry_succeeded',
-            runId: context.runId,
-            monitorId: context.monitorId,
-            retryAttempts,
-            recoveryAttempts
-          }));
-        }
-        return payload;
-      } catch (error) {
-        Object.assign(attempt, { state: 'failed', finished_at: this.now(), code: error.code || 'UNKNOWN',
-          upstream_status: error.details?.upstreamStatus, upstream_code: error.details?.upstreamCode,
-          outcome_unknown: Boolean(error.outcomeUnknown) });
-        record();
-        ensureCurrent();
-        const retryable = error?.retryable === true && error?.responseStarted !== true;
-        const recoverable = !retryable && error?.recoverable === true && recoveryAttempts < recoveryLimit &&
-          (!error.outcomeUnknown || unknownRecoveries < 1);
-        const baseDelay = retryable ? MODEL_REQUEST_RETRY_DELAYS_MS[retryAttempts]
-          : recoverable ? Math.max(error.outcomeUnknown ? 30000 : 0, MODEL_RECOVERY_DELAYS_MS[recoveryAttempts]) : NaN;
-        const delayMs = Math.max(baseDelay + Math.floor(this.random() * Math.min(1000, baseDelay * 0.2)), error.retryAfterMs || 0);
-        const activeDeadline = recoverable || recoveryAttempts > 0 ? recoveryDeadline : deadline;
-        const withinBudget = Number.isFinite(delayMs) && this.now() + delayMs < activeDeadline;
-        if ((!retryable && !recoverable) || !withinBudget) {
-          if (error && typeof error === 'object') {
-            error.retryAttempts = retryAttempts;
-            error.recoveryAttempts = recoveryAttempts;
-          }
-          throw error;
-        }
-
-        lastError = error;
-        if (retryable) retryAttempts += 1;
-        else {
-          recoveryAttempts += 1;
-          if (error.outcomeUnknown) unknownRecoveries += 1;
-          // A paid recovery starts a new session; safe reconnects keep its identity.
-          if (sessionId) sessionId = crypto.randomUUID();
-        }
-        attempt.next_action = retryable ? 'retry' : 'recovery';
-        attempt.delay_ms = delayMs;
-        record();
-        console.warn(JSON.stringify({
-          event: retryable ? 'model_request_retry' : 'model_request_recovery',
-          runId: context.runId,
-          monitorId: context.monitorId,
-          retryAttempt: retryAttempts,
-          recoveryAttempt: recoveryAttempts,
-          maxRetries: MODEL_REQUEST_RETRY_DELAYS_MS.length,
-          delayMs,
-          code: error.code || 'UNKNOWN'
-        }));
-        try {
-          await this.sleep(delayMs, context.signal);
-        } catch (error) {
-          ensureCurrent();
-          throw error;
-        }
+      const stopReason = test.api === 'chat_completions' ? payload?.choices?.[0]?.finish_reason
+        : test.api === 'anthropic_messages' ? payload?.stop_reason : payload?.candidates?.[0]?.finishReason;
+      if (['length', 'max_tokens', 'MAX_TOKENS', 'content_filter', 'SAFETY'].includes(stopReason)) {
+        throw new AppError('MODEL_RESPONSE_INCOMPLETE', `模型响应未完整完成（${stopReason}），未保存残缺输出`, { status: 502 });
       }
-    }
+      if (test.api && ['text', 'html', 'file'].includes(test.output_type) && !responseText(payload, test.api).trim()) {
+        const failure = new AppError('MODEL_RESPONSE_EMPTY', '模型没有返回文本内容', { status: 502 });
+        failure.recoverable = true;
+        throw failure;
+      }
+      return payload;
+    }, { config: this.config, context, ensureCurrent, withSession: test.api === 'responses',
+      now: this.now, random: this.random, sleep: this.sleep });
   }
 
   async remoteArtifact(urlValue) {

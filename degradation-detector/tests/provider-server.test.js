@@ -172,8 +172,14 @@ test('locally generated pelican artwork and prompt remain available after classi
   const source = '<!doctype html><html><body><svg><text>HTTP artwork</text></svg><script>window.artwork = 1;</script></body></html>';
   let generations = 0, submissions = 0;
   detector.resolve = async () => ({});
-  detector.generate = async ({ snapshot }) => {
+  detector.generate = async ({ snapshot, onAttempts }) => {
     generations++; assert.equal(snapshot.prompt, PELICAN_PROMPT);
+    onAttempts([
+      { kind: 'initial', state: 'failed', started_at: 1, finished_at: 2, code: 'PROVIDER_GENERATION_FAILED',
+        upstream_code: 'upstream_stream_read_error', outcome_unknown: true, next_action: 'recovery', delay_ms: 30000,
+        sessionId: 'private-session', authorization: 'sk-private-pelican-1-123456' },
+      { kind: 'recovery', state: 'completed', started_at: 30002, finished_at: 31000 }
+    ]);
     return { html: source, input_tokens: 100, output_tokens: 2000, first_token_ms: 30, duration_ms: 300 };
   };
   detector.request = async (_url, options) => {
@@ -194,10 +200,18 @@ test('locally generated pelican artwork and prompt remain available after classi
     assert.equal(detail.response.prompt, PELICAN_PROMPT); assert.equal(detail.response.result.html, source);
     assert.equal(detail.output_tokens, 2000); assert.equal(detail.response.result.first_token_ms, 30);
     assert.equal(detail.response.diagnostic, undefined);
+    assert.deepEqual(detail.response.generation_attempts.map(attempt => attempt.kind), ['initial', 'recovery']);
     if (who === admin) {
       assert.equal(detail.diagnostic.stage, 'poll'); assert.equal(detail.diagnostic.provider_code, 'UPSTREAM_READ');
       assert.match(detail.diagnostic.provider_message, /fixture read failed/);
-    } else assert.equal(detail.diagnostic, undefined);
+      assert.equal(detail.response.generation_attempts[0].upstream_code, 'upstream_stream_read_error');
+    } else {
+      assert.equal(detail.diagnostic, undefined);
+      assert.equal(detail.response.generation_attempts[0].code, undefined);
+      assert.equal(detail.response.generation_attempts[0].upstream_code, undefined);
+      assert.equal(detail.response.generation_attempts[0].outcome_unknown, true);
+    }
+    assert.ok(!JSON.stringify(detail).includes('private-session'));
     assert.doesNotMatch(JSON.stringify(detail), /sk-private|private\.example|relay\.example|key_cipher/);
     const preview = await get(detail.preview_url, who); assert.equal(preview.status, 200);
     assert.equal(await preview.text(), source);

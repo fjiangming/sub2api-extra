@@ -455,6 +455,8 @@ class Sub2ApiClient {
 module.exports = {
   Sub2ApiClient,
   asItems,
+  canRecoverTransport,
+  isPermanentModelFailure,
   isSafePreconnectError,
   isTimeoutError,
   isTransientModelFailure,

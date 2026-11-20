@@ -2,7 +2,7 @@
 
 const { AppError } = require('./errors');
 const { channels, names, providerFor, providerParams, providerPlatform, testParams } = require('./provider-config');
-const { runSummary } = require('./provider-results');
+const { runSummary, cleanGenerationAttempts } = require('./provider-results');
 const { publicGroupCacheStats } = require('./group-metrics');
 const { fittedArtwork } = require('./artwork-preview');
 const { sanitizeReviewDiagnostic } = require('./review-http');
@@ -110,6 +110,10 @@ function installProviderRoutes(app, runtime, { requireAuth, requireAdmin, requir
     const storedResponse = run.response_json ? JSON.parse(run.response_json) : null;
     const { diagnostic, ...publicResponse } = storedResponse || {};
     const response = storedResponse ? publicResponse : null;
+    if (Array.isArray(response?.generation_attempts)) {
+      const attempts = cleanGenerationAttempts(response.generation_attempts);
+      response.generation_attempts = admin ? attempts : attempts.map(({ code, upstream_code, upstream_status, ...progress }) => progress);
+    }
     const summary = runSummary(run);
     const path = `${admin ? '/api/admin' : '/api'}/provider-results/${run.id}/preview`;
     res.json({ ...summary, response,

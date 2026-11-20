@@ -3,7 +3,7 @@
 const dns = require('dns').promises;
 const https = require('https');
 const net = require('net');
-const { readEventStream } = require('./sub2api-client');
+const { readEventStream, retryAfterMs } = require('./sub2api-client');
 
 const ipv4Blocked = new net.BlockList();
 for (const [address, prefix] of [
@@ -129,13 +129,14 @@ async function readReviewJson(response, maxResponseBytes) {
   return result;
 }
 
-async function requestReview(value, { method, body, apiKey, signal, taskKey, maxResponseBytes = 256 * 1024, secrets = [], accept = 'application/json' }, dependencies, read) {
+async function requestReview(value, { method, body, apiKey, signal, taskKey, sessionId, maxResponseBytes = 256 * 1024, secrets = [], accept = 'application/json' }, dependencies, read) {
   const url = reviewUrl(value);
   const address = await resolveReviewAddress(url, signal, dependencies.lookup);
   const raw = body == null ? null : Buffer.from(JSON.stringify(body));
   if (raw?.length > 2 * 1024 * 1024) throw new ReviewError('REVIEW_INPUT_TOO_LARGE');
   const request = dependencies.request || https.request;
   return new Promise((resolve, reject) => {
+    let responseStarted = false;
     const connection = request(url, {
       method,
       signal,
@@ -147,27 +148,34 @@ async function requestReview(value, { method, body, apiKey, signal, taskKey, max
         'accept-encoding': 'identity',
         ...(raw ? { 'content-type': 'application/json', 'content-length': raw.length } : {}),
         ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+        ...(sessionId ? { 'session-id': sessionId } : {}),
         ...(method === 'POST' && taskKey ? { 'Idempotency-Key': taskKey } : {})
       },
       lookup: (_hostname, _options, callback) => callback(null, address.address, address.family)
     }, async (response) => {
+      responseStarted = true;
       try {
         // Redirects never receive credentials or trigger an additional POST.
         if (![200, 201, 202].includes(response.statusCode)) {
           const diagnostic = response.statusCode >= 400 ? await responseDiagnostic(response, apiKey) : undefined;
           const error = new ReviewError('REVIEW_HTTP_ERROR', { httpStatus: response.statusCode, diagnostic: sanitizeReviewDiagnostic(diagnostic, secrets) });
-          const retryAfter = Number(response.headers['retry-after']);
-          if (Number.isFinite(retryAfter) && retryAfter > 0) error.retryAfterSeconds = Math.min(86400, Math.ceil(retryAfter));
+          error.retryAfterMs = retryAfterMs(response.headers['retry-after']);
+          if (error.retryAfterMs > 0) error.retryAfterSeconds = Math.min(86400, Math.ceil(error.retryAfterMs / 1000));
           throw error;
         }
         if (Number(response.headers['content-length'] || 0) > maxResponseBytes) throw new ReviewError('REVIEW_RESPONSE_TOO_LARGE');
         resolve(await read(response, maxResponseBytes));
       } catch (error) {
+        error.responseStarted = true;
         response.destroy();
         reject(error);
       }
     });
-    connection.once('error', (error) => reject(signal.aborted ? new ReviewError('REVIEW_TIMEOUT') : error));
+    connection.once('error', (error) => {
+      const failure = signal.aborted ? new ReviewError('REVIEW_TIMEOUT') : error;
+      failure.responseStarted = responseStarted;
+      reject(failure);
+    });
     connection.end(raw);
   });
 }

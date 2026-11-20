@@ -146,11 +146,19 @@ async function main() {
       artifactStore.response(legacyArtifact.id, legacyResult); artifactStore.finish(legacyArtifact.id, 'completed');
       const failedArtifact = artifactStore.create(artifactStore.group('8', 'pelican'), 'demo');
       artifactStore.response(failedArtifact.id, { ...savedArtifact, status: 'failed', assessment: null,
+        generation_attempts: [
+          { number: 1, kind: 'initial', state: 'failed', started_at: Date.now() - 40000, finished_at: Date.now() - 35000,
+            code: 'PROVIDER_GENERATION_FAILED', upstream_code: 'upstream_stream_read_error', outcome_unknown: true, next_action: 'recovery', delay_ms: 30000 },
+          { number: 2, kind: 'recovery', state: 'completed', started_at: Date.now() - 5000, finished_at: Date.now() }
+        ],
         diagnostic: { stage: 'poll', provider_code: 'FIXTURE_READ', provider_message: '虚构分类失败 [REDACTED] [URL]' } });
       artifactStore.finish(failedArtifact.id, 'error', 'HTML 分类失败，保留已生成作品');
       await page.locator('.p-card button[data-group="8"]').last().click(); await page.frameLocator('.p-artwork').locator('svg').waitFor();
       assert.match(await page.locator('.p-history-detail').innerText(), /检测异常/);
       assert.equal(await page.locator('.p-history-detail summary').filter({ hasText: '检测诊断' }).count(), 0);
+      assert.match(await page.locator('.p-generation-recovery').innerText(), /生成尝试 2 次 · 重连 0 次 · 自动补测 1 次/);
+      assert.equal(await page.locator('.p-history-detail summary').filter({ hasText: '生成请求记录' }).count(), 0);
+      assert.doesNotMatch(await page.locator('.p-history-detail').innerText(), /upstream_stream_read_error/);
       for (const title of ['作品源码', '检测提示词']) await page.locator('.p-history-detail summary').filter({ hasText: title }).click();
       assert.equal(await page.locator('.p-history-detail summary').filter({ hasText: '作品源码' }).locator('..').locator('pre').innerText(), savedArtifact.result.html);
       assert.equal(await page.locator('.p-history-detail summary').filter({ hasText: '检测提示词' }).locator('..').locator('pre').innerText(), PELICAN_PROMPT);
@@ -185,6 +193,9 @@ async function main() {
       await fittedPreview(admin); await shot(admin, `${layout.name}-admin-pelican-preview-full`);
       await admin.locator('.p-history-detail summary').filter({ hasText: '检测诊断' }).click();
       assert.match(await admin.locator('.p-history-detail').innerText(), /FIXTURE_READ/);
+      assert.match(await admin.locator('.p-generation-recovery').innerText(), /自动补测 1 次/);
+      await admin.locator('.p-history-detail summary').filter({ hasText: '生成请求记录' }).click();
+      assert.match(await admin.locator('.p-history-detail').innerText(), /upstream_stream_read_error/);
       for (const title of ['作品源码', '检测提示词']) await admin.locator('.p-history-detail summary').filter({ hasText: title }).click();
       assert.equal(await admin.locator('.p-history-detail summary').filter({ hasText: '作品源码' }).locator('..').locator('pre').innerText(), savedArtifact.result.html);
       assert.equal(await admin.locator('.p-history-detail summary').filter({ hasText: '检测提示词' }).locator('..').locator('pre').innerText(), PELICAN_PROMPT);

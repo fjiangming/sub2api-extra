@@ -198,6 +198,25 @@
         const method = document.createElement('p');
         method.className = 'p-muted'; method.textContent = '本地生成 · HTML 源码分类';
         target.querySelector('.p-card-head').after(method);
+        const attempts = response?.generation_attempts;
+        if (Array.isArray(attempts) && attempts.length) {
+          const retries = attempts.filter(attempt => attempt.kind === 'retry').length;
+          const recoveries = attempts.filter(attempt => attempt.kind === 'recovery').length;
+          const progress = document.createElement('p'); progress.className = 'p-muted p-generation-recovery';
+          progress.textContent = `生成尝试 ${attempts.length} 次 · 重连 ${retries} 次 · 自动补测 ${recoveries} 次`;
+          const last = attempts.at(-1);
+          if (run.status === 'running' && response.phase === 'generating') {
+            if (last.state === 'failed' && last.next_action) {
+              progress.textContent += ` · 等待${last.next_action === 'retry' ? '重连' : '补测'}（${seconds(last.delay_ms / 1000)}）`;
+            } else if (last.state === 'running') progress.textContent += ' · 正在生成';
+          }
+          method.after(progress);
+          if (current.admin) {
+            const details = document.createElement('details'), summary = document.createElement('summary'), code = document.createElement('pre');
+            summary.textContent = '生成请求记录'; code.className = 'p-code'; code.textContent = JSON.stringify(attempts, null, 2);
+            details.append(summary, code); target.append(details);
+          }
+        }
       }
       if (current.admin && run.diagnostic) {
         const details = document.createElement('details'), summary = document.createElement('summary'), code = document.createElement('pre');

@@ -4,6 +4,25 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 const number = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 const percentage = value => number(value) != null && value <= 100 ? value : null;
 const text = (value, max = 4000) => typeof value === 'string' ? value.slice(0, max) : null;
+const { sanitizeReviewDiagnostic } = require('./review-http');
+
+function cleanGenerationAttempts(value, secrets = []) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 9).filter(attempt => object(attempt) && ['initial', 'retry', 'recovery'].includes(attempt.kind) &&
+    ['running', 'failed', 'completed'].includes(attempt.state)).map((attempt, index) => {
+    const code = input => sanitizeReviewDiagnostic({ provider_code: input }, secrets)?.provider_code;
+    const result = { number: index + 1, kind: attempt.kind, state: attempt.state };
+    for (const key of ['started_at', 'finished_at', 'delay_ms']) {
+      if (Number.isSafeInteger(attempt[key]) && attempt[key] >= 0) result[key] = attempt[key];
+    }
+    if (code(attempt.code)) result.code = code(attempt.code);
+    if (code(attempt.upstream_code)) result.upstream_code = code(attempt.upstream_code);
+    if (Number.isInteger(attempt.upstream_status) && attempt.upstream_status >= 300 && attempt.upstream_status <= 599) result.upstream_status = attempt.upstream_status;
+    if (typeof attempt.outcome_unknown === 'boolean') result.outcome_unknown = attempt.outcome_unknown;
+    if (['retry', 'recovery'].includes(attempt.next_action)) result.next_action = attempt.next_action;
+    return result;
+  });
+}
 
 // Persist an allowlist of result fields; never persist echoed credentials, request headers or remote share links.
 function cleanManxue(data, secrets = []) {
@@ -23,7 +42,8 @@ function cleanManxue(data, secrets = []) {
     result: object(data.result) ? { html: cleanText(data.result.html, 2 * 1024 * 1024), duration_ms: number(data.result.duration_ms), input_tokens: number(data.result.input_tokens), output_tokens: number(data.result.output_tokens),
       ...(data.method === 'local_html' ? { first_token_ms: number(data.result.first_token_ms) } : {}) } : null,
     prompt: cleanText(data.prompt ?? data.result?.prompt, 100000),
-    ...(data.method === 'local_html' ? { method: 'local_html' } : {})
+    ...(data.method === 'local_html' ? { method: 'local_html',
+      ...(Array.isArray(data.generation_attempts) ? { generation_attempts: cleanGenerationAttempts(data.generation_attempts, secrets) } : {}) } : {})
   };
 }
 
@@ -65,4 +85,4 @@ function compactResult(channel, response) {
     output_tokens: response?.candy?.output_tokens ?? response?.result?.output_tokens ?? null };
 }
 
-module.exports = { cleanManxue, cleanReport, conclusion, runSummary, compactResult };
+module.exports = { cleanManxue, cleanGenerationAttempts, cleanReport, conclusion, runSummary, compactResult };

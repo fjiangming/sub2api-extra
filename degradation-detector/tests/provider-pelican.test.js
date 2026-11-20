@@ -69,7 +69,7 @@ test('generation accepts a completed JSON response and an output carried only by
   assert.equal(fallback.html, html); assert.equal(fallback.output_tokens, null);
 });
 
-test('partial, failed, malformed and excessive generation responses cannot become complete artwork or trigger retries', async () => {
+test('partial, failed, malformed and excessive generation responses never become complete artwork with recovery disabled', async () => {
   for (const [raw, expected, options] of [
     [frame({ type: 'response.output_text.delta', delta: html }), /GENERATION_INCOMPLETE/],
     [frame({ type: 'response.incomplete', response: { status: 'incomplete', output_text: html } }), /GENERATION_FAILED/],
@@ -80,7 +80,7 @@ test('partial, failed, malformed and excessive generation responses cannot becom
     [frame(complete('x'.repeat(1024 * 1024 + 1))), /INPUT_TOO_LARGE/]
   ]) {
     const transport = streamTransport([Buffer.from(raw)]);
-    await assert.rejects(generate(transport, options), error => expected.test(error.code || error.message));
+    await assert.rejects(generate(transport, { config: { recoveryRetries: 0 }, ...options }), error => expected.test(error.code || error.message));
     assert.equal(transport.calls.length, 1); assert(transport.response.destroyed);
   }
 });
@@ -97,7 +97,7 @@ test('generation pins public addresses, rejects mixed DNS before sending credent
 test('generation cancellation bounds DNS and a stalled stream without retrying the model POST', async () => {
   const dnsAbort = new AbortController(), dnsTransport = streamTransport([]);
   const resolving = generate(dnsTransport, { signal: dnsAbort.signal }, async () => new Promise(() => {}));
-  dnsAbort.abort(); await assert.rejects(resolving, error => error.code === 'REVIEW_TIMEOUT');
+  dnsAbort.abort(); await assert.rejects(resolving, error => error.code === 'REVIEW_TIMEOUT' || error === dnsAbort.signal.reason);
   assert.equal(dnsTransport.calls.length, 0);
   const streamAbort = new AbortController(), stalled = streamTransport([], { open: true });
   const result = generate(stalled, { signal: streamAbort.signal });
@@ -149,6 +149,59 @@ test('pelican saves the exact prompt and full artwork before classification, kee
   assert(!storeContainsKey(providers, key));
 });
 function storeContainsKey(providers, value) { return providers.db.serialize().includes(Buffer.from(value)); }
+
+test('pelican persists recovery progress before waiting and classifies only the final complete artwork once', async t => {
+  const { providers, service, calls, enqueue } = setup(t);
+  const run = enqueue();
+  let now = Date.now(), requests = 0, waits = 0;
+  service.generate = options => generatePelican(options, async (_url, _options, onEvent) => {
+    requests++;
+    if (requests === 1) {
+      onEvent({ type: 'response.output_text.delta', delta: 'abandoned partial' });
+      onEvent({ type: 'error', code: 'upstream_stream_read_error', message: `Upstream response stream was interrupted ${key}` });
+    } else { onEvent({ type: 'response.output_text.delta', delta: html }); onEvent(complete()); }
+  }, { now: () => now, random: () => 0, sleep: async ms => {
+    waits++; now += ms;
+    const saved = JSON.parse(providers.run(run.id).response_json);
+    assert.equal(saved.generation_attempts.length, 1);
+    assert.equal(saved.generation_attempts[0].next_action, 'recovery');
+    assert.equal(saved.generation_attempts[0].delay_ms, 30000);
+    assert.equal(saved.prompt, PELICAN_PROMPT); assert.equal(saved.result, null);
+    assert.equal(JSON.parse(providers.run(run.id).parts_json).generation.state, 'submitting');
+    assert.equal(calls.length, 0);
+  } });
+  await service.execute(providers.run(run.id));
+  const saved = providers.run(run.id), response = JSON.parse(saved.response_json);
+  assert.equal(saved.conclusion, 'passed'); assert.equal(requests, 2); assert.equal(waits, 1);
+  assert.equal(response.result.html, html); assert.equal(response.result.output_tokens, 12000);
+  assert.deepEqual(response.generation_attempts.map(attempt => attempt.state), ['failed', 'completed']);
+  assert.equal(calls.filter(call => call.method === 'POST').length, 1);
+  assert.ok(!storeContainsKey(providers, key));
+});
+
+test('repeated stream interruption preserves the real recovery count and disabling a group prevents further generation', async t => {
+  for (const disable of [false, true]) {
+    const { providers, service, calls, enqueue } = setup(t);
+    const run = enqueue();
+    let now = Date.now(), requests = 0;
+    service.generate = options => generatePelican(options, async (_url, _options, onEvent) => {
+      requests++;
+      onEvent({ type: 'error', code: 'upstream_stream_read_error', message: 'Upstream response stream was interrupted' });
+    }, { now: () => now, random: () => 0, sleep: async ms => {
+      now += ms;
+      if (disable) providers.db.prepare("UPDATE degradation_provider_groups SET enabled=0 WHERE group_id='1' AND channel='pelican'").run();
+    } });
+    await service.execute(providers.run(run.id));
+    const saved = providers.run(run.id), response = JSON.parse(saved.response_json);
+    assert.equal(saved.status, 'error'); assert.equal(calls.length, 0); assert.equal(requests, disable ? 1 : 2);
+    assert.equal(response.result, null); assert.equal(response.generation_attempts.length, disable ? 1 : 2);
+    if (disable) assert.equal(saved.error_code, 'PROVIDER_CONFIG_CHANGED');
+    else {
+      assert.match(saved.reason, /已自动补测 1 次/); assert.doesNotMatch(saved.reason, /未自动重发/);
+      assert.equal(response.diagnostic.provider_code, 'upstream_stream_read_error');
+    }
+  }
+});
 
 test('classification failures preserve the generated work and sanitize original diagnostics without repeating generation or submission', async t => {
   for (const reply of [

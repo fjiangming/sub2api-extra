@@ -3,7 +3,7 @@
 const { setTimeout: delay } = require('node:timers/promises');
 const { AppError } = require('./errors');
 const { channels, names, configurationSchema, keyContext, providerFor, providerPlatform, testParams, validateEffective } = require('./provider-config');
-const { cleanManxue, cleanReport, runSummary } = require('./provider-results');
+const { cleanManxue, cleanGenerationAttempts, cleanReport, runSummary } = require('./provider-results');
 const { requestReviewJson, resolveReviewAddress, ReviewError, sanitizeReviewDiagnostic } = require('./review-http');
 const { waitForTestLLM } = require('./provider-http');
 const { generatePelican, PELICAN_METHOD, PELICAN_PROMPT } = require('./provider-pelican');
@@ -11,17 +11,20 @@ const { manxueHtmlBody } = require('./visual-review');
 
 const fail = (code, message, status = 400) => new AppError(code, message, { status });
 const remoteId = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value) ? value : null;
-function failure(error, stage) {
+function failure(error, stage, attempts = []) {
   const code = error.code || error.message;
   if (code === 'PROVIDER_CONFIG_CHANGED') return '配置已变更或停用，任务已停止';
   if (code === 'PROVIDER_ARTIFACT_MISSING') return '已生成作品不可读取，为避免重复调用模型，任务已停止';
   if (stage === 'generate') {
+    const recoveries = attempts.filter(attempt => attempt.kind === 'recovery').length;
+    const retries = attempts.filter(attempt => attempt.kind === 'retry').length;
+    const progress = (retries ? `；已重连 ${retries} 次` : '') + (recoveries ? `；已自动补测 ${recoveries} 次` : '');
     if (code === 'PROVIDER_SUBMISSION_UNKNOWN') return '作品生成请求结果未知，为避免重复调用模型，任务已停止';
-    if (error.httpStatus === 401 || error.httpStatus === 403) return '作品生成鉴权失败，请检查分组专用 Key；未自动重发';
-    if (['REVIEW_TIMEOUT', 'PROVIDER_TIMEOUT'].includes(code) || ['AbortError', 'TimeoutError'].includes(error.name)) return '作品生成超时，未提交分类；未自动重发模型请求';
-    if (code === 'PROVIDER_GENERATION_INCOMPLETE' || code === 'PROVIDER_GENERATION_FAILED') return '模型响应未完整完成，未提交分类；未自动重发模型请求';
-    if (code === 'REVIEW_INPUT_TOO_LARGE') return '完整作品超过 1 MiB 的分类上限，未截断或提交';
-    return '作品生成失败，未提交分类；未自动重发模型请求';
+    if (error.httpStatus === 401 || error.httpStatus === 403) return '作品生成鉴权失败，请检查分组专用 Key' + progress;
+    if (['REVIEW_TIMEOUT', 'PROVIDER_TIMEOUT'].includes(code) || ['AbortError', 'TimeoutError'].includes(error.name)) return '作品生成超时，未提交分类' + progress;
+    if (code === 'PROVIDER_GENERATION_INCOMPLETE' || code === 'PROVIDER_GENERATION_FAILED') return '模型响应未完整完成，未提交分类' + progress;
+    if (code === 'REVIEW_INPUT_TOO_LARGE') return '完整作品超过 1 MiB 的分类上限，未截断或提交' + progress;
+    return '作品生成失败，未提交分类' + progress;
   }
   if (error.httpStatus === 429) return '第三方限流，已暂停该服务的新提交；本次未自动重发';
   if (stage === 'submit') return '提交未取得可确认的任务编号，未自动重发；请核对第三方任务后再检测';
@@ -189,7 +192,13 @@ class ProviderDetection {
         store.response(run.id, response);
         store.part(run.id, 'generation', { state: 'submitting' });
       })();
-      const result = await this.generate({ snapshot, key, signal, maxResponseBytes: this.config.maxResponseBytes, taskKey: `degradation-pelican-${run.id}-generate` });
+      const result = await this.generate({ snapshot, key, signal, config: this.config,
+        deadline: run.started_at + snapshot.timeout_seconds * 1000, ensureCurrent: check, runId: run.id,
+        maxResponseBytes: this.config.maxResponseBytes, taskKey: `degradation-pelican-${run.id}-generate`,
+        onAttempts: attempts => {
+          response.generation_attempts = cleanGenerationAttempts(attempts, [key]);
+          store.response(run.id, response);
+        } });
       check();
       Object.assign(response, cleanManxue({ ...response, result, phase: 'classifying' }, [key]));
       manxueHtmlBody(response.result?.html);
@@ -361,7 +370,7 @@ class ProviderDetection {
         response.diagnostic = sanitizeReviewDiagnostic({ ...cause.diagnostic, stage, http_status: cause.httpStatus }, [key]);
         store.response(run.id, response);
       }
-      store.finish(run.id, 'error', failure(cause, changed ? 'poll' : stage), typeof cause.code === 'string' ? cause.code : /^PROVIDER_[A-Z_]+$/.test(cause.message) ? cause.message : 'PROVIDER_FAILED');
+      store.finish(run.id, 'error', failure(cause, changed ? 'poll' : stage, response.generation_attempts), typeof cause.code === 'string' ? cause.code : /^PROVIDER_[A-Z_]+$/.test(cause.message) ? cause.message : 'PROVIDER_FAILED');
     } finally { clearTimeout(timeout); }
   }
 }
