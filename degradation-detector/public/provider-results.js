@@ -183,7 +183,6 @@
     const requestId = ++detailRequest;
     renderHistory();
     const target = historyDialog.querySelector('.p-history-detail');
-    target.classList.remove('p-history-detail--artwork');
     target.scrollTop = 0;
     target.textContent = '正在读取本次结果';
     try {
@@ -224,10 +223,6 @@
         details.append(summary, code); target.append(details);
       }
       if (run.preview_url) {
-        const artwork = target.querySelector('#p-artwork-target').parentElement;
-        artwork.classList.add('p-artwork-section');
-        target.classList.add('p-history-detail--artwork');
-        target.prepend(artwork);
         const frame = document.createElement('iframe');
         frame.className = 'p-artwork'; frame.title = '本次鹈鹕检测作品';
         const source = new URL(run.preview_url, location.href); source.searchParams.set('fit', '1');

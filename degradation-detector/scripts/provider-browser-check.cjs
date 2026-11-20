@@ -48,12 +48,18 @@ async function main() {
     assert.equal(await page.locator('.p-history-detail').evaluate(element => getComputedStyle(element).scrollbarWidth), 'none');
     assert.equal(await page.locator('.p-artwork').getAttribute('scrolling'), 'no');
     const box = await page.locator('.p-history').boundingBox(), viewport = page.viewportSize();
-    const sideGap = viewport.width <= 650 ? 16 : 24;
-    assert(box.width <= 1080 && box.height <= 760, 'history must retain the original desktop width and a bounded height');
+    const mobile = viewport.width <= 650, sideGap = mobile ? 8 : 16, verticalGap = mobile ? 8 : 20;
+    assert(box.width <= 1080 && box.height <= viewport.height - verticalGap * 2 + 1, 'history must use the original width and viewport height limits');
     assert(box.x >= sideGap - 1 && viewport.width - box.x - box.width >= sideGap - 1, 'history must leave space on both sides');
-    assert(box.y >= 47 && viewport.height - box.y - box.height >= 47, 'history must leave space above and below');
-    const stage = await page.locator('.p-artwork').boundingBox(), detail = await page.locator('.p-history-detail').boundingBox();
-    assert(stage.height > detail.height * 0.8 && stage.y >= detail.y && stage.y + stage.height <= detail.y + detail.height + 1, 'complete artwork must fit in the first detail viewport');
+    assert(box.y >= verticalGap - 1 && viewport.height - box.y - box.height >= verticalGap - 1, 'history must retain the original viewport margins');
+    const body = await page.locator('.p-history-body').boundingBox();
+    assert(body.height <= Math.min(mobile ? Infinity : 680, viewport.height - (mobile ? 120 : 136)) + 1, 'history body must retain its original height');
+    const stage = await page.locator('.p-artwork').boundingBox();
+    assert.equal(stage.height, 320, 'artwork must retain the original 320px preview height');
+    const order = await page.locator('.p-history-detail').evaluate(element =>
+      Boolean(element.querySelector('.p-card-head').compareDocumentPosition(element.querySelector('#p-artwork-target')) & Node.DOCUMENT_POSITION_FOLLOWING));
+    assert(order, 'result details must precede the artwork as in the original layout');
+    await page.locator('.p-artwork').scrollIntoViewIfNeeded();
     return frame;
   };
   const save = async page => {
