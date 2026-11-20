@@ -1,6 +1,8 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { performance } = require('node:perf_hooks');
+const { setTimeout: delay } = require('node:timers/promises');
 const { publicPolicy,target,targetPolicy,invalid } = require('./conversation-push-policy');
 const { ConversationPushTransport } = require('./conversation-push-transport');
 const { ConversationJsonlService } = require('./conversation-jsonl-service');
@@ -15,7 +17,20 @@ class ConversationPushService {
     this.jsonl=new ConversationJsonlService(store,transport,{memoryBudget,...jsonlOptions,canWork:()=>canWork()&&!this.active&&!this.testing});
   }
   policy() { return publicPolicy(this.store.policy()); }
-  configure(input) { const result=this.store.configure(input);this.invalidate();this.wake();return result; }
+  async configure(input) {
+    const deadline=performance.now()+1500;
+    for (;;) {
+      let result;
+      try { result=this.store.configure(input); }
+      catch(error) {
+        if(!/^SQLITE_(?:BUSY|LOCKED)/.test(error.code||''))throw error;
+        if(performance.now()>=deadline)throw invalid('归档正在写入，暂时无法保存推送策略，请稍后重试','CONVERSATION_PUSH_POLICY_BUSY',503);
+        await delay(50);
+        continue;
+      }
+      this.invalidate();this.wake();return result;
+    }
+  }
   invalidate() { this.active?.controller.abort();this.testController?.abort();this.jsonl.invalidate(); }
   status(query) { return {...this.store.list(query),automatic:this.store.automaticStatus(),jsonl:this.jsonl.store.list(),cleanup:{...this.store.cleanup.status(),error:this.cleanupError},lastError:this.jsonl.lastError||this.lastError,lastRun:this.jsonl.lastRun||this.lastRun,enabled:this.store.policy().enabled}; }
   maintain() {

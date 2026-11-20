@@ -19,6 +19,13 @@ function setup(t,options={}) {
   const f=fixture(options);t.after(()=>{f.store.close();f.close();});
   f.push=new ConversationPushStore(f.store,options).initialize();return f;
 }
+function concurrentSetup(t) {
+  const f=fixture();
+  f.push=new ConversationPushStore(f.store).initialize();
+  f.other=new ConversationLogStore(f.directory).openReader();
+  t.after(()=>{f.other.close();f.close();});
+  return f;
+}
 function configure(f,extra={}) {
   return f.push.configure({...f.push.policy(),enabled:true,webhook:{enabled:true,url:'https://receiver.example/logs',token:'test-private-token'},...extra});
 }
@@ -50,6 +57,61 @@ test('push defaults are off; configuration is encrypted, CAS protected, and secr
   assert.equal(s3.sessionTokenConfigured,false);assert(s3.credentialsConfigured);assert(!JSON.stringify(s3).includes('test-id'));
   for(const url of ['http://public.example/','https://user:password@public.example/','https://public.example/?token=secret'])assert.throws(()=>configure(f,{webhook:{enabled:true,url}}));
   assert.throws(()=>configure(f,{s3:{...f.push.policy().s3,enabled:true,endpoint:'https://s3.example/bucket'}}));
+});
+
+test('policy saves serialize a competing archive writer before reading the WAL snapshot',t=>{
+  const f=concurrentSetup(t),other=f.other;
+  const before=f.push.policy(),read=f.push.policy.bind(f.push);
+  let conflict;
+  f.push.policy=(...args)=>{
+    const policy=read(...args);
+    try { other.db.prepare('UPDATE cl_push_cursor SET row_id=row_id+1 WHERE singleton=1').run(); }
+    catch(error) { conflict=error; }
+    return policy;
+  };
+  const saved=f.push.configure({...before,enabled:true,webhook:{...before.webhook,enabled:true,url:'https://receiver.example/logs'}});
+  f.push.policy=read;
+  assert.equal(saved.version,before.version+1);
+  assert.equal(f.push.policy().version,saved.version);
+  assert.match(conflict?.code||'',/^SQLITE_BUSY/);
+  assert.equal(other.db.prepare('UPDATE cl_push_cursor SET row_id=row_id+1 WHERE singleton=1').run().changes,1);
+});
+
+test('policy lock retries preserve newer administrator edits and only notify the worker after commit',async t=>{
+  const f=concurrentSetup(t),service=new ConversationPushService(f.push),before=f.push.policy();
+  const other=new ConversationPushStore(f.other);
+  let notifications=0;
+  service.invalidate=()=>notifications++;service.wake=()=>notifications++;
+  f.other.db.exec('BEGIN IMMEDIATE');
+  const saving=service.configure({...before,timeoutSeconds:60});
+  assert.equal(notifications,0);
+  assert.equal(f.push.db.pragma('busy_timeout',{simple:true}),5000);
+  other.configure({...before,timeoutSeconds:45});
+  f.other.db.exec('COMMIT');
+  await assert.rejects(saving,{code:'CONVERSATION_PUSH_CONFLICT',status:409});
+  assert.equal(f.push.policy().timeoutSeconds,45);
+  assert.equal(f.push.policy().version,before.version+1);
+  assert.equal(notifications,0);
+  await service.configure({...f.push.policy(),timeoutSeconds:60});
+  assert.equal(f.push.policy().timeoutSeconds,60);
+  assert.equal(notifications,2);
+  assert.equal(f.push.db.pragma('busy_timeout',{simple:true}),5000);
+});
+
+test('persistent policy write contention returns an explicit busy error without changing configuration',async t=>{
+  const f=concurrentSetup(t),service=new ConversationPushService(f.push),before=f.push.policy();
+  let notifications=0,heartbeat=0;
+  service.invalidate=()=>notifications++;service.wake=()=>notifications++;
+  f.other.db.exec('BEGIN IMMEDIATE');
+  const timer=setInterval(()=>heartbeat++,10),began=performance.now();
+  try {
+    await assert.rejects(service.configure({...before,timeoutSeconds:60}),{code:'CONVERSATION_PUSH_POLICY_BUSY',status:503});
+  } finally { clearInterval(timer);f.other.db.exec('ROLLBACK'); }
+  assert(performance.now()-began<4000);
+  assert(heartbeat>=10,'lock waits must yield to other requests and timers');
+  assert.deepEqual(f.push.policy(),before);
+  assert.equal(notifications,0);
+  assert.equal(f.push.db.pragma('busy_timeout',{simple:true}),5000);
 });
 
 test('memory deferrals preserve the single-delivery retry allowance and recover automatically',async t=>{
@@ -498,6 +560,25 @@ test('push admin endpoints enforce authentication, CSRF and collector separation
   const headers={authorization:'Session '+session.sessionToken},writes={...headers,'x-csrf-token':session.csrfToken};
   const response=await request('conversation-logs/push/policy','GET',headers);assert.equal(response.headers.get('cache-control'),'no-store');assert(!JSON.stringify(await response.json()).includes('test-private-token'));
   assert.equal((await request('conversation-logs/push/policy','PUT',headers,f.push.policy())).status,403);
+  const other=new ConversationLogStore(f.directory).openReader(),policy=f.push.policy();
+  try {
+    other.db.exec('BEGIN IMMEDIATE');
+    let attempts=0;
+    const save=f.push.configure.bind(f.push);
+    f.push.configure=(...args)=>{attempts++;return save(...args);};
+    const saving=request('conversation-logs/push/policy','PUT',writes,policy);
+    const deadline=performance.now()+1000;
+    while(!attempts&&performance.now()<deadline)await new Promise(resolve=>setTimeout(resolve,5));
+    assert(attempts,'the save request must reach the contended writer');
+    assert.equal((await fetch(base.replace('/api/','/healthz'),{signal:AbortSignal.timeout(1000)})).status,200);
+    assert.equal(f.push.policy().version,policy.version);
+    other.db.exec('ROLLBACK');
+    const saved=await saving;assert.equal(saved.status,200);
+    const body=await saved.json();assert.equal(body.version,policy.version+1);
+    assert(!JSON.stringify(body).includes('test-private-token'));
+    assert.equal(f.push.db.pragma('busy_timeout',{simple:true}),5000);
+    f.push.configure=save;
+  } finally { if(other.db.inTransaction)other.db.exec('ROLLBACK');other.close(); }
   assert.equal((await request('conversation-logs/push/jsonl/flush','POST',headers,{})).status,403);
   assert.equal((await request('conversation-logs/push/jsonl/flush','POST',writes,{})).status,409);
   assert.equal((await request('conversation-logs/push/jsonl/missing/retry','POST',headers,{})).status,403);

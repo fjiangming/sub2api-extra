@@ -363,7 +363,7 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.use('/conversation-logs/push', (_req, _res, next) => conversationPush ? next() : next(new AppError('CONVERSATION_PUSH_UNAVAILABLE', '日志推送暂不可用', { status: 503 })));
   const pushLimiter = rateLimit({ windowMs: 60000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false });
   api.get('/conversation-logs/push/policy', (_req, res) => res.json(conversationPush.policy()));
-  api.put('/conversation-logs/push/policy', csrf, pushLimiter, express.json({ limit: '4mb' }), (req, res) => res.json(conversationPush.configure(req.body)));
+  api.put('/conversation-logs/push/policy', csrf, pushLimiter, express.json({ limit: '4mb' }), asyncRoute(async (req, res) => res.json(await conversationPush.configure(req.body))));
   api.get('/conversation-logs/push/jobs', (req, res) => res.json(conversationPush.status(req.query)));
   api.get('/conversation-logs/push/billing', (req, res) => res.json(conversationPush.billing(req.query)));
   api.get('/conversation-logs/push/billing/price', (req, res) => res.json(conversationPush.pricingStatus()));

@@ -19,7 +19,7 @@ async function startMultiPreview({ port = Number(process.env.CONVERSATION_PREVIE
     const s3 = { ...policy.s3, enabled: true, name: 'S3 主存储', endpoint: primary.url, bucket: 'preview-primary',
       accessKeyId: 'fictional-preview-key', secretAccessKey: 'fictional-preview-secret', billing,
       jsonl: { ...policy.s3.jsonl, uploadMiBPerSecond: 64 } };
-    preview.push.configure({ ...policy, enabled: true, automatic: false, allowPrivateNetwork: true, s3,
+    await preview.push.configure({ ...policy, enabled: true, automatic: false, allowPrivateNetwork: true, s3,
       webhook: { ...policy.webhook, enabled: true, name: 'Webhook 接收端', url: primary.url + '/logs', billing },
       platforms: [{ ...s3, id: 'preview-replica', type: 's3', name: 'S3 备份存储', endpoint: replica.url, bucket: 'preview-replica',
         billing: { enabled: true, rates: defaultStorageRates.map(row => ({ ...row, price: row.model === 'gpt-6.2-sol' ? '60000' : row.price })) } }] });
