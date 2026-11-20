@@ -5,13 +5,13 @@
 用户要求按改造前的逻辑兼容流中断并自动重连。本轮仅改降智检测服务，保留上一轮未提交的只读排查记录及其他差异，不连接或部署服务器，不请求真实收费模型，不修改生产配置、Key 或历史。
 
 - 新增 `degradation-detector/src/model-request-recovery.js`，从 `src/detection-runner.js` 提取原有限恢复调度，原有各协议校验及短重连行为保持。明确建连失败最多 5 次短重连；明确瞬时故障默认最多 2 次补测，未知结果最多 1 次且先冷却至少 30 秒，计入总上限。保留抖动、Retry-After、停止检查及有界总时限；安全重连复用会话，实际补测新建随机会话。
-- `src/provider-pelican.js`：本地生成接入共享调度，兼容平面 / 嵌套 Responses 错误、ECONNRESET / HTTP2 / 缺完成标记等中断；已收到的 HTTP 错误不进入 5 次短重连。补测保持原模型 / 提示词 / 思考等级 / 档位与正文，生成新幂等标识；逐次独立收集作品和真实用量，不拼接残片或虚构累计 Token。保留公网固定 HTTPS、明确 completed、响应 / 作品上限；鉴权、余额 / 配额、参数、TLS、非法地址、格式、截断等错误不盲目补测。
+- `src/provider-pelican.js`：本地生成接入共享调度，兼容平面 / 嵌套 Responses 错误、ECONNRESET / HTTP2 / 缺完成标记等中断；已收到的 HTTP 错误不进入 5 次短重连。补测保持原模型 / 提示词 / 思考等级 / 档位与正文，生成新幂等标识；逐次独立收集作品和真实用量，不拼接残片或虚构累计 Token。保留公网固定 HTTPS、明确 completed、响应 / 作品上限；鉴权、余额 / 配额、参数、TLS、非法地址、格式、截断等错误不盲目补测。发布复核另补完成标记与 socket reset 的竞态保护及对应测试：已确认完整完成时保留作品，避免因完成后的断连再次付费推理；取消、超时、格式及容量检查仍生效。
 - `src/provider-detection.js`、`src/provider-results.js`、`src/provider-routes.js`：恢复等待和每次尝试写入现有 response_json 的白名单进度，仅保存有界时间 / 状态 / 脱敏码，不保存 Key、会话、请求正文和原始错误。沿用原任务绝对截止时间，恢复不延长生成 / 分类总超时；停用、配置变更和关闭停止后续请求。错误说明保留实际补测次数，最终完整作品才原子保存并提交一次分类；重启不重放未知生成 / 分类 POST。普通详情只返回恢复进度，错误码 / 上游状态仅管理员可见。
 - `src/review-http.js`：仅增加内部随机 session-id 参数及响应是否开始标记，Retry-After 兼容秒数 / HTTP 日期；没有对共享 POST 增加自动重放。`src/sub2api-client.js` 导出已有故障分类函数供生成复用。糖果、旧远程鹈鹕、TestLLM、模型身份和第三方分类保持原机制。
 - `public/provider-results.js`：原详情中显示实际重连 / 补测与等待状态，管理员可展开“生成请求记录”；保持原平台分区、柱状历史和适中作品弹窗。`README.md` 同步恢复行为、可能额外用量、总时限及已有可选环境变量，无新增依赖、必填配置、数据表或迁移。
 - 新增 `tests/provider-pelican-recovery.test.js`，更新 `tests/provider-pelican.test.js`、`tests/provider-server.test.js` 和 `scripts/provider-browser-check.cjs`：模拟线上两种断流、退避 / 次数 / opt-out / 超时 / 取消 / 停用、会话与幂等、参数不变 / 残片隔离、失败不分类及恢复后仅分类一次、重启保护、脱敏 / 权限与四布局详情回归。旧恢复测试原样保留。
 
-验证：82 个 JavaScript 文件语法检查、完整 **240 项测试（0 失败 / 跳过）**通过；包含原恢复逻辑、真实 loopback 流、新版生成恢复及完整 HTTP 权限回归。正式 Chrome / Playwright 的 1440px、390px、320px、深色四布局全部通过，无页面脚本错误、外部或真实模型请求；重连 / 补测次数、管理员请求记录、普通用户诊断隔离与原预览 / 历史操作均通过。截图 `sub2api-provider-browser-QfpHjo`，桌面管理详情和 320px 普通详情已视觉复核。语法、全量与浏览器日志分别为本机临时目录的 `sub2api-pelican-recovery-check-20261120.log`、`sub2api-pelican-recovery-tests-20261120.log`、`sub2api-pelican-recovery-ui-20261120.log`。
+验证：最终 82 个 JavaScript 文件语法检查、完整 **241 项测试（0 失败 / 跳过）**通过；包含原恢复逻辑、真实 loopback 流、新版生成恢复、完成后断连竞态及完整 HTTP 权限回归。正式 Chrome / Playwright 的 1440px、390px、320px、深色四布局全部通过，无页面脚本错误、外部或真实模型请求；重连 / 补测次数、管理员请求记录、普通用户诊断隔离与原预览 / 历史操作均通过。截图 `sub2api-provider-browser-QfpHjo`，桌面管理详情和 320px 普通详情已视觉复核。语法、全量与浏览器日志分别为本机临时目录的 `sub2api-pelican-recovery-check-20261120.log`、`sub2api-pelican-recovery-tests-20261120.log`、`sub2api-pelican-recovery-ui-20261120.log`。最后的竞态修正只涉及生成后端，完整测试重跑通过，沿用已通过的页面回归。
 
 沿用本会话已有 GitHub 提交授权，仅提交本节功能 / 测试 / 文档与台账，排除上一轮未提交的只读审计节和报告；源码提交 / 推送结果以最终回复为准。本轮所有验证使用虚构数据、模拟传输或 loopback，不代表生产链路实测；服务器生效需另行部署，已有失败历史不自动重放。
 

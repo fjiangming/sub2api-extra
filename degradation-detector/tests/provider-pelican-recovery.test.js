@@ -101,6 +101,19 @@ test('pelican handles HTTP 200 JSON failure bodies and honors a real generation 
   assert.equal(calls, 1);
 });
 
+test('a socket reset racing with accepted completion never triggers another paid generation', async () => {
+  let calls = 0;
+  const attempts = [];
+  const result = await generatePelican({ snapshot, key, signal: new AbortController().signal,
+    onAttempts: value => attempts.push(structuredClone(value)) }, async (_url, _options, onEvent) => {
+    calls++;
+    onEvent(delta); onEvent(completed);
+    throw Object.assign(new Error('synthetic socket hang up after completion'), { code: 'ECONNRESET' });
+  }, { sleep: async () => assert.fail('completed inference must not be retried') });
+  assert.equal(result.html, html); assert.equal(calls, 1);
+  assert.equal(attempts.at(-1).length, 1); assert.equal(attempts.at(-1)[0].state, 'completed');
+});
+
 test('pelican safe preconnects preserve request identity, while accepted HTTP errors use bounded recovery', async () => {
   const h = harness([{ preconnect: 'ECONNREFUSED' }, { events: [interrupted] }, success]);
   await h.generate();

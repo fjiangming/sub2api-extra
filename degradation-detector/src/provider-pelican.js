@@ -64,18 +64,23 @@ async function generatePelican({ snapshot, key, signal, maxResponseBytes, taskKe
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      await request(endpoint, { method: 'POST', body, apiKey: key, secrets: [key],
-        signal: AbortSignal.any([signal, controller.signal]), maxResponseBytes, sessionId,
-        taskKey: taskKey && recoveryAttempt ? `${taskKey}-recovery-${recoveryAttempt}` : taskKey }, event => {
-        if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
-          if (firstTokenMs == null && event.delta) firstTokenMs = now() - attemptStarted;
-          deltas += event.delta;
-        }
-        if (['response.completed', 'response.failed', 'response.incomplete', 'response.cancelled', 'error'].includes(event.type)) {
-          terminal = event;
-          return false;
-        }
-      });
+      try {
+        await request(endpoint, { method: 'POST', body, apiKey: key, secrets: [key],
+          signal: AbortSignal.any([signal, controller.signal]), maxResponseBytes, sessionId,
+          taskKey: taskKey && recoveryAttempt ? `${taskKey}-recovery-${recoveryAttempt}` : taskKey }, event => {
+          if (event.type === 'response.output_text.delta' && typeof event.delta === 'string') {
+            if (firstTokenMs == null && event.delta) firstTokenMs = now() - attemptStarted;
+            deltas += event.delta;
+          }
+          if (['response.completed', 'response.failed', 'response.incomplete', 'response.cancelled', 'error'].includes(event.type)) {
+            terminal = event;
+            return false;
+          }
+        });
+      } catch (error) {
+        // A socket failure after confirmed completion must not cause another paid inference.
+        if (terminal?.type !== 'response.completed' || terminal.response?.status !== 'completed' || terminal.response.error || !canRecoverTransport(error)) throw error;
+      }
       ensureCurrent();
       if (terminal?.type !== 'response.completed' || terminal.response?.status !== 'completed' || terminal.response.error) {
         throw generationFailure(terminal);
