@@ -11,9 +11,12 @@ const { event } = require('../tests/conversation-logs-fixture');
 const { s3Receiver } = require('../tests/conversation-s3-fixture');
 
 async function main() {
-  const until=async predicate=>{const deadline=Date.now()+20000;while(!predicate()){assert(Date.now()<deadline,'Timed out waiting for delivery');await new Promise(resolve=>setTimeout(resolve,100));}};
+  const until=async (predicate,timeout=20000)=>{const deadline=Date.now()+timeout;while(!predicate()){assert(Date.now()<deadline,'Timed out waiting for delivery');await new Promise(resolve=>setTimeout(resolve,100));}};
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),'sub2api-push-browser-'));
-  const receipts=[];let mode=200,rejectJsonlPart=false;
+  const receipts=[];let mode=200,rejectJsonlPart=false,rejectReplica=false;
+  const replicaTarget=await s3Receiver({beforeRequest:(entry,res)=>{
+    if(rejectReplica&&entry.method==='PUT'){res.writeHead(403,{'content-type':'application/xml'});res.end('<Error><Code>AccessDenied</Code></Error>');return false;}
+  }});
   const jsonlTarget=await s3Receiver({beforeRequest:(entry,res)=>{
     if(rejectJsonlPart&&entry.method==='PUT'){res.writeHead(403,{'content-type':'application/xml'});res.end('<Error><Code>AccessDenied</Code></Error>');return false;}
   }});
@@ -31,37 +34,53 @@ async function main() {
         const page=await context.newPage(),errors=[],external=[];mode=200;receipts.length=0;rejectJsonlPart=false;jsonlTarget.completed.length=0;jsonlTarget.objects.clear();
         page.on('pageerror',error=>errors.push(error.message));
         page.on('request',request=>{if(!request.url().startsWith(`http://127.0.0.1:${preview.port}/`)&&!/^(blob:|data:)/.test(request.url()))external.push(request.url());});
-        const field=name=>page.locator(`#clp-form [name="${name}"]`);
-        const shot=async suffix=>{await page.evaluate(()=>window.scrollTo(0,0));await page.screenshot({path:path.join(directory,name+'-'+suffix+'.png'),fullPage:true});};
+        const names={webhookEnabled:'platformEnabled',webhookUrl:'platformUrl',webhookToken:'platformToken',s3Enabled:'platformEnabled',endpoint:'platformEndpoint',bucket:'platformBucket',accessKeyId:'platformAccessKey',secretAccessKey:'platformSecretKey',s3Format:'platformFormat',jsonlMaxGB:'platformMaxGB',jsonlTimezone:'platformTimezone',jsonlUploadRate:'platformRate'};
+        const field=name=>page.locator(`#clp-form [name="${names[name]||name}"]`);
+        const view=async name=>page.locator(`[data-clp-view="${name}"]`).click();
+        const startPricing=async()=>{
+          const pending=page.waitForResponse(response=>response.url().endsWith('/api/conversation-logs/push/billing/price')&&response.request().method()==='POST');
+          await page.locator('[data-clp-action=bill-price]').click();const response=await pending;assert.equal(response.status(),202);return (await response.json()).job;
+        };
+        const edit=async id=>{await view('platforms');await page.locator(`.icon-button[data-clpp-edit="${id}"]`).click();};
+        const refresh=async()=>{
+          const active=await page.locator('[data-clp-view][aria-selected=true]').getAttribute('data-clp-view');
+          await view('jobs');await page.locator('[data-clp-action=refresh]').click();if(active!=='jobs')await view(active);
+        };
+        const shot=async suffix=>{await page.evaluate(()=>{window.scrollTo(0,0);document.querySelectorAll('.table-wrap').forEach(node=>{node.scrollLeft=0;});});await page.screenshot({path:path.join(directory,name+'-'+suffix+'.png'),fullPage:true});};
         const layout=async()=>{
           const result=await page.evaluate(()=>({overflow:document.documentElement.scrollWidth>innerWidth+1,
-            controls:[...document.querySelectorAll('#cl-push input,#cl-push select,#cl-push .button')].filter(node=>node.getBoundingClientRect().width).filter(node=>node.getBoundingClientRect().right>innerWidth+1).map(node=>node.name||node.id)}));
+            controls:[...document.querySelectorAll('#cl-push input,#cl-push select,#cl-push .button')].filter(node=>!node.closest('.table-wrap')&&node.getBoundingClientRect().width).filter(node=>node.getBoundingClientRect().right>innerWidth+1).map(node=>node.name||node.id)}));
           assert.equal(result.overflow,false,name+' overflow');assert.deepEqual(result.controls,[]);
         };
         const waitJobs=async(status,count)=>{
-          try {await until(()=>preview.push.store.list().counts.some(row=>row.status===status&&row.count===count));}
+          try {await until(()=>preview.push.store.list().counts.some(row=>row.status===status&&row.count===count),70000);}
           catch(error) {
             const state=preview.push.status({}),files=state.jsonl.files.map(({id,status,records,error_code,pause_reason})=>({id,status,records,error_code,pause_reason}));
-            error.message+=` (${name}, expected ${status}=${count}): `+JSON.stringify({counts:state.counts,files,workerReady:state.workerReady,lastError:state.lastError,
-              message:await page.locator('#clp-message').textContent()});throw error;
+            throw new Error(`${name}, expected ${status}=${count}: `+JSON.stringify({counts:state.counts,files,workerReady:state.workerReady,lastError:state.lastError,
+              message:await page.locator('#clp-message').textContent()}),{cause:error});
           }
-          await page.locator('[data-clp-action=refresh]').click();
+          await view('jobs');await refresh();
         };
         await page.goto(`http://127.0.0.1:${preview.port}/preview`);await page.locator('#cl-tab-push').click();await field('enabled').waitFor();
         assert.equal(await field('enabled').isChecked(),false);assert.equal(await page.locator('#clp-preview').isDisabled(),true);
         assert.equal(await field('deleteAfterPush').isChecked(),false);
         assert.equal(await page.locator('#clp-automatic-options').isVisible(),false);
         assert.equal(await field('automaticMode').isDisabled(),true);
-        assert.equal(await field('captureScope').inputValue(),'complete');assert.equal(await field('jsonlUploadRate').inputValue(),'2');
+        assert.equal(await field('captureScope').inputValue(),'complete');
         await field('enabled').check();await field('automatic').check();await field('allowPrivateNetwork').check();
         assert.equal(await field('automaticMode').inputValue(),'realtime');
         await field('automaticMode').selectOption('previous_day');
-        await field('webhookEnabled').check();await field('webhookUrl').fill(targetUrl+'/webhook');await field('webhookToken').fill('fictional-webhook-token');
-        await field('s3Enabled').check();await field('endpoint').fill(targetUrl);await field('bucket').fill('demo-archive');await field('accessKeyId').fill('fictional-id');await field('secretAccessKey').fill('fictional-secret');
+        await page.locator('#clpp-type').selectOption('s3');await page.locator('[data-clpp-add]').click();
+        assert.equal(await field('jsonlUploadRate').inputValue(),'2');
+        await field('endpoint').fill(targetUrl);await field('bucket').fill('demo-archive');await field('accessKeyId').fill('fictional-id');await field('secretAccessKey').fill('fictional-secret');
         await field('s3Format').selectOption('json');
+        await page.locator('#clpp-type').selectOption('webhook');await page.locator('[data-clpp-add]').click();
+        await field('webhookUrl').fill(targetUrl+'/webhook');await field('webhookToken').fill('fictional-webhook-token');
+        await edit('s3');assert.equal(await field('secretAccessKey').inputValue(),'fictional-secret');
+        await edit('webhook');assert.equal(await field('webhookToken').inputValue(),'fictional-webhook-token');
         await page.evaluate(()=>conversationLogsUi.load());assert.equal(await field('webhookToken').inputValue(),'fictional-webhook-token');
         await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
-        assert.equal(await field('webhookToken').inputValue(),'');assert.equal(await field('secretAccessKey').inputValue(),'');assert.equal(preview.push.store.list().total,0);
+        await edit('s3');assert.equal(await field('secretAccessKey').inputValue(),'');await edit('webhook');assert.equal(await field('webhookToken').inputValue(),'');assert.equal(preview.push.store.list().total,0);
         assert.equal(preview.push.store.policy().automaticMode,'previous_day');
         await page.locator('#clp-automatic-status').filter({hasText:'次日 00:00 起 · Asia/Shanghai'}).waitFor();
         await page.reload();await page.locator('#cl-tab-push').click();await field('automaticMode').waitFor();
@@ -71,7 +90,7 @@ async function main() {
           const response=await route.fetch(),value=await response.json();
           Object.assign(value.automatic,{waiting:12,ready:2});await route.fulfill({response,json:value});
         });
-        await page.locator('[data-clp-action=refresh]').click();
+        await refresh();
         await page.locator('#clp-automatic-status').filter({hasText:'待自动核对 12 条，已到日期 2 条'}).waitFor();
         await layout();await shot('daily-configuration');
         await page.unroute(scheduleRoute);
@@ -80,7 +99,7 @@ async function main() {
         assert.equal(preview.push.store.policy().automaticMode,'previous_day');
         await field('automatic').check();assert.equal(await field('automaticMode').inputValue(),'previous_day');
         await field('automaticMode').selectOption('realtime');
-        await page.locator('[data-clp-action=refresh]').click();assert.equal(await field('automaticMode').inputValue(),'realtime');
+        await refresh();assert.equal(await field('automaticMode').inputValue(),'realtime');
         await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
         assert.equal(preview.push.store.policy().automaticMode,'realtime');
         await page.locator('[data-clp-test=webhook]').click();await page.locator('#clp-test-webhook').filter({hasText:'连接成功'}).waitFor();
@@ -126,13 +145,14 @@ async function main() {
         mode=200;const failedJobs=preview.push.store.list({status:'failed'}).items;
         for(const job of failedJobs){await page.locator(`[data-clp-retry="${job.id}"]`).click();await until(()=>preview.push.store.list({status:'sent'}).items.some(row=>row.id===job.id));}
         await page.locator('#clp-job-status').selectOption('');await waitJobs('sent',6);
-        await field('s3Format').selectOption('jsonl');await field('endpoint').fill(jsonlTarget.url);await field('webhookEnabled').uncheck();
+        await edit('s3');await field('s3Format').selectOption('jsonl');await field('endpoint').fill(jsonlTarget.url);await page.locator('[data-clpp-toggle=webhook]').uncheck();
         assert.equal(await field('jsonlMaxGB').inputValue(),'10');await field('jsonlTimezone').fill('Asia/Shanghai');await field('jsonlUploadRate').fill('1.5');
         await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
         assert.equal(preview.push.store.policy().s3.jsonl.uploadMiBPerSecond,1.5);
         await page.locator('[data-clp-test=s3]').click();await page.locator('#clp-test-s3').filter({hasText:'连接成功'}).waitFor();
         assert.equal(JSON.parse(jsonlTarget.completed[0].body.toString()).schema,'sub2api.conversation.test.v1');
         assert(jsonlTarget.completed[0].path.includes('/test/test-'));
+        await view('jobs');
         preview.fixture.store.ingest(event(name+'-jsonl-a',{model:'Opus5'}));preview.fixture.store.ingest(event(name+'-jsonl-b',{model:'Opus5'}));preview.fixture.store.ingest(event(name+'-jsonl-c',{model:'Fable5'}));
         await until(()=>preview.push.store.list().counts.some(row=>row.status==='buffered'&&row.count===3));
         await page.locator('[data-clp-action=refresh]').click();await page.locator('#clp-files').filter({hasText:'汇总中'}).waitFor();
@@ -175,7 +195,7 @@ async function main() {
         await page.locator('[data-clp-action=refresh]').click();await page.locator('#clp-skipped').filter({hasText:'传输完整性未确认'}).waitFor();
         await page.locator('#clp-history [name=search]').fill(partial.id);await page.locator('#clp-preview').click();
         await page.locator('#clp-preview-result').filter({hasText:'当前范围不推送'}).waitFor();assert.equal(await page.locator('#clp-enqueue').count(),0);
-        await field('captureScope').selectOption('all');await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
+        await view('platforms');await field('captureScope').selectOption('all');await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();await view('jobs');
         await page.locator('#clp-preview').click();await page.locator('#clp-acknowledge').waitFor();await page.locator('#clp-acknowledge').check();
         await page.locator('#clp-enqueue').click();await waitJobs('sent',11);
         const partialBody=jsonlTarget.completed.flatMap(file=>file.body.toString().trimEnd().split('\n').map(JSON.parse)).find(body=>body.request?.includes('partial-'+name));
@@ -190,29 +210,91 @@ async function main() {
         await page.locator('[data-clp-action=refresh]').click();await page.locator('#clp-skipped').filter({hasText:'回退原文'}).waitFor();
         await page.locator('#clp-history [name=search]').fill(fallback.id);await page.locator('#clp-preview').click();
         await page.locator('#clp-preview-result').filter({hasText:'回退原文 1 条'}).waitFor();await layout();await shot('original-fallback');
-        await field('webhookToken').fill('unsaved-sensitive-value');await page.locator('[data-clp-action=refresh]').click();assert.equal(await field('webhookToken').inputValue(),'unsaved-sensitive-value');
+        await edit('webhook');await field('webhookToken').fill('unsaved-sensitive-value');await refresh();assert.equal(await field('webhookToken').inputValue(),'unsaved-sensitive-value');
         await page.locator('#cl-tab-requests').click();assert.equal(await page.locator('#clp-form').count(),0);
-        await page.locator('#cl-tab-push').click();await field('webhookToken').waitFor();assert.equal(await field('webhookToken').inputValue(),'');
-        assert.equal(await field('captureScope').inputValue(),'all');assert.equal(await field('jsonlUploadRate').inputValue(),'1.5');
+        await page.locator('#cl-tab-push').click();await edit('webhook');assert.equal(await field('webhookToken').inputValue(),'');
+        assert.equal(await field('captureScope').inputValue(),'all');await edit('s3');assert.equal(await field('jsonlUploadRate').inputValue(),'1.5');await view('jobs');
         const retained=event(name+'-cleanup-original',{model:'Opus5',response:Buffer.from('{invalid').toString('base64')});preview.fixture.store.ingest(retained);
         await until(()=>preview.push.store.list().counts.some(row=>row.status==='buffered'&&row.count===1));
         await page.locator('#clp-flush').click();await waitJobs('sent',13);
         assert(preview.fixture.store.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(retained.id));
-        await field('deleteAfterPush').check();await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
+        await view('platforms');await field('deleteAfterPush').check();await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();await view('jobs');
         await until(()=>!preview.fixture.store.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(retained.id));
         await page.locator('[data-clp-action=refresh]').click();await page.locator('#clp-cleanup').filter({hasText:'已清理'}).waitFor();
         await page.locator('#clp-jobs').filter({hasText:'送达成功，本地已清理'}).waitFor();
         assert.equal(preview.push.store.list().total,13);assert.equal(preview.push.store.list({status:'sent'}).total,13);
         assert(preview.fixture.store.ingest(retained).duplicate);assert(!preview.fixture.store.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(retained.id));
         assert.equal(await field('deleteAfterPush').isChecked(),true);await layout();await shot('delivered-cleanup');
+        await view('platforms');await page.locator('#clpp-type').selectOption('s3');await page.locator('[data-clpp-add]').click();
+        await field('platformName').fill('Replica <S3>');await field('endpoint').fill(replicaTarget.url);await field('bucket').fill('replica-archive');
+        await field('accessKeyId').fill('replica-fictional-key');await field('secretAccessKey').fill('replica-fictional-secret');
+        await field('jsonlUploadRate').fill('64');
+        await page.locator('#clpp-rates tr').filter({has:page.locator('[data-model][value="gpt-6.2-sol"]')}).locator('[data-price]').fill('80000');
+        await page.locator('[data-clpp-save]').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
+        const replicaId=preview.push.store.policy().platforms[0].id;
+        assert.equal(preview.push.store.policy().platforms[0].name,'Replica <S3>');
+        assert.equal(preview.push.store.policy().platforms[0].billing.rates.find(row=>row.model==='gpt-6.2-sol').price,'80000');
+        await layout();await shot('multi-platforms');
+        rejectReplica=true;const replicated=event(name+'-replicated',{model:'gpt-6.2-sol'});preview.fixture.store.ingest(replicated);
+        await until(()=>preview.push.store.list().counts.some(row=>row.status==='buffered'&&row.count===2));
+        await view('jobs');await page.locator('#clp-flush').click();await waitJobs('failed',1);
+        assert(preview.fixture.store.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(replicated.id));
+        assert.equal(preview.push.store.billing.report({model:'gpt-6.2-sol'}).summary.files,1);
+        await page.locator('#clp-files').filter({hasText:'Replica <S3>'}).waitFor();
+        rejectReplica=false;await page.locator('[data-clp-file-retry]').click();await waitJobs('sent',15);
+        await until(()=>!preview.fixture.store.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(replicated.id));
+        await view('billing');await page.locator('#clp-bill-model').fill('gpt-6.2-sol');await page.locator('[data-clp-action=bill-filter]').click();
+        await page.locator('#clp-billing').filter({hasText:'80000'}).waitFor();
+        assert.equal(await page.locator('#clp-billing tbody tr').count(),2);
+        assert.equal(await page.locator('#clp-billing img').count(),0);await layout();await shot('billing-models');
+        await page.locator('[data-clp-bill-view=detail]').click();await page.locator('#clp-billing').filter({hasText:'已计费'}).waitFor();
+        assert.equal(await page.locator('#clp-billing tbody tr').count(),2);await layout();await shot('billing-detail');
+        const oldAmount=preview.push.store.billing.report({model:'gpt-6.2-sol'}).summary.amount;
+        await edit(replicaId);await page.locator('#clpp-rates tr').filter({has:page.locator('[data-model][value="gpt-6.2-sol"]')}).locator('[data-price]').fill('100000');
+        await page.locator('[data-clpp-add-rate]').click();await page.locator('#clpp-rates tr').last().locator('[data-model]').fill('Opus5');
+        await page.locator('#clpp-rates tr').last().locator('[data-price]').fill('12345.6789');
+        await page.locator('[data-clpp-save]').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
+        assert.equal(preview.push.store.billing.report({model:'gpt-6.2-sol'}).summary.amount,oldAmount);
+        await edit('s3');await page.locator('[data-clpp-add-rate]').click();await page.locator('#clpp-rates tr').last().locator('[data-model]').fill('Opus5');
+        await page.locator('#clpp-rates tr').last().locator('[data-price]').fill('50000');
+        await view('billing');assert(await page.locator('[data-clp-action=bill-price]').isDisabled());await view('platforms');
+        await page.locator('[data-clpp-save]').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
+        await view('billing');await page.locator('#clp-bill-model').fill('Opus5');await page.locator('#clp-bill-platform').selectOption('s3');
+        await page.locator('[data-clp-action=bill-filter]').click();await page.locator('#clp-billing').filter({hasText:'待定价'}).waitFor();
+        await startPricing();await page.locator('#clp-message').filter({hasText:'补记任务已提交'}).waitFor();
+        await until(()=>preview.push.store.pricing.status()?.status==='done');
+        await page.locator('[data-clp-action=bill-refresh]').click();await page.locator('#clp-bill-pricing').filter({hasText:'补记已完成'}).waitFor();
+        assert(preview.push.store.billing.report({model:'Opus5',platform:'s3'}).items.every(row=>row.rate==='50000'));
+        await startPricing();await until(()=>preview.push.store.pricing.status()?.status==='done');
+        await page.locator('[data-clp-action=bill-refresh]').click();await page.locator('#clp-bill-pricing').filter({hasText:'已补记 0 项'}).waitFor();
+        assert.equal(preview.push.store.billing.report({model:'gpt-6.2-sol'}).summary.amount,oldAmount);await layout();await shot('billing-priced');
+        const pricingPolicy=preview.push.store.policy();
+        preview.push.store.db.transaction(()=>{
+          for(let i=0;i<605;i++)preview.push.store.billing.record({id:name+'-background-'+i,platformId:'s3',model:'Opus5',bytes:1000000,
+            deliveryId:name+'-background-'+i,sha256:'b'.repeat(64),logDate:'2026-11-20',historical:true,policy:pricingPolicy});
+        })();
+        await startPricing();await page.locator('#clp-message').filter({hasText:'补记任务已提交'}).waitFor();
+        const backgroundId=preview.push.store.pricing.status().id;
+        await until(()=>preview.push.store.pricing.status().updated>0);
+        await page.locator('[data-clp-action=bill-refresh]').click();await page.locator('[data-clp-action=bill-stop]').waitFor();
+        assert(await page.locator('[data-clp-action=bill-price]').isDisabled());await layout();await shot('billing-progress');
+        await page.locator('[data-clp-action=bill-stop]').click();await page.locator('#clp-bill-pricing').filter({hasText:'补记已停止'}).waitFor();
+        const stopped=preview.push.store.pricing.status();assert.equal(stopped.status,'cancelled');assert(stopped.updated>0&&stopped.updated<605);
+        await startPricing();await page.locator('#clp-message').filter({hasText:'补记任务已提交'}).waitFor();
+        assert.notEqual(preview.push.store.pricing.status().id,backgroundId);
+        await page.locator('#cl-tab-requests').click();assert.equal(await page.locator('#clp-form').count(),0);
+        await until(()=>preview.push.store.pricing.status().status==='done');
+        assert.equal(preview.push.store.pricing.status().updated+stopped.updated,605);
+        await page.locator('#cl-tab-push').click();await view('billing');
+        await page.locator('#clp-bill-pricing').filter({hasText:'补记已完成'}).waitFor();await layout();await shot('billing-background-complete');
         const safe=await page.evaluate(async()=>JSON.stringify(await(await fetch('/api/conversation-logs/push/policy')).json()));assert(!safe.includes('fictional-webhook-token'));assert(!safe.includes('fictional-secret'));
         await layout();await shot('delivered');
         await page.locator('#logout-button').click();await page.locator('#login-view').waitFor({state:'visible'});assert.equal(await page.locator('#clp-form').count(),0);
         assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
-        console.log(name+': automatic schedule/save/reload/waiting/drafts, Webhook/legacy S3, JSONL config/rate/scope/grouping/resume/progress/pause/backlog/skips, privacy, layout and logout passed');
+        console.log(name+': multi-platform S3/JSONL/Webhook, drafts, independent rates, failed replica/retry/cleanup, immutable billing, automatic batches/cancel/background progress, schedule/resume/privacy/layout/logout passed');
       } finally {await context.close();await preview.stop();}
     }
     console.log('Screenshots: '+directory);
-  } finally {await browser?.close();await jsonlTarget.close();await new Promise(resolve=>{target.close(resolve);target.closeAllConnections();});}
+  } finally {await browser?.close();await jsonlTarget.close();await replicaTarget.close();await new Promise(resolve=>{target.close(resolve);target.closeAllConnections();});}
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

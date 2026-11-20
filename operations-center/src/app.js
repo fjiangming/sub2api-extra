@@ -167,7 +167,11 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
     }
   }));
   const jsonBody = express.json({ limit: '64kb' });
-  app.use((req, res, next) => req.method === 'POST' && ['/api/billing-imports', '/api/billing-imports/inspect', '/api/conversation-logs/ingest'].includes(req.path) ? next() : jsonBody(req, res, next));
+  app.use((req, res, next) => {
+    const dedicated = req.method === 'POST' && ['/api/billing-imports', '/api/billing-imports/inspect', '/api/conversation-logs/ingest'].includes(req.path) ||
+      req.method === 'PUT' && req.path === '/api/conversation-logs/push/policy';
+    return dedicated ? next() : jsonBody(req, res, next);
+  });
 
   app.get('/healthz', (_req, res) => res.json({ status: 'ok' }));
   app.get('/readyz', asyncRoute(async (_req, res) => {
@@ -359,8 +363,12 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.use('/conversation-logs/push', (_req, _res, next) => conversationPush ? next() : next(new AppError('CONVERSATION_PUSH_UNAVAILABLE', '日志推送暂不可用', { status: 503 })));
   const pushLimiter = rateLimit({ windowMs: 60000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false });
   api.get('/conversation-logs/push/policy', (_req, res) => res.json(conversationPush.policy()));
-  api.put('/conversation-logs/push/policy', csrf, pushLimiter, (req, res) => res.json(conversationPush.configure(req.body)));
+  api.put('/conversation-logs/push/policy', csrf, pushLimiter, express.json({ limit: '4mb' }), (req, res) => res.json(conversationPush.configure(req.body)));
   api.get('/conversation-logs/push/jobs', (req, res) => res.json(conversationPush.status(req.query)));
+  api.get('/conversation-logs/push/billing', (req, res) => res.json(conversationPush.billing(req.query)));
+  api.get('/conversation-logs/push/billing/price', (req, res) => res.json(conversationPush.pricingStatus()));
+  api.post('/conversation-logs/push/billing/price', csrf, pushLimiter, (req, res) => res.status(202).json(conversationPush.fillBilling(req.body)));
+  api.post('/conversation-logs/push/billing/price/:id/cancel', csrf, pushLimiter, (req, res) => res.json(conversationPush.cancelBilling(req.params.id)));
   api.post('/conversation-logs/push/jsonl/flush', csrf, pushLimiter, (req, res) => res.status(202).json(conversationPush.flush()));
   api.post('/conversation-logs/push/jsonl/:id/retry', csrf, pushLimiter, (req, res) => res.json(conversationPush.retryFile(req.params.id)));
   api.post('/conversation-logs/push/preview', csrf, pushLimiter, (req, res) => res.json(conversationPush.preview(req.body)));

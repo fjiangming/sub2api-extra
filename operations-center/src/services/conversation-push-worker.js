@@ -17,7 +17,8 @@ process.once('message', settings => {
     service = new ConversationPushService(new ConversationPushStore(archive).initialize(), { memoryBudget: budget,
       canWork: () => Date.now() < priorityUntil && !archive.hasPending(), canCleanup: () => Date.now() < cleanupUntil });
     const report = () => { if (process.connected) process.send({ type: 'status', lastError: service.lastError, lastRun: service.lastRun,
-      jsonlError: service.jsonl.lastError, jsonlRun: service.jsonl.lastRun,cleanupError:service.cleanupError }, () => {}); };
+      jsonlError: service.jsonl.lastError, jsonlRun: service.jsonl.lastRun,cleanupError:service.cleanupError,
+      pricingError:service.pricingError,pricingPause:service.pricingPause }, () => {}); };
     process.on('message', async message => {
       if (message?.type === 'priority') { priorityUntil = message.allowed === true ? Date.now() + 1000 : 0; cleanupUntil = message.cleanupAllowed === true ? Date.now() + 1000 : 0; }
       if (message?.type === 'wake') service.wake();

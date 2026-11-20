@@ -5,6 +5,7 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { fork } = require('node:child_process');
 const { ConversationPushService } = require('./conversation-push-service');
+const { target } = require('./conversation-push-policy');
 
 class ConversationPushSupervisor extends ConversationPushService {
   constructor(store, { memoryBudgetBytes, heapMiB = process.env.OPERATIONS_CENTER_PUSH_HEAP_MIB, canWork = () => true, canCleanup = () => true } = {}) {
@@ -36,6 +37,7 @@ class ConversationPushSupervisor extends ConversationPushService {
         this.lastError = message.lastError || ''; this.lastRun = message.lastRun || null;
         this.jsonl.lastError = message.jsonlError || ''; this.jsonl.lastRun = message.jsonlRun || null;
         this.cleanupError = message.cleanupError || '';
+        this.pricingError = message.pricingError || ''; this.pricingPause = message.pricingPause || '';
       }
       if (message?.type === 'test-result') { const pending = this.pending.get(message.id); if (pending) { this.pending.delete(message.id); pending.resolve(message.result); } }
     });
@@ -50,7 +52,7 @@ class ConversationPushSupervisor extends ConversationPushService {
     this.send({ type: 'initialize', directory: path.dirname(this.store.archive.directory), timezone: this.store.archive.timezone, memoryBudgetBytes: this.memoryBudgetBytes });
   }
   async test(destination) {
-    if (!['webhook','s3'].includes(destination) || !this.ready) return { status: 'failed', errorCode: 'PUSH_WORKER_UNAVAILABLE' };
+    if (!target(this.store.policy(),destination)?.enabled || !this.ready) return { status: 'failed', errorCode: 'PUSH_WORKER_UNAVAILABLE' };
     if (this.pending.size) return { status: 'failed', errorCode: 'CONVERSATION_PUSH_BUSY' };
     const id = crypto.randomUUID();
     return new Promise(resolve => {

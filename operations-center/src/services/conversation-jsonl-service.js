@@ -2,7 +2,7 @@
 
 const { ConversationJsonlStore } = require('../conversation-jsonl-store');
 const { failure } = require('./conversation-push-transport');
-const { targetHash } = require('./conversation-push-policy');
+const { targetHash,targetPolicy } = require('./conversation-push-policy');
 const { waitForTurn } = require('./conversation-jsonl-flow');
 
 class ConversationJsonlService {
@@ -16,7 +16,7 @@ class ConversationJsonlService {
     const file = this.store.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE upload_id!='' AND status!='running' AND (status='cancelled' OR upload_version=0) AND next_at<=? ORDER BY updated_at LIMIT 1").get(this.store.now());
     if (!file) return false;
     const current = this.store.push.policy();
-    const policy = targetHash(current, 's3') === file.target_hash ? current : this.store.push.policy(file.policy_version);
+    const policy = targetPolicy(targetHash(current, file.destination) === file.target_hash ? current : this.store.push.policy(file.policy_version),file.destination);
     const result = await this.transport.abortJsonl(policy, file);
     if (result.status === 'sent') this.store.clearUpload(file.id, file.upload_id);
     else this.store.db.prepare("UPDATE cl_push_jsonl_files SET next_at=? WHERE id=? AND upload_id=? AND status!='running'")
@@ -36,7 +36,7 @@ class ConversationJsonlService {
     if (this.stopping || !this.canWork()) return worked;
     const file = this.store.claim(); if (!file) return worked;
     const controller = new AbortController(); this.active = { file, controller };
-    const policy = this.store.push.policy(), archiveVersion = this.store.archive.policy().version;
+    const policy = targetPolicy(this.store.push.policy(),file.destination), archiveVersion = this.store.archive.policy().version;
     let uploadId = file.upload_id;
     const guard = () => {
       if (this.stopping || controller.signal.aborted) throw failure('ABORTED', true);

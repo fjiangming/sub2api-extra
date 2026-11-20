@@ -11,6 +11,7 @@ const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { NodeHttpHandler } = require('@smithy/node-http-handler');
 const { deliveryBody } = require('./conversation-envelope');
 const { jsonChunks } = require('./conversation-jsonl-format');
+const { target,targetPolicy } = require('./conversation-push-policy');
 const transportFailure = Symbol('conversation-push-failure');
 
 function failure(code, retryable = false, httpStatus = 0) {
@@ -65,13 +66,16 @@ class ConversationPushTransport {
     return addresses[0];
   }
   async send(policy,destination,envelope,outerSignal,{guard=()=>{}}={}) {
+    const selected=target(policy,destination);
+    if(!selected)return {status:'failed',errorCode:'TARGET_CHANGED',retryable:false};
+    policy=targetPolicy(policy,destination);destination=selected.type;
     const controller=new AbortController(),abort=()=>controller.abort();
     outerSignal?.addEventListener('abort',abort,{once:true});
     if(outerSignal?.aborted)controller.abort();
     let timedOut=false;
     const timer=setTimeout(()=>{timedOut=true;controller.abort();},policy.timeoutSeconds*1000);
     const pinned=new Map(),agents=[];
-    let client,httpStatus=0,bodyStream,preparing=true;
+    let client,httpStatus=0,bodyStream,preparing=true,objectKey='';
     const validate=async host=>{
       const address=await this.resolve(host,policy.allowPrivateNetwork,controller.signal);
       guard();
@@ -132,12 +136,13 @@ class ConversationPushTransport {
         },{step:'finalizeRequest',name:'validateConversationPushAddress',priority:'low'});
         const date=new Date(envelope.metadata?.at||Date.now()).toISOString().slice(0,10);
         const key=[target.prefix,date,envelope.delivery_id+'.json'].filter(Boolean).join('/');
+        objectKey=key;
         bodyStream=body.stream();
         const result=await client.send(new PutObjectCommand({Bucket:target.bucket,Key:key,Body:bodyStream,ContentLength:body.length,ContentType:'application/json',
           Metadata:{'delivery-id':envelope.delivery_id},ChecksumSHA256:body.checksum}),{abortSignal:controller.signal});
         httpStatus=result.$metadata.httpStatusCode;
       }
-      return {status:'sent',httpStatus};
+      return {status:'sent',httpStatus,bytes:body.length,sha256:Buffer.from(body.checksum,'base64').toString('hex'),objectKey};
     } catch(error) {
       if(preparing&&error.code==='EXPORT_REQUEST_ID')return {status:'failed',errorCode:'EXPORT_REQUEST_ID',retryable:false};
       if(preparing&&error.code==='EXPORT_MEMORY')return {status:'failed',errorCode:'EXPORT_MEMORY',retryable:true};

@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { targetHash, invalid } = require('./services/conversation-push-policy');
+const { targetHash,targets,target,targetPolicy,invalid } = require('./services/conversation-push-policy');
 const { dayAt, objectKey, jsonlBytes } = require('./services/conversation-jsonl-format');
 const { modelAllowed } = require('./services/conversation-models');
 const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversation-sensitive');
@@ -27,7 +27,6 @@ class ConversationJsonlStore {
         sealed_at INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL DEFAULT 0,
         lease_token TEXT NOT NULL DEFAULT '',lease_until INTEGER NOT NULL DEFAULT 0,upload_id TEXT NOT NULL DEFAULT '',
         sha256 TEXT NOT NULL DEFAULT '',error_code TEXT NOT NULL DEFAULT '',http_status INTEGER NOT NULL DEFAULT 0);
-        CREATE UNIQUE INDEX IF NOT EXISTS cl_push_jsonl_open ON cl_push_jsonl_files(target_hash,source,model,day) WHERE status='open';
         CREATE INDEX IF NOT EXISTS cl_push_jsonl_due ON cl_push_jsonl_files(status,next_at);
         CREATE INDEX IF NOT EXISTS cl_push_jsonl_jobs ON cl_push_jobs(jsonl_file_id,status);
         CREATE TABLE IF NOT EXISTS cl_push_jsonl_members(
@@ -38,9 +37,11 @@ class ConversationJsonlStore {
         INSERT OR IGNORE INTO cl_push_jsonl_control VALUES(1,0);`);
       const columns = new Set(this.db.pragma('table_info(cl_push_jsonl_files)').map(row => row.name));
       for (const [name, definition] of [['upload_version','INTEGER NOT NULL DEFAULT 0'],['uploaded_bytes','INTEGER NOT NULL DEFAULT 0'],
-        ['uploaded_parts','INTEGER NOT NULL DEFAULT 0'],['pause_reason',"TEXT NOT NULL DEFAULT ''"],['first_at','INTEGER NOT NULL DEFAULT 0'],['envelope_version','INTEGER NOT NULL DEFAULT 1']]) {
+        ['uploaded_parts','INTEGER NOT NULL DEFAULT 0'],['pause_reason',"TEXT NOT NULL DEFAULT ''"],['first_at','INTEGER NOT NULL DEFAULT 0'],['envelope_version','INTEGER NOT NULL DEFAULT 1'],['destination',"TEXT NOT NULL DEFAULT 's3'"]]) {
         if (!columns.has(name)) this.db.exec(`ALTER TABLE cl_push_jsonl_files ADD COLUMN ${name} ${definition}`);
       }
+      this.db.exec(`DROP INDEX IF EXISTS cl_push_jsonl_open;
+        CREATE UNIQUE INDEX IF NOT EXISTS cl_push_jsonl_platform_open ON cl_push_jsonl_files(destination,target_hash,source,model,day) WHERE status='open';`);
       this.db.exec(`CREATE TABLE IF NOT EXISTS cl_push_jsonl_parts(
         file_id TEXT NOT NULL REFERENCES cl_push_jsonl_files(id) ON DELETE CASCADE,number INTEGER NOT NULL,
         bytes INTEGER NOT NULL,etag TEXT NOT NULL,sha256 TEXT NOT NULL,PRIMARY KEY(file_id,number));`);
@@ -51,10 +52,13 @@ class ConversationJsonlStore {
     })();
     return this;
   }
-  enabled(policy = this.push.policy()) { return policy.enabled && policy.s3.enabled && policy.s3.format === 'jsonl'; }
+  enabled(policy = this.push.policy(),destination) {
+    return policy.enabled && targets(policy).some(item=>item.type==='s3'&&item.format==='jsonl'&&(!destination||item.id===destination)&&
+      (item.enabled||this.db.prepare("SELECT 1 FROM cl_push_jobs WHERE destination=? AND status IN ('pending','buffered','running','failed') LIMIT 1").get(item.id)));
+  }
   get(id) { return this.db.prepare('SELECT * FROM cl_push_jsonl_files WHERE id=?').get(id); }
   list() {
-    const files = this.db.prepare(`SELECT id,model,day,object_key,source,status,bytes,records,attempts,created_at,updated_at,error_code,http_status,sha256,
+    const files = this.db.prepare(`SELECT id,destination,model,day,object_key,source,status,bytes,records,attempts,created_at,updated_at,error_code,http_status,sha256,
       uploaded_bytes,uploaded_parts,pause_reason,first_at,envelope_version
       FROM cl_push_jsonl_files ORDER BY created_at DESC,id DESC LIMIT 30`).all();
     const backlog = this.db.prepare(`SELECT COUNT(*) files,COALESCE(SUM(bytes),0) bytes,COALESCE(SUM(records),0) records,
@@ -73,10 +77,13 @@ class ConversationJsonlStore {
       .run(memory || retryable && attempts < policy.maxAttempts ? 'pending' : 'failed', attempts, code, this.now() + policy.retrySeconds * 1000, this.now(), job.id);
   }
   assignOne() {
-    const policy = this.push.policy(); if (!this.enabled(policy)) return false;
-    const job = this.db.prepare("SELECT * FROM cl_push_jobs WHERE destination='s3' AND status='pending' AND next_at<=? ORDER BY created_at,id LIMIT 1").get(this.now());
+    const currentPolicy = this.push.policy(); if (!this.enabled(currentPolicy)) return false;
+    const ids=targets(currentPolicy).filter(item=>item.type==='s3'&&item.format==='jsonl').map(item=>item.id);
+    const job = this.db.prepare(`SELECT * FROM cl_push_jobs WHERE destination IN (${ids.map(()=>'?').join(',')}) AND status='pending' AND next_at<=? ORDER BY created_at,id LIMIT 1`).get(...ids,this.now());
     if (!job) return false;
+    const policy=targetPolicy(currentPolicy,job.destination);
     const valid = this.push.validJob(job, policy);
+    if(valid.paused)return false;
     if (valid.cancel) {
       this.db.prepare("UPDATE cl_push_jobs SET status='cancelled',error_code=?,updated_at=? WHERE id=? AND status='pending'").run(valid.cancel, this.now(), job.id);
       return true;
@@ -99,8 +106,8 @@ class ConversationJsonlStore {
     return this.db.transaction(() => {
       const current = this.db.prepare('SELECT status FROM cl_push_jobs WHERE id=?').get(job.id);
       if (current?.status !== 'pending' || this.push.policy().version !== policy.version || this.push.validJob(job).cancel) return true;
-      let file = this.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE target_hash=? AND source=? AND model=? AND day=? AND status='open'")
-        .get(job.target_hash, job.source, envelope.metadata.model, day);
+      let file = this.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE destination=? AND target_hash=? AND source=? AND model=? AND day=? AND status='open'")
+        .get(job.destination,job.target_hash, job.source, envelope.metadata.model, day);
       if (file && (file.envelope_version !== job.envelope_version ||
         file.object_key !== objectKey(policy.s3.prefix, file.day, file.model, file.created_at, file.id))) {
         this.seal(file.id); file = null;
@@ -108,9 +115,9 @@ class ConversationJsonlStore {
       if (file && file.bytes + bytes > limit) { this.seal(file.id); file = null; }
       if (!file) {
         const id = crypto.randomBytes(16).toString('hex'), at = this.now();
-        this.db.prepare(`INSERT INTO cl_push_jsonl_files(id,target_hash,source,model,day,object_key,policy_version,archive_version,status,created_at,updated_at,envelope_version)
-          VALUES(?,?,?,?,?,?,?,?,'open',?,?,?)`).run(id, job.target_hash, job.source, envelope.metadata.model, day,
-          objectKey(policy.s3.prefix, day, envelope.metadata.model, at, id), policy.version, this.archive.policy().version, at, at, job.envelope_version);
+        this.db.prepare(`INSERT INTO cl_push_jsonl_files(id,target_hash,source,model,day,object_key,policy_version,archive_version,status,created_at,updated_at,envelope_version,destination)
+          VALUES(?,?,?,?,?,?,?,?,'open',?,?,?,?)`).run(id, job.target_hash, job.source, envelope.metadata.model, day,
+          objectKey(policy.s3.prefix, day, envelope.metadata.model, at, id), policy.version, this.archive.policy().version, at, at, job.envelope_version,job.destination);
         file = this.get(id);
       }
       const cutoff = this.db.prepare('SELECT flush_before FROM cl_push_jsonl_control WHERE singleton=1').get().flush_before;
@@ -130,14 +137,15 @@ class ConversationJsonlStore {
   }
   sealDue() {
     const policy = this.push.policy(); if (!this.enabled(policy)) return 0;
-    const backlog = this.db.prepare("SELECT 1 FROM cl_push_jobs WHERE destination='s3' AND status='pending' AND target_hash=? LIMIT 1").get(targetHash(policy, 's3'));
     const automaticBacklog = this.push.automaticBacklog();
     let count = 0;
     const retention = this.archive.policy().retention;
     for (const file of this.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE status='open'").all()) {
-      const elapsed = policy.s3.jsonl.flushMinutes && this.now() - file.created_at >= policy.s3.jsonl.flushMinutes * 60000;
+      const destination=target(policy,file.destination);if(!destination||destination.type!=='s3'||destination.format!=='jsonl')continue;
+      const backlog=this.db.prepare("SELECT 1 FROM cl_push_jobs WHERE destination=? AND status='pending' AND target_hash=? LIMIT 1").get(file.destination,file.target_hash);
+      const elapsed = destination.jsonl.flushMinutes && this.now() - file.created_at >= destination.jsonl.flushMinutes * 60000;
       const expiring = retention && file.first_at && file.first_at + retention * 86400000 <= this.now() + 6 * 3600000;
-      if (elapsed || expiring || !backlog && (file.force_flush || !automaticBacklog && file.day !== dayAt(this.now(), policy.s3.jsonl.timezone))) count += this.seal(file.id);
+      if (elapsed || expiring || !backlog && (file.force_flush || !automaticBacklog && file.day !== dayAt(this.now(), destination.jsonl.timezone))) count += this.seal(file.id);
     }
     return count;
   }
@@ -146,13 +154,14 @@ class ConversationJsonlStore {
     return this.db.transaction(() => {
       this.db.prepare('UPDATE cl_push_jsonl_control SET flush_before=? WHERE singleton=1').run(this.now());
       const files = this.db.prepare("UPDATE cl_push_jsonl_files SET force_flush=1 WHERE status='open'").run().changes;
-      const queued = this.db.prepare("SELECT COUNT(*) n FROM cl_push_jobs WHERE destination='s3' AND status='pending'").get().n;
+      const ids=targets(this.push.policy()).filter(item=>item.type==='s3'&&item.format==='jsonl').map(item=>item.id);
+      const queued = this.db.prepare(`SELECT COUNT(*) n FROM cl_push_jobs WHERE destination IN (${ids.map(()=>'?').join(',')}) AND status='pending'`).get(...ids).n;
       return { files, queued };
     }).immediate();
   }
   invalidReason(file, { full = false } = {}) {
-    const policy = this.push.policy();
-    if (policy.source !== file.source || policy.s3.format !== 'jsonl' || targetHash(policy, 's3') !== file.target_hash) return 'TARGET_CHANGED';
+    const policy = this.push.policy(),destination=target(policy,file.destination||'s3');
+    if (policy.source !== file.source || destination?.type!=='s3' || destination.format !== 'jsonl' || targetHash(policy, file.destination||'s3') !== file.target_hash) return 'TARGET_CHANGED';
     const archivePolicy = this.archive.policy();
     if (!modelAllowed(archivePolicy, file.model)) return 'COLLECTION_EXCLUDED';
     const counts = this.db.prepare(`SELECT COUNT(*) total,SUM(CASE WHEN j.status IN ('buffered','failed') AND j.jsonl_file_id=m.file_id AND j.envelope_version=? THEN 1 ELSE 0 END) valid
@@ -217,7 +226,8 @@ class ConversationJsonlStore {
   claim() {
     const policy = this.push.policy(); if (!this.enabled(policy)) return null;
     return this.db.transaction(() => {
-      const file = this.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE status='pending' AND (upload_id='' OR upload_version=1) AND next_at<=? ORDER BY sealed_at,id LIMIT 1").get(this.now());
+      const ids=targets(policy).filter(item=>item.type==='s3'&&item.format==='jsonl').map(item=>item.id);
+      const file = this.db.prepare(`SELECT * FROM cl_push_jsonl_files WHERE destination IN (${ids.map(()=>'?').join(',')}) AND status='pending' AND (upload_id='' OR upload_version=1) AND next_at<=? ORDER BY sealed_at,id LIMIT 1`).get(...ids,this.now());
       if (!file) return null;
       const token = crypto.randomUUID();
       this.db.prepare("UPDATE cl_push_jsonl_files SET status='running',attempts=attempts+1,error_code='',http_status=0,lease_token=?,lease_until=?,updated_at=? WHERE id=? AND status='pending'")
@@ -301,13 +311,14 @@ class ConversationJsonlStore {
       if (!changed) return 0;
       this.db.prepare("UPDATE cl_push_jobs SET status=?,attempts=?,error_code=?,http_status=?,updated_at=? WHERE jsonl_file_id=? AND status='buffered'")
         .run(status === 'sent' ? 'sent' : status === 'failed' ? 'failed' : 'buffered', attempts, result.errorCode || '', result.httpStatus || 0, this.now(), file.id);
+      if(status==='sent')this.push.billing.recordFile(this.get(file.id),policy);
       return changed;
     }).immediate();
   }
   retry(id) {
     const file = this.get(id);
     const policy = this.push.policy();
-    if (!file || file.status !== 'failed' || !this.enabled(policy) || policy.source !== file.source || targetHash(policy, 's3') !== file.target_hash) {
+    if (!file || file.status !== 'failed' || !this.enabled(policy,file.destination) || policy.source !== file.source || targetHash(policy, file.destination) !== file.target_hash) {
       throw invalid('请先核对 JSONL 文件、当前目标和日志副本', 'CONVERSATION_PUSH_RETRY_BLOCKED', 409);
     }
     this.db.transaction(() => {

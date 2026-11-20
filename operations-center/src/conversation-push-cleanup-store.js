@@ -1,6 +1,6 @@
 'use strict';
 
-const { targetHash } = require('./services/conversation-push-policy');
+const { targetHash,target,targets:policyTargets } = require('./services/conversation-push-policy');
 
 const historyColumns = 'id,record_id,destination,source,delivery_source,delivery_fallback_reason,envelope_version,batch_id,status,attempts,next_at,created_at,updated_at,error_code,http_status,model,user_id,local_deleted_at,request_id';
 const historySource = `(SELECT j.id,j.record_id,j.destination,j.source,j.delivery_source,j.delivery_fallback_reason,j.envelope_version,j.batch_id,j.status,j.attempts,j.next_at,j.created_at,j.updated_at,j.error_code,j.http_status,r.model,r.user_id,0 local_deleted_at,r.request_id
@@ -22,6 +22,7 @@ class ConversationPushCleanupStore {
       CREATE INDEX IF NOT EXISTS cl_push_receipt_batch ON cl_push_receipts(batch_id);
       CREATE INDEX IF NOT EXISTS cl_push_receipt_order ON cl_push_receipts(created_at DESC,id DESC);
       CREATE INDEX IF NOT EXISTS cl_push_history_order ON cl_push_jobs(created_at DESC,id DESC);
+      CREATE INDEX IF NOT EXISTS cl_push_batch_unfinished ON cl_push_jobs(batch_id) WHERE status!='sent' OR http_status<200 OR http_status>=300;
       CREATE TRIGGER IF NOT EXISTS cl_push_cleanup_sent AFTER UPDATE OF status ON cl_push_jobs WHEN NEW.status='sent' AND OLD.status!='sent'
         BEGIN INSERT OR IGNORE INTO cl_push_cleanup_queue(record_id,next_at) VALUES(NEW.record_id,NEW.updated_at); END;`);
     return this;
@@ -49,15 +50,19 @@ class ConversationPushCleanupStore {
       const jobs = this.db.prepare(`SELECT id,record_id,destination,target_hash,source,content_version,batch_id,status,attempts,created_at,updated_at,
         http_status,delivery_source,delivery_fallback_reason,delivery_version,envelope_version,jsonl_file_id FROM cl_push_jobs WHERE record_id=?`).all(row.id);
       let reason = row.processing_pending ? 'processing' : jobs.some(job => job.status !== 'sent' || job.http_status < 200 || job.http_status >= 300) ? 'delivery_pending' : '';
-      const targets = ['webhook', 's3'].filter(target => policy[target].enabled);
-      if (!targets.length) reason = 'delivery_pending';
-      for (const target of targets) if (!jobs.some(job => job.destination === target && job.target_hash === targetHash(policy, target) &&
-        job.source === policy.source && job.content_version === this.push.version(row, policy.source) &&
-        (!job.delivery_source || job.delivery_version === this.push.version(row, job.delivery_source)))) reason = 'content_changed';
+      const targets = [...new Set([...jobs.map(job=>job.destination),...policyTargets(policy).filter(target=>target.enabled&&(target.id==='s3'||target.id==='webhook')).map(target=>target.id)])];
+      if (!jobs.length) reason = 'delivery_pending';
+      for (const id of targets) {
+        const configured=target(policy,id),expected=configured&&(configured.endpoint||configured.url)?targetHash(policy,id):'';
+        if (!jobs.some(job => job.destination === id && (!expected||job.target_hash === expected) &&
+          job.source === policy.source && job.content_version === this.push.version(row, policy.source) &&
+          (!job.delivery_source || job.delivery_version === this.push.version(row, job.delivery_source)))) reason = 'content_changed';
+      }
       for (const job of jobs) if (job.jsonl_file_id) {
         const file = this.db.prepare('SELECT status,object_key,sha256,bytes,uploaded_bytes FROM cl_push_jsonl_files WHERE id=?').get(job.jsonl_file_id);
         if (!file || file.status !== 'sent' || !/^[a-f0-9]{64}$/.test(file.sha256) || file.uploaded_bytes !== file.bytes) reason = 'delivery_pending';
       }
+      for(const batchId of new Set(jobs.map(job=>job.batch_id).filter(Boolean)))if(this.db.prepare("SELECT 1 FROM cl_push_jobs WHERE batch_id=? AND (status!='sent' OR http_status<200 OR http_status>=300) LIMIT 1").get(batchId))reason='delivery_pending';
       if (reason) {
         this.db.prepare('UPDATE cl_push_cleanup_queue SET next_at=?,reason=? WHERE record_id=?').run(this.now() + 30000, reason, row.id);
         return { deleted: false, reason };

@@ -7,11 +7,13 @@ const { modelAllowed } = require('./services/conversation-models');
 const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversation-sensitive');
 const { ENVELOPE_VERSION, formatBodies, formatDeliveryBodies } = require('./services/conversation-envelope');
 const { processingBudgets } = require('./services/conversation-memory');
-const { defaults,normalizePolicy,parsePolicy,publicPolicy,targetHash,invalid } = require('./services/conversation-push-policy');
+const { defaults,normalizePolicy,parsePolicy,publicPolicy,targetHash,targets:policyTargets,target,platformIdSchema,invalid } = require('./services/conversation-push-policy');
+const { ConversationStorageBillingStore } = require('./conversation-storage-billing-store');
+const { ConversationStoragePricingStore } = require('./conversation-storage-pricing-store');
 const { ConversationPushCleanupStore, historyColumns, historySource } = require('./conversation-push-cleanup-store');
 const { metadataStatus, pushMetadataStatus } = require('./services/conversation-metadata');
 
-const destinations = z.array(z.enum(['webhook','s3'])).min(1).max(2);
+const destinations = z.array(platformIdSchema).min(1).max(20);
 const filterSchema = z.object({search:z.string().max(200).optional(),start:z.string().max(32).optional(),end:z.string().max(32).optional(),
   user_id:z.string().max(20).optional(),key_id:z.string().max(20).optional(),request_id:z.string().max(32).optional(),session_id:z.string().max(64).optional(),
   protocol:z.enum(['','JSON','SSE','WebSocket']).optional(),capture:z.enum(['','complete','partial','missing','redaction_failed']).optional()}).strict();
@@ -54,6 +56,8 @@ class ConversationPushStore {
       this.policy();
     })();
     this.cleanup = new ConversationPushCleanupStore(this).initialize();
+    this.billing = new ConversationStorageBillingStore(this).initialize();
+    this.pricing = new ConversationStoragePricingStore(this).initialize();
     return this;
   }
   latest() { return {cursor_id:this.db.prepare("SELECT seq FROM sqlite_sequence WHERE name='cl_push_arrivals'").get()?.seq || 0,id:''}; }
@@ -65,6 +69,8 @@ class ConversationPushStore {
   configure(input) {
     return this.db.transaction(()=>{
       const before=this.policy(),after=parsePolicy(input,before);
+      for(const previous of policyTargets(before))if(!target(after,previous.id)&&this.db.prepare("SELECT 1 FROM cl_push_jobs WHERE destination=? AND status!='sent' LIMIT 1").get(previous.id))throw invalid('平台仍有未完成任务，请先完成推送','CONVERSATION_PUSH_PLATFORM_BUSY',409);
+      for(const id of ['webhook','s3'])if((before[id].url||before[id].endpoint)&&!(after[id].url||after[id].endpoint)&&this.db.prepare("SELECT 1 FROM cl_push_jobs WHERE destination=? AND status!='sent' LIMIT 1").get(id))throw invalid('平台仍有未完成任务，请先完成推送','CONVERSATION_PUSH_PLATFORM_BUSY',409);
       this.db.prepare('INSERT INTO cl_push_policies VALUES(?,?,?)').run(after.version,this.archive.seal(after,'push-policy:'+after.version),this.now());
       if(!before.enabled || !before.automatic || !after.enabled || !after.automatic) this.setCursor(this.latest());
       return publicPolicy(after);
@@ -104,7 +110,7 @@ class ConversationPushStore {
     const value=parse(previewSchema,input),policy=this.policy(),archivePolicy=this.archive.policy();
     if(!policy.enabled) throw invalid('请先启用推送','CONVERSATION_PUSH_DISABLED',409);
     const targets=[...new Set(value.destinations)].sort();
-    if(targets.some(target=>!policy[target].enabled)) throw invalid('所选目标未启用');
+    if(targets.some(id=>!target(policy,id)?.enabled)) throw invalid('所选目标未启用');
     if (!metadataStatus(this.db).ready) throw invalid('历史日志索引仍在后台准备，请稍后重新预览','CONVERSATION_PUSH_HISTORY_PREPARING',409);
     const where=this.archive.where(value.filter,true);
     const rows=this.db.prepare(`SELECT ${columns} FROM cl_record_metadata${where.sql} ORDER BY at,id LIMIT 10001`).all(...where.args);
@@ -158,7 +164,7 @@ class ConversationPushStore {
   }
   automaticBacklog() {
     const policy=this.policy();
-    if (!policy.enabled || !policy.automatic || !policy.s3.enabled) return false;
+    if (!policy.enabled || !policy.automatic || !policyTargets(policy).some(item=>item.enabled&&item.type==='s3')) return false;
     const cutoff=this.automaticCutoff(policy);
     if (this.db.prepare(`SELECT 1 FROM cl_push_auto_waiting${cutoff === null ? '' : ' WHERE at<?'} LIMIT 1`).get(...(cutoff === null ? [] : [cutoff]))) return true;
     return cutoff !== null && Boolean(this.db.prepare(`SELECT 1 FROM cl_push_arrivals a LEFT JOIN cl_record_metadata m ON m.id=a.record_id
@@ -169,7 +175,7 @@ class ConversationPushStore {
       const policy=this.policy();
       if(!policy.enabled||!policy.automatic){this.setCursor(this.latest());return {created:0};}
       const cutoff=this.automaticCutoff(policy);
-      const archivePolicy=this.archive.policy(),targets=['webhook','s3'].filter(target=>policy[target].enabled);
+      const archivePolicy=this.archive.policy(),targets=policyTargets(policy).filter(item=>item.enabled).map(item=>item.id);
       let created=0,pending=this.pendingCount();
       const publish=row=>{
         if (!row.id || !row.fingerprint) return 'preparing';
@@ -217,7 +223,8 @@ class ConversationPushStore {
   }
   metadata(id) { return this.db.prepare(`SELECT ${columns} FROM cl_record_metadata WHERE id=?`).get(id); }
   validJob(job,policy=this.policy()) {
-    if(!policy.enabled||!policy[job.destination].enabled)return {paused:true};
+    if(!policy.enabled)return {paused:true};
+    if(!target(policy,job.destination))return {cancel:'TARGET_CHANGED'};
     if(policy.source!==job.source||targetHash(policy,job.destination)!==job.target_hash)return {cancel:'TARGET_CHANGED'};
     const row=this.metadata(job.record_id);
     if(!row && !this.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(job.record_id))return {cancel:'RECORD_EXPIRED'};
@@ -256,9 +263,11 @@ class ConversationPushStore {
     return this.db.transaction(()=>{
       const policy=this.policy();if(!policy.enabled)return null;
       this.db.prepare("UPDATE cl_push_jobs SET status=CASE WHEN attempts<? THEN 'pending' ELSE 'failed' END,error_code='DELIVERY_UNKNOWN',lease_token='',lease_until=0 WHERE status='running' AND lease_until<=?").run(policy.maxAttempts,this.now());
-      const targets=['webhook','s3'].filter(target=>policy[target].enabled && !(single && target==='s3' && policy.s3.format==='jsonl'));
+      const targets=policyTargets(policy).filter(item=>!(single&&item.type==='s3'&&item.format==='jsonl')).map(item=>item.id);
       if(!targets.length)return null;
-      const candidates=this.db.prepare(`SELECT * FROM cl_push_jobs WHERE status='pending' AND next_at<=? AND destination IN (${targets.map(()=>'?').join(',')}) ORDER BY next_at,created_at,id LIMIT 100`).all(this.now(),...targets);
+      const active=policyTargets(policy).filter(item=>item.enabled).map(item=>item.id);
+      const candidates=this.db.prepare(`SELECT * FROM cl_push_jobs WHERE status='pending' AND next_at<=? AND destination IN (${targets.map(()=>'?').join(',')})
+        ORDER BY CASE WHEN destination IN (${active.map(()=>'?').join(',')||"''"}) THEN 0 ELSE 1 END,next_at,created_at,id LIMIT 100`).all(this.now(),...targets,...active);
       for(const job of candidates){
         const valid=this.validJob(job,policy);
         if(valid.paused)continue;
@@ -272,11 +281,19 @@ class ConversationPushStore {
       return null;
     })();
   }
-  finish(job,{status,errorCode='',httpStatus=0,retryable=false}) {
+  finish(job,{status,errorCode='',httpStatus=0,retryable=false,bytes,sha256,objectKey=''}) {
     const policy=this.policy(),memory=errorCode==='EXPORT_MEMORY',attempts=Math.max(0,job.attempts-Number(memory));
     const retry=memory||retryable&&attempts<policy.maxAttempts;
-    return this.db.prepare("UPDATE cl_push_jobs SET status=?,attempts=?,error_code=?,http_status=?,next_at=?,lease_token='',lease_until=0,updated_at=? WHERE id=? AND status='running' AND lease_token=?")
-      .run(retry?'pending':status,attempts,errorCode,httpStatus,this.now()+Math.min(3600000,policy.retrySeconds*1000*2**Math.max(0,attempts-1)),this.now(),job.id,job.lease_token).changes;
+    return this.db.transaction(()=>{
+      const changed=this.db.prepare("UPDATE cl_push_jobs SET status=?,attempts=?,error_code=?,http_status=?,next_at=?,lease_token='',lease_until=0,updated_at=? WHERE id=? AND status='running' AND lease_token=?")
+        .run(retry?'pending':status,attempts,errorCode,httpStatus,this.now()+Math.min(3600000,policy.retrySeconds*1000*2**Math.max(0,attempts-1)),this.now(),job.id,job.lease_token).changes;
+      if(changed&&!retry&&status==='sent'&&httpStatus>=200&&httpStatus<300){
+        const row=this.metadata(job.record_id);
+        if(row)this.billing.record({id:'job:'+job.id,platformId:job.destination,model:row.model,bytes,deliveryId:job.id,objectKey,sha256,
+          logDate:DateTime.fromMillis(row.at,{zone:target(policy,job.destination)?.jsonl?.timezone||policy.s3.jsonl.timezone}).toISODate(),policy});
+      }
+      return changed;
+    })();
   }
   retry(id) {
     const job=this.db.prepare('SELECT * FROM cl_push_jobs WHERE id=?').get(id);

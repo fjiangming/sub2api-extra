@@ -1,7 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { publicPolicy, invalid } = require('./conversation-push-policy');
+const { publicPolicy,target,targetPolicy,invalid } = require('./conversation-push-policy');
 const { ConversationPushTransport } = require('./conversation-push-transport');
 const { ConversationJsonlService } = require('./conversation-jsonl-service');
 const { dayAt, objectKey, jsonlBytes } = require('./conversation-jsonl-format');
@@ -11,6 +11,7 @@ class ConversationPushService {
   constructor(store,{transport=new ConversationPushTransport(),jsonlOptions,canWork=() => true,canCleanup=() => true,memoryBudget=processingBudgets}={}) {
     this.store=store;this.transport=transport;this.stopping=false;this.active=null;this.lastError='';this.lastRun=null;this.testing=false;
     this.canWork=canWork;this.canCleanup=canCleanup;this.memoryBudget=memoryBudget;this.cleanupError='';this.nextCleanup=0;this.nextPrune=0;
+    this.pricingPause='';this.pricingError='';
     this.jsonl=new ConversationJsonlService(store,transport,{memoryBudget,...jsonlOptions,canWork:()=>canWork()&&!this.active&&!this.testing});
   }
   policy() { return publicPolicy(this.store.policy()); }
@@ -18,10 +19,22 @@ class ConversationPushService {
   invalidate() { this.active?.controller.abort();this.testController?.abort();this.jsonl.invalidate(); }
   status(query) { return {...this.store.list(query),automatic:this.store.automaticStatus(),jsonl:this.jsonl.store.list(),cleanup:{...this.store.cleanup.status(),error:this.cleanupError},lastError:this.jsonl.lastError||this.lastError,lastRun:this.jsonl.lastRun||this.lastRun,enabled:this.store.policy().enabled}; }
   maintain() {
-    if (this.stopping || this.active || this.testing || this.jsonl.active || !this.canWork() || !this.canCleanup() || this.store.now()<this.nextCleanup) return;
+    this.pricingPause=this.stopping?'stopped':!this.canWork()||!this.canCleanup()?'foreground':this.active||this.testing||this.jsonl.active?'push':'';
+    if (this.pricingPause || this.store.now()<this.nextCleanup) return;
     this.nextCleanup=this.store.now()+1000;
+    const pricing=this.store.pricing.pending(),policy=this.store.policy();
+    if (pricing && (this.pricingTurn!==false || !policy.enabled || !policy.deleteAfterPush)) {
+      this.pricingTurn=false;
+      try {
+        const result=this.store.pricing.step({canWork:()=>!this.stopping&&this.canWork()&&this.canCleanup()});
+        this.pricingError=result.busy?'CONVERSATION_STORAGE_PRICING_BUSY':'';
+      } catch { this.pricingError='CONVERSATION_STORAGE_PRICING_RETRY'; }
+      return;
+    }
+    this.pricingTurn=true;
     try {
       if (this.store.now()>=this.nextPrune) {this.store.cleanup.prune();this.nextPrune=this.store.now()+5000;}
+      if(!pricing)this.store.billing.backfill();
       if (!this.store.policy().enabled || !this.store.policy().deleteAfterPush) return;
       const began=Date.now();
       for (let index=0;index<16 && Date.now()-began<25 && this.canWork() && this.canCleanup();index++) {
@@ -42,17 +55,28 @@ class ConversationPushService {
   retryFile(id) { const result=this.jsonl.store.retry(id);this.wake();return result; }
   flush() { const result=this.jsonl.store.flush();this.wake();return result; }
   cancelBatch(id) { const result=this.store.cancelBatch(id);this.invalidate();this.wake();return result; }
+  pricingStatus() {
+    const job=this.store.pricing.status(),active=job&&['pending','running'].includes(job.status);
+    return {job,workerReady:this.ready!==false,pauseReason:active?(this.ready===false?'worker':!this.canWork()||!this.canCleanup()?'foreground':this.pricingError?'retry':this.pricingPause):'',error:active?this.pricingError:''};
+  }
+  billing(query) { return {...this.store.billing.report(query),pricing:this.pricingStatus()}; }
+  fillBilling(input) {
+    const job=this.store.pricing.request(input);
+    setImmediate(()=>{if(!this.stopping)this.wake();});
+    return {job};
+  }
+  cancelBilling(id) { return {job:this.store.pricing.cancel(id)}; }
   async test(destination) {
-    if(!['webhook','s3'].includes(destination))throw invalid();
-    const policy=this.store.policy();
-    if(!policy[destination].enabled)throw invalid('请先保存并启用目标');
+    const selected=target(this.store.policy(),destination);
+    if(!selected?.enabled)throw invalid('请先保存并启用目标');
+    const policy=targetPolicy(this.store.policy(),destination);
     if(this.testing)throw invalid('连接测试正在执行','CONVERSATION_PUSH_BUSY',409);
     this.testing=true;
     const controller=new AbortController();this.testController=controller;
     try {
       const envelope={schema:'sub2api.conversation.test.v1',delivery_id:'test-'+crypto.randomUUID(),at:Date.now()};
       const hooks={guard:()=>{if(this.store.policy().version!==policy.version||this.stopping)throw new Error('POLICY_CHANGED');}};
-      if(destination==='s3'&&policy.s3.format==='jsonl') {
+      if(selected.type==='s3'&&policy.s3.format==='jsonl') {
         const id=crypto.randomBytes(16).toString('hex');
         const file={id,source:'test',records:1,bytes:jsonlBytes(envelope),object_key:objectKey(policy.s3.prefix,dayAt(envelope.at,policy.s3.jsonl.timezone),'test',envelope.at,id)};
         this.testRun=(async()=>{
