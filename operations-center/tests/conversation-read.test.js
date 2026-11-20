@@ -8,7 +8,7 @@ const zlib = require('node:zlib');
 const {setTimeout:delay} = require('node:timers/promises');
 const {fixture,event,removeMetadata} = require('./conversation-logs-fixture');
 const {ConversationLogStore} = require('../src/conversation-log-store');
-const {projection} = require('../src/services/conversation-metadata');
+const {projection,initializeMetadata,pushMetadataStatus} = require('../src/services/conversation-metadata');
 const {ConversationReadService} = require('../src/services/conversation-read-service');
 const {ConversationArchiveService} = require('../src/services/conversation-archive-service');
 const {ConversationCleanupStore} = require('../src/conversation-cleanup-store');
@@ -92,6 +92,48 @@ for (const operation of ['update','delete']) test('backfill cannot overwrite a c
   f.store.backfillMetadata();assert(raced);assert(f.store.metadataStatus().ready);
   if (operation==='update') assert.equal(f.store.detail(row.id).processing_error,'PROCESSING_FAILED');
   else assert.equal(f.store.list().items.length,0);
+});
+
+test('legacy push fingerprints migrate lazily without changing list readiness or ciphertext',t => {
+  const f=fixture();t.after(()=>f.close());
+  for (let index=0;index<2;index++) f.store.ingest(event('push-migration-'+index));
+  const saved=f.store.db.prepare('SELECT id,original,masked,fingerprint FROM cl_records ORDER BY id').all();
+  f.store.db.exec(`DROP TRIGGER cl_metadata_insert; DROP TRIGGER cl_metadata_update; DROP INDEX cl_metadata_push_pending;
+    ALTER TABLE cl_record_metadata DROP COLUMN fingerprint`);
+  const prepare=f.store.db.prepare.bind(f.store.db);
+  f.store.db.prepare=sql=>{assert(!/FROM cl_records/i.test(sql),'initialization must not read legacy body overflow pages');return prepare(sql);};
+  initializeMetadata(f.store.db);f.store.db.prepare=prepare;
+  assert.deepEqual(f.store.metadataStatus(),{ready:true,indexed:2,total:2});
+  assert.deepEqual(pushMetadataStatus(f.store.db),{ready:false,indexed:0,total:2});
+  assert.equal(f.store.list().summary.total,2);assert.equal(f.store.exportIndex().count,2);
+  assert(!f.store.backfillMetadata().done);assert.equal(pushMetadataStatus(f.store.db).indexed,1);
+  finishIndex(f.store);assert.deepEqual(pushMetadataStatus(f.store.db),{ready:true,indexed:2,total:2});
+  assert.deepEqual(f.store.db.prepare('SELECT id,original,masked,fingerprint FROM cl_records ORDER BY id').all(),saved);
+  for (const row of saved) assert.equal(f.store.db.prepare('SELECT fingerprint FROM cl_record_metadata WHERE id=?').get(row.id).fingerprint,row.fingerprint);
+});
+
+for (const operation of ['update','delete','replace']) test('push fingerprint backfill preserves a concurrent '+operation,t=>{
+  const f=fixture(),other=new ConversationLogStore(f.directory).initialize();t.after(()=>{other.close();f.close();});
+  const row=event('push-fingerprint-race-'+operation);f.store.ingest(row);
+  f.store.db.prepare("UPDATE cl_record_metadata SET fingerprint='' WHERE id=?").run(row.id);
+  const prepare=f.store.db.prepare.bind(f.store.db);let raced=false;
+  f.store.db.prepare=sql=>{
+    const statement=prepare(sql);
+    if (sql==='SELECT fingerprint FROM cl_records WHERE id=?') return {get(id) {
+      const value=statement.get(id);raced=true;
+      if (operation==='update') other.db.prepare("UPDATE cl_records SET processing_error='PROCESSING_FAILED' WHERE id=?").run(id);
+      else {
+        other.db.prepare('DELETE FROM cl_records WHERE id=?').run(id);
+        if (operation==='replace') assert(other.ingest({...row,response:Buffer.from('{"changed":true}').toString('base64')}).accepted);
+      }
+      return value;
+    }};
+    return statement;
+  };
+  f.store.backfillMetadata();assert(raced);assert(pushMetadataStatus(f.store.db).ready);
+  const source=prepare('SELECT fingerprint,processing_error FROM cl_records WHERE id=?').get(row.id);
+  assert.deepEqual(prepare('SELECT fingerprint,processing_error FROM cl_record_metadata WHERE id=?').get(row.id),source);
+  if (operation==='update') assert.equal(source.processing_error,'PROCESSING_FAILED');
 });
 
 async function setup(t,options={}) {
@@ -213,4 +255,16 @@ test('background indexing yields to archive activity and interactive reads, and 
   const interactive=f.get('status');canWork=false;fs.rmSync(marker);
   assert.equal((await interactive).status,200,'preempted reader must restart before serving the first request');
   canWork=true;await until(()=>f.store.metadataStatus().ready);assert.equal(f.store.list().summary.total,1);
+});
+
+test('list and status responses keep background push migration scheduled until fingerprints are ready',async t=>{
+  let canWork=false;const f=await setup(t,{canWork:()=>canWork,intervalMs:30});
+  f.store.ingest(event('push-worker-migration'));f.store.db.exec("UPDATE cl_record_metadata SET fingerprint=''");
+  for (const target of ['records','status']) {
+    const value=await(await f.get(target)).json();assert.equal(value.metadataIndex.ready,true);
+    assert.equal(f.read.needsIndex,true,'list readiness must not stop push fingerprint preparation');
+  }
+  assert.equal(pushMetadataStatus(f.store.db).ready,false);
+  canWork=true;f.read.start();await until(()=>pushMetadataStatus(f.store.db).ready);
+  await until(()=>!f.read.needsIndex);assert.equal(f.store.list().summary.total,1);
 });

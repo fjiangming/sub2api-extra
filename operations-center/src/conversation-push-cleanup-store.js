@@ -4,7 +4,7 @@ const { targetHash } = require('./services/conversation-push-policy');
 
 const historyColumns = 'id,record_id,destination,source,delivery_source,delivery_fallback_reason,envelope_version,batch_id,status,attempts,next_at,created_at,updated_at,error_code,http_status,model,user_id,local_deleted_at,request_id';
 const historySource = `(SELECT j.id,j.record_id,j.destination,j.source,j.delivery_source,j.delivery_fallback_reason,j.envelope_version,j.batch_id,j.status,j.attempts,j.next_at,j.created_at,j.updated_at,j.error_code,j.http_status,r.model,r.user_id,0 local_deleted_at,r.request_id
-  FROM cl_push_jobs j JOIN cl_records r ON r.id=j.record_id
+  FROM cl_push_jobs j LEFT JOIN cl_record_metadata r ON r.id=j.record_id
   UNION ALL SELECT id,record_id,destination,source,delivery_source,delivery_fallback_reason,envelope_version,batch_id,'sent',attempts,0,created_at,updated_at,'',http_status,model,NULL,local_deleted_at,request_id FROM cl_push_receipts)`;
 
 class ConversationPushCleanupStore {

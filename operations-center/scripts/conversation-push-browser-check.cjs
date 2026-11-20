@@ -68,6 +68,29 @@ async function main() {
         for(const item of sent){assert.deepEqual(Object.keys(item.body),['request_id','request','response']);assert.equal(item.body.request_id,row.request_id);assert(!item.body.request.includes('alice@example.com'));}
         assert(sent.some(item=>item.headers.authorization?.startsWith('AWS4-HMAC-SHA256')));
         assert(sent.some(item=>preview.push.store.list().items.some(job=>job.id===item.headers['idempotency-key'])));
+        const previewRoute='**/api/conversation-logs/push/preview';let releasePreview;
+        const waiting=new Promise(resolve=>{releasePreview=resolve;});
+        await page.route(previewRoute,async route=>{
+          await waiting;await route.fulfill({status:409,contentType:'application/json',body:JSON.stringify({error:{code:'CONVERSATION_PUSH_HISTORY_PREPARING',message:'所选历史日志的推送索引仍在后台准备，请稍后重新预览'}})});
+        });
+        await page.locator('#clp-preview').click();await page.locator('#clp-preview-status').filter({hasText:'正在预览'}).waitFor();
+        assert(await page.locator('#clp-preview').isDisabled());await layout();await shot('preview-loading');releasePreview();
+        await page.locator('#clp-preview-status.amber').filter({hasText:'后台准备'}).waitFor();
+        await page.waitForFunction(()=>!document.querySelector('#clp-preview').disabled);
+        assert.equal(await page.locator('#clp-enqueue').count(),0);await layout();await shot('preview-preparing');
+        await page.unroute(previewRoute);await page.route(previewRoute,route=>route.abort('failed'));
+        await page.locator('#clp-preview').click();await page.locator('#clp-preview-status.amber').filter({hasText:'运营中心连接失败'}).waitFor();
+        await page.unroute(previewRoute);
+        const jobsRoute='**/api/conversation-logs/push/jobs?*';
+        await page.route(jobsRoute,route=>route.abort('failed'));
+        await page.locator('[data-clp-action=refresh]').click();await page.locator('#clp-message.amber').filter({hasText:'运营中心连接失败'}).waitFor();
+        await page.unroute(jobsRoute);await page.route(jobsRoute,async route=>{
+          const response=await route.fetch(),value=await response.json();value.metadataIndex={ready:false,indexed:2,total:3};
+          await route.fulfill({response,json:value});
+        });
+        await page.locator('[data-clp-action=refresh]').click();await page.locator('#clp-index').filter({hasText:'2 / 3'}).waitFor();
+        assert.equal(await page.locator('#clp-message').textContent(),'');await page.unroute(jobsRoute);
+        await page.locator('[data-clp-action=refresh]').click();await page.waitForFunction(()=>document.querySelector('#clp-index').textContent==='');
         await page.locator('#clp-history [name=search]').fill(preview.raw.id);await page.locator('#clp-preview').click();await page.locator('#clp-acknowledge').waitFor();
         assert.equal(await page.locator('#clp-enqueue').isDisabled(),true);await page.locator('#clp-acknowledge').check();await layout();await shot('preview');
         await page.locator('#clp-enqueue').dblclick();await waitJobs('sent',4);assert.equal(preview.push.store.list().batches.length,1);

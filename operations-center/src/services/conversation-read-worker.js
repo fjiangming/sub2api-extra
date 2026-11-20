@@ -7,6 +7,7 @@ const { ConversationLogStore } = require('../conversation-log-store');
 const { AppError } = require('../errors');
 const { processingBudget } = require('./conversation-memory');
 const { sendPayload } = require('./conversation-read-response');
+const { pushMetadataStatus } = require('./conversation-metadata');
 
 process.once('message', async settings => {
   if (settings?.type !== 'initialize' || !settings.secret) return process.exit(1);
@@ -28,15 +29,25 @@ process.once('message', async settings => {
         throw new AppError('CONVERSATION_READ_MEMORY','当前读取内存不足，原文保留，请稍后重试',{status:409});
       }
     }
-    app.post('/index-next', (_req,res) => res.json(store.backfillMetadata()));
+    app.post('/index-next', async (_req,res,next) => {
+      try {
+        const began = Date.now();let result;
+        for (let count=0;count<32;count++) {
+          result = store.backfillMetadata();
+          if (result.done || Date.now()-began>=50) break;
+          await new Promise(resolve => setImmediate(resolve));
+        }
+        res.json(result);
+      } catch (error) { next(error); }
+    });
     app.get('/status', (req,res) => {
       const live = JSON.parse(req.get('x-conversation-live') || '{}');
       const value = store.status();
-      res.set('x-conversation-metadata-ready',String(value.metadataIndex.ready)).json({...value,...live});
+      res.set('x-conversation-metadata-ready',String(pushMetadataStatus(store.db).ready)).json({...value,...live});
     });
     app.get('/records', (req,res) => {
       const value = store.list(req.query);
-      res.set('x-conversation-metadata-ready',String(value.metadataIndex.ready)).json(value);
+      res.set('x-conversation-metadata-ready',String(pushMetadataStatus(store.db).ready)).json(value);
     });
     app.get('/sessions', (req,res) => res.json(store.sessions(req.query)));
     app.get('/index', (req,res) => res.json(store.exportIndex(req.query)));

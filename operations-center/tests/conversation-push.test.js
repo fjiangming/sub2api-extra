@@ -134,6 +134,78 @@ test('manual batches bind preview to content and policy, deduplicate, and requir
   assert.equal(f.push.claim(),null);assert.equal(f.push.list().items[0].error_code,'COLLECTION_EXCLUDED');
 });
 
+test('preview, enqueue, automatic scan and job history use compact metadata with unchanged content versions',t=>{
+  const f=setup(t);configure(f,{automatic:true,captureScope:'all'});
+  const row=event('push-compact');f.store.ingest(row);
+  const source=f.store.db.prepare('SELECT * FROM cl_records WHERE id=?').get(row.id);
+  const expectedId=f.push.jobId(source,f.push.policy(),'webhook');
+  const prepare=f.store.db.prepare.bind(f.store.db);
+  f.store.db.prepare=sql=>{
+    if (/FROM cl_records/i.test(sql)) assert(/^SELECT \(SELECT COUNT\(\*\) FROM cl_records\)/.test(sql),'interactive push paths must not access archive body rows');
+    return prepare(sql);
+  };
+  const selected=batch(f);assert.equal(selected.preview.matched,1);assert.equal(selected.result.created,1);
+  assert.equal(f.push.list().items[0].id,expectedId);
+  assert.equal(f.push.scanAutomatic().created,0);assert.equal(batch(f).preview.duplicates,1);
+  assert.equal(f.push.validJob(f.push.claim()).row.fingerprint,source.fingerprint);
+  for (const filter of [{capture:'partial'},{capture:'missing'},{capture:'redaction_failed'},{user_id:'3'}]) {
+    assert.equal(f.push.preview({filter,destinations:['webhook']}).matched,0);
+  }
+  assert.equal(f.push.preview({filter:{capture:'complete'},destinations:['webhook']}).matched,1);
+  assert.deepEqual(f.push.list().metadataIndex,{ready:true,indexed:1,total:1});
+});
+
+test('over-limit historical previews reject using compact metadata before touching body rows or creating tasks',t=>{
+  const f=setup(t);configure(f);f.store.ingest(event('push-limit-seed'));
+  const fields=f.store.db.pragma('table_info(cl_records)').map(row=>row.name);
+  f.store.db.prepare(`WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM numbers WHERE n<10000)
+    INSERT INTO cl_records(${fields}) SELECT ${fields.map(field=>field==='id'?"printf('%032x',n)":'r.'+field)}
+    FROM numbers CROSS JOIN cl_records r WHERE r.id=?`).run(event('push-limit-seed').id);
+  f.store.db.exec("UPDATE cl_record_metadata SET fingerprint=''");
+  const prepare=f.store.db.prepare.bind(f.store.db);
+  f.store.db.prepare=sql=>{
+    if (/FROM cl_records/i.test(sql)) assert(/^SELECT \(SELECT COUNT\(\*\) FROM cl_records\)/.test(sql),'over-limit check must not scan legacy body rows');
+    return prepare(sql);
+  };
+  const input={filter:{},destinations:['webhook']};
+  assert.throws(()=>f.push.preview(input),/10,000/);
+  assert.throws(()=>f.push.enqueue({...input,batchId:crypto.randomUUID(),previewToken:'0'.repeat(64)}),/10,000/);
+  assert.equal(f.push.list().total,0);assert.equal(f.push.list().batches.length,0);
+});
+
+test('unprepared history returns an explicit retryable preview error without dropping jobs or advancing automatic arrivals',t=>{
+  const f=setup(t);configure(f,{automatic:true});
+  const first=event('push-preparing-first'),second=event('push-preparing-second');
+  f.store.ingest(first);const saved=batch(f,{request_id:first.request_id}),job=f.push.db.prepare('SELECT * FROM cl_push_jobs LIMIT 1').get();
+  f.store.ingest(second);f.store.db.prepare("UPDATE cl_record_metadata SET fingerprint='' WHERE id=?").run(first.id);
+  const cursor=f.push.db.prepare('SELECT row_id FROM cl_push_cursor').get().row_id;
+  const input={filter:{},destinations:['webhook']};
+  assert.throws(()=>f.push.preview(input),{code:'CONVERSATION_PUSH_HISTORY_PREPARING',status:409});
+  assert(f.push.scanAutomatic().preparing);assert.equal(f.push.db.prepare('SELECT row_id FROM cl_push_cursor').get().row_id,cursor);
+  assert(f.push.validJob(job).paused);assert.equal(f.push.claim(),null);assert.equal(f.push.list().items[0].status,'pending');
+  assert.deepEqual(f.push.list().metadataIndex,{ready:false,indexed:1,total:2});
+  assert.equal(f.push.preview({filter:{request_id:second.request_id},destinations:['webhook']}).jobs,1,'prepared subsets remain available');
+  f.store.backfillMetadata();assert.equal(f.push.scanAutomatic().created,1);
+  assert.equal(f.push.preview({filter:{request_id:first.request_id},destinations:['webhook']}).previewToken,saved.preview.previewToken);
+  assert.equal(f.push.list().total,2);assert.equal(f.push.list().items.find(row=>row.record_id===first.id).id,job.id);
+  f.store.db.prepare('DELETE FROM cl_record_metadata WHERE id=?').run(first.id);
+  assert.throws(()=>f.push.preview(input),{code:'CONVERSATION_PUSH_HISTORY_PREPARING'});
+  assert(f.push.validJob(job).paused);assert.equal(f.push.list().total,2,'warming must not hide existing task history');
+  f.store.db.prepare('DELETE FROM cl_records WHERE id=?').run(first.id);assert.equal(f.push.validJob(job).cancel,'RECORD_EXPIRED');
+});
+
+test('automatic arrivals stop at a missing compact row and resume without skipping a later prepared record',t=>{
+  const f=setup(t);configure(f,{automatic:true});
+  const first=event('push-missing-first'),second=event('push-missing-second');
+  f.store.ingest(first);f.store.ingest(second);f.store.db.prepare('DELETE FROM cl_record_metadata WHERE id=?').run(first.id);
+  const cursor=f.push.db.prepare('SELECT row_id FROM cl_push_cursor').get().row_id;
+  assert(f.push.scanAutomatic().preparing);assert.equal(f.push.list().total,0);
+  assert.equal(f.push.db.prepare('SELECT row_id FROM cl_push_cursor').get().row_id,cursor);
+  f.store.backfillMetadata();assert.equal(f.push.scanAutomatic().created,2);
+  assert.equal(f.push.scanAutomatic().created,0);
+  assert.deepEqual(f.push.list().items.map(row=>row.record_id).sort(),[first.id,second.id].sort());
+});
+
 test('auto queue starts with new logs, resumes across DB restart, and survives rowid reuse after retention',t=>{
   let now=Date.now();const f=setup(t,{now:()=>now});
   f.store.ingest(event('history'));configure(f,{automatic:true});assert.equal(f.push.scanAutomatic().created,0);

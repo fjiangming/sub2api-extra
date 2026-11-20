@@ -9,7 +9,7 @@
     Object.assign(errors,{MASKED_READ_FAILED:'脱敏副本读取失败',EXPORT_REQUEST_ID:'归档请求 ID 缺失或无效，请检查对应日志'});
     const fileStates={open:'汇总中',pending:'待上传',running:'上传中',sent:'已送达',failed:'失败',cancelled:'已取消'};
     const $=id=>container.querySelector('#clp-'+id),base='/api/conversation-logs/push/';
-    let policy=null,dirty=false,busy=false,mounted=false,epoch=0,controller=null,jobsController=null,jobsSeq=0,timer=null,page=1,preview=null,batchBody=null;
+    let policy=null,dirty=false,busy=false,mounted=false,epoch=0,controller=null,jobsController=null,jobsSeq=0,timer=null,page=1,preview=null,batchBody=null,jobsError='';
     const actions=new Set();
     const number=value=>new Intl.NumberFormat('zh-CN').format(value||0);
     const time=value=>value?new Date(value).toLocaleString('zh-CN',{hour12:false}):'—';
@@ -21,16 +21,19 @@
     const toggle=(name,label,checked)=>`<label class="clp-toggle"><span>${label}</span><input type="checkbox" name="${name}" ${checked?'checked':''}></label>`;
     const field=(name,label,value,type='text',attrs='')=>`<label>${label}<input name="${name}" type="${type}" value="${esc(value??'')}" ${attrs}></label>`;
     function message(value='',bad=false) { if($('message')){$('message').textContent=value;$('message').classList.toggle('amber',bad);} }
+    function errorText(error) {return /failed to fetch|networkerror|load failed|network request failed/i.test(error.message||'')
+      ?'运营中心连接失败，请稍后重试；若持续出现，请检查服务状态':error.message;}
+    function previewNotice(value='',bad=false) {if($('preview-status')){$('preview-status').textContent=value;$('preview-status').classList.toggle('amber',bad);}}
     function run(task) {
       const current=epoch;
-      Promise.resolve().then(task).catch(error=>{if(current===epoch&&isActive()&&error.name!=='AbortError')message(error.message,true);});
+      Promise.resolve().then(task).catch(error=>{if(current===epoch&&isActive()&&error.name!=='AbortError')message(errorText(error),true);});
     }
     function shell() {
       container.innerHTML=`<div class="cl-section-heading"><h2>推送策略</h2><span id="clp-state"></span></div><div id="clp-message" class="cl-notice" role="status"></div><div id="clp-config"></div><div id="clp-cleanup" class="cl-notice" role="status"></div>
-        <section class="clp-section" aria-labelledby="clp-history-title"><div class="cl-section-heading"><h2 id="clp-history-title">历史批量推送</h2><span>每批最多 10,000 条日志</span></div>
+        <section class="clp-section" aria-labelledby="clp-history-title"><div class="cl-section-heading"><h2 id="clp-history-title">历史批量推送</h2><span>每批最多 10,000 条日志</span></div><div id="clp-index" class="cl-notice" role="status"></div>
         <form id="clp-history"><div class="cl-filters">${field('search','模型 / 请求 / 用户','')}${field('start','开始日期','','date')}${field('end','结束日期','','date')}${field('user_id','用户 ID','','number','min="1"')}${field('key_id','Key ID','','number','min="1"')}
         <label>协议<select name="protocol"><option value="">全部协议</option><option>JSON</option><option>SSE</option><option>WebSocket</option></select></label><label>采集状态<select name="capture"><option value="">全部状态</option><option value="complete">完整采集</option><option value="partial">部分采集</option><option value="missing">正文缺失</option><option value="redaction_failed">处理异常</option></select></label></div>
-        <div id="clp-destinations" class="cl-modes"></div><div class="clp-actions"><button class="button secondary" type="submit" id="clp-preview">${icon('list-filter')}预览批次</button><span id="clp-source" class="cl-muted"></span></div></form>
+        <div id="clp-destinations" class="cl-modes"></div><div class="clp-actions"><button class="button secondary" type="submit" id="clp-preview">${icon('list-filter')}预览批次</button><span id="clp-source" class="cl-muted"></span></div><div id="clp-preview-status" class="cl-notice" role="status" aria-live="polite"></div></form>
         <div id="clp-preview-result"></div></section>
         <section id="clp-files-section" class="clp-section" aria-labelledby="clp-files-title"><div class="cl-section-heading"><h2 id="clp-files-title">JSONL 文件</h2><button type="button" class="button secondary" id="clp-flush" data-clp-action="flush">${icon('upload')}立即上传待汇总日志</button></div><div id="clp-backlog" class="cl-notice" role="status"></div><div id="clp-files"></div></section>
         <section class="clp-section" aria-labelledby="clp-jobs-title"><div class="cl-section-heading"><h2 id="clp-jobs-title">推送记录</h2><div class="clp-actions"><select id="clp-job-status" aria-label="推送状态"><option value="">全部状态</option>${Object.entries(states).map(([key,label])=>`<option value="${key}">${label}</option>`).join('')}</select>${tool('refresh-cw','刷新推送记录','data-clp-action="refresh"')}</div></div>
@@ -95,19 +98,23 @@
       for(const key of ['search','start','end','user_id','key_id','protocol','capture'])if(data.get(key))filter[key]=String(data.get(key));
       return {filter,destinations:data.getAll('destination')};
     }
-    function clearPreview() {preview=null;batchBody=null;if($('preview-result'))$('preview-result').innerHTML='';}
+    function clearPreview() {preview=null;batchBody=null;if($('preview-result'))$('preview-result').innerHTML='';previewNotice();}
     async function previewBatch() {
       if(busy||dirty||!policy.enabled)return;
-      const input=selection(),current=epoch;busy=true;updateControls();message();
+      const input=selection(),current=epoch;clearPreview();busy=true;updateControls();message();previewNotice('正在预览批次，请稍候');
       try {
         const value=await api(base+'preview',{method:'POST',body:JSON.stringify(input),signal:controller.signal});
-        if(current!==epoch||!isActive()||JSON.stringify(selection())!==JSON.stringify(input))return;
+        if(current!==epoch||!isActive())return;
+        if(JSON.stringify(selection())!==JSON.stringify(input)){previewNotice('筛选条件已变化，请重新预览');return;}
         preview=value;batchBody={...input,batchId:crypto.randomUUID(),previewToken:value.previewToken};
         $('preview-result').innerHTML=`<div class="clp-preview"><dl class="cl-facts">${[['匹配日志',value.matched],['可推送日志',value.eligible],['回退原文',value.fallbacks],['规则排除',value.excluded],['暂不可推送',value.unavailable],['已有任务',value.duplicates],['新增任务',value.jobs]].map(([label,count])=>`<div><dt>${label}</dt><dd>${number(count)}</dd></div>`).join('')}</dl>${value.jobs?`<label class="clp-check"><input type="checkbox" id="clp-acknowledge">确认将 ${number(value.eligible)} 条${policy.source==='original'?'原文':'脱敏优先（不可用则原文）'}日志推送至 ${input.destinations.map(target=>target==='s3'?'S3':'Webhook').join('、')}</label><div class="clp-actions"><button id="clp-enqueue" type="button" class="button" data-clp-action="enqueue" disabled>${icon('send')}加入推送队列</button></div>`:'<p class="cl-muted">没有需要新增的推送任务</p>'}</div>`;
         const unavailable=reasons(value.unavailableReasons);
         if(unavailable)$('preview-result').insertAdjacentHTML('beforeend',`<p class="cl-notice">${esc(unavailable)}</p>`);
         if(value.fallbacks)$('preview-result').insertAdjacentHTML('beforeend',`<p class="cl-notice amber">回退原文 ${number(value.fallbacks)} 条，可能含敏感信息。${esc(reasons(value.fallbackReasons))}</p>`);
+        previewNotice(`预览完成 · 匹配 ${number(value.matched)} 条 · 新增 ${number(value.jobs)} 个任务`);
         $('acknowledge')?.addEventListener('change',updateControls);refreshIcons();
+      } catch(error) {
+        if(current===epoch&&isActive()&&error.name!=='AbortError')previewNotice(errorText(error),true);
       } finally {if(current===epoch){busy=false;updateControls();}}
     }
     async function enqueue() {
@@ -124,6 +131,8 @@
       return `<tr><td><strong>${esc(file.model||'未提供模型')}</strong><small>${esc(file.day)}</small></td><td><code class="clp-object-key">${esc(file.object_key)}</code></td><td>${number(file.records)} 条<small>${esc(size(file.bytes))}</small><progress class="clp-progress" max="${file.bytes||1}" value="${uploaded}" aria-label="已确认上传进度"></progress><small>${esc(size(uploaded))} / ${esc(size(file.bytes))} · ${number(file.uploaded_parts)} 个分片</small></td><td><span class="cl-badge ${file.status==='sent'?'green':['failed','cancelled'].includes(file.status)?'amber':''}">${fileStates[file.status]||esc(file.status)}</span><small>${esc(['sent','cancelled'].includes(file.status)?'':paused)}</small><small>${esc(errors[file.error_code]||file.error_code||'')}</small></td><td>${file.status==='failed'?tool('rotate-cw','继续上传此 JSONL 文件',`data-clp-file-retry="${esc(file.id)}"`):''}</td></tr>`;
     }
     function renderJobs(value) {
+      const index=value.metadataIndex;
+      $('index').textContent=index&&!index.ready?`历史推送准备中 · 已就绪 ${number(index.indexed)} / ${number(index.total)} 条，后台会继续处理`:'';
       const cleanup=value.cleanup;
       $('cleanup').hidden=!cleanup?.enabled;
       $('cleanup').textContent=cleanup?.enabled?`送达后清理 · 已清理 ${number(cleanup.deleted)} 条 · 已移除 ${size(cleanup.bytes)} · 待核对 ${number(cleanup.pending)} 条${cleanup.error?' · 本地清理暂缓，后台将重试':''}`:'';
@@ -146,8 +155,13 @@
     async function refreshJobs() {
       if(!isActive()||!mounted)return;
       const current=epoch,seq=++jobsSeq;jobsController?.abort();jobsController=new AbortController();
-      const value=await api(base+'jobs?'+new URLSearchParams({page:String(page),status:$('job-status').value}),{signal:jobsController.signal});
-      if(current!==epoch||seq!==jobsSeq||!isActive())return;renderJobs(value);
+      try {
+        const value=await api(base+'jobs?'+new URLSearchParams({page:String(page),status:$('job-status').value}),{signal:jobsController.signal});
+        if(current!==epoch||seq!==jobsSeq||!isActive())return;renderJobs(value);
+        if(jobsError&&$('message').textContent===jobsError)message();jobsError='';
+      } catch(error) {
+        if(current===epoch&&seq===jobsSeq&&isActive()&&error.name!=='AbortError'){jobsError=errorText(error);message(jobsError,true);}
+      }
     }
     async function testTarget(destination) {
       if(busy||dirty)return;
@@ -187,12 +201,12 @@
       const value=await api(base+'policy',{signal:controller.signal});
       if(current!==epoch||!isActive())return;
       if(!dirty){if(policy?.version!==value.version)clearPreview();renderPolicy(value);}
-      await refreshJobs();
       if(!timer)timer=setInterval(()=>run(refreshJobs),5000);
+      await refreshJobs();
     }
     function leave() {
       ++epoch;++jobsSeq;controller?.abort();jobsController?.abort();clearInterval(timer);timer=null;
-      policy=null;dirty=false;busy=false;mounted=false;preview=null;batchBody=null;actions.clear();container.innerHTML='';page=1;
+      policy=null;dirty=false;busy=false;mounted=false;preview=null;batchBody=null;jobsError='';actions.clear();container.innerHTML='';page=1;
     }
     container.addEventListener('click',click);
     return {load,leave};

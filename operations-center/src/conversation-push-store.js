@@ -8,6 +8,7 @@ const { ENVELOPE_VERSION, formatBodies, formatDeliveryBodies } = require('./serv
 const { processingBudgets } = require('./services/conversation-memory');
 const { defaults,normalizePolicy,parsePolicy,publicPolicy,targetHash,invalid } = require('./services/conversation-push-policy');
 const { ConversationPushCleanupStore, historyColumns, historySource } = require('./conversation-push-cleanup-store');
+const { metadataStatus, pushMetadataStatus } = require('./services/conversation-metadata');
 
 const destinations = z.array(z.enum(['webhook','s3'])).min(1).max(2);
 const filterSchema = z.object({search:z.string().max(200).optional(),start:z.string().max(32).optional(),end:z.string().max(32).optional(),
@@ -15,7 +16,7 @@ const filterSchema = z.object({search:z.string().max(200).optional(),start:z.str
   protocol:z.enum(['','JSON','SSE','WebSocket']).optional(),capture:z.enum(['','complete','partial','missing','redaction_failed']).optional()}).strict();
 const previewSchema = z.object({filter:filterSchema,destinations}).strict();
 const enqueueSchema = previewSchema.extend({batchId:z.string().uuid(),previewToken:z.string().regex(/^[a-f0-9]{64}$/)}).strict();
-const columns = 'id,rowid AS cursor_id,user_id,model,at,fingerprint,processed_at,processing_pending,processing_policy_version,processing_error,complete,reason,redaction_version,redaction_policy_hash,inspection_warnings,original IS NOT NULL AS original,masked IS NOT NULL AS masked';
+const columns = 'id,user_id,model,at,fingerprint,processed_at,processing_pending,processing_policy_version,processing_error,complete,reason,redaction_version,redaction_policy_hash,inspection_warnings,original,masked';
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function parse(schema,value) { const result=schema.safeParse(value);if(!result.success)throw invalid();return result.data; }
 
@@ -99,10 +100,12 @@ class ConversationPushStore {
     if(!policy.enabled) throw invalid('请先启用推送','CONVERSATION_PUSH_DISABLED',409);
     const targets=[...new Set(value.destinations)].sort();
     if(targets.some(target=>!policy[target].enabled)) throw invalid('所选目标未启用');
-    const where=this.archive.where(value.filter);
-    const rows=this.db.prepare(`SELECT ${columns} FROM cl_records${where.sql} ORDER BY at,id LIMIT 10001`).all(...where.args);
+    if (!metadataStatus(this.db).ready) throw invalid('历史日志索引仍在后台准备，请稍后重新预览','CONVERSATION_PUSH_HISTORY_PREPARING',409);
+    const where=this.archive.where(value.filter,true);
+    const rows=this.db.prepare(`SELECT ${columns} FROM cl_record_metadata${where.sql} ORDER BY at,id LIMIT 10001`).all(...where.args);
     if(rows.length>10000)throw invalid('单批最多 10,000 条，请缩小筛选范围');
     const eligible=rows.filter(row=>this.allowed(row,archivePolicy)&&this.copyReady(row,policy.source,archivePolicy,policy));
+    if (eligible.some(row=>!row.fingerprint)) throw invalid('所选历史日志的推送索引仍在后台准备，请稍后重新预览','CONVERSATION_PUSH_HISTORY_PREPARING',409);
     const unavailableReasons={},fallbackReasons={};
     for(const row of rows)if(this.allowed(row,archivePolicy)) {
       const reason=this.blockedReason(row,policy.source,archivePolicy,policy);
@@ -144,10 +147,12 @@ class ConversationPushStore {
       const policy=this.policy();
       if(!policy.enabled||!policy.automatic){this.setCursor(this.latest());return {created:0};}
       const cursor=this.db.prepare('SELECT * FROM cl_push_cursor WHERE singleton=1').get();
-      const rows=this.db.prepare(`SELECT ${columns.replace('rowid AS cursor_id','a.seq AS cursor_id')} FROM cl_records JOIN cl_push_arrivals a ON a.record_id=id WHERE a.seq>? ORDER BY a.seq LIMIT 50`).all(cursor.row_id);
+      const rows=this.db.prepare(`SELECT a.seq AS cursor_id,${columns.split(',').map(column=>'m.'+column).join(',')}
+        FROM cl_push_arrivals a LEFT JOIN cl_record_metadata m ON m.id=a.record_id WHERE a.seq>? ORDER BY a.seq LIMIT 50`).all(cursor.row_id);
       const archivePolicy=this.archive.policy(),targets=['webhook','s3'].filter(target=>policy[target].enabled);
       let created=0,pending=this.pendingCount();
       for(const row of rows){
+        if (!row.id || !row.fingerprint) return {created,preparing:true};
         // Keep the receipt cursor behind unfinished processing; publication must not lose automatic delivery.
         if (row.processing_pending) return {created,processing:true};
         const reason=!this.allowed(row,archivePolicy)?'COLLECTION_EXCLUDED':this.blockedReason(row,policy.source,archivePolicy,policy);
@@ -167,12 +172,13 @@ class ConversationPushStore {
       return {created};
     })();
   }
-  metadata(id) { return this.db.prepare(`SELECT ${columns} FROM cl_records WHERE id=?`).get(id); }
+  metadata(id) { return this.db.prepare(`SELECT ${columns} FROM cl_record_metadata WHERE id=?`).get(id); }
   validJob(job,policy=this.policy()) {
     if(!policy.enabled||!policy[job.destination].enabled)return {paused:true};
     if(policy.source!==job.source||targetHash(policy,job.destination)!==job.target_hash)return {cancel:'TARGET_CHANGED'};
     const row=this.metadata(job.record_id);
-    if(!row)return {cancel:'RECORD_EXPIRED'};
+    if(!row && !this.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(job.record_id))return {cancel:'RECORD_EXPIRED'};
+    if(!row || !row.fingerprint)return {paused:true,preparing:true};
     const archivePolicy=this.archive.policy(),source=job.delivery_source||job.source;
     if(!this.allowed(row,archivePolicy))return {cancel:'COLLECTION_EXCLUDED'};
     const reason=this.blockedReason(row,source,archivePolicy,policy);
@@ -258,7 +264,7 @@ class ConversationPushStore {
     const total=this.db.prepare('SELECT COUNT(*) n FROM cl_push_jobs j'+where).get(...args).n + (!query.status || query.status==='sent'?this.db.prepare('SELECT COUNT(*) n FROM cl_push_receipts').get().n:0);
     const items=this.db.prepare(`SELECT ${historyColumns} FROM ${historySource} j${where} ORDER BY j.created_at DESC,j.id LIMIT 20 OFFSET ?`).all(...args,(page-1)*20);
     const stats=this.db.prepare('SELECT code,count,updated_at FROM cl_push_scan_stats WHERE policy_version=? ORDER BY code').all(this.policy().version);
-    return {items,page,pages:Math.ceil(total/20),total,counts:this.historyCounts(),
+    return {items,page,pages:Math.ceil(total/20),total,counts:this.historyCounts(),metadataIndex:pushMetadataStatus(this.db),
       skipped:stats.filter(row=>!row.code.startsWith('ORIGINAL_FALLBACK:')),
       fallbacks:stats.filter(row=>row.code.startsWith('ORIGINAL_FALLBACK:')).map(row=>({...row,code:row.code.slice('ORIGINAL_FALLBACK:'.length)})),
       batches:this.db.prepare('SELECT id,created_at,matched,eligible,created FROM cl_push_batches ORDER BY created_at DESC LIMIT 10').all()};
