@@ -372,7 +372,7 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.post('/conversation-logs/push/jsonl/flush', csrf, pushLimiter, (req, res) => res.status(202).json(conversationPush.flush()));
   api.post('/conversation-logs/push/jsonl/:id/retry', csrf, pushLimiter, (req, res) => res.json(conversationPush.retryFile(req.params.id)));
   api.post('/conversation-logs/push/preview', csrf, pushLimiter, (req, res) => res.json(conversationPush.preview(req.body)));
-  api.post('/conversation-logs/push/batches', csrf, pushLimiter, (req, res) => res.status(202).json(conversationPush.enqueue(req.body)));
+  api.post('/conversation-logs/push/batches', csrf, pushLimiter, asyncRoute(async (req, res) => res.status(202).json(await conversationPush.enqueue(req.body))));
   api.get('/conversation-logs/push/batches/:id', (req, res) => res.json(conversationPush.store.batch(req.params.id)));
   api.post('/conversation-logs/push/batches/:id/cancel', csrf, pushLimiter, (req, res) => res.json(conversationPush.cancelBatch(req.params.id)));
   api.post('/conversation-logs/push/jobs/:id/retry', csrf, pushLimiter, (req, res) => res.json(conversationPush.retry(req.params.id)));

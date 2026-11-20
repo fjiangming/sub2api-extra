@@ -49,7 +49,7 @@ class ConversationJsonlStore {
       for (const name of ['payload_source','fallback_reason']) {
         if (!memberColumns.has(name)) this.db.exec(`ALTER TABLE cl_push_jsonl_members ADD COLUMN ${name} TEXT NOT NULL DEFAULT ''`);
       }
-    })();
+    }).immediate();
     return this;
   }
   enabled(policy = this.push.policy(),destination) {
@@ -273,7 +273,7 @@ class ConversationJsonlStore {
       this.db.prepare('UPDATE cl_push_jsonl_files SET uploaded_bytes=uploaded_bytes+?,uploaded_parts=uploaded_parts+1,updated_at=? WHERE id=?')
         .run(part.bytes, this.now(), file.id);
       return true;
-    })();
+    }).immediate();
   }
   pause(file, reason) {
     this.db.prepare("UPDATE cl_push_jsonl_files SET pause_reason=?,updated_at=? WHERE id=? AND status='running' AND lease_token=? AND pause_reason!=?")

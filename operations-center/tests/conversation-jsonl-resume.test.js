@@ -42,6 +42,59 @@ const puts = receiver => receiver.requests.filter(row => row.method === 'PUT');
 const creates = receiver => receiver.requests.filter(row => row.query.has('uploads'));
 function reject(res, status = 503) { res.writeHead(status, { 'content-type': 'application/xml' }); res.end('<Error><Code>FixtureFailure</Code></Error>'); return false; }
 
+test('concurrent archive writes cannot discard an acknowledged multipart receipt or its capacity ledger',async t=>{
+  const receiver=await s3Receiver();t.after(()=>receiver.close());
+  const f=setup(t,receiver),other=new ConversationLogStore(f.directory).openReader();
+  const row=event('concurrent-part',{model:'Opus5'});f.store.ingest(row);f.enqueue();
+  const get=f.jsonl.get.bind(f.jsonl);let competed=false,conflict;
+  f.jsonl.get=id=>{
+    const file=get(id);
+    if(f.jsonl.db.inTransaction&&file?.status==='running'&&file.upload_id&&!competed) {
+      competed=true;
+      try { other.db.prepare("UPDATE cl_push_cursor SET record_id='concurrent-worker' WHERE singleton=1").run(); }
+      catch(error) { conflict=error; }
+    }
+    return file;
+  };
+  try { await f.service.jsonl.tick(); }
+  finally { f.jsonl.get=get;other.close(); }
+  const file=f.jsonl.list().files[0];
+  assert.equal(file.status,'sent');assert.equal(file.attempts,1);
+  assert(competed);assert.match(conflict?.code||'',/^SQLITE_BUSY/);
+  assert.equal(receiver.completed.length,1);assert.equal(puts(receiver).length,1);
+  const delivered=receiver.completed[0].body,usage=f.push.billing.report().items[0];
+  assert.equal(usage.bytes,delivered.length);
+  assert.equal(usage.sha256,crypto.createHash('sha256').update(delivered).digest('hex'));
+  assert.deepEqual(exportBodyBytes(JSON.parse(delivered.toString()),'request'),Buffer.from(row.request,'base64'));
+});
+
+test('historical capacity receipts are backfilled atomically during concurrent archive writes',async t=>{
+  const receiver=await s3Receiver();t.after(()=>receiver.close());
+  const f=setup(t,receiver);f.store.ingest(event('concurrent-history',{model:'Opus5'}));f.enqueue();
+  await f.service.jsonl.tick();assert.equal(receiver.completed.length,1);
+  f.push.db.exec('DELETE FROM cl_push_storage_usage');
+  const other=new ConversationLogStore(f.directory).openReader(),read=f.push.policy.bind(f.push);
+  let competed=false,conflict;
+  f.push.policy=(...args)=>{
+    const policy=read(...args);
+    if(f.push.db.inTransaction&&!competed) {
+      competed=true;
+      try { other.db.prepare("UPDATE cl_push_cursor SET record_id='concurrent-worker' WHERE singleton=1").run(); }
+      catch(error) { conflict=error; }
+    }
+    return policy;
+  };
+  try {
+    assert.equal(f.push.billing.backfill(),1);
+    f.push.policy=read;
+    assert(competed);assert.match(conflict?.code||'',/^SQLITE_BUSY/);
+    assert.equal(f.push.billing.report().summary.bytes,receiver.completed[0].body.length);
+    other.db.exec('BEGIN IMMEDIATE');
+    assert.equal(f.push.billing.backfill(),0,'an empty backfill must not compete for the writer');
+    assert.equal(f.push.billing.report().summary.files,1);
+  } finally { f.push.policy=read;if(other.db.inTransaction)other.db.exec('ROLLBACK');other.close(); }
+});
+
 test('original fallback choice, reason and multipart prefix survive a process and database restart',async t=>{
   let failed=false;
   const receiver=await s3Receiver({beforeRequest:async(entry,res)=>{
@@ -89,6 +142,35 @@ async function until(predicate) {
   const end = Date.now() + 5000;
   while (!predicate()) { assert(Date.now() < end, 'background progress timed out'); await new Promise(resolve => setTimeout(resolve, 20)); }
 }
+
+test('saving policy during upload preserves acknowledged parts and bills the verified delivery once',async t=>{
+  let release,held=false,hold=true;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const receiver=await s3Receiver({beforeRequest:async entry=>{
+    if(hold&&entry.method==='PUT'&&entry.query.get('partNumber')==='2') { held=true;await gate; }
+  }});t.after(()=>receiver.close());
+  const f=setup(t,receiver);f.service.wake=()=>{};
+  const row=large(f,'policy-during-upload'),sending=f.service.jsonl.tick();
+  let before;
+  try {
+    await until(()=>held);before=f.jsonl.get(f.jsonl.list().files[0].id);
+    assert.equal(before.uploaded_parts,1);assert(before.upload_id);
+    const policy=f.push.policy();
+    await f.service.configure({...policy,s3:{...policy.s3,name:'Updated storage',billing:{enabled:true,rates:[{model:'Opus5',price:'40000'}]}}});
+  } finally { hold=false;release();await sending; }
+  const paused=f.jsonl.get(before.id);
+  assert.equal(paused.status,'pending');assert.equal(paused.upload_id,before.upload_id);
+  assert.equal(paused.uploaded_parts,1);assert.equal(paused.uploaded_bytes,before.uploaded_bytes);
+  assert.equal(f.push.billing.report().summary.files,0);
+  f.advance();await f.service.jsonl.tick();
+  assert.equal(f.jsonl.get(before.id).status,'sent');assert.equal(creates(receiver).length,1);
+  assert.equal(puts(receiver).filter(entry=>entry.query.get('partNumber')==='1').length,1);
+  assert.equal(receiver.completed.length,1);
+  const delivered=receiver.completed[0].body,usage=f.push.billing.report().items[0];
+  assert.equal(f.push.billing.report().summary.files,1);assert.equal(usage.rate,'40000');
+  assert.equal(usage.bytes,delivered.length);assert.equal(usage.sha256,crypto.createHash('sha256').update(delivered).digest('hex'));
+  assert.deepEqual(exportBodyBytes(JSON.parse(delivered.toString()),'request'),Buffer.from(row.request,'base64'));
+});
 
 test('temporary memory pressure waits at the current record without rereading or reuploading the confirmed prefix', async t => {
   let f, pressure = false;

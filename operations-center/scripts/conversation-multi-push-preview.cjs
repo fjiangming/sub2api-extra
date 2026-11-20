@@ -29,7 +29,7 @@ async function startMultiPreview({ port = Number(process.env.CONVERSATION_PREVIE
       preview.fixture.store.ingest(row);
       const input = { filter: { search: row.id }, destinations: ['s3', 'webhook', 'preview-replica'] };
       const plan = preview.push.preview(input);
-      preview.push.enqueue({ ...input, batchId: crypto.randomUUID(), previewToken: plan.previewToken });
+      await preview.push.enqueue({ ...input, batchId: crypto.randomUUID(), previewToken: plan.previewToken });
     }
     const deadline = Date.now() + 20000;
     while (preview.push.store.billing.report().summary.files < 9) {

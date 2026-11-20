@@ -56,10 +56,11 @@ class ConversationStorageBillingStore {
       AND f.uploaded_bytes=f.bytes AND length(f.sha256)=64 AND f.sha256 NOT GLOB '*[^a-f0-9]*'
       AND NOT EXISTS(SELECT 1 FROM cl_push_storage_usage u WHERE u.id='jsonl:'||f.id)
       ORDER BY f.updated_at,f.id LIMIT 16`).all();
+    if(!rows.length)return 0;
     return this.db.transaction(()=>rows.reduce((sum,row)=>{
       const current=this.push.policy(),policy=target(current,row.destination)?current:this.push.policy(row.policy_version);
       return sum+this.recordFile(row,policy,true);
-    },0))();
+    },0)).immediate();
   }
   selection(input={}) {
     const parsed=filters.safeParse(input);if(!parsed.success)throw invalid('存储计费筛选参数无效');

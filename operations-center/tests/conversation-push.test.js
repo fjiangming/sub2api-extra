@@ -114,6 +114,65 @@ test('persistent policy write contention returns an explicit busy error without 
   assert.equal(f.push.db.pragma('busy_timeout',{simple:true}),5000);
 });
 
+for(const operation of ['enqueue','scanAutomatic','claim'])test('concurrent archive writes cannot invalidate push '+operation,t=>{
+  const f=concurrentSetup(t);configure(f,{automatic:true,source:'original'});
+  f.store.ingest(event('concurrent-'+operation));
+  const input={filter:{},destinations:['webhook']},preview=f.push.preview(input);
+  const body={...input,previewToken:preview.previewToken,batchId:crypto.randomUUID()};
+  if(operation==='claim')f.push.enqueue(body);
+  const read=f.push.policy.bind(f.push);let competed=false,conflict;
+  f.push.policy=(...args)=>{
+    const policy=read(...args);
+    if(f.push.db.inTransaction&&!competed) {
+      competed=true;
+      try { f.other.db.prepare("UPDATE cl_push_cursor SET record_id='concurrent-worker' WHERE singleton=1").run(); }
+      catch(error) { conflict=error; }
+    }
+    return policy;
+  };
+  const result=operation==='enqueue'?f.push.enqueue(body):f.push[operation]();
+  f.push.policy=read;
+  assert(competed);assert.match(conflict?.code||'',/^SQLITE_BUSY/);
+  if(operation==='claim') { assert.equal(result.status,'pending');assert.equal(f.push.list().items[0].status,'running'); }
+  else assert.equal(result.created,1);
+  assert.equal(f.push.list().total,1);
+});
+
+test('JSONL initialization acquires the writer before inspecting the existing schema',t=>{
+  const f=concurrentSetup(t),pragma=f.push.db.pragma.bind(f.push.db);let competed=false,conflict;
+  f.push.db.pragma=(source,...args)=>{
+    const value=pragma(source,...args);
+    if(source==='table_info(cl_push_jobs)'&&f.push.db.inTransaction&&!competed) {
+      competed=true;
+      try { f.other.db.prepare("UPDATE cl_push_cursor SET record_id='concurrent-worker' WHERE singleton=1").run(); }
+      catch(error) { conflict=error; }
+    }
+    return value;
+  };
+  try { new ConversationPushService(f.push); }
+  finally { f.push.db.pragma=pragma; }
+  assert(competed);assert.match(conflict?.code||'',/^SQLITE_BUSY/);
+  assert(f.push.db.prepare("SELECT 1 FROM sqlite_master WHERE name='cl_push_jsonl_parts'").get());
+});
+
+test('manual enqueue yields while the writer is busy and retries the same batch without duplicates',async t=>{
+  const f=concurrentSetup(t);configure(f,{source:'original'});f.store.ingest(event('enqueue-wait'));
+  const input={filter:{},destinations:['webhook']},preview=f.push.preview(input);
+  const body={...input,previewToken:preview.previewToken,batchId:crypto.randomUUID()};
+  const service=new ConversationPushService(f.push);let notifications=0,released=false;
+  service.wake=()=>notifications++;
+  f.other.db.exec('BEGIN IMMEDIATE');
+  const timer=setTimeout(()=>{f.other.db.exec('ROLLBACK');released=true;},25);
+  try {
+    const saving=service.enqueue(body);
+    assert.equal(notifications,0);assert.equal(f.push.db.pragma('busy_timeout',{simple:true}),5000);
+    const saved=await saving;assert(released);assert.equal(saved.created,1);assert.equal(saved.id,body.batchId);
+  } finally { clearTimeout(timer);if(f.other.db.inTransaction)f.other.db.exec('ROLLBACK'); }
+  assert.equal(notifications,1);
+  assert.equal((await service.enqueue(body)).id,body.batchId);
+  assert.equal(f.push.list().total,1);
+});
+
 test('memory deferrals preserve the single-delivery retry allowance and recover automatically',async t=>{
   let now=Date.now(),budget=0,calls=0;
   const f=setup(t,{now:()=>now});configure(f,{source:'original',maxAttempts:1,retrySeconds:5});
@@ -587,6 +646,7 @@ test('push admin endpoints enforce authentication, CSRF and collector separation
   const preview=await(await request('conversation-logs/push/preview','POST',writes,{filter:{},destinations:['webhook']})).json();
   const body={filter:{},destinations:['webhook'],batchId:crypto.randomUUID(),previewToken:preview.previewToken};
   assert.equal((await request('conversation-logs/push/batches','POST',headers,body)).status,403);
-  assert.equal((await request('conversation-logs/push/batches','POST',writes,body)).status,202);
+  const queued=await request('conversation-logs/push/batches','POST',writes,body);assert.equal(queued.status,202);
+  assert.equal((await queued.json()).created,1);
   await worker.running;assert.equal(sent[1].schema,'sub2api.conversation.v4');assert.equal(f.push.list().items[0].status,'sent');
 });

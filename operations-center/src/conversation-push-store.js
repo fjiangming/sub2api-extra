@@ -66,19 +66,22 @@ class ConversationPushStore {
       WHERE cl_push_cursor.row_id!=excluded.row_id OR cl_push_cursor.record_id!=''`).run(row.cursor_id);
   }
   policy(version) { const row=version?this.db.prepare('SELECT * FROM cl_push_policies WHERE version=?').get(version):this.db.prepare('SELECT * FROM cl_push_policies ORDER BY version DESC LIMIT 1').get();return normalizePolicy(this.archive.open(row.body,'push-policy:'+row.version)); }
-  configure(input) {
+  write(action) {
     const timeout=this.db.pragma('busy_timeout',{simple:true});
     this.db.pragma('busy_timeout = 1');
     // Acquire the writer before reading a WAL snapshot that a concurrent commit could invalidate.
-    try { return this.db.transaction(()=>{
+    try { return this.db.transaction(action).immediate(); }
+    finally { this.db.pragma('busy_timeout = '+timeout); }
+  }
+  configure(input) {
+    return this.write(()=>{
       const before=this.policy(),after=parsePolicy(input,before);
       for(const previous of policyTargets(before))if(!target(after,previous.id)&&this.db.prepare("SELECT 1 FROM cl_push_jobs WHERE destination=? AND status!='sent' LIMIT 1").get(previous.id))throw invalid('平台仍有未完成任务，请先完成推送','CONVERSATION_PUSH_PLATFORM_BUSY',409);
       for(const id of ['webhook','s3'])if((before[id].url||before[id].endpoint)&&!(after[id].url||after[id].endpoint)&&this.db.prepare("SELECT 1 FROM cl_push_jobs WHERE destination=? AND status!='sent' LIMIT 1").get(id))throw invalid('平台仍有未完成任务，请先完成推送','CONVERSATION_PUSH_PLATFORM_BUSY',409);
       this.db.prepare('INSERT INTO cl_push_policies VALUES(?,?,?)').run(after.version,this.archive.seal(after,'push-policy:'+after.version),this.now());
       if(!before.enabled || !before.automatic || !after.enabled || !after.automatic) this.setCursor(this.latest());
       return publicPolicy(after);
-    }).immediate();
-    } finally { this.db.pragma('busy_timeout = '+timeout); }
+    });
   }
   // The archive increments processed_at strictly on every reprocess; metadata scans never load body BLOBs.
   version(row,source) { return hash([row.fingerprint,source,source==='masked'?[row.processed_at,row.processing_policy_version]:0]); }
@@ -145,7 +148,7 @@ class ConversationPushStore {
   }
   enqueue(input) {
     const value=parse(enqueueSchema,input),digest=hash(value);
-    return this.db.transaction(()=>{
+    return this.write(()=>{
       const existing=this.db.prepare('SELECT * FROM cl_push_batches WHERE id=?').get(value.batchId);
       if(existing){if(existing.digest!==digest)throw invalid('同一批次不能更改参数','CONVERSATION_PUSH_CONFLICT',409);return this.batch(value.batchId);}
       const selected=this.selection({filter:value.filter,destinations:value.destinations});
@@ -155,7 +158,7 @@ class ConversationPushStore {
       for(const row of selected.eligible)for(const target of selected.targets)created+=this.insert(row,selected.policy,target,value.batchId);
       this.db.prepare('INSERT INTO cl_push_batches VALUES(?,?,?,?,?,?)').run(value.batchId,digest,this.now(),selected.matched,selected.eligible.length,created);
       return this.batch(value.batchId);
-    })();
+    });
   }
   automaticCutoff(policy=this.policy()) {
     return policy.automaticMode === 'previous_day' ? DateTime.fromMillis(this.now(),{zone:policy.s3.jsonl.timezone}).startOf('day').toMillis() : null;
@@ -223,7 +226,7 @@ class ConversationPushStore {
         this.setCursor(row);
       }
       return {created};
-    })();
+    }).immediate();
   }
   metadata(id) { return this.db.prepare(`SELECT ${columns} FROM cl_record_metadata WHERE id=?`).get(id); }
   validJob(job,policy=this.policy()) {
@@ -283,7 +286,7 @@ class ConversationPushStore {
         return {...job,attempts:job.attempts+1,lease_token:lease};
       }
       return null;
-    })();
+    }).immediate();
   }
   finish(job,{status,errorCode='',httpStatus=0,retryable=false,bytes,sha256,objectKey=''}) {
     const policy=this.policy(),memory=errorCode==='EXPORT_MEMORY',attempts=Math.max(0,job.attempts-Number(memory));

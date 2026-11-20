@@ -17,19 +17,20 @@ class ConversationPushService {
     this.jsonl=new ConversationJsonlService(store,transport,{memoryBudget,...jsonlOptions,canWork:()=>canWork()&&!this.active&&!this.testing});
   }
   policy() { return publicPolicy(this.store.policy()); }
-  async configure(input) {
+  async write(action,code,message) {
     const deadline=performance.now()+1500;
     for (;;) {
-      let result;
-      try { result=this.store.configure(input); }
+      try { return action(); }
       catch(error) {
         if(!/^SQLITE_(?:BUSY|LOCKED)/.test(error.code||''))throw error;
-        if(performance.now()>=deadline)throw invalid('归档正在写入，暂时无法保存推送策略，请稍后重试','CONVERSATION_PUSH_POLICY_BUSY',503);
+        if(performance.now()>=deadline)throw invalid(message,code,503);
         await delay(50);
-        continue;
       }
-      this.invalidate();this.wake();return result;
     }
+  }
+  async configure(input) {
+    const result=await this.write(()=>this.store.configure(input),'CONVERSATION_PUSH_POLICY_BUSY','归档正在写入，暂时无法保存推送策略，请稍后重试');
+    this.invalidate();this.wake();return result;
   }
   invalidate() { this.active?.controller.abort();this.testController?.abort();this.jsonl.invalidate(); }
   status(query) { return {...this.store.list(query),automatic:this.store.automaticStatus(),jsonl:this.jsonl.store.list(),cleanup:{...this.store.cleanup.status(),error:this.cleanupError},lastError:this.jsonl.lastError||this.lastError,lastRun:this.jsonl.lastRun||this.lastRun,enabled:this.store.policy().enabled}; }
@@ -62,7 +63,10 @@ class ConversationPushService {
     } catch { this.cleanupError='LOCAL_CLEANUP_RETRY'; }
   }
   preview(input) { return this.store.preview(input); }
-  enqueue(input) { const result=this.store.enqueue(input);this.wake();return result; }
+  async enqueue(input) {
+    const result=await this.write(()=>this.store.enqueue(input),'CONVERSATION_PUSH_QUEUE_BUSY','归档正在写入，暂时无法创建推送批次，请稍后重试');
+    this.wake();return result;
+  }
   retry(id) {
     const job=this.store.db.prepare('SELECT jsonl_file_id FROM cl_push_jobs WHERE id=?').get(id),file=job?.jsonl_file_id&&this.jsonl.store.get(job.jsonl_file_id);
     const result=file?.status==='failed'?this.jsonl.store.retry(file.id):this.store.retry(id);this.wake();return result;
