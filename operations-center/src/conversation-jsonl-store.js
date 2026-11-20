@@ -8,6 +8,7 @@ const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversat
 const { deliveryBody } = require('./services/conversation-envelope');
 const { processingBudgets } = require('./services/conversation-memory');
 const { prepareWithMemoryWait } = require('./services/conversation-jsonl-flow');
+const { pushMetadataStatus } = require('./services/conversation-metadata');
 
 class ConversationJsonlStore {
   constructor(push, { maxFileBytes, memoryBudget = processingBudgets, memoryWaitMs = 30000 } = {}) {
@@ -158,13 +159,16 @@ class ConversationJsonlStore {
       FROM cl_push_jsonl_members m LEFT JOIN cl_push_jobs j ON j.id=m.job_id WHERE m.file_id=?`).get(file.envelope_version,file.id);
     if (counts.total !== file.records || counts.valid !== file.records) return 'DELIVERY_INVALIDATED';
     if (full || file.archive_version !== archivePolicy.version) {
+      const compact = pushMetadataStatus(this.db).ready;
+      const present = name => compact ? `r.${name}` : `r.${name} IS NOT NULL`;
+      const missing = name => compact ? `r.${name}=0` : `r.${name} IS NULL`;
       const row = this.db.prepare(`SELECT r.id,r.user_id,r.model,r.complete,r.reason,r.fingerprint,m.fingerprint expected_fingerprint,
-        r.original IS NOT NULL has_original,r.masked IS NOT NULL has_masked,r.processing_error,r.redaction_version,r.redaction_policy_hash,r.inspection_warnings,
+        ${present('original')} has_original,${present('masked')} has_masked,r.processing_error,r.redaction_version,r.redaction_policy_hash,r.inspection_warnings,
         r.processed_at,r.processing_pending,m.processed_at expected_processed_at,r.processing_policy_version,m.processing_policy_version expected_processing_version,m.payload_source
-        FROM cl_push_jsonl_members m JOIN cl_push_jobs j ON j.id=m.job_id LEFT JOIN cl_records r ON r.id=j.record_id
+        FROM cl_push_jsonl_members m JOIN cl_push_jobs j ON j.id=m.job_id LEFT JOIN ${compact ? 'cl_record_metadata' : 'cl_records'} r ON r.id=j.record_id
         WHERE m.file_id=? AND (r.id IS NULL OR r.model!=? OR (?='complete' AND (r.complete!=1 OR r.reason!='')) OR r.fingerprint!=m.fingerprint
-          OR r.user_id IN (SELECT value FROM json_each(?)) OR CASE WHEN COALESCE(NULLIF(m.payload_source,''),?)='original' THEN r.original IS NULL
-          ELSE r.processing_pending=1 OR r.masked IS NULL OR r.processing_error!='' OR r.inspection_warnings!='[]' OR r.redaction_version!=? OR r.redaction_policy_hash!=? END
+          OR r.user_id IN (SELECT value FROM json_each(?)) OR CASE WHEN COALESCE(NULLIF(m.payload_source,''),?)='original' THEN ${missing('original')}
+          ELSE r.processing_pending=1 OR ${missing('masked')} OR r.processing_error!='' OR r.inspection_warnings!='[]' OR r.redaction_version!=? OR r.redaction_policy_hash!=? END
           OR (?='masked' AND (r.processed_at!=m.processed_at OR r.processing_policy_version!=m.processing_policy_version))) LIMIT 1`)
         .get(file.id, file.model, policy.captureScope, JSON.stringify(archivePolicy.excludedUserIds), file.source, REDACTION_VERSION, redactionPolicyHash(archivePolicy), file.source);
       if (row) {

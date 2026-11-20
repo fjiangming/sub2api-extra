@@ -144,6 +144,18 @@ test('resuming a file clears old file and member errors while retaining its immu
   assert.deepEqual(f.push.db.prepare('SELECT DISTINCT error_code,http_status FROM cl_push_jobs WHERE jsonl_file_id=?').all(file.id),[{error_code:'',http_status:0}]);
 });
 
+test('full file validation uses compact metadata, detects missing copies and falls back safely while the index is incomplete', async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close()); const f = setup(t,receiver);
+  const row = event('compact-file-check',{model:'Opus5'}); f.store.ingest(row); f.enqueue(); assert(f.jsonl.assignOne());
+  const file = f.jsonl.get(f.jsonl.list().files[0].id), prepare = f.push.db.prepare.bind(f.push.db); let bodyChecks = 0;
+  f.push.db.prepare = sql => { if (/LEFT JOIN cl_records r/.test(sql)) bodyChecks++; return prepare(sql); };
+  assert.equal(f.jsonl.invalidReason(file,{full:true}),''); assert.equal(bodyChecks,0);
+  f.push.db.prepare('DELETE FROM cl_record_metadata WHERE id=?').run(row.id);
+  assert.equal(f.jsonl.invalidReason(file,{full:true}),''); assert.equal(bodyChecks,1);
+  f.push.db.prepare('UPDATE cl_records SET original=NULL WHERE id=?').run(row.id);
+  assert.equal(f.jsonl.invalidReason(file,{full:true}),'COPY_UNAVAILABLE'); assert.equal(bodyChecks,1);
+});
+
 for (const legacyVersion of [1,2,3,4]) test(`legacy v${legacyVersion} multipart progress and flat key survive upgrade and skip the first network part`, async t => {
   let fail = true;
   const receiver = await s3Receiver({ beforeRequest: (entry, res) => fail && entry.query.get('partNumber') === '2' ? reject(res) : undefined });

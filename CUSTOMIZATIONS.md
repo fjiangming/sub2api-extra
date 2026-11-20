@@ -8,6 +8,8 @@
 - `src/conversation-push-store.js`、`services/conversation-envelope.js`：直出解压复用推送当前准入预算，避免第二次使用不匹配的缓存估算；解压超限仍明确重试，绝不截断或改变在途文件的输出表示，v1–v4 格式保持。
 - `services/conversation-jsonl-flow.js`、`src/conversation-jsonl-store.js`：单条临时内存不足先在原上传内等待最多 30 秒，指数延长检查间隔，等待中持续核对租约 / 取消、采集优先及成员有效性；不读取下一条、不跳行，不立即重新读取已发送前缀。持续不足沿原 pending / buffered 退避，保留上传 ID、分片 / 摘要和网络次数。重新 claim 时同步清除文件与成员的上次错误，避免已恢复仍显示旧内存 / 网络失败。
 - `public/conversation-push-ui.js`、`public/index.html`：新增当前内存等待说明及静态版本。`tests/conversation-compatibility.test.js`、`conversation-envelope.test.js`、`conversation-jsonl-resume.test.js` 增加推送专用缓存预算、宿主 / 堆 / 脏页保护、解压预算、原位置等待 / 原字节 / 已确认分片不重传、有界等待 / 取消 / 非内存错误、重试清除旧错误与进度保持验证。`scripts/conversation-push-browser-check.cjs` 增加四布局内存等待状态与原进度保持检查；`docs/conversation-jsonl-push.md` 同步限制及恢复行为。
+- 发布前追加检查：`src/conversation-jsonl-store.js` 的整卷有效性校验改用同事务维护的完整轻量元数据索引，避免为读取正文后的指纹 / 状态反复遍历大 BLOB 溢出页。旧历史索引未准备时保持原源表校验，不取消原文件；副本存在性按索引 0/1 解释，保留版本、完整性、排除、处理 / 回退和指纹门禁。`tests/conversation-jsonl-resume.test.js` 增加完整校验不访问正文表、索引未完备安全回退及正文删除检测，沿用原内容变更 / 排除 / 续传回归；`docs/conversation-jsonl-push.md` 同步范围。
+  追加验证：`npm run check:conversation-jsonl` 与 JSONL / 断点续传 / 送达后清理 **68 项定向测试全部通过（0 失败 / 跳过，约 68 秒）**。首次新用例误用列表摘要缺少 target_hash，已改用完整文件状态后重跑全部定向测试通过；最终源码的全量测试继续由该追加提交的 GitHub 工作流验证，前述四布局未改动。
 
 生产先在受限数据目录 `push-recovery-20261120T0904Z/state.json` 保存十九日文件、分片和轻量任务状态，不读取 / 输出正文或 S3 凭据；调用现有文件重试契约恢复 gpt-6.2-sol 的网络失败，保留 214 个已确认分片和 1,795,162,112 字节，未重新预览或创建批次。其余十九日文件沿原队列继续。原运行代码备份到 `/root/sub2api-push-memory-20261120T0910Z/base/`，本地增量补丁在原镜像文件上应用与语法检查通过；容器 rootfs 为只读，尝试复制候选到 `/tmp` 被 Docker 拒绝，未替换任何运行源码或重启进程，因此改为发布镜像并仅重建运营中心，不采用宿主挂载绕过。保留数据卷 / 密钥 / 原上传进度，重启期间接收与页面有短暂窗口；主站不重启。
 
