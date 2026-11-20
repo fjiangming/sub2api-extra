@@ -31,7 +31,7 @@ services:
     cap_drop:
       - ALL
     pids_limit: 128
-    mem_limit: ${OPERATIONS_CENTER_MEMORY_LIMIT:-1g}
+    mem_limit: ${OPERATIONS_CENTER_MEMORY_LIMIT:-4g}
     cpus: 1.0
     logging:
       driver: json-file

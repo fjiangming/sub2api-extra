@@ -7,8 +7,10 @@ const { fork } = require('node:child_process');
 const { ConversationPushService } = require('./conversation-push-service');
 
 class ConversationPushSupervisor extends ConversationPushService {
-  constructor(store, { memoryBudgetBytes, canWork = () => true, canCleanup = () => true } = {}) {
+  constructor(store, { memoryBudgetBytes, heapMiB = process.env.OPERATIONS_CENTER_PUSH_HEAP_MIB, canWork = () => true, canCleanup = () => true } = {}) {
     super(store); this.child = null; this.ready = false; this.pending = new Map(); this.memoryBudgetBytes = memoryBudgetBytes;
+    const heap = Number(heapMiB);
+    this.heapMiB = /^\d+$/.test(String(heapMiB)) && Number.isSafeInteger(heap) && heap >= 128 && heap <= 8192 ? heap : 2048;
     this.canWork = canWork; this.canCleanup = canCleanup;
   }
   send(message) { if (this.child?.connected) this.child.send(message, () => {}); }
@@ -18,7 +20,7 @@ class ConversationPushSupervisor extends ConversationPushService {
   start() {
     if (this.child || this.stopping) return;
     const child = fork(path.join(__dirname, 'conversation-push-worker.js'), [], {
-      execArgv: ['--max-old-space-size=256', '--max-semi-space-size=8', '--expose-gc'], stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true
+      execArgv: [`--max-old-space-size=${this.heapMiB}`, '--max-semi-space-size=8', '--expose-gc'], stdio: ['ignore', 'ignore', 'ignore', 'ipc'], windowsHide: true
     });
     this.child = child; this.ready = false;
     try { os.setPriority(child.pid, os.constants.priority.PRIORITY_LOW); } catch { /* Host may not support process priorities. */ }

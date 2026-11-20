@@ -1,5 +1,17 @@
 # 个性化功能维护台账
 
+## 2026-11-20：扩容推送堆与运营中心容器并保留分片恢复
+
+用户明确要求将推送堆上限调整为 2 GiB、运营中心容器限额调整为 4 GiB，并恢复当前内存不足的上传。本轮仅改运营中心及对应部署配置；保留此前未提交的降智检测只读审计节与报告。
+
+- `operations-center/src/services/conversation-push-supervisor.js`：推送子进程 old-space 默认由 256 调整为 2048 MiB，支持独立的 `OPERATIONS_CENTER_PUSH_HEAP_MIB`（128–8192 整数，非法 / 未配置回退 2048），不向其他进程传播 Node 参数；原串行、低优先级、采集让行、堆 / 物理内存准入、8 MiB 分片、限速及持久化恢复逻辑保持。
+- `operations-center/compose.yaml`、`.env.example`：容器内存默认改为 4g，增加推送堆环境变量示例；CPU 仍 1 核。`README.md`、`docs/conversation-jsonl-push.md` 同步配额、在线扩容 / 镜像生效边界、已有 failed 任务不自动重放、续传前缀校验、共享资源与重启采集窗口。
+- `operations-center/tests/conversation-jsonl.test.js`：原三种推送的 20.1 MiB 正文 / 256 MiB 堆回归显式指定低配限制，保留字节一致验证；真实推送子进程及崩溃重建验证默认 2048 MiB 参数。继续使用原分片重开 / 内存恢复测试核对任务不丢、已确认分片不重复发送。
+
+验证：`npm run check`、97 项推送 / JSONL / 分片重开 / 内存恢复 / 清理定向测试全部通过，0 失败 / 跳过。均为虚构正文及 loopback S3 接收器，不主动请求生产 Bucket。
+
+生产已先备份 `/root/sub2api-extra/compose.services.env` 与原容器元数据到受限的 `/root/sub2api-ops-memory-20261120T0628Z/`，将该插值文件的内存改为 4g，并通过 `docker update --memory 4g --memory-swap 8g` 在线生效；容器 ID / 启动时间不变，healthz 200。宿主无 Swap，8g 不构成实际 Swap 后备。沿用本会话 GitHub 发布授权，仅提交本节源码 / 配置 / 测试 / 说明，自动构建通过后按本轮部署授权只更新运营中心，保留其他服务与未提交审计；生产续传结果以本轮最终回复为准。不修改主站、S3 策略、原批次、数据卷或归档正文。
+
 ## 2026-11-20：修复对话历史推送预览同步读盘阻塞
 
 用户随后明确要求提交 GitHub。本次仅提交本节对应的运营中心源码、测试、浏览器验证、文档与台账到 `origin/main`，并核对该提交的自动测试、双架构构建和镜像发布；此前未提交的降智检测只读审计节及报告保留本地。发布结果以本次完整 SHA 的工作流为准，不更新服务器。

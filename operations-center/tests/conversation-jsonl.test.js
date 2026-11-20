@@ -18,10 +18,10 @@ async function until(predicate, timeout = 15000) {
   const end = Date.now() + timeout;
   while (!predicate()) { assert(Date.now() < end, 'Timed out waiting for background JSONL work'); await new Promise(resolve => setTimeout(resolve, 40)); }
 }
-function setup(t, { now = Date.now, jsonlOptions, supervisor = false, memoryBudgetBytes } = {}) {
+function setup(t, { now = Date.now, jsonlOptions, supervisor = false, memoryBudgetBytes, heapMiB } = {}) {
   const f = fixture({ now }); f.store.configure({ ...f.store.policy(), mode: 'original', retention: 0 });
   const push = new ConversationPushStore(f.store, { now }).initialize();
-  const service = supervisor ? new ConversationPushSupervisor(push, { memoryBudgetBytes }) : new ConversationPushService(push, { jsonlOptions });
+  const service = supervisor ? new ConversationPushSupervisor(push, { memoryBudgetBytes, heapMiB }) : new ConversationPushService(push, { jsonlOptions });
   t.after(async () => { await service.stop(); f.close(); });
   return { ...f, push, service, jsonl: service.jsonl.store };
 }
@@ -330,9 +330,9 @@ test('memory admission defers without exhausting attempts while an oversized sin
   assert.equal(f.push.list().items[0].error_code, 'JSONL_RECORD_TOO_LARGE'); assert.equal(f.store.payload(row.id, 'original', 'request').body.toString(), rawRequest);
 });
 
-for (const destination of ['webhook','s3-json','s3-jsonl']) test(`isolated ${destination} push delivers a 20.1 MiB copy with the unchanged 256 MiB heap`,async t=>{
+for (const destination of ['webhook','s3-json','s3-jsonl']) test(`isolated ${destination} push delivers a 20.1 MiB copy with an explicitly configured 256 MiB heap`,async t=>{
   const receiver=await s3Receiver();t.after(()=>receiver.close());
-  const f=setup(t,{supervisor:true,memoryBudgetBytes:256*1024**2});
+  const f=setup(t,{supervisor:true,memoryBudgetBytes:256*1024**2,heapMiB:256});
   configure(f,receiver.url,{webhook:{enabled:destination==='webhook',url:receiver.url+'/logs',token:''},
     s3:{enabled:destination!=='webhook',format:destination==='s3-json'?'json':'jsonl'}});
   const text='x'.repeat(Math.floor(15.075*1024**2))+'\u4e2d\u6587 END_OF_LARGE_RESPONSE';
@@ -376,9 +376,11 @@ test('an invalid frozen request ID blocks multipart completion and cleans up the
 test('production supervisor uploads in a child, recovers after a crash and keeps API-side work responsive', async t => {
   const receiver = await s3Receiver(); t.after(() => receiver.close()); const f = setup(t, { supervisor: true });
   configure(f, receiver.url, { automatic: true }); f.service.start(); await until(() => f.service.ready);
+  assert(f.service.child.spawnargs.includes('--max-old-space-size=2048'));
   assert.notEqual(f.service.child.pid, process.pid); const row = event('supervised'); f.store.ingest(row);
   await until(() => f.jsonl.list().files.some(file => file.status === 'open')); const original = f.jsonl.list().files[0];
   const child = f.service.child; child.kill('SIGKILL'); await until(() => f.service.child && f.service.child !== child && f.service.ready);
+  assert(f.service.child.spawnargs.includes('--max-old-space-size=2048'));
   f.service.flush(); await until(() => f.jsonl.get(original.id).status === 'sent');
   assert.equal(lines(receiver).length, 1); assert.equal(f.service.status({}).workerReady, true);
   assert.equal(lines(receiver)[0].request, rawRequest);
