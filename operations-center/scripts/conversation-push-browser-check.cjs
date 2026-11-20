@@ -139,9 +139,10 @@ async function main() {
         await page.locator('#clp-backlog').filter({hasText:'待上传 2 个文件'}).waitFor();
         await layout();await shot('jsonl-configuration');
         const stateRoute='**/api/conversation-logs/push/jobs?*';
+        let pauseReason='archive_busy';
         await page.route(stateRoute,async route=>{
           const response=await route.fetch(),body=await response.json(),value=body.data||body;
-          const file=value.jsonl.files[0];file.status='running';file.bytes=10000000000;file.uploaded_bytes=8388608;file.uploaded_parts=1;file.pause_reason='archive_busy';
+          const file=value.jsonl.files[0];file.status='running';file.bytes=10000000000;file.uploaded_bytes=8388608;file.uploaded_parts=1;file.pause_reason=pauseReason;
           file.model='<img src=x onerror=alert(1)>';file.object_key='2026-06-25/Opus5/'+ 'Opus5-'.repeat(12)+'.jsonl';
           Object.assign(value.jsonl.backlog,{atRisk:true,expiryAt:Date.now()+3600000});
           await route.fulfill({response,json:body});
@@ -151,6 +152,10 @@ async function main() {
           await page.locator('#clp-backlog.amber').filter({hasText:'到期风险'}).waitFor();
           assert.equal(await page.locator('#clp-files img').count(),0);assert.equal(await page.locator('#clp-files progress').first().getAttribute('value'),'8388608');
           await layout();await shot('jsonl-progress-paused');
+          pauseReason='memory_wait';await page.locator('[data-clp-action=refresh]').click();
+          await page.locator('#clp-files').filter({hasText:'等待内存恢复，上传进度保留'}).waitFor();
+          assert.equal(await page.locator('#clp-files progress').first().getAttribute('value'),'8388608');
+          await layout();await shot('jsonl-memory-wait');
         } finally {await page.unroute(stateRoute);}
         await page.locator('[data-clp-action=refresh]').click();
         await page.locator('#clp-flush').click();await waitJobs('sent',9);

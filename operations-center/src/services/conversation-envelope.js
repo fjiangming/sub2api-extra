@@ -86,7 +86,7 @@ function deliveryBodyFromRaw(raw, { version = ENVELOPE_VERSION, requestId, encod
 
 function formatDeliveryBodies(raw, options) {
   if (![3, 4].includes(options.version)) return formatBodies(raw, options);
-  const body = deliveryBodyFromRaw(raw, options);
+  const body = deliveryBodyFromRaw(raw, options, { maxOutputBytes: options.maxOutputBytes });
   // Keep routing metadata separate while reusing the decoded public body without another conversion.
   return { body_encoding: 'utf-8', body_encodings: { request: 'utf-8', response: 'utf-8', frames: [] },
     request: body.request, response: body.response, frames: [] };

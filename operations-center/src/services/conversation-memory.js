@@ -10,7 +10,7 @@ function statistics(text) {
   return Object.fromEntries(String(text).trim().split('\n').map(line => line.trim().split(/\s+/)).filter(([, value]) => number(value) !== null).map(([key, value]) => [key, Number(value)]));
 }
 
-function availableMemory(override, { readFile = file => fs.readFileSync(file, 'utf8'), freeMemory = os.freemem } = {}) {
+function availableMemory(override, { readFile = file => fs.readFileSync(file, 'utf8'), freeMemory = os.freemem, activeFileCacheCredit = false } = {}) {
   if (Number.isSafeInteger(override) && override >= 0) return override;
   let available = freeMemory();
   try {
@@ -29,8 +29,11 @@ function availableMemory(override, { readFile = file => fs.readFileSync(file, 'u
         const stat = statistics(readFile(base + 'memory.stat'));
         const get = key => stat[prefix + key] ?? stat[key] ?? 0;
         const file = get(prefix ? 'cache' : 'file');
-        // Credit only half of clean inactive file cache. Anonymous, shared and dirty pages remain charged.
-        reclaimable = Math.floor(Math.max(0, Math.min(get('inactive_file'), file - get('shmem') - get(prefix ? 'dirty' : 'file_dirty') - get(prefix ? 'writeback' : 'file_writeback'))) / 2);
+        const clean = Math.max(0, file - get('shmem') - get(prefix ? 'dirty' : 'file_dirty') - get(prefix ? 'writeback' : 'file_writeback'));
+        const inactive = Math.max(0, Math.min(get('inactive_file'), clean));
+        // Only the isolated push worker credits a quarter of clean active cache; do not double-count pages.
+        const active = activeFileCacheCredit ? Math.max(0, Math.min(get('active_file'), clean - inactive)) : 0;
+        reclaimable = Math.floor(inactive / 2 + active / 4);
       } catch { /* Missing statistics must never increase the budget. */ }
       available = Math.min(available, Math.max(0, Math.min(limit, limit - used + reclaimable)));
     } catch { /* The other cgroup version, or the host estimate, may apply. */ }

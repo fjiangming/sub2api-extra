@@ -12,7 +12,7 @@ process.once('message', settings => {
   try {
     archive = new ConversationLogStore(settings.directory, { timezone: settings.timezone }).initialize();
     archive.db.pragma('busy_timeout = 250');
-    const budget = () => processingBudgets(settings.memoryBudgetBytes);
+    const budget = () => processingBudgets(settings.memoryBudgetBytes, { activeFileCacheCredit: true });
     let priorityUntil = 0, cleanupUntil = 0;
     service = new ConversationPushService(new ConversationPushStore(archive).initialize(), { memoryBudget: budget,
       canWork: () => Date.now() < priorityUntil && !archive.hasPending(), canCleanup: () => Date.now() < cleanupUntil });

@@ -130,6 +130,14 @@ test('decompression memory refusal never changes payload bytes or silently retur
   }
 });
 
+test('direct push decoding uses its admitted output budget without changing compressed content on refusal', () => {
+  const text = 'x'.repeat(10000), raw = {request:'',response:zlib.gzipSync(Buffer.from(text)).toString('base64'),frames:[]};
+  const original = raw.response, options = {version:4,requestId,encoding:'gzip'};
+  assert.throws(() => formatDeliveryBodies(raw,{...options,maxOutputBytes:100}),{code:'EXPORT_MEMORY'});
+  assert.equal(raw.response,original);
+  assert.equal(formatDeliveryBodies(raw,{...options,maxOutputBytes:20000}).response,text);
+});
+
 test('direct raw downloads retain the exact shared delivery bytes for text, compression and WebSocket content', () => {
   const text='\uFEFF{\r\n "n":9007199254740993,"decimal":1.2300,"text":"\u4e2d\u6587 \uD83D\uDE00","literal":"\\n"\r\n}\r\n';
   const cases=[{raw:{request:encoded(text),response:encoded('data: [DONE]\r\n\r\n'),frames:[]}},

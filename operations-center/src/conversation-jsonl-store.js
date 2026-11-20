@@ -7,11 +7,12 @@ const { modelAllowed } = require('./services/conversation-models');
 const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversation-sensitive');
 const { deliveryBody } = require('./services/conversation-envelope');
 const { processingBudgets } = require('./services/conversation-memory');
+const { prepareWithMemoryWait } = require('./services/conversation-jsonl-flow');
 
 class ConversationJsonlStore {
-  constructor(push, { maxFileBytes, memoryBudget = processingBudgets } = {}) {
+  constructor(push, { maxFileBytes, memoryBudget = processingBudgets, memoryWaitMs = 30000 } = {}) {
     this.push = push; this.archive = push.archive; this.db = push.db; this.now = push.now;
-    this.maxFileBytes = maxFileBytes; this.memoryBudget = memoryBudget;
+    this.maxFileBytes = maxFileBytes; this.memoryBudget = memoryBudget; this.memoryWaitMs = memoryWaitMs;
   }
   initialize() {
     this.db.transaction(() => {
@@ -215,10 +216,10 @@ class ConversationJsonlStore {
       const file = this.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE status='pending' AND (upload_id='' OR upload_version=1) AND next_at<=? ORDER BY sealed_at,id LIMIT 1").get(this.now());
       if (!file) return null;
       const token = crypto.randomUUID();
-      this.db.prepare("UPDATE cl_push_jsonl_files SET status='running',attempts=attempts+1,lease_token=?,lease_until=?,updated_at=? WHERE id=? AND status='pending'")
+      this.db.prepare("UPDATE cl_push_jsonl_files SET status='running',attempts=attempts+1,error_code='',http_status=0,lease_token=?,lease_until=?,updated_at=? WHERE id=? AND status='pending'")
         .run(token, this.now() + (policy.timeoutSeconds + 30) * 3000, this.now(), file.id);
-      this.db.prepare("UPDATE cl_push_jobs SET status='buffered',attempts=?,updated_at=? WHERE jsonl_file_id=? AND status IN ('buffered','failed')").run(file.attempts + 1, this.now(), file.id);
-      return { ...file, attempts: file.attempts + 1, lease_token: token };
+      this.db.prepare("UPDATE cl_push_jobs SET status='buffered',attempts=?,error_code='',http_status=0,updated_at=? WHERE jsonl_file_id=? AND status IN ('buffered','failed')").run(file.attempts + 1, this.now(), file.id);
+      return { ...file, attempts: file.attempts + 1, error_code: '', http_status: 0, lease_token: token };
     }).immediate();
   }
   guard(file, policyVersion, archiveVersion) {
@@ -271,12 +272,13 @@ class ConversationJsonlStore {
         LEFT JOIN cl_push_jobs j ON j.id=m.job_id WHERE m.file_id=? AND m.ordinal>? ORDER BY m.ordinal LIMIT 20`).all(file.id, ordinal);
       if (!members.length) break;
       for (const member of members) {
-        await checkpoint();
-        guard(); if (!member.id || member.envelope_version !== file.envelope_version) throw new Error('DELIVERY_INVALIDATED');
-        const valid = this.push.validJob(member);
-        if (valid.paused || valid.cancel) throw new Error('DELIVERY_INVALIDATED');
         const copy = {source:member.payload_source || member.source,fallbackReason:member.fallback_reason};
-        let envelope = this.push.delivery(member, copy, this.memoryBudget);
+        let envelope = await prepareWithMemoryWait(() => {
+          if (!member.id || member.envelope_version !== file.envelope_version) throw new Error('DELIVERY_INVALIDATED');
+          const valid = this.push.validJob(member);
+          if (valid.paused || valid.cancel) throw new Error('DELIVERY_INVALIDATED');
+          return this.push.delivery(member, copy, this.memoryBudget);
+        }, { guard, checkpoint, timeoutMs: this.memoryWaitMs, onPause: reason => this.pause(file, reason) });
         envelope.metadata = this.archive.open(member.metadata, 'jsonl-metadata:' + member.id);
         yield envelope; envelope = null; ordinal = member.ordinal;
         await new Promise(resolve => setImmediate(resolve));

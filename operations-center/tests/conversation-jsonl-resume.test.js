@@ -11,7 +11,7 @@ const { ConversationPushService } = require('../src/services/conversation-push-s
 const { ConversationPushTransport } = require('../src/services/conversation-push-transport');
 const { defaults } = require('../src/services/conversation-push-policy');
 const { jsonlBytes } = require('../src/services/conversation-jsonl-format');
-const { pacedBody, waitForTurn } = require('../src/services/conversation-jsonl-flow');
+const { pacedBody, waitForTurn, prepareWithMemoryWait } = require('../src/services/conversation-jsonl-flow');
 
 function setup(t, receiver, options = {}) {
   let now = Date.now();
@@ -65,7 +65,7 @@ test('memory pressure between records preserves confirmed parts and retries beyo
   const receiver=await s3Receiver({beforeRequest:entry=>{
     if(entry.method==='PUT'&&entry.query.get('partNumber')==='1') {pressure=true;f.jsonl.memoryBudget=()=>0;}
   }});t.after(()=>receiver.close());
-  f=setup(t,receiver);f.push.configure({...f.push.policy(),maxAttempts:1});
+  f=setup(t,receiver,{jsonlOptions:{memoryWaitMs:0}});f.push.configure({...f.push.policy(),maxAttempts:1});
   const first=large(f,'memory-first'),second=event('memory-second',{model:'Opus5'});f.store.ingest(second);f.enqueue();
   f.push.db.prepare('UPDATE cl_push_jobs SET created_at=created_at+1 WHERE record_id=?').run(second.id);
   await f.service.jsonl.tick();assert(pressure);
@@ -89,6 +89,60 @@ async function until(predicate) {
   const end = Date.now() + 5000;
   while (!predicate()) { assert(Date.now() < end, 'background progress timed out'); await new Promise(resolve => setTimeout(resolve, 20)); }
 }
+
+test('temporary memory pressure waits at the current record without rereading or reuploading the confirmed prefix', async t => {
+  let f, pressure = false;
+  const receiver = await s3Receiver({beforeRequest:entry => {
+    if (entry.method === 'PUT' && entry.query.get('partNumber') === '1') { pressure = true; f.jsonl.memoryBudget = () => 0; }
+  }}); t.after(() => receiver.close());
+  f = setup(t,receiver); const first = large(f,'wait-memory-first'), second = event('wait-memory-second',{model:'Opus5'});
+  f.store.ingest(second); f.enqueue();
+  f.push.db.prepare('UPDATE cl_push_jobs SET created_at=created_at+1 WHERE record_id=?').run(second.id);
+  const delivery = f.push.delivery.bind(f.push); let firstReads = 0;
+  f.push.delivery = (job,...args) => { if (job.record_id === first.id) firstReads++; return delivery(job,...args); };
+  const sending = f.service.jsonl.tick();
+  try {
+    await until(() => f.jsonl.list().files[0]?.pause_reason === 'memory_wait');
+    const file = f.jsonl.list().files[0]; assert(pressure); assert.equal(file.status,'running');
+    assert.equal(file.uploaded_parts,1); assert.equal(file.error_code,''); assert.equal(receiver.completed.length,0);
+    f.jsonl.memoryBudget = () => Infinity; await sending;
+    assert.equal(firstReads,2); // Planning and the first send; the memory wait never restarts the file.
+    assert.equal(f.jsonl.get(file.id).status,'sent'); assert.equal(f.jsonl.get(file.id).pause_reason,'');
+    assert.equal(creates(receiver).length,1); assert.equal(puts(receiver).filter(entry => entry.query.get('partNumber') === '1').length,1);
+    const rows = receiver.completed[0].body.toString().trimEnd().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(rows.map(row => row.request_id),[first.request_id,second.request_id]);
+    assert.deepEqual(exportBodyBytes(rows[0],'request'),Buffer.from(first.request,'base64'));
+  } finally { f.jsonl.memoryBudget = () => Infinity; f.service.jsonl.invalidate(); await sending; }
+});
+
+test('memory waits are bounded, check cancellation and archive priority, and never retry other errors', async () => {
+  let clock = 0, calls = 0, checks = 0, checkpoints = 0; const pauses = [];
+  const options = {timeoutMs:500,now:() => clock,wait:async ms => {clock += ms;},guard:() => {checks++;},
+    checkpoint:async () => {checkpoints++;},onPause:reason => pauses.push(reason)};
+  const memory = Object.assign(new Error('EXPORT_MEMORY'),{code:'EXPORT_MEMORY'});
+  await assert.rejects(prepareWithMemoryWait(() => {calls++;throw memory;},options),{code:'EXPORT_MEMORY'});
+  assert.equal(clock,500); assert.equal(calls,3); assert(checks >= 5); assert.equal(checkpoints,3);
+  assert.deepEqual(pauses,['memory_wait','memory_wait','']);
+  calls = 0; pauses.length = 0;
+  await assert.rejects(prepareWithMemoryWait(() => {calls++;throw new Error('CONTENT_CHANGED');},options),/CONTENT_CHANGED/);
+  assert.equal(calls,1); assert.deepEqual(pauses,[]);
+  let cancelled = false;
+  await assert.rejects(prepareWithMemoryWait(() => {throw memory;},{...options,
+    wait:async () => {cancelled = true;},guard:() => {if (cancelled) throw new Error('DELIVERY_INVALIDATED');}}),/DELIVERY_INVALIDATED/);
+  assert.equal(pauses.at(-1),'');
+});
+
+test('resuming a file clears old file and member errors while retaining its immutable upload checkpoints', async t => {
+  const receiver = await s3Receiver({beforeRequest:(entry,res) => entry.query.get('partNumber') === '2' ? reject(res) : undefined});
+  t.after(() => receiver.close()); const f = setup(t,receiver); large(f,'clear-stale-memory');
+  await f.service.jsonl.tick(); const file = f.jsonl.list().files[0], before = f.jsonl.get(file.id), parts = f.jsonl.parts(file);
+  assert.equal(before.error_code,'HTTP_REJECTED'); assert.equal(before.uploaded_parts,1);
+  f.advance(); const claimed = f.jsonl.claim(); assert.equal(claimed.error_code,''); assert.equal(claimed.http_status,0);
+  const current = f.jsonl.get(file.id); assert.equal(current.status,'running'); assert.equal(current.error_code,'');
+  assert.equal(current.http_status,0); assert.equal(current.upload_id,before.upload_id); assert.equal(current.object_key,before.object_key);
+  assert.deepEqual(f.jsonl.parts(current),parts);
+  assert.deepEqual(f.push.db.prepare('SELECT DISTINCT error_code,http_status FROM cl_push_jobs WHERE jsonl_file_id=?').all(file.id),[{error_code:'',http_status:0}]);
+});
 
 for (const legacyVersion of [1,2,3,4]) test(`legacy v${legacyVersion} multipart progress and flat key survive upgrade and skip the first network part`, async t => {
   let fail = true;

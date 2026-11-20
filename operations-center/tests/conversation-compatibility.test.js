@@ -63,6 +63,31 @@ test('cgroup v1 hierarchical cache, missing statistics and host MemAvailable are
   assert.equal(availableMemory(undefined,fakeMemory({'/sys/fs/cgroup/memory.max':'max','/sys/fs/cgroup/memory.current':400 * MiB})),8192 * MiB);
 });
 
+test('push-only active cache credit remains bounded by clean pages, host availability and heap headroom', () => {
+  const dependencies = {...v2({file:480,inactive_file:40,active_file:440,anon:30},510),activeFileCacheCredit:true,
+    heapStatistics:() => ({heap_size_limit:128 * MiB,used_heap_size:32 * MiB})};
+  assert.equal(availableMemory(undefined,dependencies),132 * MiB);
+  assert.deepEqual(processingBudgets(undefined,dependencies),{memory:100 * MiB,heap:64 * MiB});
+  assert.equal(availableMemory(undefined,{...dependencies,activeFileCacheCredit:false}),22 * MiB);
+  assert.equal(availableMemory(undefined,{...dependencies,freeMemory:() => 12 * MiB}),12 * MiB);
+  assert.equal(availableMemory(0,dependencies),0);
+  const dirty = {...v2({file:400,inactive_file:40,active_file:360,shmem:100,file_dirty:80,file_writeback:20}),activeFileCacheCredit:true};
+  assert.equal(availableMemory(undefined,dirty),94 * MiB);
+  assert.equal(availableMemory(undefined,{...v2({file:10,inactive_file:1000,active_file:1000}),activeFileCacheCredit:true}),39 * MiB);
+  assert.equal(availableMemory(undefined,{...v2({file:340,inactive_file:0,active_file:330,shmem:340}),activeFileCacheCredit:true}),34 * MiB);
+  assert.equal(availableMemory(undefined,{...v2({anon:478,active_file:330}),activeFileCacheCredit:true}),34 * MiB);
+});
+
+test('push cache credit supports cgroup v1 and does not credit absent or dirty cache statistics', () => {
+  const dependencies = {...fakeMemory({'/sys/fs/cgroup/memory/memory.limit_in_bytes':512 * MiB,
+    '/sys/fs/cgroup/memory/memory.usage_in_bytes':478 * MiB,
+    '/sys/fs/cgroup/memory/memory.stat':`total_cache ${340 * MiB}\ntotal_inactive_file 0\ntotal_active_file ${330 * MiB}`}),activeFileCacheCredit:true};
+  assert.equal(availableMemory(undefined,dependencies),116.5 * MiB);
+  assert.equal(availableMemory(undefined,{...fakeMemory({'/sys/fs/cgroup/memory.max':512 * MiB,
+    '/sys/fs/cgroup/memory.current':478 * MiB}),activeFileCacheCredit:true}),34 * MiB);
+  assert.equal(availableMemory(undefined,{...v2({file:340,active_file:340,file_dirty:340}),activeFileCacheCredit:true}),34 * MiB);
+});
+
 test('Responses encrypted reasoning supports exact request, JSON, event and WebSocket paths without rewriting opaque bytes', () => {
   const input = JSON.stringify({model:'gpt-6.1-sol',input:[reasoning(),{role:'user',content:'contact alice@example.com'}]});
   const response = JSON.stringify({object:'response',status:'completed',output:[reasoning()]});

@@ -23,6 +23,23 @@ async function waitForTurn({ canWork, guard, signal, onPause = () => {} }) {
   } finally { onPause(''); }
 }
 
+async function prepareWithMemoryWait(prepare, { guard, checkpoint, onPause, timeoutMs = 30000, now = () => performance.now(), wait = delay }) {
+  const deadline = now() + timeoutMs; let paused = false, backoff = 250;
+  try {
+    while (true) {
+      await checkpoint(); guard();
+      try { return prepare(); }
+      catch (error) {
+        if (error.code !== 'EXPORT_MEMORY' || now() >= deadline) throw error;
+      }
+      paused = true; onPause('memory_wait');
+      const retryAt = Math.min(deadline, now() + backoff);
+      while (now() < retryAt) { await wait(Math.min(100, retryAt - now())); guard(); }
+      backoff = Math.min(4000, backoff * 2);
+    }
+  } finally { if (paused) onPause(''); }
+}
+
 function pacedBody(body, bytesPerSecond, signal, { now = () => performance.now(), wait = delay } = {}) {
   return Readable.from((async function* () {
     let next = now();
@@ -37,4 +54,4 @@ function pacedBody(body, bytesPerSecond, signal, { now = () => performance.now()
   })(), { objectMode: false, highWaterMark: 65536 });
 }
 
-module.exports = { delay, waitForTurn, pacedBody };
+module.exports = { delay, waitForTurn, prepareWithMemoryWait, pacedBody };

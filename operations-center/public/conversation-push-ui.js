@@ -130,7 +130,7 @@
     }
     function renderFile(file) {
       const uploaded=file.status==='sent'?file.bytes:Math.min(file.bytes,file.uploaded_bytes||0);
-      const paused=file.pause_reason==='archive_busy'?'采集优先，上传暂缓':!policy.enabled||!policy.s3.enabled?'推送已暂停':'';
+      const paused=file.pause_reason==='archive_busy'?'采集优先，上传暂缓':file.pause_reason==='memory_wait'?'等待内存恢复，上传进度保留':!policy.enabled||!policy.s3.enabled?'推送已暂停':'';
       return `<tr><td><strong>${esc(file.model||'未提供模型')}</strong><small>${esc(file.day)}</small></td><td><code class="clp-object-key">${esc(file.object_key)}</code></td><td>${number(file.records)} 条<small>${esc(size(file.bytes))}</small><progress class="clp-progress" max="${file.bytes||1}" value="${uploaded}" aria-label="已确认上传进度"></progress><small>${esc(size(uploaded))} / ${esc(size(file.bytes))} · ${number(file.uploaded_parts)} 个分片</small></td><td><span class="cl-badge ${file.status==='sent'?'green':['failed','cancelled'].includes(file.status)?'amber':''}">${fileStates[file.status]||esc(file.status)}</span><small>${esc(['sent','cancelled'].includes(file.status)?'':paused)}</small><small>${esc(errors[file.error_code]||file.error_code||'')}</small></td><td>${file.status==='failed'?tool('rotate-cw','继续上传此 JSONL 文件',`data-clp-file-retry="${esc(file.id)}"`):''}</td></tr>`;
     }
     function renderJobs(value) {

@@ -327,7 +327,11 @@ class ConversationPushStore {
     }
   }
   delivery(job, pinnedCopy, memoryBudget = processingBudgets) {
-    const prepare=()=>{this.admit(job,pinnedCopy,memoryBudget());return this.envelope(job,pinnedCopy,{format:formatDeliveryBodies});};
+    const prepare=()=>{
+      const budget=memoryBudget();this.admit(job,pinnedCopy,budget);
+      const limit=Math.floor((typeof budget==='number'?budget:Math.min(budget.memory,budget.heap))/4);
+      return this.envelope(job,pinnedCopy,{format:(raw,options)=>formatDeliveryBodies(raw,{...options,maxOutputBytes:Number.isFinite(limit)?limit:undefined})});
+    };
     try { return prepare(); }
     catch (error) {
       if (error.code!=='EXPORT_MEMORY' || typeof global.gc!=='function') throw error;
