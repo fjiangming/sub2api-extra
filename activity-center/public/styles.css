@@ -47,6 +47,7 @@ h2 { font-size: 16px; font-weight: 600; }
 .hub { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); width: 74px; height: 74px; border-radius: 50%; border: 6px solid var(--bg); background: var(--accent); color: var(--on-action); display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 2px; font-size: 13px; font-weight: 600; }
 .hub svg { width: 20px; height: 20px; }
 .lottery-side { min-width: 0; }
+.lottery-rule { margin-bottom: 12px; color: var(--muted); font-size: 12px; text-align: right; overflow-wrap: anywhere; }
 .chance-value { display: flex; align-items: baseline; gap: 7px; margin: 5px 0 15px; }
 .chance-value strong { color: var(--accent); font-size: 42px; line-height: 1.1; font-weight: 600; overflow-wrap: anywhere; }
 .mini-stats { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 12px; padding: 16px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
@@ -109,8 +110,9 @@ dialog::backdrop { background: #0006; }
   h1 { font-size: 21px; } .tabs { margin: 0 16px; } .content { padding: 0 16px 22px; }
   .lottery-main { grid-template-columns: minmax(0,1fr); gap: 5px; padding: 14px 0 22px; }
   .wheel-frame { width: min(100%,310px); } .lottery-side { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); column-gap: 14px; }
+  .lottery-rule { grid-column: 1 / -1; }
   .lottery-side > .muted { align-self: end; } .chance-value { grid-column: 1; margin: 4px 0; } .chance-value strong { font-size: 36px; }
-  .mini-stats { grid-column: 2; grid-row: 1 / 3; padding: 8px 0; border: 0; gap: 10px; } .mini-value { font-size: 17px; }
+  .mini-stats { grid-column: 2; grid-row: 2 / 4; padding: 8px 0; border: 0; gap: 10px; } .mini-value { font-size: 17px; }
   .outcome { grid-column: 1 / -1; min-height: 93px; text-align: center; } .outcome-parts { justify-content: center; }
   .draw,.batches,#recover-draw { grid-column: 1 / -1; }
   .admin-title { padding: 20px 16px 0; } .ledger-stats { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px 12px; } .ledger-stats strong { font-size: 23px; }

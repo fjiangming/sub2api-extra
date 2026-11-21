@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="referrer" content="no-referrer">
   <title>活动中心</title>
-  <link rel="stylesheet" href="./styles.css?v=3">
+  <link rel="stylesheet" href="./styles.css?v=4">
   <script src="./vendor/lucide.js" defer></script>
   <script src="./app.js?v=5" defer></script>
 </head>
@@ -21,6 +21,7 @@
         <div class="lottery-main">
           <div class="wheel-area"><div class="wheel-frame"><canvas id="wheel" width="720" height="720" role="img" aria-label="抽奖转盘，奖品为0.5、1、2、3、5、10、20、50元"></canvas><span class="pointer" aria-hidden="true"></span><span class="hub" aria-hidden="true"><i data-lucide="gift"></i>好运</span></div></div>
           <div class="lottery-side">
+            <p class="lottery-rule">每累计充值 50 元获得 1 次抽奖机会，奖励即时到账</p>
             <div class="muted">可用抽奖次数</div><div class="chance-value"><strong id="available">0</strong><span class="muted">次</span></div>
             <div class="mini-stats"><div><div class="mini-label">累计获得</div><div id="my-total" class="mini-value">¥0.00</div></div><div><div class="mini-label">已抽次数</div><div id="my-draws" class="mini-value">0 次</div></div></div>
             <div id="outcome" class="outcome" role="status" aria-live="polite"><span class="muted">好运即将揭晓</span></div>
