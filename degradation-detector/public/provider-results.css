@@ -54,6 +54,9 @@
 .p-empty { text-align:center; padding:64px 20px; border-block:1px solid var(--border); color:var(--muted); }
 .p-table-scroll { overflow-x:auto; border:1px solid var(--border); border-radius:6px; background:var(--surface); }
 .p-table { width:100%; border-collapse:collapse; min-width:980px; text-align:left; font-size:12px; }
+.p-table[data-columns="5"] { min-width:820px; }
+.p-table[data-columns="4"] { min-width:680px; }
+.p-table[data-columns="3"] { min-width:520px; }
 .p-table th { background:var(--surface-soft); color:var(--muted); font-size:11px; font-weight:500; padding:11px 14px; }
 .p-table td { padding:16px 14px; border-top:1px solid var(--border-soft); vertical-align:middle; }
 .p-table td:first-child { min-width:260px; max-width:340px; overflow-wrap:anywhere; }

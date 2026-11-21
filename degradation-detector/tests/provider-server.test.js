@@ -79,6 +79,58 @@ test('provider configuration and task writes enforce admin role, CSRF, scope, st
   assert.equal((await send('/api/admin/provider/groups/1/candy/runs', {})).status, 403);
 });
 
+test('TestLLM list exposes only effective test switches across legacy defaults, platform inheritance and group overrides', async t => {
+  const { get, send, runtime, input, admin, groups } = await setup(t);
+  groups.push({ id: '3', name: 'Three', platform: 'openai' });
+  input.groups.push({ id: '3', channel: 'testllm', enabled: true, override: null, key: 'sk-private-testllm-3-123456' });
+  assert.equal((await send('/api/admin/provider-config', input, admin, true, 'PUT')).status, 200);
+  const store = runtime.providerStore;
+  const original = new Map();
+  for (const id of ['1', '2', '3']) {
+    const run = store.create(store.group(id, 'testllm'));
+    store.response(run.id, demoResponse('testllm')); store.finish(run.id, 'completed');
+    original.set(id, store.run(run.id));
+  }
+  const options = async () => {
+    const configuration = store.configuration(), savedGroups = store.groups();
+    const response = await get('/api/provider-results?channel=testllm', admin);
+    assert.equal(response.status, 200);
+    const data = await response.json();
+    assert.doesNotMatch(JSON.stringify(data), /sk-private|relay\.example|key_cipher|key_context|key_fingerprint|key_destination|target_url|api_url|override_json|snapshot_json/);
+    assert.deepEqual(store.configuration(), configuration, 'listing must not migrate or write configuration');
+    assert.deepEqual(store.groups(), savedGroups);
+    for (const group of data.groups) {
+      assert.equal(group.latest.id, original.get(group.id).id);
+      assert(group.latest.cache && group.latest.think, 'old reports remain available independently of current switches');
+      assert.equal(store.run(group.latest.id).snapshot_json, original.get(group.id).snapshot_json);
+    }
+    return Object.fromEntries(data.groups.map(group => [group.id, group.test_options]));
+  };
+  const all = { iq_test: true, cache_test: true, thinking_test: true };
+  assert.deepEqual(await options(), { 1: all, 2: all, 3: all });
+  const legacy = structuredClone(input); legacy.revision = 1; legacy.groups.forEach(group => delete group.key);
+  legacy.channels.testllm.defaults.cache_test = false;
+  legacy.groups.find(group => group.id === '3').override = { ...legacy.channels.testllm.defaults, cache_test: true, thinking_test: false };
+  assert.equal((await send('/api/admin/provider-config', legacy, admin, true, 'PUT')).status, 200);
+  const signature = { iq_test: true, cache_test: false, thinking_test: true };
+  const cacheOnly = { iq_test: true, cache_test: true, thinking_test: false };
+  assert.deepEqual(await options(), { 1: signature, 2: signature, 3: cacheOnly });
+  const payload = await (await get('/api/admin/provider-config', admin)).json();
+  const next = hierarchyInput(payload);
+  const gpt = next.provider_platforms.find(scope => scope.provider === 'testllm' && scope.id === 'openai');
+  const claude = next.provider_platforms.find(scope => scope.provider === 'testllm' && scope.id === 'anthropic');
+  gpt.params.cache_test = false; gpt.params.thinking_test = false;
+  claude.params.cache_test = true; claude.params.thinking_test = false;
+  assert.equal((await send('/api/admin/provider-config', next, admin, true, 'PUT')).status, 200);
+  const reasoning = { iq_test: true, cache_test: false, thinking_test: false };
+  assert.deepEqual(await options(), { 1: reasoning, 2: cacheOnly, 3: cacheOnly });
+  const reader = await (await get('/api/provider-results?channel=testllm')).json();
+  assert.deepEqual(reader.groups.map(group => group.id), ['1']);
+  assert.deepEqual(reader.groups[0].test_options, reasoning);
+  const candy = await (await get('/api/provider-results?channel=candy', admin)).json();
+  assert(candy.groups.every(group => !Object.hasOwn(group, 'test_options')));
+});
+
 test('shared AI platform settings and changed destinations save through HTTP without resupplying credentials', async t => {
   const { get, send, runtime, input, admin } = await setup(t);
   assert.equal((await send('/api/admin/provider-config', input, admin, true, 'PUT')).status, 200);

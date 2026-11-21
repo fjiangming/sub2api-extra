@@ -35,6 +35,16 @@ async function main() {
     ]));
     assert.deepEqual(actual, expected.map(([id, title, ids]) => [id, title, ids, `${ids.length} 个检测分组`]));
   };
+  const testColumns = async (page, platform, expected) => {
+    await page.waitForFunction(({ platform, expected }) => {
+      const table = document.querySelector(`.fp-platform-zone[data-platform="${platform}"] .p-table`);
+      return table && JSON.stringify([...table.querySelectorAll('thead [data-test-option]')].map(cell => cell.dataset.testOption)) === JSON.stringify(expected);
+    }, { platform, expected });
+    const table = page.locator(`.fp-platform-zone[data-platform="${platform}"] .p-table`);
+    assert.equal(await table.locator('thead th').count(), expected.length + 3);
+    assert(await table.locator('tbody tr').evaluateAll((rows, count) => rows.every(row => row.cells.length === count), expected.length + 3), 'each row must align with the visible headers');
+    return table;
+  };
   const shot = (page, name) => page.screenshot({ path: path.join(directory, `${name}.png`), fullPage: true });
   const fittedPreview = async (page, selector = 'svg') => {
     const frame = await (await page.locator('.p-artwork').elementHandle()).contentFrame();
@@ -177,6 +187,8 @@ async function main() {
       await page.locator('[data-provider="testllm"]').click(); await page.locator('.p-table tbody tr').first().waitFor();
       assert.equal(await page.locator('.p-table tbody tr').count(), 2); assert.match(await page.locator('.p-table').first().innerText(), /极高智商/);
       await platformZones(page, cardZones.slice(0, 2));
+      await testColumns(page, 'openai', ['iq_test', 'cache_test', 'thinking_test']);
+      await testColumns(page, 'anthropic', ['iq_test', 'cache_test', 'thinking_test']);
       await page.locator('#p-platform').selectOption('anthropic'); await platformZones(page, cardZones.slice(1, 2)); await page.locator('#p-platform').selectOption('');
       await fit(page); await shot(page, `${layout.name}-testllm`);
       await page.locator('.p-table').first().getByRole('button', { name: '24小时检测记录' }).click(); await page.locator('.p-history-detail summary').first().waitFor();
@@ -189,6 +201,38 @@ async function main() {
         assert.equal(await page.locator('.p-history-detail').innerText(), '');
         preview.runtime.store.db.prepare("UPDATE degradation_provider_groups SET enabled=1 WHERE group_id='8' AND channel='testllm'").run();
       } else await page.locator('[data-history-close]').click();
+      const mixedTestOptions = async route => {
+        const response = await route.fetch(), data = await response.json();
+        const gpt = data.groups.find(group => group.platform === 'openai');
+        gpt.test_options = { iq_test: true, cache_test: false, thinking_test: true };
+        data.groups.find(group => group.platform === 'anthropic').test_options = { iq_test: true, cache_test: true, thinking_test: false };
+        data.groups.push({ ...gpt, id: 'preview-testllm-override', name: '独立缓存分组',
+          test_options: { iq_test: true, cache_test: true, thinking_test: false }, latest: { ...gpt.latest, conclusion: 'failed' } });
+        await route.fulfill({ response, json: data });
+      };
+      await page.route('**/api/provider-results?channel=testllm', mixedTestOptions);
+      await page.locator('#refresh-button').click(); await page.waitForFunction(() => document.querySelectorAll('.p-table tbody tr').length === 3);
+      const mixed = await testColumns(page, 'openai', ['iq_test', 'cache_test', 'thinking_test']);
+      await testColumns(page, 'anthropic', ['iq_test', 'cache_test']);
+      assert.equal(await mixed.locator('tbody tr').first().locator('[data-test-option="cache_test"]').innerText(), '未启用');
+      assert.equal(await mixed.locator('tbody tr').last().locator('[data-test-option="thinking_test"]').innerText(), '未启用');
+      assert.match(await mixed.locator('tbody tr').first().locator('[data-test-option="thinking_test"]').innerText(), /有签名/);
+      assert.match(await mixed.locator('tbody tr').last().locator('[data-test-option="cache_test"]').innerText(), /87\.5%/);
+      await fit(page); await shot(page, `${layout.name}-testllm-mixed-options`);
+      await page.locator('#p-search').fill('官Key');
+      await testColumns(page, 'openai', ['iq_test', 'thinking_test']);
+      await page.locator('#p-search').fill('独立缓存');
+      await testColumns(page, 'openai', ['iq_test', 'cache_test']);
+      await page.locator('#p-search').fill(''); await page.locator('#p-status').selectOption('passed');
+      await testColumns(page, 'openai', ['iq_test', 'thinking_test']);
+      await page.locator('#p-status').selectOption('failed');
+      await testColumns(page, 'openai', ['iq_test', 'cache_test']);
+      await platformZones(page, [['openai', 'ChatGPT', ['preview-testllm-override']]]);
+      await page.locator('#p-status').selectOption(''); await page.locator('#p-platform').selectOption('anthropic');
+      await testColumns(page, 'anthropic', ['iq_test', 'cache_test']);
+      await page.locator('#p-platform').selectOption(''); await page.unroute('**/api/provider-results?channel=testllm', mixedTestOptions);
+      await page.locator('#refresh-button').click(); await page.waitForFunction(() => document.querySelectorAll('.p-table tbody tr').length === 2);
+      await testColumns(page, 'openai', ['iq_test', 'cache_test', 'thinking_test']);
       const denied = await page.evaluate(async () => Promise.all(['/admin/config', '/admin/provider-config.js', '/api/admin/provider-config'].map(url => fetch(url).then(response => response.status))));
       assert.deepEqual(denied, [403, 403, 403]); await reader.close();
 
@@ -420,6 +464,20 @@ async function main() {
       await modal.locator('[name="key"]').fill(`sk-browser-testllm-${layout.name}`); await modal.getByRole('button', { name: '应用配置' }).click(); result = await save(admin);
       assert.equal(scope(result, 'testllm', 'openai').params.model, `testllm-gpt-${layout.name}`);
       assert.equal(store.effective(store.group('8', 'candy')).model, `shared-gpt-${layout.name}`); assert.equal(store.group('8', 'candy').key_cipher, retained[0]);
+      assert.equal(await form.locator('[name="iq_test"]').isChecked(), true);
+      assert.equal(await form.locator('[name="iq_test"]').isDisabled(), true);
+      const resultsContext = await browser.newContext(options);
+      const resultPage = await resultsContext.newPage(); watch(resultPage);
+      await resultPage.goto(`${preview.baseUrl}/results?demo=readonly&provider=testllm`);
+      const reasoningOnly = await testColumns(resultPage, 'openai', ['iq_test']);
+      await testColumns(resultPage, 'anthropic', ['iq_test', 'cache_test', 'thinking_test']);
+      assert.match(await reasoningOnly.innerText(), /极高智商/);
+      assert.match(await reasoningOnly.innerText(), /耗时/);
+      assert.doesNotMatch(await reasoningOnly.innerText(), /Token 缓存率|有签名|无签名/);
+      const oldReport = store.history('8', 'testllm')[0];
+      assert(oldReport.cache && oldReport.think, 'disabled columns must hide existing historical data');
+      await platformZones(resultPage, cardZones.slice(0, 2));
+      await fit(resultPage); await shot(resultPage, `${layout.name}-testllm-reasoning-only`); await resultsContext.close();
       runs = await run(admin, 'testllm', 'openai'); assert.deepEqual(runs.map(value => value.channel), ['testllm']);
       const iq = JSON.parse(store.run(runs[0].id).snapshot_json); assert.equal(iq.reasoning_effort, undefined); assert.equal(iq.cache_test, false); assert.equal(iq.thinking_test, false); assert.equal(iq.model, `testllm-gpt-${layout.name}`);
       await fit(admin); await shot(admin, `${layout.name}-admin-testllm`);

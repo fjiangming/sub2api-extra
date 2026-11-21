@@ -78,10 +78,12 @@ function installProviderRoutes(app, runtime, { requireAuth, requireAdmin, requir
       providers: Object.fromEntries(Object.entries(config.providers).map(([id, value]) => [id, { enabled: value.enabled }])),
       groups: available.map(group => {
         const saved = store.group(group.id, channel);
+        const effective = store.effective(saved, config);
         const history = store.history(group.id, channel, Number.MAX_SAFE_INTEGER, 60);
         return { id: String(group.id), name: group.name, platform: group.platform, rate_multiplier: group.rate_multiplier ?? null,
           cache_stats: metrics ? publicGroupCacheStats(metrics, group.id) : null,
-          model: store.effective(saved).model, schedule: store.schedule(saved), next_run_at: saved.next_run_at,
+          model: effective.model, schedule: store.schedule(saved, config), next_run_at: saved.next_run_at,
+          ...(channel === 'testllm' ? { test_options: { iq_test: true, cache_test: Boolean(effective.cache_test), thinking_test: Boolean(effective.thinking_test) } } : {}),
           history, latest: history[0] || null, ...store.counts(group.id, channel) };
       })
     });
