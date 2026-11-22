@@ -37,6 +37,9 @@ const { createApp } = require('./app');
 const { DomainAccessStore } = require('./domain-access-store');
 const { DomainAccessSource } = require('./services/domain-access-source');
 const { DomainAccessService } = require('./services/domain-access-service');
+const { GroupMonitorStore } = require('./group-monitor-store');
+const { GroupMonitorSource } = require('./services/group-monitor-source');
+const { GroupMonitorService } = require('./services/group-monitor-service');
 const { ConversationLogStore } = require('./conversation-log-store');
 const { ConversationArchiveService } = require('./services/conversation-archive-service');
 const { ConversationPushStore } = require('./conversation-push-store');
@@ -82,6 +85,15 @@ async function main() {
     canWork:() => !conversationArchive?.busy && !conversationArchive?.processingBusy && !conversationCleanup?.child && !conversationRepair?.busy
   }) : null;
   const database = createDatabase(config);
+  const groupMonitorStore = new GroupMonitorStore(config.dataDir, { key: settingsStore.key });
+  let groupMonitor = null;
+  try {
+    groupMonitorStore.initialize();
+    groupMonitor = new GroupMonitorService({ config, store: groupMonitorStore, source: new GroupMonitorSource({ pool: database.read, config }) });
+  } catch {
+    groupMonitorStore.close();
+    console.warn('group monitor unavailable: GROUP_MONITOR_INITIALIZATION_FAILED');
+  }
   const sub2api = new Sub2ApiClient(config);
   const providerMonitor = new ProviderMonitorClient(config);
   const billingRecoveryStore = new BillingRecoveryStore(path.join(config.dataDir, 'billing-recovery'));
@@ -164,7 +176,7 @@ async function main() {
     sub2api
   });
   const app = createApp({
-    config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationRead, conversationExport, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
+    config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, groupMonitor, conversations, conversationArchive, conversationRead, conversationExport, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
   });
   const server = http.createServer(app);
   server.requestTimeout = 120000;
@@ -181,6 +193,7 @@ async function main() {
   cashFlow.start();
   billingRecovery.start();
   domainAccess?.start();
+  groupMonitor?.start();
   conversationPush?.start();
   conversationCleanup?.start();
   conversationRepair?.start();
@@ -193,6 +206,7 @@ async function main() {
     stopping = true;
     console.info(`operations-center shutting down (${signal})`);
     scheduler.stop();
+    await groupMonitor?.stop();
     await conversationExport?.stop();
     await conversationRead?.stop();
     await conversationCleanup?.stop();
@@ -210,6 +224,7 @@ async function main() {
     dailyProfitStore.close();
     accountingStore.close();
     domainStore.close();
+    groupMonitorStore.close();
     conversations?.close();
     billingRecoveryStore.close();
     telemetry.close();

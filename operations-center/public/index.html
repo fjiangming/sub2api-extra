@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/user-messages.css?v=20261019-1">
   <link rel="stylesheet" href="/latency.css?v=20261020-1">
   <link rel="stylesheet" href="/request-errors.css?v=20261102-1">
+  <link rel="stylesheet" href="/group-monitor.css?v=20261122-1">
   <link rel="stylesheet" href="/billing-recovery.css?v=20261029-2">
   <link rel="stylesheet" href="/cost-accounting.css?v=20261106-1">
   <link rel="stylesheet" href="/domain-access.css?v=20261113-1">
@@ -23,6 +24,7 @@
   <script src="/user-messages-ui.js?v=20261019-1" defer></script>
   <script src="/latency-ui.js?v=20261020-1" defer></script>
   <script src="/request-errors-ui.js?v=20261102-1" defer></script>
+  <script src="/group-monitor-ui.js?v=20261122-1" defer></script>
   <script src="/domain-access-ui.js?v=20261113-1" defer></script>
   <script src="/conversation-platforms-ui.js?v=20261121-platform-toggle-1" defer></script>
   <script src="/conversation-push-ui.js?v=20261120-auto-storage-pricing-1" defer></script>
@@ -33,7 +35,7 @@
   <script src="/conversation-logs-ui.js?v=20261118-jsonl-export-1" defer></script>
   <script src="/billing-recovery-ui.js?v=20261023-1" defer></script>
   <script src="/billing-import-ui.js?v=20261030-1" defer></script>
-  <script src="/app.js?v=20261117-abort" defer></script>
+  <script src="/app.js?v=20261122-group-monitor-1" defer></script>
 </head>
 <body>
   <div id="login-view" class="login-view" hidden>
@@ -63,6 +65,7 @@
         <button class="module-tab" data-view="usage" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="activity"></i><span>用量分析</span></button>
         <button class="module-tab" data-view="latency" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="timer"></i><span>慢请求</span></button>
         <button class="module-tab" data-view="errors" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="scan-line"></i><span>错误分析</span></button>
+        <button class="module-tab" data-view="group-monitor" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="radar"></i><span>分组监控</span></button>
         <button class="module-tab" data-view="conversations" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="messages-square"></i><span>对话日志</span></button>
         <button class="module-tab" data-view="users" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="users"></i><span>用户分析</span></button>
         <button class="module-tab" data-view="profiles" role="tab" aria-selected="false" aria-controls="content" tabindex="-1"><i data-lucide="contact-round"></i><span>用户画像</span></button>
@@ -98,6 +101,7 @@
       </header>
 
       <main id="content" class="content">
+        <section id="view-group-monitor" class="view" aria-labelledby="page-title"><div id="gm-root" class="gm-root"></div></section>
         <section id="view-domains" class="view" aria-labelledby="page-title"><div id="da-root"></div></section>
         <section id="view-conversations" class="view" aria-labelledby="page-title"><div id="cl-root" class="cl-root"></div></section>
         <section id="view-overview" class="view active" aria-labelledby="page-title">

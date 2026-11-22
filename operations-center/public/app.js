@@ -46,6 +46,7 @@ const titles = {
   usage: '用量分析',
   latency: '慢请求',
   errors: '错误分析',
+  'group-monitor': '分组监控',
   users: '用户分析',
   profiles: '用户画像',
   messages: '用户消息',
@@ -256,6 +257,7 @@ function showLogin(message = '') {
   messagesUi.reset();
   latencyUi.reset();
   requestErrorsUi.reset();
+  groupMonitorUi.reset();
   domainAccessUi.reset();
   conversationLogsUi.reset();
   billingUi.reset();
@@ -1623,6 +1625,7 @@ async function loadCurrentView(options = {}) {
     usage: loadUsage,
     latency: () => latencyUi.load(options),
     errors: () => requestErrorsUi.load(options),
+    'group-monitor': () => groupMonitorUi.load(options),
     users: loadUsers,
     profiles: () => profilesUi.load(options),
     messages: () => messagesUi.load(),
@@ -1641,7 +1644,7 @@ async function loadCurrentView(options = {}) {
   try {
     await loaders[requestedView]();
     if (requestedSequence !== viewLoadSequence || requestedView !== state.currentView || !state.user) return;
-    if (!['maintenance', 'settings'].includes(state.currentView)) setConnection(true, '数据源正常');
+    if (!['maintenance', 'settings', 'group-monitor'].includes(state.currentView)) setConnection(true, '数据源正常');
   } catch (error) {
     if (error.name === 'AbortError' || requestedSequence !== viewLoadSequence || requestedView !== state.currentView || !state.user) return;
     setConnection(false, '数据源异常');
@@ -1661,6 +1664,7 @@ function navigate(view) {
   if (state.currentView === 'messages') messagesUi.leave();
   if (state.currentView === 'latency') latencyUi.leave();
   if (state.currentView === 'errors') requestErrorsUi.leave();
+  if (state.currentView === 'group-monitor') groupMonitorUi.leave();
   if (state.currentView === 'domains') domainAccessUi.leave();
   if (state.currentView === 'conversations') conversationLogsUi.leave();
   if (state.currentView === 'billing') billingUi.leave();
@@ -1906,6 +1910,11 @@ const latencyUi = window.LatencyUi.create({
 const requestErrorsUi = window.RequestErrorsUi.create({
   api, escapeHtml, icon, refreshIcons, toast, setPageMeta,
   isActive: () => state.currentView === 'errors' && Boolean(state.user)
+});
+
+const groupMonitorUi = window.GroupMonitorUi.create({
+  api, escapeHtml, icon, refreshIcons, toast, setPageMeta, setConnection,
+  isActive: () => state.currentView === 'group-monitor' && Boolean(state.user)
 });
 
 const domainAccessUi = window.DomainAccessUi.create({

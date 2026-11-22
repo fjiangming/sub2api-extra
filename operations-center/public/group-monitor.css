@@ -1,0 +1,72 @@
+#view-group-monitor { min-width: 0; }
+.gm-root { --gm-soft: var(--surface-subtle); --gm-good: var(--green); --gm-bad: var(--red); --gm-warn: var(--amber); color: var(--text); }
+.gm-root * { box-sizing: border-box; }
+.gm-root :is(h2,h3,p) { margin: 0; }
+.gm-root h2 { font-size: 16px; }.gm-root h3 { font-size: 14px; }
+.gm-root button,.gm-root input,.gm-root select { letter-spacing: 0; }
+.gm-toolbar,.gm-heading,.gm-actions,.gm-pagination { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.gm-heading { justify-content: space-between; margin: 16px 0 10px; }
+.gm-toolbar { align-items: end; margin: 16px 0; }
+.gm-toolbar>label { min-width: 0; flex: 0 1 160px; }
+.gm-toolbar>.gm-search { flex: 1 1 200px; }
+.gm-commands { justify-content: end; margin-bottom: 18px; }
+.gm-metrics { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 18px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 18px 0; margin: 14px 0 18px; }
+.gm-metrics>div { min-width: 0; }.gm-metrics span,.gm-metrics small { display: block; color: var(--muted); font-size: 12px; }
+.gm-metrics strong { display: block; font-size: 27px; margin: 4px 0; font-variant-numeric: tabular-nums; }
+.gm-metrics small { font-size: 11px; line-height: 1.6; }
+.gm-good { color: var(--gm-good); }.gm-bad { color: var(--gm-bad); }.gm-warn { color: var(--gm-warn); }
+.gm-muted { color: var(--muted); font-size: 12px; line-height: 1.6; }
+.gm-tabs { display: flex; gap: 22px; border-bottom: 1px solid var(--line); margin: 18px 0; }
+.gm-tabs button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 0 12px; color: var(--muted); background: transparent; border: 0; border-bottom: 2px solid transparent; }
+.gm-tabs button[aria-selected=true] { border-bottom-color: var(--green); color: var(--green); font-weight: 600; }
+.gm-tabs svg,.gm-actions svg { width: 16px; height: 16px; }
+.gm-link { display: inline-flex; align-items: center; gap: 4px; font: inherit; color: var(--blue); padding: 3px 0; background: transparent; border: 0; text-align: left; }
+.gm-link:hover { text-decoration: underline; }.gm-link:disabled { opacity: .45; cursor: not-allowed; }
+.gm-root :focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
+.gm-risk-count { background: var(--red-soft); color: var(--red); padding: 1px 5px; border-radius: 3px; font-size: 11px; }
+.gm-notice { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; background: var(--amber-soft); color: var(--amber); padding: 10px 12px; font-size: 12px; border-radius: 4px; margin: 12px 0; }
+.gm-notice .gm-link { color: inherit; margin-left: auto; }.gm-notice>svg { width: 16px; height: 16px; flex-shrink: 0; }
+.gm-source { margin: 12px 0; }.gm-source p { margin-top: 5px; }
+.gm-root .table-wrap { min-width: 0; }
+.gm-root table { width: 100%; background: var(--surface); }
+.gm-root .gm-main-table { min-width: 810px; table-layout: fixed; }
+.gm-root td,.gm-root th { white-space: normal; overflow-wrap: anywhere; text-align: left; font-size: 12px; }
+.gm-root td { padding-top: 12px; padding-bottom: 12px; vertical-align: middle; }
+.gm-root td small { display: block; font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.6; }
+.gm-root .gm-number { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.gm-root td .gm-actions { gap: 8px; }.gm-root td .gm-actions .gm-link { white-space: nowrap; }
+.gm-badge { display: inline-flex; gap: 5px; align-items: center; font-size: 11px; padding: 2px 6px; border-radius: 4px; white-space: nowrap; background: var(--gm-soft); color: var(--muted); }
+.gm-badge::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.gm-badge.gm-good { color: var(--green); background: var(--green-soft); }.gm-badge.gm-bad { color: var(--red); background: var(--red-soft); }.gm-badge.gm-warn { color: var(--amber); background: var(--amber-soft); }
+.gm-bars { display: flex; gap: 3px; margin-top: 6px; }.gm-bars span { width: 6px; height: 12px; background: var(--green); border-radius: 1px; }.gm-bars .gm-failed { background: var(--red); }.gm-bars .gm-skipped { background: var(--line-strong); }
+.gm-pagination { font-size: 12px; color: var(--muted); margin-top: 14px; }.gm-pagination>span:first-child { margin-right: auto; }
+.gm-pagination select { width: auto; min-height: 34px; font-size: 12px; }
+.gm-footnote { margin: 16px 0 0 !important; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.gm-empty { padding: 32px 12px !important; text-align: center !important; color: var(--muted); }
+.gm-progress { margin: 14px 0; padding: 12px; background: var(--blue-soft); border-radius: 4px; }
+.gm-track { height: 4px; margin-top: 10px; background: var(--line); }.gm-track div { height: 100%; background: var(--blue); }
+.gm-dialog { width: min(780px,calc(100% - 24px)); max-height: 88vh; padding: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--text); }
+.gm-dialog::backdrop { background: #0005; }.gm-dialog>header { padding: 18px 20px; display: flex; justify-content: space-between; align-items: start; gap: 12px; border-bottom: 1px solid var(--line); }
+.gm-dialog h2 { font-size: 16px; }.gm-dialog h3 { font-size: 14px; }.gm-dialog header p { margin-top: 4px; }
+.gm-dialog-body { display: grid; grid-template-columns: minmax(0,1fr); gap: 18px; padding: 20px; }.gm-dialog-body>* { min-width: 0; }
+.gm-dialog footer { display: flex; flex-wrap: wrap; justify-content: end; gap: 8px; padding: 16px 20px; border-top: 1px solid var(--line); }
+.gm-dialog .table-wrap table { min-width: 580px; }.gm-dialog td small { display: block; }
+.gm-facts { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 15px; margin: 0; }.gm-facts>div { min-width: 0; }.gm-facts dt { font-size: 12px; color: var(--muted); }.gm-facts dd { margin: 5px 0 0; font-size: 13px; overflow-wrap: anywhere; }
+.gm-result { background: var(--gm-soft); padding: 12px; border-left: 3px solid var(--line-strong); }.gm-result.gm-good { border-left-color: var(--green); }.gm-result.gm-bad { border-left-color: var(--red); }.gm-result p { margin-top: 6px; font-size: 12px; }
+.gm-form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }.gm-form-grid label { min-width: 0; }
+.gm-check { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; }.gm-check input { width: 16px; min-height: 16px; margin: 0; accent-color: var(--green); }
+.gm-dialog :is(input,select) { max-width: 100%; }.gm-dialog .form-error { margin-top: 10px; }
+@media(max-width:700px) {
+  .gm-metrics { grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px 12px; }.gm-metrics strong { font-size: 23px; }
+  .gm-toolbar>label { flex: 1 1 100px; }.gm-toolbar>.gm-search { flex-basis: 100%; }
+  .gm-commands { justify-content: start; }.gm-commands .primary { flex: 1; }
+  .gm-root .gm-main-table { min-width: 0; table-layout: auto; }.gm-main-table colgroup,.gm-main-table thead { display: none; }
+  .gm-main-table tbody { display: grid; }.gm-main-table tr { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px 12px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+  .gm-root .gm-main-table td { display: block; padding: 0; border: 0; }.gm-main-table td::before { content: attr(data-label); display: block; color: var(--muted); font-size: 11px; margin-bottom: 3px; }
+  .gm-main-table td:first-child { grid-column: 1/-1; }.gm-main-table td:first-child::before,.gm-main-table td:last-child::before { display: none; }
+  .gm-main-table td:last-child { display: flex; align-items: end; justify-content: end; }.gm-main-table .gm-bars { display: none; }
+  .gm-form-grid { grid-template-columns: 1fr; }.gm-facts { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .gm-dialog-body { padding: 16px 12px; }.gm-dialog>header,.gm-dialog footer { padding: 14px 12px; }
+  .gm-pagination { gap: 6px; }.gm-pagination select { max-width: 100px; }
+}
+@media(pointer:coarse) { .gm-root .button,.gm-root .icon-button { min-height: 44px; }.gm-root .icon-button { min-width: 44px; }.gm-root .gm-link { min-height: 35px; }.gm-root :is(input:not([type=checkbox]),select) { font-size: 16px; min-height: 44px; } }

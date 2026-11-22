@@ -142,7 +142,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, conversations, conversationArchive, conversationRead, conversationExport, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, groupMonitor, conversations, conversationArchive, conversationRead, conversationExport, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -424,6 +424,18 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.post('/billing-recovery/:id/settle', csrf, asyncRoute(async (req, res) => res.json(await billingRecovery.settle(req.params.id, req.body, req.auth.upstreamAccessToken))));
 
   api.get('/overview', asyncRoute(async (_req, res) => res.json(await metrics.getOverview())));
+  const groupMonitorLimiter = rateLimit({ windowMs: 60000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false });
+  api.use('/group-monitor', (_req, _res, next) => groupMonitor ? next() : next(new AppError('GROUP_MONITOR_UNAVAILABLE', '分组监控暂不可用，请检查服务启动日志', { status: 503 })));
+  api.get('/group-monitor', asyncRoute(async (req, res) => res.json(await groupMonitor.report(req.query))));
+  api.get('/group-monitor/groups/:id', (req, res) => res.json(groupMonitor.detail(req.params.id)));
+  api.put('/group-monitor/groups/:id', csrf, groupMonitorLimiter, asyncRoute(async (req, res) => res.json(await groupMonitor.configureGroup(req.params.id, req.body))));
+  api.put('/group-monitor/policy', csrf, groupMonitorLimiter, (req, res) => res.json(groupMonitor.configurePolicy(req.body)));
+  api.get('/group-monitor/findings', (req, res) => res.json(groupMonitor.findings(req.query)));
+  api.get('/group-monitor/findings/:id', (req, res) => res.json(groupMonitor.finding(req.params.id)));
+  api.post('/group-monitor/scan', csrf, groupMonitorLimiter, asyncRoute(async (_req, res) => res.json(await groupMonitor.scan())));
+  api.post('/group-monitor/runs', csrf, groupMonitorLimiter, asyncRoute(async (req, res) => res.status(202).json(await groupMonitor.startRun(req.body))));
+  api.post('/group-monitor/runs/:id/cancel', csrf, groupMonitorLimiter, (req, res) => res.json(groupMonitor.cancel(req.params.id)));
+
   if (domainAccess) {
     api.get('/domain-access/options', (_req, res) => res.json(domainAccess.options()));
     api.get('/domain-access/status', (_req, res) => res.json(domainAccess.status()));
