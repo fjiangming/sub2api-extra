@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const Database = require('better-sqlite3');
 const { EventEmitter } = require('node:events');
 const { fixture, event, rawRequest, rawResponse } = require('./conversation-logs-fixture');
 const { s3Receiver } = require('./conversation-s3-fixture');
@@ -37,6 +38,14 @@ const until = async predicate => {
   const deadline = Date.now() + 15000;
   while (!predicate()) { assert(Date.now() < deadline, 'cleanup worker timed out'); await new Promise(resolve => setTimeout(resolve, 50)); }
 };
+async function deliveredRows(f, count, extra = {}) {
+  const rows = [];
+  for (let n = 0; n < count; n++) {
+    const row = event('batch-delivered-' + n, extra); rows.push(row);
+    f.enqueue(row); await f.service.tick();
+  }
+  return rows;
+}
 
 test('cleanup is explicit, legacy policies stay off and older clients preserve the saved setting', t => {
   const f = setup(t, { deleteAfterPush: false });
@@ -208,4 +217,132 @@ test('cleanup obeys worker priority and cross-process reader leases without dela
   const next = event('collection-during-cleanup'); assert(f.store.ingest(next).accepted);
   release(); await until(() => !exists(f, row)); assert(exists(f, next));
   assert.equal(f.push.list({ status: 'sent' }).total, 1);
+});
+
+test('cleanup uses an indexed due queue and skips deferred records without starving confirmed siblings', async t => {
+  const f = setup(t), rows = await deliveredRows(f, 3);
+  const held = [...rows].sort((a, b) => a.id.localeCompare(b.id))[0];
+  f.store.db.prepare('UPDATE cl_records SET processing_pending=1 WHERE id=?').run(held.id);
+  const plan = f.store.db.prepare('EXPLAIN QUERY PLAN SELECT record_id FROM cl_push_cleanup_queue WHERE next_at<=? ORDER BY next_at,record_id LIMIT 1').all(f.push.now());
+  assert(plan.some(row => row.detail.includes('cl_push_cleanup_due')));
+  assert(!plan.some(row => row.detail.includes('TEMP B-TREE')));
+  const result = f.push.cleanup.batch({ maxMs: 1000 });
+  assert.equal(result.deleted, 2); assert(exists(f, held));
+  assert.equal(f.store.db.prepare('SELECT reason FROM cl_push_cleanup_queue WHERE record_id=?').get(held.id).reason, 'processing');
+  f.store.db.prepare('UPDATE cl_records SET processing_pending=0 WHERE id=?').run(held.id);
+  f.advance(); assert.equal(f.push.cleanup.batch({ maxMs: 1000 }).deleted, 1);
+});
+
+test('cleanup batches limit bytes and records, allow one oversized record and recheck foreground priority', async t => {
+  const f = setup(t), rows = await deliveredRows(f, 6);
+  const bytes = f.store.db.prepare('SELECT bytes FROM cl_record_metadata LIMIT 1').get().bytes;
+  assert.equal(f.push.cleanup.batch({ maxBytes: 2 * bytes, maxMs: 1000 }).deleted, 2);
+  assert.equal(f.push.cleanup.batch({ maxBytes: 1, maxMs: 1000 }).deleted, 1);
+  assert.equal(f.push.cleanup.batch({ maxRecords: 1, maxMs: 1000 }).deleted, 1);
+  assert.equal(f.push.cleanup.batch({ maxMs: 0 }).deleted, 0);
+  const remaining = () => rows.filter(row => exists(f, row)).length;
+  assert.equal(remaining(), 2);
+  assert.equal(f.push.cleanup.batch({ maxMs: 1000, canWork: () => remaining() > 1 }).deleted, 1);
+  assert.equal(remaining(), 1);
+  const release = holdPayloads(f.store.db); assert.equal(f.push.cleanup.batch().deleted, 0);
+  release(); assert.equal(f.push.cleanup.batch({ maxMs: 1000 }).deleted, 1);
+});
+
+test('a batch commits receipts and deletions together and rolls back every earlier deletion on failure', async t => {
+  const f = setup(t), rows = await deliveredRows(f, 3);
+  const refused = [...rows].sort((a, b) => a.id.localeCompare(b.id))[1];
+  const before = f.push.cleanup.status();
+  f.store.db.exec(`CREATE TRIGGER fixture_batch_failure BEFORE DELETE ON cl_records WHEN OLD.id='${refused.id}'
+    BEGIN SELECT RAISE(ABORT,'fixture second deletion'); END;`);
+  assert.throws(() => f.push.cleanup.batch({ maxMs: 1000 }), /fixture second deletion/);
+  assert(rows.every(row => exists(f, row)));
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM cl_push_receipts').get().n, 0);
+  assert.deepEqual(f.push.cleanup.status(), before);
+  f.store.db.exec('DROP TRIGGER fixture_batch_failure');
+  assert.equal(f.push.cleanup.batch({ maxMs: 1000 }).deleted, 3);
+  assert.equal(f.push.list({ status: 'sent' }).total, 3);
+});
+
+test('a source deletion that is ignored cannot leave a receipt or incorrectly increment cleanup progress', async t => {
+  const f = setup(t), [row] = await deliveredRows(f, 1);
+  f.store.db.exec('CREATE TRIGGER fixture_ignore_delete BEFORE DELETE ON cl_records BEGIN SELECT RAISE(IGNORE); END;');
+  assert.throws(() => f.push.cleanup.batch({ maxMs: 1000 }), /CONVERSATION_CLEANUP_CHANGED/);
+  assert(exists(f, row)); assert.equal(f.push.cleanup.status().deleted, 0);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM cl_push_receipts').get().n, 0);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM cl_delivered_records').get().n, 0);
+});
+
+test('missing or legacy metadata postpones deletion until the compact projection is ready', async t => {
+  const f = setup(t), [row] = await deliveredRows(f, 1);
+  f.store.db.prepare('DELETE FROM cl_record_metadata WHERE id=?').run(row.id);
+  assert.equal(f.push.cleanup.batch().deleted, 0); assert(exists(f, row));
+  assert.equal(f.store.db.prepare('SELECT reason FROM cl_push_cleanup_queue').get().reason, 'metadata_pending');
+  f.store.backfillMetadata(); f.advance();
+  f.store.db.prepare("UPDATE cl_record_metadata SET fingerprint='' WHERE id=?").run(row.id);
+  assert.equal(f.push.cleanup.batch().deleted, 0); assert(exists(f, row));
+  f.store.backfillMetadata(); f.advance();
+  assert.equal(f.push.cleanup.batch({ maxMs: 1000 }).deleted, 1);
+});
+
+test('cleanup yields to another SQLite writer promptly and restores its connection timeout', async t => {
+  const f = setup(t), rows = await deliveredRows(f, 2);
+  const timeout = f.store.db.pragma('busy_timeout', { simple: true });
+  const writer = new Database(f.store.file, { timeout: 1 });
+  try {
+    writer.exec('BEGIN IMMEDIATE');
+    const began = performance.now();
+    assert.throws(() => f.push.cleanup.batch(), { code: 'SQLITE_BUSY' });
+    assert(performance.now() - began < 200, 'cleanup must not wait seconds behind foreground writes');
+    assert.equal(f.store.db.pragma('busy_timeout', { simple: true }), timeout);
+    assert(rows.every(row => exists(f, row)));
+    writer.exec('ROLLBACK');
+    assert.equal(f.push.cleanup.batch({ maxMs: 1000 }).deleted, 2);
+    assert(writer.prepare('SELECT COUNT(*) n FROM cl_records').get().n === 0);
+    writer.exec('BEGIN IMMEDIATE'); writer.exec('ROLLBACK');
+  } finally { if (writer.inTransaction) writer.exec('ROLLBACK'); writer.close(); }
+});
+
+test('large single-record deletions extend the next cleanup interval instead of bypassing the byte budget', t => {
+  const f = setup(t); let calls = 0;
+  f.push.cleanup.batch = () => { calls++; return { deleted: 1, bytes: 20 * 1024 ** 2 }; };
+  f.service.maintain(); assert.equal(calls, 1);
+  f.advance(999); f.service.maintain(); assert.equal(calls, 1);
+  f.advance(1); f.service.maintain(); assert.equal(calls, 2);
+  f.service.canWork = () => false; f.advance(); f.service.maintain(); assert.equal(calls, 2);
+  f.service.canWork = () => true; f.service.canCleanup = () => false;
+  f.service.maintain(); assert.equal(calls, 2);
+});
+
+test('a successful file is cleaned during a different multipart upload without changing its bytes or checkpoints', async t => {
+  let block = false, reached = false, resume;
+  const barrier = new Promise(resolve => { resume = resolve; });
+  const receiver = await s3Receiver({ beforeRequest: async entry => {
+    if (block && entry.method === 'PUT' && entry.query.has('partNumber')) { reached = true; await barrier; }
+  } }); t.after(() => receiver.close());
+  const f = setup(t);
+  f.push.configure({ ...f.push.policy(), webhook: { enabled: false, url: '', token: '' }, allowPrivateNetwork: true,
+    s3: { ...f.push.policy().s3, enabled: true, endpoint: receiver.url, bucket: 'test-bucket', prefix: '', accessKeyId: 'fictional', secretAccessKey: 'fictional' } });
+  await f.service.stop(); f.service = new ConversationPushService(f.push, { transport: new ConversationPushTransport() });
+  const sent = event('interleave-sent'), active = event('interleave-active');
+  f.enqueue(sent, ['s3']); await f.service.jsonl.tick(); assert(exists(f, sent));
+  const before = receiver.completed[0].body;
+  f.advance(); f.enqueue(active, ['s3']); block = true;
+  const uploading = f.service.jsonl.tick();
+  try {
+    await until(() => reached); assert(f.service.jsonl.active);
+    const file = f.service.jsonl.store.get(f.service.jsonl.active.file.id);
+    f.service.maintain(); assert(!exists(f, sent)); assert(exists(f, active));
+    const held = f.service.jsonl.store.get(file.id);
+    assert.equal(held.status, 'running'); assert.equal(held.upload_id, file.upload_id);
+    assert.equal(held.uploaded_parts, file.uploaded_parts);
+    assert.equal(f.push.cleanup.status().deleted, 1);
+    assert(!f.push.pricing.pending());
+  } finally { resume(); await uploading; }
+  assert.equal(receiver.completed.length, 2); assert.deepEqual(receiver.completed[0].body, before);
+  const received = JSON.parse(receiver.completed[1].body.toString().trim());
+  assert.equal(received.request_id, active.request_id);
+  assert.equal(received.request, Buffer.from(active.request, 'base64').toString());
+  assert.equal(received.response, Buffer.from(active.response, 'base64').toString());
+  const complete = f.push.list().items.find(row => row.record_id === active.id); assert.equal(complete.status, 'sent');
+  f.advance(); f.service.maintain(); assert(!exists(f, active));
 });

@@ -8,11 +8,12 @@ const { ConversationPushTransport } = require('./conversation-push-transport');
 const { ConversationJsonlService } = require('./conversation-jsonl-service');
 const { dayAt, objectKey, jsonlBytes } = require('./conversation-jsonl-format');
 const { processingBudgets } = require('./conversation-memory');
+const { CLEANUP_BATCH_BYTES } = require('../conversation-push-cleanup-store');
 
 class ConversationPushService {
   constructor(store,{transport=new ConversationPushTransport(),jsonlOptions,canWork=() => true,canCleanup=() => true,memoryBudget=processingBudgets}={}) {
     this.store=store;this.transport=transport;this.stopping=false;this.active=null;this.lastError='';this.lastRun=null;this.testing=false;
-    this.canWork=canWork;this.canCleanup=canCleanup;this.memoryBudget=memoryBudget;this.cleanupError='';this.nextCleanup=0;this.nextPrune=0;
+    this.canWork=canWork;this.canCleanup=canCleanup;this.memoryBudget=memoryBudget;this.cleanupError='';this.nextCleanup=0;this.nextMaintenance=0;this.nextPrune=0;this.nextReclaim=0;
     this.pricingPause='';this.pricingError='';
     this.jsonl=new ConversationJsonlService(store,transport,{memoryBudget,...jsonlOptions,canWork:()=>canWork()&&!this.active&&!this.testing});
   }
@@ -36,31 +37,36 @@ class ConversationPushService {
   status(query) { return {...this.store.list(query),automatic:this.store.automaticStatus(),jsonl:this.jsonl.store.list(),cleanup:{...this.store.cleanup.status(),error:this.cleanupError},lastError:this.jsonl.lastError||this.lastError,lastRun:this.jsonl.lastRun||this.lastRun,enabled:this.store.policy().enabled}; }
   maintain() {
     this.pricingPause=this.stopping?'stopped':!this.canWork()||!this.canCleanup()?'foreground':this.active||this.testing||this.jsonl.active?'push':'';
-    if (this.pricingPause || this.store.now()<this.nextCleanup) return;
-    this.nextCleanup=this.store.now()+1000;
-    const pricing=this.store.pricing.pending(),policy=this.store.policy();
-    if (pricing && (this.pricingTurn!==false || !policy.enabled || !policy.deleteAfterPush)) {
-      this.pricingTurn=false;
-      try {
-        const result=this.store.pricing.step({canWork:()=>!this.stopping&&this.canWork()&&this.canCleanup()});
-        this.pricingError=result.busy?'CONVERSATION_STORAGE_PRICING_BUSY':'';
-      } catch { this.pricingError='CONVERSATION_STORAGE_PRICING_RETRY'; }
-      return;
-    }
-    this.pricingTurn=true;
+    if (this.stopping || !this.canWork() || !this.canCleanup()) return;
     try {
-      if (this.store.now()>=this.nextPrune) {this.store.cleanup.prune();this.nextPrune=this.store.now()+5000;}
-      if(!pricing)this.store.billing.backfill();
-      if (!this.store.policy().enabled || !this.store.policy().deleteAfterPush) return;
-      const began=Date.now();
-      for (let index=0;index<16 && Date.now()-began<25 && this.canWork() && this.canCleanup();index++) {
-        if (!this.store.cleanup.step().deleted) break;
+      if (!this.pricingPause && this.store.now()>=this.nextMaintenance) {
+        this.nextMaintenance=this.store.now()+1000;
+        const pricing=this.store.pricing.pending(),policy=this.store.policy();
+        if (pricing && (this.pricingTurn!==false || !policy.enabled || !policy.deleteAfterPush)) {
+          this.pricingTurn=false;
+          try {
+            const result=this.store.pricing.step({canWork:()=>!this.stopping&&this.canWork()&&this.canCleanup()});
+            this.pricingError=result.busy?'CONVERSATION_STORAGE_PRICING_BUSY':'';
+          } catch { this.pricingError='CONVERSATION_STORAGE_PRICING_RETRY'; }
+          return;
+        }
+        this.pricingTurn=true;
+        if (this.store.now()>=this.nextPrune) {this.store.cleanup.prune();this.nextPrune=this.store.now()+5000;}
+        if(!pricing)this.store.billing.backfill();
       }
-      if (this.canWork() && this.canCleanup() && !this.store.db.prepare('SELECT 1 FROM cl_payload_leases WHERE expires_at>? LIMIT 1').get(this.store.now())) {
-        if (this.store.db.pragma('freelist_count',{simple:true})>0) this.store.cleanup.reclaim();
+      if (this.store.now()<this.nextCleanup) return;
+      this.nextCleanup=this.store.now()+200;
+      if (!this.store.policy().enabled || !this.store.policy().deleteAfterPush) return;
+      // Completed files can be cleaned while another file awaits the network.
+      const cleaned=this.store.cleanup.batch({canWork:()=>!this.stopping&&this.canWork()&&this.canCleanup()});
+      this.nextCleanup=this.store.now()+200*Math.max(1,Math.ceil(cleaned.bytes/CLEANUP_BATCH_BYTES));
+      if (!this.pricingPause && this.store.now()>=this.nextReclaim && this.canWork() && this.canCleanup() &&
+        !this.store.db.prepare('SELECT 1 FROM cl_payload_leases WHERE expires_at>? LIMIT 1').get(this.store.now())) {
+        this.nextReclaim=this.store.now()+1000;
+        if (this.store.db.pragma('freelist_count',{simple:true})>0) this.store.cleanup.reclaim({pages:1024});
       }
       this.cleanupError='';
-    } catch { this.cleanupError='LOCAL_CLEANUP_RETRY'; }
+    } catch { this.cleanupError='LOCAL_CLEANUP_RETRY';this.nextCleanup=Math.max(this.nextCleanup,this.store.now()+1000); }
   }
   preview(input) { return this.store.preview(input); }
   async enqueue(input) {
@@ -142,10 +148,11 @@ class ConversationPushService {
     if(this.timer)return;
     this.stopping=false;
     this.jsonl.start();
+    this.cleanupTimer=setInterval(()=>this.maintain(),200);this.cleanupTimer.unref();
     this.timer=setInterval(()=>this.wake(),1000);this.timer.unref();this.wake();
   }
   async stop() {
-    this.stopping=true;clearInterval(this.timer);this.timer=null;this.invalidate();this.testController?.abort();
+    this.stopping=true;clearInterval(this.timer);clearInterval(this.cleanupTimer);this.timer=null;this.cleanupTimer=null;this.invalidate();this.testController?.abort();
     await this.running;await this.testRun;await this.jsonl.stop();
   }
 }

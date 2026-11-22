@@ -1,7 +1,9 @@
 'use strict';
 
+const { performance } = require('node:perf_hooks');
 const { targetHash,target,targets:policyTargets } = require('./services/conversation-push-policy');
 
+const CLEANUP_BATCH_BYTES = 4 * 1024 ** 2;
 const historyColumns = 'id,record_id,destination,source,delivery_source,delivery_fallback_reason,envelope_version,batch_id,status,attempts,next_at,created_at,updated_at,error_code,http_status,model,user_id,local_deleted_at,request_id';
 const historySource = `(SELECT j.id,j.record_id,j.destination,j.source,j.delivery_source,j.delivery_fallback_reason,j.envelope_version,j.batch_id,j.status,j.attempts,j.next_at,j.created_at,j.updated_at,j.error_code,j.http_status,r.model,r.user_id,0 local_deleted_at,r.request_id
   FROM cl_push_jobs j LEFT JOIN cl_record_metadata r ON r.id=j.record_id
@@ -37,56 +39,88 @@ class ConversationPushCleanupStore {
     for (const row of rows) if (row.status === 'sent') this.db.prepare('INSERT OR IGNORE INTO cl_push_cleanup_queue(record_id,next_at) VALUES(?,?)').run(row.record_id, this.now());
     if (rows.length) this.db.prepare('UPDATE cl_push_cleanup_state SET cursor=? WHERE singleton=1').run(rows.at(-1).cursor);
   }
-  step() {
-    return this.db.transaction(() => {
-      const policy = this.push.policy();
-      if (!policy.enabled || !policy.deleteAfterPush) return { deleted: false };
-      this.backfill();
-      if (this.db.prepare('SELECT 1 FROM cl_payload_leases WHERE expires_at>? LIMIT 1').get(this.now())) return { deleted: false, reason: 'reading' };
-      const candidate = this.db.prepare('SELECT record_id FROM cl_push_cleanup_queue WHERE next_at<=? ORDER BY next_at,record_id LIMIT 1').get(this.now());
-      if (!candidate) return { deleted: false };
-      const row = this.db.prepare(`SELECT id,request_id,model,fingerprint,body_sha256,processed_at,processing_pending,processing_policy_version,bytes FROM cl_records WHERE id=?`).get(candidate.record_id);
-      if (!row) return { deleted: false };
-      const jobs = this.db.prepare(`SELECT id,record_id,destination,target_hash,source,content_version,batch_id,status,attempts,created_at,updated_at,
-        http_status,delivery_source,delivery_fallback_reason,delivery_version,envelope_version,jsonl_file_id FROM cl_push_jobs WHERE record_id=?`).all(row.id);
-      let reason = row.processing_pending ? 'processing' : jobs.some(job => job.status !== 'sent' || job.http_status < 200 || job.http_status >= 300) ? 'delivery_pending' : '';
-      const targets = [...new Set([...jobs.map(job=>job.destination),...policyTargets(policy).filter(target=>target.enabled&&(target.id==='s3'||target.id==='webhook')).map(target=>target.id)])];
-      if (!jobs.length) reason = 'delivery_pending';
-      for (const id of targets) {
-        const configured=target(policy,id),expected=configured&&(configured.endpoint||configured.url)?targetHash(policy,id):'';
-        if (!jobs.some(job => job.destination === id && (!expected||job.target_hash === expected) &&
-          job.source === policy.source && job.content_version === this.push.version(row, policy.source) &&
-          (!job.delivery_source || job.delivery_version === this.push.version(row, job.delivery_source)))) reason = 'content_changed';
-      }
-      for (const job of jobs) if (job.jsonl_file_id) {
-        const file = this.db.prepare('SELECT status,object_key,sha256,bytes,uploaded_bytes FROM cl_push_jsonl_files WHERE id=?').get(job.jsonl_file_id);
-        if (!file || file.status !== 'sent' || !/^[a-f0-9]{64}$/.test(file.sha256) || file.uploaded_bytes !== file.bytes) reason = 'delivery_pending';
-      }
-      for(const batchId of new Set(jobs.map(job=>job.batch_id).filter(Boolean)))if(this.db.prepare("SELECT 1 FROM cl_push_jobs WHERE batch_id=? AND (status!='sent' OR http_status<200 OR http_status>=300) LIMIT 1").get(batchId))reason='delivery_pending';
-      if (reason) {
-        this.db.prepare('UPDATE cl_push_cleanup_queue SET next_at=?,reason=? WHERE record_id=?').run(this.now() + 30000, reason, row.id);
-        return { deleted: false, reason };
-      }
-      const at = this.now();
-      for (const job of jobs) {
-        const file = job.jsonl_file_id && this.db.prepare('SELECT object_key,sha256 FROM cl_push_jsonl_files WHERE id=?').get(job.jsonl_file_id);
-        this.db.prepare(`INSERT OR IGNORE INTO cl_push_receipts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(job.id,row.id,job.destination,job.source,
-          job.delivery_source,job.delivery_fallback_reason,job.envelope_version,job.batch_id,job.attempts,job.created_at,job.updated_at,job.http_status,row.model,at,row.request_id,file?.object_key || '',file?.sha256 || '');
-      }
-      this.db.prepare('INSERT INTO cl_delivered_records VALUES(?,?,?,?)').run(row.id,row.fingerprint,row.body_sha256,at);
-      if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='cl_push_jsonl_members'").get()) {
-        this.db.prepare('DELETE FROM cl_push_jsonl_members WHERE job_id IN (SELECT id FROM cl_push_jobs WHERE record_id=?)').run(row.id);
-      }
-      this.db.prepare('DELETE FROM cl_records WHERE id=? AND fingerprint=?').run(row.id,row.fingerprint);
-      this.db.prepare('UPDATE cl_push_cleanup_state SET deleted=deleted+1,bytes=bytes+?,last_at=? WHERE singleton=1').run(row.bytes,at);
-      return { deleted: true, bytes: row.bytes };
-    }).immediate();
+  batch({ canWork = () => true, maxRecords = 64, maxBytes = CLEANUP_BATCH_BYTES, maxMs = 10 } = {}) {
+    const result = { deleted: 0, bytes: 0, scanned: 0 };
+    if (!canWork()) return result;
+    const cursor = this.db.prepare('SELECT cursor FROM cl_push_cleanup_state WHERE singleton=1').get().cursor;
+    if (!this.db.prepare('SELECT 1 FROM cl_push_cleanup_queue WHERE next_at<=? LIMIT 1').get(this.now()) &&
+      !this.db.prepare('SELECT 1 FROM cl_push_jobs WHERE rowid>? LIMIT 1').get(cursor)) return result;
+    const timeout = this.db.pragma('busy_timeout', { simple: true });
+    this.db.pragma('busy_timeout = 1');
+    try {
+      return this.db.transaction(() => {
+        if (!canWork()) return result;
+        const began = performance.now();
+        const policy = this.push.policy();
+        if (!policy.enabled || !policy.deleteAfterPush) return result;
+        this.backfill();
+        while (result.scanned < maxRecords && result.bytes < maxBytes && performance.now() - began < maxMs && canWork()) {
+          // The first oversized record must still be able to make progress.
+          const next = this.deleteCandidate({ policy, backfill: false, maxBytes: result.deleted ? maxBytes - result.bytes : Infinity });
+          result.scanned++;
+          if (next.deleted) { result.deleted++; result.bytes += next.bytes; }
+          else if (!next.reason || ['reading','budget','disabled'].includes(next.reason)) break;
+        }
+        return result;
+      }).immediate();
+    } finally { this.db.pragma('busy_timeout = ' + timeout); }
   }
-  reclaim() {
+  step(options) { return this.db.transaction(() => this.deleteCandidate(options)).immediate(); }
+  deleteCandidate({ policy = this.push.policy(), backfill = true, maxBytes = Infinity } = {}) {
+    if (!this.db.inTransaction) throw new Error('CONVERSATION_CLEANUP_TRANSACTION_REQUIRED');
+    if (!policy.enabled || !policy.deleteAfterPush) return { deleted: false, reason: 'disabled' };
+    if (backfill) this.backfill();
+    if (this.db.prepare('SELECT 1 FROM cl_payload_leases WHERE expires_at>? LIMIT 1').get(this.now())) return { deleted: false, reason: 'reading' };
+    const candidate = this.db.prepare('SELECT record_id FROM cl_push_cleanup_queue WHERE next_at<=? ORDER BY next_at,record_id LIMIT 1').get(this.now());
+    if (!candidate) return { deleted: false };
+    const row = this.db.prepare(`SELECT id,request_id,model,fingerprint,body_sha256,processed_at,processing_pending,processing_policy_version,bytes FROM cl_record_metadata WHERE id=?`).get(candidate.record_id);
+    if (!row?.fingerprint) {
+      this.db.prepare('UPDATE cl_push_cleanup_queue SET next_at=?,reason=? WHERE record_id=?').run(this.now() + 30000, 'metadata_pending', candidate.record_id);
+      return { deleted: false, reason: 'metadata_pending' };
+    }
+    if (row.bytes > maxBytes) return { deleted: false, reason: 'budget' };
+    const jobs = this.db.prepare(`SELECT id,record_id,destination,target_hash,source,content_version,batch_id,status,attempts,created_at,updated_at,
+      http_status,delivery_source,delivery_fallback_reason,delivery_version,envelope_version,jsonl_file_id FROM cl_push_jobs WHERE record_id=?`).all(row.id);
+    let reason = row.processing_pending ? 'processing' : jobs.some(job => job.status !== 'sent' || job.http_status < 200 || job.http_status >= 300) ? 'delivery_pending' : '';
+    const targets = [...new Set([...jobs.map(job=>job.destination),...policyTargets(policy).filter(target=>target.enabled&&(target.id==='s3'||target.id==='webhook')).map(target=>target.id)])];
+    if (!jobs.length) reason = 'delivery_pending';
+    for (const id of targets) {
+      const configured=target(policy,id),expected=configured&&(configured.endpoint||configured.url)?targetHash(policy,id):'';
+      if (!jobs.some(job => job.destination === id && (!expected||job.target_hash === expected) &&
+        job.source === policy.source && job.content_version === this.push.version(row, policy.source) &&
+        (!job.delivery_source || job.delivery_version === this.push.version(row, job.delivery_source)))) reason = 'content_changed';
+    }
+    for (const job of jobs) if (job.jsonl_file_id) {
+      const file = this.db.prepare('SELECT status,object_key,sha256,bytes,uploaded_bytes FROM cl_push_jsonl_files WHERE id=?').get(job.jsonl_file_id);
+      if (!file || file.status !== 'sent' || !/^[a-f0-9]{64}$/.test(file.sha256) || file.uploaded_bytes !== file.bytes) reason = 'delivery_pending';
+    }
+    for(const batchId of new Set(jobs.map(job=>job.batch_id).filter(Boolean)))if(this.db.prepare("SELECT 1 FROM cl_push_jobs WHERE batch_id=? AND (status!='sent' OR http_status<200 OR http_status>=300) LIMIT 1").get(batchId))reason='delivery_pending';
+    if (reason) {
+      this.db.prepare('UPDATE cl_push_cleanup_queue SET next_at=?,reason=? WHERE record_id=?').run(this.now() + 30000, reason, row.id);
+      return { deleted: false, reason };
+    }
+    const at = this.now();
+    for (const job of jobs) {
+      const file = job.jsonl_file_id && this.db.prepare('SELECT object_key,sha256 FROM cl_push_jsonl_files WHERE id=?').get(job.jsonl_file_id);
+      this.db.prepare(`INSERT OR IGNORE INTO cl_push_receipts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(job.id,row.id,job.destination,job.source,
+        job.delivery_source,job.delivery_fallback_reason,job.envelope_version,job.batch_id,job.attempts,job.created_at,job.updated_at,job.http_status,row.model,at,row.request_id,file?.object_key || '',file?.sha256 || '');
+    }
+    this.db.prepare('INSERT INTO cl_delivered_records VALUES(?,?,?,?)').run(row.id,row.fingerprint,row.body_sha256,at);
+    if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='cl_push_jsonl_members'").get()) {
+      this.db.prepare('DELETE FROM cl_push_jsonl_members WHERE job_id IN (SELECT id FROM cl_push_jobs WHERE record_id=?)').run(row.id);
+    }
+    // Metadata stays atomic with the source under this writer lock; do not read past body BLOBs to compare fingerprints.
+    const deleted = this.db.prepare(`DELETE FROM cl_records WHERE id=? AND EXISTS(
+      SELECT 1 FROM cl_record_metadata WHERE id=? AND fingerprint=?)`).run(row.id,row.id,row.fingerprint).changes;
+    if (deleted !== 1) throw new Error('CONVERSATION_CLEANUP_CHANGED');
+    this.db.prepare('UPDATE cl_push_cleanup_state SET deleted=deleted+1,bytes=bytes+?,last_at=? WHERE singleton=1').run(row.bytes,at);
+    return { deleted: true, bytes: row.bytes };
+  }
+  reclaim({ pages = 128 } = {}) {
     const timeout = this.db.pragma('busy_timeout', { simple: true });
     try {
       this.db.pragma('busy_timeout = 0');
-      this.db.pragma('incremental_vacuum(128)');
+      this.db.pragma(`incremental_vacuum(${Math.max(1, Math.min(1024, Math.trunc(pages)))})`);
       this.db.pragma('wal_checkpoint(PASSIVE)');
       this.db.pragma('wal_checkpoint(TRUNCATE)');
     } finally { this.db.pragma(`busy_timeout = ${timeout}`); }
@@ -101,4 +135,4 @@ class ConversationPushCleanupStore {
   }
 }
 
-module.exports = { ConversationPushCleanupStore, historyColumns, historySource };
+module.exports = { ConversationPushCleanupStore, CLEANUP_BATCH_BYTES, historyColumns, historySource };

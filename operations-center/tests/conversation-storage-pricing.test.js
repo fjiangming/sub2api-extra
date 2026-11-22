@@ -205,7 +205,7 @@ test('long pricing tasks interleave local delivered-body cleanup instead of post
   const policy = f.push.policy(); f.push.configure({ ...policy, enabled: true, deleteAfterPush: true,
     webhook: { ...policy.webhook, enabled: true, url: 'https://receiver.example/logs' } });
   let cleanupSteps = 0;
-  f.push.cleanup.step = () => { cleanupSteps++; return { deleted: false }; };
+  f.push.cleanup.batch = () => { cleanupSteps++; return { deleted: 0, bytes: 0 }; };
   f.push.billing.backfill = () => { throw new Error('active pricing already imports historical receipts in bounded batches'); };
   f.push.pricing.request({}); f.service.maintain(); const first = f.push.pricing.status().updated;
   assert(first > 0); f.advance(); f.service.maintain(); assert.equal(cleanupSteps, 1);
