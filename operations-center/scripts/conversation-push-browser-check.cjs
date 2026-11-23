@@ -10,6 +10,81 @@ const { startPreview } = require('./conversation-logs-live-preview.cjs');
 const { event } = require('../tests/conversation-logs-fixture');
 const { s3Receiver } = require('../tests/conversation-s3-fixture');
 
+async function checkTableScrolling(page,name,directory) {
+  const routePattern='**/api/conversation-logs/push/jobs?*';
+  let revision=0,fileCount=30;
+  await page.route(routePattern,async route=>{
+    const response=await route.fetch(),body=await response.json(),value=body.data||body;
+    const at=Date.UTC(2026,10,23);revision++;
+    value.jsonl={...value.jsonl,files:Array.from({length:fileCount},(_,index)=>({
+      id:'scroll-file-'+index,destination:'s3',model:'Opus5.5',day:'2026-11-23',status:'running',
+      object_key:'2026-11-23/Opus5.5/Opus5.5-2026-11-23-20261123T000000000Z-'+index+'.jsonl',
+      records:100,bytes:10000000000,uploaded_bytes:revision*8388608,uploaded_parts:revision,error_code:'',pause_reason:''
+    }))};
+    value.items=Array.from({length:fileCount?20:0},(_,index)=>({
+      id:'scroll-job-'+index,record_id:'scroll-record-'+index,user_id:2,model:'Opus5.5',destination:'s3',
+      source:'masked',status:'running',attempts:1,error_code:'',updated_at:at+revision,http_status:0
+    }));
+    value.total=fileCount?40:0;value.pages=fileCount?2:0;
+    await route.fulfill({response,json:body});
+  });
+  const refresh=async()=>{
+    const previous=await page.evaluate(()=>document.querySelector('#clp-files progress')?.getAttribute('value')??null);
+    await page.locator('[data-clp-action=refresh]').click();
+    if(fileCount)await page.waitForFunction(old=>document.querySelector('#clp-files progress')?.getAttribute('value')!==old,previous);
+    else await page.locator('#clp-files .cl-empty').waitFor();
+  };
+  try {
+    await page.locator('[data-clp-view=jobs]').click();await refresh();
+    const before=await page.evaluate(()=>{
+      window.pushScrollTables=['files','jobs'].map(id=>document.querySelector('#clp-'+id+' .clp-table'));
+      return window.pushScrollTables.map(node=>{
+        node.scrollTop=240;node.scrollLeft=180;
+        return {top:node.scrollTop,left:node.scrollLeft};
+      });
+    });
+    assert(before.every(value=>value.top>0),name+' has vertically scrollable file and job lists');
+    if(name==='mobile'||name==='narrow')assert(before.every(value=>value.left>0),name+' has horizontal scroll');
+    const verify=async label=>{
+      const after=await page.evaluate(()=>window.pushScrollTables.map((node,index)=>{
+        const current=document.querySelector('#clp-'+['files','jobs'][index]+' .clp-table');
+        return {same:node===current,top:current.scrollTop,left:current.scrollLeft};
+      }));
+      for(let index=0;index<after.length;index++){
+        assert.equal(after[index].top,before[index].top,name+' '+label+' vertical scroll '+index);
+        assert.equal(after[index].left,before[index].left,name+' '+label+' horizontal scroll '+index);
+        assert(after[index].same,name+' '+label+' retains scroll container '+index);
+      }
+    };
+    for(let cycle=0;cycle<2;cycle++){
+      const previous=await page.locator('#clp-files progress').first().getAttribute('value');
+      await page.waitForFunction(old=>document.querySelector('#clp-files progress')?.getAttribute('value')!==old,previous,{timeout:12000});
+      await verify('automatic refresh '+cycle);
+    }
+    await refresh();await verify('manual refresh');
+    await page.locator('#clp-files .clp-table').scrollIntoViewIfNeeded();
+    await page.screenshot({path:path.join(directory,name+'-table-scroll.png')});
+    await page.locator('#clp-next').click();
+    await page.locator('#clp-pages').filter({hasText:'2 / 2'}).waitFor();
+    assert.equal(await page.locator('#clp-jobs .clp-table').evaluate(node=>node.scrollTop),0,name+' new page starts at top');
+    await page.locator('#clp-jobs .clp-table').evaluate(node=>{node.scrollTop=200;});
+    await page.locator('#clp-job-status').selectOption('running');
+    await page.locator('#clp-pages').filter({hasText:'1 / 2'}).waitFor();
+    assert.equal(await page.locator('#clp-jobs .clp-table').evaluate(node=>node.scrollTop),0,name+' new filter starts at top');
+    fileCount=1;await refresh();
+    assert.equal(await page.locator('#clp-files .clp-table').evaluate(node=>node.scrollTop),0,name+' shorter results clamp scroll');
+    fileCount=0;await refresh();assert.equal(await page.locator('#clp-jobs .cl-empty').count(),1);
+    fileCount=30;await refresh();
+    assert.equal(await page.locator('#clp-files .clp-table').evaluate(node=>node.scrollTop),0,name+' restored results start at top');
+    assert.equal(await page.locator('#clp-files tbody tr').count(),30);
+    console.log(name+': automatic/manual progress refresh preserves both scroll axes and containers; pagination/filter/empty recovery passed');
+  } finally {
+    await page.unroute(routePattern);await page.locator('#clp-job-status').selectOption('');
+    await page.locator('[data-clp-action=refresh]').click();await page.locator('[data-clp-view=platforms]').click();
+    await page.evaluate(()=>{delete window.pushScrollTables;});
+  }
+}
+
 async function main() {
   const until=async (predicate,timeout=20000)=>{const deadline=Date.now()+timeout;while(!predicate()){assert(Date.now()<deadline,'Timed out waiting for delivery');await new Promise(resolve=>setTimeout(resolve,100));}};
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),'sub2api-push-browser-'));
@@ -68,6 +143,8 @@ async function main() {
           await view('jobs');await refresh();
         };
         await page.goto(`http://127.0.0.1:${preview.port}/preview`);await page.locator('#cl-tab-push').click();await field('enabled').waitFor();
+        await checkTableScrolling(page,name,directory);
+        if(process.argv.includes('--scroll-only')){assert.deepEqual(errors,[]);assert.deepEqual(external,[]);continue;}
         assert.equal(await field('enabled').isChecked(),false);assert.equal(await page.locator('#clp-preview').isDisabled(),true);
         assert.equal(await field('deleteAfterPush').isChecked(),false);
         assert.equal(await page.locator('#clp-automatic-options').isVisible(),false);

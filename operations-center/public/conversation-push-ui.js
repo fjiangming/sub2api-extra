@@ -10,7 +10,7 @@
     const fileStates={open:'汇总中',pending:'待上传',running:'上传中',sent:'已送达',failed:'失败',cancelled:'已取消'};
     const $=id=>container.querySelector('#clp-'+id),base='/api/conversation-logs/push/';
     let policy=null,dirty=false,busy=false,mounted=false,epoch=0,controller=null,jobsController=null,jobsSeq=0,timer=null,page=1,preview=null,batchBody=null,jobsError='';
-    let platforms=null,view='platforms',billingPage=1,billingView='summary',billingController=null,billingSeq=0;
+    let platforms=null,view='platforms',billingPage=1,billingView='summary',billingController=null,billingSeq=0,jobsTableKey='';
     let pricing=null,pricingController=null,pricingSeq=0,lastBillingRefresh=0;
     const pricingActive=()=>pricing?.job&&['pending','running'].includes(pricing.job.status);
     const targets=()=>root.ConversationPlatformsUi.all(policy);
@@ -129,6 +129,17 @@
         if(current!==epoch||!isActive())return;clearPreview();message(`批次已创建，新增 ${number(result.created)} 个任务`);page=1;await refreshJobs();
       } finally {if(current===epoch){busy=false;updateControls();}}
     }
+    function renderTable(id,columns,rows,emptyText,reset=false) {
+      const host=$(id);let viewport=host.querySelector('.clp-table');
+      const top=reset?0:viewport?.scrollTop||0,left=reset?0:viewport?.scrollLeft||0;
+      if(!rows){host.innerHTML=`<div class="cl-empty">${esc(emptyText)}</div>`;return;}
+      if(!viewport){
+        host.innerHTML=`<div class="table-wrap clp-table"><table><thead><tr>${columns.map(label=>`<th>${esc(label)}</th>`).join('')}</tr></thead><tbody></tbody></table></div>`;
+        viewport=host.querySelector('.clp-table');
+      }
+      viewport.querySelector('tbody').innerHTML=rows;
+      viewport.scrollTop=top;viewport.scrollLeft=left;
+    }
     function renderFile(file) {
       const uploaded=file.status==='sent'?file.bytes:Math.min(file.bytes,file.uploaded_bytes||0);
       const paused=file.pause_reason==='archive_busy'?'采集优先，上传暂缓':file.pause_reason==='memory_wait'?'等待内存恢复，上传进度保留':!policy.enabled?'推送已暂停':'';
@@ -149,12 +160,14 @@
       const backlog=value.jsonl?.backlog;
       $('backlog').textContent=backlog?.files?`待上传 ${number(backlog.files)} 个文件 · ${number(backlog.records)} 条 · ${size(backlog.bytes)}${backlog.expiryAt?' · 最早归档到期 '+time(backlog.expiryAt):''}${backlog.atRisk?' · 6 小时内有归档到期风险':''}`:'暂无待上传积压';
       $('backlog').classList.toggle('amber',Boolean(backlog?.atRisk));
-      $('files').innerHTML=files.length?`<div class="table-wrap clp-table"><table><thead><tr><th>模型 / 日期</th><th>文件</th><th>日志 / 上传进度</th><th>状态</th><th></th></tr></thead><tbody>${files.map(renderFile).join('')}</tbody></table></div>`:'<div class="cl-empty">暂无 JSONL 文件</div>';
+      renderTable('files',['模型 / 日期','文件','日志 / 上传进度','状态',''],files.map(renderFile).join(''),'暂无 JSONL 文件');
       const skipped=reasons(Object.fromEntries((value.skipped||[]).map(row=>[row.code,row.count])));
       const fallbacks=reasons(Object.fromEntries((value.fallbacks||[]).map(row=>[row.code,row.count])));
       $('skipped').textContent=[fallbacks?'本策略自动入队已回退原文（可能含敏感信息）：'+fallbacks:'',skipped?'本策略自动扫描已跳过：'+skipped:''].filter(Boolean).join('；');
       $('counts').innerHTML=Object.entries(states).map(([state,label])=>`<span>${label}<strong>${number(value.counts.find(row=>row.status===state)?.count)}</strong></span>`).join('');
-      $('jobs').innerHTML=value.items.length?`<div class="table-wrap clp-table"><table><thead><tr><th>日志 / 模型</th><th>目标 / 副本策略</th><th>状态 / 尝试</th><th>最近结果</th><th>更新时间</th><th></th></tr></thead><tbody>${value.items.map(row=>`<tr><td><strong>${esc(row.model||'未提供模型')}</strong><small>${row.local_deleted_at?'本地已清理':'用户 #'+esc(row.user_id)} · ${esc(row.record_id.slice(0,12))}</small></td><td>${esc(targetName(row.destination))}<small>${esc(copyLabel(row))}</small></td><td><span class="cl-badge ${row.status==='sent'?'green':['failed','cancelled'].includes(row.status)?'amber':''}">${states[row.status]}</span><small>${row.attempts} 次尝试</small></td><td>${esc(errors[row.error_code]||row.error_code|| (row.local_deleted_at?'送达成功，本地已清理':row.status==='sent'?'送达成功':'—'))}${row.http_status?`<small>HTTP ${row.http_status}</small>`:''}${row.status==='pending'&&row.attempts?`<small>下次 ${esc(time(row.next_at))}</small>`:''}</td><td>${esc(time(row.updated_at))}<small><code>${esc(row.id.slice(0,12))}</code></small></td><td>${['failed','cancelled'].includes(row.status)?tool('rotate-cw','重试此推送',`data-clp-retry="${row.id}" ${actions.has(row.id)?'disabled':''}`):''}</td></tr>`).join('')}</tbody></table></div>`:'<div class="cl-empty">暂无推送任务</div>';
+      const tableKey=`${page}:${$('job-status').value}`;
+      renderTable('jobs',['日志 / 模型','目标 / 副本策略','状态 / 尝试','最近结果','更新时间',''],value.items.map(row=>`<tr><td><strong>${esc(row.model||'未提供模型')}</strong><small>${row.local_deleted_at?'本地已清理':'用户 #'+esc(row.user_id)} · ${esc(row.record_id.slice(0,12))}</small></td><td>${esc(targetName(row.destination))}<small>${esc(copyLabel(row))}</small></td><td><span class="cl-badge ${row.status==='sent'?'green':['failed','cancelled'].includes(row.status)?'amber':''}">${states[row.status]}</span><small>${row.attempts} 次尝试</small></td><td>${esc(errors[row.error_code]||row.error_code|| (row.local_deleted_at?'送达成功，本地已清理':row.status==='sent'?'送达成功':'—'))}${row.http_status?`<small>HTTP ${row.http_status}</small>`:''}${row.status==='pending'&&row.attempts?`<small>下次 ${esc(time(row.next_at))}</small>`:''}</td><td>${esc(time(row.updated_at))}<small><code>${esc(row.id.slice(0,12))}</code></small></td><td>${['failed','cancelled'].includes(row.status)?tool('rotate-cw','重试此推送',`data-clp-retry="${row.id}" ${actions.has(row.id)?'disabled':''}`):''}</td></tr>`).join(''),'暂无推送任务',jobsTableKey!==tableKey);
+      jobsTableKey=tableKey;
       $('pages').textContent=`${number(value.total)} 个任务 · ${page} / ${Math.max(1,value.pages)} 页`;
       $('prev').disabled=page<=1;$('next').disabled=page>=value.pages;
       $('batches').innerHTML=value.batches.length?`<div class="cl-section-heading"><h2>最近批次</h2></div><div class="clp-batches">${value.batches.map(row=>`<div><code>${esc(row.id)}</code><span>${esc(time(row.created_at))} · ${number(row.created)} 个任务</span>${tool('square','取消此批次未完成推送',`data-clp-cancel="${row.id}" ${actions.has(row.id)?'disabled':''}`)}</div>`).join('')}</div>`:'';
@@ -290,7 +303,7 @@
     }
     function leave() {
       ++epoch;++jobsSeq;++billingSeq;++pricingSeq;controller?.abort();jobsController?.abort();billingController?.abort();pricingController?.abort();platforms?.clear();platforms=null;clearInterval(timer);timer=null;
-      policy=null;dirty=false;busy=false;mounted=false;preview=null;batchBody=null;jobsError='';actions.clear();container.innerHTML='';page=1;
+      policy=null;dirty=false;busy=false;mounted=false;preview=null;batchBody=null;jobsError='';actions.clear();container.innerHTML='';page=1;jobsTableKey='';
       pricing=null;lastBillingRefresh=0;
     }
     container.addEventListener('click',click);
