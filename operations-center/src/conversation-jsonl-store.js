@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { DateTime } = require('luxon');
 const { targetHash,targets,target,targetPolicy,invalid } = require('./services/conversation-push-policy');
 const { dayAt, objectKey, jsonlBytes } = require('./services/conversation-jsonl-format');
 const { modelAllowed } = require('./services/conversation-models');
@@ -135,9 +136,25 @@ class ConversationJsonlStore {
     return this.db.prepare("UPDATE cl_push_jsonl_files SET status='pending',sealed_at=?,next_at=?,updated_at=? WHERE id=? AND status='open'")
       .run(this.now(), this.now(), this.now(), id).changes;
   }
+  hasBacklog() {
+    return Boolean(this.db.prepare("SELECT 1 FROM cl_push_jobs WHERE status IN ('pending','buffered','running','failed') LIMIT 1").get() ||
+      this.db.prepare("SELECT 1 FROM cl_push_jsonl_files WHERE status IN ('open','pending','running','failed') LIMIT 1").get() || this.push.automaticBacklog());
+  }
+  dayBacklog(file,destination) {
+    const day=DateTime.fromISO(file.day,{zone:destination.jsonl.timezone}).startOf('day');
+    if(!day.isValid)return true;
+    const start=day.toMillis(),end=day.plus({days:1}).toMillis();
+    const pending=this.db.prepare(`SELECT 1 FROM cl_record_metadata m INDEXED BY cl_metadata_time
+      CROSS JOIN cl_push_jobs j INDEXED BY cl_push_record WHERE j.record_id=m.id AND m.at>=? AND m.at<? AND m.model=?
+      AND j.destination=? AND j.target_hash=? AND j.status='pending' LIMIT 1`).get(start,end,file.model,file.destination,file.target_hash);
+    if(pending)return true;
+    // Unknown legacy metadata must be classified before a natural day rollover.
+    if(this.db.prepare(`SELECT 1 FROM cl_push_jobs j LEFT JOIN cl_record_metadata m ON m.id=j.record_id
+      WHERE j.destination=? AND j.target_hash=? AND j.status='pending' AND m.id IS NULL LIMIT 1`).get(file.destination,file.target_hash))return true;
+    return this.push.automaticBacklog({start,end,model:file.model,destination:file.destination});
+  }
   sealDue() {
     const policy = this.push.policy(); if (!this.enabled(policy)) return 0;
-    const automaticBacklog = this.push.automaticBacklog();
     let count = 0;
     const retention = this.archive.policy().retention;
     for (const file of this.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE status='open'").all()) {
@@ -145,7 +162,8 @@ class ConversationJsonlStore {
       const backlog=this.db.prepare("SELECT 1 FROM cl_push_jobs WHERE destination=? AND status='pending' AND target_hash=? LIMIT 1").get(file.destination,file.target_hash);
       const elapsed = destination.jsonl.flushMinutes && this.now() - file.created_at >= destination.jsonl.flushMinutes * 60000;
       const expiring = retention && file.first_at && file.first_at + retention * 86400000 <= this.now() + 6 * 3600000;
-      if (elapsed || expiring || !backlog && (file.force_flush || !automaticBacklog && file.day !== dayAt(this.now(), destination.jsonl.timezone))) count += this.seal(file.id);
+      const rollover=file.day<dayAt(this.now(),destination.jsonl.timezone);
+      if (elapsed || expiring || !backlog&&file.force_flush || rollover&&!this.dayBacklog(file,destination)) count += this.seal(file.id);
     }
     return count;
   }

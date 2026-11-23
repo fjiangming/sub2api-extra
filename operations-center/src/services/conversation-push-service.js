@@ -10,11 +10,13 @@ const { dayAt, objectKey, jsonlBytes } = require('./conversation-jsonl-format');
 const { processingBudgets } = require('./conversation-memory');
 const { CLEANUP_BATCH_BYTES } = require('../conversation-push-cleanup-store');
 
+const RECLAIM_IDLE_MS = 30000;
+
 class ConversationPushService {
   constructor(store,{transport=new ConversationPushTransport(),jsonlOptions,canWork=() => true,canCleanup=() => true,memoryBudget=processingBudgets}={}) {
     this.store=store;this.transport=transport;this.stopping=false;this.active=null;this.lastError='';this.lastRun=null;this.testing=false;
     this.canWork=canWork;this.canCleanup=canCleanup;this.memoryBudget=memoryBudget;this.cleanupError='';this.nextCleanup=0;this.nextMaintenance=0;this.nextPrune=0;this.nextReclaim=0;
-    this.pricingPause='';this.pricingError='';
+    this.pricingPause='';this.pricingError='';this.reclaimIdleSince=null;
     this.jsonl=new ConversationJsonlService(store,transport,{memoryBudget,...jsonlOptions,canWork:()=>canWork()&&!this.active&&!this.testing});
   }
   policy() { return publicPolicy(this.store.policy()); }
@@ -37,11 +39,13 @@ class ConversationPushService {
   status(query) { return {...this.store.list(query),automatic:this.store.automaticStatus(),jsonl:this.jsonl.store.list(),cleanup:{...this.store.cleanup.status(),error:this.cleanupError},lastError:this.jsonl.lastError||this.lastError,lastRun:this.jsonl.lastRun||this.lastRun,enabled:this.store.policy().enabled}; }
   maintain() {
     this.pricingPause=this.stopping?'stopped':!this.canWork()||!this.canCleanup()?'foreground':this.active||this.testing||this.jsonl.active?'push':'';
+    if(this.pricingPause)this.reclaimIdleSince=null;
     if (this.stopping || !this.canWork() || !this.canCleanup()) return;
     try {
       if (!this.pricingPause && this.store.now()>=this.nextMaintenance) {
         this.nextMaintenance=this.store.now()+1000;
         const pricing=this.store.pricing.pending(),policy=this.store.policy();
+        if(pricing)this.reclaimIdleSince=null;
         if (pricing && (this.pricingTurn!==false || !policy.enabled || !policy.deleteAfterPush)) {
           this.pricingTurn=false;
           try {
@@ -60,13 +64,20 @@ class ConversationPushService {
       // Completed files can be cleaned while another file awaits the network.
       const cleaned=this.store.cleanup.batch({canWork:()=>!this.stopping&&this.canWork()&&this.canCleanup()});
       this.nextCleanup=this.store.now()+200*Math.max(1,Math.ceil(cleaned.bytes/CLEANUP_BATCH_BYTES));
-      if (!this.pricingPause && this.store.now()>=this.nextReclaim && this.canWork() && this.canCleanup() &&
-        !this.store.db.prepare('SELECT 1 FROM cl_payload_leases WHERE expires_at>? LIMIT 1').get(this.store.now())) {
-        this.nextReclaim=this.store.now()+1000;
-        if (this.store.db.pragma('freelist_count',{simple:true})>0) this.store.cleanup.reclaim({pages:1024});
-      }
+      this.reclaimWhenIdle();
       this.cleanupError='';
     } catch { this.cleanupError='LOCAL_CLEANUP_RETRY';this.nextCleanup=Math.max(this.nextCleanup,this.store.now()+1000); }
+  }
+  reclaimWhenIdle() {
+    const now=this.store.now();
+    if(this.stopping||this.pricingPause||this.running||this.jsonl.running||!this.canWork()||!this.canCleanup()||this.store.pricing.pending()||
+      this.jsonl.store.hasBacklog()||this.store.db.prepare('SELECT 1 FROM cl_payload_leases WHERE expires_at>? LIMIT 1').get(now)) {
+      this.reclaimIdleSince=null;return;
+    }
+    if(this.reclaimIdleSince===null)this.reclaimIdleSince=now;
+    if(now-this.reclaimIdleSince<RECLAIM_IDLE_MS||now<this.nextReclaim)return;
+    this.nextReclaim=now+RECLAIM_IDLE_MS;
+    if(this.store.db.pragma('freelist_count',{simple:true})>0)this.store.cleanup.reclaim({pages:128});
   }
   preview(input) { return this.store.preview(input); }
   async enqueue(input) {
@@ -118,6 +129,7 @@ class ConversationPushService {
     if(this.stopping||this.active||this.testing||this.jsonl.active||!this.canWork())return false;
     this.store.scanAutomatic();
     const job=this.store.claim({single:true});if(!job)return false;
+    this.reclaimIdleSince=null;
     const controller=new AbortController();this.active={job,controller};
     const guard=()=>{
       const valid=this.store.validJob(job),current=this.store.db.prepare('SELECT status,lease_token FROM cl_push_jobs WHERE id=?').get(job.id);
@@ -146,7 +158,7 @@ class ConversationPushService {
   }
   start() {
     if(this.timer)return;
-    this.stopping=false;
+    this.stopping=false;this.reclaimIdleSince=null;
     this.jsonl.start();
     this.cleanupTimer=setInterval(()=>this.maintain(),200);this.cleanupTimer.unref();
     this.timer=setInterval(()=>this.wake(),1000);this.timer.unref();this.wake();

@@ -211,3 +211,123 @@ test('manual JSONL history is not held by a daily automatic record still being p
   assert.equal(JSON.parse(receiver.completed[0].body.toString()).request_id, current.request_id);
   assert.equal(f.push.automaticStatus().waiting, 1);
 });
+
+test('realtime rollover uploads yesterday intact while today still has pending jobs', async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close());
+  const f = setup(t); configure(f, { automaticMode: 'realtime', allowPrivateNetwork: true, webhook: { enabled: false },
+    s3: { enabled: true, endpoint: receiver.url, bucket: 'fictional-rollover', prefix: '', accessKeyId: 'fictional', secretAccessKey: 'fictional', jsonl: { uploadMiBPerSecond: 64 } } });
+  f.service = new ConversationPushService(f.push);
+  const first = ingest(f, 'rollover-first', { model: 'Opus5.5' });
+  f.push.scanAutomatic(); await f.service.jsonl.tick(); assert.equal(receiver.completed.length, 0);
+  f.clock.value = midnight;
+  const late = ingest(f, 'rollover-late', { at: today, model: 'Opus5.5' }); f.push.scanAutomatic();
+  f.clock.value++;
+  for (let index = 0; index < 60; index++) ingest(f, 'rollover-today-' + index, { model: 'Opus5.5' });
+  assert.equal(f.push.scanAutomatic().created, 50);
+  await f.service.jsonl.tick();
+  assert.equal(receiver.completed.length, 1);
+  assert.match(receiver.completed[0].path, /^\/fictional-rollover\/2026-11-20\/Opus5\.5\/Opus5\.5-.*\.jsonl$/);
+  const bodies = receiver.completed[0].body.toString().trimEnd().split('\n').map(JSON.parse);
+  assert.deepEqual(bodies, [first, late].map(row => ({ request_id: row.request_id, request: rawRequest, response: rawResponse })));
+  assert(f.push.list({ status: 'pending' }).total > 0);
+  assert(f.service.jsonl.store.list().files.some(file => file.day === '2026-11-21' && file.status === 'open'));
+});
+
+test('unscanned late arrivals and delayed same-day jobs hold a realtime tail until its complete membership is assigned', async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close());
+  const f = setup(t); configure(f, { automaticMode: 'realtime', allowPrivateNetwork: true, webhook: { enabled: false },
+    s3: { enabled: true, endpoint: receiver.url, bucket: 'fictional-late', prefix: '', accessKeyId: 'fictional', secretAccessKey: 'fictional', jsonl: { uploadMiBPerSecond: 64 } } });
+  f.service = new ConversationPushService(f.push);
+  const first = ingest(f, 'rollover-unscanned-first', { model: 'Opus5.5' });
+  f.push.scanAutomatic(); await f.service.jsonl.tick(); f.clock.value = midnight;
+  for (let index = 0; index < 60; index++) ingest(f, 'rollover-unscanned-today-' + index, { model: 'Opus5.5' });
+  const late = ingest(f, 'rollover-unscanned-late', { at: today, model: 'Opus5.5' });
+  assert.equal(f.push.scanAutomatic().created, 50); await f.service.jsonl.tick();
+  assert.equal(receiver.requests.length, 0);
+  assert.equal(f.push.scanAutomatic().created, 11);
+  f.push.db.prepare('UPDATE cl_push_jobs SET next_at=? WHERE record_id=?').run(midnight + 3600000, late.id);
+  for (let index = 0; index < 3; index++) await f.service.jsonl.tick();
+  assert.equal(receiver.requests.length, 0);
+  assert.equal(f.service.jsonl.store.list().files.find(file => file.day === '2026-11-20').records, 1);
+  f.clock.value += 3600000; await f.service.jsonl.tick();
+  assert.equal(receiver.completed.length, 1);
+  const bodies = receiver.completed[0].body.toString().trimEnd().split('\n').map(JSON.parse);
+  assert.deepEqual(bodies, [first, late].map(row => ({ request_id: row.request_id, request: rawRequest, response: rawResponse })));
+  assert.equal(f.push.list({ status: 'sent' }).total, 2);
+  assert.equal(f.push.list({ status: 'buffered' }).total, 60);
+});
+
+test('natural rollover scopes backlog by target, model and day and conservatively holds unknown metadata without reading bodies', t => {
+  const f = setup(t); configure(f, { automatic: false,
+    s3: { enabled: true, endpoint: 'https://storage.example/', bucket: 'fictional-scoped', accessKeyId: 'fictional', secretAccessKey: 'fictional' } });
+  const policy = f.push.policy();
+  f.push.configure({ ...policy, platforms: [{ ...policy.s3, id: 'partner', type: 's3', bucket: 'fictional-partner' }] });
+  f.service = new ConversationPushService(f.push); const jsonl = f.service.jsonl.store;
+  const first = ingest(f, 'scoped-first', { model: 'Opus5.5' }); enqueue(f, first, 's3'); assert(jsonl.assignOne());
+  const file = jsonl.list().files[0], destination = f.push.policy().s3;
+  f.push.db.prepare('UPDATE cl_push_jsonl_files SET force_flush=0 WHERE id=?').run(file.id);
+  f.clock.value = midnight;
+  const otherModel = ingest(f, 'scoped-other-model', { at: today, model: 'Fable5' }); enqueue(f, otherModel, 's3');
+  const otherPlatform = ingest(f, 'scoped-other-platform', { at: today, model: 'Opus5.5' }); enqueue(f, otherPlatform, 'partner');
+  const webhook = ingest(f, 'scoped-webhook', { at: today, model: 'Opus5.5' }); enqueue(f, webhook);
+  const current = ingest(f, 'scoped-today', { model: 'Opus5.5' }); enqueue(f, current, 's3');
+  assert.equal(jsonl.dayBacklog(file, destination), false);
+  const same = ingest(f, 'scoped-same', { at: today, model: 'Opus5.5' }); enqueue(f, same, 's3');
+  f.push.db.prepare('UPDATE cl_push_jobs SET next_at=? WHERE record_id=?').run(midnight + 3600000, same.id);
+  const prepare = f.push.db.prepare.bind(f.push.db);
+  f.push.db.prepare = sql => { assert(!/\bcl_records\b/i.test(sql), 'rollover must not read archive body rows'); return prepare(sql); };
+  try {
+    assert.equal(jsonl.sealDue(), 0);
+    prepare("UPDATE cl_push_jobs SET status='cancelled' WHERE record_id=?").run(same.id);
+    prepare('DELETE FROM cl_record_metadata WHERE id=?').run(otherModel.id);
+    assert.equal(jsonl.sealDue(), 0);
+  } finally { f.push.db.prepare = prepare; }
+  f.store.backfillMetadata();
+  assert.equal(jsonl.sealDue(), 1); assert.equal(jsonl.get(file.id).status, 'pending');
+});
+
+test('rollover backlog uses exclusive local midnight boundaries for both short and long DST days', t => {
+  for (const [startText, endText, hours] of [
+    ['2026-03-08T05:00:00Z', '2026-03-09T04:00:00Z', 23],
+    ['2026-11-01T04:00:00Z', '2026-11-02T05:00:00Z', 25]
+  ]) {
+    const start = Date.parse(startText), end = Date.parse(endText), f = setup(t, { value: start });
+    configure(f, { automatic: false, webhook: { enabled: false },
+      s3: { enabled: true, endpoint: 'https://storage.example/', bucket: 'fictional-dst', accessKeyId: 'fictional', secretAccessKey: 'fictional', jsonl: { timezone: 'America/New_York' } } });
+    f.service = new ConversationPushService(f.push); const jsonl = f.service.jsonl.store;
+    const first = ingest(f, 'dst-first-' + hours); enqueue(f, first, 's3'); assert(jsonl.assignOne());
+    const file = jsonl.list().files[0], destination = f.push.policy().s3;
+    f.push.db.prepare('UPDATE cl_push_jsonl_files SET force_flush=0 WHERE id=?').run(file.id); f.clock.value = end;
+    for (const at of [start - 1, end]) enqueue(f, ingest(f, 'dst-outside-' + at, { at }), 's3');
+    assert.equal(jsonl.dayBacklog(file, destination), false);
+    const last = ingest(f, 'dst-last-' + hours, { at: end - 1 }); enqueue(f, last, 's3');
+    assert.equal(jsonl.sealDue(), 0);
+    f.push.db.prepare("UPDATE cl_push_jobs SET status='cancelled' WHERE record_id=?").run(last.id);
+    assert.equal(jsonl.sealDue(), 1);
+  }
+});
+
+test('future-dated open files wait for their own day instead of naturally sealing early', t => {
+  const f = setup(t, { value: midnight - 30000 }); configure(f, { automaticMode: 'realtime', webhook: { enabled: false },
+    s3: { enabled: true, endpoint: 'https://storage.example/', bucket: 'fictional-future', accessKeyId: 'fictional', secretAccessKey: 'fictional' } });
+  f.service = new ConversationPushService(f.push); const jsonl = f.service.jsonl.store;
+  ingest(f, 'rollover-future', { at: midnight }); f.push.scanAutomatic(); assert(jsonl.assignOne());
+  assert.equal(jsonl.sealDue(), 0); f.clock.value = midnight;
+  assert.equal(jsonl.sealDue(), 0); f.clock.value += 86400000;
+  assert.equal(jsonl.sealDue(), 1);
+});
+
+test('automatic backlog includes realtime webhook arrivals and unknown metadata but only scans compact indexes', t => {
+  const f = setup(t); configure(f, { automaticMode: 'realtime' });
+  const row = ingest(f, 'backlog-webhook');
+  const prepare = f.push.db.prepare.bind(f.push.db);
+  f.push.db.prepare = sql => { assert(!/\bcl_records\b/i.test(sql), 'backlog queries must not read archive body rows'); return prepare(sql); };
+  try {
+    assert.equal(f.push.automaticBacklog(), true);
+    assert.equal(f.push.automaticBacklog({ destination: 's3' }), false);
+    prepare('DELETE FROM cl_record_metadata WHERE id=?').run(row.id);
+    assert.equal(f.push.automaticBacklog({ start: today, end: midnight, model: 'Opus5.5', destination: 'webhook' }), true);
+  } finally { f.push.db.prepare = prepare; }
+  f.store.backfillMetadata(); assert.equal(f.push.scanAutomatic().created, 1);
+  assert.equal(f.push.automaticBacklog(), false);
+});

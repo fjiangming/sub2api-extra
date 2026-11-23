@@ -185,6 +185,65 @@ test('background reclamation releases quota and physical pages without a full VA
   assert(f.store.storageUsage().physicalBytes < before.physicalBytes);
 });
 
+test('physical shrinking yields to pending deliveries while logical deletion and quota reuse continue', async t => {
+  const f = setup(t), [sent] = await deliveredRows(f, 1, {
+    request: Buffer.from(JSON.stringify({ input: 'x'.repeat(2 * 1024 ** 2) })).toString('base64')
+  });
+  const pending = event('reclaim-pending'); f.enqueue(pending);
+  const before = f.store.storageUsage().quotaBytes, calls = [], reclaim = f.push.cleanup.reclaim.bind(f.push.cleanup);
+  f.push.cleanup.reclaim = options => { calls.push(options); reclaim(options); };
+  f.service.maintain(); assert(!exists(f, sent)); assert(exists(f, pending));
+  assert(f.store.storageUsage().quotaBytes < before);
+  assert(f.store.db.pragma('freelist_count', { simple: true }) > 128);
+  f.advance(); f.service.maintain(); assert.equal(calls.length, 0);
+  assert.equal(f.service.reclaimIdleSince, null);
+  await f.service.tick(); f.advance(200); f.service.maintain(); assert(!exists(f, pending));
+  f.advance(29800); f.service.maintain(); assert.equal(calls.length, 0);
+  f.advance(200); f.service.maintain(); assert.deepEqual(calls, [{ pages: 128 }]);
+  f.advance(29800); f.service.maintain(); assert.equal(calls.length, 1);
+  f.advance(200); f.service.maintain(); assert.deepEqual(calls, [{ pages: 128 }, { pages: 128 }]);
+});
+
+test('automatic arrivals, open JSONL tails and failed files retain priority over physical shrinking', t => {
+  const f = setup(t, { automatic: true });
+  f.push.configure({ ...f.push.policy(), webhook: { ...f.push.policy().webhook, enabled: false },
+    s3: { ...f.push.policy().s3, enabled: true, endpoint: 'https://storage.example/', bucket: 'fictional-reclaim', accessKeyId: 'fictional', secretAccessKey: 'fictional' } });
+  const calls = [];
+  f.push.cleanup.reclaim = options => calls.push(options);
+  const held = () => {
+    f.service.reclaimIdleSince = f.push.now() - 60000;
+    f.service.maintain(); assert.equal(f.service.reclaimIdleSince, null);
+    assert.equal(calls.length, 0); f.advance();
+  };
+  f.store.ingest(event('reclaim-unscanned', { at: f.push.now() })); held();
+  assert.equal(f.push.scanAutomatic().created, 1); held();
+  assert(f.service.jsonl.store.assignOne());
+  const file = f.service.jsonl.store.list().files[0]; assert.equal(file.status, 'open'); held();
+  f.store.db.prepare("UPDATE cl_push_jsonl_files SET status='failed',error_code='CONNECTION_FAILED' WHERE id=?").run(file.id); held();
+  f.store.db.prepare("UPDATE cl_push_jobs SET status='failed' WHERE jsonl_file_id=?").run(file.id); held();
+});
+
+test('foreground work, readers, pricing and stop/start reset the physical shrinking idle window', async t => {
+  const f = setup(t), service = f.service;
+  const reset = block => {
+    service.reclaimIdleSince = f.push.now() - 60000; block();
+    service.maintain(); assert.equal(service.reclaimIdleSince, null); f.advance();
+  };
+  reset(() => { service.canWork = () => false; }); service.canWork = () => true;
+  reset(() => { service.canCleanup = () => false; }); service.canCleanup = () => true;
+  const release = holdPayloads(f.store.db, f.push.now); t.after(release);
+  reset(() => {}); release();
+  reset(() => { service.jsonl.active = {}; }); service.jsonl.active = null;
+  service.reclaimIdleSince = f.push.now() - 60000;
+  f.push.configure({ ...f.push.policy(), webhook: { ...f.push.policy().webhook,
+    billing: { enabled: true, rates: [{ model: 'example-model', price: '1' }] } } });
+  assert.equal(f.push.pricing.request({}).status, 'pending');
+  service.maintain(); assert.equal(service.reclaimIdleSince, null);
+  await service.stop(); service.reclaimIdleSince = f.push.now() - 60000;
+  service.start(); assert(service.reclaimIdleSince === null || service.reclaimIdleSince === f.push.now());
+  await service.stop();
+});
+
 test('multipart parts or a lost Complete receipt never authorize archive deletion', async t => {
   let lose = true;
   const receiver = await s3Receiver({ beforeRequest: (entry, res) => {

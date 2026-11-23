@@ -169,13 +169,27 @@ class ConversationPushStore {
     const ready=cutoff === null ? waiting : this.db.prepare('SELECT COUNT(*) count FROM cl_push_auto_waiting WHERE at<?').get(cutoff).count;
     return {waiting,ready,mode:policy.automaticMode,timezone:policy.s3.jsonl.timezone};
   }
-  automaticBacklog() {
+  automaticBacklog({ start, end, model, destination } = {}) {
     const policy=this.policy();
-    if (!policy.enabled || !policy.automatic || !policyTargets(policy).some(item=>item.enabled&&item.type==='s3')) return false;
+    if (!policy.enabled || !policy.automatic || !policyTargets(policy).some(item=>item.enabled&&(!destination||item.id===destination))) return false;
     const cutoff=this.automaticCutoff(policy);
-    if (this.db.prepare(`SELECT 1 FROM cl_push_auto_waiting${cutoff === null ? '' : ' WHERE at<?'} LIMIT 1`).get(...(cutoff === null ? [] : [cutoff]))) return true;
-    return cutoff !== null && Boolean(this.db.prepare(`SELECT 1 FROM cl_push_arrivals a LEFT JOIN cl_record_metadata m ON m.id=a.record_id
-      WHERE a.seq>(SELECT row_id FROM cl_push_cursor WHERE singleton=1) AND (m.at IS NULL OR m.at<?) LIMIT 1`).get(cutoff));
+    const upper=end===undefined?cutoff:cutoff===null?end:Math.min(end,cutoff);
+    if(start!==undefined&&upper!==null&&start>=upper)return false;
+    const range=(column,args)=>{
+      const conditions=[];
+      if(start!==undefined){conditions.push(column+'>=?');args.push(start);}
+      if(upper!==null){conditions.push(column+'<?');args.push(upper);}
+      return conditions;
+    };
+    const waitingArgs=[],waiting=range('w.at',waitingArgs);
+    if(model!==undefined){waiting.push('(m.id IS NULL OR m.model=?)');waitingArgs.push(model);}
+    if(this.db.prepare(`SELECT 1 FROM cl_push_auto_waiting w LEFT JOIN cl_record_metadata m ON m.id=w.record_id
+      ${waiting.length?'WHERE '+waiting.join(' AND '):''} LIMIT 1`).get(...waitingArgs))return true;
+    const arrivalArgs=[],arrivals=range('m.at',arrivalArgs);
+    if(model!==undefined){arrivals.push('m.model=?');arrivalArgs.push(model);}
+    return Boolean(this.db.prepare(`SELECT 1 FROM cl_push_arrivals a LEFT JOIN cl_record_metadata m ON m.id=a.record_id
+      WHERE a.seq>(SELECT row_id FROM cl_push_cursor WHERE singleton=1)
+      ${arrivals.length?'AND (m.id IS NULL OR ('+arrivals.join(' AND ')+'))':''} LIMIT 1`).get(...arrivalArgs));
   }
   scanAutomatic() {
     return this.db.transaction(()=>{
