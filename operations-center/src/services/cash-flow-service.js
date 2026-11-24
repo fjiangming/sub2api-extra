@@ -7,10 +7,11 @@ const Decimal = require('decimal.js');
 const { DateTime } = require('luxon');
 const { z } = require('zod');
 const { AppError } = require('../errors');
-const { dateInTimezone } = require('./metrics-service');
+const { addUtcDays, dateInTimezone } = require('./metrics-service');
 const { localDate } = require('./accounting-source');
 const { AccountingService } = require('./accounting-service');
 const { parseAutomaticIncomeInput, parseAutomaticIncomeUserKey, createPeriods } = require('./cost-analysis-service');
+const { activityRewardSql, isActivityReward } = require('./activity-reward');
 
 const CUMULATIVE_START_DATE = '2026-10-01';
 const number = value => new Decimal(value).toDecimalPlaces(8).toNumber();
@@ -103,9 +104,13 @@ class CashFlowService {
         if (schema.tables.redeem_codes?.exists) {
           for (let page = 0; page < 4; page++) {
             const { rows } = await this.pool.query(`SELECT r.id::text AS id,r.used_by::text AS user_id,
-              r.type,r.value::text AS value,r.used_at,r.code,r.notes,to_jsonb(r)->>'created_at' AS created_at
+              r.type,r.value::text AS value,r.used_at,COALESCE(to_jsonb(r)->>'code','') AS code,
+              r.notes,to_jsonb(r)->>'created_at' AS created_at
               FROM redeem_codes r WHERE r.id>$1::bigint AND r.status='used' AND r.used_at IS NOT NULL
-              AND r.type IN ('balance','admin_balance') AND r.used_by IS DISTINCT FROM 1 ORDER BY r.id LIMIT 1000`, [creditCursor]);
+              AND r.used_by IS DISTINCT FROM 1
+              AND (r.type IN ('balance','admin_balance') OR
+                (r.type = 'affiliate_balance' AND ${activityRewardSql('r')}))
+              ORDER BY r.id LIMIT 1000`, [creditCursor]);
             if (AccountingService.scope(this.config) !== scope) return;
             this.store.importDocuments(rows.map(row => {
               const key = `redeem:${row.id}`, previous = this.store.document(key);
@@ -379,7 +384,8 @@ class CashFlowService {
       ...(this.unresolvedRefunds(rows, period).length ? { expense: null, net: null } : {}) }));
     let balance;
     try { balance = await this.balances({ refresh: input.refresh === '1' }); } catch { balance = { userBalance: null, capturedAt: null }; }
-    const cumulative = this.cumulative(rows, source, balance);
+    const lottery = await this.lotteryRewards();
+    const cumulative = this.cumulative(rows, source, balance, lottery);
     const page = Math.min(query.page, Math.max(1, Math.ceil(filtered.length / query.pageSize)));
     return { range: query.range, currency: query.currency, timezone: this.config.financeTimezone, granularity: query.granularity,
       generatedAt: this.now().toISOString(), summary, known, cumulative, source, periods,
@@ -397,18 +403,51 @@ class CashFlowService {
       !rows.some(other => other.counted && other.direction === 'expense' && [other.sourceRef?.toLowerCase(), other.key].includes(`refund:${row.key.slice(8)}`)));
   }
 
-  cumulative(rows, source, balance) {
+  async lotteryRewards() {
+    const range = { start: CUMULATIVE_START_DATE, end: dateInTimezone(this.config.financeTimezone, this.now()) };
+    try {
+      const { rows } = await this.pool.query(`
+        SELECT COALESCE(SUM(r.value), 0) AS lottery_reward, COUNT(*) AS lottery_transactions
+        FROM redeem_codes r
+        WHERE r.used_at >= $1::date::timestamp AT TIME ZONE $3
+          AND r.used_at < $2::date::timestamp AT TIME ZONE $3
+          AND r.used_at IS NOT NULL
+          AND r.status = 'used'
+          AND r.used_by IS DISTINCT FROM 1
+          AND ${activityRewardSql('r')}
+      `, [range.start, addUtcDays(range.end, 1), this.config.financeTimezone]);
+      const row = rows[0] || {};
+      return { amount: number(row.lottery_reward), transactions: Number(row.lottery_transactions || 0), complete: true };
+    } catch {
+      // Keep a completed local credit snapshot usable for older deployments whose
+      // database adapter cannot run the aggregate query (for example during a
+      // rolling upgrade). Never present a partial local scan as complete.
+      const sync = this.store.setting('cash:sync', {});
+      const documents = typeof this.store.documents === 'function' ? this.store.documents() : [];
+      const rows = documents.filter(row => isActivityReward(row) && row.date >= range.start && row.date <= range.end);
+      if (!sync.creditsComplete) return { amount: null, transactions: null, complete: false };
+      return { amount: number(rows.reduce((sum, row) => sum.plus(row.quantity || 0), new Decimal(0))),
+        transactions: rows.length, complete: true };
+    }
+  }
+
+  cumulative(rows, source, balance, lottery = { amount: null, transactions: null, complete: false }) {
     const range = { start: CUMULATIVE_START_DATE, end: dateInTimezone(this.config.financeTimezone, this.now()) };
     const counted = rows.filter(row => row.counted && row.date >= range.start && row.date <= range.end), amounts = totals(counted);
     const unresolved = this.unresolvedRefunds(rows, range).length;
     const income = source.complete ? amounts.income : null, expense = unresolved ? null : amounts.expense;
-    return { currency: 'CNY', income, expense, userBalance: balance.userBalance,
-      net: income != null && expense != null && balance.userBalance != null ? number(new Decimal(income).minus(expense).minus(balance.userBalance)) : null,
+    const lotteryReward = lottery.complete ? lottery.amount : null;
+    return { currency: 'CNY', income, expense, lotteryReward, lotteryTransactions: lottery.transactions,
+      userBalance: balance.userBalance,
+      net: income != null && expense != null && lotteryReward != null && balance.userBalance != null
+        ? number(new Decimal(income).minus(expense).minus(lotteryReward).minus(balance.userBalance)) : null,
       capturedAt: this.now().toISOString(), balanceCapturedAt: balance.capturedAt, recordCount: counted.length,
       missingRates: 0, from: range.start, to: range.end,
       originals: [{ currency: 'CNY', ...amounts }],
       notices: [!source.complete ? source.message : null,
-        balance.userBalance == null ? '当前用户余额暂不可用' : null, unresolved ? '实际现金退款金额缺失' : null].filter(Boolean) };
+        balance.userBalance == null ? '当前用户余额暂不可用' : null,
+        lotteryReward == null ? '历史抽奖奖励暂不可用' : null,
+        unresolved ? '实际现金退款金额缺失' : null].filter(Boolean) };
   }
 
   publicRow(row) {

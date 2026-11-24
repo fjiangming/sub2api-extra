@@ -8,8 +8,10 @@ const {
   parseDateRange,
   number
 } = require('./metrics-service');
+const { activityRewardSql } = require('./activity-reward');
 
 const GRANULARITIES = new Set(['day', 'week', 'month', 'year']);
+const LOTTERY_REWARD_SQL = activityRewardSql('r');
 const AUTOMATIC_INCOME_FILTER_SQL = `
   r.used_at >= $1::date::timestamp AT TIME ZONE $3
   AND r.used_at < $2::date::timestamp AT TIME ZONE $3
@@ -18,6 +20,7 @@ const AUTOMATIC_INCOME_FILTER_SQL = `
   AND r.type IN ('balance', 'admin_balance')
   AND r.used_by IS DISTINCT FROM 1
   AND COALESCE(r.notes, '') NOT LIKE '%补贴%'
+  AND NOT (${LOTTERY_REWARD_SQL})
   AND $4 = 'CNY'
 `;
 
@@ -106,6 +109,7 @@ function createPeriods(range, granularity) {
       revenue: 0,
       expense: 0,
       profit: 0,
+      lotteryReward: 0,
       balanceConsumption: null,
       consumptionProfit: null,
       consumptionComplete: false,
@@ -137,17 +141,22 @@ function parseReportInput(input, config) {
 }
 
 function dailyProfitReport(items, { range, currency, timezone, granularity = 'day', generatedAt = new Date().toISOString() }, notices = []) {
+  // Keep archived rows forward-compatible: reports produced before the lottery
+  // field existed are treated as having no identifiable reward for that day and
+  // are queued for a background refresh by DailyProfitService.
+  const normalizedItems = items.map(row => ({ lotteryReward: 0, ...row }));
   const sum = (rows, key) => rows.every(row => row[key] != null)
     ? rows.reduce((total, row) => total.plus(row[key]), new Decimal(0)).toDecimalPlaces(8).toNumber() : null;
   const totals = rows => {
     const siteConsumption = sum(rows, 'siteConsumption');
+    const lotteryReward = sum(rows, 'lotteryReward');
     const profit = sum(rows, 'profit');
-    return { siteConsumption, supplierConsumption: sum(rows, 'supplierConsumption'), profit,
+    return { siteConsumption, supplierConsumption: sum(rows, 'supplierConsumption'), lotteryReward, profit,
       margin: profit != null && siteConsumption > 0
         ? new Decimal(profit).div(siteConsumption).times(100).toDecimalPlaces(2).toNumber() : null };
   };
   const buckets = new Map();
-  for (const row of items) {
+  for (const row of normalizedItems) {
     const key = periodStart(row.date, granularity);
     if (!buckets.has(key)) buckets.set(key, []);
     buckets.get(key).push(row);
@@ -159,9 +168,9 @@ function dailyProfitReport(items, { range, currency, timezone, granularity = 'da
   }));
   return { range, currency, timezone, granularity, generatedAt,
     supplierSource: 'upstream_daily_summary', supplierScope: 'account', providerFilter: 'scheduled_enabled',
-    summary: { ...totals(items), days: items.length, completeDays: items.filter(row => row.complete).length },
-    completeSubtotal: totals(items.filter(row => row.complete)),
-    periods, items: [...items].sort((a, b) => b.date.localeCompare(a.date)), notices: [...new Set(notices)] };
+    summary: { ...totals(normalizedItems), days: normalizedItems.length, completeDays: normalizedItems.filter(row => row.complete).length },
+    completeSubtotal: totals(normalizedItems.filter(row => row.complete)),
+    periods, items: [...normalizedItems].sort((a, b) => b.date.localeCompare(a.date)), notices: [...new Set(notices)] };
 }
 
 function parsePagination(input = {}) {
@@ -478,41 +487,49 @@ class CostAnalysisService {
 
   async getDailyProfit(input = {}, { accessToken = null, supplierReader = null, signal = null } = {}) {
     const { range, currency, granularity } = parseReportInput(input, this.config);
-    const [site, supplier] = await Promise.all([
+    const [site, supplier, lottery] = await Promise.all([
       this.#dailyBalanceConsumption(range, currency),
       currency === 'CNY' ? this.#supplierDailyCosts(range, currency, accessToken, input.refresh === '1' || input.refresh === true, supplierReader, signal) :
-        { items: [], notice: '主站消费没有币种字段，每日真实收入仅适用于 CNY。' }
+        { items: [], notice: '主站消费没有币种字段，每日真实收入仅适用于 CNY。' },
+      currency === 'CNY' ? this.#dailyLotteryRewards(range) :
+        { rows: [], notice: '抽奖奖励扣除仅适用于 CNY。' }
     ]);
     const siteByDate = new Map(site.rows.map((row) => [row.date, row]));
     const supplierByDate = new Map(supplier.items.map((row) => [row.date, row]));
+    const lotteryByDate = new Map(lottery.rows.map((row) => [row.date, row]));
     const items = [];
     for (let date = range.start; date <= range.end; date = addUtcDays(date, 1)) {
       const usage = siteByDate.get(date);
       const upstream = supplierByDate.get(date);
+      const lotteryRow = lotteryByDate.get(date);
       const siteComplete = currency === 'CNY' && usage?.complete === true;
       const supplierComplete = upstream?.complete === true;
+      const lotteryComplete = currency === 'CNY' && lotteryRow?.complete === true;
       const siteConsumption = siteComplete ? new Decimal(usage.site_consumption).toDecimalPlaces(8).toNumber() : null;
       const supplierConsumption = supplierComplete ? upstream.cost : null;
-      const profit = siteComplete && supplierComplete
-        ? new Decimal(siteConsumption).minus(supplierConsumption).toDecimalPlaces(8).toNumber() : null;
+      const lotteryReward = lotteryComplete ? new Decimal(lotteryRow.lottery_reward).toDecimalPlaces(8).toNumber() : null;
+      const profit = siteComplete && supplierComplete && lotteryComplete
+        ? new Decimal(siteConsumption).minus(supplierConsumption).minus(lotteryReward).toDecimalPlaces(8).toNumber() : null;
       const accountingSource = this.accounting ? await this.accounting.collectDay(date) : undefined;
-      items.push({ date, siteConsumption, supplierConsumption, profit,
+      items.push({ date, siteConsumption, supplierConsumption, lotteryReward, profit,
         ...(accountingSource ? { accountingSource } : {}),
         margin: profit != null && siteConsumption > 0
           ? new Decimal(profit).div(siteConsumption).times(100).toDecimalPlaces(2).toNumber() : null,
         siteRequests: usage ? number(usage.site_requests) : null,
         supplierRequests: upstream?.requests ?? null,
-        siteComplete, supplierComplete, complete: siteComplete && supplierComplete,
+        siteComplete, supplierComplete, lotteryComplete, complete: siteComplete && supplierComplete && lotteryComplete,
         providers: upstream?.providers || [],
         notices: [...(site.notice ? ['主站消费无法核验，请检查用量表、明细覆盖和所选币种。'] : []),
-          ...(supplier.failures || []).filter(failure => failure.date === date || !failure.date).map(failure => failure.notice)],
+          ...(supplier.failures || []).filter(failure => failure.date === date || !failure.date).map(failure => failure.notice),
+          ...(lottery.notice ? [lottery.notice] : [])],
         status: currency !== 'CNY' ? 'unsupported_currency' :
-          !siteComplete ? 'site_incomplete' : !supplierComplete ? 'supplier_incomplete' : 'complete'
+          !siteComplete ? 'site_incomplete' : !supplierComplete ? 'supplier_incomplete' : !lotteryComplete ? 'lottery_incomplete' : 'complete'
       });
     }
     return dailyProfitReport(items, { range, currency, granularity, timezone: this.config.financeTimezone }, [
         ...(site.notice ? ['主站消费无法核验，请检查用量表、明细覆盖和所选币种。'] : []),
-        ...(supplier.notice ? [supplier.notice] : [])
+        ...(supplier.notice ? [supplier.notice] : []),
+        ...(lottery.notice ? [lottery.notice] : [])
       ]);
   }
 
@@ -755,7 +772,7 @@ class CostAnalysisService {
         periods.some((period) => !period.consumptionComplete)
           ? ['部分日期的用量明细不完整或无法核验，余额消费与实际利润趋势留空；支出仍完整展示。'] : [],
       caveats: [
-        '自动收入只统计 Sub2API 兑换页面中已使用的余额记录（balance、admin_balance），排除用户 ID 1 及备注包含“补贴”的记录，以 used_at 归属日期；每条记录只统计一次。',
+        '自动收入只统计 Sub2API 兑换页面中已使用的余额记录（balance、admin_balance），排除用户 ID 1、补贴记录及新旧充值抽奖奖励，以 used_at 归属日期；每条记录只统计一次。',
         '并发、管理员并发调整、订阅和邀请记录不是金额，均不计入自动收入。',
         '管理员为其他用户增加余额会增加自动收入，扣减余额等负数记录会冲减自动收入；admin_balance 也可能是赠送或纠错，并不必然代表现金实收。',
         '同一笔线下充值若已录入手工收入，请删除对应手工记录，避免与管理员余额调整记录重复统计。',
@@ -764,9 +781,10 @@ class CostAnalysisService {
         '支出按手工台账的发生日期归集；不同币种不会自动换算。',
         '利润为总收入减手工支出，不包含税费，也不扣除退款估算。',
         '用户总余额是当前未删除用户的 balance 合计并排除 ID 1；实际利润为利润减用户总余额，余额是当前快照且不随查询日期回溯。',
-        '真实收入趋势与每日列表使用同一份数据：主站全部 usage_logs.actual_cost（排除 ID 1，包含订阅）减已启用定时检查供应商的账号日消费，不扣手工支出或当前余额；利润率以主站消费为分母。',
+        '真实收入趋势与每日列表使用同一份数据：主站全部 usage_logs.actual_cost（排除 ID 1，包含订阅）减已启用定时检查供应商的账号日消费，再减当日充值抽奖奖励；不扣手工支出或当前余额，利润率以主站消费为分母。',
         '按资金时区每天 01:00 归档前一日，当天实时查询；历史缺口在后台补算，历史归档保留统计时的供应商范围、倍率和汇率，需要调整时使用历史重算。',
         '供应商汇总按完整历史充值倍率和配置汇率折算；缺失、异常或主站明细不完整时保持待核验，不以零成本推断利润；周期内任一天未知，趋势保留空缺。',
+        '充值抽奖奖励按兑换记录的 used_at 资金日统计，奖励金额作为营销赠送成本从消费毛利和真实收入中扣除；旧日报会在升级后自动补算。',
         '自动收入直接依赖 Sub2API 当前兑换记录；源记录被删除后，历史报表会同步减少。'
       ]
     };
@@ -823,6 +841,42 @@ class CostAnalysisService {
     `, [range.start, range.endExclusive, this.config.financeTimezone,
       this.config.sub2apiTimezone || this.config.financeTimezone]);
     return { rows };
+  }
+
+  async #dailyLotteryRewards(range) {
+    const missing = await this.inspector.requireTables(['redeem_codes']);
+    if (missing.length) {
+      return { rows: [], notice: '缺少兑换记录表，抽奖奖励暂无法核验；相关日期利润保持待核验。' };
+    }
+    try {
+      const { rows } = await this.pool.query(`
+        WITH dates AS (
+          SELECT generate_series($1::date, $2::date - 1, INTERVAL '1 day')::date AS date
+        )
+        SELECT dates.date::text,
+               COALESCE(SUM(r.value), 0) AS lottery_reward,
+               COUNT(r.id) AS lottery_transactions
+        FROM dates
+        LEFT JOIN redeem_codes r ON r.used_at >= $1::date::timestamp AT TIME ZONE $3
+          AND r.used_at < $2::date::timestamp AT TIME ZONE $3
+          AND (r.used_at AT TIME ZONE $3)::date = dates.date
+          AND r.status = 'used'
+          AND r.used_by IS DISTINCT FROM 1
+          AND ${LOTTERY_REWARD_SQL}
+        GROUP BY dates.date
+        ORDER BY dates.date
+      `, [range.start, range.endExclusive, this.config.financeTimezone]);
+      return {
+        rows: rows.map(row => ({
+          date: row.date,
+          lottery_reward: number(row.lottery_reward),
+          lottery_transactions: number(row.lottery_transactions),
+          complete: true
+        }))
+      };
+    } catch {
+      return { rows: [], notice: '抽奖奖励读取失败，相关日期利润保持待核验。' };
+    }
   }
 
   async #requireAutomaticIncomeTables() {

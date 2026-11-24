@@ -21,9 +21,9 @@ const CostAccountingUi = (() => {
       </div><div data-notice class="accounting-notice" role="status" hidden></div>
       <section id="accounting-automatic" role="tabpanel" aria-labelledby="accounting-tab-automatic">
         <div class="accounting-metrics" data-automatic-metrics></div><div class="accounting-aux" data-automatic-meta></div>
-        <section class="accounting-section"><div class="panel-heading"><h2>消费与毛利趋势</h2><span class="muted" data-automatic-range></span></div><div id="accounting-automatic-chart" class="chart" role="img" aria-label="主站消费、供应商消费及消费毛利趋势"></div></section>
+        <section class="accounting-section"><div class="panel-heading"><h2>消费与毛利趋势</h2><span class="muted" data-automatic-range></span></div><div id="accounting-automatic-chart" class="chart" role="img" aria-label="主站消费、供应商消费、抽奖所得及消费毛利趋势"></div></section>
         <section class="accounting-section"><div class="panel-heading accounting-detail-heading"><div class="accounting-subtabs" role="tablist" aria-label="消费明细">${[['days', '每日明细'], ['providers', '供应商汇总']].map(([key, label]) => `<button type="button" id="cost-detail-tab-${key}" role="tab" aria-controls="cost-detail-${key}" aria-selected="${key === 'days'}" tabindex="${key === 'days' ? 0 : -1}" data-detail-tab="${key}">${label}</button>`).join('')}</div><span class="muted" data-automatic-day-meta></span></div>
-          <div id="cost-detail-days" role="tabpanel" aria-labelledby="cost-detail-tab-days"><div class="table-wrap"><table class="accounting-automatic-table"><thead><tr><th>日期</th><th class="numeric">主站消费</th><th class="numeric">供应商消费</th><th class="numeric">消费毛利</th><th class="numeric">毛利率</th><th class="numeric">请求数</th><th>数据状态</th><th>操作</th></tr></thead><tbody data-automatic-days></tbody><tfoot data-automatic-total></tfoot></table></div>${pager('automatic-day')}</div>
+          <div id="cost-detail-days" role="tabpanel" aria-labelledby="cost-detail-tab-days"><div class="table-wrap"><table class="accounting-automatic-table"><thead><tr><th>日期</th><th class="numeric">主站消费</th><th class="numeric">供应商消费</th><th class="numeric">当日抽奖所得</th><th class="numeric">消费毛利</th><th class="numeric">毛利率</th><th class="numeric">请求数</th><th>数据状态</th><th>操作</th></tr></thead><tbody data-automatic-days></tbody><tfoot data-automatic-total></tfoot></table></div>${pager('automatic-day')}</div>
           <div id="cost-detail-providers" role="tabpanel" aria-labelledby="cost-detail-tab-providers" hidden><div data-provider-summary></div></div>
         </section>
       </section>
@@ -37,7 +37,7 @@ const CostAccountingUi = (() => {
           <p class="muted accounting-filter-total" data-filter-total></p><div class="table-wrap"><table class="accounting-cash-table"><thead><tr><th>日期</th><th>项目</th><th>收支</th><th>来源</th><th>供应商 / 用户</th><th class="numeric">金额（元）</th><th>统计状态</th><th>操作</th></tr></thead><tbody data-cash-rows></tbody></table></div>${pager('cash')}
         </section>
       </section>
-      <details class="accounting-rules"><summary>统计范围与数据来源</summary><p>消费毛利 = 主站实际消费 − 启用定时检查的供应商账号实际消费。主站消费不含 ID 1；包含余额、赠送与订阅产生的用量，充值额度和余额独立展示。供应商充值只计现金支出，不重复扣入消费毛利。</p><p>自动收入恢复已使用余额兑换的入账口径，按使用日期统计正负额度；排除 ID 1，以及并发、订阅、邀请等非金额兑换，已有有效排除事实沿用。关联支付订单不重复相加；未关联兑换的已付款订单按实收补充。额度可能含赠送、优惠，不等同渠道实收。手工收付按实际日期统计，所有金额统一按人民币原数值计算，历史 USD 100 计为人民币 100 元。</p><p>第一行按所选期间统计，列表搜索只筛记录。第二行的历史收入、历史支出与累计净结余从资金时区 2026-10-01（含当天）累计至今，不受日期和粒度影响。累计净结余 = 该日起累计入账 − 该日起累计支出 − 当前用户余额；余额排除 ID 1 及已删除用户。历史来源或余额缺失时保留未知，源站同步前已清理的数据无法恢复。</p><p>历史日报每日 01:00 自动归档，今天实时统计；缺失来源自动重试，未知不当零。消费毛利、净现金流和累计净结余均不表示经营净利润。</p></details>
+      <details class="accounting-rules"><summary>统计范围与数据来源</summary><p>消费毛利 = 主站实际消费 − 启用定时检查的供应商账号实际消费 − 当日充值抽奖所得。主站消费不含 ID 1；包含余额、赠送与订阅产生的用量，充值额度和余额独立展示。抽奖所得按兑换记录的 used_at 资金日归集，供应商充值只计现金支出，不重复扣入消费毛利。</p><p>自动收入恢复已使用余额兑换的入账口径，按使用日期统计正负额度；排除 ID 1、补贴及新旧充值抽奖奖励，以及并发、订阅、邀请等非金额兑换，已有有效排除事实沿用。关联支付订单不重复相加；未关联兑换的已付款订单按实收补充。额度可能含赠送、优惠，不等同渠道实收。手工收付按实际日期统计，所有金额统一按人民币原数值计算，历史 USD 100 计为人民币 100 元。</p><p>第一行按所选期间统计，列表搜索只筛记录。第二行的历史收入、历史支出、历史抽奖所得与累计净结余从资金时区 2026-10-01（含当天）累计至今，不受日期和粒度影响。累计净结余 = 该日起累计入账 − 该日起累计支出 − 历史抽奖所得 − 当前用户余额；余额排除 ID 1 及已删除用户。历史来源或余额缺失时保留未知，源站同步前已清理的数据无法恢复。</p><p>历史日报每日 01:00 自动归档，今天实时统计；缺失来源自动重试，未知不当零。消费毛利、净现金流和累计净结余均不表示经营净利润。</p></details>
       <dialog class="accounting-dialog" data-dialog aria-labelledby="accounting-drawer-title"><header class="accounting-drawer-header"><h2 id="accounting-drawer-title"></h2><button type="button" class="icon-button" data-close title="关闭" aria-label="关闭">${h.icon('x')}</button></header><div class="accounting-drawer-body" data-drawer></div></dialog>`;
 
     function fitMetrics() {
@@ -64,12 +64,12 @@ const CostAccountingUi = (() => {
     }
     function renderAutomatic() {
       const r = state.report, s = r.summary;
-      q('[data-automatic-metrics]').innerHTML = metric('主站消费', s.siteConsumption, '用户实际消费 · 不含 ID 1', 'siteConsumption') + metric('供应商实际消费', s.supplierConsumption, '启用供应商账号日汇总', 'supplierConsumption') + metric('消费毛利', s.profit, '主站消费 − 供应商实际消费', 'profit') + metric('消费毛利率', s.margin, `${s.completeDays}/${s.days} 天数据完整`, 'margin', pct);
+      q('[data-automatic-metrics]').innerHTML = metric('主站消费', s.siteConsumption, '用户实际消费 · 不含 ID 1', 'siteConsumption') + metric('供应商实际消费', s.supplierConsumption, '启用供应商账号日汇总', 'supplierConsumption') + metric('当日抽奖所得', s.lotteryReward, '充值抽奖奖励 · 营销成本', 'lotteryReward') + metric('消费毛利', s.profit, '主站消费 − 供应商消费 − 抽奖所得', 'profit') + metric('消费毛利率', s.margin, `${s.completeDays}/${s.days} 天数据完整`, 'margin', pct);
       q('[data-automatic-range]').textContent = `${r.range.start} 至 ${r.range.end} · CNY`; q('[data-automatic-day-meta]').textContent = '历史归档 / 当日实时';
       const notice = q('[data-notice]'); notice.hidden = s.completeDays === s.days && !r.archive?.pendingDays;
       notice.textContent = `${r.archive?.pendingDays ? `${r.archive.pendingDays} 天历史数据正在后台同步或重试。` : ''}${s.completeDays !== s.days ? `数据完整 ${s.completeDays}/${s.days} 天，完整日期毛利小计 ${money(r.completeSubtotal?.profit)} CNY。缺失日期留空。` : ''}`;
       renderMeta(); renderAutomaticDays(); renderProviders();
-      renderChart('accounting-automatic-chart', r.periods, [['siteConsumption', '主站消费', '#176b4d'], ['supplierConsumption', '供应商消费', '#b05a3c'], ['profit', '消费毛利', '#2d5ea8']], 'CNY'); readyIcons();
+      renderChart('accounting-automatic-chart', r.periods, [['siteConsumption', '主站消费', '#176b4d'], ['supplierConsumption', '供应商消费', '#b05a3c'], ['lotteryReward', '抽奖所得', '#8a5a9b'], ['profit', '消费毛利', '#2d5ea8']], 'CNY'); readyIcons();
     }
     function renderMeta() {
       const value = (source, amount) => source === undefined ? '读取中' : money(amount);
@@ -77,9 +77,9 @@ const CostAccountingUi = (() => {
     }
     function renderAutomaticDays() {
       const r = state.report, size = 15, pages = Math.max(1, Math.ceil(r.items.length / size)); state.automaticPage = Math.max(1, Math.min(state.automaticPage, pages));
-      const labels = { complete: '数据完整', site_incomplete: '用量缺失', supplier_incomplete: '成本缺失', future: '未发生', pending_archive: '同步中', archive_failed: '自动重试', live_failed: '自动重试', live_pending: '实时查询中' };
-      q('[data-automatic-days]').innerHTML = r.items.slice((state.automaticPage - 1) * size, state.automaticPage * size).map(row => `<tr><td><strong>${e(row.date)}</strong></td>${['siteConsumption', 'supplierConsumption', 'profit'].map(key => `<td class="numeric${row[key] < 0 ? ' negative-value' : ''}">${e(money(row[key]))}</td>`).join('')}<td class="numeric">${e(pct(row.margin))}</td><td class="numeric">${e(row.siteRequests ?? '-')}</td><td><span class="badge ${row.complete ? 'success' : 'warning'}">${e(labels[row.status] || '数据缺失')}</span><small>${row.mode === 'live' ? '今日实时' : row.mode === 'archived' ? '已归档' : '等待同步'}${row.archiveStatus ? ' · 自动更新中' : ''}</small></td><td>${button('data-day', row.date)}</td></tr>`).join('');
-      const total = (label, values, hint) => `<tr><th>${label}</th>${['siteConsumption', 'supplierConsumption', 'profit'].map(key => `<td class="numeric">${e(money(values?.[key]))}</td>`).join('')}<td class="numeric">${e(pct(values?.margin))}</td><td colspan="3">${hint}</td></tr>`;
+      const labels = { complete: '数据完整', site_incomplete: '用量缺失', supplier_incomplete: '成本缺失', lottery_incomplete: '抽奖数据缺失', future: '未发生', pending_archive: '同步中', archive_failed: '自动重试', live_failed: '自动重试', live_pending: '实时查询中' };
+      q('[data-automatic-days]').innerHTML = r.items.slice((state.automaticPage - 1) * size, state.automaticPage * size).map(row => `<tr><td><strong>${e(row.date)}</strong></td>${['siteConsumption', 'supplierConsumption', 'lotteryReward', 'profit'].map(key => `<td class="numeric${row[key] < 0 ? ' negative-value' : ''}">${e(money(row[key]))}</td>`).join('')}<td class="numeric">${e(pct(row.margin))}</td><td class="numeric">${e(row.siteRequests ?? '-')}</td><td><span class="badge ${row.complete ? 'success' : 'warning'}">${e(labels[row.status] || '数据缺失')}</span><small>${row.mode === 'live' ? '今日实时' : row.mode === 'archived' ? '已归档' : '等待同步'}${row.archiveStatus ? ' · 自动更新中' : ''}</small></td><td>${button('data-day', row.date)}</td></tr>`).join('');
+      const total = (label, values, hint) => `<tr><th>${label}</th>${['siteConsumption', 'supplierConsumption', 'lotteryReward', 'profit'].map(key => `<td class="numeric">${e(money(values?.[key]))}</td>`).join('')}<td class="numeric">${e(pct(values?.margin))}</td><td colspan="3">${hint}</td></tr>`;
       q('[data-automatic-total]').innerHTML = total('期间合计', r.summary, `${r.summary.completeDays}/${r.summary.days} 天完整`) + (r.summary.completeDays < r.summary.days ? total('完整日期小计', r.completeSubtotal, `仅 ${r.summary.completeDays} 天`) : '');
       pageState('automatic-day', { page: state.automaticPage, totalPages: pages, total: r.items.length }); readyIcons();
     }
@@ -100,7 +100,7 @@ const CostAccountingUi = (() => {
       q('[data-cash-metrics]').innerHTML = metric('本期收入', s.income, '人民币', 'income') + metric('本期支出', s.expense, '人民币', 'expense') + metric('净现金流', s.net, '收入 − 支出 · 人民币', 'net');
       const c = r.cumulative;
       const since = `${c.from} 起`;
-      q('[data-cash-history]').innerHTML = metric('历史收入', c.income, `${since} · 人民币`, 'historyIncome') + metric('历史支出', c.expense, `${since} · 人民币`, 'historyExpense') + metric('当前用户余额', c.userBalance, '不含 ID 1 及已删除用户', 'userBalance') + metric('累计净结余', c.net, `${since} · 不随筛选变化`, 'cumulative');
+      q('[data-cash-history]').innerHTML = metric('历史收入', c.income, `${since} · 人民币`, 'historyIncome') + metric('历史支出', c.expense, `${since} · 人民币`, 'historyExpense') + metric('历史抽奖所得', c.lotteryReward, `${since} · 营销成本`, 'lotteryReward') + metric('当前用户余额', c.userBalance, '不含 ID 1 及已删除用户', 'userBalance') + metric('累计净结余', c.net, `${since} · 入账 − 支出 − 抽奖 − 余额`, 'cumulative');
       q('[data-cash-meta]').textContent = `自动收入 ${r.source.complete ? money(s.automatic) : '暂不可用'} · 手工收入 ${money(s.manual)} 元 · ${r.recordCount} 条期间记录`;
       const notices = [...new Set([...r.notices, ...c.notices])];
       q('[data-notice]').hidden = !notices.length; q('[data-notice]').textContent = notices.join('；');
@@ -157,7 +157,7 @@ const CostAccountingUi = (() => {
     function dayDetail(date) {
       const row = state.report.items.find(row => row.date === date); if (!row) return;
       const notices = [...new Set([...(row.notices || []), ...(row.lastAttempt?.errorCode ? row.lastAttempt.notices : [])])];
-      drawer(`${date} · 消费与毛利`, `<div data-open-day="${e(date)}">${table(['项目', 'CNY'], [['主站消费', money(row.siteConsumption)], ['供应商消费', money(row.supplierConsumption)], ['消费毛利', money(row.profit)], ['毛利率', pct(row.margin)]])}<h3>供应商账号消费</h3>${table(['供应商', 'CNY', '数据状态', '操作'], (row.providers || []).map(provider => [e(provider.name), money(provider.cost), e(provider.complete ? '数据完整' : (provider.reasons || ['自动重试']).join('；')), iconButton('data-provider-refresh', provider.id, 'refresh-cw', `刷新 ${provider.name} 消费`, `cost-provider-refresh" data-provider-date="${e(date)}`)]))}<p class="muted">${row.mode === 'live' ? '今日实时' : '历史归档'} · ${e(row.computedAt ? h.formatDateTime(row.computedAt) : '等待同步')}</p>${row.complete && row.lastAttempt?.errorCode ? '<p class="muted">更新失败，保留最后一次完整归档，后台自动重试。</p>' : ''}${notices.length ? `<details><summary>来源状态</summary>${notices.map(text => `<p>${e(text)}</p>`).join('')}</details>` : ''}</div>`);
+      drawer(`${date} · 消费与毛利`, `<div data-open-day="${e(date)}">${table(['项目', 'CNY'], [['主站消费', money(row.siteConsumption)], ['供应商消费', money(row.supplierConsumption)], ['当日抽奖所得', money(row.lotteryReward)], ['消费毛利', money(row.profit)], ['毛利率', pct(row.margin)]])}<h3>供应商账号消费</h3>${table(['供应商', 'CNY', '数据状态', '操作'], (row.providers || []).map(provider => [e(provider.name), money(provider.cost), e(provider.complete ? '数据完整' : (provider.reasons || ['自动重试']).join('；')), iconButton('data-provider-refresh', provider.id, 'refresh-cw', `刷新 ${provider.name} 消费`, `cost-provider-refresh" data-provider-date="${e(date)}`)]))}<p class="muted">${row.mode === 'live' ? '今日实时' : '历史归档'} · ${e(row.computedAt ? h.formatDateTime(row.computedAt) : '等待同步')}</p>${row.complete && row.lastAttempt?.errorCode ? '<p class="muted">更新失败，保留最后一次完整归档，后台自动重试。</p>' : ''}${notices.length ? `<details><summary>来源状态</summary>${notices.map(text => `<p>${e(text)}</p>`).join('')}</details>` : ''}</div>`);
     }
     async function refreshProvider(date, providerId, node) {
       if (state.providerRefresh) return;
@@ -183,7 +183,7 @@ const CostAccountingUi = (() => {
     }
     function cumulativeDetail() {
       const c = state.report.cumulative;
-      drawer('累计净结余', table(['组成', '金额（元）'], [['累计入账', money(c.income)], ['累计支出', money(c.expense)], ['当前用户余额（不含 ID 1）', money(c.userBalance)], ['累计净结余', `<strong>${e(money(c.net))}</strong>`]]) + `<p class="muted">${e(c.from)}（含当天）至 ${e(c.to)} · ${e(h.formatDateTime(c.capturedAt))}</p><p class="muted">余额快照 ${e(c.balanceCapturedAt ? h.formatDateTime(c.balanceCapturedAt) : '暂不可用')}</p>${c.notices.map(text => `<p class="accounting-notice">${e(text)}</p>`).join('')}`);
+      drawer('累计净结余', table(['组成', '金额（元）'], [['累计入账', money(c.income)], ['累计支出', money(c.expense)], ['历史抽奖所得', money(c.lotteryReward)], ['当前用户余额（不含 ID 1）', money(c.userBalance)], ['累计净结余', `<strong>${e(money(c.net))}</strong>`]]) + `<p class="muted">${e(c.from)}（含当天）至 ${e(c.to)} · ${e(h.formatDateTime(c.capturedAt))}</p><p class="muted">余额快照 ${e(c.balanceCapturedAt ? h.formatDateTime(c.balanceCapturedAt) : '暂不可用')}</p>${c.notices.map(text => `<p class="accounting-notice">${e(text)}</p>`).join('')}`);
     }
     async function ensureProviders() { try { state.providers = (await h.api('/api/cost-analysis/providers')).items || []; } catch { /* Custom cash entries remain available. */ } }
     async function entryForm(item = null, providerId = '') {
@@ -233,11 +233,11 @@ const CostAccountingUi = (() => {
         if (node.dataset.provider) { const row = providerRows().find(row => row.id === node.dataset.provider); if (row) drawer(row.name, table(['日期', '实际消费 CNY', '数据状态', '操作'], row.days.map(day => [e(day.date), money(day.cost), e(day.complete ? '数据完整' : (day.reasons || ['自动重试']).join('；')), button('data-day', day.date)]))); return; }
         if (node.dataset.metric && state.report) { const key = node.dataset.metric;
           if (state.tab === 'cash') {
-            if (['cumulative', 'historyIncome', 'historyExpense'].includes(key)) return cumulativeDetail();
+            if (['cumulative', 'historyIncome', 'historyExpense', 'lotteryReward'].includes(key)) return cumulativeDetail();
             if (key === 'userBalance') return balanceDetail();
             state.direction = key === 'net' ? 'all' : key; state.cashPage = 1; return load();
           }
-          const label = { siteConsumption: '主站消费', supplierConsumption: '供应商消费', profit: '消费毛利', margin: '消费毛利率' }[key];
+          const label = { siteConsumption: '主站消费', supplierConsumption: '供应商消费', lotteryReward: '当日抽奖所得', profit: '消费毛利', margin: '消费毛利率' }[key];
           return drawer(label, table(['日期', key === 'margin' ? '毛利率' : 'CNY', '操作'], state.report.items.map(row => [e(row.date), e(key === 'margin' ? pct(row[key]) : money(row[key])), button('data-day', row.date)])));
         }
       }; run().catch(error => h.toast(error.message, 'error'));

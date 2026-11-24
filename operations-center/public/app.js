@@ -806,7 +806,7 @@ function renderCostDailyProfit(report) {
   const currency = report.currency || 'CNY';
   const money = (value) => value == null ? '待核验' : formatMoney(value, currency, 8);
   const labels = { complete: '已核验', site_incomplete: '主站待核验',
-    supplier_incomplete: '供应商待核验', unsupported_currency: '币种不支持',
+     supplier_incomplete: '供应商待核验', lottery_incomplete: '抽奖数据待核验', unsupported_currency: '币种不支持',
     pending_archive: '待统计', archive_failed: '统计失败', live_failed: '实时统计失败', future: '未发生' };
   const summary = report.summary || {};
   $('cost-daily-profit-meta').textContent = `${report.timezone || ''} · ${items.length} 天 · 已核验 ${summary.completeDays || 0} 天 · ${currency} · 上游账号日汇总 · 历史归档 / 当日实时`;
@@ -816,6 +816,7 @@ function renderCostDailyProfit(report) {
       <td><strong>${escapeHtml(row.date)}</strong></td>
       <td class="numeric">${escapeHtml(money(row.siteConsumption))}</td>
       <td class="numeric">${escapeHtml(money(row.supplierConsumption))}</td>
+      <td class="numeric">${escapeHtml(money(row.lotteryReward))}</td>
       <td class="numeric ${row.profit < 0 ? 'negative-value' : ''}">${escapeHtml(money(row.profit))}</td>
       <td class="numeric">${formatPercent(row.margin)}</td>
       <td class="numeric">${row.siteRequests == null ? 'N/A' : formatInteger(row.siteRequests)}</td>
@@ -824,21 +825,22 @@ function renderCostDailyProfit(report) {
         <li><strong>${escapeHtml(provider.name)}</strong><span>${escapeHtml(money(provider.cost))}</span>${provider.lastSyncedAt ? `<small>账号汇总 · ${escapeHtml(formatDateTime(provider.lastSyncedAt, report.timezone))}</small>` : ''}${!provider.complete ? `<small>${escapeHtml((provider.reasons || []).join('；') || '上游汇总未核验')}</small>` : ''}</li>
       `).join('')}</ul></details>` : '<span class="muted">暂无可核验数据</span>'}</td>
     </tr>
-  `).join('') : emptyRow(8, '所选范围暂无每日收入数据');
+  `).join('') : emptyRow(9, '所选范围暂无每日收入数据');
   $('cost-daily-profit-summary').innerHTML = items.length ? `
-    <tr><th>合计</th><td class="numeric">${escapeHtml(money(summary.siteConsumption))}</td><td class="numeric">${escapeHtml(money(summary.supplierConsumption))}</td><td class="numeric ${summary.profit < 0 ? 'negative-value' : ''}">${escapeHtml(money(summary.profit))}</td><td class="numeric">${formatPercent(summary.margin)}</td><td colspan="3" class="muted">${summary.completeDays === summary.days ? '全部日期已核验' : '包含待核验日期'}</td></tr>
+    <tr><th>合计</th><td class="numeric">${escapeHtml(money(summary.siteConsumption))}</td><td class="numeric">${escapeHtml(money(summary.supplierConsumption))}</td><td class="numeric">${escapeHtml(money(summary.lotteryReward))}</td><td class="numeric ${summary.profit < 0 ? 'negative-value' : ''}">${escapeHtml(money(summary.profit))}</td><td class="numeric">${formatPercent(summary.margin)}</td><td colspan="3" class="muted">${summary.completeDays === summary.days ? '全部日期已核验' : '包含待核验日期'}</td></tr>
   ` : '';
 }
 
 function renderCostProfitTrend(report) {
   const periods = report.periods || [...(report.items || [])].reverse().map(row => ({ ...row, label: row.date.slice(5) }));
   chart('cost-analysis-chart', {
-    legend: { top: 2, right: 10, data: ['主站消费', '供应商消费', '真实收入'] },
+    legend: { top: 2, right: 10, data: ['主站消费', '供应商消费', '抽奖所得', '真实收入'] },
     xAxis: { type: 'category', data: periods.map(period => period.label), axisLabel: { hideOverlap: true } },
     yAxis: { type: 'value', splitLine: { lineStyle: { color: '#edf0eb' } } },
     series: [
       lineSeries('主站消费', periods.map(period => period.siteConsumption), '#176b4d'),
       { name: '供应商消费', type: 'bar', data: periods.map(period => period.supplierConsumption), itemStyle: { color: '#b05a3c' }, barMaxWidth: 28 },
+      { name: '抽奖所得', type: 'bar', data: periods.map(period => period.lotteryReward), itemStyle: { color: '#8a5a9b' }, barMaxWidth: 20 },
       lineSeries('真实收入', periods.map(period => period.profit), '#2d5ea8')
     ]
   });

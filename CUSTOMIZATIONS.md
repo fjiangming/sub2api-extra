@@ -2873,8 +2873,8 @@ API 每请求最多 20 行；前端串行分块以控制负载。最多 20,000 �
 | `operations-center/src/services/cash-flow-service.js` | 累计现金报告增加历史抽奖所得及交易数，累计净结余扣除历史抽奖奖励；保留本地快照回退和源记录防重。 |
 | `operations-center/public/app.js`、`public/cost-accounting-ui.js`、`public/index.html`、`public/cost-accounting.css` | 每日明细、趋势、指标卡、累计下钻及状态展示新增抽奖所得；静态资源版本更新，历史卡片桌面端调整为五列。 |
 | `operations-center/tests/cost-consumption.test.js`、`tests/cash-flow.test.js`、`tests/cost-analysis-ui.test.js` | 覆盖按资金日扣除活动奖励、排除管理员 / 未使用奖励、累计净结余、缺少兑换表待核验、旧 UI 列数和趋势序列。 |
-| `operations-center/docs/cost-analysis.md`、`docs/cost-accounting.md`、`README.md` | 补充抽奖奖励识别、每日利润、现金累计、历史兼容和故障边界。 |
+| `operations-center/docs/cost-analysis.md`、`docs/cost-accounting.md`、`docs/cost-analysis-automatic-plan.md`、`docs/cost-analysis-redesign.md`、`docs/metrics.md`、`README.md` | 补充抽奖奖励识别、每日利润、现金累计、历史兼容和故障边界，并同步归档方案与指标文档的抽奖扣除公式及五项指标说明。 |
 
-验证：专项成本消费、日报、现金流和前端测试通过；新增活动奖励日报回归通过，`to_jsonb` 兼容缺少 `code` 字段的旧测试 schema。运行中的全量测试尚未作为本节验收，未提交 GitHub、未构建镜像、未部署服务器。
+验证：专项成本消费、日报、现金流、前端及历史 `affiliate_balance` 回退测试共 103 项全部通过；此前运营中心完整测试 810 项全部通过；`npm run check` 和 `git diff --check` 通过。新增活动奖励日报回归通过，`to_jsonb` 兼容缺少 `code` 字段的旧测试 schema。未提交 GitHub、未构建镜像、未部署服务器。
 
 补充：现金流同步同时归档符合活动奖励契约的历史 `affiliate_balance` 记录，使抽奖奖励聚合在实时 SQL 失败时仍可从本地快照回退；该类型仍不会进入自动收入或充值用户下钻。新增现金流回退回归测试。

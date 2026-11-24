@@ -60,11 +60,27 @@ test('activity rewards are gifts and cannot create automatic cash income', async
   const report = await f.service.getReport(f.query);
   assert.equal(report.summary.income, 120);
   assert.equal(report.cumulative.income, 120);
+  assert.equal(report.cumulative.lotteryReward, 50);
+  assert.equal(report.cumulative.lotteryTransactions, 1);
+  assert.equal(report.cumulative.net, 10);
   const gift = f.accounting.effectiveDocuments().find(d => d.key === 'redeem:1');
   assert.equal(gift.kind, 'gift'); assert.equal(gift.cash, 0); assert.equal(gift.fundingValue, 0); assert.equal(gift.pending, false);
   const users = await f.accounting.creditUsers({ start: '2026-10-01', end: '2026-10-31' });
   assert.equal(users.summary.totalIncome, 120);
   assert.equal((await f.service.creditUsers(f.query)).summary.totalIncome, 120);
+});
+
+test('affiliate activity rewards remain deductible when the aggregate falls back to the local snapshot', async t => {
+  const f = fixture(t); f.source.payments = [];
+  const code = 'AC-' + 'c'.repeat(28);
+  const notes = '活动奖励; activity=recharge-lottery; reward=11111111-1111-4111-8111-111111111111; batch=22222222-2222-4222-8222-222222222222';
+  f.source.credits = [credit({ id: '1', code: 'AC-' + 'a'.repeat(48), notes, value: '50' }),
+    credit({ id: '2', value: '100' }), credit({ id: '3', type: 'affiliate_balance', code, notes, value: '25' })];
+  const report = await f.service.getReport(f.query);
+  assert.equal(report.summary.income, 100);
+  assert.equal(report.cumulative.lotteryReward, 75);
+  assert.equal(report.cumulative.lotteryTransactions, 2);
+  assert.equal(report.cumulative.net, -35);
 });
 
 test('subsidy mentions anywhere exclude balance and admin credits from income and recharge drilldowns without altering source records', async t => {

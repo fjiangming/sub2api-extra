@@ -139,9 +139,9 @@ test('profit trend uses the same main-site and supplier totals as the real-incom
   ] } });
   await ui.loadCostAnalysis();
   const option = JSON.parse(JSON.stringify(ui.chart()));
-  assert.deepEqual(option.legend.data, ['主站消费', '供应商消费', '真实收入']);
-  assert.equal(option.series.length, 3);
-  assert.deepEqual(option.series.map((series) => series.data), [[20.12500001, 4], [10, 6], [10.12500001, -2]]);
+  assert.deepEqual(option.legend.data, ['主站消费', '供应商消费', '抽奖所得', '真实收入']);
+  assert.equal(option.series.length, 4);
+  assert.deepEqual(option.series.map((series) => series.data), [[20.12500001, 4], [10, 6], [null, null], [10.12500001, -2]]);
   assert.match(ui.requests.find(url => url.startsWith('/api/cost-analysis?')), /include_consumption=0/);
 });
 
@@ -150,12 +150,13 @@ test('unknown supplier costs leave real income unknown while main-site consumpti
   const ui = costReportUi({ periods: [reportPeriod({
     balanceConsumption: null, consumptionProfit: null, consumptionComplete: false
   })], notices: [warning], daily: { periods: [
-    { label: '09-01', siteConsumption: 13, supplierConsumption: null, profit: null }
+    { label: '09-01', siteConsumption: 13, supplierConsumption: null, lotteryReward: 0, profit: null }
   ] } });
   await ui.loadCostAnalysis();
   assert.equal(ui.chart().series[0].data[0], 13);
   assert.equal(ui.chart().series[1].data[0], null);
-  assert.equal(ui.chart().series[2].data[0], null);
+  assert.equal(ui.chart().series[2].data[0], 0);
+  assert.equal(ui.chart().series[3].data[0], null);
   const notices = ui.nodes.get('cost-analysis-operational-notices');
   assert.equal(notices.hidden, false);
   assert.match(notices.innerHTML, /用量明细不完整/);
@@ -164,10 +165,10 @@ test('unknown supplier costs leave real income unknown while main-site consumpti
   assert.match(notices.innerHTML, /供应商同步失败/);
 });
 
-test('empty daily profit tables span all eight columns', async () => {
+test('empty daily profit tables span all nine columns', async () => {
   const ui = costReportUi({ periods: [] });
   await ui.loadCostAnalysis();
-  assert.match(ui.nodes.get('cost-daily-profits').innerHTML, /colspan="8"/);
+  assert.match(ui.nodes.get('cost-daily-profits').innerHTML, /colspan="9"/);
   assert.equal(ui.nodes.get('cost-daily-profit-summary').innerHTML, '');
 });
 
@@ -180,14 +181,14 @@ test('background polling updates both the archived list and trend without anothe
       items: [{ date: '2026-09-01', status: 'pending_archive', profit: null, providers: [] }] } :
       { archive: { pendingDays: 0, ready: true },
         items: [{ date: '2026-09-01', siteConsumption: 10, supplierConsumption: 2, profit: 8,
-          complete: true, status: 'complete', mode: 'archived', providers: [] }] }
+          lotteryReward: 0, complete: true, status: 'complete', mode: 'archived', providers: [] }] }
   });
   ui.state.currentView = 'costs'; ui.state.user = { name: 'admin' };
   await ui.loadCostAnalysis({ refresh: true });
   assert.match(ui.nodes.get('cost-daily-profits').innerHTML, /待统计/);
   await callbacks.shift()();
   assert.match(ui.nodes.get('cost-daily-profits').innerHTML, /已归档/);
-  assert.equal(ui.chart().series[2].data[0], 8);
+  assert.equal(ui.chart().series[3].data[0], 8);
   assert.equal(ui.requests.filter(url => url.startsWith('/api/cost-analysis?')).length, 1);
   assert.ok(!ui.requests.at(-1).includes('refresh='));
   assert.equal(callbacks.length, 0);
@@ -231,14 +232,14 @@ test('daily profit renders actual supplier costs, losses, zero denominators and 
   const ui = costReportUi({ daily: {
     items: [
       { date: '2026-09-02', siteConsumption: 0, supplierConsumption: 2, profit: -2,
-        margin: null, siteRequests: 0, complete: true, status: 'complete', providers: [] },
+        lotteryReward: 0, margin: null, siteRequests: 0, complete: true, status: 'complete', providers: [] },
       { date: '2026-09-01', siteConsumption: 13.12500001, supplierConsumption: 10,
-        profit: 3.12500001, margin: 23.81, siteRequests: 3, complete: true, status: 'complete',
+        lotteryReward: 1.25, profit: 1.87500001, margin: 14.29, siteRequests: 3, complete: true, status: 'complete',
         providers: [{ name: '<img src=x onerror=alert(1)>', cost: 10, complete: true,
           lastSyncedAt: '2026-09-02T00:00:00Z' }] }
     ],
     summary: { days: 2, completeDays: 2, siteConsumption: 13.12500001,
-      supplierConsumption: 12, profit: 1.12500001, margin: 8.57 }
+      supplierConsumption: 12, lotteryReward: 1.25, profit: -0.12499999, margin: -0.95 }
   } });
   ui.nodes.get('cost-analysis-filter').elements.granularity.value = 'month';
   await ui.loadCostAnalysis();
@@ -246,7 +247,8 @@ test('daily profit renders actual supplier costs, losses, zero denominators and 
   assert.match(table, /2026-09-01/);
   assert.match(table, /2026-09-02/);
   assert.match(table, /13\.12500001 CNY/);
-  assert.match(table, /3\.12500001 CNY/);
+  assert.match(table, /1\.87500001 CNY/);
+  assert.match(table, /1\.25 CNY/);
   assert.match(table, /negative-value[^>]*>-2 CNY/);
   assert.match(table, /N\/A/);
   assert.match(table, /<details class="cost-daily-suppliers">/);
@@ -254,22 +256,23 @@ test('daily profit renders actual supplier costs, losses, zero denominators and 
   assert.match(table, /账号汇总/);
   assert.match(ui.nodes.get('cost-daily-profit-meta').textContent, /上游账号日汇总/);
   assert.doesNotMatch(table, /<img|<details[^>]* open/);
-  assert.match(ui.nodes.get('cost-daily-profit-summary').innerHTML, /1\.12500001 CNY/);
+  assert.match(ui.nodes.get('cost-daily-profit-summary').innerHTML, /-0\.12499999 CNY/);
 });
 
 test('missing supplier data leaves daily costs, profits and totals unknown rather than zero', async () => {
   const ui = costReportUi({ daily: {
     items: [{ date: '2026-09-01', siteConsumption: 13, supplierConsumption: null,
-      profit: null, margin: null, siteRequests: 3, complete: false, status: 'supplier_incomplete',
+      lotteryReward: 0, profit: null, margin: null, siteRequests: 3, complete: false, status: 'supplier_incomplete',
       providers: [{ name: 'Supplier', cost: null, complete: false, reasons: ['<未同步>'] }] }],
     summary: { days: 1, completeDays: 0, siteConsumption: 13,
-      supplierConsumption: null, profit: null, margin: null }, notices: ['供应商实际消费暂不可用']
+      supplierConsumption: null, lotteryReward: 0, profit: null, margin: null }, notices: ['供应商实际消费暂不可用']
   } });
   await ui.loadCostAnalysis();
   const table = ui.nodes.get('cost-daily-profits').innerHTML;
   assert.match(table, /供应商待核验/);
   assert.match(table, /&lt;未同步&gt;/);
-  assert.doesNotMatch(table, />0 CNY/);
+  assert.match(table, />0 CNY</);
+  assert.match(table, /待核验/);
   assert.match(ui.nodes.get('cost-daily-profit-summary').innerHTML, /待核验/);
   assert.match(ui.nodes.get('cost-daily-profit-notices').innerHTML, /暂不可用/);
 });

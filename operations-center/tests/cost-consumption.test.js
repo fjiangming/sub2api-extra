@@ -198,6 +198,24 @@ test('daily real profit uses all non-admin actual costs and upstream costs, inde
   assert.equal(report.timezone, 'Asia/Shanghai');
 });
 
+test('daily real profit subtracts used lottery rewards by finance date and ignores admin or unused rewards', async () => {
+  await database.exec(`ALTER TABLE redeem_codes ADD COLUMN code text`);
+  await database.exec(`INSERT INTO redeem_codes (id, used_by, used_at, status, type, value, notes, code) VALUES
+    (901, 2, '2026-01-01T08:00:00Z', 'used', 'balance', 7.25,
+      '活动奖励; activity=recharge-lottery; reward=11111111-1111-4111-8111-111111111111; batch=22222222-2222-4222-8222-222222222222', 'AC-${'a'.repeat(48)}'),
+    (902, 1, '2026-01-01T08:00:00Z', 'used', 'balance', 100,
+      '活动奖励; activity=recharge-lottery; reward=33333333-3333-4333-8333-333333333333; batch=44444444-4444-4444-8444-444444444444', 'AC-${'b'.repeat(28)}'),
+    (903, 2, '2026-01-01T08:00:00Z', 'unused', 'balance', 50,
+      '活动奖励; activity=recharge-lottery; reward=55555555-5555-4555-8555-555555555555; batch=66666666-6666-4666-8666-666666666666', 'AC-${'c'.repeat(28)}')`);
+  const report = await withSuppliers(service()).getDailyProfit({ start: '2026-01-01', end: '2026-01-01' });
+  const row = report.items[0];
+  assert.equal(row.lotteryReward, 7.25);
+  assert.equal(row.profit, 1335.37500001);
+  assert.equal(row.complete, true);
+  assert.equal(report.summary.lotteryReward, 7.25);
+  await database.exec('DELETE FROM redeem_codes WHERE id >= 901');
+});
+
 test('the lightweight financial report skips usage scans and real-income trends aggregate the exact daily rows', async () => {
   const costs = withSuppliers(service());
   const originalQuery = costs.pool.query.bind(costs.pool);
@@ -231,6 +249,18 @@ test('daily profit handles finance and usage timezones independently and refuses
   assert.equal(report.items[0].profit, 1.5);
   assert.equal(report.summary.profit, null);
   assert.equal(report.summary.completeDays, 1);
+});
+
+test('missing redeem-code schema keeps site and supplier figures visible but never treats lottery cost as zero', async () => {
+  const costs = withSuppliers(service());
+  costs.inspector = { requireTables: async (names) => names.includes('redeem_codes') ? ['redeem_codes'] : [] };
+  const report = await costs.getDailyProfit({ start: '2026-01-02', end: '2026-01-02' });
+  assert.equal(report.items[0].siteConsumption, 4);
+  assert.equal(report.items[0].supplierConsumption, 2.5);
+  assert.equal(report.items[0].lotteryReward, null);
+  assert.equal(report.items[0].profit, null);
+  assert.equal(report.items[0].status, 'lottery_incomplete');
+  assert.match(report.notices.join('；'), /缺少兑换记录表/);
 });
 
 test('daily profit keeps missing, duplicate, inconsistent and unsupported supplier data unknown', async () => {

@@ -9,9 +9,9 @@ const { parseReportInput, dailyProfitReport } = require('./cost-analysis-service
 const { AppError } = require('../errors');
 
 function pendingRow(date, status = 'pending_archive') {
-  return { date, status, siteConsumption: null, supplierConsumption: null, profit: null, margin: null,
+  return { date, status, siteConsumption: null, supplierConsumption: null, lotteryReward: null, profit: null, margin: null,
     siteRequests: null, supplierRequests: null, complete: false, siteComplete: false,
-    supplierComplete: false, providers: [] };
+    supplierComplete: false, lotteryComplete: false, providers: [] };
 }
 
 class DailyProfitService {
@@ -211,21 +211,25 @@ class DailyProfitService {
       const supplierConsumption = supplierComplete
         ? new Decimal(providers.reduce((sum, item) => sum.plus(item.cost), new Decimal(0))).toDecimalPlaces(8).toNumber() : null;
       const siteConsumption = siteComplete ? new Decimal(snapshot.row.siteConsumption).toDecimalPlaces(8).toNumber() : null;
-      const profit = siteComplete && supplierComplete
-        ? new Decimal(siteConsumption).minus(supplierConsumption).toDecimalPlaces(8).toNumber() : null;
+      const lotteryReward = snapshot.row.lotteryReward == null ? null :
+        new Decimal(snapshot.row.lotteryReward).toDecimalPlaces(8).toNumber();
+      const profit = siteComplete && supplierComplete && lotteryReward != null
+        ? new Decimal(siteConsumption).minus(supplierConsumption).minus(lotteryReward).toDecimalPlaces(8).toNumber() : null;
       const row = {
         ...snapshot.row,
         providers,
         siteConsumption,
         supplierConsumption,
+        lotteryReward,
         profit,
         margin: profit != null && siteConsumption > 0
           ? new Decimal(profit).div(siteConsumption).times(100).toDecimalPlaces(2).toNumber() : null,
         supplierRequests: providers.every((item) => item.requests != null)
           ? providers.reduce((sum, item) => sum + Number(item.requests), 0) : null,
         supplierComplete,
-        complete: siteComplete && supplierComplete,
-        status: !siteComplete ? 'site_incomplete' : !supplierComplete ? 'supplier_incomplete' : 'complete',
+        lotteryComplete: lotteryReward != null,
+        complete: siteComplete && supplierComplete && lotteryReward != null,
+        status: !siteComplete ? 'site_incomplete' : !supplierComplete ? 'supplier_incomplete' : lotteryReward == null ? 'lottery_incomplete' : 'complete',
         notices: supplierComplete ? [] : ['部分供应商消费仍待核验。']
       };
       const saved = this.store.saveManualSnapshot(scope, date, { row, notices: row.notices });
@@ -274,14 +278,28 @@ class DailyProfitService {
         continue;
       }
       const snapshot = snapshots.get(date);
-      if (!snapshot || !snapshot.row.complete || (force && (!refreshRange || (date >= refreshRange.start && date <= refreshRange.end))) ||
-          (input.accounting === '1' && (!snapshot.row.accountingSource?.complete || snapshot.row.accountingSource.version !== 2))) {
+      const lotteryFieldMissing = Boolean(snapshot?.row) && !Object.hasOwn(snapshot.row, 'lotteryReward');
+      const needsRefresh = !snapshot || !snapshot.row.complete || lotteryFieldMissing ||
+        (force && (!refreshRange || (date >= refreshRange.start && date <= refreshRange.end))) ||
+        (input.accounting === '1' && (!snapshot.row.accountingSource?.complete || snapshot.row.accountingSource.version !== 2));
+      if (needsRefresh) {
         const dueAt = date === local.minus({ days: 1 }).toISODate() && local.hour < 1
           ? local.startOf('day').plus({ hours: 1 }).toMillis() : this.now().getTime();
         queued.push({ date, dueAt });
       }
       const row = snapshot ? { ...snapshot.row, mode: 'archived', computedAt: snapshot.computedAt,
         notices: snapshot.notices || [], lastAttempt: snapshot.lastAttempt } : { ...pendingRow(date), notices: [] };
+      if (snapshot && lotteryFieldMissing) {
+        // Keep known site and supplier figures visible while an old snapshot is
+        // recalculated with the lottery deduction available in newer versions.
+        row.lotteryReward = null;
+        row.lotteryComplete = false;
+        row.profit = null;
+        row.margin = null;
+        row.complete = false;
+        row.status = row.siteComplete !== true ? 'site_incomplete' :
+          row.supplierComplete !== true ? 'supplier_incomplete' : 'lottery_incomplete';
+      }
       items.push(row);
       if (snapshot?.lastAttempt?.errorCode && row.complete) {
         notices.push(`${date} 最近更新失败，保留已归档的完整结果，后台自动重试。`);
