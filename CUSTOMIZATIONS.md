@@ -1,5 +1,16 @@
 # 个性化功能维护台账
 
+## 2026-11-24：充值抽奖规则后台配置
+
+用户要求不要把 1 元、2 元中奖率继续写死，改为允许管理员配置活动累计有效充值门槛和基础概率；默认值继续使用当前充值抽奖配置。仅修改活动中心，不修改主站或运营中心，不改变补偿抽奖的独立概率方案。
+
+- `activity-center/src/prizes.js`、`activity-center/src/store.js`：抽奖采样读取活动当前规则；SQLite schema 5 增加管理员规则 JSON、规则变更审计和每笔充值奖励的门槛快照，旧 schema 自动补入当前默认规则，规则修改不改写历史审计结果。
+- `activity-center/src/app.js`、`activity-center/views/ledger.html`、`activity-center/public/app.js`、`activity-center/public/styles.css`、`activity-center/public/index.html`：增加仅管理员可访问的充值抽奖规则 API 和账本配置表单，可编辑基础概率与累计有效充值门槛，校验概率总和、门槛顺序和 CSRF；普通用户接口继续隐藏规则。
+- `activity-center/tests/rules.test.js`、`activity-center/tests/http.test.js`、`activity-center/tests/audit.test.js`、`activity-center/tests/lottery.test.js`、`activity-center/scripts/preview.cjs`、`activity-center/scripts/browser-check.cjs`：覆盖默认值、配置持久化、历史门槛快照、迁移、管理员权限、输入校验和页面布局。
+- `activity-center/README.md`：记录默认配置、管理员配置入口、schema 5 和历史快照语义。
+
+默认基础概率为 0.5 / 1 / 2 / 3 / 5 / 10 / 20 / 50 元对应 52% / 20% / 10% / 5% / 2% / 5% / 4% / 2%；默认累计有效充值门槛为 0 / 0 / 0 / 0 / 0 / 1,000 / 2,000 / 5,000 元。验证：`npm run check`、活动中心全量 **69 项测试**和 Chrome 桌面 / 手机 / 窄屏 / 深色浏览器回归全部通过；未连接生产、未部署服务器、未提交 GitHub。
+
 ## 2026-11-24：开发补偿抽奖机会管理
 
 用户确认 Demo 后要求开始开发“给全体或指定用户额外发放抽奖机会，并使用独立概率规则”。本轮仅修改活动中心，不修改主站或运营中心；充值机会的累计兑换口径、充值概率和现有奖励账本保持兼容。补偿机会优先消耗，独立概率方案在发放批次创建时保存快照，普通用户仍只看到合并后的可用次数，不看到来源、概率、批次、有效期或门槛。
@@ -2850,3 +2861,20 @@ API 每请求最多 20 行；前端串行分块以控制负载。最多 20,000 �
 先备份当前完整 PostgreSQL（pg_restore --list 校验）、在线一致性 SQLite（quick_check / 全部导入行摘要 / 压缩 SHA-256 校验）、当前配置和必要历史证据，统一留在权限 0700 的 `/root/sub2api-deploy/backups/billing-audit-cleanup-20261030-231306/`。将七个旧维护备份目录的配置 / 清单 / 日志合并归档后删除原目录及 `/root/sub2api-deploy/billing-log-evidence/2026-10-23`，排除重复旧数据库快照和 isolated-probe 演练，原占用 3,451,846,656 字节，新增必要备份约 536 MiB，净释放约 2.69 GiB。旧快照不再保留，旧 rollback 路径失效，未来不能照旧文档直接执行。没有删除 Docker 镜像、卷、正常日志、在用 SQLite / WAL / SHM、认领或防重表。
 
 验收：执行前后无 CSV 在途任务 / 结算行，14,480 条导入状态 / 版本 / 预览 / 结果摘要相同，144 条已补记合计 52.03179180 USD，与主站 settled、每笔唯一 usage / claim、原生 dedup / archive 全部一致。受保护配置 / 价格 / 收支 / 消息摘要不变，运营中心和主站本地及外部健康 HTTP 200。仍保留未决候选及原 CSV / 回执，但再核查文件来源时须从历史归档恢复日志和只读挂载，再重新核查；撤挂载不会恢复过去未扣的资金，也不表示全部候选已经获准扣费。
+## 2026-11-24：成本分析扣除充值抽奖奖励
+
+用户要求核对并改造抽奖中心对成本分析的影响。本轮沿用运营中心现有对账模块和 Sub2API 原生兑换记录，不修改余额、不新增资金扣减路径，也不连接服务器或部署。活动中心产生的充值抽奖奖励按兑换记录 `used_at` 的资金日识别，自动收入排除奖励；每日真实收入和消费毛利按“主站消费 - 启用供应商实际消费 - 当日抽奖所得”计算；固定起点累计净结余按“历史收入 - 历史支出 - 历史抽奖所得 - 当前用户余额”计算，余额继续排除 ID 1 和已删除用户。
+
+| 文件 | 变更 |
+| --- | --- |
+| `operations-center/src/services/activity-reward.js` | 统一识别新旧 28 / 48 位活动奖励码、活动奖励备注和 `affiliate_balance` 历史回执；SQL 识别通过 `to_jsonb` 读取可选 `code` 字段，兼容旧兑换表结构。 |
+| `operations-center/src/services/cost-analysis-service.js` | 自动收入排除活动奖励；每日查询增加 `lotteryReward`，按 `used_at` 资金日聚合并从利润扣除；兑换表缺失或读取失败时保持待核验，不把未知奖励当零。 |
+| `operations-center/src/services/daily-profit-service.js` | 日报快照增加抽奖字段；旧快照自动排队补算，补算期间保留已知主站 / 供应商金额并将利润置为待核验；强制重算继续展示原快照。 |
+| `operations-center/src/services/cash-flow-service.js` | 累计现金报告增加历史抽奖所得及交易数，累计净结余扣除历史抽奖奖励；保留本地快照回退和源记录防重。 |
+| `operations-center/public/app.js`、`public/cost-accounting-ui.js`、`public/index.html`、`public/cost-accounting.css` | 每日明细、趋势、指标卡、累计下钻及状态展示新增抽奖所得；静态资源版本更新，历史卡片桌面端调整为五列。 |
+| `operations-center/tests/cost-consumption.test.js`、`tests/cash-flow.test.js`、`tests/cost-analysis-ui.test.js` | 覆盖按资金日扣除活动奖励、排除管理员 / 未使用奖励、累计净结余、缺少兑换表待核验、旧 UI 列数和趋势序列。 |
+| `operations-center/docs/cost-analysis.md`、`docs/cost-accounting.md`、`README.md` | 补充抽奖奖励识别、每日利润、现金累计、历史兼容和故障边界。 |
+
+验证：专项成本消费、日报、现金流和前端测试通过；新增活动奖励日报回归通过，`to_jsonb` 兼容缺少 `code` 字段的旧测试 schema。运行中的全量测试尚未作为本节验收，未提交 GitHub、未构建镜像、未部署服务器。
+
+补充：现金流同步同时归档符合活动奖励契约的历史 `affiliate_balance` 记录，使抽奖奖励聚合在实时 SQL 失败时仍可从本地快照回退；该类型仍不会进入自动收入或充值用户下钻。新增现金流回退回归测试。

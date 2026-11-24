@@ -85,6 +85,14 @@ h2 { font-size: 16px; font-weight: 600; }
 .audit-actions:not(:has(button:not([hidden]))) { display: none; }
 .audit-actions .button { margin-top: 10px; }
 .audit-detail { margin-bottom: 18px; font-size: 13px; }
+.lottery-config { padding: 22px 0 4px; border-bottom: 1px solid var(--line); }
+.lottery-config .section-heading { align-items: flex-start; }
+.lottery-config .field-help { margin-top: 5px; }
+.lottery-config-table { min-width: 560px; }
+.lottery-config-table td:nth-child(2) { width: 190px; }
+.lottery-config-table td:nth-child(3) { width: 260px; }
+.money-input { display: flex; align-items: center; gap: 6px; }
+.money-input input { max-width: 170px; }
 .ledger-section { padding-top: 22px; }
 .filters { display: grid; grid-template-columns: minmax(130px,1.4fr) minmax(120px,1fr) minmax(120px,1fr) minmax(100px,.8fr) minmax(115px,.9fr) auto; gap: 9px; align-items: end; margin: 15px 0; }
 .filter-actions { display: flex; gap: 9px; }

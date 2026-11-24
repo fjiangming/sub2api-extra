@@ -10,7 +10,10 @@ const { creditCode, creditNotes, legacyCredit } = require('./reward-credit');
 
 const ACTIVITY = Object.freeze({ id: 'recharge-lottery', name: '充值抽奖', kind: 'wheel' });
 const DEFAULT_COMPENSATION_PROFILE_ID = 'compensation-standard-v1';
-const AUDIT_REQUIRED = `CASE WHEN r.chance_source='recharge' THEN CASE r.amount_minor ${PRIZES.filter(p => p.minimum > 0).map(p => `WHEN ${p.amount} THEN ${p.minimum}`).join(' ')} ELSE 0 END ELSE 0 END`;
+const MAX_PRIZE_THRESHOLD_MINOR = 1_000_000_000_000;
+const DEFAULT_PRIZE_CONFIG = Object.freeze(PRIZES.map(prize => Object.freeze({ amount: prize.amount, weight: prize.weight, minimum: prize.minimum })));
+const DEFAULT_REQUIRED_CASE = `CASE amount_minor ${PRIZES.filter(p => p.minimum > 0).map(p => `WHEN ${p.amount} THEN ${p.minimum}`).join(' ')} ELSE 0 END`;
+const AUDIT_REQUIRED = "CASE WHEN r.chance_source='recharge' THEN COALESCE(r.required_recharge_minor,0) ELSE 0 END";
 const AUDIT_SNAPSHOT_VALID = `(b.user_id=r.user_id AND typeof(b.recharge_minor)='integer' AND b.recharge_minor BETWEEN 0 AND ${Number.MAX_SAFE_INTEGER})`;
 const AUDIT_STATUS = `CASE WHEN (${AUDIT_REQUIRED})=0 THEN 'not_required'
   WHEN NOT COALESCE(${AUDIT_SNAPSHOT_VALID},0) THEN 'unverifiable'
@@ -20,6 +23,41 @@ const ADMIN_REWARDS_SELECT = `r.*, (${AUDIT_REQUIRED}) AS audit_required_minor, 
   CASE WHEN ${AUDIT_SNAPSHOT_VALID} THEN b.recharge_minor END AS audit_recharge_minor`;
 function day(value, timezone) {
   return new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(value));
+}
+function normalizePrizeConfig(prizes) {
+  if (!Array.isArray(prizes) || prizes.length !== PRIZES.length) throw new AppError('INVALID_PRIZE_CONFIG', '充值抽奖规则必须包含全部奖项');
+  const expected = new Map(PRIZES.map(prize => [prize.amount, null]));
+  const seen = new Set();
+  let total = 0;
+  for (const item of prizes) {
+    const amount = item?.amount ?? item?.amountMinor;
+    const weight = item?.weight;
+    const minimum = item?.minimum ?? item?.minimumMinor ?? 0;
+    if (!Number.isSafeInteger(amount) || !expected.has(amount) || seen.has(amount) ||
+        !Number.isSafeInteger(weight) || weight < 0 || weight > 10000 ||
+        !Number.isSafeInteger(minimum) || minimum < 0 || minimum > MAX_PRIZE_THRESHOLD_MINOR) {
+      throw new AppError('INVALID_PRIZE_CONFIG', '充值抽奖规则数值无效');
+    }
+    seen.add(amount); total += weight;
+    expected.set(amount, { amount, weight, minimum });
+  }
+  if (total !== 10000) throw new AppError('INVALID_PRIZE_CONFIG', '基础概率总和必须为 100%');
+  const ordered = PRIZES.map(prize => expected.get(prize.amount));
+  if (ordered.some(prize => !prize)) throw new AppError('INVALID_PRIZE_CONFIG', '充值抽奖规则必须包含全部奖项');
+  if (ordered[0].minimum !== 0 || ordered.some((prize, index) => index > 0 && prize.minimum < ordered[index - 1].minimum)) {
+    throw new AppError('INVALID_PRIZE_CONFIG', '充值门槛必须从低到高设置，0.5 元奖项门槛必须为 0');
+  }
+  return Object.freeze(ordered.map(prize => Object.freeze(prize)));
+}
+function parsePrizeConfig(value) {
+  try { return normalizePrizeConfig(JSON.parse(value)); }
+  catch (error) {
+    if (error instanceof AppError) throw error;
+    throw new Error('活动中心的充值抽奖规则无效');
+  }
+}
+function publicPrizeConfig(config) {
+  return config.map(prize => ({ amountMinor: prize.amount, weight: prize.weight, minimumMinor: prize.minimum }));
 }
 function weightsJson(weights) {
   const expected = new Map(PRIZES.map(prize => [prize.amount, 0]));
@@ -75,12 +113,14 @@ class Store {
     this.db.pragma('synchronous = FULL');
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
-    if (this.db.pragma('user_version', { simple: true }) > 4) throw new Error('活动数据库版本高于当前程序');
+    if (this.db.pragma('user_version', { simple: true }) > 5) throw new Error('活动数据库版本高于当前程序');
+    let requiredColumnAdded = false;
     this.db.transaction(() => {
       this.db.exec(`
       CREATE TABLE IF NOT EXISTS campaign (
         id TEXT PRIMARY KEY, start_at TEXT NOT NULL, timezone TEXT NOT NULL, sources TEXT NOT NULL, source_scope TEXT NOT NULL,
-        probability_version INTEGER NOT NULL CHECK(probability_version=1)
+        probability_version INTEGER NOT NULL CHECK(probability_version=1), prize_config_json TEXT,
+        config_version INTEGER NOT NULL DEFAULT 1, config_updated_at TEXT, config_updated_by TEXT
       );
       CREATE TABLE IF NOT EXISTS accounts (
         user_id TEXT PRIMARY KEY, used INTEGER NOT NULL DEFAULT 0 CHECK(used>=0)
@@ -93,7 +133,7 @@ class Store {
       CREATE TABLE IF NOT EXISTS rewards (
         id TEXT PRIMARY KEY, batch_id TEXT NOT NULL REFERENCES batches(id), sequence INTEGER NOT NULL,
         user_id TEXT NOT NULL, user_email TEXT NOT NULL, user_name TEXT NOT NULL,
-        amount_minor INTEGER NOT NULL CHECK(amount_minor IN (50,100,200,300,500,1000,2000,5000)),
+        amount_minor INTEGER NOT NULL CHECK(amount_minor IN (50,100,200,300,500,1000,2000,5000)), required_recharge_minor INTEGER NOT NULL DEFAULT 0 CHECK(required_recharge_minor>=0),
         credit_code TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','paid','failed')),
         credit_type TEXT NOT NULL DEFAULT 'balance' CHECK(credit_type IN ('balance','affiliate_balance')),
         credit_notes TEXT, credit_migration TEXT,
@@ -132,6 +172,10 @@ class Store {
         id INTEGER PRIMARY KEY, grant_id TEXT, profile_id TEXT, actor_id TEXT NOT NULL,
         action TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS lottery_config_audit (
+        id INTEGER PRIMARY KEY, campaign_id TEXT NOT NULL, actor_id TEXT NOT NULL,
+        previous_json TEXT NOT NULL, next_json TEXT NOT NULL, created_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS retry_audit (
         id INTEGER PRIMARY KEY, reward_id TEXT NOT NULL REFERENCES rewards(id), actor_id TEXT NOT NULL, created_at TEXT NOT NULL
       );
@@ -151,14 +195,26 @@ class Store {
       }
       if (!this.db.pragma('table_info(rewards)').some(column => column.name === 'grant_id')) this.db.exec('ALTER TABLE rewards ADD COLUMN grant_id TEXT');
       if (!this.db.pragma('table_info(rewards)').some(column => column.name === 'profile_id')) this.db.exec('ALTER TABLE rewards ADD COLUMN profile_id TEXT');
+      if (!this.db.pragma('table_info(rewards)').some(column => column.name === 'required_recharge_minor')) {
+        this.db.exec('ALTER TABLE rewards ADD COLUMN required_recharge_minor INTEGER NOT NULL DEFAULT 0 CHECK(required_recharge_minor>=0)');
+        requiredColumnAdded = true;
+      }
+      if (!this.db.pragma('table_info(campaign)').some(column => column.name === 'prize_config_json')) this.db.exec('ALTER TABLE campaign ADD COLUMN prize_config_json TEXT');
+      if (!this.db.pragma('table_info(campaign)').some(column => column.name === 'config_version')) this.db.exec('ALTER TABLE campaign ADD COLUMN config_version INTEGER NOT NULL DEFAULT 1');
+      if (!this.db.pragma('table_info(campaign)').some(column => column.name === 'config_updated_at')) this.db.exec('ALTER TABLE campaign ADD COLUMN config_updated_at TEXT');
+      if (!this.db.pragma('table_info(campaign)').some(column => column.name === 'config_updated_by')) this.db.exec('ALTER TABLE campaign ADD COLUMN config_updated_by TEXT');
       this.db.exec("UPDATE rewards SET credit_notes='活动奖励; activity=recharge-lottery; reward='||id||'; batch='||batch_id WHERE credit_notes IS NULL");
+      if (requiredColumnAdded) this.db.exec(`UPDATE rewards SET required_recharge_minor=${DEFAULT_REQUIRED_CASE} WHERE chance_source='recharge'`);
       this.db.exec('CREATE INDEX IF NOT EXISTS rewards_source ON rewards(chance_source,created_at DESC,id)');
+      const defaultConfig = JSON.stringify(DEFAULT_PRIZE_CONFIG);
+      const campaign = this.db.prepare('SELECT id FROM campaign WHERE id=?').get(ACTIVITY.id);
+      if (campaign) this.db.prepare("UPDATE campaign SET prize_config_json=?,config_updated_at=COALESCE(config_updated_at,?),config_updated_by=COALESCE(config_updated_by,'system') WHERE id=? AND prize_config_json IS NULL").run(defaultConfig,new Date(now()).toISOString(),ACTIVITY.id);
       if (!this.db.prepare('SELECT 1 FROM compensation_profiles WHERE id=?').get(DEFAULT_COMPENSATION_PROFILE_ID)) {
         const at = new Date(now()).toISOString();
         this.db.prepare('INSERT INTO compensation_profiles(id,name,weights_json,status,version,created_at,updated_at,created_by) VALUES (?,?,?,?,?,?,?,?)')
           .run(DEFAULT_COMPENSATION_PROFILE_ID,'补偿抽奖·标准 v1',weightsJson(COMPENSATION_DEFAULT_WEIGHTS),'enabled',1,at,at,'system');
       }
-      this.db.pragma('user_version = 4');
+      this.db.pragma('user_version = 5');
     }).immediate();
     this.db.transaction(() => {
       let campaign = this.db.prepare('SELECT * FROM campaign WHERE id=?').get(ACTIVITY.id);
@@ -168,7 +224,9 @@ class Store {
       const hash = parts => crypto.createHash('sha256').update(JSON.stringify(parts)).digest('hex');
       const scope = hash(identity);
       if (!campaign) {
-        this.db.prepare('INSERT INTO campaign VALUES (?,?,?,?,?,1)').run(ACTIVITY.id, new Date(now()).toISOString(), config.timezone, sources, scope);
+        const at = new Date(now()).toISOString();
+        this.db.prepare('INSERT INTO campaign(id,start_at,timezone,sources,source_scope,probability_version,prize_config_json,config_version,config_updated_at,config_updated_by) VALUES (?,?,?,?,?,?,?,?,?,?)')
+          .run(ACTIVITY.id,at,config.timezone,sources,scope,1,JSON.stringify(DEFAULT_PRIZE_CONFIG),1,at,'system');
         campaign = this.db.prepare('SELECT * FROM campaign WHERE id=?').get(ACTIVITY.id);
       }
       const legacySources = campaign.sources.split(',');
@@ -182,9 +240,10 @@ class Store {
       }
       if (campaign.sources !== sources || campaign.timezone !== config.timezone || campaign.source_scope !== scope) throw new Error('已存在活动的充值来源和时区不能直接更改，请保留原配置与数据库');
       this.campaign = campaign;
+      this.prizeConfig = parsePrizeConfig(campaign.prize_config_json || JSON.stringify(DEFAULT_PRIZE_CONFIG));
     }).immediate();
   }
-  registry() { return [{ ...ACTIVITY, enabled: this.config.enabled && this.now() >= Date.parse(this.campaign.start_at), prizes: PRIZES.map(p => p.amount) }]; }
+  registry() { return [{ ...ACTIVITY, enabled: this.config.enabled && this.now() >= Date.parse(this.campaign.start_at), prizes: this.prizeConfig.map(p => p.amount) }]; }
   used(userId) { return this.db.prepare('SELECT used FROM accounts WHERE user_id=?').get(userId)?.used || 0; }
   compensationAvailable(userId, at = this.now()) {
     const rows = this.db.prepare(`SELECT g.chance_count,COALESCE(u.used,0) AS used
@@ -229,8 +288,8 @@ class Store {
       const batchId = crypto.randomUUID();
       const at = new Date(this.now()).toISOString();
       this.db.prepare('INSERT INTO batches VALUES (?,?,?,?,?,?)').run(batchId, user.id, requestId, count, rechargeMinor, at);
-      const insert = this.db.prepare(`INSERT INTO rewards(id,batch_id,sequence,user_id,user_email,user_name,amount_minor,credit_code,credit_type,credit_notes,chance_source,grant_id,profile_id,created_at,created_day)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      const insert = this.db.prepare(`INSERT INTO rewards(id,batch_id,sequence,user_id,user_email,user_name,amount_minor,required_recharge_minor,credit_code,credit_type,credit_notes,chance_source,grant_id,profile_id,created_at,created_day)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
       let rechargeCount = 0; let candidateIndex = 0;
       for (let index = 1; index <= count; index++) {
         const id = crypto.randomUUID();
@@ -247,8 +306,10 @@ class Store {
         } else rechargeCount++;
         const chanceSource = grant ? 'compensation' : 'recharge';
         const profileWeights = grant ? parseWeights(grant.weights_json) : null;
-        insert.run(id, batchId, index, user.id, user.email, user.name,
-          grant ? sampleWeights(profileWeights, this.rng) : sample(rechargeMinor, this.rng), creditCode(), 'balance',
+        const amount = grant ? sampleWeights(profileWeights, this.rng) : sample(rechargeMinor, this.rng, this.prizeConfig);
+        const requiredRecharge = grant ? 0 : this.prizeConfig.find(prize => prize.amount === amount)?.minimum;
+        if (!Number.isSafeInteger(requiredRecharge)) throw new AppError('INVALID_PRIZE_CONFIG', '充值抽奖规则无法核验');
+        insert.run(id, batchId, index, user.id, user.email, user.name, amount, requiredRecharge, creditCode(), 'balance',
           creditNotes({ id,batch_id: batchId,chance_source: chanceSource,grant_id: grant?.id }), chanceSource, grant?.id || null,
           grant?.profile_id || null, at, day(at, this.config.timezone));
       }
@@ -311,6 +372,29 @@ class Store {
         ${ADMIN_REWARDS_FROM} WHERE (${AUDIT_REQUIRED})>0)`).get();
     if (Object.values(result).some(v => !Number.isSafeInteger(v))) throw new AppError('AUDIT_OVERFLOW', '门槛审计汇总超出支持范围', 503);
     return result;
+  }
+  lotteryConfig() {
+    const campaign = this.db.prepare('SELECT config_version,config_updated_at,config_updated_by,prize_config_json FROM campaign WHERE id=?').get(ACTIVITY.id);
+    if (!campaign) throw new AppError('CONFIG_UNAVAILABLE', '充值抽奖规则暂不可用', 503);
+    return { version: campaign.config_version, updatedAt: campaign.config_updated_at, updatedBy: campaign.config_updated_by,
+      prizes: publicPrizeConfig(parsePrizeConfig(campaign.prize_config_json)) };
+  }
+  updateLotteryConfig({ prizes }, actorId) {
+    const normalized = normalizePrizeConfig(prizes);
+    const campaign = this.db.prepare('SELECT * FROM campaign WHERE id=?').get(ACTIVITY.id);
+    if (!campaign) throw new AppError('CONFIG_UNAVAILABLE', '充值抽奖规则暂不可用', 503);
+    const previous = campaign.prize_config_json || JSON.stringify(DEFAULT_PRIZE_CONFIG);
+    const next = JSON.stringify(normalized);
+    const at = new Date(this.now()).toISOString();
+    this.db.transaction(() => {
+      this.db.prepare('UPDATE campaign SET prize_config_json=?,config_version=config_version+1,config_updated_at=?,config_updated_by=? WHERE id=?')
+        .run(next,at,actorId,ACTIVITY.id);
+      this.db.prepare('INSERT INTO lottery_config_audit(campaign_id,actor_id,previous_json,next_json,created_at) VALUES (?,?,?,?,?)')
+        .run(ACTIVITY.id,actorId,previous,next,at);
+    }).immediate();
+    this.campaign = this.db.prepare('SELECT * FROM campaign WHERE id=?').get(ACTIVITY.id);
+    this.prizeConfig = normalized;
+    return this.lotteryConfig();
   }
   compensationProfiles() {
     return this.db.prepare('SELECT * FROM compensation_profiles ORDER BY CASE status WHEN \'enabled\' THEN 0 ELSE 1 END,name').all().map(row => ({

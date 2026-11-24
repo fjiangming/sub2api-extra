@@ -82,6 +82,8 @@ async function run() {
       const admin = await adminContext.newPage(); admin.on('pageerror',error => errors.push(error.message));
       await admin.goto(`${preview.base}/?token=preview-admin`);
       await admin.locator('#open-ledger').click(); await admin.locator('#ledger-rows button').first().waitFor();
+      await admin.locator('#lottery-config-form').waitFor();
+      assert.equal(await admin.locator('#lottery-config-rows tr').count(),8);
       if (name === 'desktop') {
         await admin.locator('#admin-compensation-tab').click();
         await admin.locator('#compensation-grant-form').waitFor();

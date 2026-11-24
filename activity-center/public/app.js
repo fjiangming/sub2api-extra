@@ -16,6 +16,42 @@ const statusHtml = status => `<span class="${['paid','pending','failed'].include
 const sourceText = source => source === 'compensation' ? '补偿机会' : '充值机会';
 const auditText = status => ({ violation: '未达门槛', unverifiable: '待核查', passed: '已达门槛', not_required: '无需门槛' })[status] || '待核查';
 const auditHtml = audit => `<span class="${audit?.status === 'violation' ? 'failed' : audit?.status === 'passed' || audit?.status === 'not_required' ? 'muted' : 'pending'}">${auditText(audit?.status)}</span>`;
+const prizeLabels = new Map([[50,'¥0.5'],[100,'¥1'],[200,'¥2'],[300,'¥3'],[500,'¥5'],[1000,'¥10'],[2000,'¥20'],[5000,'¥50']]);
+function decimalToMinor(value) {
+  const text = String(value ?? '').trim();
+  if (!/^\d+(?:\.\d{1,2})?$/.test(text)) return null;
+  const [whole,fraction = ''] = text.split('.');
+  const result = Number(whole) * 100 + Number((fraction + '00').slice(0,2));
+  return Number.isSafeInteger(result) ? result : null;
+}
+function updateLotteryConfigTotal() {
+  const values = [...document.querySelectorAll('[data-lottery-weight]')].map(input => decimalToMinor(input.value));
+  const total = values.every(Number.isSafeInteger) ? values.reduce((sum,value) => sum + value,0) : null;
+  const label = $('lottery-config-total');
+  label.textContent = total === null ? '总概率无效' : `总概率 ${(total / 100).toLocaleString('zh-CN',{ maximumFractionDigits: 2 })}%`;
+  label.className = total === 10000 ? 'total-good' : 'total-bad';
+}
+function renderLotteryConfig(config) {
+  $('lottery-config-version').textContent = `v${config.version} · 更新于 ${time(config.updatedAt)} · 管理员 #${escapeHtml(config.updatedBy)}`;
+  $('lottery-config-rows').innerHTML = config.prizes.map(prize => `<tr><td><strong>${prizeLabels.get(prize.amountMinor)}</strong></td><td><div class="percent-input"><input data-lottery-weight="${prize.amountMinor}" type="number" min="0" max="100" step="0.01" value="${prize.weight / 100}"><span>%</span></div></td><td><div class="money-input"><input data-lottery-threshold="${prize.amountMinor}" type="number" min="0" max="10000000000" step="0.01" value="${prize.minimumMinor / 100}"><span>元</span></div></td></tr>`).join('');
+  document.querySelectorAll('[data-lottery-weight],[data-lottery-threshold]').forEach(input => input.oninput = updateLotteryConfigTotal);
+  updateLotteryConfigTotal();
+}
+function readLotteryConfig() {
+  const amounts = [...prizeLabels.keys()];
+  const prizes = amounts.map(amountMinor => ({ amountMinor,
+    weight: decimalToMinor(document.querySelector(`[data-lottery-weight="${amountMinor}"]`)?.value),
+    minimumMinor: decimalToMinor(document.querySelector(`[data-lottery-threshold="${amountMinor}"]`)?.value) }));
+  if (prizes.some(prize => !Number.isSafeInteger(prize.weight) || !Number.isSafeInteger(prize.minimumMinor))) throw new Error('概率和门槛必须填写为最多两位小数的非负数');
+  if (prizes.reduce((sum,prize) => sum + prize.weight,0) !== 10000) throw new Error('基础概率总和必须为 100%');
+  if (prizes[0].minimumMinor !== 0 || prizes.some((prize,index) => index > 0 && prize.minimumMinor < prizes[index - 1].minimumMinor)) throw new Error('充值门槛必须从低到高设置，0.5 元奖项门槛必须为 0');
+  return { prizes };
+}
+async function refreshLotteryConfig() {
+  if (!$('lottery-config-form')) return;
+  const config = await api('admin/lottery-config');
+  renderLotteryConfig(config);
+}
 function storage(key, value) {
   try { if (value === undefined) return sessionStorage.getItem(key); if (value === null) sessionStorage.removeItem(key); else sessionStorage.setItem(key, value); }
   catch { /* Session cookies and in-memory recovery remain available. */ }
@@ -248,7 +284,7 @@ async function openAdminPanel(panel = 'ledger') {
     if ($('admin-ledger-tab')) $('admin-ledger-tab').onclick = () => openAdminPanel('ledger');
     if ($('admin-compensation-tab')) $('admin-compensation-tab').onclick = () => openAdminPanel('compensation');
     if (panel === 'ledger') {
-      $('refresh-ledger').onclick = refreshLedger;
+      $('refresh-ledger').onclick = async () => { await refreshLedger(); await refreshLotteryConfig(); };
       $('ledger-filters').onsubmit = event => { event.preventDefault(); state.ledgerPage = 1; refreshLedger(); };
       $('clear-filters').onclick = () => { $('ledger-filters').reset(); state.ledgerPage = 1; refreshLedger(); };
       for (const [id,audit] of [['view-audit-violations','violation'],['view-audit-unverifiable','unverifiable']]) {
@@ -256,7 +292,22 @@ async function openAdminPanel(panel = 'ledger') {
       }
       $('ledger-prev').onclick = () => { state.ledgerPage--; refreshLedger(); };
       $('ledger-next').onclick = () => { state.ledgerPage++; refreshLedger(); };
+      $('lottery-config-form').onsubmit = async event => {
+        event.preventDefault();
+        const feedback = $('lottery-config-feedback');
+        try {
+          const payload = readLotteryConfig();
+          feedback.className = 'feedback'; feedback.textContent = '';
+          const button = $('lottery-config-form button[type="submit"]'); button.disabled = true;
+          try {
+            await api('admin/lottery-config',{ method: 'POST',body: JSON.stringify(payload) });
+            feedback.textContent = '充值抽奖规则已保存，新抽奖将使用本次配置。';
+            await refreshLotteryConfig();
+          } finally { button.disabled = false; }
+        } catch (error) { feedback.className = 'feedback error'; feedback.textContent = error.message || '充值抽奖规则保存失败'; }
+      };
       await refreshLedger();
+      await refreshLotteryConfig();
     } else if (window.initCompensationAdmin) {
       window.initCompensationAdmin({ api, icons, escapeHtml, time });
     }

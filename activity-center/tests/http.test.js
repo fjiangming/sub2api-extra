@@ -77,7 +77,7 @@ test('only admins can inspect and filter threshold violations while customer res
   const f = await httpFixture(t); const user = await f.login('user'); const admin = await f.login('admin');
   const batch = f.store.reserve(USER,crypto.randomUUID(),1,5000);
   const id = batch.rewards[0].id;
-  f.store.db.prepare("UPDATE rewards SET amount_minor=1000,status='failed' WHERE id=?").run(id);
+  f.store.db.prepare("UPDATE rewards SET amount_minor=1000,required_recharge_minor=100000,status='failed' WHERE id=?").run(id);
   const before = f.store.db.prepare('SELECT * FROM rewards WHERE id=?').get(id);
   const summary = await (await f.call('admin/summary',admin)).json();
   assert.equal(summary.audit.violationCount,1); assert.equal(summary.audit.violationUsers,1);
@@ -125,6 +125,22 @@ test('admin recovery requires both CSRF and origin and cannot alter the original
   assert.equal(f.store.detail(id).status,'paid'); assert.equal(f.store.used(USER.id),1);
   assert.equal(f.store.detail(id).retries.length,1);
   assert.equal((await f.call('rewards?user_id=1',user)).status,400);
+});
+
+test('recharge lottery rules are admin-only, validate percentages and persist thresholds', async t => {
+  const f = await httpFixture(t); const user = await f.login('user'); const admin = await f.login('admin');
+  assert.equal((await f.call('admin/lottery-config',user)).status,403);
+  const initial = await (await f.call('admin/lottery-config',admin)).json();
+  assert.equal(initial.version,1); assert.equal(initial.prizes.find(row => row.amountMinor === 1000).minimumMinor,100000);
+  const prizes = initial.prizes.map(row => row.amountMinor === 1000 ? { ...row,weight: 700,minimumMinor: 120000 } : row.amountMinor === 50 ? { ...row,weight: 5000 } : row);
+  assert.equal((await f.call('admin/lottery-config',admin,{ prizes },{ 'x-csrf-token': '' })).status,403);
+  assert.equal((await f.call('admin/lottery-config',admin,{ prizes },{ origin:'https://evil.test' })).status,403);
+  const saved = await f.call('admin/lottery-config',admin,{ prizes });
+  assert.equal(saved.status,200); const config = await saved.json(); assert.equal(config.version,2);
+  assert.equal(config.prizes.find(row => row.amountMinor === 50).weight,5000);
+  assert.equal(config.prizes.find(row => row.amountMinor === 1000).minimumMinor,120000);
+  assert.equal((await f.call('admin/lottery-config',admin,{ prizes: prizes.map(row => row.amountMinor === 50 ? { ...row,weight: 4999 } : row) })).status,400);
+  assert.doesNotMatch(JSON.stringify(await (await f.call('activities/recharge-lottery',user)).json()),/weight|minimum|120000/);
 });
 
 test('compensation management is admin-only, keeps independent profiles and supports multi-user grants', async t => {

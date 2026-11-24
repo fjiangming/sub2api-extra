@@ -11,6 +11,14 @@
       <button id="view-audit-unverifiable" class="button" hidden><i data-lucide="file-search"></i>查看待核查</button>
     </div>
   </section>
+  <section id="lottery-config" class="lottery-config" aria-labelledby="lottery-config-heading">
+    <div class="section-heading"><div><h2 id="lottery-config-heading">充值抽奖规则</h2><p class="field-help">管理员可调整基础概率和累计有效充值门槛；新抽奖使用保存后的规则，历史奖励保留原门槛快照。</p></div><span id="lottery-config-version" class="row-sub"></span></div>
+    <form id="lottery-config-form">
+      <div class="ledger-scroll"><table class="table lottery-config-table"><thead><tr><th>奖品</th><th>基础概率</th><th>累计有效充值门槛</th></tr></thead><tbody id="lottery-config-rows"></tbody></table></div>
+      <div class="probability-footer"><span id="lottery-config-total" class="total-good">总概率 100%</span><span class="field-help">概率总和必须为 100%；门槛按人民币元填写，0 表示无门槛。</span><button class="button primary" type="submit"><i data-lucide="save"></i>保存充值抽奖规则</button></div>
+      <div id="lottery-config-feedback" class="feedback" role="status" aria-live="polite"></div>
+    </form>
+  </section>
   <section class="ledger-section"><h2>奖励明细</h2>
     <form id="ledger-filters" class="filters">
       <label class="field search">用户 / 邮箱 / 流水号<input name="query" maxlength="320" type="search" placeholder="搜索奖励记录"></label>

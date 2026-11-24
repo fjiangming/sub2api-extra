@@ -14,6 +14,7 @@ const ledgerQuery = paging.extend({ query: z.string().trim().max(320).default(''
 const drawInput = z.object({ requestId: z.string().uuid().transform(v => v.toLowerCase()), count: z.union([z.literal(1),z.literal(10),z.literal(20),z.literal(50)]) }).strict();
 const profileInput = z.object({ name: z.string().trim().min(1).max(80), status: z.enum(['enabled','disabled']).default('enabled'),
   weights: z.array(z.object({ amountMinor: z.number().int().min(1).max(10000), weight: z.number().int().min(0).max(10000) }).strict()).length(8) }).strict();
+const lotteryConfigInput = z.object({ prizes: z.array(z.object({ amountMinor: z.number().int().min(1).max(10000), weight: z.number().int().min(0).max(10000), minimumMinor: z.number().int().min(0).max(1000000000000) }).strict()).length(8) }).strict();
 const grantInput = z.object({ audience: z.enum(['all','selected']), userIds: z.array(z.string().trim().regex(/^[1-9]\d{0,14}$/)).max(100).default([]),
   chanceCount: z.number().int().min(1).max(100000), profileId: z.string().trim().min(1).max(100), startsAt: z.string().min(1).max(64), expiresAt: z.string().max(64).nullable().optional(), reason: z.string().trim().min(1).max(200) }).strict();
 function parse(schema, value) {
@@ -62,6 +63,11 @@ function createApp({ config, auth, store, lottery }) {
   admin.get('/summary', (_req, res) => res.json({ ...store.ledgerSummary(), audit: store.auditSummary() }));
   admin.get('/rewards', (req, res) => res.json(store.list(parse(ledgerQuery, req.query))));
   admin.get('/rewards/:id', (req, res) => res.json(store.detail(parse(z.string().uuid(), req.params.id))));
+  admin.get('/lottery-config', (_req, res) => res.json(store.lotteryConfig()));
+  admin.post('/lottery-config', limit(30), auth.mutation(), (req, res) => {
+    const input = parse(lotteryConfigInput, req.body);
+    res.json(store.updateLotteryConfig(input, req.auth.user.id));
+  });
   admin.post('/rewards/:id/retry', limit(10), auth.mutation(), (req, res) => {
     const result = store.retry(parse(z.string().uuid(), req.params.id), req.auth.user.id);
     lottery.kick();

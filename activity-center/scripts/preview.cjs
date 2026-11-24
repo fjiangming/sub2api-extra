@@ -47,7 +47,8 @@ async function startPreview({ port = 19927, seed = true, auditSeed = false } = {
       // Deliberately inconsistent local fixtures exercise the administrator audit.
       for (const [amount,recharge] of [[1000,5000],[2000,100000],[5000,200000],[1000,-1]]) {
         const sample = runtime.store.reserve(user,crypto.randomUUID(),1,600000);
-        runtime.store.db.prepare('UPDATE rewards SET amount_minor=? WHERE id=?').run(amount,sample.rewards[0].id);
+        const required = runtime.store.prizeConfig.find(prize => prize.amount === amount)?.minimum ?? 0;
+        runtime.store.db.prepare('UPDATE rewards SET amount_minor=?,required_recharge_minor=? WHERE id=?').run(amount,required,sample.rewards[0].id);
         runtime.store.db.prepare('UPDATE batches SET recharge_minor=? WHERE id=?').run(recharge,sample.id);
       }
       await runtime.lottery.kick();

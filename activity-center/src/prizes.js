@@ -25,11 +25,11 @@ function sampleWeights(weights, rng = randomInt) {
   throw new Error('Invalid prize distribution');
 }
 
-function sample(rechargeMinor, rng = randomInt) {
+function sample(rechargeMinor, rng = randomInt, prizes = PRIZES) {
   const roll = rng(10000);
   if (!Number.isInteger(roll) || roll < 0 || roll >= 10000) throw new Error('Invalid random sample');
-  const missing = PRIZES.filter(p => p.minimum > rechargeMinor).reduce((sum, p) => sum + p.weight, 0);
-  const weights = PRIZES.map((prize, index) => ({ amount: prize.amount, weight: index === 0 ? prize.weight + missing : prize.minimum <= rechargeMinor ? prize.weight : 0 }));
+  const missing = prizes.filter(p => p.minimum > rechargeMinor).reduce((sum, p) => sum + p.weight, 0);
+  const weights = prizes.map((prize, index) => ({ amount: prize.amount, weight: index === 0 ? prize.weight + missing : prize.minimum <= rechargeMinor ? prize.weight : 0 }));
   let cumulative = 0;
   for (const prize of weights) {
     cumulative += prize.weight;

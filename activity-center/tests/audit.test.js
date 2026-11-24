@@ -12,7 +12,8 @@ const { fixture, config, USER } = require('./fixtures');
 function seed(store, { amount = 1000, recharge = 5000, status = 'paid', user = USER } = {}) {
   const batch = store.reserve(user,crypto.randomUUID(),1,500000);
   const id = batch.rewards[0].id;
-  store.db.prepare('UPDATE rewards SET amount_minor=?,status=? WHERE id=?').run(amount,status,id);
+  const required = store.prizeConfig.find(prize => prize.amount === amount)?.minimum ?? 0;
+  store.db.prepare('UPDATE rewards SET amount_minor=?,required_recharge_minor=?,status=? WHERE id=?').run(amount,required,status,id);
   store.db.prepare('UPDATE batches SET recharge_minor=? WHERE id=?').run(recharge,batch.id);
   return { id,batchId: batch.id };
 }
