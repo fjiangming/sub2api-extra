@@ -82,6 +82,19 @@ async function run() {
       const admin = await adminContext.newPage(); admin.on('pageerror',error => errors.push(error.message));
       await admin.goto(`${preview.base}/?token=preview-admin`);
       await admin.locator('#open-ledger').click(); await admin.locator('#ledger-rows button').first().waitFor();
+      if (name === 'desktop') {
+        await admin.locator('#admin-compensation-tab').click();
+        await admin.locator('#compensation-grant-form').waitFor();
+        await admin.locator('input[name="comp-audience"][value="selected"]').check();
+        await admin.locator('#comp-user-ids').fill('99\n99');
+        await admin.locator('#comp-chance-count').fill('2');
+        await admin.locator('#comp-reason').fill('浏览器补偿回归');
+        await admin.locator('#compensation-grant-form button[type="submit"]').click();
+        await admin.waitForFunction(() => document.querySelector('#comp-grant-feedback')?.textContent.includes('1 个指定用户'));
+        await admin.waitForFunction(() => document.querySelector('#comp-grant-rows')?.textContent.includes('1 个指定用户'));
+        assert.match(await admin.locator('#compensation-unsettled').innerText(),/已覆盖用户/);
+        await admin.locator('#admin-ledger-tab').click(); await admin.locator('#ledger-rows button').first().waitFor();
+      }
       assert.equal(await admin.locator('#ledger-total').innerText(),`¥${(preview.store.ledgerSummary().totalMinor/100).toLocaleString('zh-CN',{ minimumFractionDigits: 2,maximumFractionDigits: 2 })}`);
       assert(await admin.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
       await admin.screenshot({ path: path.join(output,`${name}-ledger.png`),fullPage: true });
@@ -180,7 +193,7 @@ async function run() {
       await cleanContext.close();
     } finally { await cleanPreview.close(); }
     assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({ passed: results,checks: 'wheel pixels/landing, hidden parameters, single tab, single/batch/recovery, session reload, roles, ledger filters/details/retry, legacy credit review/recovery, audit alerts/filters/details/unverifiable/healthy/read failures, fractional cash, reduced motion, layouts',screenshots: output },null,2));
+    console.log(JSON.stringify({ passed: results,checks: 'wheel pixels/landing, hidden parameters, single tab, single/batch/recovery, session reload, roles, compensation grant/profile UI, ledger filters/details/retry, legacy credit review/recovery, audit alerts/filters/details/unverifiable/healthy/read failures, fractional cash, reduced motion, layouts',screenshots: output },null,2));
   } finally { await browser.close(); await preview.close(); }
 }
 

@@ -120,7 +120,7 @@ test('legacy reward migration preserves balance receipts, lost-response retries 
   const oldRows = store.db.prepare('SELECT * FROM rewards ORDER BY id').all();
   store.close();
   store = new Store(cfg,{ filename,now: f.now,rng: () => { throw new Error('old outcomes must not be resampled'); } });
-  assert.equal(store.db.pragma('user_version',{ simple: true }),3);
+  assert.equal(store.db.pragma('user_version',{ simple: true }),4);
   assert.equal(store.campaign.start_at,originalStart);
   assert.equal(store.used(USER.id),3);
   assert.deepEqual(store.db.prepare('SELECT * FROM rewards ORDER BY id').all(),oldRows.map(row => ({ ...row,credit_type: 'balance',credit_notes: legacyNotes(row),credit_migration: null })));

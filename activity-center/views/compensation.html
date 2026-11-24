@@ -1,0 +1,43 @@
+<div class="admin-title compensation-title"><button id="back-activity" class="icon-button" title="返回活动中心" aria-label="返回活动中心"><i data-lucide="arrow-left"></i></button><div class="admin-nav" role="tablist" aria-label="管理员功能"><button id="admin-ledger-tab" class="admin-nav-button" role="tab">奖励账本</button><button id="admin-compensation-tab" class="admin-nav-button active" role="tab" aria-selected="true">补偿机会</button></div><button id="refresh-compensation" class="icon-button" title="刷新补偿管理" aria-label="刷新补偿管理"><i data-lucide="refresh-cw"></i></button></div>
+<div class="content compensation-content">
+  <div id="compensation-error" class="error" role="alert" hidden></div>
+  <div class="ledger-stats compensation-stats"><div><span class="mini-label">发放批次</span><strong id="comp-grant-count">0</strong></div><div><span class="mini-label">启用批次</span><strong id="comp-active-count">0</strong></div><div><span class="mini-label">已使用次数</span><strong id="comp-used-count">0</strong></div><div><span class="mini-label">补偿奖励</span><strong id="comp-paid-total">¥0.00</strong></div></div>
+  <div id="compensation-unsettled" class="unsettled"></div>
+
+  <section class="compensation-section" aria-labelledby="grant-heading">
+    <div class="section-heading"><div><p class="eyebrow">发放管理</p><h2 id="grant-heading">发放额外抽奖机会</h2></div><span class="status-pill"><i data-lucide="shield-check"></i>仅管理员</span></div>
+    <form id="compensation-grant-form" class="compensation-form">
+      <fieldset><legend>发放对象</legend><div class="choice-grid"><label class="choice-card selected"><input type="radio" name="comp-audience" value="all" checked><span><strong>所有用户</strong><small>在有效期内可使用</small></span></label><label class="choice-card"><input type="radio" name="comp-audience" value="selected"><span><strong>指定用户</strong><small>填写用户 ID，可批量粘贴</small></span></label></div></fieldset>
+      <label id="comp-user-field" class="field" hidden><span>指定用户 ID</span><textarea id="comp-user-ids" rows="3" maxlength="1800" placeholder="每行一个，也可用逗号分隔，例如：386&#10;412&#10;509"></textarea><small class="field-help">最多 100 个用户，重复 ID 会自动合并。</small></label>
+      <div class="field-row"><label class="field"><span>额外抽奖次数</span><span class="input-suffix"><input id="comp-chance-count" type="number" min="1" max="100000" value="2"><small>每位用户</small></span></label><label class="field"><span>概率方案</span><select id="comp-profile-select"></select></label></div>
+      <div class="field-row"><label class="field"><span>生效时间</span><input id="comp-starts-at" type="datetime-local"></label><label class="field"><span>结束时间（可选）</span><input id="comp-expires-at" type="datetime-local"></label></div>
+      <label class="field"><span>补偿原因</span><textarea id="comp-reason" rows="3" maxlength="200" placeholder="例如：服务波动补偿"></textarea></label>
+      <div class="credit-contract"><i data-lucide="info"></i><span>入账方式固定为普通余额，系统自动添加“活动奖励补贴”备注；不会计入充值、抽奖次数或运营收入。</span></div>
+      <div class="form-actions"><button class="button primary" type="submit"><i data-lucide="send"></i>发放预览</button><button id="comp-reset-grant" class="button" type="reset">重置</button></div>
+      <div id="comp-grant-feedback" class="feedback" role="status" aria-live="polite"></div>
+    </form>
+  </section>
+
+  <section class="compensation-section" aria-labelledby="profile-heading">
+    <div class="section-heading"><div><p class="eyebrow">独立规则</p><h2 id="profile-heading">补偿抽奖概率方案</h2></div><button id="new-comp-profile" class="button" type="button"><i data-lucide="plus"></i>新建方案</button></div>
+    <form id="comp-profile-form" class="profile-form">
+      <input id="comp-profile-id" type="hidden">
+      <div class="profile-toolbar"><label class="field"><span>方案名称</span><input id="comp-profile-name" maxlength="80" placeholder="例如：服务波动补偿 v1"></label><label class="field"><span>状态</span><select id="comp-profile-status"><option value="enabled">启用</option><option value="disabled">停用</option></select></label></div>
+      <div class="ledger-scroll"><table class="table compensation-probability-table"><thead><tr><th>奖品</th><th>概率</th><th>充值门槛</th><th>用途</th></tr></thead><tbody id="comp-profile-rows"></tbody></table></div>
+      <div class="probability-footer"><span id="comp-profile-total" class="total-good">总概率 100%</span><span class="muted">补偿机会不读取充值门槛；奖品概率只对补偿机会生效。</span><button class="button primary" type="submit"><i data-lucide="save"></i>保存概率方案</button></div>
+      <div id="comp-profile-feedback" class="feedback" role="status" aria-live="polite"></div>
+    </form>
+    <div class="ledger-scroll compensation-profile-list"><table class="table"><thead><tr><th>方案</th><th>状态</th><th>版本</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="comp-profile-list"></tbody></table></div>
+  </section>
+
+  <section class="compensation-section" aria-labelledby="grant-record-heading">
+    <div class="section-heading"><div><p class="eyebrow">可追溯</p><h2 id="grant-record-heading">补偿发放记录</h2></div></div>
+    <div class="ledger-scroll"><table class="table compensation-grant-table"><thead><tr><th>发放对象</th><th>次数</th><th>概率方案</th><th>有效期</th><th>使用</th><th>原因</th><th>状态</th><th>操作</th></tr></thead><tbody id="comp-grant-rows"></tbody></table></div>
+    <div class="pagination"><span id="comp-grant-page"></span><button id="comp-grant-prev" class="icon-button" title="上一页" aria-label="上一页"><i data-lucide="chevron-left"></i></button><button id="comp-grant-next" class="icon-button" title="下一页" aria-label="下一页"><i data-lucide="chevron-right"></i></button></div>
+  </section>
+
+  <section class="compensation-section" aria-labelledby="comp-audit-heading">
+    <div class="section-heading"><div><p class="eyebrow">操作审计</p><h2 id="comp-audit-heading">补偿配置操作记录</h2></div></div>
+    <div class="ledger-scroll"><table class="table compensation-audit-table"><thead><tr><th>时间</th><th>管理员</th><th>操作</th><th>对象</th><th>详情</th></tr></thead><tbody id="comp-audit-rows"></tbody></table></div>
+  </section>
+</div>

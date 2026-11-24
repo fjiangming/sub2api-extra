@@ -6,14 +6,23 @@ const { legacyCredit } = require('./reward-credit');
 class Lottery {
   constructor(store, source, core) { Object.assign(this, { store, source, core, running: null, stopped: false }); }
   async summary(userId) {
-    const total = await this.source.total(userId, this.store.campaign.start_at);
+    const compensation = this.store.compensationAvailable(userId);
+    let total;
+    try { total = await this.source.total(userId, this.store.campaign.start_at); }
+    catch (error) {
+      if (!compensation) throw error;
+      // Keep already-issued compensation chances usable when the recharge source is temporarily unavailable.
+      total = 0;
+    }
     return this.store.summary(userId, total);
   }
   async draw(user, requestId, count) {
     const existing = this.store.existing(user.id, requestId, count);
     if (existing) { this.kick(); return existing; }
     if (this.stopped) throw new AppError('SERVICE_STOPPING', '服务正在维护，请稍后重试', 503);
-    const total = await this.source.total(user.id, this.store.campaign.start_at);
+    // A fully covered compensation draw does not need to read recharge history.
+    // Mixed draws still use the recharge snapshot for the remaining chances.
+    const total = this.store.compensationAvailable(user.id) >= count ? 0 : await this.source.total(user.id, this.store.campaign.start_at);
     if (this.stopped) throw new AppError('SERVICE_STOPPING', '服务正在维护，请稍后重试', 503);
     const result = this.store.reserve(user, requestId, count, total);
     this.kick();

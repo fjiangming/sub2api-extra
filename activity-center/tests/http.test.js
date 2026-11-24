@@ -127,6 +127,23 @@ test('admin recovery requires both CSRF and origin and cannot alter the original
   assert.equal((await f.call('rewards?user_id=1',user)).status,400);
 });
 
+test('compensation management is admin-only, keeps independent profiles and supports multi-user grants', async t => {
+  const f = await httpFixture(t); const user = await f.login('user'); const admin = await f.login('admin');
+  for (const endpoint of ['admin/compensation/view','admin/compensation/summary','admin/compensation/profiles','admin/compensation/grants']) assert.equal((await f.call(endpoint,user)).status,403);
+  const initial = await (await f.call('admin/compensation/profiles',admin)).json(); assert.equal(initial.profiles.length,1);
+  const weights = [50,100,200,300,500,1000,2000,5000].map((amountMinor,index) => ({ amountMinor,weight: index === 0 ? 6000 : index === 1 ? 2000 : index === 2 ? 1000 : index === 3 ? 500 : index === 4 ? 300 : index === 5 ? 100 : index === 6 ? 70 : 30 }));
+  const profileResponse = await f.call('admin/compensation/profiles',admin,{ name:'HTTP 补偿方案',status:'enabled',weights });
+  assert.equal(profileResponse.status,201); const created = await profileResponse.json(); assert.equal(created.name,'HTTP 补偿方案');
+  assert.equal((await f.call('admin/compensation/profiles',admin,{}, { 'x-csrf-token': '' })).status,403);
+  const grantResponse = await f.call('admin/compensation/grants',admin,{ audience:'selected',userIds:['42','99','42'],chanceCount:3,profileId:created.id,startsAt:new Date(f.now()).toISOString(),expiresAt:null,reason:'接口补偿测试' });
+  assert.equal(grantResponse.status,201); const grant = await grantResponse.json(); assert.equal(grant.selectedUsers,2); assert.equal(grant.chanceCount,3);
+  const rows = await (await f.call('admin/compensation/grants?page=1',admin)).json(); assert.equal(rows.total,1); assert.equal(rows.rows[0].usedCount,0);
+  assert.equal((await f.call(`admin/compensation/grants/${grant.id}/disable`,admin,{}, { origin:'https://evil.test' })).status,403);
+  const disabled = await (await f.call(`admin/compensation/grants/${grant.id}/disable`,admin,{})).json(); assert.equal(disabled.status,'disabled');
+  const audit = await (await f.call('admin/compensation/audit',admin)).json(); assert.ok(audit.rows.some(row => row.action === 'grant_created')); assert.ok(audit.rows.some(row => row.action === 'grant_disabled'));
+  assert.match(await (await f.call('admin/compensation/view',admin)).text(),/compensation-grant-form/);
+});
+
 test('logout and expiry cannot be undone by late upstream identity verification', async t => {
   const f = await httpFixture(t); const user = await f.login('user');
   const session = f.auth.sessions.get(user.sessionToken);

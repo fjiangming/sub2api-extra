@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>补偿抽奖机会 Demo</title>
+  <link rel="stylesheet" href="./compensation-lottery.css">
+  <script src="../vendor/lucide.js" defer></script>
+  <script src="./compensation-lottery.js" defer></script>
+</head>
+<body>
+  <div class="demo-shell">
+    <header class="demo-header">
+      <div>
+        <p class="eyebrow">活动中心 · 后台演示</p>
+        <h1>补偿抽奖机会</h1>
+        <p class="lead">给指定用户或全量用户发放额外次数，并使用独立的抽奖规则。</p>
+      </div>
+      <div class="header-actions">
+        <span class="demo-badge">演示模式</span>
+        <a class="icon-button" href="../index.html" title="返回活动中心" aria-label="返回活动中心"><i data-lucide="arrow-left"></i></a>
+      </div>
+    </header>
+
+    <div class="demo-note" role="status">
+      <i data-lucide="flask-conical"></i>
+      <span>这里只演示后台配置形态和用户展示效果，提交、保存和发放均不会写入真实数据。</span>
+    </div>
+
+    <nav class="mode-switch" role="tablist" aria-label="演示视图">
+      <button class="mode-button active" role="tab" aria-selected="true" aria-controls="admin-mode" data-mode="admin"><i data-lucide="settings-2"></i>管理员配置</button>
+      <button class="mode-button" role="tab" aria-selected="false" aria-controls="user-mode" data-mode="user"><i data-lucide="user-round"></i>用户抽奖预览</button>
+    </nav>
+
+    <main id="admin-mode" class="mode-panel" role="tabpanel">
+      <section class="summary-grid" aria-label="补偿抽奖概览">
+        <div><span class="summary-label">已发放额外次数</span><strong id="summary-issued">1,280</strong><span class="summary-unit">次</span></div>
+        <div><span class="summary-label">仍可使用</span><strong id="summary-available">864</strong><span class="summary-unit">次</span></div>
+        <div><span class="summary-label">覆盖用户</span><strong>386</strong><span class="summary-unit">人</span></div>
+        <div><span class="summary-label">当前概率方案</span><strong class="summary-text">补偿抽奖·标准 v1</strong><span class="summary-unit">启用中</span></div>
+      </section>
+
+      <div class="admin-grid">
+        <section class="panel grant-panel" aria-labelledby="grant-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">发放管理</p><h2 id="grant-title">发放额外抽奖机会</h2></div>
+            <span class="status-pill"><i data-lucide="circle-check"></i>配置可用</span>
+          </div>
+          <form id="grant-form">
+            <fieldset>
+              <legend>发放对象</legend>
+              <div class="choice-grid">
+                <label class="choice-card selected"><input type="radio" name="audience" value="all" checked><span><strong>所有用户</strong><small>按每位用户发放</small></span></label>
+                <label class="choice-card"><input type="radio" name="audience" value="selected"><span><strong>指定用户</strong><small>按用户 ID 或邮箱</small></span></label>
+              </div>
+            </fieldset>
+
+            <div id="selected-users" class="field hidden-field">
+              <label for="user-search">指定用户</label>
+              <div class="input-with-action"><input id="user-search" type="text" maxlength="320" placeholder="输入用户 ID 或邮箱后按 Enter"><button id="add-user" class="icon-button" type="button" title="添加用户" aria-label="添加用户"><i data-lucide="plus"></i></button></div>
+              <div id="user-chips" class="user-chips" aria-live="polite"></div>
+            </div>
+
+            <div class="field-row">
+              <label class="field"><span>额外抽奖次数</span><span class="input-suffix"><input id="grant-count" type="number" min="1" max="100000" value="2"><small>每位用户</small></span></label>
+              <label class="field"><span>有效期</span><select id="grant-expiry"><option value="forever">永久有效</option><option value="30">30 天</option><option value="7">7 天</option><option value="custom">自定义结束时间</option></select></label>
+            </div>
+
+            <div class="field-row">
+              <label class="field"><span>独立概率方案</span><select id="grant-profile"><option>补偿抽奖·标准 v1</option><option>补偿抽奖·春节 v2</option></select></label>
+              <label class="field"><span>奖励入账方式</span><select><option>活动补偿（普通余额 + 补贴备注）</option></select></label>
+            </div>
+
+            <label class="field"><span>补偿原因</span><textarea id="grant-reason" rows="3" maxlength="200" placeholder="例如：服务波动补偿"></textarea></label>
+            <div class="form-actions"><button class="button primary" type="submit"><i data-lucide="send"></i>生成发放预览</button><button id="reset-grant" class="button" type="reset">重置</button></div>
+            <div id="grant-feedback" class="feedback" role="status" aria-live="polite"></div>
+          </form>
+        </section>
+
+        <aside class="panel rule-summary" aria-labelledby="summary-title">
+          <div class="section-heading"><div><p class="eyebrow">本次发放</p><h2 id="summary-title">规则摘要</h2></div><i class="section-icon" data-lucide="clipboard-check"></i></div>
+          <dl class="summary-list">
+            <div><dt>机会来源</dt><dd>后台补偿发放</dd></div>
+            <div><dt>与充值次数</dt><dd>分开统计</dd></div>
+            <div><dt>概率方案</dt><dd>独立维护</dd></div>
+            <div><dt>奖励入账</dt><dd>即时到账</dd></div>
+            <div><dt>充值统计</dt><dd>不计入充值</dd></div>
+          </dl>
+          <p class="muted small-copy">补偿次数只参与补偿抽奖，使用单独的概率配置；不会改变用户按充值金额获得的抽奖次数。</p>
+        </aside>
+      </div>
+
+      <section class="panel probability-panel" aria-labelledby="probability-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">独立规则</p><h2 id="probability-title">补偿抽奖概率方案</h2></div>
+          <span id="profile-status" class="status-pill"><i data-lucide="radio"></i>启用中</span>
+        </div>
+        <div class="profile-toolbar">
+          <label class="field"><span>方案名称</span><input id="profile-name" value="补偿抽奖·标准 v1" maxlength="80"></label>
+          <label class="field"><span>方案状态</span><select id="profile-enabled"><option value="enabled">启用</option><option value="disabled">停用</option></select></label>
+          <label class="field"><span>未命中处理</span><select><option>按 0.5 元奖品兜底</option><option>重新抽取</option></select></label>
+        </div>
+        <div class="table-scroll">
+          <table class="probability-table"><thead><tr><th>奖品</th><th>概率</th><th>充值门槛</th><th>说明</th></tr></thead><tbody>
+            <tr><td><strong>¥0.5</strong></td><td><div class="percent-input"><input class="probability-input" type="number" min="0" max="100" step="0.1" value="60"><span>%</span></div></td><td>不适用</td><td>基础奖项</td></tr>
+            <tr><td><strong>¥1</strong></td><td><div class="percent-input"><input class="probability-input" type="number" min="0" max="100" step="0.1" value="20"><span>%</span></div></td><td>不适用</td><td>常规奖项</td></tr>
+            <tr><td><strong>¥2</strong></td><td><div class="percent-input"><input class="probability-input" type="number" min="0" max="100" step="0.1" value="10"><span>%</span></div></td><td>不适用</td><td>常规奖项</td></tr>
+            <tr><td><strong>¥3</strong></td><td><div class="percent-input"><input class="probability-input" type="number" min="0" max="100" step="0.1" value="5"><span>%</span></div></td><td>不适用</td><td>常规奖项</td></tr>
+            <tr><td><strong>¥5</strong></td><td><div class="percent-input"><input class="probability-input" type="number" min="0" max="100" step="0.1" value="3"><span>%</span></div></td><td>不适用</td><td>进阶奖项</td></tr>
+            <tr><td><strong>¥10</strong></td><td><div class="percent-input"><input class="probability-input" type="number" min="0" max="100" step="0.1" value="1"><span>%</span></div></td><td>不适用</td><td>高额奖项</td></tr>
+            <tr><td><strong>¥20</strong></td><td><div class="percent-input"><input class="probability-input" type="number" min="0" max="100" step="0.1" value="0.7"><span>%</span></div></td><td>不适用</td><td>高额奖项</td></tr>
+            <tr><td><strong>¥50</strong></td><td><div class="percent-input"><input class="probability-input" type="number" min="0" max="100" step="0.1" value="0.3"><span>%</span></div></td><td>不适用</td><td>稀有奖项</td></tr>
+          </tbody></table>
+        </div>
+        <div class="probability-footer"><span id="probability-total" class="total-good">总概率 100%</span><span class="muted">门槛在补偿抽奖中不生效，概率仅对补偿次数使用。</span><button id="save-profile" class="button" type="button"><i data-lucide="save"></i>保存方案预览</button></div>
+        <div id="profile-feedback" class="feedback" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="panel records-panel" aria-labelledby="records-title">
+        <div class="section-heading"><div><p class="eyebrow">可追溯</p><h2 id="records-title">补偿发放记录</h2></div><button id="refresh-records" class="icon-button" type="button" title="刷新记录" aria-label="刷新记录"><i data-lucide="refresh-cw"></i></button></div>
+        <div class="table-scroll"><table class="records-table"><thead><tr><th>发放对象</th><th>次数</th><th>概率方案</th><th>原因</th><th>状态</th><th>操作时间</th></tr></thead><tbody id="record-rows">
+          <tr><td>所有用户</td><td>2 次 / 人</td><td>补偿抽奖·标准 v1</td><td>服务波动补偿</td><td><span class="status-text active-text">已生效</span></td><td>刚刚</td></tr>
+          <tr><td>#386、#412、#509</td><td>5 次 / 人</td><td>补偿抽奖·春节 v2</td><td>活动补发</td><td><span class="status-text active-text">已生效</span></td><td>2026-11-23 16:20</td></tr>
+          <tr><td>所有用户</td><td>1 次 / 人</td><td>补偿抽奖·标准 v1</td><td>系统维护补偿</td><td><span class="status-text muted-text">已结束</span></td><td>2026-11-18 09:00</td></tr>
+        </tbody></table></div>
+      </section>
+    </main>
+
+    <main id="user-mode" class="mode-panel" role="tabpanel" hidden>
+      <div class="user-preview-bar"><div><p class="eyebrow">用户视图</p><h2>活动中心</h2></div><span class="demo-user">示例用户 · #386</span></div>
+      <nav class="activity-tab-preview" aria-label="活动"><span class="active"><i data-lucide="gift"></i>充值抽奖</span></nav>
+      <section class="user-content">
+        <div class="user-lottery-grid">
+          <div class="wheel-preview" aria-label="抽奖转盘预览">
+            <div class="wheel-disc"><span class="wheel-label label-a">¥0.5</span><span class="wheel-label label-b">¥1</span><span class="wheel-label label-c">¥2</span><span class="wheel-label label-d">¥3</span><span class="wheel-label label-e">¥5</span><span class="wheel-label label-f">¥10</span><span class="wheel-label label-g">¥20</span><span class="wheel-label label-h">¥50</span><span class="wheel-center"><i data-lucide="gift"></i>好运</span></div><span class="wheel-pointer"></span>
+          </div>
+          <div class="user-side">
+            <p class="muted">可用抽奖次数</p><div class="user-chance"><strong>5</strong><span>次</span></div>
+            <div class="user-stat-row"><div><span class="muted">累计获得</span><strong>¥12.50</strong></div><div><span class="muted">已抽次数</span><strong>7 次</strong></div></div>
+            <div class="user-actions"><button class="button primary" type="button"><i data-lucide="rotate-cw"></i>抽一次</button><button class="button" type="button">连抽 10 次</button></div>
+            <div class="user-outcome"><span class="muted">好运即将揭晓</span></div>
+          </div>
+        </div>
+        <div class="user-history"><div class="section-heading"><h2>我的奖励</h2><button class="icon-button" type="button" title="刷新奖励记录" aria-label="刷新奖励记录"><i data-lucide="refresh-cw"></i></button></div><table class="records-table"><thead><tr><th>时间</th><th>奖励</th><th>状态</th></tr></thead><tbody><tr><td>今天 14:06</td><td>¥1.00</td><td><span class="status-text active-text">已入账</span></td></tr><tr><td>昨天 19:32</td><td>¥0.50</td><td><span class="status-text active-text">已入账</span></td></tr></tbody></table></div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

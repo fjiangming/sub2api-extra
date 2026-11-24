@@ -2,7 +2,7 @@
 
 const $ = id => document.getElementById(id);
 const state = { session: '', csrf: '', user: null, config: null, summary: null, prizes: [], busy: false, rotation: 0,
-  page: 1, mySequence: 0, admin: false, ledgerPage: 1, ledgerSequence: 0, batch: null, pending: null, polling: false };
+  page: 1, mySequence: 0, admin: false, adminPanel: '', ledgerPage: 1, ledgerSequence: 0, batch: null, pending: null, polling: false };
 const query = new URLSearchParams(location.search);
 let upstreamToken = query.get('token') || query.get('access_token') || '';
 for (const key of ['token','access_token','user_id','src_host','src_url']) query.delete(key);
@@ -13,6 +13,7 @@ const icon = name => `<i data-lucide="${name}" aria-hidden="true"></i>`;
 const icons = () => window.lucide?.createIcons({ attrs: { 'aria-hidden': 'true' } });
 const statusText = status => ({ paid: '已入账', pending: '待入账', failed: '入账异常' })[status] || '待核验';
 const statusHtml = status => `<span class="${['paid','pending','failed'].includes(status) ? status : ''}">${statusText(status)}</span>`;
+const sourceText = source => source === 'compensation' ? '补偿机会' : '充值机会';
 const auditText = status => ({ violation: '未达门槛', unverifiable: '待核查', passed: '已达门槛', not_required: '无需门槛' })[status] || '待核查';
 const auditHtml = audit => `<span class="${audit?.status === 'violation' ? 'failed' : audit?.status === 'passed' || audit?.status === 'not_required' ? 'muted' : 'pending'}">${auditText(audit?.status)}</span>`;
 function storage(key, value) {
@@ -31,7 +32,7 @@ function controls() {
   $('recover-draw').disabled = state.busy;
 }
 function signedOut(message) {
-  state.user = null; state.csrf = ''; state.session = ''; state.pending = null; state.admin = false; state.summary = null;
+  state.user = null; state.csrf = ''; state.session = ''; state.pending = null; state.admin = false; state.adminPanel = ''; state.summary = null;
   state.mySequence++; state.ledgerSequence++;
   storage('activity-center.session', null);
   $('activity-view').hidden = true;
@@ -56,7 +57,7 @@ async function api(endpoint, options = {}) {
     error.status = response.status; error.code = result?.error?.code;
     if (response.status === 401) signedOut('登录已过期，请重新从主站打开活动中心');
     if (response.status === 403 && endpoint.startsWith('admin/')) {
-      state.admin = false; state.ledgerSequence++;
+      state.admin = false; state.adminPanel = ''; state.ledgerSequence++;
       $('admin-view').replaceChildren(); $('admin-view').hidden = true;
       $('activity-view').hidden = !state.user; $('admin-entry').replaceChildren();
       $('detail-dialog').close(); $('dialog-body').replaceChildren();
@@ -196,7 +197,7 @@ async function refreshLedger() {
     } else renderAudit(null);
     if (results[1].status === 'fulfilled') {
       const data = results[1].value;
-      $('ledger-rows').innerHTML = data.rows.length ? data.rows.map(row => `<tr><td>${escapeHtml(row.name)}<span class="row-sub">${escapeHtml(row.email)} · #${escapeHtml(row.userId)}</span></td><td>${money(row.amountMinor)}</td><td>${escapeHtml(row.activity)}</td><td>${escapeHtml(time(row.createdAt))}</td><td>${statusHtml(row.status)}</td><td>${auditHtml(row.audit)}</td><td><button class="icon-button" data-detail="${row.id}" title="查看详情" aria-label="查看奖励详情">${icon('file-text')}</button></td></tr>`).join('') : '<tr><td class="empty" colspan="7">没有符合条件的奖励记录</td></tr>';
+      $('ledger-rows').innerHTML = data.rows.length ? data.rows.map(row => `<tr><td>${escapeHtml(row.name)}<span class="row-sub">${escapeHtml(row.email)} · #${escapeHtml(row.userId)}</span></td><td>${money(row.amountMinor)}</td><td>${escapeHtml(sourceText(row.chanceSource))}</td><td>${escapeHtml(row.activity)}</td><td>${escapeHtml(time(row.createdAt))}</td><td>${statusHtml(row.status)}</td><td>${auditHtml(row.audit)}</td><td><button class="icon-button" data-detail="${row.id}" title="查看详情" aria-label="查看奖励详情">${icon('file-text')}</button></td></tr>`).join('') : '<tr><td class="empty" colspan="8">没有符合条件的奖励记录</td></tr>';
       pagination('ledger',data); icons();
       document.querySelectorAll('[data-detail]').forEach(button => { button.onclick = () => showReward(button.dataset.detail); });
     }
@@ -213,7 +214,8 @@ async function showReward(id) {
   try {
     const row = await api(`admin/rewards/${id}`);
     if (!state.admin) return;
-    const entries = [['奖励流水',row.id],['批次',row.batchId],['用户',`${row.name} · #${row.userId}`],['邮箱',row.email],['奖励',money(row.amountMinor)],['活动',row.activity],['抽奖时间',time(row.createdAt)],['入账时间',row.creditedAt ? time(row.creditedAt) : '待入账'],['状态',statusText(row.status)],['入账尝试',row.attempts],['主站回执编号',row.receipt?.id || '尚未核验'],['主站兑换回执',row.receipt?.code || '尚未核验']];
+    const entries = [['奖励流水',row.id],['批次',row.batchId],['用户',`${row.name} · #${row.userId}`],['邮箱',row.email],['奖励',money(row.amountMinor)],['抽奖来源',sourceText(row.chanceSource)],['活动',row.activity],['抽奖时间',time(row.createdAt)],['入账时间',row.creditedAt ? time(row.creditedAt) : '待入账'],['状态',statusText(row.status)],['入账尝试',row.attempts],['主站回执编号',row.receipt?.id || '尚未核验'],['主站兑换回执',row.receipt?.code || '尚未核验']];
+    if (row.chanceSource === 'compensation') entries.push(['补偿发放批次',row.grantId || '未知'],['概率方案',row.profileId || '已锁定快照']);
     entries.push(['门槛审计',auditText(row.audit?.status)]);
     if (row.audit?.requiredMinor > 0) {
       entries.push(['所需充值',money(row.audit.requiredMinor)],['抽奖时充值',row.audit.rechargeMinor === null ? '缺少有效快照' : money(row.audit.rechargeMinor)]);
@@ -233,26 +235,34 @@ async function showReward(id) {
     if (!$('detail-dialog').open) $('detail-dialog').showModal();
   } catch (error) { if (state.admin) errorBox('ledger-error',error.message); }
 }
-async function openAdmin() {
+async function openAdminPanel(panel = 'ledger') {
   try {
-    const response = await fetch('./api/admin/view',{ headers: { authorization: `Session ${state.session}` }, cache: 'no-store' });
-    if (!response.ok) { await api('admin/summary'); throw new Error('账本加载失败'); }
+    const endpoint = panel === 'compensation' ? 'admin/compensation/view' : 'admin/view';
+    const response = await fetch(`./api/${endpoint}`,{ headers: { authorization: `Session ${state.session}` }, cache: 'no-store' });
+    if (!response.ok) { await api(panel === 'compensation' ? 'admin/compensation/summary' : 'admin/summary'); throw new Error(panel === 'compensation' ? '补偿管理加载失败' : '账本加载失败'); }
     const html = await response.text();
     if (!state.user || state.user.role !== 'admin') return;
-    state.admin = true;
+    state.admin = true; state.adminPanel = panel; state.ledgerSequence++;
     $('admin-view').innerHTML = html; $('admin-view').hidden = false; $('activity-view').hidden = true; icons();
-    $('back-activity').onclick = () => { state.admin = false; state.ledgerSequence++; $('admin-view').hidden = true; $('admin-view').replaceChildren(); $('activity-view').hidden = false; refreshActivity(); };
-    $('refresh-ledger').onclick = refreshLedger;
-    $('ledger-filters').onsubmit = event => { event.preventDefault(); state.ledgerPage = 1; refreshLedger(); };
-    $('clear-filters').onclick = () => { $('ledger-filters').reset(); state.ledgerPage = 1; refreshLedger(); };
-    for (const [id,audit] of [['view-audit-violations','violation'],['view-audit-unverifiable','unverifiable']]) {
-      $(id).onclick = () => { $('ledger-filters').reset(); $('ledger-filters').elements.audit.value = audit; state.ledgerPage = 1; refreshLedger(); };
+    $('back-activity').onclick = () => { state.admin = false; state.adminPanel = ''; state.ledgerSequence++; $('admin-view').hidden = true; $('admin-view').replaceChildren(); $('activity-view').hidden = false; refreshActivity(); };
+    if ($('admin-ledger-tab')) $('admin-ledger-tab').onclick = () => openAdminPanel('ledger');
+    if ($('admin-compensation-tab')) $('admin-compensation-tab').onclick = () => openAdminPanel('compensation');
+    if (panel === 'ledger') {
+      $('refresh-ledger').onclick = refreshLedger;
+      $('ledger-filters').onsubmit = event => { event.preventDefault(); state.ledgerPage = 1; refreshLedger(); };
+      $('clear-filters').onclick = () => { $('ledger-filters').reset(); state.ledgerPage = 1; refreshLedger(); };
+      for (const [id,audit] of [['view-audit-violations','violation'],['view-audit-unverifiable','unverifiable']]) {
+        $(id).onclick = () => { $('ledger-filters').reset(); $('ledger-filters').elements.audit.value = audit; state.ledgerPage = 1; refreshLedger(); };
+      }
+      $('ledger-prev').onclick = () => { state.ledgerPage--; refreshLedger(); };
+      $('ledger-next').onclick = () => { state.ledgerPage++; refreshLedger(); };
+      await refreshLedger();
+    } else if (window.initCompensationAdmin) {
+      window.initCompensationAdmin({ api, icons, escapeHtml, time });
     }
-    $('ledger-prev').onclick = () => { state.ledgerPage--; refreshLedger(); };
-    $('ledger-next').onclick = () => { state.ledgerPage++; refreshLedger(); };
-    await refreshLedger();
-  } catch (error) { if (state.user) errorBox('activity-error',error.message || '账本暂不可用'); }
+  } catch (error) { if (state.user) errorBox('activity-error',error.message || '管理员页面暂不可用'); }
 }
+function openAdmin() { return openAdminPanel('ledger'); }
 async function initialize() {
   $('retry-page').disabled = true;
   try {
@@ -307,7 +317,7 @@ setInterval(async () => {
   if (!state.user || state.busy || state.polling || document.hidden) return;
   state.polling = true;
   try {
-    if (state.admin) await refreshLedger();
+    if (state.admin) { if (state.adminPanel === 'compensation') await window.refreshCompensationAdmin?.(); else await refreshLedger(); }
     else {
       await refreshActivity();
       if (state.batch?.rewards.some(r => r.status === 'pending')) showBatch(await api(`activities/recharge-lottery/batches/${state.batch.id}`));

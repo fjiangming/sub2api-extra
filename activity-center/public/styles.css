@@ -104,6 +104,46 @@ dialog::backdrop { background: #0006; }
 .dialog-action { margin-top: 20px; }
 .batch-results { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; margin: 12px 0; }
 .batch-results span { text-align: center; padding: 9px 3px; background: var(--soft); border-radius: 4px; font-size: 12px; }
+.compensation-title { gap: 14px; }
+.admin-nav { display: flex; align-items: center; gap: 3px; flex: 1; }
+.admin-nav-button { min-height: 34px; padding: 6px 11px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer; }
+.admin-nav-button.active { border-color: var(--line); background: var(--soft); color: var(--accent); font-weight: 600; }
+.compensation-stats { margin-bottom: 4px; }
+.compensation-section { padding: 26px 0; border-bottom: 1px solid var(--line); }
+.compensation-section:last-child { border-bottom: 0; }
+.compensation-form { max-width: 880px; }
+.compensation-form fieldset { margin: 0 0 18px; padding: 0; border: 0; }
+.compensation-form legend { margin-bottom: 8px; color: var(--muted); font-size: 12px; }
+.choice-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 9px; }
+.choice-card { display: flex; align-items: center; gap: 10px; min-height: 58px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); cursor: pointer; }
+.choice-card.selected { border-color: var(--accent); background: var(--tint); }
+.choice-card input { accent-color: var(--accent); }
+.choice-card span { display: flex; flex-direction: column; gap: 2px; }
+.choice-card small,.field-help { color: var(--muted); font-size: 11px; }
+.compensation-form > .field { margin-bottom: 16px; }
+.compensation-form textarea { width: 100%; min-width: 0; padding: 8px 9px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--text); resize: vertical; line-height: 1.5; }
+.field-row { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; margin-bottom: 16px; }
+.field-row .field { min-width: 0; }
+.input-suffix { display: flex; align-items: center; gap: 8px; }
+.input-suffix input { flex: 1; }
+.input-suffix small { color: var(--muted); white-space: nowrap; }
+.credit-contract { display: flex; align-items: flex-start; gap: 8px; margin-top: 16px; padding: 11px 12px; border-left: 3px solid var(--accent); background: var(--soft); color: var(--muted); font-size: 12px; }
+.credit-contract svg { color: var(--accent); margin-top: 2px; }
+.profile-toolbar { display: grid; grid-template-columns: minmax(0,1.4fr) minmax(150px,.6fr); gap: 14px; margin-bottom: 18px; max-width: 700px; }
+.compensation-probability-table td:nth-child(2) { width: 150px; }
+.percent-input { display: flex; align-items: center; gap: 6px; }
+.percent-input input { width: 92px; }
+.percent-input span { color: var(--muted); }
+.probability-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; padding-top: 15px; }
+.probability-footer .button { margin-left: auto; }
+.total-good { color: var(--accent); font-weight: 600; }
+.total-bad { color: var(--danger); font-weight: 600; }
+.compensation-profile-list { margin-top: 22px; }
+.compensation-grant-table { min-width: 980px; }
+.compensation-audit-table { min-width: 760px; }
+.audit-json { max-width: 380px; overflow-wrap: anywhere; color: var(--muted); }
+.feedback { min-height: 20px; margin-top: 11px; color: var(--accent); font-size: 12px; overflow-wrap: anywhere; }
+.feedback.error { color: var(--danger); }
 @media (max-width: 850px) { .filters { grid-template-columns: repeat(2,minmax(0,1fr)); } .filters .search,.filter-actions { grid-column: 1 / -1; } .filter-actions { justify-content: flex-end; } }
 @media (max-width: 680px) {
   .page-heading { padding: 20px 16px 16px; }
@@ -116,6 +156,7 @@ dialog::backdrop { background: #0006; }
   .outcome { grid-column: 1 / -1; min-height: 93px; text-align: center; } .outcome-parts { justify-content: center; }
   .draw,.batches,#recover-draw { grid-column: 1 / -1; }
   .admin-title { padding: 20px 16px 0; } .ledger-stats { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px 12px; } .ledger-stats strong { font-size: 23px; }
+  .admin-nav { overflow-x: auto; } .admin-nav-button { white-space: nowrap; } .choice-grid,.field-row,.profile-toolbar { grid-template-columns: minmax(0,1fr); } .probability-footer .button { margin-left: 0; }
   .detail-grid { grid-template-columns: minmax(0,1fr); } .batch-results { grid-template-columns: repeat(3,minmax(0,1fr)); }
 }
 @media (max-width: 400px) { .mini-stats { grid-template-columns: minmax(0,1fr); padding: 0; gap: 9px; } }
