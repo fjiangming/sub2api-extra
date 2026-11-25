@@ -13,8 +13,8 @@
 .supplier-group-provider-heading h2 { margin: 0; font-size: 16px; }
 .supplier-group-provider-heading small { font-size: 12px; color: var(--muted); }
 .supplier-group-table { table-layout: fixed; background: var(--surface); }
-.supplier-group-table col:nth-child(1) { width: 17%; }
-.supplier-group-table col:nth-child(2) { width: 38%; }
+.supplier-group-table col:nth-child(1) { width: 38%; }
+.supplier-group-table col:nth-child(2) { width: 17%; }
 .supplier-group-table col:nth-child(3),.supplier-group-table col:nth-child(5) { width: 14%; }
 .supplier-group-table col:nth-child(4) { width: 17%; }
 .supplier-group-table th { position: static; white-space: normal; background: var(--surface-subtle); color: var(--muted); font-weight: 500; }
@@ -61,7 +61,7 @@
 @media(max-width:900px) {
   .supplier-group-table,.supplier-group-table tbody,.supplier-group-table tfoot { display: block; width: 100%; }
   .supplier-group-table colgroup,.supplier-group-table thead { display: none; }
-  .supplier-group-table tbody > tr { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); grid-template-areas: 'name name name' 'main upstream diff' 'accounts accounts accounts'; gap: 12px 8px; padding: 16px 0; border-top: 1px solid var(--line); }
+  .supplier-group-table tbody > tr { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); grid-template-areas: 'accounts accounts accounts' 'name name name' 'main upstream diff'; gap: 12px 8px; padding: 16px 0; border-top: 1px solid var(--line); }
   #accounting-groups .supplier-group-table td,#accounting-groups .supplier-group-table th { padding: 0; border-bottom: 0; }
   .supplier-group-table .supplier-group-name { grid-area: name; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
   #accounting-groups .supplier-group-table .supplier-group-name > small,.supplier-group-table .supplier-group-name .supplier-group-status { margin: 0; }
@@ -71,7 +71,7 @@
   .supplier-group-table .supplier-group-diff { grid-area: diff; }
   .supplier-group-table .numeric { text-align: left; }
   .supplier-group-mobile-label { display: block; margin-bottom: 4px; font-size: 11px; color: var(--muted); font-weight: 400; }
-  .supplier-group-accounts { gap: 4px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .supplier-group-accounts { gap: 4px; }
   .supplier-group-account summary { min-height: 44px; align-items: center; }
   .supplier-group-account summary > svg { margin-top: 0; }
   .supplier-group-table tfoot > tr { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px 8px; padding: 12px 10px; background: var(--surface-subtle); }

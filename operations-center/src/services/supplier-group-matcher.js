@@ -6,12 +6,9 @@ const total = (items, field) => items.reduce((sum, item) => sum.plus(item[field]
 const unique = values => [...new Set(values)];
 const groupId = (provider, group) => crypto.createHash('sha256').update(JSON.stringify([provider, group])).digest('hex').slice(0, 32);
 function aliases(provider, settings) {
-  const name = String(provider.name), stem = norm(name.replace(/\s*api\s*$/i, '')), letters = [...stem];
-  const length = Math.max(/\p{Script=Han}/u.test(stem) ? 2 : 3, Math.ceil(letters.length / 2));
-  const fragments = Array.from({ length: Math.max(0, letters.length - length + 1) }, (_, i) => letters.slice(i, i + length).join(''));
-  const pieces = name.split(/[\s._/()（）-]+/u).concat(stem, fragments);
+  const stem = norm(String(provider.name).replace(/\s*api\s*$/i, ''));
   const configured = Object.hasOwn(settings.aliases, provider.id) ? settings.aliases[provider.id] : [];
-  return unique([...configured, ...pieces].map(norm).filter(v =>
+  return unique([...configured, stem].map(norm).filter(v =>
     v.length >= 2 && !['api', 'https', 'http', 'com', 'cn', 'vip', 'relay', 'cloud', 'provider', '供应商'].includes(v)));
 }
 function buildGroupReport(upstream, source, settings, date, at) {
@@ -50,6 +47,7 @@ function buildGroupReport(upstream, source, settings, date, at) {
       localGroups: usage.map(row => ({ id: row.group_id || 'unknown', name: row.group_name || `分组 #${row.group_id || '未知'}`,
         main: total([row], 'amount'), requests: Number(row.requests) })),
       matched: false, method: full.length ? '完整名称' : '简称包含' };
+    if (candidates.length === 1) Object.assign(mapping, { providerId: candidates[0].id, providerName: candidates[0].name });
     if (!account.stable) mapping.reason = '当日账号身份发生变化或缺少有效历史依据';
     else if (!candidates.length) mapping.reason = '名称未匹配供应商';
     else if (!targets.length) mapping.reason = candidates.length > 1 ? '供应商候选不唯一，Key 未能核验' : '完整 Key 未匹配';

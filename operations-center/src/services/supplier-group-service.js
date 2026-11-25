@@ -156,42 +156,59 @@ class SupplierGroupService {
     if (!report) return { date, today, timezone: this.config.financeTimezone, currency: 'CNY', source: 'history_missing',
       settings, providers: [], providerSummaries: [], groups: [], mappings: [], missingProviders: [], summary: null,
       pagination: { page: 1, total: 0, totalPages: 0 }, warning: '该日没有分组消费归档；历史不会重新拉取或按当前关系倒推' };
-    const all = report.groups.filter(g => !query.providerId || g.providerId === query.providerId);
+    const scopedGroups = report.groups.filter(g => !query.providerId || g.providerId === query.providerId);
+    const all = scopedGroups.filter(g => g.accountCount > 0);
+    const providerOf = account => account.providerId || (account.candidates.length === 1 ? account.candidates[0].id : null);
     const matched = report.mappings.filter(a => a.matched && (!query.providerId || a.providerId === query.providerId));
     const mappings = report.mappings.filter(a => !query.providerId || a.providerId === query.providerId || a.candidates.some(p => p.id === query.providerId));
+    const pending = mappings.filter(a => !a.matched && providerOf(a) && (!query.providerId || providerOf(a) === query.providerId));
+    const pendingByProvider = new Map();
+    for (const account of pending) {
+      const id = providerOf(account);
+      if (!pendingByProvider.has(id)) pendingByProvider.set(id, []);
+      pendingByProvider.get(id).push(account);
+    }
     const known = all.filter(g => g.upstream !== null), comparable = all.filter(g => g.comparable && !stale);
     const page = items => { const n = Math.min(query.page, Math.max(1, Math.ceil(items.length / query.pageSize))); return {
       items: items.slice((n - 1) * query.pageSize, n * query.pageSize), pagination: { page: n, pageSize: query.pageSize, total: items.length, totalPages: Math.ceil(items.length / query.pageSize) } }; };
     const publicGroup = g => ({ ...g, keys: undefined, status: this.status(g, settings.alert, stale),
       diff: stale ? null : g.diff, rate: stale ? null : g.rate, keyCount: g.keys.length });
-    const publicAccounts = group => group.keys.flatMap(key => key.accounts).map(account => ({
+    const publicAccount = account => ({
       id: account.id, name: account.name, status: account.status, deleted: Boolean(account.deleted),
-      main: group.main === null ? null : account.main, requests: account.requests,
-      localGroups: account.localGroups.map(row => ({ ...row, main: group.main === null ? null : row.main }))
-    }));
+      main: report.siteComplete ? account.main : null, requests: account.requests,
+      localGroups: account.localGroups.map(row => ({ ...row, main: report.siteComplete ? row.main : null })),
+      ...(!account.matched ? { reason: account.reason } : {})
+    });
+    const publicAccounts = group => group.keys.flatMap(key => key.accounts).map(publicAccount);
     const byProvider = new Map();
     for (const group of all) {
       if (!byProvider.has(group.providerId)) byProvider.set(group.providerId, []);
       byProvider.get(group.providerId).push(group);
     }
+    for (const id of pendingByProvider.keys()) if (!byProvider.has(id)) byProvider.set(id, []);
+    const providers = [...new Map([...report.groups.map(g => ({ id: g.providerId, name: g.providerName })),
+      ...report.missingProviders, ...report.mappings.flatMap(a => a.candidates)]
+      .map(p => [p.id, { id: p.id, name: p.name }])).values()];
     const result = { date, today, timezone: this.config.financeTimezone, currency: 'CNY', source: date === today ? 'live' : 'archive',
       computedAt: report.computedAt, siteComplete: report.siteComplete, settings, stale, warning,
-      providers: [...new Map([...report.groups.map(g => ({ id: g.providerId, name: g.providerName })), ...report.missingProviders].map(p => [p.id, { id: p.id, name: p.name }])).values()],
-      providerSummaries: [...byProvider].map(([id, groups]) => ({ id, name: groups[0].providerName,
+      providers,
+      providerSummaries: [...byProvider].map(([id, groups]) => ({ id, name: providers.find(p => p.id === id).name,
         groupCount: groups.length, knownGroups: groups.filter(g => g.upstream !== null).length,
-        upstream: groups.every(g => g.upstream !== null) ? total(groups, 'upstream') : null,
+        pendingAccountCount: pendingByProvider.get(id)?.length || 0,
+        upstream: !pendingByProvider.has(id) && groups.every(g => g.upstream !== null) ? total(groups, 'upstream') : null,
         knownUpstream: total(groups, 'knownUpstream'),
-        main: report.siteComplete ? total(groups, 'main') : null,
-        diff: !stale && groups.every(g => g.comparable) ? total(groups, 'diff') : null })),
+        main: report.siteComplete ? total([...groups, ...(pendingByProvider.get(id) || [])], 'main') : null,
+        diff: !stale && !pendingByProvider.has(id) && groups.every(g => g.comparable) ? total(groups, 'diff') : null })),
       missingProviders: report.missingProviders.filter(p => !query.providerId || p.id === query.providerId),
       summary: { groupCount: all.length, knownGroups: known.length, comparableGroups: comparable.length,
-        upstream: known.length ? total(known, 'upstream') : null, main: report.siteComplete ? total(matched, 'main') : null,
-        diff: comparable.length ? total(comparable, 'diff') : null, accountCount: matched.length,
-        localGroupCount: new Set(matched.flatMap(a => a.localGroups.map(g => g.id))).size,
+        upstream: known.length && !pending.length ? total(known, 'upstream') : null, main: report.siteComplete ? total([...matched, ...pending], 'main') : null,
+        diff: comparable.length && !pending.length ? total(comparable, 'diff') : null, accountCount: matched.length + pending.length,
+        pendingAccountCount: pending.length,
+        localGroupCount: new Set([...matched, ...pending].flatMap(a => a.localGroups.map(g => g.id))).size,
         issueCount: mappings.filter(a => !a.matched).length,
         unassignedProviderCount: query.providerId ? report.mappings.filter(a => !a.candidates.length).length : 0 } };
     if (query.groupId) {
-      const group = all.find(g => g.id === query.groupId);
+      const group = scopedGroups.find(g => g.id === query.groupId);
       if (!group) throw new AppError('NOT_FOUND', '所选范围没有该上游分组', { status: 404 });
       const selected = group.keys.find(k => k.id === query.keyId) || group.keys[0];
       const keyPage = page(selected.accounts);
@@ -224,10 +241,17 @@ class SupplierGroupService {
       const filtered = query.issuesOnly === '1' ? mappings.filter(a => !a.matched) : mappings;
       const selected = page(filtered); result.mappings = selected.items; result.pagination = selected.pagination;
     } else {
-      const selected = page([...byProvider.values()].flat());
-      result.groups = selected.items.map(group => {
+      const rows = [...byProvider].flatMap(([id, groups]) => [...groups.map(group => ({ group })),
+        ...(pendingByProvider.has(id) ? [{ providerId: id }] : [])]);
+      const selected = page(rows);
+      result.groups = selected.items.filter(row => row.group).map(({ group }) => {
         const accounts = publicAccounts(group);
         return { ...publicGroup(group), accounts: accounts.slice(0, 10), accountsTruncated: accounts.length > 10 };
+      });
+      result.pendingProviders = selected.items.filter(row => row.providerId).map(({ providerId: id }) => {
+        const accounts = pendingByProvider.get(id);
+        return { id, accounts: accounts.slice(0, 10).map(publicAccount), accountCount: accounts.length,
+          accountsTruncated: accounts.length > 10, main: report.siteComplete ? total(accounts, 'main') : null };
       });
       result.pagination = selected.pagination;
     }

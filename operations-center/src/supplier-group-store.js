@@ -40,7 +40,8 @@ class SupplierGroupStore {
       // A later-day rotation must not rewrite a previously observed historical identity.
       if (prior && updated >= Date.parse(to)) return { ...prior, stable: !stored.changed };
       const first = firstByAccount.get(account.id);
-      const stable = Number.isFinite(updated) && updated < Date.parse(to) && (first === undefined || updated <= first);
+      const unchanged = prior && !stored.changed && prior.identity === account.identity && prior.name === account.name;
+      const stable = unchanged || (Number.isFinite(updated) && updated < Date.parse(to) && (first === undefined || updated <= first));
       const changed = Boolean(stored?.changed || (prior && (prior.identity !== account.identity || prior.name !== account.name)) || !stable);
       this.db.prepare(`INSERT INTO sg_observations VALUES(?,?,?,?,?) ON CONFLICT(scope,date,account_id)
         DO UPDATE SET payload=excluded.payload,changed=excluded.changed`)

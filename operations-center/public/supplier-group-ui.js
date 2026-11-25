@@ -16,7 +16,7 @@ const SupplierGroupUi = (() => {
       <div class="supplier-group-tools"><button type="button" class="icon-button" data-sg-view="mapping" aria-label="账号关联核对" title="账号关联核对" aria-pressed="false">${h.icon('list-checks')}<span data-sg-issue-count></span></button><button type="button" class="icon-button" data-sg-settings aria-label="简称与差额提醒" title="简称与差额提醒">${h.icon('sliders-horizontal')}</button></div><span class="muted" data-sg-meta></span></div>
       <p data-sg-warning class="accounting-notice" role="status" hidden></p><section id="sg-main-panel" aria-label="供应商分组消费" data-sg-content></section>
       <div class="accounting-pager"><span data-sg-page></span><div><button type="button" class="icon-button" data-sg-step="-1" aria-label="上一页" title="上一页">${h.icon('chevron-left')}</button><button type="button" class="icon-button" data-sg-step="1" aria-label="下一页" title="下一页">${h.icon('chevron-right')}</button></div></div>
-      <details class="accounting-rules"><summary>消费统计口径</summary><p>主站按账号的实际请求统计消费，跨主站分组累加，再汇总到对应上游分组。同一上游 Key 对应的多个账号分别列出，上游消费只计一次。排除 ID 1，保留停用或已删除账号的历史消费。</p><p>差额 = 主站合计 − 上游分组消费。数据缺失不当零，来源与关联均完整才计算差额。供应商合计包含全部上游分组；分组或账号较多时分页展示，合计仍包含全部消费。差额未扣除抽奖和其他费用。</p><p>资金时区每日 01:00 首次归档前一天，今日实时。历史只读归档，没有归档时保持缺失，不按当前账号关系倒推历史。</p></details>
+      <details class="accounting-rules"><summary>消费统计口径</summary><p>主站按账号的实际请求统计消费，跨主站分组累加，再汇总到对应上游分组。同一上游 Key 对应的多个账号分别列出，上游消费只计一次。排除 ID 1，保留停用或已删除账号的历史消费。</p><p>仅展示主站有关联账号的上游分组，零消费账号也保留。名称已定位供应商但分组未核验的账号单列待核对。供应商合计只包含所展示范围的全部分页，存在待核对账号时上游合计和差额保持未知。差额 = 主站合计 − 上游分组消费，未扣除抽奖和其他费用。</p><p>资金时区每日 01:00 首次归档前一天，今日实时。历史只读归档，没有归档时保持缺失，不按当前账号关系倒推历史。</p></details>
       <dialog class="accounting-dialog" data-sg-dialog aria-labelledby="sg-dialog-title"><header class="accounting-drawer-header"><h2 id="sg-dialog-title"></h2><button type="button" class="icon-button" data-sg-close aria-label="关闭" title="关闭">${h.icon('x')}</button></header><div class="accounting-drawer-body" data-sg-dialog-body></div></dialog>`;
     function render() {
       const r = state.report;
@@ -26,7 +26,7 @@ const SupplierGroupUi = (() => {
       q('[data-sg-meta]').textContent = `${r.timezone} · CNY · ${r.source === 'live' ? '今日实时' : r.source === 'archive' ? '本地归档' : '历史缺失'}${r.computedAt ? ` · ${h.formatDateTime(r.computedAt)}` : ''}`;
       q('[data-sg-view="mapping"]').setAttribute('aria-pressed', String(state.view === 'mapping' && !r.group));
       q('[data-sg-issue-count]').textContent = r.summary?.issueCount || '';
-      const notices = [r.warning, ...(r.missingProviders || []).map(p => `${p.name}：${(p.reasons || ['来源缺失']).join('；')}`),
+      const notices = [r.warning, ...(r.missingProviders || []).map(p => `${p.name}：${(p.reasons?.length ? p.reasons : ['上游分组来源缺失']).join('；')}`),
         r.siteComplete === false ? '主站用量未通过原生日桶完整性核验，主站金额与差额暂不核定' : null,
         r.summary?.unassignedProviderCount ? `另有 ${r.summary.unassignedProviderCount} 个账号未定位供应商，可在全部供应商范围核对` : null].filter(Boolean);
       q('[data-sg-warning]').hidden = !notices.length; q('[data-sg-warning]').textContent = notices.join('；');
@@ -38,13 +38,14 @@ const SupplierGroupUi = (() => {
     }
     function accountMarkup(account, groupId) {
       const id = `${groupId}:${account.id}`;
-      return `<details class="supplier-group-account" data-sg-account="${e(id)}"${state.expandedAccounts.has(id) ? ' open' : ''}><summary aria-label="${e(account.name)}，消费 ${e(money(account.main))}，查看主站分组明细">${h.icon('chevron-right')}<span class="supplier-group-account-name">${e(account.name)}</span><span class="supplier-group-account-amount">${e(money(account.main))}</span></summary><div class="supplier-group-account-splits"><small>#${e(account.id)}${account.deleted ? ' · 已删除，保留历史' : account.status !== 'active' ? ' · 当前停用，保留消费' : ''}</small>${account.localGroups.length ? account.localGroups.map(row => `<div class="supplier-group-split"><span>${e(row.name)}</span><span>${e(money(row.main))}</span></div>`).join('') : '<small>当日无消费</small>'}</div></details>`;
+      return `<details class="supplier-group-account" data-sg-account="${e(id)}"${state.expandedAccounts.has(id) ? ' open' : ''}><summary aria-label="${e(account.name)}，消费 ${e(money(account.main))}，查看主站分组明细">${h.icon('chevron-right')}<span class="supplier-group-account-name">${e(account.name)}</span><span class="supplier-group-account-amount">${e(money(account.main))}</span></summary><div class="supplier-group-account-splits"><small>#${e(account.id)}${account.deleted ? ' · 已删除，保留历史' : account.status !== 'active' ? ' · 当前停用，保留消费' : ''}</small>${account.reason ? `<small>${e(account.reason)}</small>` : ''}${account.localGroups.length ? account.localGroups.map(row => `<div class="supplier-group-split"><span>${e(row.name)}</span><span>${e(money(row.main))}</span></div>`).join('') : '<small>当日无消费</small>'}</div></details>`;
     }
-    function comparisonTable(groups, summary) {
+    function comparisonTable(groups, summary, pending) {
       const amountCell = (label, value, cls) => `<td class="numeric supplier-group-amount ${cls || ''}"><span class="supplier-group-mobile-label">${label}</span><span>${e(value)}</span></td>`;
-      const rows = groups.map(g => `<tr data-sg-row="${e(g.id)}"><td class="supplier-group-name">${link('data-sg-group', g.id, e(g.name), `查看 ${g.name} 账号与每日明细`)}<small>${g.accountCount} 个主站账号</small>${['comparable', 'zero'].includes(g.status) ? '' : status(g.status)}</td><td class="supplier-group-accounts-cell"><div class="supplier-group-accounts"><span class="supplier-group-mobile-label">主站对应账号消费</span>${g.accounts.length ? g.accounts.map(account => accountMarkup(account, g.id)).join('') : '<span class="muted">暂无已关联账号</span>'}${g.accountsTruncated ? link('data-sg-group', g.id, `查看全部 ${g.accountCount} 个账号`) : ''}</div></td>${amountCell('主站合计', money(g.main), 'supplier-group-main')}${amountCell('上游分组消费', money(g.upstream), 'supplier-group-upstream')}${amountCell('主站 − 上游', signed(g.diff), `supplier-group-diff ${g.diff < 0 ? 'negative-value' : ''}`)}</tr>`).join('');
-      const footer = summary ? `<tfoot><tr><th scope="row" colspan="2">供应商合计${summary.groupCount > groups.length ? `<small>全部 ${summary.groupCount} 个上游分组</small>` : ''}${summary.upstream === null ? `<small>上游已取得 ${e(money(summary.knownUpstream))} · ${summary.knownGroups}/${summary.groupCount} 组完整</small>` : ''}</th>${amountCell('主站合计', money(summary.main))}${amountCell('上游分组消费', money(summary.upstream))}${amountCell('差额', signed(summary.diff), summary.diff < 0 ? 'negative-value' : '')}</tr></tfoot>` : '';
-      return `<table class="supplier-group-table"><colgroup><col><col><col><col><col></colgroup><thead><tr><th scope="col">上游分组</th><th scope="col">主站对应账号消费</th><th scope="col" class="numeric">主站合计</th><th scope="col" class="numeric">上游分组消费<small>折算 CNY</small></th><th scope="col" class="numeric">差额<small>主站 − 上游</small></th></tr></thead><tbody>${rows}</tbody>${footer}</table>`;
+      let rows = groups.map(g => `<tr data-sg-row="${e(g.id)}"><td class="supplier-group-accounts-cell"><div class="supplier-group-accounts"><span class="supplier-group-mobile-label">主站账号 / 消费</span>${g.accounts.map(account => accountMarkup(account, g.id)).join('')}${g.accountsTruncated ? link('data-sg-group', g.id, `查看全部 ${g.accountCount} 个账号`) : ''}</div></td><td class="supplier-group-name">${link('data-sg-group', g.id, e(g.name), `查看 ${g.name} 账号与每日明细`)}<small>${g.accountCount} 个主站账号</small>${['comparable', 'zero'].includes(g.status) ? '' : status(g.status)}</td>${amountCell('主站合计', money(g.main), 'supplier-group-main')}${amountCell('上游分组消费', money(g.upstream), 'supplier-group-upstream')}${amountCell('主站 − 上游', signed(g.diff), `supplier-group-diff ${g.diff < 0 ? 'negative-value' : ''}`)}</tr>`).join('');
+      if (pending) rows += `<tr data-sg-pending="${e(pending.id)}"><td class="supplier-group-accounts-cell"><div class="supplier-group-accounts"><span class="supplier-group-mobile-label">主站账号 / 消费</span>${pending.accounts.map(account => accountMarkup(account, `pending:${pending.id}`)).join('')}${pending.accountsTruncated ? link('data-sg-pending-provider', pending.id, `查看全部 ${pending.accountCount} 个待核对账号`) : ''}</div></td><td class="supplier-group-name"><span>上游分组待核对</span><small>${pending.accountCount} 个主站账号</small>${status('mapping_incomplete')}</td>${amountCell('主站合计', money(pending.main), 'supplier-group-main')}${amountCell('上游分组消费', money(null), 'supplier-group-upstream')}${amountCell('主站 − 上游', signed(null), 'supplier-group-diff')}</tr>`;
+      const footer = summary ? `<tfoot><tr><th scope="row" colspan="2">供应商合计<small>主站在用 ${summary.groupCount} 个上游分组${summary.pendingAccountCount ? ` · ${summary.pendingAccountCount} 个账号待核对` : ''}</small>${summary.upstream === null && summary.groupCount ? `<small>上游已取得 ${e(money(summary.knownUpstream))} · ${summary.knownGroups}/${summary.groupCount} 组完整</small>` : ''}</th>${amountCell('主站合计', money(summary.main))}${amountCell('上游分组消费', money(summary.upstream))}${amountCell('差额', signed(summary.diff), summary.diff < 0 ? 'negative-value' : '')}</tr></tfoot>` : '';
+      return `<table class="supplier-group-table"><colgroup><col><col><col><col><col></colgroup><thead><tr><th scope="col">主站账号<small>账号消费 CNY</small></th><th scope="col">上游供应商分组</th><th scope="col" class="numeric">主站合计</th><th scope="col" class="numeric">上游分组消费<small>折算 CNY</small></th><th scope="col" class="numeric">差额<small>主站 − 上游</small></th></tr></thead><tbody>${rows}</tbody>${footer}</table>`;
     }
     function renderGroups(r) {
       const providers = new Map();
@@ -52,9 +53,11 @@ const SupplierGroupUi = (() => {
         if (!providers.has(group.providerId)) providers.set(group.providerId, []);
         providers.get(group.providerId).push(group);
       }
+      const pendingProviders = new Map((r.pendingProviders || []).map(provider => [provider.id, provider]));
+      for (const id of pendingProviders.keys()) if (!providers.has(id)) providers.set(id, []);
       return [...providers].map(([id, groups]) => {
         const summary = r.providerSummaries.find(provider => provider.id === id);
-        return `<section class="supplier-group-provider" aria-label="${e(groups[0].providerName)}"><div class="supplier-group-provider-heading"><h2>${e(groups[0].providerName)}</h2><small>${summary.groupCount} 个上游分组</small></div>${comparisonTable(groups, summary)}</section>`;
+        return `<section class="supplier-group-provider" aria-label="${e(summary.name)}"><div class="supplier-group-provider-heading"><h2>${e(summary.name)}</h2><small>${summary.groupCount} 个在用上游分组${summary.pendingAccountCount ? ` · ${summary.pendingAccountCount} 个账号待核对` : ''}</small></div>${comparisonTable(groups, summary, pendingProviders.get(id))}</section>`;
       }).join('') || '<p class="empty-state">当前范围暂无分组消费</p>';
     }
     function renderMappings(r) {
@@ -124,6 +127,7 @@ const SupplierGroupUi = (() => {
       if (b.hasAttribute('data-sg-close')) q('[data-sg-dialog]').close();
       if (b.dataset.sgView) { state.view = b.dataset.sgView; state.groupId = ''; state.page = 1; changed = true; }
       if (b.dataset.sgGroup) { state.groupId = b.dataset.sgGroup; state.detail = 'accounts'; state.page = 1; changed = true; }
+      if (b.dataset.sgPendingProvider) { state.providerId = b.dataset.sgPendingProvider; state.view = 'mapping'; state.issuesOnly = true; state.groupId = ''; state.page = 1; changed = true; }
       if (b.hasAttribute('data-sg-back')) { state.groupId = ''; state.page = 1; changed = true; }
       if (b.dataset.sgDetail) { state.detail = b.dataset.sgDetail; state.page = 1; changed = true; }
       if (b.dataset.sgStep) { state.page += Number(b.dataset.sgStep); changed = true; }

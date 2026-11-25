@@ -1,5 +1,21 @@
 # 个性化功能维护台账
 
+## 2026-11-26：修复供应商账号缺失并改为账号优先列表
+
+用户要求连接服务器分析关联账号缺失，并将供应商下列表第一列改为主站账号、第二列改为上游分组，仅保留主站在用分组。本轮只读诊断 216.227.169.198，核对两个服务实际 revision 为 `5371db2c86be725a696dd9b547ec7d9128ec4ac0`。真实目录存在完整指纹，但 apiclub / lingsu 的分组采集在 6 秒截止时仍未完成，旧代码丢弃目录；另有泛用 updated_at 引起身份稳定性否决。详见新增 `operations-center/docs/supplier-group-link-audit-20261126.md`，没有保存密码、完整 Key 或 Token，没有修改生产配置、数据库、余额或容器，未提交 GitHub 或部署。
+
+- `provider-monitor/src/services/group-daily-cost-service.js`：抽出有界目录读取。今日分组消费失败且无旧快照时，返回目录已有的 Key 指纹 / 当前分组，消费和请求数保持未知，不保存成功快照；历史 / 昨日归档 / 跨日均不使用当前目录兜底，既有期限、上限及迟到保护保持。
+- `operations-center/src/services/supplier-group-matcher.js`：名称候选唯一时独立保留供应商归属，Key 仍须唯一核验分组；停止自动半名 / 分词片段匹配，保留全名、去 API 后缀及手工简称，避免未经 Key 核验的模糊名称被直接归属。
+- `operations-center/src/supplier-group-store.js`：已可信观察且名称 / Key 不变时，不因其他字段更新时间变动新标身份变化；初次依据不足、真实轮换、已记录变化和历史保护不放宽。
+- `operations-center/src/services/supplier-group-service.js`：分组按有关联账号过滤后再分页 / 汇总，保留零消费账号；名称已定位而分组待核验的账号按供应商单列 `pendingProviders`，预览最多 10 个，通过原 mapping 查询分页。供应商主站总额含全部在用组及待核对账号，上游缺失或有待核对账号则上游总额 / 差额未知，保留已知小计；历史只从原快照投影，不重新按当前关系匹配。
+- `operations-center/public/supplier-group-ui.js`、`public/cost-accounting.css`、`public/index.html`：交换前两列，移动端也先展示账号；增加待核对账号行、展开原因与分页入口，合计注明在用范围，递增静态资源版本。
+- `operations-center/tests/supplier-groups.test.js`、`scripts/supplier-group-browser-check.cjs`、`provider-monitor/tests/group-daily-cost.test.js`：覆盖无上游 Key 仍显示名称关联账号、未用分组不参与合计 / 分页、零消费保留、多主站分组累加、待核对账号预览 / 分页、普通更新时间不误判及真实身份变动仍拦截、今日目录兜底不补历史 / 不写成功快照；浏览器检查列顺序与供应商来源缺失布局。
+- `operations-center/docs/supplier-group-costs.md`、`operations-center/README.md`、本台账：更新匹配、在用范围、未知金额、接口和配套更新要求。无新增依赖、环境变量或 schema；需要更新运营中心与供应商监控才生效，保留其他会话改动。
+
+验证：运营中心供应商分组 **18 项**、Provider Monitor 分组 **12 项**专项通过；运营中心 `npm run check` 及最终前端语法检查、分组桌面 / 宽屏 / 390px / 320px / 深色偏好 **5 组**浏览器、原消费毛利 / 现金收支 **4 组**浏览器回归及 `git diff --check` 通过，未运行无关全量测试。截图保留于本会话可视化目录 `supplier-accounts-first`，已复核桌面及窄屏；本机隔离预览 `http://127.0.0.1:19884/preview`（PID 69752），使用虚构数据，不请求生产。收尾只读确认两组件健康 HTTP 200、重启计数均 0、revision 保持原值，SSH 已关闭。原 Provider Monitor 独立测试工作文件 hash 仍为 `0fa91265bd5c576f8ce53debb11c399d3768312d`，其他未提交文档及维护章节保留。未提交 GitHub 或部署。
+
+用户随后明确要求提交 GitHub。本次仅提交上述供应商账号关联、账号优先列表、相关测试 / 文档和本节台账，推送 `origin/main`；其他维护章节、Provider Monitor 独立测试与未跟踪审计文档保留本地。推送前核对远端同步与暂存范围，按最终完整提交 SHA 核对 GitHub 自动测试和镜像构建状态，不连接或部署服务器。
+
 ## 2026-11-25：供应商分组消费改为简版账号对照表
 
 用户确认简版 Demo 并要求将主站 Key 消费改为账号名称与消费后，进一步要求改造正式代码。本轮仅修改现有运营中心成本分析模块；不修改上游监控、匹配 / 归档 / 计费契约、余额、环境变量或数据库 schema，不连接生产、提交 GitHub 或部署。保留原 Provider Monitor 独立测试及其他维护记录、未跟踪审计文档。

@@ -24,7 +24,8 @@ test('supplier matching fingerprints are identical across services and never acc
 
 test('real SQL groups all accounts by upstream group without account membership multiplication', async t => {
   const f = await fixture(t), r = await f.service.getReport({ date: f.date });
-  assert.equal(r.summary.groupCount, 6); assert.equal(r.summary.accountCount, 9); assert.equal(r.summary.issueCount, 3);
+  assert.equal(r.summary.groupCount, 6); assert.equal(r.summary.accountCount, 10); assert.equal(r.summary.issueCount, 3);
+  assert.equal(r.summary.pendingAccountCount, 1);
   const claude = r.groups.find(g => g.groupRef === 'claude');
   assert.equal(claude.upstream, 15); assert.equal(claude.main, 35); assert.equal(claude.accountCount, 3);
   assert.equal(claude.localGroupCount, 3); assert.equal(claude.diff, 20); assert.equal(claude.status, 'comparable');
@@ -34,7 +35,8 @@ test('real SQL groups all accounts by upstream group without account membership 
   assert.deepEqual(claude.accounts[0].localGroups.map(g => g.main), [20, 3]);
   assert.equal(claude.accountsTruncated, false);
   assert.deepEqual(r.providerSummaries.find(p => p.id === 'ling'), {
-    id: 'ling', name: '灵枢 API', groupCount: 2, knownGroups: 2, upstream: 23, knownUpstream: 23, main: 47, diff: 24
+    id: 'ling', name: '灵枢 API', groupCount: 2, knownGroups: 2, pendingAccountCount: 1,
+    upstream: null, knownUpstream: 23, main: 47, diff: null
   });
   assert.equal(r.providerSummaries.find(p => p.id === 'nova').diff, null);
   assert.equal(r.providerSummaries.find(p => p.id === 'zen').upstream, null);
@@ -78,8 +80,12 @@ test('ambiguous supplier/group identity blocks comparison and does not allocate 
   assert.match(r.mappings.find(a => a.id === '11').reason, /多个/);
   assert.equal(r.groups.find(g => g.groupRef === 'claude').diff, null);
   const partial = { items: [{ ...f.items[0], name: 'ABC科技123' }] };
-  const result = buildGroupReport(partial, { accounts: [{ ...accounts[0], name: 'ABC科技 标准账号' }], usage: raw.usage, complete: true }, settings, f.date, new Date().toISOString());
-  assert.equal(result.mappings.find(a => a.id === '11').matched, true);
+  const source = { accounts: [{ ...accounts[0], name: 'ABC科技 标准账号' }], usage: raw.usage, complete: true };
+  const result = buildGroupReport(partial, source, settings, f.date, new Date().toISOString());
+  assert.equal(result.mappings.find(a => a.id === '11').matched, false);
+  assert.equal(result.mappings.find(a => a.id === '11').providerId, undefined);
+  const configured = buildGroupReport(partial, source, { ...settings, aliases: { ling: ['ABC科技'] } }, f.date, new Date().toISOString());
+  assert.equal(configured.mappings.find(a => a.id === '11').matched, true);
 });
 
 test('account previews stay bounded while supplier and group totals include every account and page', async t => {
@@ -95,9 +101,9 @@ test('account previews stay bounded while supplier and group totals include ever
   assert.equal(group.accountCount, 14);
   assert.equal(group.accounts.length, 10); assert.equal(group.accountsTruncated, true);
   assert.equal(group.main, 35.11); assert.equal(group.upstream, 15);
-  assert.equal(report.pagination.total, 2);
+  assert.equal(report.pagination.total, 3);
   assert.deepEqual(report.providerSummaries.map(provider => [provider.id, provider.groupCount, provider.main, provider.upstream, provider.diff]),
-    [['ling', 2, 47.11, 23, 24.11]]);
+    [['ling', 2, 47.11, null, null]]);
   const pages = await Promise.all([1, 2].map(page => f.service.getReport({ date: f.date, groupId: group.id, view: 'accounts', pageSize: 10, page })));
   assert.deepEqual(pages.map(page => page.group.accounts.length), [10, 4]);
   assert(pages.every(page => page.group.main === 35.11 && page.group.upstream === 15 && page.pagination.total === 14));
@@ -148,6 +154,72 @@ test('day observations reject rotations but preserve previously observed histori
     '2026-11-24T16:00:00Z', '2026-11-25T16:00:00Z'); assert.equal(next[0].identity, 'old');
 });
 
+test('unchanged observed credentials tolerate later account updates but actual identity changes stay blocked', async t => {
+  const f = await fixture(t);
+  await f.service.collect(f.date);
+  await f.database.exec("UPDATE accounts SET updated_at='2026-11-25T03:00:00Z' WHERE id=11");
+  let report = await f.service.collect(f.date);
+  assert.equal(report.mappings.find(a => a.id === '11').matched, true);
+  assert.equal(report.groups.find(g => g.groupRef === 'claude').main, 35);
+  await f.database.exec("UPDATE accounts SET name='灵枢 API 新名称',updated_at='2026-11-25T03:01:00Z' WHERE id=11");
+  report = await f.service.collect(f.date);
+  const account = report.mappings.find(a => a.id === '11');
+  assert.equal(account.matched, false); assert.equal(account.providerId, 'ling');
+  assert.match(account.reason, /身份/);
+});
+
+test('name-identified accounts remain visible without upstream keys and keep cross-group consumption', async t => {
+  const f = await fixture(t);
+  f.items[0].keys = [];
+  const report = await f.service.getReport({ date: f.date, providerId: 'ling' });
+  assert.equal(report.groups.length, 0);
+  assert.equal(report.pendingProviders.length, 1);
+  const pending = report.pendingProviders[0];
+  assert.equal(pending.id, 'ling'); assert.equal(pending.accountCount, 5);
+  assert.equal(pending.main, 47);
+  const account = pending.accounts.find(a => a.id === '11');
+  assert.equal(account.name, '灵枢 API Claude 主账号'); assert.equal(account.main, 23);
+  assert.deepEqual(account.localGroups.map(g => g.main), [20, 3]);
+  assert.equal(report.providerSummaries[0].main, 47);
+  assert.equal(report.providerSummaries[0].upstream, null); assert.equal(report.providerSummaries[0].diff, null);
+  assert.equal(report.summary.accountCount, 5);
+  const mapping = await f.service.getReport({ date: f.date, providerId: 'ling', view: 'mapping' });
+  assert(mapping.mappings.every(a => a.providerId === 'ling' && !a.matched));
+  assert(!JSON.stringify(report).includes(f.secrets[0]));
+});
+
+test('unused upstream groups are excluded before totals and pagination while zero-use accounts stay', async t => {
+  const f = await fixture(t);
+  const unused = { ...f.items[0].keys[0], id: 'unused-key', identity: null, groupRef: 'unused', cost: 999, upstreamAmount: 999 };
+  f.items[0].keys.push(unused);
+  f.items.push({ id: 'unused-provider', name: 'Unused Provider', complete: true, accountCovered: true, reasons: [], keys: [{ ...unused, id: 'unused-other' }] });
+  const report = await f.service.getReport({ date: f.date });
+  assert(report.groups.every(g => g.groupRef !== 'unused'));
+  assert.equal(report.providerSummaries.find(p => p.id === 'ling').knownUpstream, 23);
+  assert(!report.providerSummaries.some(p => p.id === 'unused-provider'));
+  assert(report.groups.some(g => g.groupRef === 'zero' && g.main === 0 && g.accountCount === 1));
+  assert.equal(report.pagination.total, 7);
+  const pages = await Promise.all(Array.from({ length: 7 }, (_, n) => f.service.getReport({ date: f.date, pageSize: 1, page: n + 1 })));
+  assert.equal(pages.flatMap(page => page.groups).length, 6);
+  assert.equal(pages.flatMap(page => page.pendingProviders).length, 1);
+});
+
+test('pending previews paginate without losing supplier totals or exposing credentials', async t => {
+  const f = await fixture(t);
+  f.items[0].keys = [];
+  await f.database.query(`INSERT INTO accounts SELECT n,'灵枢 API 待核对 ' || n,'active',$1::jsonb,'2026-01-01T00:00:00Z',NULL
+    FROM generate_series(100,111) n`, [JSON.stringify({ api_key: f.secrets[0] })]);
+  const report = await f.service.getReport({ providerId: 'ling' });
+  assert.equal(report.pendingProviders[0].accounts.length, 10);
+  assert.equal(report.pendingProviders[0].accountsTruncated, true);
+  assert.equal(report.pendingProviders[0].accountCount, 17);
+  assert.equal(report.providerSummaries[0].main, 47);
+  const pages = await Promise.all([1, 2].map(page => f.service.getReport({ providerId: 'ling', view: 'mapping', pageSize: 10, page })));
+  assert.equal(new Set(pages.flatMap(page => page.mappings.map(a => a.id))).size, 17);
+  assert(pages.every(page => page.providerSummaries[0].main === 47));
+  assert(!JSON.stringify([report, pages]).includes(f.secrets[0]));
+});
+
 test('archive retries retain confirmed upstream values and allow incomplete main-site data to fill', async t => {
   const f = await fixture(t);
   f.controls.clock = new Date('2026-11-25T18:00:00Z');
@@ -175,7 +247,7 @@ test('settings persist with audit, only current-day matching updates, and pagina
   const policy = f.store.settings(f.service.scope()); policy.aliases.ling = ['自定义别名']; policy.alert.amount = 100;
   f.service.configure(policy, { id: 'admin' });
   const report = await f.service.getReport({ date: f.date, pageSize: '1', page: '100' });
-  assert.equal(report.pagination.page, 6); assert.equal(report.groups.length, 1);
+  assert.equal(report.pagination.page, 7); assert.equal(report.groups.length, 1);
   assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM sg_audit').get().n, 1);
   assert.deepEqual(f.store.settings(f.service.scope()), policy);
   await assert.rejects(f.service.getReport({ date: '2026-02-30' }), { code: 'INVALID_DATE_RANGE' });

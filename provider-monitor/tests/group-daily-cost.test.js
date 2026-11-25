@@ -53,6 +53,25 @@ test('daily upstream group reads use actual historical groups and verified accou
   const calls = f.calls.length; assert.equal((await f.service.report(query)).items[0].cached, true); assert.equal(f.calls.length, calls);
 });
 
+test('failed daily reads retain today catalog identities with unknown costs without saving a snapshot', async t => {
+  const f = fixture(t);
+  f.states[0].unavailable = true;
+  let report = await f.service.report(query), p = report.items[0];
+  assert.equal(p.complete, false); assert.equal(p.accountCovered, false);
+  assert.equal(p.keys.length, 1); assert.equal(p.keys[0].groupRef, '9');
+  assert.equal(p.keys[0].identity, costKeyIdentity('sk-synthetic-group-key-001122334455'));
+  assert.equal(p.keys[0].cost, null); assert.equal(p.keys[0].upstreamAmount, null);
+  assert.equal(p.keys[0].requests, null);
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM provider_group_daily_costs').get().n, 0);
+  const calls = f.calls.length;
+  f.setClock('2026-11-26T04:00:00Z');
+  report = await f.service.report(query);
+  assert.equal(report.items[0].keys.length, 0); assert.equal(f.calls.length, calls);
+  report = await f.service.report({ ...query, archive: '1' });
+  assert.equal(report.items[0].keys.length, 0);
+  assert.doesNotMatch(JSON.stringify(report), /synthetic-access|_catalog/);
+});
+
 test('invalid/duplicate group totals fail atomically and real empty days remain confirmed zero', async t => {
   const f = fixture(t);
   f.states[0].groups.push({ group_id: 10, group_name: 'invalid', actual_cost: null, requests: 0 });

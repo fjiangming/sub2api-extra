@@ -31,6 +31,32 @@ class GroupDailyCostService {
       this.providers.getCredentials(connection)])).digest('hex');
   }
 
+  catalog(providerId) {
+    return this.db.prepare(`SELECT k.id,k.remote_id,k.name,k.masked_key,k.primary_group_ref,k.metadata_json,
+      g.name AS group_name FROM remote_keys k LEFT JOIN remote_groups g ON g.connection_id=k.connection_id
+      AND g.group_type='key_route_group' AND g.remote_id=k.primary_group_ref
+      WHERE k.connection_id=? AND k.status<>'missing' ORDER BY k.id LIMIT 501`).all(providerId);
+  }
+
+  unavailable(info, query, archive) {
+    const result = failure(info);
+    // Today's directory can locate accounts even when the daily usage request times out.
+    if (archive || !this.allowed(query.from, query.timezone, false)) return result;
+    const catalog = this.catalog(info.id);
+    if (!catalog.length || catalog.length > 500) return result;
+    result.keys = catalog.map(key => {
+      let metadata;
+      try { metadata = JSON.parse(key.metadata_json); } catch { metadata = null; }
+      return { id: key.id, name: key.name, maskedKey: key.masked_key,
+        identity: /^[a-f0-9]{64}$/.test(metadata?.costKeyIdentity || '') ? metadata.costKeyIdentity : null,
+        groupRef: key.primary_group_ref, groupName: key.group_name,
+        upstreamAmount: null, cost: null, requests: null, complete: false,
+        reasons: ['保留今日目录分组，日消费尚未核验'] };
+    });
+    result.reasons = ['上游日消费读取失败，保留今日 Key 目录关联；金额待核对'];
+    return result;
+  }
+
   async report(input = {}) {
     const { query, settings, periods } = this.dailyCosts.grossProfit.dailyCostOptions(input);
     if (query.from !== query.to || settings.currency !== 'CNY') throw new AppError('INVALID_REQUEST', 'One CNY finance day is required', { status: 400 });
@@ -67,7 +93,8 @@ class GroupDailyCostService {
             }
             items.push(await budget.wait(this.running.get(identity)));
           } catch {
-            items.push(cached ? { ...cached, stale: true, complete: false, reasons: ['本次分组消费读取失败，保留上次快照'] } : failure(connection));
+            items.push(cached ? { ...cached, stale: true, complete: false, reasons: ['本次分组消费读取失败，保留上次快照'] }
+              : this.unavailable(connection, query, archive));
           }
         }
       }));
@@ -108,10 +135,7 @@ class GroupDailyCostService {
       context.withCredentialsRefresh = operation => refresh(() => budget.run(operation));
       context.onCredentialsUpdated = updated => { verify(); return saveCredentials(updated); };
       const adapter = createAdapter(connection.adapter_type, context);
-      const catalog = previous?._catalog || this.db.prepare(`SELECT k.id,k.remote_id,k.name,k.masked_key,k.primary_group_ref,k.metadata_json,
-        g.name AS group_name FROM remote_keys k LEFT JOIN remote_groups g ON g.connection_id=k.connection_id
-        AND g.group_type='key_route_group' AND g.remote_id=k.primary_group_ref
-        WHERE k.connection_id=? AND k.status<>'missing' ORDER BY k.id LIMIT 501`).all(info.id);
+      const catalog = previous?._catalog || this.catalog(info.id);
       if (catalog.length > 500 || !catalog.length) throw new Error('incomplete catalog');
       const account = previous?._account || await budget.run(() => adapter.getDailyUsageSummary({ date: query.from,
         timezone: query.timezone, fromAt: period.from, toAt: period.to }));
