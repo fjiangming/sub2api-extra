@@ -3,6 +3,7 @@ const { createAdapter } = require('../adapters/registry');
 const { AppError, asAppError } = require('../errors');
 const { nowIso, parseJson, stringifyJson } = require('../db');
 const { maskKey, redact, redactText } = require('../security/redaction');
+const { costKeyIdentity } = require('../security/cost-key-identity');
 const { upsertGroups } = require('./group-store');
 const { normalizeDynamicRouteConfig } = require('./dynamic-route-rate');
 const {
@@ -709,7 +710,8 @@ class SyncService {
         preserveUsage ? existing.currency : key.quota?.currency || null,
         preserveUsage ? existing.expires_at : key.expiresAt || null,
         preserveUsage ? existing.last_used_at : key.lastUsedAt || null,
-        stringifyJson(key.metadata || {}),
+        stringifyJson({ ...(key.metadata || {}), costKeyIdentity:
+          costKeyIdentity(key.maskedKey) || key.metadata?.costKeyIdentity || null }),
         capturedAt,
         capturedAt
       );

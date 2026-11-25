@@ -60,7 +60,7 @@ async function main() {
         }, 'example', 'Isolated cutoff example');
         page = await context.newPage(); const errors = [], paths = []; page.on('pageerror', error => errors.push(error.message)); page.on('request', request => paths.push(new URL(request.url()).pathname));
         await page.goto(`http://127.0.0.1:${preview.port}/preview`); await waitFor(page, () => accountingUi.state.report?.automatic);
-        assert.equal(await page.locator('.accounting-tabs [role=tab]').count(), 2); assert.equal(await page.locator('.accounting-rules').evaluate(node => node.open), false);
+        assert.equal(await page.locator('.accounting-tabs [role=tab]').count(), 3); assert.equal(await page.locator('.accounting-rules').first().evaluate(node => node.open), false);
         assert.equal(await page.locator('#cost-analysis-filter [name=granularity]').inputValue(), 'day');
         await page.locator('#cost-analysis-filter [name=start]').fill(preview.start); await page.locator('#cost-analysis-filter [name=end]').fill(preview.today); await page.locator('#cost-analysis-filter [type=submit]').click();
         await waitFor(page, start => accountingUi.state.report?.range.start === start && accountingUi.state.report.summary.completeDays === 31, preview.start);
@@ -139,7 +139,7 @@ async function main() {
         assert.equal(await page.evaluate(() => accountingUi.state.report.items[0].name), 'Sub2API 示例上游 付款');
         assert.equal(await page.locator('[data-cash-rows] tr').count(), 1); assert.equal(await page.locator('[data-cash-metrics] [data-metric]').count(), 3);
         assert.deepEqual(await page.locator('[data-cash-metrics] [data-metric]').evaluateAll(nodes => nodes.map(node => node.dataset.metric)), ['income', 'expense', 'net']);
-        assert.deepEqual(await page.locator('[data-cash-history] [data-metric]').evaluateAll(nodes => nodes.map(node => node.dataset.metric)), ['historyIncome', 'historyExpense', 'userBalance', 'cumulative']);
+        assert.deepEqual(await page.locator('[data-cash-history] [data-metric]').evaluateAll(nodes => nodes.map(node => node.dataset.metric)), ['historyIncome', 'historyExpense', 'lotteryReward', 'userBalance', 'cumulative']);
         const metricRows = await page.evaluate(() => ({ period: document.querySelector('[data-cash-metrics]').getBoundingClientRect().bottom,
           history: document.querySelector('[data-cash-history]').getBoundingClientRect().top }));
         assert(metricRows.history > metricRows.period, 'Cumulative cards have their own second row');

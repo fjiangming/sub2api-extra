@@ -466,6 +466,54 @@ class OneApiFamilyAdapter extends ProviderAdapter {
     return { amount: quota / divisor, requests: null, currency: 'USD', subjectId: account.remoteId, scope: 'account' };
   }
 
+  async getKeyDailyGroupUsage({ key, fromAt, toAt }) {
+    if (this.type !== 'new-api') throw new AppError('CAPABILITY_UNSUPPORTED', 'Key group usage is unavailable', { status: 409 });
+    const status = await this.ensureStatus(), divisor = summaryNumber(status?.quota_per_unit);
+    if (!(divisor > 0)) throw new AppError('SCHEMA_MISMATCH', 'Missing quota unit', { status: 502 });
+    const start = Math.floor(Date.parse(fromAt) / 1000), end = Math.floor(Date.parse(toAt) / 1000) - 1;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start || !/^[1-9]\d*$/.test(String(key.remote_id))) {
+      throw new AppError('SCHEMA_MISMATCH', 'Invalid key or day', { status: 502 });
+    }
+    const result = new Map();
+    const seen = new Set();
+    let count = 0, expectedTotal;
+    for (let page = 1; page <= 100; page++) {
+      const query = new URLSearchParams({ p: String(page), page_size: '100', type: '2', token_name: key.name,
+        start_timestamp: String(start), end_timestamp: String(end) });
+      const response = await this.http.requestJson(joinUrl(this.connection.base_url, `/api/log/self?${query}`),
+        { headers: this.headers(), retries: 0 });
+      const { items, total, hasTotal } = extractItems(response.data);
+      const body = unwrapEnvelope(response.data), declared = summaryNumber(body?.total ?? body?.count ?? body?.total_count);
+      const list = body?.items ?? body?.list ?? body?.records ?? body?.data;
+      if (!hasTotal || !Number.isSafeInteger(total) || total < 0 || total > 10000 ||
+          declared !== total || !Array.isArray(list) || (expectedTotal !== undefined && total !== expectedTotal) || items.length > 100) {
+        throw new AppError('SCHEMA_MISMATCH', 'Key log coverage cannot be verified', { status: 502 });
+      }
+      expectedTotal = total;
+      for (const row of items) {
+        // A name search can include other tokens; every row still needs a stable identity.
+        if (!/^[1-9]\d*$/.test(String(row.id)) || seen.has(String(row.id)) || !/^[1-9]\d*$/.test(String(row.token_id))) {
+          throw new AppError('SCHEMA_MISMATCH', 'Duplicate or unidentified key log', { status: 502 });
+        }
+        seen.add(String(row.id));
+        if (String(row.token_id) !== String(key.remote_id)) continue;
+        const quota = summaryNumber(row.quota), timestamp = summaryNumber(row.created_at);
+        if (Number(row.type) !== 2 || !Number.isSafeInteger(quota) || quota < 0 || !Number.isSafeInteger(timestamp) || timestamp < start || timestamp > end ||
+            typeof row.group !== 'string' || !row.group.trim() || row.group.length > 200) {
+          throw new AppError('SCHEMA_MISMATCH', 'Invalid key group log', { status: 502 });
+        }
+        const groupRef = row.group.trim(), previous = result.get(groupRef) || { groupRef, groupName: groupRef, amount: 0, requests: 0, currency: 'USD' };
+        previous.amount += quota / divisor; previous.requests++;
+        result.set(groupRef, previous);
+      }
+      count += items.length;
+      if (count === total) return [...result.values()];
+      if (count > total) break;
+      if (items.length !== 100) break;
+    }
+    throw new AppError('SCHEMA_MISMATCH', 'Key logs were truncated', { status: 502 });
+  }
+
   async getRequestLogs(options = {}) {
     if (this.type !== 'new-api') return super.getRequestLogs(options);
     const lookbackDays = Math.min(90, Math.max(1, Number(options.lookbackDays) || 30));

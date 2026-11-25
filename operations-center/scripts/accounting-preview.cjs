@@ -20,7 +20,7 @@ const { CostAnalysisService } = require('../src/services/cost-analysis-service')
 const { DailyProfitService } = require('../src/services/daily-profit-service');
 const { dateInTimezone, addUtcDays } = require('../src/services/metrics-service');
 
-async function startPreview({ port = 0 } = {}) {
+async function startPreview({ port = 0, supplierGroups = null } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cost-accounting-preview-'));
   const password = crypto.randomBytes(24).toString('hex');
   const config = loadConfig({ NODE_ENV: 'test', OPERATIONS_CENTER_AUTH_MODE: 'local', OPERATIONS_CENTER_ADMIN_PASSWORD: password,
@@ -93,7 +93,7 @@ async function startPreview({ port = 0 } = {}) {
   accounting.classify('payment:2', { kind: 'subscription', amount: 199, currency: 'CNY', serviceStart: start, serviceEnd: today, reason: 'Synthetic service agreement' }, 'example');
   accounting.create({ kind: 'fee', name: '年度域名费用', date: start, amount: 365, currency: 'CNY', serviceStart: start, serviceEnd: addUtcDays(start, 364), category: 'domain', reason: 'Synthetic invoice' }, 'example');
   await cashFlow.sync();
-  const app = createApp({ config, auth, database: { ping: async () => ({ database: 'local-example' }), configured: () => true }, inspector, accounting, cashFlow, costAnalysis: analysis, dailyProfit: daily,
+  const app = createApp({ config, auth, database: { ping: async () => ({ database: 'local-example' }), configured: () => true }, inspector, accounting, cashFlow, costAnalysis: analysis, dailyProfit: daily, supplierGroups,
     settings: { getStatus: () => ({ setupRequired: false }) } });
   const outer = express();
   outer.get('/preview', async (req, res, next) => {

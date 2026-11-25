@@ -1,0 +1,203 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { DateTime } = require('luxon');
+const { supplierGroupFixture } = require('./supplier-group-fixture');
+const { keyIdentity } = require('../src/services/supplier-group-source');
+const { buildGroupReport } = require('../src/services/supplier-group-matcher');
+const { SupplierGroupStore } = require('../src/supplier-group-store');
+const { ProviderMonitorClient } = require('../src/provider-monitor-client');
+const { createApp } = require('../src/app');
+const { AuthService } = require('../src/auth');
+async function fixture(t, options) { const f = await supplierGroupFixture(options); t.after(() => f.close()); return f; }
+const response = body => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+
+test('supplier matching fingerprints are identical across services and never accept masks', () => {
+  const { costKeyIdentity } = require('../../provider-monitor/src/security/cost-key-identity');
+  for (const value of ['sk-synthetic-complete-key-001122334455', 'Bearer sk-synthetic-complete-key-001122334455',
+    'synthetic-complete-key-001122334455', 'sk-1234...567890123456789', 'sk-1234********5678', 'sk-1234…567890123456789', 'short']) {
+    assert.equal(keyIdentity(value), costKeyIdentity(value));
+  }
+  assert.equal(keyIdentity('Bearer sk-synthetic-complete-key-001122334455'), keyIdentity('synthetic-complete-key-001122334455'));
+  assert.equal(keyIdentity('sk-1234...567890123456789'), null);
+});
+
+test('real SQL groups all accounts by upstream group without account membership multiplication', async t => {
+  const f = await fixture(t), r = await f.service.getReport({ date: f.date });
+  assert.equal(r.summary.groupCount, 6); assert.equal(r.summary.accountCount, 9); assert.equal(r.summary.issueCount, 3);
+  const claude = r.groups.find(g => g.groupRef === 'claude');
+  assert.equal(claude.upstream, 15); assert.equal(claude.main, 35); assert.equal(claude.accountCount, 3);
+  assert.equal(claude.localGroupCount, 3); assert.equal(claude.diff, 20); assert.equal(claude.status, 'comparable');
+  assert.equal(r.groups.find(g => g.groupRef === 'gpt').main, 12);
+  assert.equal(r.groups.find(g => g.groupRef === 'pro').status, 'upstream_high');
+  assert.equal(r.groups.find(g => g.groupRef === 'batch').status, 'unlinked_key');
+  assert.equal(r.groups.find(g => g.groupRef === 'zero').status, 'zero');
+  assert.equal(r.groups.find(g => g.groupRef === 'unknown').diff, null);
+  const detail = await f.service.getReport({ date: f.date, groupId: claude.id, keyId: 'k1', pageSize: 1 });
+  assert.equal(detail.group.keys.find(k => k.id === 'k1').upstream, 12);
+  assert.equal(detail.group.keys.find(k => k.id === 'k1').main, 30);
+  assert.equal(detail.group.keys.find(k => k.id === 'k1').accountCount, 2);
+  assert.equal(detail.pagination.total, 2); assert.equal(detail.group.localGroups.reduce((s, g) => s + g.main, 0), 25);
+  const local = await f.service.getReport({ date: f.date, groupId: claude.id, view: 'local', pageSize: 100 });
+  assert.equal(local.group.localGroups.reduce((s, g) => s + g.main, 0), 35);
+  const publicData = JSON.stringify([r, detail, local, await f.service.getReport({ view: 'mapping', issuesOnly: '0' })]);
+  assert(!publicData.includes(keyIdentity(f.secrets[0]))); assert(!publicData.includes(f.secrets[0]));
+  assert(!publicData.includes('upstreamSnapshot')); assert(!publicData.includes('siteSnapshot'));
+  assert(f.queries.every(sql => /^(SELECT|WITH|BEGIN|SET LOCAL|COMMIT|ROLLBACK)/.test(sql)));
+});
+
+test('ambiguous supplier/group identity blocks comparison and does not allocate or duplicate usage', async t => {
+  const f = await fixture(t), raw = await f.source.read('2026-11-24T16:00:00Z', '2026-11-25T16:00:00Z');
+  const upstream = { items: structuredClone(f.items) }, settings = f.store.settings(f.service.scope());
+  const accounts = raw.accounts.map(a => ({ ...a, stable: true }));
+  accounts[1].name = '名称无法定位';
+  let r = buildGroupReport(upstream, { ...raw, accounts }, settings, f.date, new Date().toISOString());
+  assert.equal(r.groups.find(g => g.groupRef === 'claude').comparable, false);
+  assert.equal(r.groups.find(g => g.groupRef === 'claude').main, 28);
+  upstream.items[0].keys.push({ ...upstream.items[0].keys[0], groupRef: 'second-daily-group', cost: 1, upstreamAmount: 1 });
+  r = buildGroupReport(upstream, { ...raw, accounts }, settings, f.date, new Date().toISOString());
+  assert.equal(r.mappings.find(a => a.id === '11').matched, false);
+  assert.match(r.mappings.find(a => a.id === '11').reason, /多个/);
+  assert.equal(r.groups.find(g => g.groupRef === 'claude').diff, null);
+  const partial = { items: [{ ...f.items[0], name: 'ABC科技123' }] };
+  const result = buildGroupReport(partial, { accounts: [{ ...accounts[0], name: 'ABC科技 标准账号' }], usage: raw.usage, complete: true }, settings, f.date, new Date().toISOString());
+  assert.equal(result.mappings.find(a => a.id === '11').matched, true);
+});
+
+test('missing detailed usage or native coverage stays unknown, including deleted/disabled accounts', async t => {
+  const f = await fixture(t);
+  await f.database.exec("UPDATE accounts SET deleted_at='2026-11-25T02:00:00Z' WHERE id=14");
+  let r = await f.service.collect(f.date); assert.equal(r.mappings.find(a => a.id === '14').main, 12);
+  assert.equal(r.mappings.find(a => a.id === '14').deleted, true);
+  await f.database.exec("INSERT INTO usage_logs(user_id,account_id,group_id,actual_cost,created_at) VALUES(2,999,1,4,'2026-11-25T00:00:00Z'); UPDATE usage_dashboard_daily SET total_requests=11");
+  r = await f.service.collect(f.date); assert.equal(r.siteComplete, false); assert(r.groups.every(g => g.diff === null));
+  await f.database.exec('DELETE FROM usage_logs WHERE account_id=999; UPDATE usage_dashboard_daily SET total_requests=10');
+  await f.database.exec('DELETE FROM usage_logs WHERE account_id=12');
+  r = await f.service.collect(f.date); assert.equal(r.siteComplete, false);
+  assert(r.groups.every(g => g.main === null && g.diff === null));
+  await f.database.exec('DELETE FROM usage_dashboard_daily');
+  const raw = await f.source.read('2026-11-24T16:00:00Z', '2026-11-25T16:00:00Z'); assert.equal(raw.complete, false);
+});
+
+test('day observations reject rotations but preserve previously observed historical identity', async t => {
+  const f = await fixture(t); await f.service.collect(f.date);
+  await f.database.query("UPDATE accounts SET credentials=$1::jsonb,updated_at='2026-11-25T03:00:00Z' WHERE id=11", [JSON.stringify({ api_key: f.secrets[2] })]);
+  let r = await f.service.collect(f.date); assert.equal(r.mappings.find(a => a.id === '11').matched, false);
+  assert.match(r.mappings.find(a => a.id === '11').reason, /身份/);
+  const previous = f.store.observe('other', f.date, [{ id: '1', identity: 'old', name: 'old', updatedAt: '2026-11-24T00:00:00Z' }], [],
+    '2026-11-24T16:00:00Z', '2026-11-25T16:00:00Z');
+  assert.equal(previous[0].stable, true);
+  const next = f.store.observe('other', f.date, [{ id: '1', identity: 'new', name: 'new', updatedAt: '2026-11-26T00:00:00Z' }], [],
+    '2026-11-24T16:00:00Z', '2026-11-25T16:00:00Z'); assert.equal(next[0].identity, 'old');
+});
+
+test('archive retries retain confirmed upstream values and allow incomplete main-site data to fill', async t => {
+  const f = await fixture(t);
+  f.controls.clock = new Date('2026-11-25T18:00:00Z');
+  await f.database.exec('UPDATE usage_dashboard_daily SET total_requests=11');
+  let r = await f.service.collect(f.date, { archive: true }); assert.equal(r.siteComplete, false);
+  f.items[0].keys.forEach(k => { k.cost = 0; k.upstreamAmount = 0; k.requests = 0; });
+  await f.database.exec('UPDATE usage_dashboard_daily SET total_requests=10');
+  r = await f.service.collect(f.date, { archive: true });
+  assert.equal(r.groups.find(g => g.groupRef === 'claude').upstream, 15);
+  assert.equal(r.groups.find(g => g.groupRef === 'claude').main, 35);
+  assert.equal(r.groups.find(g => g.groupRef === 'claude').diff, 20);
+  const calls = f.controls.calls.length;
+  const archived = await f.service.getReport({ date: f.date }); assert.equal(archived.source, 'archive');
+  assert.equal(f.controls.calls.length, calls);
+  f.controls.clock = new Date('2026-11-27T04:00:00Z');
+  await assert.rejects(f.service.collect(f.date, { archive: true }), { code: 'SUPPLIER_HISTORY_FETCH_FORBIDDEN' });
+  const missing = await f.service.getReport({ date: '2026-11-24' }); assert.equal(missing.source, 'history_missing');
+  assert.equal(f.controls.calls.length, calls);
+  const reopened = new SupplierGroupStore(f.directory); reopened.initialize();
+  try { assert.equal(reopened.get(f.service.scope(), f.date).groups.find(g => g.groupRef === 'claude').upstream, 15); } finally { reopened.close(); }
+});
+
+test('settings persist with audit, only current-day matching updates, and pagination is bounded', async t => {
+  const f = await fixture(t, { history: true });
+  const policy = f.store.settings(f.service.scope()); policy.aliases.ling = ['自定义别名']; policy.alert.amount = 100;
+  f.service.configure(policy, { id: 'admin' });
+  const report = await f.service.getReport({ date: f.date, pageSize: '1', page: '100' });
+  assert.equal(report.pagination.page, 6); assert.equal(report.groups.length, 1);
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM sg_audit').get().n, 1);
+  assert.deepEqual(f.store.settings(f.service.scope()), policy);
+  await assert.rejects(f.service.getReport({ date: '2026-02-30' }), { code: 'INVALID_DATE_RANGE' });
+  await assert.rejects(f.service.getReport({ groupId: 'bad' }), { code: 'INVALID_REQUEST' });
+  assert.throws(() => f.service.configure({ ...policy, alert: { ...policy.alert, amount: -1 } }), { code: 'INVALID_REQUEST' });
+  const g = (await f.service.getReport({ date: f.date })).groups.find(g => g.groupRef === 'pro');
+  assert.equal(g.status, 'upstream_above');
+  const detail = await f.service.getReport({ date: f.date, groupId: g.id, view: 'daily' });
+  assert.equal(detail.group.days.length, 7); assert(detail.group.days.every(d => d.upstream === 20));
+  assert.equal(detail.pagination.totalPages, 1);
+});
+
+test('single-flight, timeout, stale fallback and shutdown prevent late source writes', async t => {
+  const f = await fixture(t, { timeoutMs: 40 });
+  await f.service.getReport({ date: f.date });
+  f.controls.clock = new Date(f.controls.clock.getTime() + 61000);
+  let release; f.controls.delay = new Promise(resolve => { release = resolve; });
+  const count = f.controls.calls.length;
+  const [a, b] = await Promise.all([f.service.getReport({ date: f.date }), f.service.getReport({ date: f.date })]);
+  assert.equal(f.controls.calls.length, count + 1); assert.equal(a.stale, true); assert.equal(b.stale, true);
+  assert(a.groups.every(g => g.diff === null));
+  const saved = f.store.get(f.service.scope(), f.date);
+  release(); await new Promise(resolve => setTimeout(resolve, 15));
+  assert.deepEqual(f.store.get(f.service.scope(), f.date), saved);
+  await f.service.stop(); await assert.rejects(f.service.collect(f.date), { code: 'SERVICE_STOPPING' });
+});
+
+test('source/scope and finance-day changes discard responses and observations', async t => {
+  const f = await fixture(t), scope = f.service.scope(), original = f.source.read.bind(f.source);
+  f.source.read = async (...args) => { const r = await original(...args); f.pool.connectionString += '-changed'; return r; };
+  await assert.rejects(f.service.collect(f.date), { code: 'SOURCE_CHANGED' });
+  assert.equal(f.store.get(scope, f.date), null); assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM sg_observations').get().n, 0);
+  f.source.read = async (...args) => { const r = await original(...args); f.controls.clock = new Date('2026-11-26T17:00:00Z'); return r; };
+  await assert.rejects(f.service.collect(f.date), { code: 'SUPPLIER_HISTORY_FETCH_FORBIDDEN' });
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM sg_observations').get().n, 0);
+  f.source.read = original; f.controls.clock = new Date('2026-11-25T04:00:00Z');
+  const observe = f.store.observe.bind(f.store);
+  f.store.observe = (...args) => { const accounts = observe(...args); f.controls.clock = new Date('2026-11-26T17:00:00Z'); return accounts; };
+  await assert.rejects(f.service.collect(f.date), { code: 'SUPPLIER_HISTORY_FETCH_FORBIDDEN' });
+  assert.equal(f.store.db.prepare('SELECT COUNT(*) n FROM sg_observations').get().n, 0);
+});
+
+test('native source counts both 25-hour DST day and every overlapping source day', async t => {
+  const f = await fixture(t); f.config.financeTimezone = 'America/New_York'; f.config.sub2apiTimezone = 'UTC';
+  const day = DateTime.fromISO('2026-11-01', { zone: f.config.financeTimezone });
+  assert.equal(day.plus({ days: 1 }).diff(day, 'hours').hours, 25);
+  await f.database.exec(`DELETE FROM usage_logs; DELETE FROM usage_dashboard_daily;
+    INSERT INTO usage_logs(user_id,account_id,group_id,actual_cost,created_at) VALUES
+    (2,11,1,3,'2026-11-01T05:30:00Z'),(2,11,2,4,'2026-11-01T06:30:00Z'),(2,12,1,5,'2026-11-02T04:30:00Z');
+    INSERT INTO usage_dashboard_daily VALUES('2026-11-01',2),('2026-11-02',1)`);
+  let r = await f.source.read(day.toUTC().toISO(), day.plus({ days: 1 }).toUTC().toISO());
+  assert.equal(r.complete, true); assert.equal(r.usage.reduce((s, r) => s + Number(r.amount), 0), 12);
+  await f.database.exec("DELETE FROM usage_dashboard_daily WHERE bucket_date='2026-11-02'");
+  r = await f.source.read(day.toUTC().toISO(), day.plus({ days: 1 }).toUTC().toISO()); assert.equal(r.complete, false);
+});
+
+test('monitor client sends group reads with integration or SSO authentication and propagates cancellation', async () => {
+  const calls = [], config = { providerMonitorBaseUrl: 'http://synthetic.test', providerMonitorRequestTimeoutMs: 100 };
+  const fetcher = async (url, options) => { calls.push({ url, options }); return response(url.endsWith('/sso') ? { sessionToken: 'session' } : { items: [] }); };
+  const integration = new ProviderMonitorClient({ ...config, providerMonitorIntegrationToken: 'integration' }, fetcher);
+  await integration.getGroupDailyCosts({ from: '2026-11-25', archive: '1' });
+  assert.match(calls[0].url, /\/api\/integrations\/group-daily-costs\?/); assert.equal(calls[0].options.headers.authorization, 'Bearer integration');
+  const sso = new ProviderMonitorClient(config, fetcher); await sso.getGroupDailyCosts({}, 'main-site-token');
+  assert.equal(calls[1].options.headers.authorization, 'Bearer main-site-token'); assert.equal(calls[2].options.headers.authorization, 'Session session');
+  const signal = new AbortController(); signal.abort(); await assert.rejects(integration.getGroupDailyCosts({}, null, { signal: signal.signal }), { code: 'PROVIDER_MONITOR_TIMEOUT' });
+});
+
+test('HTTP group report/settings require administrator session and CSRF, and reject invalid upstream rows', async t => {
+  const f = await fixture(t), auth = new AuthService(f.config); t.after(() => auth.close());
+  const app = createApp({ config: f.config, auth, supplierGroups: f.service, settings: { getStatus: () => ({ setupRequired: false }) } });
+  const server = app.listen(0, '127.0.0.1'); await new Promise(resolve => server.once('listening', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve))); const url = `http://127.0.0.1:${server.address().port}`;
+  assert.equal((await fetch(`${url}/api/cost-analysis/supplier-groups`)).status, 401);
+  const login = await fetch(`${url}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'synthetic-admin-password' }) });
+  const cookie = login.headers.get('set-cookie').split(';')[0], session = await login.json();
+  let r = await fetch(`${url}/api/cost-analysis/supplier-groups`, { headers: { cookie } }); assert.equal(r.status, 200); assert.equal(r.headers.get('cache-control'), 'no-store');
+  const options = { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(f.store.settings(f.service.scope())) };
+  assert.equal((await fetch(`${url}/api/cost-analysis/supplier-groups/settings`, options)).status, 403);
+  options.headers['x-csrf-token'] = session.csrfToken; assert.equal((await fetch(`${url}/api/cost-analysis/supplier-groups/settings`, options)).status, 200);
+  f.items[0].keys.push(structuredClone(f.items[0].keys[0]));
+  await assert.rejects(f.service.collect(f.date), { code: 'SUPPLIER_GROUP_INVALID_SOURCE' });
+});

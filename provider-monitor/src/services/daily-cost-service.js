@@ -171,7 +171,7 @@ class DailyCostService {
     return budget.wait(this.inFlight.get(key));
   }
 
-  #cashCost(connection, snapshot, period, settings) {
+  valueCost(connection, snapshot, period, settings) {
     if (snapshot.amount === 0) return { cost: 0, reasons: [] };
     const end = Math.min(Date.parse(period.to), Date.parse(snapshot.fetched_at));
     const history = this.db.prepare(`SELECT * FROM provider_recharge_rate_history
@@ -214,7 +214,7 @@ class DailyCostService {
             if (Date.parse(period.from) >= Date.parse(generatedAt)) return { ...base, reasons: ['该资金日尚未发生'] };
             const connection = this.providers.get(id, { forAdapter: true });
             const snapshot = await this.#snapshot(connection, period, query.timezone, budget, refresh);
-            const valuation = this.#cashCost(connection, snapshot, period, settings);
+            const valuation = this.valueCost(connection, snapshot, period, settings);
             return { ...base, ...valuation, recordedCost: valuation.cost, complete: valuation.cost != null,
               requests: snapshot.requests, lastSyncedAt: snapshot.fetched_at, cached: snapshot.cached,
               upstreamCost: snapshot.amount, upstreamCurrency: snapshot.currency, accountKey: snapshot.account_key };
@@ -267,7 +267,7 @@ class DailyCostService {
       else if (this.now().getTime() - Date.parse(row.captured_at) > 3600000 || this.now().getTime() < Date.parse(row.captured_at)) reasons = ['余额快照超出有效时间，等待监控刷新'];
       else {
         const at = new Date(Date.parse(row.captured_at) - 1).toISOString();
-        const converted = this.#cashCost(connection, { amount: row.available, currency: row.currency, fetched_at: row.captured_at },
+        const converted = this.valueCost(connection, { amount: row.available, currency: row.currency, fetched_at: row.captured_at },
           { from: at, to: row.captured_at }, settings);
         cost = converted.cost; reasons = converted.reasons;
       }

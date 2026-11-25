@@ -72,6 +72,18 @@ class ProviderMonitorClient {
     return this.#request('/api/financial-balances', { headers: { authorization: `Session ${session.sessionToken}` } });
   }
 
+  async getGroupDailyCosts(query, accessToken = null, { signal } = {}) {
+    if (!this.baseUrl) throw new AppError('PROVIDER_MONITOR_NOT_CONFIGURED', '未配置供应商监控地址', { status: 503 });
+    let prefix = '/api/integrations', authorization = `Bearer ${this.integrationToken}`;
+    if (!this.integrationToken) {
+      if (!accessToken) throw new AppError('PROVIDER_MONITOR_AUTH_NOT_CONFIGURED', '分组消费需要管理员认证或集成 Token', { status: 409 });
+      const session = await this.#request('/api/auth/sso', { method: 'POST', headers: { authorization: `Bearer ${accessToken}` }, body: '{}', signal });
+      if (!session?.sessionToken) throw new AppError('PROVIDER_MONITOR_INVALID_RESPONSE', '供应商监控未返回有效会话', { status: 502 });
+      prefix = '/api'; authorization = `Session ${session.sessionToken}`;
+    }
+    return this.#request(`${prefix}/group-daily-costs?${new URLSearchParams(query)}`, { signal, headers: { authorization } });
+  }
+
   async createDailyCostsReader(accessToken = null, { signal } = {}) {
     if (!this.baseUrl) throw new AppError('PROVIDER_MONITOR_NOT_CONFIGURED', '未配置供应商监控服务地址', { status: 503 });
     if (this.integrationToken) {

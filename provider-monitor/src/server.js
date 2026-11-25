@@ -41,6 +41,7 @@ const { KeyProbeService } = require('./services/key-probe-service');
 const { KeyTtftAlertService } = require('./services/key-ttft-alert-service');
 const { GrossProfitService } = require('./services/gross-profit-service');
 const { DailyCostService } = require('./services/daily-cost-service');
+const { GroupDailyCostService } = require('./services/group-daily-cost-service');
 const { historyOptions, initialHistory } = require('./services/recharge-rate-history');
 const {
   RechargeLinkService,
@@ -701,6 +702,7 @@ function createApplication(options = {}) {
   const keyTtftAlerts = new KeyTtftAlertService({ db, notifications });
   const grossProfit = new GrossProfitService({ db, config });
   const dailyCosts = new DailyCostService({ db, config, providers, http, grossProfit });
+  const groupDailyCosts = new GroupDailyCostService({ db, config, providers, http, dailyCosts });
   const mappings = new MappingService({ db, config, sub2api, http });
   const automation = new AutomationService({ db, config, sub2api, mappings, notifications });
   const analysis = new AnalysisService({ db, config });
@@ -1058,6 +1060,10 @@ function createApplication(options = {}) {
   app.get('/api/integrations/financial-balances', (req, res, next) => {
     if (!secureTokenEqual(bearerToken(req), config.integrationToken)) return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
     try { res.set('Cache-Control', 'no-store').json(dailyCosts.balanceReport()); } catch (error) { next(error); }
+  });
+  app.get('/api/integrations/group-daily-costs', async (req, res, next) => {
+    if (!secureTokenEqual(bearerToken(req), config.integrationToken)) return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
+    try { res.set('Cache-Control', 'no-store').json(await groupDailyCosts.report(req.query)); } catch (error) { next(error); }
   });
   app.get('/api/integrations/latency-samples', (req, res, next) => {
     if (!secureTokenEqual(bearerToken(req), config.integrationToken)) {
@@ -1919,6 +1925,7 @@ function createApplication(options = {}) {
     }
   )));
   api.get('/daily-costs', async (req, res) => res.set('Cache-Control', 'no-store').json(await dailyCosts.report(req.query)));
+  api.get('/group-daily-costs', async (req, res) => res.set('Cache-Control', 'no-store').json(await groupDailyCosts.report(req.query)));
   api.get('/gross-profit', (req, res) => res.json(grossProfit.report({
     dimension: req.query.dimension,
     granularity: req.query.granularity,

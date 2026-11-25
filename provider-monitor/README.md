@@ -538,7 +538,7 @@ HTTPS iframe 会同时设置普通 Cookie 和分区 Cookie，并在 URL Fragment
 
 运营中心的成本分析需要供应商 ID、名称、适配器、启停状态和币种；每日真实收入直接读取上游账号日消费汇总，慢请求页继续读取已同步的请求耗时和用量。两个服务都使用 Sub2API SSO 时可复用当前管理员会话；Provider Monitor 使用本地认证时，应在两个服务中配置相同的 `PROVIDER_MONITOR_INTEGRATION_TOKEN`。该 Token 至少 32 个字符，现有范围包含 `GET /api/integrations/providers`、`GET /api/integrations/latency-samples`、`GET /api/integrations/daily-costs` 查询接口，以及前文计费核查专用的有界账单日志刷新。请求样本接口必须提供账号 ID 和最长 48 小时的时间窗口，只返回已映射上游 Key 的脱敏请求样本及同步覆盖，不返回凭据或请求正文，也不会发起模型探测。
 
-运营中心新版经营分析区分确认收入、消费额度、现金收付和预收余额，经营利润为确认收入减实际日成本及所属期间费用，不扣当前用户余额。完整口径见[经营核算说明](../operations-center/docs/cost-accounting.md)。本次须两服务配套更新，无新增环境变量；两侧持久化数据卷保持。
+运营中心新增供应商分组每日消费，对应只读集成接口 `GET /api/integrations/group-daily-costs`（管理员 SSO 为 `/api/group-daily-costs`）。按单日、资金时区和 CNY 读取 Sub2API / New API 的实际 Key 分组消费，复用历史充值倍率 / 汇率，与整个账号日汇总核验覆盖；重复上游账号不允许比较。每请求最多 8.5 秒，最多 3 个供应商及每供应商 3 个 Key 并发，单供应商最多 6 秒；目录上限 500 Key / 供应商、结果上限 1,000 条 Key / 分组，New API 日志上限 10,000 条，缺能力或截断不当零。独立表 `provider_group_daily_costs` 保存归档；今天实时，只有当天 01:00 后的昨天初始归档可拉取，完整归档不重查，部分归档只补未知 Key；其他历史只读本地值。需要运营中心和监控配套更新，并完成一次正常供应商目录同步生成完整 Key 指纹；没有完整 Key、历史用量或当日分组观察时不倒推关联。服务间接口含匹配指纹且需要现有集成 Token / 管理员会话，浏览器仅显示运营中心脱敏结果。完整口径、历史限制及本地演示见[供应商分组每日消费](../operations-center/docs/supplier-group-costs.md)。两侧沿用原数据卷，无新增环境变量或主站迁移，不执行资金写入。
 
 新增 `GET /api/integrations/financial-balances`，沿用相同集成 Token，管理员 SSO 对应 `GET /api/financial-balances`。只读启用供应商最新账号余额快照，不加总 Key 余额、不请求上游同步或推理，返回 CNY 当前倍率估值和快照时间；超过一小时、账号重复、无限余额、缺倍率 / 汇率时总额保持未知，逐项保留原因。不返回供应商凭据或原账号标识，运营中心仅将其展示为当前预付估值，不冒充历史期末或可提现金额。
 

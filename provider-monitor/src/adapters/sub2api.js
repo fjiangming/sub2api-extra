@@ -9,6 +9,7 @@ const {
   extractItems
 } = require('./base');
 const { AppError } = require('../errors');
+const { costKeyIdentity } = require('../security/cost-key-identity');
 const {
   LEGACY_CONFIGURED_API_KEY_ID,
   apiKeyIdentityHash,
@@ -920,6 +921,7 @@ class Sub2ApiAdapter extends ProviderAdapter {
           metadata: this.safeRaw({
             source: 'sub2api_key_billing',
             configuredKeyId: entry.id,
+            costKeyIdentity: costKeyIdentity(entry.key),
             billingScope,
             ...billing
           })
@@ -1143,6 +1145,31 @@ class Sub2ApiAdapter extends ProviderAdapter {
       throw new AppError('SCHEMA_MISMATCH', 'Sub2API daily summary is missing actual cost or request count', { status: 502 });
     }
     return { amount, requests, currency: 'USD', subjectId: account.remoteId, scope: 'account' };
+  }
+
+  async getKeyDailyGroupUsage({ key, date, timezone }) {
+    if (usesApiKey(this.connection) || !/^[1-9]\d*$/.test(String(key.remote_id))) {
+      throw new AppError('CAPABILITY_UNSUPPORTED', 'Key group usage requires account credentials', { status: 409 });
+    }
+    const query = new URLSearchParams({ start_date: date, end_date: date, timezone,
+      api_key_id: String(key.remote_id), include_trend: 'false', include_model_stats: 'false', include_group_stats: 'true' });
+    const response = await this.authenticatedRequest(`/api/v1/usage/dashboard/snapshot-v2?${query}`, { retries: 0 });
+    const data = unwrapEnvelope(response.data);
+    if (!Array.isArray(data?.groups)) throw new AppError('SCHEMA_MISMATCH', 'Missing historical group usage', { status: 502 });
+    const rows = data.groups.map(row => ({ groupRef: String(row.group_id), groupName: row.group_name,
+      amount: summaryNumber(row.actual_cost), requests: summaryNumber(row.requests), currency: 'USD' }));
+    if (new Set(rows.map(r => r.groupRef)).size !== rows.length || rows.some(r => !/^[1-9]\d*$/.test(r.groupRef) || r.amount == null || r.amount < 0 ||
+        !Number.isSafeInteger(r.requests) || r.requests < 0)) {
+      throw new AppError('SCHEMA_MISMATCH', 'Invalid historical group usage', { status: 502 });
+    }
+    const totals = await this.authenticatedRequest(`/api/v1/usage/stats?${query}`, { retries: 0 });
+    const stats = unwrapEnvelope(totals.data), amount = summaryNumber(stats?.total_actual_cost);
+    const requests = summaryNumber(stats?.total_requests);
+    if (amount == null || !Number.isSafeInteger(requests) || requests < 0 || Math.abs(rows.reduce((sum, r) => sum + r.amount, 0) - amount) > 1e-7 ||
+        rows.reduce((sum, r) => sum + r.requests, 0) !== requests) {
+      throw new AppError('SCHEMA_MISMATCH', 'Group totals do not cover key usage', { status: 502 });
+    }
+    return rows;
   }
 
   async getRequestLogs(options = {}) {

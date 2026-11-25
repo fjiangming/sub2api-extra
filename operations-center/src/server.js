@@ -22,6 +22,9 @@ const { MetricsService } = require('./services/metrics-service');
 const { UserProfilesService } = require('./services/user-profiles-service');
 const { CostAnalysisService } = require('./services/cost-analysis-service');
 const { DailyProfitService } = require('./services/daily-profit-service');
+const { SupplierGroupStore } = require('./supplier-group-store');
+const { SupplierGroupSource } = require('./services/supplier-group-source');
+const { SupplierGroupService } = require('./services/supplier-group-service');
 const { UserMessagesService } = require('./services/user-messages-service');
 const { BillingRecoveryService } = require('./services/billing-recovery-service');
 const { BillingRecoveryStore } = require('./billing-recovery-store');
@@ -152,6 +155,13 @@ async function main() {
   const dailyProfitStore = new DailyProfitStore(config.dataDir);
   dailyProfitStore.initialize();
   const dailyProfit = new DailyProfitService({ analysis: costAnalysis, store: dailyProfitStore, config });
+  const supplierGroupStore = new SupplierGroupStore(config.dataDir);
+  let supplierGroups = null;
+  try {
+    supplierGroupStore.initialize();
+    supplierGroups = new SupplierGroupService({ source: new SupplierGroupSource({ pool: database.read, config }),
+      store: supplierGroupStore, providerMonitor, sub2api, config });
+  } catch { console.warn('supplier group costs unavailable: STORE_INITIALIZATION_FAILED'); }
   const accountingStore = new AccountingStore(config.dataDir, AccountingService.scope(config));
   accountingStore.initialize();
   const accounting = new AccountingService({ pool: database.read, inspector, config,
@@ -178,7 +188,7 @@ async function main() {
     sub2api
   });
   const app = createApp({
-    config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, accounting, cashFlow, messages, domainAccess, groupMonitor, conversations, conversationArchive, conversationRead, conversationExport, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
+    config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, supplierGroups, accounting, cashFlow, messages, domainAccess, groupMonitor, conversations, conversationArchive, conversationRead, conversationExport, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings
   });
   const server = http.createServer(app);
   server.requestTimeout = 120000;
@@ -192,6 +202,7 @@ async function main() {
   storage.start();
   scheduler.start();
   dailyProfit.start();
+  supplierGroups?.start();
   cashFlow.start();
   billingRecovery.start();
   domainAccess?.start();
@@ -217,6 +228,7 @@ async function main() {
     await conversationArchive?.stop();
     await domainAccess?.stop();
     await dailyProfit.stop();
+    await supplierGroups?.stop();
     await cashFlow.stop();
     await billingImports.stop();
     await billingRecovery.stop();
@@ -224,6 +236,7 @@ async function main() {
     auth.close();
     await new Promise((resolve) => server.close(resolve));
     dailyProfitStore.close();
+    supplierGroupStore.close();
     accountingStore.close();
     domainStore.close();
     groupMonitorStore.close();

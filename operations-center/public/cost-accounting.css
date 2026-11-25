@@ -1,4 +1,39 @@
 #cost-accounting-root { min-width: 0; }
+.supplier-group-toolbar { display: flex; align-items: end; flex-wrap: wrap; gap: 12px 18px; margin-bottom: 16px; }
+.supplier-group-toolbar > .muted { font-size: 12px; margin-left: auto; }
+.supplier-group-toolbar > label { min-width: 180px; }
+.supplier-group-toolbar input,.supplier-group-toolbar select { width: 100%; min-width: 0; }
+.supplier-group-tabs { margin: 14px 0; border-bottom: 1px solid var(--line); }
+.supplier-group-metrics { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 18px; margin: 18px 0; }
+.supplier-group-metrics > div { min-width: 0; }
+.supplier-group-metrics span,.supplier-group-metrics small { display: block; color: var(--muted); font-size: 12px; }
+.supplier-group-metrics strong { display: block; font-size: 23px; font-weight: 600; margin: 6px 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.supplier-group-table { min-width: 930px; background: var(--surface); }
+.supplier-group-account-table { min-width: 740px; background: var(--surface); }
+#accounting-groups td,#accounting-groups th { padding: 11px 10px; }
+#accounting-groups td small { display: block; color: var(--muted); margin-top: 4px; }
+.supplier-group-status { color: var(--green); background: var(--green-soft); border-radius: 4px; padding: 3px 7px; font-size: 12px; white-space: nowrap; }
+.supplier-group-status.warn { color: var(--amber); background: var(--amber-soft); }
+.supplier-group-status.bad { color: var(--red); background: var(--red-soft); }
+.supplier-group-heading { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 18px; }
+.supplier-group-heading h2 { margin: 0; font-size: 16px; }
+.supplier-group-heading small { color: var(--muted); }
+.supplier-group-key-toolbar { display: flex; gap: 12px 20px; align-items: end; flex-wrap: wrap; margin: 12px 0; }
+.supplier-group-key-toolbar select { max-width: 100%; }
+.supplier-group-check { display: flex; align-items: center; gap: 8px; }
+.supplier-group-check input { width: 17px; min-height: 17px; margin: 0; }
+.supplier-group-filter { margin: 14px 0; }
+.supplier-group-split { display: flex; justify-content: space-between; gap: 16px; font-size: 12px; color: var(--muted); }
+@media(max-width:600px) {
+  .supplier-group-metrics { grid-template-columns: minmax(0,1fr); gap: 14px; }
+  .supplier-group-metrics > div { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 4px 10px; }
+  .supplier-group-metrics strong { grid-column: 2; grid-row: 1 / 3; margin: 0; font-size: 20px; }
+  .supplier-group-metrics small { grid-column: 1; }
+  .supplier-group-toolbar > label { flex: 1 1 160px; min-width: 160px; }
+  .supplier-group-toolbar input,.supplier-group-toolbar select { width: 100%; font-size: 16px; }
+  .supplier-group-toolbar > .muted { margin-left: 0; flex-basis: 100%; }
+  .supplier-group-key-toolbar > label { width: 100%; }
+}
 .accounting-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--line); margin-bottom: 18px; overflow-x: auto; }
 .accounting-tabs button { color: var(--muted); border: 0; border-bottom: 2px solid transparent; background: transparent; padding: 12px 0; white-space: nowrap; }
 .accounting-tabs button[aria-selected="true"] { color: var(--green); border-bottom-color: var(--green); font-weight: 600; }

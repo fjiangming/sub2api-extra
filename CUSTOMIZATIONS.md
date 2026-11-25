@@ -1,5 +1,40 @@
 # 个性化功能维护台账
 
+## 2026-11-25：供应商分组每日消费正式实现
+
+用户在确认前述 Demo 后明确要求“开始开发”。本轮在现有运营中心成本分析内实现分组消费监控，配套扩展 Provider Monitor 只读取数接口；不修改主站计费契约、不扣余额、不连接生产、不提交 / 推送或部署。保留原有 Provider Monitor CI 测试修改及独立审计文档和台账。
+
+| 文件 | 变更与维护要求 |
+| --- | --- |
+| `provider-monitor/src/security/cost-key-identity.js`、`src/services/sync-service.js`、`src/adapters/sub2api.js` | 普通目录同步在脱敏前生成完整 Key 的 SHA-256 匹配指纹，统一 Bearer / sk- 前缀，拒绝短值和脱敏字符串；配置 Key 来源也保存指纹，不落原文。Sub2API 新增按 Key / 日的真实上游分组查询，与 Key 汇总核验金额和请求数，不用当前分组估算有消费的历史。 |
+| `provider-monitor/src/adapters/one-api-family.js` | New API 消费日志按精确 token_id 归集实际 group；严格单位、时间边界、唯一日志 ID、分页数量 / 总数和上限，缺失、重复、变化或截断保持未知，其他类型不回退估算。 |
+| `provider-monitor/src/services/group-daily-cost-service.js`、`src/services/daily-cost-service.js`、`src/server.js` | 复用充值倍率 / 汇率估值；新增独立日分组快照表及集成 / 管理员查询接口。单供应商 6 秒、整份 8.5 秒，供应商 / Key 各最多 3 并发，截止时间覆盖排队和凭据协调；校验账号总量覆盖、重复上游账号、配置 / 日期变化和迟到写入。仅今日实时和 01:00 后昨天初始归档可拉取，完整归档不重查，部分归档只补未知 Key，已知历史成本不被零覆盖；历史零分组需当日观察。 |
+| `operations-center/src/services/supplier-group-source.js` | 只读可重复读事务读取账号、完整 Key 指纹及按 account_id / group_id 汇总的 actual_cost，排除 ID 1；保留使用过的停用 / 已删账号，不乘 account_groups。与所有重叠原生日桶核对完整性，超限不截断，原始 Key 不返回和不落盘。 |
+| `operations-center/src/services/supplier-group-matcher.js` | 全名、名称片段和可配置简称形成候选，再以完整 Key 唯一确定供应商 / 上游分组。上游 Key 只计一次，主站实际用量逐条归集；未关联 Key、歧义、身份变化和潜在漏关联阻止相关组计算差额。主站零和来源未知区分，不分摊抽奖 / 其他费用，不将差额认定漏记或经营净利润。 |
+| `operations-center/src/supplier-group-store.js`、`src/services/supplier-group-service.js` | 新增持久 SQLite 归档、日身份观察、简称 / 提醒设置和管理员审计。今日缓存 / 后台每分钟采集，01:00 初始归档昨天、同日补缺；历史页面只读归档，归档冻结已知上游关系和金额同时允许主站补齐。新设置只重算今日关系，历史关系不倒推。分页、七日下钻、45 秒期限、取消 / 单次在途合并、切源 / 跨日 / 停止及观察与结果原子提交保护。 |
+| `operations-center/src/provider-monitor-client.js`、`src/server.js`、`src/app.js` | 集成 Token / 管理员 SSO 读取，初始化 / 后台 / 退出生命周期接入。新增管理员 GET 报表和 CSRF / 限流保护的 PUT 设置，错误脱敏、no-store，模块初始化失败独立显示不可用。 |
+| `operations-center/public/supplier-group-ui.js`、`public/cost-accounting-ui.js`、`public/cost-accounting.css`、`public/index.html` | 成本分析增加供应商分组消费 Tab；独立日期 / 供应商筛选、已知和可比小计、分组表、Key 下多账号、主站分组拆分、七日历史、关联核对依据、简称 / 提醒设置。复用原风格与图标，窄屏表内滚动；离开取消在途读取，失败隐藏本次差额，静态版本更新。 |
+| `operations-center/tests/supplier-group-fixture.js`、`tests/supplier-groups.test.js`、`provider-monitor/tests/group-daily-cost.test.js` | 真实 PGlite / SQLite 与适配器专项：同 Key 多账号和跨组防重、停用 / 已删、名称片段 / 歧义、指纹保密、零 / 缺失、实际分页、DST、归档重试保留、设置审计、认证 / CSRF、截止时间 / 迟到写入及切源 / 跨日事务回滚。 |
+| `operations-center/scripts/supplier-group-preview.cjs`、`scripts/supplier-group-browser-check.cjs`、`scripts/accounting-preview.cjs`、`scripts/accounting-browser-check.cjs`、`package.json` | 新增完全隔离本地示例及五视口浏览器交互 / 布局检查；原核算示例支持注入分组模块，原两 Tab 断言更新为三个，同步过期的现金历史四指标断言到已上线含抽奖字段的五指标，不改变原抽奖业务。语法门禁纳入新文件，无依赖或锁文件变更。 |
+| `operations-center/docs/supplier-group-costs.md`、`docs/cost-accounting.md`、`README.md`、`provider-monitor/README.md`、`CUSTOMIZATIONS.md` | 记录匹配、金额、历史、来源上限、上游能力和两组件配套要求；上线后需完成一次正常目录同步，缺少完整 Key 或历史观察时保持待核对，无新配置或主站迁移。 |
+
+验证：运营中心全量 **851 项**、Provider Monitor 全量 **370 项**通过；最后细化历史零归属、分页字段及孤立用量保护后，相关运营中心专项 **12 项**、监控及适配器专项 **34 项**复核通过。`npm run check` 与变更模块语法检查、最终 `git diff --check` 通过。新增桌面 / 宽屏 / 390px / 320px / 深色五组浏览器检查及原核算桌面 / 手机 / 窄屏 / 深色四组回归通过，覆盖查询、跨组明细、历史只读 / 缺失、匹配核对、设置保存、提醒阈值、现金 CRUD、图表与布局；截图复核后调整手机筛选换行并隐藏分组模式无关的期间筛选，0 页面脚本错误、无整页横向溢出。
+
+本地模拟预览已启动于 `http://127.0.0.1:19882/preview`，进入成本分析的供应商分组消费；所有演示使用模拟供应商和临时本地数据，不调用真实供应商、主站资金接口或生产服务器。原型及正式实现截图继续保留在会话可视化目录。尚未进行 Docker / Linux 环境验证、GitHub 提交或生产部署；启用需运营中心和 Provider Monitor 配套更新及一次正常目录同步。
+
+用户随后明确要求提交 GitHub。本次提交并推送上述供应商分组消费实现、测试、文档和相关 Demo / 实现台账至 `origin/main`；推送前 fetch 确认本地与远端同步。独立 Provider Monitor CI 时序测试、生产维护 / 发布复核台账及其他未跟踪审计文档保留本地，不纳入提交。沿用现有 GitHub 测试与 GHCR 双架构镜像工作流，构建 / 发布状态须按本次完整 SHA 核对；本次不部署服务器或执行真实消费。
+
+## 2026-11-25：供应商分组每日消费对比 Demo，等待确认
+
+用户要求在成本分析内按供应商的上游分组，汇总同一 Key 对应的多个主站账号及跨主站分组的每日消费，先出 Demo、确认后再开发。本轮仅制作会话内独立交互原型并记录台账，沿用运营中心绿色导航、紧凑表格与浅色 / 深色样式；没有修改正式运营中心源码、接口、配置、数据库、业务测试或部署入口，保留其他会话未提交改动。
+
+- 会话目录 `C:/Users/Apricity/.codex/visualizations/2026/11/25/01a211a2-1564-79d2-9613-351205fccc4d/` 的 `supplier-group-consumption-demo.html`：使用 3 个虚构供应商、6 个上游分组、8 个上游 Key、14 个主站账号和 7 天数据；11 个账号已关联，3 个账号待核对，另有 1 个上游 Key 无主站账号。支持日期 / 供应商选择、分组消费与差额、提醒门槛、Key 下全部账号、实际请求所属主站分组拆分、每日历史对比及名称 / Key 匹配依据。
+- 原型先用供应商全名或已确认简称形成名称候选，再用完整 Key 的精确身份交叉确定唯一供应商 / 上游分组；尾号只作展示。名称缺失、简称歧义和 Key 未匹配独立展示，不强行归组。上游 Key 只计一次，主站按原始用量记录归集；覆盖同 Key 多账号、同账号跨组、停用账号当日消费，以及账号换 Key 前后的当日关联快照。
+- 对比暂沿用现有主站用户计费消费口径，上游使用当日折算的实际消费；差额为主站对应消费减上游实际消费，不直接认定漏记或经营净利润，不在分组内摊抽奖及其他费用。缺失不当零，未关联 Key 的分组保留已知金额但不进入可比组差额；已知小计、可比分组范围和真实零消费分别展示。历史只读归档及不以当前分组倒推历史的约束在口径中明确。
+- `supplier-group-consumption-preview.html` 为技能生成的本地验证包装；`supplier-group-demo-check.cjs`、`supplier-group-verification.json` 及截图只在该会话目录，不加入产品构建或业务测试。演示交互仅保存不含凭据的日期、筛选、明细视图和提醒门槛，不调用业务接口。
+
+验证：原型脚本通过 Node 编译；Chrome / Playwright 在 1440px 桌面、1060px 嵌入、390px / 320px 手机及深色五布局通过汇总金额、同 Key 多账号去重、跨组拆分、历史换 Key 快照、停用账号、来源缺失、真实零值、未关联 Key、提醒开关 / 非法金额、匹配核对、日期边界及键盘切 Tab 检查，0 页面脚本错误、0 业务接口请求、无整页横向溢出。桌面、手机与深色截图复核；未运行无关产品全量测试、连接生产、发起真实消费、修改资金、提交 GitHub 或部署。正式采集、持久化与生产接入继续等待用户确认。
+
 ## 2026-11-25：补全 JSONL 卡住恢复与本地资源等待保护
 
 用户同意继续优化上传跟不上采集的问题。本轮在此前未提交的独立 JSONL 准入和过期租约恢复基础上，仅修改运营中心；使用本地虚构正文、临时 SQLite、loopback S3 和真实子进程验证，不连接生产、不请求真实 Bucket、不修改服务器配置、不提交 GitHub 或部署。保留活动中心、Provider Monitor 及其他未提交审计记录；不改主站采集、推理、用户资金和计费契约。
