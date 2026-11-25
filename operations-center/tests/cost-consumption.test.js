@@ -177,6 +177,14 @@ function dailyCosts(from, to, change = (item) => item) {
 function withSuppliers(costs, getDailyCosts = async ({ from, to }) => dailyCosts(from, to)) {
   costs.providerMonitor = { configured: () => true, integrationToken: 'integration', getDailyCosts,
     async createDailyCostsReader(token) { return (query) => this.getDailyCosts(query, token); } };
+  // Aggregation fixtures inject stored daily sources. Network policy is tested separately.
+  const calculate = costs.getDailyProfit.bind(costs);
+  costs.getDailyProfit = (input, options = {}) => calculate(input, {
+    supplierReader: async query => {
+      if (!costs.providerMonitor.configured()) throw new AppError('PROVIDER_MONITOR_NOT_CONFIGURED', 'not configured');
+      return costs.providerMonitor.getDailyCosts(query, options.accessToken || null);
+    }, ...options
+  });
   return costs;
 }
 
@@ -214,6 +222,45 @@ test('daily real profit subtracts used lottery rewards by finance date and ignor
   assert.equal(row.complete, true);
   assert.equal(report.summary.lotteryReward, 7.25);
   await database.exec('DELETE FROM redeem_codes WHERE id >= 901');
+});
+
+test('legacy daily archives gain lottery deductions without reading expired supplier summaries', async t => {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+  const { DailyProfitStore } = require('../src/daily-profit-store');
+  const { DailyProfitService } = require('../src/services/daily-profit-service');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'daily-profit-lottery-'));
+  const store = new DailyProfitStore(directory);
+  store.initialize();
+  const analysis = withSuppliers(service());
+  let clock = new Date('2026-01-02T04:00:00Z'), reads = 0;
+  analysis.now = () => new Date(clock);
+  analysis.providerMonitor.getDailyCosts = async ({ from, to }) => { reads++; return dailyCosts(from, to); };
+  const archive = new DailyProfitService({ analysis, store, config: analysis.config, now: () => new Date(clock) });
+  t.after(async () => { await archive.stop(); store.close(); fs.rmSync(directory, { recursive: true, force: true });
+    await database.exec('DELETE FROM redeem_codes WHERE id = 904'); });
+  const date = '2026-01-01', query = { start: date, end: date };
+  await archive.getDailyProfit(query);
+  await archive.drain();
+  const snapshot = store.list(archive.scope(), date, date)[0];
+  assert.equal(snapshot.row.supplierConsumption, 2.5);
+  delete snapshot.row.lotteryReward;
+  delete snapshot.row.lotteryComplete;
+  store.db.prepare('UPDATE daily_profit_snapshots SET payload=? WHERE scope=? AND date=?')
+    .run(JSON.stringify({ row: snapshot.row, notices: [] }), archive.scope(), date);
+  await database.exec(`INSERT INTO redeem_codes (id, used_by, used_at, status, type, value, notes, code)
+    VALUES (904, 2, '2026-01-01T08:00:00Z', 'used', 'balance', 7.25,
+      '活动奖励; activity=recharge-lottery; reward=11111111-1111-4111-8111-111111111111; batch=22222222-2222-4222-8222-222222222222', 'AC-${'d'.repeat(48)}')`);
+  clock = new Date('2026-01-15T04:00:00Z');
+  analysis.providerMonitor.createDailyCostsReader = async () => { throw new Error('Do not access cleared upstream history'); };
+  assert.equal((await archive.getDailyProfit(query)).items[0].status, 'lottery_incomplete');
+  await archive.drain();
+  const row = (await archive.getDailyProfit(query)).items[0];
+  assert.equal(reads, 1);
+  assert.equal(row.supplierConsumption, 2.5);
+  assert.equal(row.providers[0].cost, 2.5);
+  assert.equal(row.lotteryReward, 7.25);
+  assert.equal(row.profit, 1335.37500001);
+  assert.equal(row.complete, true);
 });
 
 test('the lightweight financial report skips usage scans and real-income trends aggregate the exact daily rows', async () => {
@@ -303,7 +350,7 @@ test('daily profit accepts verified zero cost and does not infer cost from an un
   }
 });
 
-test('daily supplier queries read each finance day once across year boundaries and pass the SSO token', async () => {
+test('injected supplier sources read each finance day once across year boundaries and preserve access context', async () => {
   const calls = [];
   const costs = withSuppliers(service(), async (query, token) => {
     calls.push({ query, token });
@@ -337,7 +384,7 @@ test('one failed day retains all other supplier costs and marks only the missing
   assert.doesNotMatch(report.notices.join(), /private upstream details/);
 });
 
-test('explicit daily profit refresh bypasses upstream summary caches for every selected date', async () => {
+test('daily aggregation passes explicit refresh to injected sources without changing date boundaries', async () => {
   const queries = [];
   const costs = withSuppliers(service(), async (query) => { queries.push(query); return dailyCosts(query.from, query.to); });
   await costs.getDailyProfit({ start: '2026-01-01', end: '2026-01-02', refresh: '1' });
@@ -421,4 +468,61 @@ test('daily supplier HTML, old report contracts and duplicate dates are diagnose
     assert.match(report.notices.join(), /数据格式不兼容/);
     assert.equal(report.items[0].profit, null);
   }
+});
+
+test('the shared supplier fetch boundary rejects history, future days and ranges before any login or monitor request', async () => {
+  const costs = service();
+  costs.now = () => new Date('2026-01-03T04:00:00Z');
+  let logins = 0, sessions = 0, requests = 0;
+  costs.sub2api = { configured: () => true, login: async () => { logins++; return 'synthetic'; } };
+  costs.providerMonitor = { configured: () => true,
+    createDailyCostsReader: async () => { sessions++; return async () => { requests++; }; } };
+  for (const archiveDate of [null, '2026-01-01', '2026-01-02']) {
+    const read = await costs.createSupplierDailyCostsReader(null, { archiveDate });
+    for (const query of [
+      { from: '2026-01-01', to: '2026-01-01', refresh: '1' },
+      { from: '2026-01-02', to: '2026-01-03', refresh: '1' },
+      { from: '2026-01-04', to: '2026-01-04' }
+    ]) await assert.rejects(read(query), { code: 'SUPPLIER_HISTORY_FETCH_FORBIDDEN' });
+  }
+  await assert.rejects(costs.getSupplierDailyCost('2026-01-02', 'p1'), { code: 'SUPPLIER_HISTORY_FETCH_FORBIDDEN' });
+  const report = await costs.getDailyProfit({ start: '2026-01-01', end: '2026-01-02', recalculate: '1', refresh: '1' });
+  assert.equal(report.summary.supplierConsumption, null);
+  assert.match(report.notices.join(), /仅当天归档前一天时允许拉取上游/);
+  assert.equal(logins, 0); assert.equal(sessions, 0); assert.equal(requests, 0);
+});
+
+test('the shared fetch boundary permits live today and yesterday only with an archive grant after 01:00', async () => {
+  const costs = service();
+  let clock = new Date('2026-01-02T16:30:00Z'), sessions = 0;
+  costs.now = () => new Date(clock);
+  const queries = [];
+  costs.providerMonitor = { configured: () => true, integrationToken: 'synthetic',
+    createDailyCostsReader: async () => { sessions++; return async query => { queries.push(query); return dailyCosts(query.from, query.to); }; } };
+  const read = await costs.createSupplierDailyCostsReader(null, { archiveDate: '2026-01-02' });
+  const yesterday = { from: '2026-01-02', to: '2026-01-02', refresh: '1' };
+  await assert.rejects(read(yesterday), { code: 'SUPPLIER_HISTORY_FETCH_FORBIDDEN' });
+  assert.equal(sessions, 0);
+  clock = new Date('2026-01-02T17:00:00Z');
+  await read(yesterday);
+  await read({ from: '2026-01-03', to: '2026-01-03' });
+  assert.equal(sessions, 1);
+  assert.deepEqual(queries.map(query => query.from), ['2026-01-02', '2026-01-03']);
+  clock = new Date('2026-01-03T16:00:00Z');
+  await assert.rejects(read(yesterday), { code: 'SUPPLIER_HISTORY_FETCH_FORBIDDEN' });
+  assert.equal(queries.length, 2);
+});
+
+test('a finance-day change during authentication cannot send a newly expired history query', async () => {
+  const costs = service();
+  let clock = new Date('2026-01-03T15:59:59Z'), requests = 0;
+  costs.now = () => new Date(clock);
+  costs.sub2api = { configured: () => true, login: async () => {
+    clock = new Date('2026-01-03T16:00:00Z'); return 'synthetic';
+  } };
+  costs.providerMonitor = { configured: () => true,
+    createDailyCostsReader: async () => async () => { requests++; } };
+  const read = await costs.createSupplierDailyCostsReader(null, { archiveDate: '2026-01-02' });
+  await assert.rejects(read({ from: '2026-01-02', to: '2026-01-02' }), { code: 'SUPPLIER_HISTORY_FETCH_FORBIDDEN' });
+  assert.equal(requests, 0);
 });

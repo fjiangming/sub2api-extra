@@ -45,22 +45,69 @@ class DailyProfitService {
 
   localNow() { return DateTime.fromJSDate(this.now(), { zone: this.config.financeTimezone }); }
 
+  canFetchSupplier(date, archivePreviousDay = false) {
+    const local = this.localNow();
+    return date === local.toISODate() || (archivePreviousDay && local.hour >= 1 &&
+      date === local.minus({ days: 1 }).toISODate());
+  }
+
+  archivedSupplierReader(date, snapshot) {
+    const row = snapshot?.row || pendingRow(date);
+    return async () => ({
+      range: { start: date, end: date }, currency: 'CNY', timezone: this.config.financeTimezone,
+      source: 'upstream_daily_summary', scope: 'account', providerFilter: 'scheduled_enabled',
+      items: [{ date, cost: row.supplierConsumption, complete: row.supplierComplete === true,
+        requests: row.supplierRequests ?? null, providers: row.providers || [] }]
+    });
+  }
+
+  retrySupplierReader(date, snapshot, read, accessToken) {
+    if (!snapshot?.row.providers?.length) return read;
+    return async (query, { signal } = {}) => {
+      const providers = [];
+      for (const provider of snapshot.row.providers) {
+        signal?.throwIfAborted();
+        // An initial archive retry may fill gaps in yesterday only; known costs are immutable.
+        if (provider.complete === true && provider.cost != null) providers.push(provider);
+        else try {
+          const result = await this.analysis.getSupplierDailyCost(date, provider.id, accessToken,
+            { signal, supplierReader: read });
+          providers.push(result.provider);
+        } catch { providers.push(provider); }
+      }
+      const complete = providers.every(provider => provider.complete === true && provider.cost != null &&
+        new Decimal(provider.cost).isFinite() && new Decimal(provider.cost).gte(0));
+      return { ...(await this.archivedSupplierReader(date, snapshot)(query)),
+        items: [{ date, providers, complete,
+          cost: complete ? providers.reduce((sum, provider) => sum.plus(provider.cost), new Decimal(0)).toDecimalPlaces(8).toNumber() : null,
+          requests: providers.every(provider => provider.requests != null)
+            ? providers.reduce((sum, provider) => sum + Number(provider.requests), 0) : null }] };
+    };
+  }
+
   ready(accessToken) {
     if (this.analysis.accounting && this.analysis.pool?.configured?.() !== false) return true;
     return this.analysis.pool?.configured?.() !== false && this.analysis.providerMonitor?.configured() && Boolean(
       this.analysis.providerMonitor.integrationToken || accessToken || this.analysis.sub2api?.configured());
   }
 
-  async supplierReader(accessToken, signal) {
+  async supplierReader(date, accessToken, signal, archivePreviousDay = false) {
+    if (!this.canFetchSupplier(date, archivePreviousDay)) {
+      throw new AppError('SUPPLIER_HISTORY_FETCH_FORBIDDEN', '历史供应商消费禁止重新拉取', { status: 409 });
+    }
     if (!this.analysis.createSupplierDailyCostsReader) return null;
-    const key = crypto.createHash('sha256').update(JSON.stringify([this.scope(), accessToken,
+    const archiveDate = archivePreviousDay ? date : null;
+    const key = crypto.createHash('sha256').update(JSON.stringify([this.scope(), accessToken, date, archiveDate,
       this.analysis.providerMonitor?.integrationToken, this.config.sub2apiAdminToken,
       this.config.sub2apiAdminEmail, this.config.sub2apiAdminPassword,
       this.analysis.sub2api?.activeRuntimeToken?.()])).digest('hex');
     if (this.readerCache?.key === key && this.readerCache.until > this.now().getTime()) return this.readerCache.read;
-    const reader = await this.analysis.createSupplierDailyCostsReader(accessToken, { signal });
+    const reader = await this.analysis.createSupplierDailyCostsReader(accessToken, { signal, archiveDate });
     signal?.throwIfAborted();
     const read = async (query, options) => {
+      if (query.from !== date || query.to !== date || !this.canFetchSupplier(date, archivePreviousDay)) {
+        throw new AppError('SUPPLIER_HISTORY_FETCH_FORBIDDEN', '历史供应商消费禁止重新拉取', { status: 409 });
+      }
       try { return await reader(query, options); }
       catch (error) { if (this.readerCache?.key === key) this.readerCache = null; throw error; }
     };
@@ -70,6 +117,7 @@ class DailyProfitService {
 
   scheduleDue() {
     const local = this.localNow();
+    const yesterday = local.minus({ days: 1 }).toISODate();
     const target = local.minus({ days: local.hour >= 1 ? 1 : 2 }).toISODate();
     const scope = this.scope();
     const previous = this.store.metadata(scope, 'scheduled_through');
@@ -77,7 +125,7 @@ class DailyProfitService {
     const days = [];
     // Bound recovery after a long outage; later ticks continue from the saved cursor.
     for (let count = 0; date <= target && count < 366; count++, date = addUtcDays(date, 1)) {
-      days.push({ date });
+      days.push({ date, fetchSupplier: date === yesterday && this.store.list(scope, date, date).length === 0 });
     }
     this.store.enqueueDays(scope, days);
     if (days.length) this.store.metadata(scope, 'scheduled_through', days.at(-1).date);
@@ -124,7 +172,7 @@ class DailyProfitService {
         const job = this.store.claim(this.scope());
         if (!job) break;
         try {
-          const report = await this.calculateDay(job.date, accessToken);
+          const report = await this.calculateDay(job.date, accessToken, { archivePreviousDay: job.fetch_supplier === 1 });
           const row = report.items[0];
           if (!row || row.date !== job.date) throw new Error('Invalid calculated day');
           this.store.finish(job, { row, notices: report.notices }, row.complete &&
@@ -141,8 +189,14 @@ class DailyProfitService {
     try { await this.running; } finally { this.running = null; }
   }
 
-  async calculateDay(date, accessToken) {
+  async calculateDay(date, accessToken, { archivePreviousDay = false } = {}) {
     const scope = this.scope();
+    const snapshot = this.store.list(scope, date, date)[0];
+    // ONLY today's initial archive of yesterday may fetch historical supplier consumption.
+    // Every rearchive, rule migration and manual refresh MUST reuse persisted values.
+    // Missing older history stays unknown; an upstream zero must never replace it.
+    const fetchSupplier = this.canFetchSupplier(date, archivePreviousDay) &&
+      (date === this.localNow().toISODate() || snapshot?.row.supplierComplete !== true);
     const controller = new AbortController();
     let timer;
     const timeout = new Promise((_, reject) => {
@@ -154,11 +208,22 @@ class DailyProfitService {
     });
     const operation = (async () => {
       let supplierReader;
-      try { supplierReader = await this.supplierReader(accessToken, controller.signal); }
-      catch (error) { if (!this.analysis.accounting) throw error; }
+      try {
+        supplierReader = fetchSupplier ? this.retrySupplierReader(date, snapshot,
+          await this.supplierReader(date, accessToken, controller.signal, archivePreviousDay), accessToken) :
+          this.archivedSupplierReader(date, snapshot);
+      } catch (error) {
+        if (!this.analysis.accounting) throw error;
+        supplierReader = this.archivedSupplierReader(date, snapshot);
+      }
       controller.signal.throwIfAborted();
       const report = await this.analysis.getDailyProfit({ start: date, end: date, currency: 'CNY', refresh: '1' },
         { accessToken, supplierReader, signal: controller.signal });
+      if (!fetchSupplier && snapshot?.row.supplierComplete !== true) {
+        const notice = '本地归档缺少完整供应商消费；仅当天归档前一天时拉取上游，历史缺口需从备份恢复。';
+        report.notices = [...report.notices, notice];
+        report.items[0].notices = [...(report.items[0].notices || []), notice];
+      }
       controller.signal.throwIfAborted();
       if (scope !== this.scope()) throw new AppError('DAILY_PROFIT_CONFIG_CHANGED', 'Daily data source changed during calculation', { status: 409 });
       return report;
@@ -189,56 +254,10 @@ class DailyProfitService {
     if (!snapshot?.row || snapshot.row.date !== date) {
       throw new AppError('DAILY_PROFIT_NOT_ARCHIVED', '该日期尚未形成历史归档，请等待自动统计后重试', { status: 409 });
     }
-    const controller = new AbortController();
-    let timer;
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => {
-        const error = new AppError('DAILY_PROFIT_TIMEOUT', '供应商消费刷新超时，请稍后重试', { status: 504 });
-        controller.abort(error);
-        reject(error);
-      }, this.calculationTimeoutMs);
-    });
-    const operation = this.analysis.getSupplierDailyCost(date, id, accessToken, { signal: controller.signal });
-    try {
-      const result = await Promise.race([operation, timeout]);
-      controller.signal.throwIfAborted();
-      const providers = [...(snapshot.row.providers || [])];
-      const index = providers.findIndex((item) => String(item.id) === id);
-      if (index < 0) providers.push(result.provider);
-      else providers[index] = result.provider;
-      const siteComplete = snapshot.row.siteComplete === true && snapshot.row.siteConsumption != null;
-      const supplierComplete = providers.length > 0 && providers.every((item) => item.complete === true && item.cost != null);
-      const supplierConsumption = supplierComplete
-        ? new Decimal(providers.reduce((sum, item) => sum.plus(item.cost), new Decimal(0))).toDecimalPlaces(8).toNumber() : null;
-      const siteConsumption = siteComplete ? new Decimal(snapshot.row.siteConsumption).toDecimalPlaces(8).toNumber() : null;
-      const lotteryReward = snapshot.row.lotteryReward == null ? null :
-        new Decimal(snapshot.row.lotteryReward).toDecimalPlaces(8).toNumber();
-      const profit = siteComplete && supplierComplete && lotteryReward != null
-        ? new Decimal(siteConsumption).minus(supplierConsumption).minus(lotteryReward).toDecimalPlaces(8).toNumber() : null;
-      const row = {
-        ...snapshot.row,
-        providers,
-        siteConsumption,
-        supplierConsumption,
-        lotteryReward,
-        profit,
-        margin: profit != null && siteConsumption > 0
-          ? new Decimal(profit).div(siteConsumption).times(100).toDecimalPlaces(2).toNumber() : null,
-        supplierRequests: providers.every((item) => item.requests != null)
-          ? providers.reduce((sum, item) => sum + Number(item.requests), 0) : null,
-        supplierComplete,
-        lotteryComplete: lotteryReward != null,
-        complete: siteComplete && supplierComplete && lotteryReward != null,
-        status: !siteComplete ? 'site_incomplete' : !supplierComplete ? 'supplier_incomplete' : lotteryReward == null ? 'lottery_incomplete' : 'complete',
-        notices: supplierComplete ? [] : ['部分供应商消费仍待核验。']
-      };
-      const saved = this.store.saveManualSnapshot(scope, date, { row, notices: row.notices });
-      try { this.analysis.accounting?.rebuildArchived(); }
-      catch { this.logger.warn('accounting derived report rebuild failed'); }
-      return { ...saved, date, mode: 'archived', row: saved.row, provider: result.provider };
-    } finally {
-      clearTimeout(timer);
-    }
+    // Manual historical refresh is archive-only, including yesterday before/after 01:00.
+    const provider = snapshot.row.providers?.find(item => String(item.id) === id);
+    if (!provider) throw new AppError('PROVIDER_NOT_ARCHIVED', '该历史日期没有此供应商的归档消费，请从备份恢复', { status: 409 });
+    return { ...snapshot, date, mode: 'archived', row: snapshot.row, provider, reused: true };
   }
 
   async getDailyProfit(input = {}, { accessToken = null, refreshRange = null } = {}) {
@@ -285,7 +304,7 @@ class DailyProfitService {
       if (needsRefresh) {
         const dueAt = date === local.minus({ days: 1 }).toISODate() && local.hour < 1
           ? local.startOf('day').plus({ hours: 1 }).toMillis() : this.now().getTime();
-        queued.push({ date, dueAt });
+        queued.push({ date, dueAt, fetchSupplier: !force && !snapshot && date === local.minus({ days: 1 }).toISODate() });
       }
       const row = snapshot ? { ...snapshot.row, mode: 'archived', computedAt: snapshot.computedAt,
         notices: snapshot.notices || [], lastAttempt: snapshot.lastAttempt } : { ...pendingRow(date), notices: [] };

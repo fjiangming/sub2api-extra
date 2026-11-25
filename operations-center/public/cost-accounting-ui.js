@@ -164,11 +164,11 @@ const CostAccountingUi = (() => {
       state.providerRefresh = true;
       node.disabled = true; node.setAttribute('aria-busy', 'true'); node.classList.add('is-loading');
       try {
-        await h.api('/api/cost-analysis/daily-profit/provider-refresh', {
+        const result = await h.api('/api/cost-analysis/daily-profit/provider-refresh', {
           method: 'POST', body: JSON.stringify({ date, providerId })
         });
         if (!state.active || !h.isActive()) return;
-        h.toast('供应商消费已刷新', 'success');
+        h.toast(result.reused ? '已读取历史归档，供应商消费保持不变' : '供应商消费已刷新', 'success');
         await load({ poll: true });
         if (state.active && q('[data-dialog]').open) dayDetail(date);
       } finally {

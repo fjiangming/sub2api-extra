@@ -2,6 +2,7 @@
 
 const { AppError } = require('../errors');
 const Decimal = require('decimal.js');
+const { DateTime } = require('luxon');
 const {
   addUtcDays,
   dateInTimezone,
@@ -42,6 +43,8 @@ function supplierCostFailure(error, currency) {
     reason = '请求供应商监控超时，请检查服务负载、连接和请求超时设置。';
   } else if (code === 'PROVIDER_MONITOR_UNAVAILABLE') {
     reason = '运营中心无法连接供应商监控，请检查服务地址、容器网络或反向代理。';
+  } else if (code === 'SUPPLIER_HISTORY_FETCH_FORBIDDEN') {
+    reason = '历史消费只读取已有归档；仅当天归档前一天时允许拉取上游，缺失历史请从备份恢复。';
   } else if (status === 400 || status === 422) {
     reason = `供应商监控拒绝了日期、时区或币种参数（HTTP ${status}），请核对查询条件和服务版本。`;
   } else if (Number.isInteger(status) && status >= 500 && status <= 599) {
@@ -214,13 +217,14 @@ function paginationResult(page, pageSize, total) {
 }
 
 class CostAnalysisService {
-  constructor({ pool, inspector, config, store, providerMonitor, sub2api }) {
+  constructor({ pool, inspector, config, store, providerMonitor, sub2api, now = () => new Date() }) {
     this.pool = pool;
     this.inspector = inspector;
     this.config = config;
     this.store = store;
     this.providerMonitor = providerMonitor;
     this.sub2api = sub2api;
+    this.now = now;
   }
 
   async getProviders({ refresh = false, accessToken = null } = {}) {
@@ -533,16 +537,40 @@ class CostAnalysisService {
       ]);
   }
 
-  async createSupplierDailyCostsReader(accessToken = null, { signal } = {}) {
-    if (!this.providerMonitor?.configured()) throw new AppError('PROVIDER_MONITOR_NOT_CONFIGURED', 'not configured');
-    let token = accessToken;
-    if (!this.providerMonitor.integrationToken && !token && this.sub2api?.configured()) token = await this.sub2api.login();
-    signal?.throwIfAborted();
-    return this.providerMonitor.createDailyCostsReader(token, { signal });
+  assertSupplierFetch(query, archiveDate = null) {
+    const local = DateTime.fromJSDate(this.now(), { zone: this.config.financeTimezone });
+    const today = local.toISODate(), yesterday = local.minus({ days: 1 }).toISODate();
+    // Historical upstream reads are ONLY allowed while archiving yesterday today.
+    // Recalculations must inject stored supplier values; never fall back to upstream.
+    // Today's live view is the only other permitted upstream read.
+    if (query.from !== query.to || (query.from !== today &&
+        !(archiveDate === yesterday && query.from === yesterday && local.hour >= 1))) {
+      throw new AppError('SUPPLIER_HISTORY_FETCH_FORBIDDEN', '历史供应商消费禁止重新拉取', { status: 409 });
+    }
   }
 
-  async getSupplierDailyCost(date, providerId, accessToken = null, { signal } = {}) {
-    const read = await this.createSupplierDailyCostsReader(accessToken, { signal });
+  async createSupplierDailyCostsReader(accessToken = null, { signal, archiveDate = null } = {}) {
+    if (!this.providerMonitor?.configured()) throw new AppError('PROVIDER_MONITOR_NOT_CONFIGURED', 'not configured');
+    let reader;
+    return async (query, options = {}) => {
+      this.assertSupplierFetch(query, archiveDate);
+      const activeSignal = options.signal || signal;
+      activeSignal?.throwIfAborted();
+      if (!reader) {
+        let token = accessToken;
+        if (!this.providerMonitor.integrationToken && !token && this.sub2api?.configured()) token = await this.sub2api.login();
+        activeSignal?.throwIfAborted();
+        reader = await this.providerMonitor.createDailyCostsReader(token, { signal: activeSignal });
+      }
+      // Recheck after authentication: the finance date may have changed while waiting.
+      this.assertSupplierFetch(query, archiveDate);
+      activeSignal?.throwIfAborted();
+      return reader(query, { ...options, signal: activeSignal });
+    };
+  }
+
+  async getSupplierDailyCost(date, providerId, accessToken = null, { signal, supplierReader = null } = {}) {
+    const read = supplierReader || await this.createSupplierDailyCostsReader(accessToken, { signal });
     signal?.throwIfAborted();
     const report = await read({ from: date, to: date, currency: 'CNY',
       timezone: this.config.financeTimezone, connectionId: providerId, refresh: '1' }, { signal });
@@ -782,7 +810,7 @@ class CostAnalysisService {
         '利润为总收入减手工支出，不包含税费，也不扣除退款估算。',
         '用户总余额是当前未删除用户的 balance 合计并排除 ID 1；实际利润为利润减用户总余额，余额是当前快照且不随查询日期回溯。',
         '真实收入趋势与每日列表使用同一份数据：主站全部 usage_logs.actual_cost（排除 ID 1，包含订阅）减已启用定时检查供应商的账号日消费，再减当日充值抽奖奖励；不扣手工支出或当前余额，利润率以主站消费为分母。',
-        '按资金时区每天 01:00 归档前一日，当天实时查询；历史缺口在后台补算，历史归档保留统计时的供应商范围、倍率和汇率，需要调整时使用历史重算。',
+        '按资金时区每天 01:00 首次归档前一日，当天实时查询；历史重算复用原供应商消费、范围、倍率和汇率，更早消费缺口需从备份恢复。',
         '供应商汇总按完整历史充值倍率和配置汇率折算；缺失、异常或主站明细不完整时保持待核验，不以零成本推断利润；周期内任一天未知，趋势保留空缺。',
         '充值抽奖奖励按兑换记录的 used_at 资金日统计，奖励金额作为营销赠送成本从消费毛利和真实收入中扣除；旧日报会在升级后自动补算。',
         '自动收入直接依赖 Sub2API 当前兑换记录；源记录被删除后，历史报表会同步减少。'

@@ -75,7 +75,17 @@ async function startPreview({ port = 0 } = {}) {
     await database.query("INSERT INTO redeem_codes VALUES($1,$1,'admin_balance','used',40,$2::date+INTERVAL '1 hour',$3,'Synthetic sample',$2::date)", [id, start, `example-${id}`]);
   }
   await analysis.getProviders({ refresh: true });
-  dailyStore.enqueueDays(daily.scope(), Array.from({ length: 30 }, (_, index) => ({ date: addUtcDays(start, index) })));
+  const history = Array.from({ length: 30 }, (_, index) => ({ date: addUtcDays(start, index) }));
+  // Seed synthetic archives explicitly; previews obey the same no-history-fetch policy.
+  for (const { date } of history) {
+    dailyStore.enqueue(daily.scope(), date);
+    dailyStore.finish(dailyStore.claim(daily.scope()), { row: { date, complete: false,
+      siteConsumption: null, siteComplete: false, supplierConsumption: 18.5, supplierComplete: true,
+      lotteryReward: 0, lotteryComplete: true, profit: null, margin: null, supplierRequests: null,
+      providers: [{ id: 'alpha', name: 'Sub2API 示例上游', cost: 12, complete: true },
+        { id: 'beta', name: 'New API 示例上游', cost: 6.5, complete: true }] }, notices: [] });
+  }
+  dailyStore.enqueueDays(daily.scope(), history);
   await daily.drain({ limit: 30 });
   await accounting.collectDay(start);
   await accounting.collectDay(today);

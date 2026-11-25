@@ -365,7 +365,8 @@ test('real PostgreSQL sources, daily archive and accounting report are idempoten
       return { source: 'upstream_daily_summary', scope: 'account', providerFilter: 'scheduled_enabled', timezone: config.financeTimezone,
         currency: 'CNY', range: { start: input.from, end: input.to }, items: [{ date: input.from, cost: 20, complete: true, providers: [{ id: 'one', name: 'Supplier', cost: 20, complete: true }] }] };
     }, getFinancialBalances: async () => ({ currency: 'CNY', providerFilter: 'scheduled_enabled', complete: true, total: 300, items: [] }) };
-  const analysis = new CostAnalysisService({ pool, inspector, config, store: ledger, providerMonitor });
+  const analysis = new CostAnalysisService({ pool, inspector, config, store: ledger, providerMonitor,
+    now: () => new Date('2026-10-02T04:00:00Z') });
   const dailyStore = new DailyProfitStore(f.directory); dailyStore.initialize();
   const daily = new DailyProfitService({ analysis, store: dailyStore, config, now: () => new Date('2026-10-02T04:00:00Z') });
   const accounting = new AccountingService({ pool, inspector, config, store: f.store, ledger, analysis, dailyProfit: daily, now: () => new Date('2026-10-02T04:00:00Z') });

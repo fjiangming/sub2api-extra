@@ -16,18 +16,32 @@ function fixture(t, start = '2026-10-31T04:00:00Z') {
   store.initialize();
   const config = { financeTimezone: 'Asia/Shanghai', sub2apiTimezone: 'Asia/Shanghai',
     databaseUrl: 'postgres://readonly:synthetic@main.example:5432/sub2api', providerMonitorBaseUrl: 'https://monitor.example' };
-  let cost = 2, failed = false;
-  const calls = [];
+  let cost = 2, failed = false, lotteryReward = 0;
+  const calls = [], supplierCalls = [];
   const analysis = {
     pool: { configured: () => true }, providerMonitor: { configured: () => true, integrationToken: 'synthetic-token' },
+    async createSupplierDailyCostsReader() {
+      return async query => {
+        supplierCalls.push(query);
+        return { items: [{ date: query.from, cost, complete: cost != null,
+          providers: [{ id: 'p1', name: 'Enabled supplier', cost, complete: cost != null }] }] };
+      };
+    },
+    async getSupplierDailyCost(date, id, accessToken, { supplierReader }) {
+      const result = await supplierReader({ from: date, to: date, connectionId: id });
+      return { date, provider: result.items[0].providers.find(provider => provider.id === id) };
+    },
     async getDailyProfit(input, options) {
       calls.push({ input, options });
       if (failed) throw new Error('private diagnostics must not be persisted');
-      const row = { date: input.start, siteConsumption: 10.12500001, supplierConsumption: cost,
-        profit: cost == null ? null : 10.12500001 - cost, margin: cost == null ? null : 80.25,
-        siteRequests: 5, supplierRequests: null, complete: cost != null, siteComplete: true,
-        supplierComplete: cost != null, status: cost == null ? 'supplier_incomplete' : 'complete',
-        providers: [{ id: 'p1', name: 'Enabled supplier', cost, complete: cost != null }] };
+      const archived = options.supplierReader ? (await options.supplierReader({ from: input.start, to: input.end }))?.items?.[0] : null;
+      const supplierConsumption = archived ? archived.cost : cost;
+      const row = { date: input.start, siteConsumption: 10.12500001, supplierConsumption, lotteryReward,
+        profit: supplierConsumption == null ? null : Number((10.12500001 - supplierConsumption - lotteryReward).toFixed(8)),
+        margin: supplierConsumption == null ? null : 80.25,
+        siteRequests: 5, supplierRequests: null, complete: supplierConsumption != null, siteComplete: true,
+        supplierComplete: supplierConsumption != null, status: supplierConsumption == null ? 'supplier_incomplete' : 'complete',
+        providers: archived ? archived.providers : [{ id: 'p1', name: 'Enabled supplier', cost, complete: cost != null }] };
       return { ...dailyProfitReport([row], { range: { start: input.start, end: input.end },
         currency: 'CNY', timezone: config.financeTimezone }), generatedAt: clock.toISOString() };
     }
@@ -40,23 +54,34 @@ function fixture(t, start = '2026-10-31T04:00:00Z') {
   } };
   const service = new DailyProfitService({ analysis, store, config, now: () => new Date(clock), cronImpl: cron });
   t.after(async () => { await service.stop(); store.close(); fs.rmSync(directory, { recursive: true, force: true }); });
-  return { service, store, analysis, config, calls, schedules, directory,
-    time(value) { clock = new Date(value); }, cost(value) { cost = value; }, fail(value = true) { failed = value; } };
+  return { service, store, analysis, config, calls, supplierCalls, schedules, directory,
+    time(value) { clock = new Date(value); }, cost(value) { cost = value; }, fail(value = true) { failed = value; },
+    reward(value) { lotteryReward = value; },
+    seed(date, overrides = {}) {
+      const row = { date, siteConsumption: 10.12500001, supplierConsumption: cost, lotteryReward,
+        profit: Number((10.12500001 - cost - lotteryReward).toFixed(8)), margin: 80.25,
+        siteRequests: 5, supplierRequests: null, complete: cost != null, siteComplete: true,
+        supplierComplete: cost != null, lotteryComplete: true, status: cost == null ? 'supplier_incomplete' : 'complete',
+        providers: [{ id: 'p1', name: 'Enabled supplier', cost, complete: cost != null }], ...overrides };
+      store.enqueue(service.scope(), date);
+      store.finish(store.claim(service.scope()), { row, notices: [] });
+    } };
 }
 
-test('history queries return immediately, backfill in the background and then read only durable snapshots', async t => {
+test('history queries return immediately and recompute durable supplier snapshots without upstream backfill', async t => {
   const f = fixture(t);
+  f.seed('2026-10-28'); f.seed('2026-10-29');
   const query = { start: '2026-10-28', end: '2026-10-30', granularity: 'month' };
   const initial = await f.service.getDailyProfit(query);
-  assert.equal(initial.archive.pendingDays, 3);
+  assert.equal(initial.archive.pendingDays, 1);
   assert.equal(initial.summary.profit, null);
-  assert.ok(initial.items.every(row => row.status === 'pending_archive'));
+  assert.equal(initial.items[0].status, 'pending_archive');
   assert.equal(f.calls.length, 0);
   await f.service.drain();
-  assert.equal(f.calls.length, 3);
+  assert.equal(f.calls.length, 1);
   assert.ok(f.calls.every(call => call.input.refresh === '1'));
   const saved = await f.service.getDailyProfit(query);
-  assert.equal(f.calls.length, 3);
+  assert.equal(f.calls.length, 1);
   assert.equal(saved.archive.pendingDays, 0);
   assert.equal(saved.summary.profit, 24.37500003);
   assert.equal(saved.periods[0].profit, saved.summary.profit);
@@ -64,7 +89,7 @@ test('history queries return immediately, backfill in the background and then re
   f.store.close();
   f.store.initialize();
   assert.deepEqual((await f.service.getDailyProfit(query)).items, saved.items);
-  assert.equal(f.calls.length, 3);
+  assert.equal(f.calls.length, 1);
 });
 
 test('current day is always read live, concurrent reads merge, and future days never query or enqueue', async t => {
@@ -83,21 +108,20 @@ test('current day is always read live, concurrent reads merge, and future days n
   assert.equal(f.calls.length, 2);
 });
 
-test('background batches reuse one short-lived supplier session and isolate changed administrator credentials', async t => {
+test('permitted live readers reuse short-lived sessions and isolate administrator credentials', async t => {
   const f = fixture(t);
   let exchanges = 0;
   f.analysis.createSupplierDailyCostsReader = async token => {
     exchanges++;
     return async () => token;
   };
-  await f.service.getDailyProfit({ start: '2026-10-01', end: '2026-10-30' });
-  for (let batch = 0; batch < 4; batch++) await f.service.drain({ accessToken: 'synthetic-admin-one' });
+  const first = await f.service.supplierReader('2026-10-31', 'synthetic-admin-one');
+  assert.equal(await f.service.supplierReader('2026-10-31', 'synthetic-admin-one'), first);
   assert.equal(exchanges, 1);
-  assert.ok(f.calls.every(call => call.options.supplierReader === f.calls[0].options.supplierReader));
-  await f.service.drain({ accessToken: 'synthetic-admin-two' });
+  await f.service.supplierReader('2026-10-31', 'synthetic-admin-two');
   assert.equal(exchanges, 2);
   f.time('2026-10-31T04:06:00Z');
-  await f.service.drain({ accessToken: 'synthetic-admin-two' });
+  await f.service.supplierReader('2026-10-31', 'synthetic-admin-two');
   assert.equal(exchanges, 3);
 });
 
@@ -124,11 +148,12 @@ test('the 01:00 finance-day job persists once, catches downtime and never archiv
   f.service.scheduleDue();
   await f.service.drain();
   assert.ok(['2026-11-01', '2026-11-02', '2026-11-03'].every(date => f.calls.some(call => call.input.start === date)));
+  assert.deepEqual(f.supplierCalls.map(query => query.from), ['2026-10-31', '2026-11-03']);
   await f.service.stop();
   assert.equal(f.schedules[0].task.stopped, true);
 });
 
-test('refresh reads saved history, explicit recalculation replaces it and failed updates retain the complete snapshot', async t => {
+test('yesterday recalculations retain supplier costs and failed source updates retain the complete snapshot', async t => {
   const f = fixture(t);
   const query = { start: '2026-10-30', end: '2026-10-30' };
   await f.service.getDailyProfit(query);
@@ -142,12 +167,12 @@ test('refresh reads saved history, explicit recalculation replaces it and failed
   assert.equal(pending.items[0].supplierConsumption, 2);
   assert.equal(pending.items[0].archiveStatus, 'pending');
   await f.service.drain();
-  assert.equal((await f.service.getDailyProfit(query)).items[0].supplierConsumption, 8);
+  assert.equal((await f.service.getDailyProfit(query)).items[0].supplierConsumption, 2);
   f.fail();
   await f.service.getDailyProfit({ ...query, recalculate: '1' });
   await f.service.drain();
   const failed = await f.service.getDailyProfit(query);
-  assert.equal(failed.items[0].supplierConsumption, 8);
+  assert.equal(failed.items[0].supplierConsumption, 2);
   assert.equal(failed.items[0].computedAt, pending.items[0].computedAt);
   assert.equal(failed.items[0].complete, true);
   assert.equal(failed.items[0].lastAttempt.errorCode, 'DAILY_PROFIT_FAILED');
@@ -159,10 +184,127 @@ test('refresh reads saved history, explicit recalculation replaces it and failed
   f.store.close(); f.store.initialize();
   f.time('2026-10-31T04:02:00Z'); f.fail(false); f.cost(1);
   await f.service.drain();
-  assert.equal((await f.service.getDailyProfit(query)).items[0].supplierConsumption, 1);
+  assert.equal((await f.service.getDailyProfit(query)).items[0].supplierConsumption, 2);
 });
 
-test('manual provider refresh reads one upstream account and atomically updates its archived day', async t => {
+test('historical rearchives preserve supplier costs while recalculating lottery deductions', async t => {
+  const f = fixture(t), date = '2026-10-28', query = { start: date, end: date };
+  f.seed(date);
+  await f.service.getDailyProfit(query);
+  await f.service.drain();
+  f.cost(0);
+  f.reward(3);
+  f.analysis.createSupplierDailyCostsReader = async () => { throw new Error('History must not access the monitor'); };
+  await f.service.getDailyProfit({ ...query, recalculate: '1' });
+  await f.service.drain();
+  const row = (await f.service.getDailyProfit(query)).items[0];
+  assert.equal(row.supplierConsumption, 2);
+  assert.equal(row.providers[0].cost, 2);
+  assert.equal(row.lotteryReward, 3);
+  assert.equal(row.profit, 5.12500001);
+  assert.equal(row.complete, true);
+  assert.equal(row.lastAttempt.errorCode, null);
+  f.store.close(); f.store.initialize();
+  assert.equal((await f.service.getDailyProfit(query)).items[0].supplierConsumption, 2);
+});
+
+test('verified zero supplier consumption remains complete when old history is rearchived', async t => {
+  const f = fixture(t), date = '2026-10-28', query = { start: date, end: date };
+  f.cost(0);
+  f.seed(date);
+  await f.service.getDailyProfit(query);
+  await f.service.drain();
+  f.cost(9);
+  await f.service.getDailyProfit({ ...query, recalculate: '1' });
+  await f.service.drain();
+  const row = (await f.service.getDailyProfit(query)).items[0];
+  assert.equal(row.supplierConsumption, 0);
+  assert.equal(row.providers[0].cost, 0);
+  assert.equal(row.complete, true);
+  assert.equal(row.profit, 10.12500001);
+});
+
+test('all archived dates including yesterday retain supplier costs and use finance calendar boundaries', async t => {
+  const f = fixture(t), query = { start: '2026-10-28', end: '2026-10-30' };
+  f.seed('2026-10-28'); f.seed('2026-10-29');
+  await f.service.getDailyProfit(query);
+  await f.service.drain();
+  f.cost(0);
+  await f.service.getDailyProfit({ ...query, recalculate: '1' });
+  await f.service.drain();
+  const report = await f.service.getDailyProfit(query);
+  assert.deepEqual(report.items.map(row => [row.date, row.supplierConsumption]), [
+    ['2026-10-30', 2], ['2026-10-29', 2], ['2026-10-28', 2]
+  ]);
+  f.config.financeTimezone = 'America/New_York';
+  f.time('2026-11-01T04:30:00Z');
+  assert.equal(f.service.canFetchSupplier('2026-10-30', true), false);
+  assert.equal(f.service.canFetchSupplier('2026-10-31', true), false); // 00:30, before archival.
+  f.time('2026-11-01T05:00:00Z');
+  assert.equal(f.service.canFetchSupplier('2026-10-31', true), true);
+  assert.equal(f.service.canFetchSupplier('2026-10-31'), false);
+  f.time('2026-11-02T04:30:00Z'); // Still November 1 before the DST midnight in New York.
+  assert.equal(f.service.canFetchSupplier('2026-10-31', true), true);
+  f.time('2026-11-02T05:00:00Z');
+  assert.equal(f.service.canFetchSupplier('2026-10-31', true), false);
+});
+
+test('old incomplete supplier snapshots keep each known amount and never turn missing suppliers into zero', async t => {
+  const f = fixture(t), date = '2026-10-28', scope = f.service.scope();
+  f.cost(null);
+  f.seed(date);
+  const original = f.store.list(scope, date, date)[0];
+  original.row.providers.push({ id: 'p2', name: 'Known supplier', cost: 9, complete: true });
+  f.store.db.prepare('UPDATE daily_profit_snapshots SET payload=? WHERE scope=? AND date=?')
+    .run(JSON.stringify({ row: original.row, notices: original.notices }), scope, date);
+  f.cost(0);
+  f.analysis.createSupplierDailyCostsReader = async () => { throw new Error('Do not fetch expired logs'); };
+  await f.service.getDailyProfit({ start: date, end: date, recalculate: '1' });
+  await f.service.drain();
+  const row = (await f.service.getDailyProfit({ start: date, end: date })).items[0];
+  assert.equal(row.supplierConsumption, null);
+  assert.equal(row.profit, null);
+  assert.equal(row.providers[0].cost, null);
+  assert.equal(row.providers[1].cost, 9);
+  assert.equal(row.complete, false);
+});
+
+test('manual refresh of a locked historical provider returns its stored value without contacting upstream', async t => {
+  const f = fixture(t), date = '2026-10-28';
+  f.seed(date);
+  await f.service.getDailyProfit({ start: date, end: date });
+  await f.service.drain();
+  const before = f.store.list(f.service.scope(), date, date)[0];
+  f.analysis.getSupplierDailyCost = async () => { throw new Error('Historical refresh must stay local'); };
+  const result = await f.service.refreshProvider({ date, providerId: 'p1' });
+  assert.equal(result.reused, true);
+  assert.equal(result.provider.cost, 2);
+  assert.deepEqual(f.store.list(f.service.scope(), date, date)[0], before);
+  await assert.rejects(f.service.refreshProvider({ date, providerId: 'missing' }), { code: 'PROVIDER_NOT_ARCHIVED' });
+});
+
+test('failed rearchives preserve known suppliers even when the existing day is incomplete', async t => {
+  for (const cost of [12, '12']) {
+    const f = fixture(t), date = '2026-10-28', scope = f.service.scope();
+    f.store.enqueue(scope, date);
+    f.store.finish(f.store.claim(scope), { row: { date, complete: false, siteComplete: false,
+      supplierComplete: false, supplierConsumption: null, providers: [
+        { id: 'p1', complete: true, cost }, { id: 'p2', complete: false, cost: null }
+      ] } }, 'DAILY_PROFIT_INCOMPLETE');
+    const before = f.store.list(scope, date, date)[0];
+    f.fail();
+    await f.service.getDailyProfit({ start: date, end: date, recalculate: '1' });
+    await f.service.drain();
+    const after = f.store.list(scope, date, date)[0];
+    assert.equal(after.row.supplierConsumption, null);
+    assert.equal(after.row.providers[0].cost, cost);
+    assert.equal(after.row.complete, false);
+    assert.equal(after.computedAt, before.computedAt);
+    assert.equal(after.lastAttempt.errorCode, 'DAILY_PROFIT_FAILED');
+  }
+});
+
+test('manual refresh of yesterday reads only its archive and does not call the upstream account', async t => {
   const f = fixture(t);
   const date = '2026-10-30', scope = f.service.scope();
   await f.service.getDailyProfit({ start: date, end: date });
@@ -176,43 +318,161 @@ test('manual provider refresh reads one upstream account and atomically updates 
     } };
   };
   const result = await f.service.refreshProvider({ date, providerId: 'p1' });
-  assert.deepEqual(refreshed, { requestedDate: date, providerId: 'p1' });
+  assert.equal(refreshed, undefined);
+  assert.equal(result.reused, true);
   assert.equal(result.mode, 'archived');
-  assert.equal(result.provider.cost, 7);
-  assert.equal(result.row.supplierConsumption, 7);
-  assert.equal(result.row.profit, 3.12500001);
-  assert.equal(result.row.supplierRequests, 9);
+  assert.equal(result.provider.cost, 2);
+  assert.equal(result.row.supplierConsumption, 2);
+  assert.equal(result.row.profit, 8.12500001);
+  assert.equal(result.row.supplierRequests, null);
   assert.equal(result.row.complete, true);
   assert.equal(f.store.jobs(scope, date, date).length, 0);
   const saved = f.store.list(scope, date, date)[0];
-  assert.equal(saved.row.supplierConsumption, 7);
+  assert.equal(saved.row.supplierConsumption, 2);
   assert.equal(saved.computedAt, before.computedAt);
 });
 
-test('an incomplete manual provider refresh preserves the last complete archive and schedules a retry', async t => {
+test('manual provider refresh never creates an upstream retry even for missing historical costs', async t => {
   const f = fixture(t);
   const date = '2026-10-30', scope = f.service.scope();
   await f.service.getDailyProfit({ start: date, end: date });
   await f.service.drain();
   const before = f.store.list(scope, date, date)[0];
+  before.row.providers[0].cost = null;
+  before.row.providers[0].complete = false;
+  before.row.supplierConsumption = null;
+  before.row.supplierComplete = false;
+  before.row.complete = false;
+  f.store.db.prepare('UPDATE daily_profit_snapshots SET payload=? WHERE scope=? AND date=?')
+    .run(JSON.stringify({ row: before.row, notices: [] }), scope, date);
   f.analysis.getSupplierDailyCost = async (requestedDate, providerId) => ({
     date: requestedDate,
     provider: { id: providerId, name: 'Enabled supplier', cost: null, complete: false, reasons: ['上游连接暂不可用'] }
   });
   const result = await f.service.refreshProvider({ date, providerId: 'p1' });
   assert.equal(result.provider.complete, false);
+  assert.equal(result.reused, true);
   assert.equal(result.row.supplierConsumption, before.row.supplierConsumption);
-  assert.equal(result.row.complete, true);
-  assert.equal(result.lastAttempt.errorCode, 'DAILY_PROFIT_INCOMPLETE');
+  assert.equal(result.row.complete, false);
+  assert.equal(result.lastAttempt.errorCode, null);
   assert.equal(result.computedAt, before.computedAt);
-  assert.equal(f.store.jobs(scope, date, date).length, 1);
+  assert.equal(f.store.jobs(scope, date, date).length, 0);
   const saved = f.store.list(scope, date, date)[0];
   assert.equal(saved.row.supplierConsumption, before.row.supplierConsumption);
   assert.equal(saved.computedAt, before.computedAt);
 });
 
+test('missing older history stays unknown without authenticating or querying upstream, even when force is requested', async t => {
+  const f = fixture(t), date = '2026-10-29', query = { start: date, end: date };
+  f.analysis.createSupplierDailyCostsReader = async () => { throw new Error('Older history must never authenticate'); };
+  await f.service.getDailyProfit(query);
+  await f.service.drain();
+  let row = (await f.service.getDailyProfit(query)).items[0];
+  assert.equal(row.siteConsumption, 10.12500001);
+  assert.equal(row.supplierConsumption, null);
+  assert.equal(row.profit, null);
+  assert.equal(row.complete, false);
+  assert.match(row.notices.join(), /历史缺口需从备份恢复/);
+  await f.service.getDailyProfit({ ...query, accounting: '1', refresh: '1' });
+  await f.service.drain();
+  row = (await f.service.getDailyProfit(query)).items[0];
+  assert.equal(row.supplierConsumption, null);
+  assert.equal(row.providers.length, 0);
+  await assert.rejects(f.service.refreshProvider({ date, providerId: 'p1' }), { code: 'PROVIDER_NOT_ARCHIVED' });
+});
+
+test('yesterday initial archive retries fill only missing accounts and never overwrite known costs', async t => {
+  const f = fixture(t), date = '2026-10-30', scope = f.service.scope();
+  const queries = [];
+  let failed = true;
+  f.analysis.createSupplierDailyCostsReader = async () => async query => {
+    queries.push(query);
+    const providers = [
+      { id: 'p1', name: 'Known supplier', cost: queries.length === 1 ? 9 : 0, complete: true },
+      { id: 'p2', name: 'Missing supplier', cost: failed ? null : 3, complete: !failed }
+    ].filter(provider => !query.connectionId || provider.id === query.connectionId);
+    return { items: [{ date, cost: failed ? null : 3, complete: !failed, providers }] };
+  };
+  await f.service.getDailyProfit({ start: date, end: date });
+  await f.service.drain();
+  assert.equal(queries.length, 1);
+  assert.equal(f.store.list(scope, date, date)[0].row.providers[0].cost, 9);
+  f.store.close(); f.store.initialize();
+  failed = false;
+  f.time('2026-10-31T04:02:00Z');
+  await f.service.drain();
+  const row = f.store.list(scope, date, date)[0].row;
+  assert.deepEqual(queries.map(query => query.connectionId || 'all'), ['all', 'p2']);
+  assert.equal(row.providers[0].cost, 9);
+  assert.equal(row.providers[1].cost, 3);
+  assert.equal(row.supplierConsumption, 12);
+  assert.equal(row.complete, true);
+  assert.equal(f.store.jobs(scope, date, date).length, 0);
+});
+
+test('an explicit recalculation cannot inherit or regain a previous-day archive fetch permission', async t => {
+  const f = fixture(t), date = '2026-10-30', scope = f.service.scope(), query = { start: date, end: date };
+  f.cost(null);
+  await f.service.getDailyProfit(query);
+  assert.equal(f.store.db.prepare('SELECT fetch_supplier FROM daily_profit_jobs WHERE scope=? AND date=?').get(scope, date).fetch_supplier, 1);
+  await f.service.drain();
+  f.store.close(); f.store.initialize();
+  await f.service.getDailyProfit({ ...query, recalculate: '1' });
+  await f.service.getDailyProfit(query); // A poll must not grant permission to the forced job.
+  assert.equal(f.store.db.prepare('SELECT fetch_supplier FROM daily_profit_jobs WHERE scope=? AND date=?').get(scope, date).fetch_supplier, 0);
+  f.analysis.createSupplierDailyCostsReader = async () => { throw new Error('Recalculation must stay local'); };
+  await f.service.drain();
+  assert.equal(f.store.list(scope, date, date)[0].row.supplierConsumption, null);
+});
+
+test('yesterday legacy migrations and scheduled catch-up cannot grant historical snapshots upstream access', async t => {
+  const f = fixture(t), date = '2026-10-30', scope = f.service.scope();
+  f.cost(null); f.seed(date);
+  const snapshot = f.store.list(scope, date, date)[0];
+  delete snapshot.row.lotteryReward;
+  f.store.db.prepare('UPDATE daily_profit_snapshots SET payload=? WHERE scope=? AND date=?')
+    .run(JSON.stringify({ row: snapshot.row, notices: [] }), scope, date);
+  f.service.scheduleDue();
+  await f.service.getDailyProfit({ start: date, end: date });
+  f.cost(0);
+  await f.service.drain();
+  const row = f.store.list(scope, date, date)[0].row;
+  assert.equal(row.lotteryReward, 0);
+  assert.equal(row.supplierConsumption, null);
+  assert.equal(row.complete, false);
+  assert.equal(f.supplierCalls.length, 0);
+});
+
+test('archive retries lose upstream permission after the finance date changes and cached readers cannot bypass it', async t => {
+  const f = fixture(t), date = '2026-10-30', scope = f.service.scope();
+  f.cost(null);
+  await f.service.getDailyProfit({ start: date, end: date });
+  await f.service.drain();
+  const cached = f.service.readerCache.read;
+  f.time('2026-10-31T16:00:00Z'); // November 1 in the finance timezone.
+  await assert.rejects(cached({ from: date, to: date }), { code: 'SUPPLIER_HISTORY_FETCH_FORBIDDEN' });
+  f.cost(0);
+  f.analysis.createSupplierDailyCostsReader = async () => { throw new Error('Retry must not request an older day'); };
+  await f.service.drain();
+  assert.equal(f.store.list(scope, date, date)[0].row.supplierConsumption, null);
+  await assert.rejects(f.service.supplierReader(date, null, null, true), { code: 'SUPPLIER_HISTORY_FETCH_FORBIDDEN' });
+});
+
+test('today manual supplier refresh remains live and never writes a historical snapshot', async t => {
+  const f = fixture(t), date = '2026-10-31';
+  f.cost(4);
+  const result = await f.service.refreshProvider({ date, providerId: 'p1' });
+  assert.equal(result.mode, 'live');
+  assert.equal(result.provider.cost, 4);
+  assert.equal(f.store.list(f.service.scope(), date, date).length, 0);
+  f.time('2026-10-31T16:00:00Z');
+  f.cost(6);
+  assert.equal((await f.service.refreshProvider({ date: '2026-11-01', providerId: 'p1' })).provider.cost, 6);
+});
+
 test('partial dates preserve successful amounts and gaps propagate to every trend granularity', async t => {
   const f = fixture(t);
+  f.seed('2026-10-29');
   const query = { start: '2026-10-29', end: '2026-10-30' };
   await f.service.getDailyProfit(query);
   f.cost(null);
@@ -273,6 +533,18 @@ test('leases and generations prevent duplicate workers and late superseded jobs 
   assert.ok(f.store.claim(scope));
 });
 
+test('legacy job schema migrates without granting old recalculations supplier-fetch permission', async t => {
+  const f = fixture(t), date = '2026-10-30', scope = f.service.scope();
+  f.store.enqueue(scope, date, { fetchSupplier: true });
+  f.store.db.exec('ALTER TABLE daily_profit_jobs DROP COLUMN fetch_supplier');
+  f.store.close(); f.store.initialize();
+  const job = f.store.db.prepare('SELECT fetch_supplier FROM daily_profit_jobs WHERE scope=? AND date=?').get(scope, date);
+  assert.equal(job.fetch_supplier, 0);
+  f.analysis.createSupplierDailyCostsReader = async () => { throw new Error('Legacy jobs must not gain upstream access'); };
+  await f.service.drain();
+  assert.equal(f.store.list(scope, date, date)[0].row.supplierConsumption, null);
+});
+
 test('daily archive HTTP requires administrator auth and returns archived history without recalculation', async t => {
   const { createApp } = require('../src/app');
   const { AuthService } = require('../src/auth');
@@ -304,7 +576,7 @@ test('daily archive HTTP requires administrator auth and returns archived histor
   assert.equal(f.calls.length, 1);
 });
 
-test('manual provider refresh endpoint requires CSRF and returns the refreshed archived row', async t => {
+test('manual provider refresh endpoint requires CSRF and returns the unchanged archived row', async t => {
   const { createApp } = require('../src/app');
   const { AuthService } = require('../src/auth');
   const f = fixture(t);
@@ -338,8 +610,9 @@ test('manual provider refresh endpoint requires CSRF and returns the refreshed a
   });
   assert.equal(response.status, 200);
   const payload = await response.json();
-  assert.equal(payload.row.supplierConsumption, 7);
-  assert.equal(payload.provider.cost, 7);
+  assert.equal(payload.reused, true);
+  assert.equal(payload.row.supplierConsumption, 2);
+  assert.equal(payload.provider.cost, 2);
 });
 
 test('archived results render independently of a stalled live read and today is never stored as history', async t => {
@@ -369,7 +642,7 @@ test('archived results render independently of a stalled live read and today is 
   assert.equal((await f.service.getDailyProfit(query)).summary.completeDays, 2);
 });
 
-test('old failed snapshots without jobs resume automatically and completed days never refresh upstream on page refresh', async t => {
+test('old failed snapshots resume local calculation without gaining a new supplier fetch grant', async t => {
   const f = fixture(t);
   const date = '2026-10-30', scope = f.service.scope();
   await f.service.getDailyProfit({ start: date, end: date });
@@ -384,8 +657,9 @@ test('old failed snapshots without jobs resume automatically and completed days 
   const row = (await f.service.getDailyProfit({ start: date, end: date, refresh: '1' })).items[0];
   await f.service.drain();
   assert.equal(f.calls.length, calls);
-  assert.equal(row.complete, true);
-  assert.equal(row.lastAttempt.errorCode, null);
+  assert.equal(row.complete, false);
+  assert.equal(row.lastAttempt.errorCode, 'DAILY_PROFIT_INCOMPLETE');
+  assert.equal(row.supplierConsumption, null);
 });
 
 test('failed partial recalculations preserve full archived amounts, timestamps and isolated diagnostics after restart', async t => {
@@ -395,7 +669,12 @@ test('failed partial recalculations preserve full archived amounts, timestamps a
   const original = (await f.service.getDailyProfit(query)).items[0];
   f.time('2026-10-31T04:05:00Z');
   await f.service.getDailyProfit({ ...query, recalculate: '1' });
-  f.cost(null);
+  const originalGet = f.analysis.getDailyProfit;
+  f.analysis.getDailyProfit = async (...args) => {
+    const report = await originalGet(...args);
+    Object.assign(report.items[0], { siteConsumption: null, siteComplete: false, complete: false, profit: null });
+    return report;
+  };
   await f.service.drain();
   f.store.close(); f.store.initialize();
   const saved = (await f.service.getDailyProfit(query)).items[0];
@@ -410,6 +689,7 @@ test('failed partial recalculations preserve full archived amounts, timestamps a
 
 test('a timed-out archive job releases the worker and late results cannot overwrite a successful retry', async t => {
   const f = fixture(t), scope = f.service.scope();
+  f.seed('2026-10-29');
   f.service.calculationTimeoutMs = 50;
   let resume;
   const pending = new Promise(resolve => { resume = resolve; });
@@ -442,7 +722,7 @@ test('stalled supplier session creation is bounded and a cached live poll expire
   const query = { start: '2026-10-31', end: '2026-10-31' };
   assert.equal((await f.service.getDailyProfit(query)).items[0].status, 'live_failed');
   assert.equal(f.calls.length, 0);
-  f.analysis.createSupplierDailyCostsReader = async () => null;
+  f.analysis.createSupplierDailyCostsReader = async () => async () => null;
   assert.equal((await f.service.getDailyProfit(query)).items[0].complete, true);
   const before = f.calls.length;
   for (const seconds of [5, 15, 30, 45, 59]) {

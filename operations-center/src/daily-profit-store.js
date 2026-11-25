@@ -6,6 +6,15 @@ const crypto = require('node:crypto');
 const Database = require('better-sqlite3');
 const { AppError } = require('./errors');
 
+function losesKnownSupplier(previous, next) {
+  const known = value => (typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')) &&
+    Number.isFinite(Number(value)) && Number(value) >= 0;
+  if (previous?.supplierComplete === true && known(previous.supplierConsumption) &&
+      !(next?.supplierComplete === true && known(next.supplierConsumption))) return true;
+  return (previous?.providers || []).some(provider => provider.complete === true && known(provider.cost) &&
+    !(next?.providers || []).some(item => String(item.id) === String(provider.id) && item.complete === true && known(item.cost)));
+}
+
 class DailyProfitStore {
   constructor(directory, { now = () => Date.now() } = {}) {
     this.directory = directory;
@@ -32,6 +41,9 @@ class DailyProfitStore {
       CREATE TABLE IF NOT EXISTS daily_profit_attempts (
       scope TEXT NOT NULL, date TEXT NOT NULL, error_code TEXT, notices TEXT NOT NULL,
       attempted_at TEXT NOT NULL, PRIMARY KEY(scope,date));`);
+    if (!this.db.pragma('table_info(daily_profit_jobs)').some(column => column.name === 'fetch_supplier')) {
+      this.db.exec('ALTER TABLE daily_profit_jobs ADD COLUMN fetch_supplier INTEGER NOT NULL DEFAULT 0');
+    }
   }
 
   list(scope, start, end) {
@@ -48,16 +60,17 @@ class DailyProfitStore {
       .all(scope, start, end);
   }
 
-  enqueue(scope, date, { force = false, dueAt = this.now() } = {}) {
-    this.db.prepare(`INSERT INTO daily_profit_jobs(scope,date,next_attempt_at) VALUES (?,?,?)
+  enqueue(scope, date, { force = false, dueAt = this.now(), fetchSupplier = false } = {}) {
+    this.db.prepare(`INSERT INTO daily_profit_jobs(scope,date,next_attempt_at,fetch_supplier) VALUES (?,?,?,?)
       ON CONFLICT(scope,date) DO ${force ? `UPDATE SET generation=generation+1,attempts=0,
-      next_attempt_at=excluded.next_attempt_at,lease_until=0,lease_token=NULL,last_error=NULL` : 'NOTHING'}`)
-      .run(scope, date, dueAt);
+      next_attempt_at=excluded.next_attempt_at,fetch_supplier=excluded.fetch_supplier,
+      lease_until=0,lease_token=NULL,last_error=NULL` : 'NOTHING'}`)
+      .run(scope, date, dueAt, !force && fetchSupplier ? 1 : 0);
   }
 
   enqueueDays(scope, days, { force = false } = {}) {
     this.db.transaction(() => {
-      for (const { date, dueAt } of days) this.enqueue(scope, date, { force, dueAt });
+      for (const { date, dueAt, fetchSupplier } of days) this.enqueue(scope, date, { force, dueAt, fetchSupplier });
     })();
   }
 
@@ -82,8 +95,9 @@ class DailyProfitStore {
         ON CONFLICT(scope,date) DO UPDATE SET error_code=excluded.error_code,notices=excluded.notices,
         attempted_at=excluded.attempted_at`).run(job.scope, job.date, errorCode, JSON.stringify(payload?.notices || []), at);
       const existing = this.db.prepare('SELECT payload FROM daily_profit_snapshots WHERE scope=? AND date=?').get(job.scope, job.date);
-      const preserve = existing && JSON.parse(existing.payload).row?.complete === true &&
-        (errorCode || payload?.row?.complete !== true);
+      const previous = existing && JSON.parse(existing.payload).row;
+      const preserve = previous && ((previous.complete === true && (errorCode || payload?.row?.complete !== true)) ||
+        (errorCode && losesKnownSupplier(previous, payload?.row)));
       if (payload && !preserve) this.db.prepare(`INSERT INTO daily_profit_snapshots(scope,date,payload,computed_at) VALUES (?,?,?,?)
         ON CONFLICT(scope,date) DO UPDATE SET payload=excluded.payload,computed_at=excluded.computed_at`)
         .run(job.scope, job.date, JSON.stringify(payload), at);
@@ -106,7 +120,7 @@ class DailyProfitStore {
       const at = new Date(this.now()).toISOString();
       const errorCode = payload?.row?.complete === true ? null : 'DAILY_PROFIT_INCOMPLETE';
       const existingPayload = JSON.parse(existing.payload);
-      const preserve = existingPayload.row?.complete === true && errorCode;
+      const preserve = errorCode && (existingPayload.row?.complete === true || losesKnownSupplier(existingPayload.row, payload?.row));
       if (!preserve) {
         this.db.prepare(`INSERT INTO daily_profit_snapshots(scope,date,payload,computed_at) VALUES (?,?,?,?)
           ON CONFLICT(scope,date) DO UPDATE SET payload=excluded.payload,computed_at=excluded.computed_at`)
@@ -119,7 +133,7 @@ class DailyProfitStore {
       if (!errorCode) {
         this.db.prepare('DELETE FROM daily_profit_jobs WHERE scope=? AND date=?').run(scope, date);
       } else if (job) {
-        this.db.prepare(`UPDATE daily_profit_jobs SET generation=generation+1,attempts=0,next_attempt_at=?,
+        this.db.prepare(`UPDATE daily_profit_jobs SET generation=generation+1,attempts=0,next_attempt_at=?,fetch_supplier=0,
           lease_until=0,lease_token=NULL,last_error=? WHERE scope=? AND date=?`)
           .run(this.now(), errorCode, scope, date);
       } else {
