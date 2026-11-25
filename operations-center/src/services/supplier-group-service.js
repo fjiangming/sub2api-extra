@@ -7,7 +7,7 @@ const { buildGroupReport, total } = require('./supplier-group-matcher');
 
 const querySchema = z.object({ date: z.string().optional(), start: z.string().optional(), end: z.string().optional(),
   providerId: z.string().max(200).optional(), groupId: z.string().regex(/^[a-f0-9]{32}$/).optional(),
-  keyId: z.string().max(200).optional(), view: z.enum(['groups', 'mapping', 'keys', 'local', 'daily']).default('groups'),
+  keyId: z.string().max(200).optional(), view: z.enum(['groups', 'mapping', 'accounts', 'keys', 'local', 'daily']).default('groups'),
   issuesOnly: z.enum(['0', '1']).default('1'), page: z.coerce.number().int().min(1).max(100000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20) });
 const settingsSchema = z.object({ aliases: z.record(z.string().min(1).max(200), z.array(z.string().trim().min(2).max(120)).max(20)),
@@ -154,7 +154,7 @@ class SupplierGroupService {
       catch (error) { if (!report) throw error; stale = true; warning = '本次刷新失败，显示上次快照，差额暂不核定'; }
     }
     if (!report) return { date, today, timezone: this.config.financeTimezone, currency: 'CNY', source: 'history_missing',
-      settings, providers: [], groups: [], mappings: [], missingProviders: [], summary: null,
+      settings, providers: [], providerSummaries: [], groups: [], mappings: [], missingProviders: [], summary: null,
       pagination: { page: 1, total: 0, totalPages: 0 }, warning: '该日没有分组消费归档；历史不会重新拉取或按当前关系倒推' };
     const all = report.groups.filter(g => !query.providerId || g.providerId === query.providerId);
     const matched = report.mappings.filter(a => a.matched && (!query.providerId || a.providerId === query.providerId));
@@ -164,9 +164,25 @@ class SupplierGroupService {
       items: items.slice((n - 1) * query.pageSize, n * query.pageSize), pagination: { page: n, pageSize: query.pageSize, total: items.length, totalPages: Math.ceil(items.length / query.pageSize) } }; };
     const publicGroup = g => ({ ...g, keys: undefined, status: this.status(g, settings.alert, stale),
       diff: stale ? null : g.diff, rate: stale ? null : g.rate, keyCount: g.keys.length });
+    const publicAccounts = group => group.keys.flatMap(key => key.accounts).map(account => ({
+      id: account.id, name: account.name, status: account.status, deleted: Boolean(account.deleted),
+      main: group.main === null ? null : account.main, requests: account.requests,
+      localGroups: account.localGroups.map(row => ({ ...row, main: group.main === null ? null : row.main }))
+    }));
+    const byProvider = new Map();
+    for (const group of all) {
+      if (!byProvider.has(group.providerId)) byProvider.set(group.providerId, []);
+      byProvider.get(group.providerId).push(group);
+    }
     const result = { date, today, timezone: this.config.financeTimezone, currency: 'CNY', source: date === today ? 'live' : 'archive',
       computedAt: report.computedAt, siteComplete: report.siteComplete, settings, stale, warning,
       providers: [...new Map([...report.groups.map(g => ({ id: g.providerId, name: g.providerName })), ...report.missingProviders].map(p => [p.id, { id: p.id, name: p.name }])).values()],
+      providerSummaries: [...byProvider].map(([id, groups]) => ({ id, name: groups[0].providerName,
+        groupCount: groups.length, knownGroups: groups.filter(g => g.upstream !== null).length,
+        upstream: groups.every(g => g.upstream !== null) ? total(groups, 'upstream') : null,
+        knownUpstream: total(groups, 'knownUpstream'),
+        main: report.siteComplete ? total(groups, 'main') : null,
+        diff: !stale && groups.every(g => g.comparable) ? total(groups, 'diff') : null })),
       missingProviders: report.missingProviders.filter(p => !query.providerId || p.id === query.providerId),
       summary: { groupCount: all.length, knownGroups: known.length, comparableGroups: comparable.length,
         upstream: known.length ? total(known, 'upstream') : null, main: report.siteComplete ? total(matched, 'main') : null,
@@ -179,6 +195,8 @@ class SupplierGroupService {
       if (!group) throw new AppError('NOT_FOUND', '所选范围没有该上游分组', { status: 404 });
       const selected = group.keys.find(k => k.id === query.keyId) || group.keys[0];
       const keyPage = page(selected.accounts);
+      const accounts = publicAccounts(group), accountPage = page(accounts);
+      const accountById = new Map(accounts.map(account => [account.id, account]));
       const local = new Map();
       for (const account of group.keys.flatMap(k => k.accounts)) for (const row of account.localGroups) {
         const previous = local.get(row.id) || { id: row.id, name: row.name, main: 0, requests: 0, accountIds: [] };
@@ -188,8 +206,10 @@ class SupplierGroupService {
       }
       const localPage = page([...local.values()]);
       result.group = { ...publicGroup(group), selectedKeyId: selected.id,
+        accounts: accountPage.items,
         keys: group.keys.map(k => ({ ...k, accounts: k.id === selected.id ? keyPage.items : [], accountCount: k.accounts.length })),
-        localGroups: localPage.items.map(row => ({ ...row, main: group.main === null ? null : row.main })),
+        localGroups: localPage.items.map(row => ({ ...row, main: group.main === null ? null : row.main,
+          accounts: row.accountIds.map(id => ({ id, name: accountById.get(id).name })) })),
         days: Array.from({ length: 7 }, (_, index) => {
           const previousDate = day.minus({ days: index }).toISODate();
           const snapshot = previousDate === date ? report : this.store.get(scope, previousDate);
@@ -198,13 +218,18 @@ class SupplierGroupService {
             ...(previousDate === date ? {} : { diff: row.diff, rate: row.rate, status: this.status(row, settings.alert) }) }
             : { upstream: null, main: null, diff: null, rate: null, status: 'history_missing' }) };
         }) };
-      result.pagination = query.view === 'local' ? localPage.pagination : query.view === 'daily'
+      result.pagination = query.view === 'accounts' ? accountPage.pagination : query.view === 'local' ? localPage.pagination : query.view === 'daily'
         ? { page: 1, total: 7, totalPages: 1 } : keyPage.pagination;
     } else if (query.view === 'mapping') {
       const filtered = query.issuesOnly === '1' ? mappings.filter(a => !a.matched) : mappings;
       const selected = page(filtered); result.mappings = selected.items; result.pagination = selected.pagination;
     } else {
-      const selected = page(all); result.groups = selected.items.map(publicGroup); result.pagination = selected.pagination;
+      const selected = page([...byProvider.values()].flat());
+      result.groups = selected.items.map(group => {
+        const accounts = publicAccounts(group);
+        return { ...publicGroup(group), accounts: accounts.slice(0, 10), accountsTruncated: accounts.length > 10 };
+      });
+      result.pagination = selected.pagination;
     }
     return result;
   }

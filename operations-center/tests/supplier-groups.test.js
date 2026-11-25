@@ -28,6 +28,17 @@ test('real SQL groups all accounts by upstream group without account membership 
   const claude = r.groups.find(g => g.groupRef === 'claude');
   assert.equal(claude.upstream, 15); assert.equal(claude.main, 35); assert.equal(claude.accountCount, 3);
   assert.equal(claude.localGroupCount, 3); assert.equal(claude.diff, 20); assert.equal(claude.status, 'comparable');
+  assert.deepEqual(claude.accounts.map(a => [a.id, a.name, a.main]), [
+    ['11', '灵枢 API Claude 主账号', 23], ['12', '灵枢 Claude 备用', 7], ['13', '灵枢 API Claude 高倍率', 5]
+  ]);
+  assert.deepEqual(claude.accounts[0].localGroups.map(g => g.main), [20, 3]);
+  assert.equal(claude.accountsTruncated, false);
+  assert.deepEqual(r.providerSummaries.find(p => p.id === 'ling'), {
+    id: 'ling', name: '灵枢 API', groupCount: 2, knownGroups: 2, upstream: 23, knownUpstream: 23, main: 47, diff: 24
+  });
+  assert.equal(r.providerSummaries.find(p => p.id === 'nova').diff, null);
+  assert.equal(r.providerSummaries.find(p => p.id === 'zen').upstream, null);
+  assert.equal(r.providerSummaries.find(p => p.id === 'zen').knownUpstream, 0);
   assert.equal(r.groups.find(g => g.groupRef === 'gpt').main, 12);
   assert.equal(r.groups.find(g => g.groupRef === 'pro').status, 'upstream_high');
   assert.equal(r.groups.find(g => g.groupRef === 'batch').status, 'unlinked_key');
@@ -40,6 +51,13 @@ test('real SQL groups all accounts by upstream group without account membership 
   assert.equal(detail.pagination.total, 2); assert.equal(detail.group.localGroups.reduce((s, g) => s + g.main, 0), 25);
   const local = await f.service.getReport({ date: f.date, groupId: claude.id, view: 'local', pageSize: 100 });
   assert.equal(local.group.localGroups.reduce((s, g) => s + g.main, 0), 35);
+  assert.deepEqual(local.group.localGroups.find(g => g.id === '1').accounts.map(a => a.name), ['灵枢 API Claude 主账号', '灵枢 API Claude 高倍率']);
+  const accounts = await f.service.getReport({ date: f.date, groupId: claude.id, view: 'accounts', pageSize: 2 });
+  assert.equal(accounts.pagination.total, 3);
+  assert.deepEqual(accounts.group.accounts.map(a => a.main), [23, 7]);
+  const nextAccounts = await f.service.getReport({ date: f.date, groupId: claude.id, view: 'accounts', pageSize: 2, page: 2 });
+  assert.deepEqual(nextAccounts.group.accounts.map(a => a.main), [5]);
+  assert.equal(nextAccounts.group.main, 35);
   const publicData = JSON.stringify([r, detail, local, await f.service.getReport({ view: 'mapping', issuesOnly: '0' })]);
   assert(!publicData.includes(keyIdentity(f.secrets[0]))); assert(!publicData.includes(f.secrets[0]));
   assert(!publicData.includes('upstreamSnapshot')); assert(!publicData.includes('siteSnapshot'));
@@ -64,6 +82,42 @@ test('ambiguous supplier/group identity blocks comparison and does not allocate 
   assert.equal(result.mappings.find(a => a.id === '11').matched, true);
 });
 
+test('account previews stay bounded while supplier and group totals include every account and page', async t => {
+  const f = await fixture(t);
+  await f.database.query(`INSERT INTO accounts
+    SELECT n,'灵枢 API Claude 扩展账号 ' || n,'active',$1::jsonb,'2026-01-01T00:00:00Z',NULL
+    FROM generate_series(100,110) n`, [JSON.stringify({ api_key: f.secrets[0] })]);
+  await f.database.exec(`INSERT INTO usage_logs(user_id,account_id,group_id,actual_cost,created_at)
+    SELECT 2,n,1,0.01,'2026-11-25T00:00:00Z' FROM generate_series(100,110) n;
+    UPDATE usage_dashboard_daily SET total_requests=21`);
+  const report = await f.service.getReport({ date: f.date, providerId: 'ling', pageSize: 1 });
+  const group = report.groups[0];
+  assert.equal(group.accountCount, 14);
+  assert.equal(group.accounts.length, 10); assert.equal(group.accountsTruncated, true);
+  assert.equal(group.main, 35.11); assert.equal(group.upstream, 15);
+  assert.equal(report.pagination.total, 2);
+  assert.deepEqual(report.providerSummaries.map(provider => [provider.id, provider.groupCount, provider.main, provider.upstream, provider.diff]),
+    [['ling', 2, 47.11, 23, 24.11]]);
+  const pages = await Promise.all([1, 2].map(page => f.service.getReport({ date: f.date, groupId: group.id, view: 'accounts', pageSize: 10, page })));
+  assert.deepEqual(pages.map(page => page.group.accounts.length), [10, 4]);
+  assert(pages.every(page => page.group.main === 35.11 && page.group.upstream === 15 && page.pagination.total === 14));
+  assert.equal(new Set(pages.flatMap(page => page.group.accounts.map(account => account.id))).size, 14);
+  const payload = JSON.stringify([report, pages]);
+  assert(!payload.includes(f.secrets[0])); assert(!payload.includes(keyIdentity(f.secrets[0])));
+});
+
+test('a partial upstream group contributes only to the known subtotal and never creates a supplier difference', async t => {
+  const f = await fixture(t);
+  Object.assign(f.items[0].keys[1], { cost: null, upstreamAmount: null, requests: null, complete: false });
+  const report = await f.service.getReport({ date: f.date });
+  const provider = report.providerSummaries.find(provider => provider.id === 'ling');
+  assert.equal(provider.main, 47);
+  assert.equal(provider.upstream, null); assert.equal(provider.diff, null);
+  assert.equal(provider.knownGroups, 1); assert.equal(provider.groupCount, 2);
+  assert.equal(provider.knownUpstream, 20);
+  assert.equal(report.groups.find(group => group.groupRef === 'claude').knownUpstream, 12);
+});
+
 test('missing detailed usage or native coverage stays unknown, including deleted/disabled accounts', async t => {
   const f = await fixture(t);
   await f.database.exec("UPDATE accounts SET deleted_at='2026-11-25T02:00:00Z' WHERE id=14");
@@ -75,6 +129,9 @@ test('missing detailed usage or native coverage stays unknown, including deleted
   await f.database.exec('DELETE FROM usage_logs WHERE account_id=12');
   r = await f.service.collect(f.date); assert.equal(r.siteComplete, false);
   assert(r.groups.every(g => g.main === null && g.diff === null));
+  const incomplete = await f.service.getReport({ date: f.date });
+  assert(incomplete.groups.every(group => group.accounts.every(account => account.main === null && account.localGroups.every(local => local.main === null))));
+  assert(incomplete.providerSummaries.every(provider => provider.main === null && provider.diff === null));
   await f.database.exec('DELETE FROM usage_dashboard_daily');
   const raw = await f.source.read('2026-11-24T16:00:00Z', '2026-11-25T16:00:00Z'); assert.equal(raw.complete, false);
 });
@@ -140,6 +197,7 @@ test('single-flight, timeout, stale fallback and shutdown prevent late source wr
   const [a, b] = await Promise.all([f.service.getReport({ date: f.date }), f.service.getReport({ date: f.date })]);
   assert.equal(f.controls.calls.length, count + 1); assert.equal(a.stale, true); assert.equal(b.stale, true);
   assert(a.groups.every(g => g.diff === null));
+  assert(a.providerSummaries.every(provider => provider.diff === null));
   const saved = f.store.get(f.service.scope(), f.date);
   release(); await new Promise(resolve => setTimeout(resolve, 15));
   assert.deepEqual(f.store.get(f.service.scope(), f.date), saved);
