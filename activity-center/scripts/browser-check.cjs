@@ -84,6 +84,56 @@ async function run() {
       await admin.locator('#open-ledger').click(); await admin.locator('#ledger-rows button').first().waitFor();
       await admin.locator('#lottery-config-form').waitFor();
       assert.equal(await admin.locator('#lottery-config-rows tr').count(),8);
+      await admin.locator('[data-lottery-weight="50"]').waitFor();
+      const previousConfig = preview.store.lotteryConfig();
+      const firstWeight = admin.locator('[data-lottery-weight="50"]');
+      const secondWeight = admin.locator('[data-lottery-weight="100"]');
+      const submitConfig = admin.locator('#lottery-config-form button[type="submit"]');
+      const firstPercent = previousConfig.prizes[0].weight / 100;
+      const secondPercent = previousConfig.prizes[1].weight / 100;
+      let configPosts = 0;
+      admin.on('request',request => { if (request.method() === 'POST' && request.url().endsWith('/api/admin/lottery-config')) configPosts++; });
+      for (const offset of [-1,1]) {
+        await firstWeight.fill(String(firstPercent + offset));
+        await submitConfig.click();
+        await admin.waitForFunction(() => document.querySelector('#lottery-config-feedback')?.textContent.includes('基础概率总和必须为 100%'));
+        assert.equal(configPosts,0);
+        assert.deepEqual(preview.store.lotteryConfig(),previousConfig);
+        assert(await submitConfig.isEnabled());
+      }
+      await firstWeight.fill(String(firstPercent + .25));
+      await secondWeight.fill(String(secondPercent - .25));
+      const threshold = previousConfig.prizes.find(prize => prize.amountMinor === 1000).minimumMinor + 100;
+      await admin.locator('[data-lottery-threshold="1000"]').fill(String(threshold / 100));
+      if (name === 'desktop') {
+        await admin.route('**/api/admin/lottery-config',route => route.request().method() === 'POST'
+          ? route.fulfill({ status: 503,contentType: 'application/json',body: JSON.stringify({ error: { message: '模拟保存失败' } }) }) : route.continue());
+        await submitConfig.click();
+        await admin.waitForFunction(() => {
+          const text = document.querySelector('#lottery-config-feedback')?.textContent;
+          return text && text !== '基础概率总和必须为 100%';
+        });
+        assert.equal(await admin.locator('#lottery-config-feedback').innerText(),'模拟保存失败');
+        assert(await submitConfig.isEnabled());
+        assert.deepEqual(preview.store.lotteryConfig(),previousConfig);
+        await admin.unroute('**/api/admin/lottery-config');
+      }
+      const postsBeforeSave = configPosts;
+      await submitConfig.click();
+      await admin.waitForFunction(() => document.querySelector('#lottery-config-feedback')?.textContent.includes('充值抽奖规则已保存'));
+      await admin.waitForFunction(() => !document.querySelector('#lottery-config-form button[type="submit"]').disabled);
+      assert.equal(configPosts,postsBeforeSave + 1);
+      const savedConfig = preview.store.lotteryConfig();
+      assert.equal(savedConfig.version,previousConfig.version + 1);
+      assert.equal(savedConfig.prizes[0].weight,previousConfig.prizes[0].weight + 25);
+      assert.equal(savedConfig.prizes[1].weight,previousConfig.prizes[1].weight - 25);
+      assert.equal(savedConfig.prizes.find(prize => prize.amountMinor === 1000).minimumMinor,threshold);
+      await admin.reload();
+      await admin.locator('#open-ledger').click();
+      await admin.locator('[data-lottery-weight="50"]').waitFor();
+      assert.equal(await firstWeight.inputValue(),String(firstPercent + .25));
+      assert.equal(await secondWeight.inputValue(),String(secondPercent - .25));
+      assert.equal(await admin.locator('[data-lottery-threshold="1000"]').inputValue(),String(threshold / 100));
       if (name === 'desktop') {
         await admin.locator('#admin-compensation-tab').click();
         await admin.locator('#compensation-grant-form').waitFor();
@@ -195,7 +245,7 @@ async function run() {
       await cleanContext.close();
     } finally { await cleanPreview.close(); }
     assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({ passed: results,checks: 'wheel pixels/landing, hidden parameters, single tab, single/batch/recovery, session reload, roles, compensation grant/profile UI, ledger filters/details/retry, legacy credit review/recovery, audit alerts/filters/details/unverifiable/healthy/read failures, fractional cash, reduced motion, layouts',screenshots: output },null,2));
+    console.log(JSON.stringify({ passed: results,checks: 'wheel pixels/landing, hidden parameters, single tab, single/batch/recovery, session reload, roles, lottery config save/reload/validation/error recovery, compensation grant/profile UI, ledger filters/details/retry, legacy credit review/recovery, audit alerts/filters/details/unverifiable/healthy/read failures, fractional cash, reduced motion, layouts',screenshots: output },null,2));
   } finally { await browser.close(); await preview.close(); }
 }
 

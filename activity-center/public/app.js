@@ -298,7 +298,7 @@ async function openAdminPanel(panel = 'ledger') {
         try {
           const payload = readLotteryConfig();
           feedback.className = 'feedback'; feedback.textContent = '';
-          const button = $('lottery-config-form button[type="submit"]'); button.disabled = true;
+          const button = event.currentTarget.querySelector('button[type="submit"]'); button.disabled = true;
           try {
             await api('admin/lottery-config',{ method: 'POST',body: JSON.stringify(payload) });
             feedback.textContent = '充值抽奖规则已保存，新抽奖将使用本次配置。';
