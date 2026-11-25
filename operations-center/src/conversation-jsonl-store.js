@@ -8,7 +8,7 @@ const { modelAllowed } = require('./services/conversation-models');
 const { REDACTION_VERSION, redactionPolicyHash } = require('./services/conversation-sensitive');
 const { deliveryBody } = require('./services/conversation-envelope');
 const { processingBudgets } = require('./services/conversation-memory');
-const { prepareWithMemoryWait } = require('./services/conversation-jsonl-flow');
+const { prepareWithMemoryWait, withArchiveRetry } = require('./services/conversation-jsonl-flow');
 const { pushMetadataStatus } = require('./services/conversation-metadata');
 
 class ConversationJsonlStore {
@@ -30,6 +30,7 @@ class ConversationJsonlStore {
         sha256 TEXT NOT NULL DEFAULT '',error_code TEXT NOT NULL DEFAULT '',http_status INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS cl_push_jsonl_due ON cl_push_jsonl_files(status,next_at);
         CREATE INDEX IF NOT EXISTS cl_push_jsonl_jobs ON cl_push_jobs(jsonl_file_id,status);
+        CREATE INDEX IF NOT EXISTS cl_push_jsonl_pending ON cl_push_jobs(created_at,id,destination,next_at) WHERE status='pending';
         CREATE TABLE IF NOT EXISTS cl_push_jsonl_members(
           job_id TEXT PRIMARY KEY,file_id TEXT NOT NULL REFERENCES cl_push_jsonl_files(id) ON DELETE CASCADE,
           ordinal INTEGER NOT NULL,metadata BLOB NOT NULL,fingerprint TEXT NOT NULL,processed_at INTEGER NOT NULL,
@@ -80,7 +81,7 @@ class ConversationJsonlStore {
   assignOne() {
     const currentPolicy = this.push.policy(); if (!this.enabled(currentPolicy)) return false;
     const ids=targets(currentPolicy).filter(item=>item.type==='s3'&&item.format==='jsonl').map(item=>item.id);
-    const job = this.db.prepare(`SELECT * FROM cl_push_jobs WHERE destination IN (${ids.map(()=>'?').join(',')}) AND status='pending' AND next_at<=? ORDER BY created_at,id LIMIT 1`).get(...ids,this.now());
+    const job = this.db.prepare(`SELECT * FROM cl_push_jobs INDEXED BY cl_push_jsonl_pending WHERE destination IN (${ids.map(()=>'?').join(',')}) AND status='pending' AND next_at<=? ORDER BY created_at,id LIMIT 1`).get(...ids,this.now());
     if (!job) return false;
     const policy=targetPolicy(currentPolicy,job.destination);
     const valid = this.push.validJob(job, policy);
@@ -90,8 +91,9 @@ class ConversationJsonlStore {
       return true;
     }
     let envelope, bytes;
-    try { envelope = this.push.delivery(job,undefined,this.memoryBudget); bytes = jsonlBytes(deliveryBody(envelope)); }
+    try { envelope = this.push.delivery(job,undefined,this.memoryBudget,{compactMetadata:true}); bytes = jsonlBytes(deliveryBody(envelope)); }
     catch (error) {
+      if (/^SQLITE_(?:BUSY|LOCKED)/.test(error.code || '')) throw error;
       const code = ['EXPORT_MEMORY','EXPORT_REQUEST_ID'].includes(error.code) ? error.code : 'COPY_UNAVAILABLE';
       this.defer(job, code, code !== 'EXPORT_REQUEST_ID'); return true;
     }
@@ -265,19 +267,23 @@ class ConversationJsonlStore {
     }).immediate();
   }
   guard(file, policyVersion, archiveVersion) {
-    const current = this.get(file.id);
-    if (current?.status !== 'running' || current.lease_token !== file.lease_token || this.push.policy().version !== policyVersion ||
-      this.archive.policy().version !== archiveVersion) throw new Error('DELIVERY_INVALIDATED');
-    if (current.lease_until - this.now() < 60000) this.db.prepare('UPDATE cl_push_jsonl_files SET lease_until=? WHERE id=? AND lease_token=?')
-      .run(this.now() + 270000, file.id, file.lease_token);
+    const current = this.db.prepare(`SELECT status,lease_token,lease_until,
+      (SELECT version FROM cl_push_policies ORDER BY version DESC LIMIT 1) push_version,
+      (SELECT version FROM cl_policies ORDER BY version DESC LIMIT 1) archive_version FROM cl_push_jsonl_files WHERE id=?`).get(file.id);
+    if (current?.status !== 'running' || current.lease_token !== file.lease_token || current.push_version !== policyVersion ||
+      current.archive_version !== archiveVersion) throw new Error('DELIVERY_INVALIDATED');
+    if (current.lease_until - this.now() < 60000 && !this.db.prepare("UPDATE cl_push_jsonl_files SET lease_until=? WHERE id=? AND status='running' AND lease_token=?")
+      .run(this.now() + 270000, file.id, file.lease_token).changes) throw new Error('DELIVERY_INVALIDATED');
   }
   uploadId(file, id) {
     return this.db.transaction(() => {
+      const current = this.get(file.id);
+      if (current?.status === 'running' && current.lease_token === file.lease_token && current.upload_id === id && current.upload_version === 1) return 1;
       const changed = this.db.prepare("UPDATE cl_push_jsonl_files SET upload_id=?,upload_version=1,uploaded_bytes=0,uploaded_parts=0,updated_at=? WHERE id=? AND status='running' AND lease_token=? AND upload_id=''")
         .run(id, this.now(), file.id, file.lease_token).changes;
       if (changed) this.db.prepare('DELETE FROM cl_push_jsonl_parts WHERE file_id=?').run(file.id);
       return changed;
-    })();
+    }).immediate();
   }
   clearUpload(id, uploadId, leaseToken = '') {
     return this.db.transaction(() => {
@@ -295,8 +301,12 @@ class ConversationJsonlStore {
   savePart(file, uploadId, part) {
     return this.db.transaction(() => {
       const current = this.get(file.id);
-      if (current?.status !== 'running' || current.lease_token !== file.lease_token || current.upload_id !== uploadId ||
-        part.number !== current.uploaded_parts + 1 || current.uploaded_bytes + part.bytes > current.bytes) return false;
+      if (current?.status !== 'running' || current.lease_token !== file.lease_token || current.upload_id !== uploadId) return false;
+      if (part.number <= current.uploaded_parts) {
+        const saved = this.db.prepare('SELECT bytes,etag,sha256 FROM cl_push_jsonl_parts WHERE file_id=? AND number=?').get(file.id, part.number);
+        return Boolean(saved && saved.bytes === part.bytes && saved.etag === part.etag && saved.sha256 === part.sha256);
+      }
+      if (part.number !== current.uploaded_parts + 1 || current.uploaded_bytes + part.bytes > current.bytes) return false;
       this.db.prepare('INSERT INTO cl_push_jsonl_parts VALUES(?,?,?,?,?)').run(file.id, part.number, part.bytes, part.etag, part.sha256);
       this.db.prepare('UPDATE cl_push_jsonl_files SET uploaded_bytes=uploaded_bytes+?,uploaded_parts=uploaded_parts+1,updated_at=? WHERE id=?')
         .run(part.bytes, this.now(), file.id);
@@ -307,20 +317,20 @@ class ConversationJsonlStore {
     this.db.prepare("UPDATE cl_push_jsonl_files SET pause_reason=?,updated_at=? WHERE id=? AND status='running' AND lease_token=? AND pause_reason!=?")
       .run(reason, this.now(), file.id, file.lease_token, reason);
   }
-  async *envelopes(file, guard, checkpoint = async () => {}) {
+  async *envelopes(file, guard, checkpoint = async () => {}, local = action => withArchiveRetry(action, { guard })) {
     let ordinal = -1;
     while (true) {
-      const members = this.db.prepare(`SELECT m.job_id,m.ordinal,m.metadata,m.payload_source,m.fallback_reason,j.* FROM cl_push_jsonl_members m
-        LEFT JOIN cl_push_jobs j ON j.id=m.job_id WHERE m.file_id=? AND m.ordinal>? ORDER BY m.ordinal LIMIT 20`).all(file.id, ordinal);
+      const members = await local(() => this.db.prepare(`SELECT m.job_id,m.ordinal,m.metadata,m.payload_source,m.fallback_reason,j.* FROM cl_push_jsonl_members m
+        LEFT JOIN cl_push_jobs j ON j.id=m.job_id WHERE m.file_id=? AND m.ordinal>? ORDER BY m.ordinal LIMIT 20`).all(file.id, ordinal));
       if (!members.length) break;
       for (const member of members) {
         const copy = {source:member.payload_source || member.source,fallbackReason:member.fallback_reason};
-        let envelope = await prepareWithMemoryWait(() => {
+        let envelope = await prepareWithMemoryWait(() => local(() => {
           if (!member.id || member.envelope_version !== file.envelope_version) throw new Error('DELIVERY_INVALIDATED');
           const valid = this.push.validJob(member);
           if (valid.paused || valid.cancel) throw new Error('DELIVERY_INVALIDATED');
-          return this.push.delivery(member, copy, this.memoryBudget);
-        }, { guard, checkpoint, timeoutMs: this.memoryWaitMs, onPause: reason => this.pause(file, reason) });
+          return this.push.delivery(member, copy, this.memoryBudget, {compactMetadata:true});
+        }), { guard, checkpoint, timeoutMs: this.memoryWaitMs, onPause: reason => local(() => this.pause(file, reason)) });
         envelope.metadata = this.archive.open(member.metadata, 'jsonl-metadata:' + member.id);
         yield envelope; envelope = null; ordinal = member.ordinal;
         await new Promise(resolve => setImmediate(resolve));
@@ -332,10 +342,11 @@ class ConversationJsonlStore {
       attempts = Math.max(0,file.attempts-Number(deferred));
     const retry = deferred || result.retryable && attempts < policy.maxAttempts;
     const status = retry ? 'pending' : result.status;
+    const retryMs = deferred ? 5000 : Math.min(3600000, policy.retrySeconds * 1000 * 2 ** Math.max(0, attempts - 1));
     return this.db.transaction(() => {
       const changed = this.db.prepare(`UPDATE cl_push_jsonl_files SET status=?,attempts=?,error_code=?,http_status=?,sha256=?,next_at=?,lease_token='',lease_until=0,pause_reason='',updated_at=?,
         upload_id=CASE WHEN ?='sent' THEN '' ELSE upload_id END WHERE id=? AND status='running' AND lease_token=?`)
-        .run(status, attempts, result.errorCode || '', result.httpStatus || 0, result.sha256 || '', this.now() + Math.min(3600000, policy.retrySeconds * 1000 * 2 ** Math.max(0, attempts - 1)),
+        .run(status, attempts, result.errorCode || '', result.httpStatus || 0, result.sha256 || '', this.now() + retryMs,
           this.now(), status, file.id, file.lease_token).changes;
       if (!changed) return 0;
       this.db.prepare("UPDATE cl_push_jobs SET status=?,attempts=?,error_code=?,http_status=?,updated_at=? WHERE jsonl_file_id=? AND status='buffered'")

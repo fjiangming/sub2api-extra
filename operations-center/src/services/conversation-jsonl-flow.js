@@ -29,30 +29,44 @@ function delay(ms, signal) {
 }
 
 async function waitForTurn({ canWork, guard, signal, onPause = () => {} }) {
-  guard();
+  await guard();
   if (canWork()) return;
-  onPause('archive_busy');
+  await onPause('archive_busy');
   try {
-    while (!canWork()) { guard(); await delay(100, signal); }
-    guard();
-  } finally { onPause(''); }
+    while (!canWork()) { await guard(); await delay(100, signal); }
+    await guard();
+  } finally { await onPause(''); }
+}
+
+async function withArchiveRetry(action, { guard = () => {}, signal, timeoutMs = 5000, now = () => performance.now(), wait = delay } = {}) {
+  const deadline = now() + timeoutMs; let backoff = 20;
+  for (;;) {
+    if (signal?.aborted) throw signal.reason?.pushCode ? signal.reason : failure('ABORTED', true);
+    await guard();
+    try { return await action(); }
+    catch (error) {
+      if (!/^SQLITE_(?:BUSY|LOCKED)/.test(error.code || '') || now() >= deadline) throw error;
+    }
+    await wait(Math.min(backoff, Math.max(0, deadline - now())), signal);
+    backoff = Math.min(250, backoff * 2);
+  }
 }
 
 async function prepareWithMemoryWait(prepare, { guard, checkpoint, onPause, timeoutMs = 30000, now = () => performance.now(), wait = delay }) {
   const deadline = now() + timeoutMs; let paused = false, backoff = 250;
   try {
     while (true) {
-      await checkpoint(); guard();
-      try { return prepare(); }
+      await checkpoint(); await guard();
+      try { return await prepare(); }
       catch (error) {
-        if (error.code !== 'EXPORT_MEMORY' || now() >= deadline) throw error;
+        if ((error.pushCode || error.code) !== 'EXPORT_MEMORY' || now() >= deadline) throw error;
       }
-      paused = true; onPause('memory_wait');
+      paused = true; await onPause('memory_wait');
       const retryAt = Math.min(deadline, now() + backoff);
-      while (now() < retryAt) { await wait(Math.min(100, retryAt - now())); guard(); }
+      while (now() < retryAt) { await wait(Math.min(100, retryAt - now())); await guard(); }
       backoff = Math.min(4000, backoff * 2);
     }
-  } finally { if (paused) onPause(''); }
+  } finally { if (paused) await onPause(''); }
 }
 
 function pacedBody(body, bytesPerSecond, signal, { now = () => performance.now(), wait = delay } = {}) {
@@ -69,4 +83,4 @@ function pacedBody(body, bytesPerSecond, signal, { now = () => performance.now()
   })(), { objectMode: false, highWaterMark: 65536 });
 }
 
-module.exports = { abortable, delay, waitForTurn, prepareWithMemoryWait, pacedBody };
+module.exports = { abortable, delay, waitForTurn, withArchiveRetry, prepareWithMemoryWait, pacedBody };

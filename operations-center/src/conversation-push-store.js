@@ -351,7 +351,12 @@ class ConversationPushStore {
       batches:this.db.prepare('SELECT id,created_at,matched,eligible,created FROM cl_push_batches ORDER BY created_at DESC LIMIT 10').all()};
   }
   admit(job, pinnedCopy, budget = processingBudgets()) {
-    const row=this.db.prepare(`SELECT original IS NOT NULL AS original,masked IS NOT NULL AS masked,length(original) original_bytes,length(masked) masked_bytes,
+    let row=this.db.prepare(`SELECT m.original,m.masked,length(r.original) original_bytes,length(r.masked) masked_bytes,
+      m.processing_pending,m.processing_error,m.inspection_warnings,m.redaction_version,m.redaction_policy_hash
+      FROM cl_records r LEFT JOIN cl_record_metadata m ON m.id=r.id WHERE r.id=?`).get(job.record_id);
+    // BLOB lengths come from the record header; late processing fields must not
+    // traverse large overflow pages just to decide whether memory is available.
+    if (row && row.original === null) row=this.db.prepare(`SELECT original IS NOT NULL AS original,masked IS NOT NULL AS masked,length(original) original_bytes,length(masked) masked_bytes,
       processing_pending,processing_error,inspection_warnings,redaction_version,redaction_policy_hash FROM cl_records WHERE id=?`).get(job.record_id);
     const fixed=pinnedCopy || (job.delivery_source ? {source:job.delivery_source} : null);
     const copy=row && (fixed || this.copySelection(row,job.source,this.archive.policy()));
@@ -364,11 +369,11 @@ class ConversationPushStore {
       throw Object.assign(new Error('EXPORT_MEMORY'),{code:'EXPORT_MEMORY'});
     }
   }
-  delivery(job, pinnedCopy, memoryBudget = processingBudgets) {
+  delivery(job, pinnedCopy, memoryBudget = processingBudgets, { compactMetadata = false } = {}) {
     const prepare=()=>{
       const budget=memoryBudget();this.admit(job,pinnedCopy,budget);
       const limit=Math.floor((typeof budget==='number'?budget:Math.min(budget.memory,budget.heap))/4);
-      return this.envelope(job,pinnedCopy,{format:(raw,options)=>formatDeliveryBodies(raw,{...options,maxOutputBytes:Number.isFinite(limit)?limit:undefined})});
+      return this.envelope(job,pinnedCopy,{compactMetadata,format:(raw,options)=>formatDeliveryBodies(raw,{...options,maxOutputBytes:Number.isFinite(limit)?limit:undefined})});
     };
     try { return prepare(); }
     catch (error) {
@@ -377,9 +382,15 @@ class ConversationPushStore {
     // Only isolated push workers expose GC; release the failed preparation before one recovery attempt.
     global.gc();return prepare();
   }
-  envelope(job, pinnedCopy, { format = formatBodies } = {}) {
+  envelope(job, pinnedCopy, { format = formatBodies, compactMetadata = false } = {}) {
     const fields='id,request_id,user_id,key_id,account_id,session_id,at,duration_ms,host,path,method,protocol,model,status,complete,reason,policy_version,mode,encoding,processing_error,processing_policy_version,processed_at,capture_version,body_sha256,redaction_version,inspection_warnings,upstream_status,upstream_evidence,completion_source,transport_diagnostics';
-    const row=this.db.prepare(`SELECT ${fields},processing_pending,redaction_policy_hash,original IS NOT NULL AS original,masked IS NOT NULL AS masked FROM cl_records WHERE id=?`).get(job.record_id);
+    const version=job.envelope_version ?? ENVELOPE_VERSION;
+    let row;
+    if (compactMetadata && [3,4].includes(version)) {
+      const compactFields=fields.split(',').filter(field=>field!=='transport_diagnostics').join(',');
+      row=this.db.prepare(`SELECT ${compactFields},processing_pending,redaction_policy_hash,original,masked FROM cl_record_metadata WHERE id=?`).get(job.record_id);
+    }
+    row ||= this.db.prepare(`SELECT ${fields},processing_pending,redaction_policy_hash,original IS NOT NULL AS original,masked IS NOT NULL AS masked FROM cl_records WHERE id=?`).get(job.record_id);
     const unavailable=()=>invalid('日志副本不可用','CONVERSATION_PUSH_COPY_UNAVAILABLE',409);
     if(!row || !this.allowed(row,this.archive.policy()))throw unavailable();
     const fixed=pinnedCopy || (job.delivery_source?{source:job.delivery_source,fallbackReason:job.delivery_fallback_reason}:null);
@@ -400,7 +411,6 @@ class ConversationPushStore {
       copy={source:'original',fallbackReason:'MASKED_READ_FAILED'};raw=open('original');
     }
     const {processing_pending,redaction_policy_hash,original,masked,...metadata}=row;
-    const version=job.envelope_version ?? ENVELOPE_VERSION;
     const outputMetadata=!pinnedCopy && job.delivery_metadata?this.archive.open(job.delivery_metadata,'push-metadata:'+job.id):
       {...metadata,transport_diagnostics:metadata.transport_diagnostics?JSON.parse(metadata.transport_diagnostics):null,
       inspection_warnings:JSON.parse(metadata.inspection_warnings),complete:Boolean(metadata.complete),encoding:copy.source==='original'?metadata.encoding:''};

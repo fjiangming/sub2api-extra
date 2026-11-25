@@ -17,6 +17,7 @@ class ConversationPushService {
     this.store=store;this.transport=transport;this.stopping=false;this.active=null;this.lastError='';this.lastRun=null;this.testing=false;
     this.canWork=canWork;this.canJsonlWork=canJsonlWork;this.canCleanup=canCleanup;this.memoryBudget=memoryBudget;this.cleanupError='';this.nextCleanup=0;this.nextMaintenance=0;this.nextPrune=0;this.nextReclaim=0;
     this.pricingPause='';this.pricingError='';this.reclaimIdleSince=null;
+    this.nextAutomaticScanAt=0;
     this.jsonl=new ConversationJsonlService(store,transport,{memoryBudget,...jsonlOptions,canWork:()=>canJsonlWork()&&!this.active&&!this.testing});
   }
   policy() { return publicPolicy(this.store.policy()); }
@@ -126,7 +127,13 @@ class ConversationPushService {
     } finally { this.testing=false;this.testController=null;this.testRun=null; }
   }
   async tick() {
-    if(this.stopping||this.active||this.testing||this.jsonl.active||!this.canWork())return false;
+    if(this.stopping||this.active||this.testing||!this.canWork())return false;
+    if(this.jsonl.active) {
+      if(performance.now()>=this.nextAutomaticScanAt) {
+        this.nextAutomaticScanAt=performance.now()+1000;this.store.scanAutomatic();
+      }
+      return false;
+    }
     this.store.scanAutomatic();
     const job=this.store.claim({single:true});if(!job)return false;
     this.reclaimIdleSince=null;

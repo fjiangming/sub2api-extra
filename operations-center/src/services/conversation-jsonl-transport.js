@@ -41,11 +41,11 @@ async function session(transport, policy, outerSignal, guard, operation) {
     const host = args.request.hostname.replace(/^\[|\]$/g, ''), base = baseUrl.hostname.replace(/^\[|\]$/g, '');
     if (host !== base && host !== `${target.bucket}.${base}`) throw failure('ADDRESS_BLOCKED');
     const address = await transport.resolve(host, policy.allowPrivateNetwork, requestSignal);
-    guard(); if (requestSignal.aborted) throw failure('ABORTED', true);
+    await guard(); if (requestSignal.aborted) throw failure('ABORTED', true);
     pinned.set(host, address); return next(args);
   }, { step: 'finalizeRequest', name: 'validateConversationJsonlAddress', priority: 'low' });
   const request = async (command, extraMs = 0) => {
-    guard(); if (stop.signal.aborted) throw stop.signal.reason?.pushCode ? stop.signal.reason : failure('ABORTED', true);
+    await guard(); if (stop.signal.aborted) throw stop.signal.reason?.pushCode ? stop.signal.reason : failure('ABORTED', true);
     const controller = new AbortController(), cancel = () => controller.abort(stop.signal.reason); let timedOut = false;
     stop.signal.addEventListener('abort', cancel, { once: true }); requestSignal = controller.signal;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, policy.timeoutSeconds * 1000 + extraMs);
@@ -92,7 +92,7 @@ async function sendJsonl(transport, policy, file, envelopes, signal, {
     const upload = { ...target, UploadId: uploadId }, parts = [], hash = crypto.createHash('sha256');
     const buffer = Buffer.allocUnsafe(PART_BYTES); let offset = 0, bytes = 0, records = 0, sinceYield = 0;
     const sendPart = async () => {
-      await checkpoint(); guard();
+      await checkpoint(); await guard();
       const body = buffer.subarray(0, offset), checksum = crypto.createHash('sha256').update(body).digest('base64'), number = parts.length + 1;
       const saved = restoredParts[number - 1];
       let etag;
@@ -112,7 +112,7 @@ async function sendJsonl(transport, policy, file, envelopes, signal, {
       parts.push({ PartNumber: number, ETag: etag, ChecksumSHA256: checksum }); offset = 0;
     };
     for await (let envelope of envelopes) {
-      await checkpoint(); guard(); records++;
+      await checkpoint(); await guard(); records++;
       for (const chunk of jsonlChunks(deliveryBody(envelope))) {
         const source = Buffer.from(chunk); hash.update(source); bytes += source.length;
         if (bytes > file.bytes) throw failure('JSONL_CONTENT_CHANGED');
@@ -128,7 +128,7 @@ async function sendJsonl(transport, policy, file, envelopes, signal, {
     }
     if (offset) await sendPart();
     if (bytes !== file.bytes || records !== file.records || !parts.length || restoredParts.length > parts.length) throw failure('JSONL_CONTENT_CHANGED');
-    await checkpoint(); await beforeComplete(); guard();
+    await checkpoint(); await beforeComplete(); await guard();
     const completed = await request(new CompleteMultipartUploadCommand({ ...upload, MultipartUpload: { Parts: parts } }));
     return { status: 'sent', httpStatus: completed.$metadata.httpStatusCode, bytes, records, sha256: hash.digest('hex') };
   });

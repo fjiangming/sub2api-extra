@@ -12,7 +12,7 @@ const { ConversationPushService } = require('../src/services/conversation-push-s
 const { ConversationPushTransport } = require('../src/services/conversation-push-transport');
 const { defaults } = require('../src/services/conversation-push-policy');
 const { jsonlBytes } = require('../src/services/conversation-jsonl-format');
-const { pacedBody, waitForTurn, prepareWithMemoryWait } = require('../src/services/conversation-jsonl-flow');
+const { pacedBody, waitForTurn, withArchiveRetry, prepareWithMemoryWait } = require('../src/services/conversation-jsonl-flow');
 
 function setup(t, receiver, options = {}) {
   let now = Date.now();
@@ -269,12 +269,13 @@ test('a transport ignoring cancellation requires a worker restart and its late s
   assert.equal(puts(receiver).filter(entry => entry.query.get('partNumber') === '1').length, 1);
 });
 
-test('a busy local part checkpoint preserves the upload and does not exhaust network retries', async t => {
+test('a busy local part checkpoint retries in place without rereading or retransmitting the file', async t => {
   const receiver = await s3Receiver(); t.after(() => receiver.close()); const f = setup(t, receiver);
   f.push.configure({ ...f.push.policy(), maxAttempts: 1 }); const row = large(f, 'local-checkpoint-busy');
   const other = new ConversationLogStore(f.directory).openReader(), save = f.jsonl.savePart.bind(f.jsonl);
   const busyTimeout = f.jsonl.db.pragma('busy_timeout', { simple: true }); f.jsonl.db.pragma('busy_timeout = 1');
-  let compete = true;
+  const delivery = f.push.delivery.bind(f.push); let reads = 0, compete = true;
+  f.push.delivery = (...args) => { reads++; return delivery(...args); };
   f.jsonl.savePart = (...args) => {
     if (!compete || args[2].number !== 2) return save(...args);
     compete = false; other.db.exec('BEGIN IMMEDIATE');
@@ -282,15 +283,186 @@ test('a busy local part checkpoint preserves the upload and does not exhaust net
   };
   try { await f.service.jsonl.tick(); }
   finally { f.jsonl.savePart = save; f.jsonl.db.pragma(`busy_timeout = ${busyTimeout}`); other.close(); }
-  const paused = f.jsonl.get(f.jsonl.list().files[0].id);
-  assert.equal(paused.status, 'pending'); assert.equal(paused.error_code, 'ARCHIVE_BUSY'); assert.equal(paused.attempts, 0);
-  assert.equal(paused.uploaded_parts, 1); assert.equal(receiver.completed.length, 0); assert.equal(f.push.billing.report().summary.files, 0);
-  f.advance(); await f.service.jsonl.tick();
-  const done = f.jsonl.get(paused.id), body = receiver.completed[0].body;
+  const done = f.jsonl.get(f.jsonl.list().files[0].id), body = receiver.completed[0].body;
   assert.equal(done.status, 'sent'); assert.equal(creates(receiver).length, 1);
-  assert.deepEqual(puts(receiver).map(entry => entry.query.get('partNumber')), ['1','2','2']);
+  assert.equal(compete, false); assert.equal(done.attempts, 1); assert.equal(reads, 2);
+  assert.equal(f.push.billing.report().summary.files, 1);
+  assert.deepEqual(puts(receiver).map(entry => entry.query.get('partNumber')), ['1','2']);
   assert.equal(done.sha256, crypto.createHash('sha256').update(body).digest('hex'));
   assert.deepEqual(exportBodyBytes(JSON.parse(body), 'request'), Buffer.from(row.request, 'base64'));
+});
+
+for (const stage of ['uploadId','savePart','guard','finish']) test(`a real SQLite writer lock during ${stage} yields and preserves one multipart delivery`, async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close());
+  const f = setup(t, receiver), row = large(f, 'writer-wait-' + stage);
+  const other = new ConversationLogStore(f.directory).openReader(), action = f.jsonl[stage].bind(f.jsonl);
+  const busyTimeout = f.jsonl.db.pragma('busy_timeout', { simple: true }); f.jsonl.db.pragma('busy_timeout = 1');
+  let competed = false, busy = 0, timer, heartbeats = 0;
+  const heartbeat = setInterval(() => { heartbeats++; }, 10);
+  f.jsonl[stage] = (...args) => {
+    if (!competed) {
+      competed = true;
+      if (stage === 'guard') f.jsonl.db.prepare('UPDATE cl_push_jsonl_files SET lease_until=? WHERE id=?').run(f.jsonl.now() + 1000, args[0].id);
+      other.db.exec('BEGIN IMMEDIATE');
+      timer = setTimeout(() => other.db.exec('ROLLBACK'), 80);
+    }
+    try { return action(...args); }
+    catch (error) { if (/^SQLITE_BUSY/.test(error.code || '')) busy++; throw error; }
+  };
+  try { await f.service.jsonl.tick(); }
+  finally {
+    clearInterval(heartbeat); clearTimeout(timer); if (other.db.inTransaction) other.db.exec('ROLLBACK');
+    f.jsonl[stage] = action; f.jsonl.db.pragma(`busy_timeout = ${busyTimeout}`); other.close();
+  }
+  const file = f.jsonl.get(f.jsonl.list().files[0].id), body = receiver.completed[0]?.body;
+  assert(competed && busy > 0); assert(heartbeats >= 3, 'local lock waiting must release the event loop');
+  assert.equal(file.status, 'sent'); assert.equal(file.attempts, 1); assert.equal(file.error_code, '');
+  assert.equal(creates(receiver).length, 1); assert.equal(receiver.requests.filter(entry => entry.method === 'POST' && entry.query.has('uploadId')).length, 1);
+  assert.deepEqual(puts(receiver).map(entry => entry.query.get('partNumber')), ['1','2']);
+  assert.equal(f.push.billing.report().summary.files, 1); assert.equal(file.bytes, body.length);
+  assert.equal(file.sha256, crypto.createHash('sha256').update(body).digest('hex'));
+  assert.deepEqual(exportBodyBytes(JSON.parse(body), 'request'), Buffer.from(row.request, 'base64'));
+});
+
+for (const cancel of [false, true]) test(`a ${cancel ? 'cancelled' : 'prolonged'} local checkpoint wait retains the archive and resumes confirmed parts`, async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close());
+  const f = setup(t, receiver, { jsonlOptions: { archiveRetryMs: 100 } });
+  f.push.configure({ ...f.push.policy(), maxAttempts: 1, deleteAfterPush: true });
+  const row = large(f, 'bounded-lock-' + cancel), other = new ConversationLogStore(f.directory).openReader();
+  const save = f.jsonl.savePart.bind(f.jsonl), busyTimeout = f.jsonl.db.pragma('busy_timeout', { simple: true });
+  f.jsonl.db.pragma('busy_timeout = 1'); let competed = false, release, cancellation;
+  f.jsonl.savePart = (...args) => {
+    if (!competed && args[2].number === 2) {
+      competed = true; other.db.exec('BEGIN IMMEDIATE');
+      release = setTimeout(() => other.db.exec('ROLLBACK'), 150);
+      if (cancel) cancellation = setTimeout(() => f.service.jsonl.invalidate(), 20);
+    }
+    return save(...args);
+  };
+  try { await within(f.service.jsonl.tick()); }
+  finally {
+    clearTimeout(release); clearTimeout(cancellation); if (other.db.inTransaction) other.db.exec('ROLLBACK');
+    f.jsonl.savePart = save; f.jsonl.db.pragma(`busy_timeout = ${busyTimeout}`); other.close();
+  }
+  const paused = f.jsonl.get(f.jsonl.list().files[0].id);
+  assert(competed); assert.equal(paused.status, 'pending'); assert.equal(paused.error_code, cancel ? 'ABORTED' : 'ARCHIVE_BUSY');
+  assert.equal(paused.attempts, 0); assert.equal(paused.uploaded_parts, 1); assert(paused.upload_id);
+  assert.equal(receiver.completed.length, 0); assert.equal(f.push.billing.report().summary.files, 0);
+  f.service.maintain(); assert(f.store.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(row.id));
+  f.advance(); await f.service.jsonl.tick();
+  const done = f.jsonl.get(paused.id); assert.equal(done.status, 'sent'); assert.equal(creates(receiver).length, 1);
+  assert.deepEqual(puts(receiver).map(entry => entry.query.get('partNumber')), ['1','2','2']);
+  assert.equal(done.sha256, crypto.createHash('sha256').update(receiver.completed[0].body).digest('hex'));
+});
+
+test('uploading a sealed file keeps automatically scanning and collecting new files without early sealing or parallel uploads', async t => {
+  let release, held = false, allowed = true;
+  const gate = new Promise(resolve => { release = resolve; });
+  const receiver = await s3Receiver({ beforeRequest: async entry => {
+    if (entry.method === 'PUT' && entry.query.get('partNumber') === '1') { held = true; await gate; }
+  } }); t.after(() => receiver.close());
+  const f = setup(t, receiver, { canWork: () => allowed }); f.push.configure({ ...f.push.policy(), automatic: true });
+  const first = large(f, 'collect-during-upload'); f.service.start();
+  try {
+    await until(() => held); const frozen = f.jsonl.get(f.jsonl.list().files[0].id);
+    allowed = false;
+    const next = event('collect-next', { model: 'Opus5' }), other = event('collect-other', { model: 'Fable5' });
+    f.store.ingest(next); f.store.ingest(other);
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    assert.equal(f.push.db.prepare('SELECT 1 FROM cl_push_jobs WHERE record_id=?').get(next.id), undefined, 'foreground work takes priority');
+    allowed = true;
+    const assign = f.jsonl.assignOne.bind(f.jsonl); let collectionCalls = 0;
+    f.jsonl.assignOne = () => { collectionCalls++; return assign(); };
+    await until(() => f.push.db.prepare("SELECT COUNT(*) n FROM cl_push_jobs WHERE record_id IN (?,?) AND status='buffered'").get(next.id, other.id).n === 2);
+    await f.service.jsonl.collecting;
+    const collected = collectionCalls;
+    for (let index = 0; index < 50; index++) f.service.jsonl.wake();
+    await f.service.jsonl.collecting;
+    assert(collectionCalls <= collected + 1, 'frequent arrivals cannot cause unbounded collection turns');
+    assert(f.service.jsonl.active); assert.equal(f.jsonl.get(frozen.id).records, 1); assert.equal(f.jsonl.get(frozen.id).bytes, frozen.bytes);
+    const open = f.jsonl.list().files.filter(file => file.id !== frozen.id);
+    assert.equal(open.length, 2); assert(open.every(file => file.status === 'open' && file.bytes < 10000000000));
+    assert.equal(f.push.policy().s3.jsonl.flushMinutes, 0); assert.equal(creates(receiver).length, 1); assert.equal(puts(receiver).length, 1);
+    release(); await until(() => f.jsonl.get(frozen.id).status === 'sent'); await f.service.stop();
+    assert.equal(receiver.completed.length, 1); assert.equal(JSON.parse(receiver.completed[0].body).request_id, first.request_id);
+    assert.equal(f.jsonl.get(frozen.id).sha256, crypto.createHash('sha256').update(receiver.completed[0].body).digest('hex'));
+    assert(open.every(file => f.jsonl.get(file.id).status === 'open'));
+  } finally { allowed = true; release(); await f.service.stop(); }
+});
+
+test('local resource deferrals use a short independent delay without discarding network attempt history', async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close()); const f = setup(t, receiver);
+  f.push.configure({ ...f.push.policy(), retrySeconds: 30, maxAttempts: 10 });
+  f.store.ingest(event('local-backoff')); f.enqueue(); f.jsonl.assignOne();
+  const id = f.jsonl.list().files[0].id; f.jsonl.seal(id);
+  for (const code of ['ARCHIVE_BUSY','EXPORT_MEMORY','UPLOAD_STALLED','ABORTED','HTTP_REJECTED']) {
+    f.jsonl.db.prepare("UPDATE cl_push_jsonl_files SET status='pending',attempts=4,next_at=0 WHERE id=?").run(id);
+    const file = f.jsonl.claim(); f.jsonl.finish(file, { status: 'failed', errorCode: code, retryable: true });
+    const saved = f.jsonl.get(id); assert.equal(saved.status, 'pending');
+    assert.equal(saved.attempts, code === 'HTTP_REJECTED' ? 5 : 4);
+    assert.equal(saved.next_at - f.jsonl.now(), code === 'HTTP_REJECTED' ? 480000 : 5000);
+  }
+});
+
+test('archive retries await guards, stop on cancellation or invalidation, and have a bounded busy deadline', async () => {
+  const busy = Object.assign(new Error('busy'), { code: 'SQLITE_BUSY' });
+  let clock = 0, calls = 0, checks = 0;
+  const options = { now: () => clock, timeoutMs: 75, wait: async ms => { clock += ms; }, guard: async () => { checks++; } };
+  await assert.rejects(withArchiveRetry(() => { calls++; throw busy; }, options), { code: 'SQLITE_BUSY' });
+  assert.equal(clock, 75); assert.equal(calls, 4); assert.equal(checks, 4);
+  const controller = new AbortController(); calls = 0;
+  await assert.rejects(withArchiveRetry(() => { calls++; throw busy; }, { ...options, signal: controller.signal,
+    wait: async () => { controller.abort(); } }), /ABORTED/);
+  assert.equal(calls, 1);
+  calls = 0;
+  await assert.rejects(withArchiveRetry(() => { calls++; throw busy; }, { ...options,
+    guard: async () => { throw new Error('DELIVERY_INVALIDATED'); } }), /DELIVERY_INVALIDATED/);
+  assert.equal(calls, 0);
+  await assert.rejects(prepareWithMemoryWait(async () => { throw new Error('CONTENT_CHANGED'); }, {
+    guard: async () => {}, checkpoint: async () => {}, onPause: async () => {}
+  }), /CONTENT_CHANGED/);
+});
+
+test('repeating identical persisted upload receipts is idempotent and conflicting receipts remain rejected', async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close()); const f = setup(t, receiver);
+  f.store.ingest(event('idempotent-local-receipt')); f.enqueue(); f.jsonl.assignOne();
+  f.jsonl.seal(f.jsonl.list().files[0].id); const file = f.jsonl.claim();
+  const part = { number: 1, bytes: file.bytes, etag: 'fixture-etag', sha256: crypto.createHash('sha256').update('fixture').digest('base64') };
+  assert(f.jsonl.uploadId(file, 'fixture-upload')); assert(f.jsonl.savePart(file, 'fixture-upload', part));
+  assert(f.jsonl.uploadId(file, 'fixture-upload')); assert(f.jsonl.savePart(file, 'fixture-upload', part));
+  assert.equal(f.jsonl.uploadId(file, 'other-upload'), 0);
+  assert.equal(f.jsonl.savePart(file, 'fixture-upload', { ...part, etag: 'different' }), false);
+  assert.equal(f.jsonl.savePart(file, 'fixture-upload', { ...part, bytes: part.bytes - 1 }), false);
+  assert.equal(f.jsonl.savePart(file, 'fixture-upload', { ...part, sha256: Buffer.alloc(32).toString('base64') }), false);
+  assert.deepEqual(f.jsonl.parts(file), [part]); assert.equal(f.jsonl.get(file.id).uploaded_bytes, part.bytes);
+  assert.equal(f.jsonl.get(file.id).uploaded_parts, 1);
+});
+
+test('frequent upload guards check current policy versions without decrypting policy bodies', async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close()); const f = setup(t, receiver);
+  f.store.ingest(event('lightweight-guard')); f.enqueue(); f.jsonl.assignOne();
+  f.jsonl.seal(f.jsonl.list().files[0].id); const file = f.jsonl.claim(), policy = f.push.policy(), archivePolicy = f.store.policy();
+  const pushPolicy = f.push.policy, readPolicy = f.store.policy;
+  f.push.policy = f.store.policy = () => { throw new Error('Guard must only read policy versions'); };
+  try { for (let index = 0; index < 20; index++) f.jsonl.guard(file, policy.version, archivePolicy.version); }
+  finally { f.push.policy = pushPolicy; f.store.policy = readPolicy; }
+  f.push.configure({ ...policy, retrySeconds: policy.retrySeconds + 1 });
+  assert.throws(() => f.jsonl.guard(file, policy.version, archivePolicy.version), /DELIVERY_INVALIDATED/);
+  f.jsonl.guard(file, f.push.policy().version, archivePolicy.version);
+  f.store.configure({ ...archivePolicy, retention: 1 });
+  assert.throws(() => f.jsonl.guard(file, f.push.policy().version, archivePolicy.version), /DELIVERY_INVALIDATED/);
+});
+
+test('a busy planning read leaves the job pending without consuming attempts or misclassifying the copy', async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close()); const f = setup(t, receiver);
+  const row = event('busy-planning-read'); f.store.ingest(row); f.enqueue();
+  const delivery = f.push.delivery;
+  f.push.delivery = () => { throw Object.assign(new Error('busy'), { code: 'SQLITE_BUSY' }); };
+  try { assert.throws(() => f.jsonl.assignOne(), { code: 'SQLITE_BUSY' }); }
+  finally { f.push.delivery = delivery; }
+  const job = f.push.db.prepare('SELECT * FROM cl_push_jobs WHERE record_id=?').get(row.id);
+  assert.equal(job.status, 'pending'); assert.equal(job.attempts, 0); assert.equal(job.error_code, '');
+  assert(f.jsonl.assignOne()); assert.equal(f.push.list().items[0].status, 'buffered');
 });
 
 test('saving policy during upload preserves acknowledged parts and bills the verified delivery once',async t=>{
