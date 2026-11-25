@@ -59,21 +59,23 @@ async function main() {
   catch { conversationStore.close(); console.warn('conversation archive unavailable: CONVERSATION_INITIALIZATION_FAILED'); }
   const conversationArchive = conversations ? new ConversationArchiveService(conversations) : null;
   if (conversationArchive) conversationArchive.start().catch(() => console.warn('conversation processor unavailable: CONVERSATION_PROCESSOR_START_FAILED'));
+  let conversationCleanup = null;
+  let conversationRepair = null;
+  const conversationPushForegroundAvailable = () => !conversationCleanup?.child && !conversationRepair?.busy && !conversationRead?.active && !conversationRead?.queue.length && !conversationRead?.draining
+    && !conversationExport?.active && !conversationExport?.queue.length && !conversationExport?.draining;
+  const conversationPushCleanupAvailable = () => conversationPushForegroundAvailable() && !conversationArchive?.busy && !conversationArchive?.processingBusy;
   let conversationPush = null;
   if (conversations) {
     try { conversationPush = new ConversationPushSupervisor(new ConversationPushStore(conversations).initialize(), {
-      canWork: () => conversationArchive?.idleForHistory,
-      canCleanup: () => !conversationCleanup?.child && !conversationRepair?.busy && !conversationRead?.active && !conversationRead?.queue.length && !conversationRead?.draining
-        && !conversationExport?.active && !conversationExport?.queue.length && !conversationExport?.draining
+      canWork: conversationPushForegroundAvailable,
+      canCleanup: conversationPushCleanupAvailable
     }); }
     catch { console.warn('conversation push unavailable: CONVERSATION_PUSH_INITIALIZATION_FAILED'); }
   }
-  let conversationCleanup = null;
   if (conversations) {
     try { conversationCleanup = new ConversationCleanupService(conversations, { canWork: () => !conversationArchive?.busy && !conversationArchive?.processingBusy }); }
     catch { console.warn('conversation cleanup unavailable: CONVERSATION_CLEANUP_INITIALIZATION_FAILED'); }
   }
-  let conversationRepair = null;
   if (conversations) {
     try { conversationRepair = new ConversationRepairService(conversations,{canWork:() => conversationArchive?.idleForHistory && !conversationCleanup?.child
       && !conversationRead?.active && !conversationRead?.queue.length && !conversationRead?.draining

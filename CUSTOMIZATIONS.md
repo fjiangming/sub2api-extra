@@ -1,5 +1,21 @@
 # 个性化功能维护台账
 
+## 2026-11-25：补全 JSONL 卡住恢复与本地资源等待保护
+
+用户同意继续优化上传跟不上采集的问题。本轮在此前未提交的独立 JSONL 准入和过期租约恢复基础上，仅修改运营中心；使用本地虚构正文、临时 SQLite、loopback S3 和真实子进程验证，不连接生产、不请求真实 Bucket、不修改服务器配置、不提交 GitHub 或部署。保留活动中心、Provider Monitor 及其他未提交审计记录；不改主站采集、推理、用户资金和计费契约。
+
+- `operations-center/src/services/conversation-jsonl-flow.js`、`conversation-jsonl-transport.js`：网络等待增加独立取消截止，SDK 不响应取消 / 超时也能释放上传占用，并消费迟到的成功 / 失败。响应正文改用可取消的限长流管道，取消时销毁连接；保留原 8 MiB 分片、发送限速、签名、校验和超时预算。
+- `operations-center/src/services/conversation-jsonl-service.js`：每 30 秒复核过期 / 失效租约及 120 秒无检查点的活动上传；正常前缀校验、内存和采集优先等待持续更新检查点。取消后仍占用超过 5 秒要求重建推送子进程，迟到 Complete 成功必须再次核验租约和取消。区分本地 SQLite 忙锁、内存不足、真实条件变更与副本不可用，不再把全部本地失败笼统显示为条件变化。
+- `operations-center/src/services/conversation-push-worker.js`、`conversation-push-supervisor.js`：状态心跳携带取消超时重建请求；主进程在该请求或 60 秒心跳失效时仅终止推送子进程，等待退出后沿现有 5 秒退避重启，忽略旧进程迟到状态，不产生重叠上传进程。测试允许注入本地 worker 文件，生产默认入口不变。
+- `operations-center/src/conversation-jsonl-store.js`：恢复失活 / 过期租约时保留 UploadId、成员、已确认分片、原对象路径，原子退回未结算的本地尝试并同步成员次数。内存不足、本地忙锁、后台卡住恢复和管理取消等待不耗尽网络重试次数；真实网络错误 / 超时继续遵守上限，既有 failed 历史仍需管理员确认重试，不自动重发。
+- `operations-center/public/conversation-push-ui.js`、`public/index.html`：区分归档暂忙、上传后台失去响应和恢复暂缓，更新脚本版本；仅错误文案，不改变列表滚动、管理操作或文件目录格式。
+- `operations-center/tests/conversation-jsonl-resume.test.js`、`tests/conversation-jsonl.test.js`、`tests/conversation-push-worker-fixture.cjs`：增加 SDK 不响应取消 / 超时 / watchdog、真实 HTTP 正文不结束、Complete 未确认不计费 / 清理、迟到成功不得标记送达、SQLite 分片回执忙锁以及真实无响应子进程重建续传回归。核对完整正文与 SHA-256、原 UploadId、已确认首片不重传、成功后才清理和网络尝试预算；保留旧格式 / 丢回执 / 前缀校验 / 优先级等待回归。
+- `operations-center/docs/conversation-jsonl-push.md`：记录强制截止、两级恢复、资源等待与重试边界。此前同轮累计的 `src/server.js`、`services/conversation-push-service.js` 独立 JSONL 门控及其验证仍见 11 月 24 日对应记录，未覆盖或撤回。
+
+验证：`npm run check`、新 worker 替身语法检查、运营中心标准串行全量 **822 项测试（0 失败 / 取消 / 跳过，约 323 秒，比原 814 项增加 8 项恢复回归）**及 `git diff --check` 均通过。真实 loopback S3 / SQLite / 子进程回归确认原 UploadId、首片仅传一次、最终正文及 SHA-256 一致、未确认不计费 / 清理，确认送达后正常清理；采集优先等待不会被无检查点 watchdog 误判。检查与测试日志在本机临时目录 `sub2api-jsonl-recovery-check-20261125.log`、`sub2api-jsonl-recovery-tests-20261125.log`。本轮无需新增环境变量、数据库 schema 或服务器资源调整，现有 6 GiB 容器 / 2 CPU、2 GiB 推送堆、30 MiB/s 限速可先保留。恢复只避免后台永久占用和重试误耗，不保证公网网络永不失败、固定生产提速倍数或严格零资源成本；未知 Complete 仍不能授权删除，恢复需重读前缀校验。仅本地修改验证完成，未提交 GitHub、连接或部署服务器。
+
+用户随后要求提交 GitHub。本次仅提交上述运营中心改动，以及 11 月 24 日独立 JSONL 准入 / 租约恢复两节对应维护记录，推送 `origin/main`；其他模块改动和未提交审计记录继续保留本地。按最终完整 SHA 核对自动测试、双架构镜像构建和发布；不连接或部署服务器。
+
 ## 2026-11-25：修复充值抽奖规则保存按钮空值报错
 
 用户反馈后台配置概率后保存提示 `Cannot set properties of null (setting 'disabled')`。原因是把 CSS 选择器传给了只接受元素 ID 的 `$` 帮助函数，无法获取保存按钮；异常发生在 POST 请求之前，本次操作未写入配置。
@@ -11,6 +27,32 @@
 验证：修复前新增浏览器回归在保存步骤失败；修复后 `npm run check`、完整 **69 项测试**和 Chrome 桌面 / 手机 / 窄屏 / 深色模式浏览器回归全部通过，实际保存请求成功且刷新后读回值与数据库一致。仅本地修复，未提交 GitHub、连接生产、修改服务器配置或部署；保留其他模块改动。
 
 用户随后要求提交 GitHub，本次只提交上述三个活动中心文件及本节台账并推送 `origin/main`，其他运营中心 / Provider Monitor 改动和维护记录继续保留本地；不部署服务器。
+
+## 2026-11-24：持续归档时放行已封卷 JSONL 上传并恢复线上运营中心
+
+用户要求连接服务器确认积压推送并优化代码。本轮先只重启 `sub2api-operations-center`，没有重启主站、删除数据、改写 SQLite 正文或更换推送目标；重启后保留原数据卷、UploadId 和已确认分片。线上仍运行 `operations-center-main` revision `9971508ffb915f1936651f6df2809dadcfd307bc`，该旧镜像尚未包含本节源码改动。
+
+只读核对确认归档卷约 80 GiB，推送表有 10 GiB 分卷在续传（已确认分片约 0.7–1.1 GiB）、一份此前 `NETWORK_FAILED` 的失败分卷和多个当日开放分卷；重启没有清理任何历史。运营中心健康检查恢复 HTTP 200，主站容器未重启。重启后同一 `gpt-6.1-sol` 上传的已确认字节继续增长，未重传已确认前缀。当前 4 CPU / 15 GiB 主机上运营中心曾达到单核满载，cgroup `memory.events` 有 memory-max 压力但无 OOM kill；瓶颈是单核归档 / 序列化、SQLite / 文件缓存和旧版归档空闲门控的叠加。未使用管理员资金接口或直接修改推送状态。
+
+随后按用户授权在线提高了运营中心容器资源，没有重启进程：`docker update --memory 6g --memory-swap 8g --cpus 2.0 sub2api-operations-center`。容器 PID 未变，运营中心 `/healthz` 和主站 `127.0.0.1:9000` 均保持可用；并将 `/root/sub2api-extra/.env` 的 `OPERATIONS_CENTER_MEMORY_LIMIT` 设为 `6g`、Compose 的 `cpus` 持久设为 `2.0`，先保存了带时间戳的配置备份。宿主无 Swap，因此 8 GiB 是 cgroup 上限而非实际 Swap 扩容；该调整只影响运营中心，未重启主站。
+
+- `operations-center/src/services/conversation-push-service.js`：增加独立 `canJsonlWork` 门控，普通单条交付、计费和清理沿用归档优先，已封卷 JSONL 上传可在持续归档时低优先级运行。
+- `operations-center/src/services/conversation-push-worker.js`：子进程把 `cl_processing` 队列门控只用于普通交付；JSONL 续传沿用父进程前台 / 交互优先信号，保留单 worker、分片、租约和取消检查。
+- `operations-center/tests/conversation-jsonl-resume.test.js`：增加归档处理持续时 JSONL 仍可完整送达的回归。
+- `operations-center/docs/conversation-jsonl-push.md`：说明两类门控、数据完整性边界和生产调度语义。
+
+验证：JSONL 续传专项 27 项、运营中心完整测试 **814 项（0 失败）**、`npm run check` 和 `git diff --check` 均通过。源码改动尚未提交 GitHub 或部署；服务器只完成上述可恢复重启和在线资源调整。根据当前资源，保留 2 GiB 推送堆；上传限速先从 32 MiB/s 观察 10 分钟，再按主站延迟和出口利用率提高到 48–64 MiB/s，不直接使用 125 MB/s 标称出口速度。旧镜像中的历史 `NETWORK_FAILED` 文件仍需在运营中心点击重试，当前代码不会自动重发已经明确失败的历史文件。
+
+## 2026-11-24：恢复 JSONL 过期租约并允许持续采集时后台上传
+
+用户要求连接服务器恢复积压推送并优化运营中心。本轮按用户授权只重启 `sub2api-operations-center`，保留主站和数据卷；重启后确认过期的 `gpt-6.1-sol` 分卷被恢复为可续传状态，其中已有分片继续保留，但当前任务仍因旧版归档空闲门控暂停。未复制 80 GiB 数据卷、未手工修改 SQLite 正文、未更新服务器镜像或推送策略。
+
+- `operations-center/src/conversation-jsonl-store.js`、`operations-center/src/services/conversation-jsonl-service.js`：增加每 30 秒检查过期租约的恢复路径；失活请求先取消，过期 `running` 文件重新排队，保留 UploadId、已确认分片和正文成员，防止工作进程卡住后永久占用队列。
+- `operations-center/src/server.js`：将 JSONL 推送准入与归档处理完全空闲条件拆开。持续采集 / 脱敏时允许低优先级上传；历史读取、导出、修复或人工清理占用时仍让行，送达后本地清理额外等待归档写入空闲。
+- `operations-center/tests/conversation-jsonl-resume.test.js`：覆盖过期租约续传状态保留和活动上传中止后重新排队。
+- `operations-center/docs/conversation-jsonl-push.md`：记录租约 watchdog、持续采集上传准入及 1Gbps 出口下 32–64 MiB/s 的限速建议。
+
+验证：JSONL 续传专项 27 项、运营中心完整测试 **814 项（0 失败）**、`npm run check` 和 `git diff --check` 均通过；本轮源码改动不自动部署服务器，容器限额已在线调整并持久化，上传限速仍按生产观测逐步调高。
 
 ## 2026-11-24：充值抽奖规则后台配置
 

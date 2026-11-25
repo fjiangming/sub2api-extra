@@ -4,6 +4,21 @@ const { Readable } = require('node:stream');
 const { performance } = require('node:perf_hooks');
 const { failure } = require('./conversation-push-transport');
 
+function abortable(operation, signal) {
+  if (!signal) return Promise.resolve(operation);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true; signal.removeEventListener('abort', abort); callback(value);
+    };
+    const abort = () => finish(reject, signal.reason?.pushCode ? signal.reason : failure('ABORTED', true));
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+    Promise.resolve(operation).then(value => finish(resolve, value), error => finish(reject, error));
+  });
+}
+
 function delay(ms, signal) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(failure('ABORTED', true));
@@ -54,4 +69,4 @@ function pacedBody(body, bytesPerSecond, signal, { now = () => performance.now()
   })(), { objectMode: false, highWaterMark: 65536 });
 }
 
-module.exports = { delay, waitForTurn, prepareWithMemoryWait, pacedBody };
+module.exports = { abortable, delay, waitForTurn, prepareWithMemoryWait, pacedBody };

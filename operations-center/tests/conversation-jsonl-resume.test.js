@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const { S3Client, UploadPartCommand } = require('@aws-sdk/client-s3');
 const { fixture, event, exportBodyBytes } = require('./conversation-logs-fixture');
 const { s3Receiver } = require('./conversation-s3-fixture');
 const { ConversationLogStore } = require('../src/conversation-log-store');
@@ -142,6 +143,155 @@ async function until(predicate) {
   const end = Date.now() + 5000;
   while (!predicate()) { assert(Date.now() < end, 'background progress timed out'); await new Promise(resolve => setTimeout(resolve, 20)); }
 }
+
+async function within(promise, timeoutMs = 2000) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Upload did not stop within its deadline')), timeoutMs);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+
+for (const mode of ['cancellation', 'timeout', 'watchdog']) test(`an SDK part that ignores ${mode} cannot retain the upload slot`, async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close());
+  const f = setup(t, receiver); f.push.configure({ ...f.push.policy(), timeoutSeconds: 3 });
+  const row = large(f, 'sdk-ignores-' + mode), send = S3Client.prototype.send;
+  let release, held = false;
+  S3Client.prototype.send = function(command, ...args) {
+    if (command instanceof UploadPartCommand && command.input.PartNumber === 2) {
+      held = true; return new Promise(resolve => { release = resolve; });
+    }
+    return send.call(this, command, ...args);
+  };
+  const sending = f.service.jsonl.tick();
+  let before;
+  try {
+    await until(() => held); before = f.jsonl.get(f.jsonl.list().files[0].id);
+    if (mode === 'cancellation') f.service.jsonl.invalidate();
+    if (mode === 'watchdog') { f.service.jsonl.active.lastCheckpointAt -= 120001; f.service.jsonl.recoverExpired(); }
+    await within(sending, mode === 'timeout' ? 5000 : 2000);
+    const paused = f.jsonl.get(before.id);
+    assert.equal(paused.status, 'pending'); assert.equal(paused.error_code, { cancellation: 'ABORTED', timeout: 'TIMEOUT', watchdog: 'UPLOAD_STALLED' }[mode]);
+    assert.equal(paused.upload_id, before.upload_id); assert.equal(paused.uploaded_bytes, 8 * 1024 ** 2);
+    assert.equal(paused.uploaded_parts, 1); assert.equal(f.service.jsonl.active, null);
+    assert.equal(receiver.completed.length, 0); assert.equal(f.push.billing.report().summary.files, 0);
+    release({ ETag: 'late-unconfirmed-part' }); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.jsonl.get(before.id).uploaded_parts, 1);
+  } finally {
+    S3Client.prototype.send = send; release?.({ ETag: 'late-unconfirmed-part' });
+    f.service.jsonl.invalidate(); await sending;
+  }
+  f.advance(); await f.service.jsonl.tick();
+  const file = f.jsonl.get(before.id), body = receiver.completed[0].body;
+  assert.equal(file.status, 'sent'); assert.equal(file.bytes, body.length);
+  assert.equal(file.sha256, crypto.createHash('sha256').update(body).digest('hex'));
+  assert.equal(puts(receiver).filter(entry => entry.query.get('partNumber') === '1').length, 1);
+  assert.deepEqual(exportBodyBytes(JSON.parse(body), 'request'), Buffer.from(row.request, 'base64'));
+});
+
+test('cancelling an unfinished S3 response body retains confirmed parts and releases the connection', async t => {
+  let hold = true, held = false, response;
+  const receiver = await s3Receiver({ beforeRequest: (entry, res) => {
+    if (hold && entry.method === 'PUT' && entry.query.get('partNumber') === '2') {
+      response = res; res.writeHead(200, { 'content-type': 'application/xml' });
+      res.write('<UploadPartResult>'); held = true; return false;
+    }
+  } }); t.after(() => receiver.close());
+  const f = setup(t, receiver); const row = large(f, 'response-body-cancel');
+  const sending = f.service.jsonl.tick();
+  let file;
+  try {
+    await until(() => held); file = f.jsonl.get(f.jsonl.list().files[0].id);
+    f.service.jsonl.invalidate(); await within(sending);
+    assert.equal(f.jsonl.get(file.id).status, 'pending');
+    assert.equal(f.jsonl.get(file.id).uploaded_parts, 1);
+    await until(() => response.destroyed);
+    assert.equal(receiver.completed.length, 0);
+  } finally { hold = false; response?.destroy(); f.service.jsonl.invalidate(); await sending; }
+  f.advance(); await f.service.jsonl.tick();
+  assert.equal(f.jsonl.get(file.id).status, 'sent'); assert.equal(creates(receiver).length, 1);
+  assert.deepEqual(exportBodyBytes(JSON.parse(receiver.completed[0].body), 'request'), Buffer.from(row.request, 'base64'));
+});
+
+test('an unfinished Complete response cannot authorize billing or cleanup and resumes without resending parts', async t => {
+  let hold = true, held = false, response;
+  const receiver = await s3Receiver({ beforeRequest: (entry, res) => {
+    if (hold && entry.method === 'POST' && entry.query.has('uploadId')) {
+      response = res; res.writeHead(200, { 'content-type': 'application/xml' });
+      res.write('<CompleteMultipartUploadResult>'); held = true; return false;
+    }
+  } }); t.after(() => receiver.close());
+  const f = setup(t, receiver); f.push.configure({ ...f.push.policy(), maxAttempts: 1, deleteAfterPush: true });
+  const row = large(f, 'complete-body-cancel'), sending = f.service.jsonl.tick();
+  let file;
+  try {
+    await until(() => held); file = f.jsonl.get(f.jsonl.list().files[0].id);
+    assert.equal(file.uploaded_parts, 2);
+    f.service.jsonl.invalidate(); await within(sending);
+    assert.equal(f.jsonl.get(file.id).status, 'pending'); assert.equal(f.jsonl.get(file.id).attempts, 0);
+    assert.equal(f.push.billing.report().summary.files, 0);
+    f.service.maintain(); assert(f.store.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(row.id));
+    await until(() => response.destroyed); assert.equal(receiver.completed.length, 0);
+  } finally { hold = false; response?.destroy(); f.service.jsonl.invalidate(); await sending; }
+  f.advance(); await f.service.jsonl.tick();
+  const done = f.jsonl.get(file.id), body = receiver.completed[0].body;
+  assert.equal(done.status, 'sent'); assert.equal(creates(receiver).length, 1); assert.equal(puts(receiver).length, 2);
+  assert.equal(done.sha256, crypto.createHash('sha256').update(body).digest('hex'));
+  assert.equal(f.push.billing.report().summary.files, 1);
+  assert.deepEqual(exportBodyBytes(JSON.parse(body), 'request'), Buffer.from(row.request, 'base64'));
+  f.advance(); f.service.maintain(); assert.equal(f.store.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(row.id), undefined);
+});
+
+test('a transport ignoring cancellation requires a worker restart and its late success cannot mark a file sent', async t => {
+  let fail = true, stall = false, release;
+  const receiver = await s3Receiver({ beforeRequest: (entry, res) => fail && entry.query.get('partNumber') === '2' ? reject(res) : undefined });
+  t.after(() => receiver.close());
+  const transport = new ConversationPushTransport(), send = transport.sendJsonl.bind(transport);
+  transport.sendJsonl = (...args) => stall ? new Promise(resolve => { release = resolve; }) : send(...args);
+  const f = setup(t, receiver, { transport, jsonlOptions: { abortGraceMs: 0 } });
+  large(f, 'unresponsive-transport'); await f.service.jsonl.tick();
+  const before = f.jsonl.get(f.jsonl.list().files[0].id), parts = f.jsonl.parts(before);
+  assert.equal(before.attempts, 1); assert.equal(before.uploaded_parts, 1);
+  stall = true; fail = false; f.advance(); const sending = f.service.jsonl.tick();
+  try {
+    await until(() => release); const active = f.service.jsonl.active;
+    active.lastCheckpointAt -= 120001; f.service.jsonl.recoverExpired();
+    assert.equal(active.controller.signal.reason.pushCode, 'UPLOAD_STALLED'); assert(f.service.jsonl.needsRestart());
+    release({ status: 'sent', httpStatus: 200, sha256: 'unverified' }); await within(sending);
+    const paused = f.jsonl.get(before.id);
+    assert.equal(paused.status, 'pending'); assert.equal(paused.error_code, 'UPLOAD_STALLED'); assert.equal(paused.attempts, 1);
+    assert.equal(paused.upload_id, before.upload_id); assert.deepEqual(f.jsonl.parts(paused), parts);
+    assert.equal(f.push.billing.report().summary.files, 0); assert.equal(f.service.jsonl.needsRestart(), false);
+  } finally { release?.({ status: 'failed', errorCode: 'ABORTED', retryable: true }); await sending; }
+  stall = false; f.advance(); await f.service.jsonl.tick();
+  assert.equal(f.jsonl.get(before.id).status, 'sent'); assert.equal(creates(receiver).length, 1);
+  assert.equal(puts(receiver).filter(entry => entry.query.get('partNumber') === '1').length, 1);
+});
+
+test('a busy local part checkpoint preserves the upload and does not exhaust network retries', async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close()); const f = setup(t, receiver);
+  f.push.configure({ ...f.push.policy(), maxAttempts: 1 }); const row = large(f, 'local-checkpoint-busy');
+  const other = new ConversationLogStore(f.directory).openReader(), save = f.jsonl.savePart.bind(f.jsonl);
+  const busyTimeout = f.jsonl.db.pragma('busy_timeout', { simple: true }); f.jsonl.db.pragma('busy_timeout = 1');
+  let compete = true;
+  f.jsonl.savePart = (...args) => {
+    if (!compete || args[2].number !== 2) return save(...args);
+    compete = false; other.db.exec('BEGIN IMMEDIATE');
+    try { return save(...args); } finally { other.db.exec('ROLLBACK'); }
+  };
+  try { await f.service.jsonl.tick(); }
+  finally { f.jsonl.savePart = save; f.jsonl.db.pragma(`busy_timeout = ${busyTimeout}`); other.close(); }
+  const paused = f.jsonl.get(f.jsonl.list().files[0].id);
+  assert.equal(paused.status, 'pending'); assert.equal(paused.error_code, 'ARCHIVE_BUSY'); assert.equal(paused.attempts, 0);
+  assert.equal(paused.uploaded_parts, 1); assert.equal(receiver.completed.length, 0); assert.equal(f.push.billing.report().summary.files, 0);
+  f.advance(); await f.service.jsonl.tick();
+  const done = f.jsonl.get(paused.id), body = receiver.completed[0].body;
+  assert.equal(done.status, 'sent'); assert.equal(creates(receiver).length, 1);
+  assert.deepEqual(puts(receiver).map(entry => entry.query.get('partNumber')), ['1','2','2']);
+  assert.equal(done.sha256, crypto.createHash('sha256').update(body).digest('hex'));
+  assert.deepEqual(exportBodyBytes(JSON.parse(body), 'request'), Buffer.from(row.request, 'base64'));
+});
 
 test('saving policy during upload preserves acknowledged parts and bills the verified delivery once',async t=>{
   let release,held=false,hold=true;
@@ -329,6 +479,9 @@ test('archive priority pauses before the next part, renews guards, and resumes t
     const file = f.jsonl.list().files[0], lease = f.jsonl.get(file.id).lease_until;
     assert.equal(puts(receiver).length, 1); assert.equal(file.uploaded_parts, 1); f.advance(300000);
     await until(() => f.jsonl.get(file.id).lease_until > lease);
+    f.service.jsonl.active.lastCheckpointAt -= 120001;
+    await new Promise(resolve => setTimeout(resolve, 150)); f.service.jsonl.recoverExpired();
+    assert.equal(f.service.jsonl.active.controller.signal.aborted, false, 'priority waits keep the watchdog alive');
     assert.equal(puts(receiver).length, 1); allowed = true; await sending;
     assert.equal(f.jsonl.get(file.id).status, 'sent'); assert.equal(f.jsonl.get(file.id).pause_reason, ''); assert.equal(creates(receiver).length, 1);
   } finally { allowed = true; f.service.jsonl.invalidate(); await sending; }
@@ -357,6 +510,44 @@ test('stale lease acknowledgements cannot clear or overwrite a recovered upload'
   assert.equal(f.jsonl.clearUpload(file.id, 'fake-upload'), 0); assert.equal(f.jsonl.abandonUpload(stale, 'fake-upload'), 0);
   assert.equal(f.jsonl.savePart(stale, 'fake-upload', { number: 1, bytes: 1, etag: 'etag', sha256: 'hash' }), false);
   assert.equal(f.jsonl.finish(stale, { status: 'sent' }), 0); assert.equal(f.jsonl.get(file.id).lease_token, current.lease_token);
+});
+
+test('expired JSONL leases are requeued without discarding resumable upload state', async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close()); const f = setup(t, receiver);
+  f.store.ingest(event('expired-lease')); f.enqueue(); f.jsonl.assignOne(); const file = f.jsonl.list().files[0]; f.jsonl.seal(file.id);
+  const active = f.jsonl.claim(); assert(f.jsonl.uploadId(active, 'stale-upload'));
+  f.jsonl.db.prepare("UPDATE cl_push_jsonl_files SET uploaded_bytes=?,uploaded_parts=?,lease_until=? WHERE id=?")
+    .run(8 * 1024 ** 2, 1, f.jsonl.now() - 1, file.id);
+  f.jsonl.db.prepare('INSERT INTO cl_push_jsonl_parts VALUES(?,?,?,?,?)').run(file.id, 1, 8 * 1024 ** 2, 'etag', 'sha256');
+  assert.equal(f.jsonl.recoverExpired(), 1);
+  const recovered = f.jsonl.get(file.id);
+  assert.equal(recovered.status, 'pending'); assert.equal(recovered.error_code, 'DELIVERY_UNKNOWN');
+  assert.equal(recovered.attempts, 0, 'an abandoned local attempt does not consume a network retry');
+  assert.equal(recovered.upload_id, 'stale-upload'); assert.equal(recovered.uploaded_bytes, 8 * 1024 ** 2);
+  assert.equal(recovered.uploaded_parts, 1); assert.equal(recovered.lease_token, ''); assert.equal(f.jsonl.recoverExpired(), 0);
+});
+
+test('JSONL lease watchdog aborts an expired active upload before requeueing it', async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close()); const f = setup(t, receiver);
+  f.store.ingest(event('active-expired-lease')); f.enqueue(); f.jsonl.assignOne(); const file = f.jsonl.list().files[0]; f.jsonl.seal(file.id);
+  const active = f.jsonl.claim(); assert(f.jsonl.uploadId(active, 'active-stale-upload'));
+  f.jsonl.db.prepare('UPDATE cl_push_jsonl_files SET lease_until=? WHERE id=?').run(f.jsonl.now() - 1, file.id);
+  let reason; f.service.jsonl.wake = () => {};
+  f.service.jsonl.active = { file: active, controller: { abort: error => { reason = error.pushCode; } } };
+  f.service.jsonl.recoverExpired();
+  assert.equal(reason, 'UPLOAD_STALLED'); assert.equal(f.jsonl.get(file.id).status, 'pending');
+  assert.equal(f.jsonl.get(file.id).upload_id, 'active-stale-upload');
+  reason = ''; f.service.jsonl.recoverExpired(); assert.equal(reason, 'DELIVERY_INVALIDATED');
+  f.service.jsonl.active = null;
+});
+
+test('JSONL upload can continue while ordinary delivery yields to archive processing', async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close());
+  const f = setup(t, receiver, { canWork: () => false, canJsonlWork: () => true });
+  f.store.ingest(event('archive-pending-upload')); f.enqueue();
+  assert.equal((await f.service.jsonl.tick()), true);
+  assert.equal(f.jsonl.list().files[0].status, 'sent');
+  assert.equal(receiver.completed.length, 1);
 });
 
 test('legacy upload state is cleaned before resuming and schema migration keeps manifests intact', async t => {

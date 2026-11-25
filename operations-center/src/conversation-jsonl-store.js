@@ -238,8 +238,18 @@ class ConversationJsonlStore {
       const reason = this.invalidReason(file); if (reason) this.cancel(file, reason);
     }
   }
-  recover() {
-    this.db.prepare("UPDATE cl_push_jsonl_files SET status='pending',pause_reason='',lease_token='',lease_until=0,error_code='DELIVERY_UNKNOWN',next_at=? WHERE status='running'").run(this.now());
+  recover() { return this.recoverRunning(false); }
+  recoverExpired() { return this.recoverRunning(true); }
+  recoverRunning(expired) {
+    const at = this.now();
+    return this.db.transaction(() => {
+      const files = this.db.prepare(`UPDATE cl_push_jsonl_files SET status='pending',attempts=MAX(0,attempts-1),pause_reason='',lease_token='',lease_until=0,
+        error_code='DELIVERY_UNKNOWN',next_at=?,updated_at=? WHERE status='running' ${expired ? 'AND lease_until>0 AND lease_until<=?' : ''} RETURNING id,attempts`)
+        .all(at, at, ...(expired ? [at] : []));
+      for (const file of files) this.db.prepare("UPDATE cl_push_jobs SET attempts=?,error_code='DELIVERY_UNKNOWN',updated_at=? WHERE jsonl_file_id=? AND status='buffered'")
+        .run(file.attempts, at, file.id);
+      return files.length;
+    }).immediate();
   }
   claim() {
     const policy = this.push.policy(); if (!this.enabled(policy)) return null;
@@ -318,8 +328,9 @@ class ConversationJsonlStore {
     }
   }
   finish(file, result) {
-    const policy = this.push.policy(), memory=result.errorCode==='EXPORT_MEMORY', attempts=Math.max(0,file.attempts-Number(memory));
-    const retry = memory || result.retryable && attempts < policy.maxAttempts;
+    const policy = this.push.policy(), deferred = ['EXPORT_MEMORY','ARCHIVE_BUSY','UPLOAD_STALLED','ABORTED'].includes(result.errorCode),
+      attempts = Math.max(0,file.attempts-Number(deferred));
+    const retry = deferred || result.retryable && attempts < policy.maxAttempts;
     const status = retry ? 'pending' : result.status;
     return this.db.transaction(() => {
       const changed = this.db.prepare(`UPDATE cl_push_jsonl_files SET status=?,attempts=?,error_code=?,http_status=?,sha256=?,next_at=?,lease_token='',lease_until=0,pause_reason='',updated_at=?,

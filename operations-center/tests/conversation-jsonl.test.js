@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const path = require('node:path');
 const { fixture, event, rawRequest, rawResponse, exportBodyBytes } = require('./conversation-logs-fixture');
 const { s3Receiver } = require('./conversation-s3-fixture');
 const { ConversationPushStore } = require('../src/conversation-push-store');
@@ -18,10 +19,10 @@ async function until(predicate, timeout = 15000) {
   const end = Date.now() + timeout;
   while (!predicate()) { assert(Date.now() < end, 'Timed out waiting for background JSONL work'); await new Promise(resolve => setTimeout(resolve, 40)); }
 }
-function setup(t, { now = Date.now, jsonlOptions, supervisor = false, memoryBudgetBytes, heapMiB } = {}) {
+function setup(t, { now = Date.now, jsonlOptions, supervisor = false, memoryBudgetBytes, heapMiB, workerFile } = {}) {
   const f = fixture({ now }); f.store.configure({ ...f.store.policy(), mode: 'original', retention: 0 });
   const push = new ConversationPushStore(f.store, { now }).initialize();
-  const service = supervisor ? new ConversationPushSupervisor(push, { memoryBudgetBytes, heapMiB }) : new ConversationPushService(push, { jsonlOptions });
+  const service = supervisor ? new ConversationPushSupervisor(push, { memoryBudgetBytes, heapMiB, workerFile }) : new ConversationPushService(push, { jsonlOptions });
   t.after(async () => { await service.stop(); f.close(); });
   return { ...f, push, service, jsonl: service.jsonl.store };
 }
@@ -384,6 +385,43 @@ test('production supervisor uploads in a child, recovers after a crash and keeps
   f.service.flush(); await until(() => f.jsonl.get(original.id).status === 'sent');
   assert.equal(lines(receiver).length, 1); assert.equal(f.service.status({}).workerReady, true);
   assert.equal(lines(receiver)[0].request, rawRequest);
+});
+
+test('a lost worker heartbeat rebuilds only the push child and resumes its original multipart checkpoints', async t => {
+  let fail = true;
+  const receiver = await s3Receiver({ beforeRequest: (entry, res) => {
+    if (fail && entry.query.get('partNumber') === '2') {
+      res.writeHead(503, { 'content-type': 'application/xml' }); res.end('<Error><Code>Unavailable</Code></Error>'); return false;
+    }
+  } }); t.after(() => receiver.close());
+  const f = setup(t, { supervisor: true, workerFile: path.join(__dirname, 'conversation-push-worker-fixture.cjs') });
+  configure(f, receiver.url, { maxAttempts: 2, retrySeconds: 5, deleteAfterPush: true });
+  const request = JSON.stringify({ model: 'Opus5', messages: [{ role: 'user', content: 'x'.repeat(9 * 1024 ** 2) }] });
+  const row = event('heartbeat-resume', { model: 'Opus5', request: Buffer.from(request).toString('base64') });
+  f.store.ingest(row); enqueue(f); await f.service.jsonl.tick();
+  const before = f.jsonl.get(f.jsonl.list().files[0].id), parts = f.jsonl.parts(before);
+  assert.equal(before.uploaded_parts, 1); assert.equal(before.attempts, 1);
+  f.jsonl.db.prepare('UPDATE cl_push_jsonl_files SET next_at=0 WHERE id=?').run(before.id);
+  assert(f.jsonl.claim()); fail = false; f.service.start(); await until(() => f.service.ready);
+  const child = f.service.child, exited = new Promise(resolve => child.once('exit', resolve));
+  f.service.checkHeartbeat(f.service.lastHeartbeatAt + 59000); assert.equal(f.service.retiring, false);
+  f.service.workerFile = path.join(__dirname, '../src/services/conversation-push-worker.js');
+  f.service.checkHeartbeat(f.service.lastHeartbeatAt + 60001); f.service.checkHeartbeat(f.service.lastHeartbeatAt + 60002);
+  assert.equal(f.service.retiring, true); assert.equal(f.service.child, child); assert.equal(f.service.ready, false);
+  assert.deepEqual(f.jsonl.parts(before), parts); assert.equal(f.jsonl.get(before.id).upload_id, before.upload_id);
+  assert.equal(f.jsonl.get(before.id).status, 'running'); assert.equal(f.push.billing.report().summary.files, 0);
+  await exited;
+  await until(() => f.service.child && f.service.child !== child && f.service.ready && f.jsonl.get(before.id).status === 'sent', 20000);
+  const done = f.jsonl.get(before.id), body = receiver.completed[0].body;
+  assert.equal(done.object_key, before.object_key); assert.equal(done.attempts, 2); assert.equal(receiver.completed.length, 1);
+  assert.equal(done.sha256, crypto.createHash('sha256').update(body).digest('hex'));
+  assert.deepEqual(JSON.parse(body), { request_id: row.request_id, request, response: rawResponse });
+  const puts = receiver.requests.filter(entry => entry.method === 'PUT');
+  assert.deepEqual(puts.map(entry => entry.query.get('partNumber')), ['1','2','2']);
+  assert(puts.every(entry => entry.query.get('uploadId') === before.upload_id));
+  assert.equal(receiver.requests.filter(entry => entry.query.has('uploads')).length, 1);
+  assert.equal(f.push.billing.report().summary.files, 1);
+  await until(() => !f.store.db.prepare('SELECT 1 FROM cl_records WHERE id=?').get(row.id));
 });
 
 test('administrator policy requests finish while the production child is waiting on an S3 part', async t => {

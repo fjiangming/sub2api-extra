@@ -14,11 +14,17 @@ process.once('message', settings => {
     archive.db.pragma('busy_timeout = 250');
     const budget = () => processingBudgets(settings.memoryBudgetBytes, { activeFileCacheCredit: true });
     let priorityUntil = 0, cleanupUntil = 0;
+    const priorityAvailable = () => Date.now() < priorityUntil;
     service = new ConversationPushService(new ConversationPushStore(archive).initialize(), { memoryBudget: budget,
-      canWork: () => Date.now() < priorityUntil && !archive.hasPending(), canCleanup: () => Date.now() < cleanupUntil });
+      // Ordinary delivery and pricing still yield to records waiting for masking. A
+      // JSONL file already has an immutable member list, so its low-priority network
+      // stream may continue while the archive worker drains that queue.
+      canWork: () => priorityAvailable() && !archive.hasPending(),
+      canJsonlWork: priorityAvailable,
+      canCleanup: () => Date.now() < cleanupUntil });
     const report = () => { if (process.connected) process.send({ type: 'status', lastError: service.lastError, lastRun: service.lastRun,
       jsonlError: service.jsonl.lastError, jsonlRun: service.jsonl.lastRun,cleanupError:service.cleanupError,
-      pricingError:service.pricingError,pricingPause:service.pricingPause }, () => {}); };
+      pricingError:service.pricingError,pricingPause:service.pricingPause,jsonlRestartRequired:service.jsonl.needsRestart() }, () => {}); };
     process.on('message', async message => {
       if (message?.type === 'priority') { priorityUntil = message.allowed === true ? Date.now() + 1000 : 0; cleanupUntil = message.cleanupAllowed === true ? Date.now() + 1000 : 0; }
       if (message?.type === 'wake') service.wake();

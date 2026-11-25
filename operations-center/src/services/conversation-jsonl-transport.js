@@ -4,20 +4,21 @@ const http = require('node:http');
 const https = require('node:https');
 const crypto = require('node:crypto');
 const { Transform } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 const { S3Client, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } = require('@aws-sdk/client-s3');
 const { NodeHttpHandler } = require('@smithy/node-http-handler');
 const { failure, failureResult } = require('./conversation-push-transport');
 const { jsonlChunks } = require('./conversation-jsonl-format');
-const { pacedBody } = require('./conversation-jsonl-flow');
+const { abortable, pacedBody } = require('./conversation-jsonl-flow');
 const { deliveryBody } = require('./conversation-envelope');
 
 const PART_BYTES = 8 * 1024 ** 2;
 
 async function session(transport, policy, outerSignal, guard, operation) {
   const target = policy.s3, baseUrl = new URL(target.endpoint), pinned = new Map();
-  const stop = new AbortController(), abort = () => stop.abort();
+  const stop = new AbortController(), abort = () => stop.abort(outerSignal?.reason);
   outerSignal?.addEventListener('abort', abort, { once: true });
-  if (outerSignal?.aborted) stop.abort();
+  if (outerSignal?.aborted) abort();
   const lookup = (host, options, callback) => {
     const address = pinned.get(host.replace(/^\[|\]$/g, ''));
     if (!address) return callback(failure('ADDRESS_BLOCKED'));
@@ -29,8 +30,8 @@ async function session(transport, policy, outerSignal, guard, operation) {
   const boundedHandler = { metadata: handler.metadata, destroy: () => handler.destroy(), handle: async (request, options) => {
     const result = await handler.handle(request, options); let bytes = 0;
     const limit = new Transform({ transform(chunk, _encoding, callback) { bytes += chunk.length; callback(bytes > 65536 ? failure('RESPONSE_TOO_LARGE') : null, chunk); } });
-    result.response.body.on('error', error => limit.destroy(error)); limit.on('close', () => result.response.body.destroy());
-    return { response: { ...result.response, body: result.response.body.pipe(limit) } };
+    pipeline(result.response.body, limit, { signal: options?.abortSignal }).catch(() => {});
+    return { response: { ...result.response, body: limit } };
   } };
   const client = new S3Client({ endpoint: target.endpoint, region: target.region, forcePathStyle: target.forcePathStyle,
     credentials: { accessKeyId: target.accessKeyId, secretAccessKey: target.secretAccessKey, ...(target.sessionToken ? { sessionToken: target.sessionToken } : {}) },
@@ -44,12 +45,17 @@ async function session(transport, policy, outerSignal, guard, operation) {
     pinned.set(host, address); return next(args);
   }, { step: 'finalizeRequest', name: 'validateConversationJsonlAddress', priority: 'low' });
   const request = async (command, extraMs = 0) => {
-    guard(); if (stop.signal.aborted) throw failure('ABORTED', true);
-    const controller = new AbortController(), cancel = () => controller.abort(); let timedOut = false;
+    guard(); if (stop.signal.aborted) throw stop.signal.reason?.pushCode ? stop.signal.reason : failure('ABORTED', true);
+    const controller = new AbortController(), cancel = () => controller.abort(stop.signal.reason); let timedOut = false;
     stop.signal.addEventListener('abort', cancel, { once: true }); requestSignal = controller.signal;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, policy.timeoutSeconds * 1000 + extraMs);
-    try { return await client.send(command, { abortSignal: controller.signal }); }
-    catch (error) { if (timedOut) throw failure('TIMEOUT', true); if (controller.signal.aborted) throw failure('ABORTED', true); throw error; }
+    // Do not depend on the SDK settling its promise after a socket or stream abort.
+    try { return await abortable(client.send(command, { abortSignal: controller.signal }), controller.signal); }
+    catch (error) {
+      if (timedOut) throw failure('TIMEOUT', true);
+      if (controller.signal.aborted) throw controller.signal.reason?.pushCode ? controller.signal.reason : failure('ABORTED', true);
+      throw error;
+    }
     finally { clearTimeout(timer); stop.signal.removeEventListener('abort', cancel); }
   };
   try {

@@ -13,11 +13,11 @@ const { CLEANUP_BATCH_BYTES } = require('../conversation-push-cleanup-store');
 const RECLAIM_IDLE_MS = 30000;
 
 class ConversationPushService {
-  constructor(store,{transport=new ConversationPushTransport(),jsonlOptions,canWork=() => true,canCleanup=() => true,memoryBudget=processingBudgets}={}) {
+  constructor(store,{transport=new ConversationPushTransport(),jsonlOptions,canWork=() => true,canJsonlWork=canWork,canCleanup=() => true,memoryBudget=processingBudgets}={}) {
     this.store=store;this.transport=transport;this.stopping=false;this.active=null;this.lastError='';this.lastRun=null;this.testing=false;
-    this.canWork=canWork;this.canCleanup=canCleanup;this.memoryBudget=memoryBudget;this.cleanupError='';this.nextCleanup=0;this.nextMaintenance=0;this.nextPrune=0;this.nextReclaim=0;
+    this.canWork=canWork;this.canJsonlWork=canJsonlWork;this.canCleanup=canCleanup;this.memoryBudget=memoryBudget;this.cleanupError='';this.nextCleanup=0;this.nextMaintenance=0;this.nextPrune=0;this.nextReclaim=0;
     this.pricingPause='';this.pricingError='';this.reclaimIdleSince=null;
-    this.jsonl=new ConversationJsonlService(store,transport,{memoryBudget,...jsonlOptions,canWork:()=>canWork()&&!this.active&&!this.testing});
+    this.jsonl=new ConversationJsonlService(store,transport,{memoryBudget,...jsonlOptions,canWork:()=>canJsonlWork()&&!this.active&&!this.testing});
   }
   policy() { return publicPolicy(this.store.policy()); }
   async write(action,code,message) {
