@@ -4,11 +4,13 @@ const SupplierGroupUi = (() => {
     const e = h.escapeHtml, q = selector => root.querySelector(selector), base = '/api/cost-analysis/supplier-groups';
     const state = { active: false, request: 0, date: '', providerId: '', view: 'groups', detail: 'accounts', groupId: '', page: 1, issuesOnly: true, report: null, expandedAccounts: new Set() };
     const money = value => value == null ? '—' : h.formatMoney(value, '', 8);
+    const upstream = (row, value = row.upstream) => value != null ? e(money(value)) : row.knownKeyCount > 0
+      ? `${e(money(row.knownUpstream))}<small class="supplier-group-subtotal">${row.stale ? '上次已知小计' : '已知小计'}</small>` : '—';
     const signed = value => value == null ? '—' : `${value > 0 ? '+' : ''}${money(value)}`;
     const pct = value => value == null ? '—' : h.formatPercent(value);
     const option = (value, text, selected) => `<option value="${e(value)}"${value === selected ? ' selected' : ''}>${e(text)}</option>`;
-    const labels = { comparable: '可比较', upstream_high: '上游偏高', upstream_above: '上游高于主站', upstream_missing: '上游数据缺失', site_incomplete: '主站数据不完整', unlinked_key: '有 Key 未关联', mapping_incomplete: '关联待核对', history_unverified: '全天归属待核对', zero: '零消费', history_missing: '历史缺失', stale: '上次快照' };
-    const status = value => `<span class="supplier-group-status ${['upstream_high'].includes(value) ? 'bad' : ['upstream_missing', 'site_incomplete', 'unlinked_key', 'mapping_incomplete', 'history_unverified', 'history_missing', 'stale'].includes(value) ? 'warn' : ''}">${e(labels[value] || value)}</span>`;
+    const labels = { comparable: '可比较', upstream_high: '上游偏高', upstream_above: '上游高于主站', upstream_missing: '上游数据待核验', archive_conflict: '历史归档冲突', site_incomplete: '主站数据不完整', unlinked_key: '有 Key 未关联', mapping_incomplete: '关联待核对', history_unverified: '全天归属待核对', zero: '零消费', history_missing: '历史缺失', stale: '上次快照' };
+    const status = value => `<span class="supplier-group-status ${['upstream_high'].includes(value) ? 'bad' : ['upstream_missing', 'archive_conflict', 'site_incomplete', 'unlinked_key', 'mapping_incomplete', 'history_unverified', 'history_missing', 'stale'].includes(value) ? 'warn' : ''}">${e(labels[value] || value)}</span>`;
     const link = (attr, value, text, label) => `<button type="button" class="accounting-link" ${attr}="${e(value)}"${label ? ` aria-label="${e(label)}" title="${e(label)}"` : ''}>${text}</button>`;
     const table = (headers, rows, cls = '') => `<div class="table-wrap"><table class="${cls}"><thead><tr>${headers.map(t => `<th>${t}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map(row => `<tr>${row.map((v, i) => `<td${headers[i].includes('CNY') || headers[i].includes('差额率') || headers[i] === '请求数' ? ' class="numeric"' : ''}>${v}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${headers.length}" class="empty-state">当前范围暂无记录</td></tr>`}</tbody></table></div>`;
     root.innerHTML = `<div class="supplier-group-toolbar">
@@ -41,10 +43,10 @@ const SupplierGroupUi = (() => {
       return `<details class="supplier-group-account" data-sg-account="${e(id)}"${state.expandedAccounts.has(id) ? ' open' : ''}><summary aria-label="${e(account.name)}，消费 ${e(money(account.main))}，查看主站分组明细">${h.icon('chevron-right')}<span class="supplier-group-account-name">${e(account.name)}</span><span class="supplier-group-account-amount">${e(money(account.main))}</span></summary><div class="supplier-group-account-splits"><small>#${e(account.id)}${account.deleted ? ' · 已删除，保留历史' : account.status !== 'active' ? ' · 当前停用，保留消费' : ''}</small>${account.reason ? `<small>${e(account.reason)}</small>` : ''}${account.localGroups.length ? account.localGroups.map(row => `<div class="supplier-group-split"><span>${e(row.name)}</span><span>${e(money(row.main))}</span></div>`).join('') : '<small>当日无消费</small>'}</div></details>`;
     }
     function comparisonTable(groups, summary, pending) {
-      const amountCell = (label, value, cls) => `<td class="numeric supplier-group-amount ${cls || ''}"><span class="supplier-group-mobile-label">${label}</span><span>${e(value)}</span></td>`;
-      let rows = groups.map(g => `<tr data-sg-row="${e(g.id)}"><td class="supplier-group-accounts-cell"><div class="supplier-group-accounts"><span class="supplier-group-mobile-label">主站账号 / 消费</span>${g.accounts.map(account => accountMarkup(account, g.id)).join('')}${g.accountsTruncated ? link('data-sg-group', g.id, `查看全部 ${g.accountCount} 个账号`) : ''}</div></td><td class="supplier-group-name">${link('data-sg-group', g.id, e(g.name), `查看 ${g.name} 账号与每日明细`)}<small>${g.accountCount} 个主站账号</small>${['comparable', 'zero'].includes(g.status) ? '' : status(g.status)}</td>${amountCell('主站合计', money(g.main), 'supplier-group-main')}${amountCell('上游分组消费', money(g.upstream), 'supplier-group-upstream')}${amountCell('主站 − 上游', signed(g.diff), `supplier-group-diff ${g.diff < 0 ? 'negative-value' : ''}`)}</tr>`).join('');
+      const amountCell = (label, value, cls, markup = false) => `<td class="numeric supplier-group-amount ${cls || ''}"><span class="supplier-group-mobile-label">${label}</span><span>${markup ? value : e(value)}</span></td>`;
+      let rows = groups.map(g => `<tr data-sg-row="${e(g.id)}"><td class="supplier-group-accounts-cell"><div class="supplier-group-accounts"><span class="supplier-group-mobile-label">主站账号 / 消费</span>${g.accounts.map(account => accountMarkup(account, g.id)).join('')}${g.accountsTruncated ? link('data-sg-group', g.id, `查看全部 ${g.accountCount} 个账号`) : ''}</div></td><td class="supplier-group-name">${link('data-sg-group', g.id, e(g.name), `查看 ${g.name} 账号与每日明细`)}<small>${g.accountCount} 个主站账号</small>${['comparable', 'zero'].includes(g.status) ? '' : status(g.status)}</td>${amountCell('主站合计', money(g.main), 'supplier-group-main')}${amountCell('上游分组消费', upstream(g), 'supplier-group-upstream', true)}${amountCell('主站 − 上游', signed(g.diff), `supplier-group-diff ${g.diff < 0 ? 'negative-value' : ''}`)}</tr>`).join('');
       if (pending) rows += `<tr data-sg-pending="${e(pending.id)}"><td class="supplier-group-accounts-cell"><div class="supplier-group-accounts"><span class="supplier-group-mobile-label">主站账号 / 消费</span>${pending.accounts.map(account => accountMarkup(account, `pending:${pending.id}`)).join('')}${pending.accountsTruncated ? link('data-sg-pending-provider', pending.id, `查看全部 ${pending.accountCount} 个待核对账号`) : ''}</div></td><td class="supplier-group-name"><span>上游分组待核对</span><small>${pending.accountCount} 个主站账号</small>${status('mapping_incomplete')}</td>${amountCell('主站合计', money(pending.main), 'supplier-group-main')}${amountCell('上游分组消费', money(null), 'supplier-group-upstream')}${amountCell('主站 − 上游', signed(null), 'supplier-group-diff')}</tr>`;
-      const footer = summary ? `<tfoot><tr><th scope="row" colspan="2">供应商合计<small>主站在用 ${summary.groupCount} 个上游分组${summary.pendingAccountCount ? ` · ${summary.pendingAccountCount} 个账号待核对` : ''}</small>${summary.upstream === null && summary.groupCount ? `<small>上游已取得 ${e(money(summary.knownUpstream))} · ${summary.knownGroups}/${summary.groupCount} 组完整</small>` : ''}</th>${amountCell('主站合计', money(summary.main))}${amountCell('上游分组消费', money(summary.upstream))}${amountCell('差额', signed(summary.diff), summary.diff < 0 ? 'negative-value' : '')}</tr></tfoot>` : '';
+      const footer = summary ? `<tfoot><tr><th scope="row" colspan="2">供应商合计<small>主站在用 ${summary.groupCount} 个上游分组${summary.pendingAccountCount ? ` · ${summary.pendingAccountCount} 个账号待核对` : ''}</small>${summary.upstream === null && summary.groupCount ? `<small>${summary.knownGroups}/${summary.groupCount} 组完整</small>` : ''}</th>${amountCell('主站合计', money(summary.main))}${amountCell('上游分组消费', upstream(summary), '', true)}${amountCell('差额', signed(summary.diff), summary.diff < 0 ? 'negative-value' : '')}</tr></tfoot>` : '';
       return `<table class="supplier-group-table"><colgroup><col><col><col><col><col></colgroup><thead><tr><th scope="col">主站账号<small>账号消费 CNY</small></th><th scope="col">上游供应商分组</th><th scope="col" class="numeric">主站合计</th><th scope="col" class="numeric">上游分组消费<small>折算 CNY</small></th><th scope="col" class="numeric">差额<small>主站 − 上游</small></th></tr></thead><tbody>${rows}</tbody>${footer}</table>`;
     }
     function renderGroups(r) {
@@ -69,10 +71,10 @@ const SupplierGroupUi = (() => {
     function renderDetail(g) {
       const tabs = [['accounts', '账号消费'], ['local', '按主站分组'], ['daily', '每日对比']];
       let content;
-      if (state.detail === 'daily') content = table(['日期', '上游消费 CNY', '主站消费 CNY', '消费差额 CNY', '差额率', '状态'], g.days.map(d => [link('data-sg-day', d.date, e(d.date)), e(money(d.upstream)), e(money(d.main)), e(signed(d.diff)), e(pct(d.rate)), status(d.status)]), 'supplier-group-account-table');
+      if (state.detail === 'daily') content = table(['日期', '上游消费 CNY', '主站消费 CNY', '消费差额 CNY', '差额率', '状态'], g.days.map(d => [link('data-sg-day', d.date, e(d.date)), upstream(d), e(money(d.main)), e(signed(d.diff)), e(pct(d.rate)), status(d.status)]), 'supplier-group-account-table');
       else if (state.detail === 'local') content = table(['主站分组', '主站账号', '请求数', '主站消费 CNY'], g.localGroups.map(row => [`${e(row.name)}<small>#${e(row.id)}</small>`, row.accounts.map(account => e(account.name)).join('<br>'), row.requests, e(money(row.main))]), 'supplier-group-account-table');
       else {
-        content = `<p class="muted">上游 ${e(money(g.upstream))} · 主站 ${e(money(g.main))} · 差额 ${e(signed(g.diff))}</p>` +
+        content = `<p class="muted">上游 ${upstream(g)} · 主站 ${e(money(g.main))} · 差额 ${e(signed(g.diff))}</p>` +
           table(['主站账号', '主站分组 / 消费', '请求数', '账号消费 CNY'], g.accounts.map(a => [
             `<strong>${e(a.name)}</strong><small>#${e(a.id)}${a.deleted ? ' · 已删除，保留历史' : a.status !== 'active' ? ' · 当前停用，保留消费' : ''}</small>`,
             a.localGroups.map(row => `<div class="supplier-group-split"><span>${e(row.name)}</span><span>${e(money(row.main))}</span></div>`).join(''), a.requests, e(money(a.main))]), 'supplier-group-account-table');
@@ -106,11 +108,11 @@ const SupplierGroupUi = (() => {
         if (!state.active || request !== state.request) return;
         if (state.report) {
           state.report.stale = true;
-          if (state.report.groups) state.report.groups = state.report.groups.map(g => ({ ...g, diff: null, rate: null, status: 'stale' }));
-          if (state.report.providerSummaries) state.report.providerSummaries = state.report.providerSummaries.map(provider => ({ ...provider, diff: null }));
+          if (state.report.groups) state.report.groups = state.report.groups.map(g => ({ ...g, stale: true, diff: null, rate: null, status: 'stale' }));
+          if (state.report.providerSummaries) state.report.providerSummaries = state.report.providerSummaries.map(provider => ({ ...provider, stale: true, diff: null }));
           if (state.report.group) {
-            state.report.group = { ...state.report.group, diff: null, rate: null, status: 'stale',
-              days: state.report.group.days.map(d => d.date === state.date ? { ...d, diff: null, rate: null, status: 'stale' } : d) };
+            state.report.group = { ...state.report.group, stale: true, diff: null, rate: null, status: 'stale',
+              days: state.report.group.days.map(d => d.date === state.date ? { ...d, stale: true, diff: null, rate: null, status: 'stale' } : d) };
           }
           if (state.report.summary) state.report.summary.diff = null;
           render();

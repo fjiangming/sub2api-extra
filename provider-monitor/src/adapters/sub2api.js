@@ -1171,14 +1171,35 @@ class Sub2ApiAdapter extends ProviderAdapter {
           data.items.length > pageSize || total < (number - 1) * pageSize + data.items.length) throw invalid();
       return { items: data.items, total, pageSize, number };
     };
+    const verifiedGroups = new Map();
+    // Some upstream versions omit log group IDs. Resolve the recorded name from that key's day statistics, never its current directory.
+    const prepareGroups = async rows => {
+      const missing = [...new Set(rows.filter(row => row && row.group_id == null).map(row => {
+        if (typeof row.group_name !== 'string' || !row.group_name.trim() || row.group_name.length > 200) throw invalid();
+        return id(row.api_key_id);
+      }))].filter(keyId => !verifiedGroups.has(keyId));
+      if (verifiedGroups.size + missing.length > 500) throw new AppError('SOURCE_LIMIT', 'Too many keys require historical group resolution', { status: 502 });
+      let cursor = 0;
+      await Promise.all(Array.from({ length: Math.min(3, missing.length) }, async () => {
+        while (cursor < missing.length) {
+          const keyId = missing[cursor++];
+          const groups = await this.getKeyDailyGroupUsage({ key: { remote_id: keyId }, date, timezone });
+          if (groups.length > 1000) throw invalid();
+          verifiedGroups.set(keyId, groups);
+        }
+      }));
+    };
     const normalize = row => {
       if (!row || typeof row !== 'object' || Array.isArray(row)) throw invalid();
       const amount = summaryNumber(row.actual_cost), at = Date.parse(row.created_at);
       if (id(row.user_id) !== subjectId || amount === null || !Number.isFinite(at) || at < from || at >= to) throw invalid();
-      const groupRef = id(row.group_id);
+      const keyId = id(row.api_key_id);
+      const candidates = row.group_id == null ? verifiedGroups.get(keyId)?.filter(group => group.groupName === row.group_name) : null;
+      if (row.group_id == null && candidates?.length !== 1) throw invalid();
+      const groupRef = id(row.group_id ?? candidates[0].groupRef);
       if (row.group?.id != null && id(row.group.id) !== groupRef) throw invalid();
-      return { id: id(row.id), keyId: id(row.api_key_id), groupRef,
-        groupName: String(row.group?.name || groupRef).slice(0, 200), amount, at };
+      return { id: id(row.id), keyId, groupRef,
+        groupName: String(row.group_name || row.group?.name || groupRef).slice(0, 200), amount, at };
     };
     // Freeze both the last record and row count before reading ascending pages. Appended usage is for the next refresh.
     const head = await page(1, 1, 'desc');
@@ -1210,8 +1231,14 @@ class Sub2ApiAdapter extends ProviderAdapter {
     const priorCount = account.requests;
     if (head.total < priorCount) throw invalid();
     if (head.total - priorCount > limit) throw new AppError('SOURCE_LIMIT', 'Daily group snapshot exceeds the unread usage record limit', { status: 502 });
+    await prepareGroups(head.items);
     const anchor = head.total ? normalize(head.items[0]) : null;
     const result = pageSize => {
+      for (const [keyId, groups] of verifiedGroups) for (const row of keys.get(keyId)?.values() || []) {
+        const verified = groups.find(group => group.groupRef === row.groupRef);
+        if (!verified || row.requests > verified.requests ||
+            row.amount - verified.amount > Math.max(1e-7, Math.abs(verified.amount) * 1e-10)) throw invalid();
+      }
       const rows = [...keys].map(([keyId, groups]) => [keyId, [...groups.values()]]);
       return { account, keys: new Map(rows), state: { date, timezone, account, keys: rows, anchor, pageSize } };
     };
@@ -1255,11 +1282,13 @@ class Sub2ApiAdapter extends ProviderAdapter {
     };
     const first = await page(firstPage, pageSize, 'asc');
     if (firstPage === 1) pageSize = first.pageSize;
+    await prepareGroups(first.items.filter(row => BigInt(id(row?.id)) <= BigInt(anchor.id)));
     if (consume(first)) return result(pageSize);
     const lastPage = Math.ceil(head.total / pageSize);
     for (let number = firstPage + 1; number <= lastPage; number += 3) {
       const pages = await Promise.all(Array.from({ length: Math.min(3, lastPage - number + 1) },
         (_, offset) => page(number + offset, pageSize, 'asc')));
+      await prepareGroups(pages.flatMap(current => current.items).filter(row => BigInt(id(row?.id)) <= BigInt(anchor.id)));
       for (const current of pages) if (consume(current)) return result(pageSize);
     }
     throw invalid();

@@ -30,6 +30,37 @@ async function layout(page) {
   });
   assert.equal(result.overflow, false); assert.deepEqual(result.clipped, []); assert.equal(result.overlapping, false);
 }
+async function subtotals(page, fixture, directory, name) {
+  const original = structuredClone(fixture.items[0]);
+  try {
+    Object.assign(fixture.items[0], { complete: false, accountCovered: false });
+    Object.assign(fixture.items[0].keys[1], { cost: null, upstreamAmount: null, requests: null, complete: false });
+    await fixture.service.collect(fixture.date);
+    await openDay(page, fixture.date); await openGroups(page);
+    const group = page.locator('[data-provider-group-row]').filter({ hasText: 'Claude 标准' });
+    assert.match(await group.locator('td').nth(3).innerText(), /12[\s\S]*已知小计/);
+    assert.match(await page.locator('.cost-provider-group-table tfoot').innerText(), /20[\s\S]*已知小计/);
+    assert.equal(await page.locator('[data-provider-main-total]').innerText(), '47');
+    assert.match(await page.locator('.cost-provider-group-totals').innerText(), /供应商当日消费[\s\S]*23/);
+    await layout(page); await page.screenshot({ path: path.join(directory, `${name}-known-subtotal.png`), fullPage: true });
+    await page.locator('[data-close]').click();
+    Object.assign(fixture.items[0], structuredClone(original), { accountCovered: false, archiveConflict: true });
+    await fixture.service.collect(fixture.date);
+    await openDay(page, fixture.date); await openGroups(page);
+    assert.match(await group.innerText(), /历史归档冲突/);
+    assert.match(await group.locator('td').nth(3).innerText(), /15[\s\S]*已知小计/);
+    await layout(page); await page.locator('[data-close]').click();
+    fixture.items[0].keys.forEach(key => Object.assign(key, { cost: null, upstreamAmount: null, requests: null, complete: false }));
+    await fixture.service.collect(fixture.date);
+    await openDay(page, fixture.date); await openGroups(page);
+    assert.match(await group.locator('td').nth(3).innerText(), /暂不可用$/);
+    assert.equal(await page.locator('.cost-provider-group-table .supplier-group-subtotal').count(), 0);
+    await page.locator('[data-close]').click();
+  } finally {
+    Object.assign(fixture.items[0], original); delete fixture.items[0].archiveConflict;
+    await fixture.service.collect(fixture.date);
+  }
+}
 async function pagination(page, fixture) {
   const originalKeys = [...fixture.items[0].keys];
   try {
@@ -135,6 +166,7 @@ async function run() {
         assert.equal(await page.locator('[data-provider-main-total]').innerText(), '暂不可用');
         assert.equal(fixture.controls.calls.length, calls);
         await layout(page); await page.locator('[data-close]').click();
+        await subtotals(page, fixture, directory, name);
         if (name === 'desktop') {
           await pagination(page, fixture);
           await openDay(page, fixture.date);

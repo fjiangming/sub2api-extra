@@ -15,16 +15,20 @@ function buildGroupReport(upstream, source, settings, date, at) {
   const names = upstream.items.map(provider => ({ provider, full: norm(provider.name), aliases: aliases(provider, settings) }));
   const groups = new Map(), keyTargets = new Map();
   for (const provider of upstream.items) for (const key of provider.keys) {
-    const id = groupId(provider.id, key.groupRef || 'unassigned');
-    if (!groups.has(id)) groups.set(id, { id, providerId: provider.id, providerName: provider.name,
-      groupRef: key.groupRef, name: key.groupName || key.groupRef || '上游分组未定位', keys: [], reasons: [...(provider.reasons || [])] });
     const item = { id: key.id, name: key.name, maskedKey: key.maskedKey, upstream: key.cost,
-      upstreamComplete: key.complete === true && provider.accountCovered === true && !provider.stale,
+      upstreamComplete: key.complete === true && provider.accountCovered === true && !provider.stale && !provider.archiveConflict,
       accounts: [], blocked: false, reasons: key.reasons || [] };
-    groups.get(id).keys.push(item);
+    let group = null;
+    if (key.groupRef !== null) {
+      const id = groupId(provider.id, key.groupRef);
+      if (!groups.has(id)) groups.set(id, { id, providerId: provider.id, providerName: provider.name,
+        groupRef: key.groupRef, name: key.groupName || key.groupRef, keys: [],
+        archiveConflict: provider.archiveConflict === true, stale: provider.stale === true, reasons: [...(provider.reasons || [])] });
+      group = groups.get(id); group.keys.push(item);
+    }
     if (key.identity) {
       if (!keyTargets.has(key.identity)) keyTargets.set(key.identity, []);
-      keyTargets.get(key.identity).push({ provider, group: groups.get(id), key: item });
+      keyTargets.get(key.identity).push({ provider, group, key: item });
     }
   }
   const mappings = [];
@@ -51,6 +55,8 @@ function buildGroupReport(upstream, source, settings, date, at) {
     if (!candidates.length) mapping.reason = '名称未匹配供应商';
     else if (!targets.length) mapping.reason = candidates.length > 1 ? '供应商候选不唯一，Key 未能核验' : '完整 Key 未匹配';
     else if (targets.length > 1) mapping.reason = 'Key 对应多个供应商或当日上游分组';
+    else if (!targets[0].group) mapping.reason = targets[0].key.upstream === 0
+      ? 'Key 已核验零消费，历史上游分组未观察' : 'Key 已核验，历史上游分组未定位';
     else {
       const target = targets[0];
       Object.assign(mapping, { matched: true, providerId: target.provider.id, providerName: target.provider.name,
@@ -69,7 +75,7 @@ function buildGroupReport(upstream, source, settings, date, at) {
     if (!mapping.matched) {
       const possible = keyTargets.get(account.identity) || [];
       for (const target of possible) target.key.blocked = true;
-      if (!possible.length && usage.length) for (const group of groups.values()) {
+      if ((!possible.length || possible.some(t => !t.group)) && usage.length) for (const group of groups.values()) {
         if (candidates.some(p => p.id === group.providerId)) group.mappingBlocked = true;
       }
     }

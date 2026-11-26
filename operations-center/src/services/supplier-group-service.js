@@ -1,6 +1,7 @@
 'use strict';
 const crypto = require('node:crypto');
 const { DateTime } = require('luxon');
+const Decimal = require('decimal.js');
 const { z } = require('zod');
 const { AppError } = require('../errors');
 const { buildGroupReport, total } = require('./supplier-group-matcher');
@@ -16,7 +17,7 @@ const text = z.string().max(200), amount = z.number().finite().nonnegative().nul
 const upstreamSchema = z.object({ source: z.literal('upstream_key_group_daily_v1'), date: z.string(), timezone: z.string(),
   currency: z.literal('CNY'), providerFilter: z.literal('scheduled_enabled'), items: z.array(z.object({
     id: text.min(1), name: text, complete: z.boolean(), accountCovered: z.boolean().optional().default(false),
-    stale: z.boolean().optional(), reasons: z.array(z.string().max(500)).max(20).optional().default([]),
+    stale: z.boolean().optional(), archiveConflict: z.boolean().optional(), reasons: z.array(z.string().max(500)).max(20).optional().default([]),
     keys: z.array(z.object({ id: text.min(1), name: text.nullable().optional(), maskedKey: z.string().max(500).nullable().optional(),
       identity: z.string().regex(/^[a-f0-9]{64}$/).nullable(), groupRef: text.nullable(), groupName: text.nullable().optional(),
       cost: amount, upstreamAmount: amount, requests: z.number().int().nonnegative().safe().nullable(), complete: z.boolean(),
@@ -45,8 +46,21 @@ function archiveUpstream(previous, next) {
     if (!current || (old.complete && old.accountCovered && !old.stale)) { providers.set(old.id, old); continue; }
     const knownIds = new Set(old.keys.filter(k => k.cost !== null).map(k => k.id));
     const frozen = old.keys.filter(k => knownIds.has(k.id));
-    const changed = frozen.some(k => !current.keys.some(n => n.id === k.id && n.groupRef === k.groupRef && n.upstreamAmount === k.upstreamAmount));
-    providers.set(old.id, { ...current, accountCovered: current.accountCovered && !changed,
+    const confirmed = frozen.filter(k => k.cost !== null);
+    const equal = (a, b) => a !== null && b !== null && new Decimal(a).minus(b).abs().lte(Decimal.max('0.0000001', new Decimal(a).abs().times('0.0000000001')));
+    const matches = (k, n) => n.id === k.id && n.groupRef === k.groupRef && equal(n.upstreamAmount, k.upstreamAmount) && n.requests === k.requests;
+    const changed = confirmed.some(k => !current.keys.some(n => matches(k, n)));
+    const conflict = confirmed.some(k => {
+      const rows = current.keys.filter(n => n.id === k.id), sameGroup = rows.find(n => n.groupRef === k.groupRef);
+      if (!sameGroup) return k.groupRef !== null && rows.length > 0 && rows.every(n => n.groupRef !== null && n.complete);
+      return (k.upstreamAmount !== null && sameGroup.upstreamAmount !== null && !equal(sameGroup.upstreamAmount, k.upstreamAmount)) ||
+        (k.requests !== null && sameGroup.requests !== null && k.requests !== sameGroup.requests);
+    });
+    const verified = current.complete && current.accountCovered && !current.stale && !changed;
+    const archiveConflict = conflict || current.archiveConflict === true || (old.archiveConflict === true && !verified);
+    const reason = '历史分组归档与后续上游数据不一致，保留原已知金额；完整合计和差额待核对';
+    providers.set(old.id, { ...current, accountCovered: current.accountCovered && !changed, archiveConflict,
+      reasons: [...new Set([...current.reasons, ...(archiveConflict ? [reason] : [])])],
       keys: [...frozen, ...current.keys.filter(k => !knownIds.has(k.id))] });
   }
   return { ...next, items: [...providers.values()] };
@@ -131,7 +145,8 @@ class SupplierGroupService {
     return this.store.configure(this.scope(), parsed.data, actor, this.now().toISOString());
   }
   status(group, alert, stale = false) {
-    if (stale) return 'stale';
+    if (group.archiveConflict) return 'archive_conflict';
+    if (stale || group.stale) return 'stale';
     if (!group.upstreamComplete) return 'upstream_missing';
     if (group.main === null) return 'site_incomplete';
     if (group.keys.some(k => k.accounts.some(a => a.historyVerified === false))) return 'history_unverified';
@@ -172,8 +187,10 @@ class SupplierGroupService {
     const known = all.filter(g => g.upstream !== null), comparable = all.filter(g => g.comparable && !stale);
     const page = items => { const n = Math.min(query.page, Math.max(1, Math.ceil(items.length / query.pageSize))); return {
       items: items.slice((n - 1) * query.pageSize, n * query.pageSize), pagination: { page: n, pageSize: query.pageSize, total: items.length, totalPages: Math.ceil(items.length / query.pageSize) } }; };
-    const publicGroup = g => ({ ...g, keys: undefined, status: this.status(g, settings.alert, stale),
-      diff: stale ? null : g.diff, rate: stale ? null : g.rate, keyCount: g.keys.length });
+    const knownKeyCount = group => group.keys.filter(key => key.upstream !== null).length;
+    const publicGroup = (g, outdated = stale) => ({ ...g, keys: undefined, stale: outdated || Boolean(g.stale),
+      status: this.status(g, settings.alert, outdated), knownKeyCount: knownKeyCount(g),
+      diff: outdated ? null : g.diff, rate: outdated ? null : g.rate, keyCount: g.keys.length });
     const publicAccount = account => ({
       id: account.id, name: account.name, status: account.status, deleted: Boolean(account.deleted),
       main: report.siteComplete ? account.main : null, requests: account.requests,
@@ -201,6 +218,8 @@ class SupplierGroupService {
         groupUpstream: groups.length && groups.every(g => g.upstream !== null) ? total(groups, 'upstream') : null,
         upstream: !pendingByProvider.has(id) && groups.every(g => g.upstream !== null) ? total(groups, 'upstream') : null,
         knownUpstream: total(groups, 'knownUpstream'),
+        knownKeyCount: groups.reduce((count, group) => count + knownKeyCount(group), 0),
+        stale: stale || groups.some(group => group.stale),
         main: report.siteComplete ? total([...groups, ...(pendingByProvider.get(id) || [])], 'main') : null,
         diff: !stale && !pendingByProvider.has(id) && groups.every(g => g.comparable) ? total(groups, 'diff') : null })),
       missingProviders: report.missingProviders.filter(p => !query.providerId || p.id === query.providerId),
@@ -235,8 +254,7 @@ class SupplierGroupService {
           const previousDate = day.minus({ days: index }).toISODate();
           const snapshot = previousDate === date ? report : this.store.get(scope, previousDate);
           const row = snapshot?.groups.find(g => g.id === group.id);
-          return { date: previousDate, ...(row ? { ...publicGroup(row),
-            ...(previousDate === date ? {} : { diff: row.diff, rate: row.rate, status: this.status(row, settings.alert) }) }
+          return { date: previousDate, ...(row ? publicGroup(row, previousDate === date && stale)
             : { upstream: null, main: null, diff: null, rate: null, status: 'history_missing' }) };
         }) };
       result.pagination = query.view === 'accounts' ? accountPage.pagination : query.view === 'local' ? localPage.pagination : query.view === 'daily'

@@ -36,7 +36,7 @@ test('real SQL groups all accounts by upstream group without account membership 
   assert.equal(claude.accountsTruncated, false);
   assert.deepEqual(r.providerSummaries.find(p => p.id === 'ling'), {
     id: 'ling', name: '灵枢 API', groupCount: 2, knownGroups: 2, pendingAccountCount: 1, groupMain: 47, groupUpstream: 23,
-    upstream: null, knownUpstream: 23, main: 47, diff: null
+    upstream: null, knownUpstream: 23, knownKeyCount: 3, stale: false, main: 47, diff: null
   });
   assert.equal(r.providerSummaries.find(p => p.id === 'nova').diff, null);
   assert.equal(r.providerSummaries.find(p => p.id === 'zen').upstream, null);
@@ -122,7 +122,35 @@ test('a partial upstream group contributes only to the known subtotal and never 
   assert.equal(provider.upstream, null); assert.equal(provider.diff, null);
   assert.equal(provider.knownGroups, 1); assert.equal(provider.groupCount, 2);
   assert.equal(provider.knownUpstream, 20);
-  assert.equal(report.groups.find(group => group.groupRef === 'claude').knownUpstream, 12);
+  assert.equal(provider.knownKeyCount, 2);
+  const group = report.groups.find(group => group.groupRef === 'claude');
+  assert.equal(group.knownUpstream, 12); assert.equal(group.knownKeyCount, 1);
+  assert.equal(group.upstream, null); assert.equal(group.diff, null);
+  const unknown = report.groups.find(group => group.groupRef === 'unknown');
+  assert.equal(unknown.knownUpstream, 0); assert.equal(unknown.knownKeyCount, 0);
+  assert.equal(unknown.upstream, null);
+  const zero = report.groups.find(group => group.groupRef === 'zero');
+  assert.equal(zero.knownKeyCount, 1); assert.equal(zero.upstream, 0);
+});
+
+test('verified zero with unknown historical group stays pending without inventing a group or counting an account twice', async t => {
+  const f = await fixture(t);
+  Object.assign(f.items[0].keys[1], { groupRef: null, groupName: null, cost: 0, upstreamAmount: 0,
+    requests: 0, complete: false, reasons: ['已核验零消费，历史分组未观察'] });
+  const report = await f.service.getReport({ date: f.date, providerId: 'ling' });
+  assert(report.groups.every(group => group.groupRef !== null));
+  const claude = report.groups.find(group => group.groupRef === 'claude');
+  assert.equal(claude.upstream, 12); assert.equal(claude.main, 30); assert.equal(claude.diff, null);
+  assert.equal(claude.status, 'mapping_incomplete');
+  assert.deepEqual(claude.accounts.map(account => account.id), ['11', '12']);
+  const summary = report.providerSummaries[0];
+  assert.equal(summary.groupUpstream, 20); assert.equal(summary.knownUpstream, 20);
+  assert.equal(summary.groupMain, 42); assert.equal(summary.main, 47);
+  assert.equal(summary.upstream, null); assert.equal(summary.diff, null); assert.equal(summary.pendingAccountCount, 2);
+  const pending = await f.service.getReport({ date: f.date, providerId: 'ling', view: 'pending' });
+  const account = pending.accounts.find(account => account.id === '13');
+  assert.equal(account.main, 5); assert.match(account.reason, /零消费.*历史上游分组/);
+  assert.equal(new Set([...claude.accounts, ...pending.accounts].map(account => account.id)).size, 4);
 });
 
 test('missing detailed usage or native coverage stays unknown, including deleted/disabled accounts', async t => {
@@ -314,6 +342,71 @@ test('archive retries retain confirmed upstream values and allow incomplete main
   try { assert.equal(reopened.get(f.service.scope(), f.date).groups.find(g => g.groupRef === 'claude').upstream, 15); } finally { reopened.close(); }
 });
 
+test('partial historical archives keep known amounts and explicitly flag conflicting later values without computing differences', async t => {
+  const f = await fixture(t), baseline = structuredClone(f.items[0]);
+  f.controls.clock = new Date('2026-11-25T18:00:00Z');
+  Object.assign(f.items[0], { complete: false, accountCovered: false });
+  await f.service.collect(f.date, { archive: true });
+  Object.assign(f.items[0], { complete: true, accountCovered: true });
+  Object.assign(f.items[0].keys[0], { cost: 13, upstreamAmount: 13 });
+  await f.service.collect(f.date, { archive: true });
+  let report = await f.service.getReport({ date: f.date, providerId: 'ling' });
+  let group = report.groups.find(group => group.groupRef === 'claude');
+  assert.equal(group.status, 'archive_conflict'); assert.equal(group.archiveConflict, true);
+  assert.equal(group.knownUpstream, 15); assert.equal(group.knownKeyCount, 2);
+  assert.equal(group.upstream, null); assert.equal(group.diff, null); assert.match(group.reasons.join(''), /保留原已知金额/);
+  const detail = await f.service.getReport({ date: f.date, groupId: group.id, view: 'daily' });
+  assert.equal(detail.group.days[0].status, 'archive_conflict'); assert.equal(detail.group.days[0].knownUpstream, 15);
+  assert.equal(report.providerSummaries[0].knownUpstream, 23); assert.equal(report.providerSummaries[0].groupUpstream, null);
+  f.items[0].keys.forEach(key => Object.assign(key, { cost: null, upstreamAmount: null, requests: null, complete: false }));
+  await f.service.collect(f.date, { archive: true });
+  report = await f.service.getReport({ date: f.date });
+  assert.equal(report.groups.find(group => group.id === detail.group.id).status, 'archive_conflict');
+  Object.assign(f.items[0], structuredClone(baseline), { complete: false, accountCovered: false });
+  await f.service.collect(f.date, { archive: true });
+  report = await f.service.getReport({ date: f.date });
+  assert.equal(report.groups.find(group => group.id === detail.group.id).status, 'archive_conflict');
+  Object.assign(f.items[0], baseline);
+  await f.service.collect(f.date, { archive: true });
+  report = await f.service.getReport({ date: f.date });
+  group = report.groups.find(group => group.id === detail.group.id);
+  assert.equal(group.archiveConflict, false); assert.equal(group.upstream, 15); assert.equal(group.diff, 20);
+  const calls = f.controls.calls.length, queries = f.queries.length;
+  f.controls.clock = new Date('2026-11-28T04:00:00Z');
+  await f.service.getReport({ date: f.date });
+  assert.equal(f.controls.calls.length, calls); assert.equal(f.queries.length, queries);
+});
+
+test('missing later historical values retain known subtotals without claiming a numeric conflict', async t => {
+  const f = await fixture(t); f.controls.clock = new Date('2026-11-25T18:00:00Z');
+  Object.assign(f.items[0], { complete: false, accountCovered: false });
+  await f.service.collect(f.date, { archive: true });
+  f.items[0].keys.forEach(key => Object.assign(key, { cost: null, upstreamAmount: null, requests: null, complete: false }));
+  await f.service.collect(f.date, { archive: true });
+  const report = await f.service.getReport({ date: f.date, providerId: 'ling' });
+  assert(report.groups.every(group => group.status === 'upstream_missing' && group.archiveConflict === false));
+  assert.equal(report.providerSummaries[0].knownUpstream, 23); assert.equal(report.providerSummaries[0].knownKeyCount, 3);
+  assert.equal(report.providerSummaries[0].groupUpstream, null); assert.equal(report.providerSummaries[0].diff, null);
+});
+
+test('historical conflict detection tolerates rounding noise and missing counts but rejects changed group membership', async t => {
+  const f = await fixture(t); f.controls.clock = new Date('2026-11-25T18:00:00Z');
+  Object.assign(f.items[0], { complete: false, accountCovered: false });
+  await f.service.collect(f.date, { archive: true });
+  Object.assign(f.items[0].keys[0], { cost: 12.000000001, upstreamAmount: 12.000000001, requests: null, complete: false });
+  await f.service.collect(f.date, { archive: true });
+  let report = await f.service.getReport({ date: f.date });
+  let group = report.groups.find(group => group.groupRef === 'claude');
+  assert.equal(group.archiveConflict, false); assert.equal(group.knownUpstream, 15); assert.equal(group.diff, null);
+  Object.assign(f.items[0], { complete: true, accountCovered: true });
+  Object.assign(f.items[0].keys[0], { groupRef: 'changed', groupName: 'Changed group', cost: 12, upstreamAmount: 12, requests: 4, complete: true });
+  await f.service.collect(f.date, { archive: true });
+  report = await f.service.getReport({ date: f.date });
+  group = report.groups.find(group => group.groupRef === 'claude');
+  assert.equal(group.archiveConflict, true); assert.equal(group.knownUpstream, 15); assert.equal(group.diff, null);
+  assert(!report.groups.some(group => group.groupRef === 'changed'));
+});
+
 test('settings persist with audit, only current-day matching updates, and pagination is bounded', async t => {
   const f = await fixture(t, { history: true });
   const policy = f.store.settings(f.service.scope()); policy.aliases.ling = ['自定义别名']; policy.alert.amount = 100;
@@ -334,6 +427,7 @@ test('settings persist with audit, only current-day matching updates, and pagina
 
 test('single-flight, timeout, stale fallback and shutdown prevent late source writes', async t => {
   const f = await fixture(t, { timeoutMs: 40 });
+  Object.assign(f.items[0].keys[1], { cost: null, upstreamAmount: null, requests: null, complete: false });
   await f.service.getReport({ date: f.date });
   f.controls.clock = new Date(f.controls.clock.getTime() + 61000);
   let release; f.controls.delay = new Promise(resolve => { release = resolve; });
@@ -341,6 +435,9 @@ test('single-flight, timeout, stale fallback and shutdown prevent late source wr
   const [a, b] = await Promise.all([f.service.getReport({ date: f.date }), f.service.getReport({ date: f.date })]);
   assert.equal(f.controls.calls.length, count + 1); assert.equal(a.stale, true); assert.equal(b.stale, true);
   assert(a.groups.every(g => g.diff === null));
+  const partial = a.groups.find(group => group.groupRef === 'claude');
+  assert.equal(partial.stale, true); assert.equal(partial.status, 'stale');
+  assert.equal(partial.knownUpstream, 12); assert.equal(partial.knownKeyCount, 1); assert.equal(partial.upstream, null);
   assert(a.providerSummaries.every(provider => provider.diff === null));
   const saved = f.store.get(f.service.scope(), f.date);
   release(); await new Promise(resolve => setTimeout(resolve, 15));

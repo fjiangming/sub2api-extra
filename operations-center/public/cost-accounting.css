@@ -46,6 +46,7 @@
 .supplier-group-status { color: var(--green); background: var(--green-soft); border-radius: 4px; padding: 3px 7px; font-size: 12px; white-space: nowrap; }
 .supplier-group-status.warn { color: var(--amber); background: var(--amber-soft); }
 .supplier-group-status.bad { color: var(--red); background: var(--red-soft); }
+.supplier-group-subtotal,#accounting-groups td .supplier-group-subtotal,.accounting-drawer-body td .supplier-group-subtotal { color: var(--amber); font-size: 11px; font-weight: 400; }
 .supplier-group-heading { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 18px; }
 .supplier-group-heading h2 { margin: 0; font-size: 16px; }
 .supplier-group-heading small { color: var(--muted); }

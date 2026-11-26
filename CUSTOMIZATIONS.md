@@ -1,5 +1,30 @@
 # 个性化功能维护台账
 
+## 2026-11-26：修复供应商分组消费兼容与已知金额展示
+
+用户要求按最合理方式修复上一轮生产只读诊断的缺失消费。本轮仅修改本地现有 provider-monitor 采集和 operations-center 成本分析模块；不直接扣余额，不改变消费毛利来源，不重新连接、修改或部署生产，不提交或推送 GitHub。保留其他会话的维护章节、独立 `provider-monitor/tests/daily-cost.test.js` 和未跟踪审计文档。本次需配套更新两个组件，无新增依赖、环境变量、数据库表或迁移。
+
+| 文件 | 本轮改动及保留约定 |
+| --- | --- |
+| `provider-monitor/src/adapters/sub2api.js` | 对用量顶层 group_id 缺失、发生时 group_name 存在的上游，仅按涉及 Key 的同日实际分组统计与 Key 日汇总严格核验，再按名称精确唯一恢复分组身份；拒绝同名歧义、缺统计或不覆盖。账号 / Key / 组金额与请求仍来自原固定 ID 截点，新增消费留到下次，不用当前嵌套 api_key.group_id。最多 500 Key、3 并发，原分页、截点增量、6 秒 / 8.5 秒预算、取消及迟到保护不变；正常 ID 不新增 HTTP。 |
+| `provider-monitor/src/services/group-daily-cost-service.js` | 严格核验的历史零金额零请求允许保留金额 0、未知分组 null 和 Key complete=false，财务覆盖与估值完整独立判断，不让闲置 Key 阻断已核验组；不按当前目录补历史分组、不给真实缺口补零，已观察正用量不能因空统计变成确认零。已知历史金额仍冻结，完整归档不反复查询。 |
+| `operations-center/src/services/supplier-group-matcher.js` | 未定位分组的 Key 仍用于身份核验，对应账号进入原待分组列表，不生成虚构上游组、不重复统计；非零主站待分组用量继续阻断可能受影响的差额。分组携带陈旧和归档冲突标记，冲突金额不参与完整比较。 |
+| `operations-center/src/services/supplier-group-service.js` | 从原快照投影分组 / 供应商 knownKeyCount，区分已知零与空小计；供应商小计覆盖全部在用分组页。部分历史归档遇不同已知金额、请求或分组时冻结旧值并标 archive_conflict / 原因，单纯读取缺失不误报冲突，重新一致可恢复；不覆盖完整历史，不重拉旧日。 |
+| `operations-center/public/supplier-group-ui.js`、`public/cost-accounting-ui.js`、`public/cost-accounting.css`、`public/index.html` | 两处列表、账号下钻与七日对比显示已有金额及“已知小计” / “上次已知小计”，全未知不显示伪零；完整合计和差额仍保持未知。新增历史归档冲突状态及原因，样式沿用现有表格，更新静态资源版本。供应商全天金额与在用分组小计范围不变。 |
+| `provider-monitor/tests/group-daily-cost.test.js`、`operations-center/tests/supplier-groups.test.js` | 覆盖缺日志分组 ID 按真实统计匹配、当前 Key 分组错误仍正确归属、同 Key 当日多组、名称歧义 / 缺统计 / 不覆盖拒绝、固定截点 / 增量及并发 / 超时保护；历史零身份未知、真实金额 / 请求缺口、全未知 / 已知零、小计、主站多账号跨组、历史冻结 / 冲突恢复 / 只读回归。 |
+| `operations-center/scripts/provider-group-browser-check.cjs`、`scripts/supplier-group-browser-check.cjs` | 在原五视口回归中增加部分金额、全未知、确认零、历史冲突、账号 / 七日下钻和表尾完整小计检查，隔离模拟数据，不连接生产。 |
+| `operations-center/docs/supplier-group-costs.md`、`docs/cost-accounting.md`、`docs/supplier-group-cost-unavailable-audit-20261126.md`、`provider-monitor/README.md`、本台账 | 同步兼容读取、财务 / 归属完整性、小计、冲突与两组件配套更新边界。旧归档不自动补历史关系、改金额或生成冲突证据。 |
+
+验证：Provider Monitor 全量 **385 项通过**；随后补充 500 Key 上限用例并完善无效行错误处理，最终分组专项 **26 项通过**。运营中心分组 / 核算 / 界面专项 **65 项通过**，最终 `npm run check` 和 `git diff --check` 通过；两处分组列表各 **5 组**及原核算 **4 组**浏览器回归全部通过，含已知小计、全未知、确认零、冲突、下钻、分页、历史只读与取消保护。额外检查桌面 / 320px 实际视口，无横向溢出或裁切；截图和隔离验收脚本位于会话可视化目录 `supplier-group-cost-fix`，模拟预览 `http://127.0.0.1:19887/preview` 已启动。未运行运营中心无关模块的全量测试、Docker / Linux 构建或生产验收；既有独立 Provider Monitor 测试 hash 仍为 `0fa91265bd5c576f8ce53debb11c399d3768312d`。没有提交、推送、生产数据修复、部署或资金操作。
+
+用户随后明确要求提交 GitHub，本次仅提交上述供应商分组兼容采集、已知金额展示、历史零消费 / 冲突处理及相关测试、文档和本节及诊断维护记录，推送 `origin/main`。提交前沿用既有测试模式，将新兼容读取的短超时用例与同步凭据解密开销隔离，继续核验上游取消及迟到不落库；分组专项复核通过。其他维护章节、独立 Provider Monitor CI 测试及无关未跟踪审计文件保留本地。推送前核对远端同步和暂存范围，沿用现有 GitHub 自动测试与 GHCR 双架构构建发布，以本次完整 SHA 核对结果；不连接、修改或部署服务器。更新时需要同时更新 operations-center 与 provider-monitor，缺失历史不自动补零或重算。
+
+## 2026-11-26：只读分析分组明细供应商消费暂不可用
+
+用户更新服务器后要求分析分组明细的上游消费缺失。北京时间 10:26 至 10:34 只读检查 `216.227.169.198`，新增 `operations-center/docs/supplier-group-cost-unavailable-audit-20261126.md`。两组件实际均为 `1f1be976f22ce669a0836d0f263f05e9f59e6ea7`、健康 HTTP 200、重启计数 0，SSH 已关闭。诊断数据库使用 readonly / query_only，仅复用已有会话执行有界 GET，禁止登录、刷新、凭据回写及采集落库；无生产数据、配置、余额或容器改动，未开发修复、提交 GitHub 或部署，保留其他会话修改。
+
+11 月 25 日 apiclub / lingsu / ailzd 已保存部分分组金额，但供应商 `accountCovered=false` 或 stale 使其所有正式分组金额为空；例如 Kimi 分组已知 CNY 43.72492451、lingsu 满血CCMax 760.25012616，日详情只展示正式字段，未展示已知小计。历史零请求 Key 缺当日归属观察也会连带阻断完整性；lingsu、ailzd 则另有真实未覆盖用量。jinitaimei 的监控历史归档完整合计 21.33818316，运营中心冻结旧值 20.94434322，与新金额冲突使 `accountCovered=false`，四个分组全被隐藏且缺专门冲突原因。11 月 26 日其余 8 家当日正常，ailzd 的 64 条正数用量记录顶层 `group_id` 全为空，183ms 复现新明细适配器 SCHEMA_MISMATCH；同会话今日 snapshot-v2 / stats 仍成功核验分组 34 的 61 次请求、原始 13.35510352 USD，证实是读取路径兼容问题。建议分离已知金额展示与完整比较、独立处理历史零用量归属、增加有界兼容分组读取及历史冲突原因，不强行补零或倒推旧日。本轮只改审计文档及本台账，不为分析重跑产品测试。
+
 ## 2026-11-26：实现消费毛利每日供应商分组明细入口
 
 用户确认上一轮 Demo 并要求开始开发。本轮在既有 operations-center 成本分析模块实现“消费毛利 → 每日明细 → 供应商账号消费”的分组明细快捷入口；复用原供应商分组报表和历史归档，不修改匹配、采集、资金计费或余额，不连接生产、提交 GitHub 或部署。保留其他维护章节、独立 `provider-monitor/tests/daily-cost.test.js` 修改和未跟踪审计文档。

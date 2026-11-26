@@ -57,7 +57,7 @@ async function run() {
         const firstGroup = page.locator('.supplier-group-table tbody tr').first();
         assert.match(await firstGroup.locator('.supplier-group-main').innerText(), /35$/);
         assert.match(await firstGroup.locator('.supplier-group-upstream').innerText(), /15$/);
-        assert.match(await page.locator('.supplier-group-table').first().locator('tfoot').innerText(), /上游已取得 23/);
+        assert.match(await page.locator('.supplier-group-table').first().locator('tfoot').innerText(), /23[\s\S]*已知小计/);
         assert.equal(await page.locator('.supplier-group-table').first().locator('tfoot td').first().locator('span').last().innerText(), '47');
         assert.doesNotMatch(await page.locator('.supplier-group-table').first().innerText(), /sk-s/);
         assert.equal(await page.locator('#cost-accounting-add').isVisible(), false);
@@ -115,7 +115,7 @@ async function run() {
         await page.locator('[data-sg-provider]').selectOption('ling');
         await until(page, () => document.querySelectorAll('.supplier-group-table tbody tr').length === 3);
         assert.equal(await page.locator('.supplier-group-provider').count(), 1);
-        assert.match(await page.locator('.supplier-group-table tfoot').innerText(), /上游已取得 23/);
+        assert.match(await page.locator('.supplier-group-table tfoot').innerText(), /23[\s\S]*已知小计/);
         assert.equal(await page.locator('.supplier-group-table tfoot td').first().locator('span').last().innerText(), '47');
         await page.locator('[data-sg-provider]').selectOption('');
         await until(page, () => document.querySelectorAll('.supplier-group-table tbody tr').length === 7);
@@ -128,6 +128,39 @@ async function run() {
           await page.unroute('**/api/cost-analysis/supplier-groups?**');
           await page.locator('[data-sg-date]').dispatchEvent('change');
           await until(page, () => document.querySelector('[data-sg-warning]')?.hidden);
+        }
+
+        const originalProvider = structuredClone(fixture.items[0]);
+        try {
+          Object.assign(fixture.items[0], { complete: false, accountCovered: false });
+          Object.assign(fixture.items[0].keys[1], { cost: null, upstreamAmount: null, requests: null, complete: false });
+          await fixture.service.collect(fixture.date);
+          await page.locator('[data-sg-date]').dispatchEvent('change');
+          const partial = page.locator('.supplier-group-table tbody tr').filter({ hasText: 'Claude 标准' });
+          await until(page, () => document.querySelector('.supplier-group-upstream .supplier-group-subtotal')?.textContent === '已知小计');
+          assert.match(await partial.locator('.supplier-group-upstream').innerText(), /12[\s\S]*已知小计/);
+          assert.match(await partial.locator('.supplier-group-diff').innerText(), /—$/);
+          assert.match(await page.locator('.supplier-group-table').first().locator('tfoot').innerText(), /20[\s\S]*已知小计/);
+          await layout(page); await page.evaluate(() => scrollTo(0, 0));
+          await page.screenshot({ path: path.join(directory, `${spec.name}-known-subtotal.png`), fullPage: true });
+          await page.getByRole('button', { name: '查看 Claude 标准 账号与每日明细', exact: true }).click();
+          await until(page, () => document.querySelector('#sg-detail-panel > .muted')?.textContent.includes('已知小计'));
+          await page.getByRole('tab', { name: '每日对比', exact: true }).click();
+          await until(page, () => document.querySelector('#sg-detail-panel tbody tr')?.textContent.includes('已知小计'));
+          await page.getByRole('button', { name: '返回分组列表', exact: true }).click();
+          await until(page, () => Boolean(document.querySelector('.supplier-group-table')));
+          Object.assign(fixture.items[0], structuredClone(originalProvider), { accountCovered: false, archiveConflict: true });
+          await fixture.service.collect(fixture.date); await page.locator('[data-sg-date]').dispatchEvent('change');
+          await until(page, () => document.querySelector('[data-sg-content]')?.textContent.includes('历史归档冲突'));
+          assert.match(await partial.locator('.supplier-group-upstream').innerText(), /15[\s\S]*已知小计/);
+          fixture.items[0].keys.forEach(key => Object.assign(key, { cost: null, upstreamAmount: null, requests: null, complete: false }));
+          await fixture.service.collect(fixture.date); await page.locator('[data-sg-date]').dispatchEvent('change');
+          await until(page, () => !document.querySelector('.supplier-group-table')?.querySelector('.supplier-group-subtotal'));
+          assert.match(await partial.locator('.supplier-group-upstream').innerText(), /—$/);
+          assert.doesNotMatch(await page.locator('.supplier-group-table').first().locator('tfoot').innerText(), /已知小计/);
+        } finally {
+          Object.assign(fixture.items[0], originalProvider); delete fixture.items[0].archiveConflict;
+          await fixture.service.collect(fixture.date);
         }
 
         const originalKeys = fixture.items[0].keys;

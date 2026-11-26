@@ -162,7 +162,8 @@ class GroupDailyCostService {
                 if (k.cost !== null) return k;
                 const valuation = this.dailyCosts.valueCost(connection, { amount: k.upstreamAmount, currency: account.currency,
                   fetched_at: previous.computedAt }, period, settings);
-                return { ...k, cost: valuation.cost, complete: valuation.cost !== null, reasons: valuation.reasons };
+                return { ...k, cost: valuation.cost, complete: valuation.cost !== null && k.groupRef !== null,
+                  reasons: [...valuation.reasons, ...(k.groupRef === null ? ['已核验零消费，历史分组未观察，不按当前目录倒推'] : [])] };
               }));
               continue;
             }
@@ -173,19 +174,23 @@ class GroupDailyCostService {
             if (!rows.length) {
               const observed = cached?.keys.filter(k => k.id === key.id && k.identity === base.identity && k.upstreamAmount !== null);
               // Zero usage has no log group; historical membership requires an observation from that day.
-              if (archive && (!observed?.length || new Set(observed.map(k => k.groupRef)).size !== 1)) throw new Error('historical zero group unknown');
-              rows.push({ groupRef: archive ? observed[0].groupRef : key.primary_group_ref,
-                groupName: archive ? observed[0].groupName : key.group_name, amount: 0, requests: 0, currency: account.currency });
+              if (archive && observed?.some(k => k.upstreamAmount > 0 || k.requests > 0)) throw new Error('historical usage decreased');
+              const historical = observed?.length && observed.every(k => k.groupRef !== null) && new Set(observed.map(k => k.groupRef)).size === 1
+                ? observed[0] : null;
+              rows.push({ groupRef: archive ? historical?.groupRef ?? null : key.primary_group_ref,
+                groupName: archive ? historical?.groupName ?? null : key.group_name, amount: 0, requests: 0, currency: account.currency });
             }
             if (rows.length > 1000 || new Set(rows.map(r => String(r.groupRef))).size !== rows.length) throw new Error('invalid groups');
             const entries = rows.map(row => {
-              if (!row.groupRef || typeof row.amount !== 'number' || !Number.isFinite(row.amount) || row.amount < 0 ||
+              const unassignedZero = archive && row.groupRef === null && row.amount === 0 && row.requests === 0 && rows.length === 1;
+              if ((!row.groupRef && !unassignedZero) || typeof row.amount !== 'number' || !Number.isFinite(row.amount) || row.amount < 0 ||
                   !Number.isSafeInteger(row.requests) || row.requests < 0 || row.currency !== account.currency) throw new Error('invalid');
               const valuation = this.dailyCosts.valueCost(connection, { amount: row.amount, currency: row.currency,
                 fetched_at: this.now().toISOString() }, period, settings);
-              return { ...base, groupRef: String(row.groupRef), groupName: String(row.groupName || key.group_name || row.groupRef).slice(0, 200),
-                upstreamAmount: row.amount, cost: valuation.cost, requests: row.requests, complete: valuation.cost !== null,
-                reasons: valuation.reasons };
+              return { ...base, groupRef: unassignedZero ? null : String(row.groupRef),
+                groupName: unassignedZero ? null : String(row.groupName || key.group_name || row.groupRef).slice(0, 200),
+                upstreamAmount: row.amount, cost: valuation.cost, requests: row.requests, complete: valuation.cost !== null && !unassignedZero,
+                reasons: [...valuation.reasons, ...(unassignedZero ? ['已核验零消费，历史分组未观察，不按当前目录倒推'] : [])] };
             });
             keys.push(...entries);
           } catch { keys.push({ ...base, groupRef: archive ? null : key.primary_group_ref, groupName: archive ? null : key.group_name,
@@ -202,7 +207,7 @@ class GroupDailyCostService {
       const requests = keys.reduce((sum, key) => sum + (key.requests ?? 0), 0);
       const covered = keys.every(k => k.upstreamAmount !== null) && Math.abs(total - account.amount) <= Math.max(1e-7, Math.abs(account.amount) * 1e-10) &&
         (account.requests === null || account.requests === requests);
-      const result = { id: info.id, name: info.name, complete: covered && keys.every(k => k.complete), accountCovered: covered,
+      const result = { id: info.id, name: info.name, complete: covered && keys.every(k => k.cost !== null), accountCovered: covered,
         accountKey: crypto.createHmac('sha256', this.config.secret).update(JSON.stringify([connection.adapter_type,
           new URL(connection.base_url).origin, String(account.subjectId)])).digest('hex'),
         keys, reasons: covered ? [] : ['Key 消费合计未覆盖上游账号日汇总，不认定分组消费完整'],
