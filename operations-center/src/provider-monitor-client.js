@@ -56,9 +56,9 @@ class ProviderMonitorClient {
     return (payload?.items || []).map(normalizeProvider);
   }
 
-  async getDailyCosts(query, accessToken = null) {
-    const read = await this.createDailyCostsReader(accessToken);
-    return read(query);
+  async getDailyCosts(query, accessToken = null, { signal } = {}) {
+    const read = await this.createDailyCostsReader(accessToken, { signal });
+    return read(query, { signal });
   }
 
   async getFinancialBalances(accessToken = null) {

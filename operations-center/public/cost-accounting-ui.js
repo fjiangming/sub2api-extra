@@ -189,25 +189,31 @@ const CostAccountingUi = (() => {
         ? `${e(money(row.knownUpstream))}<small class="supplier-group-subtotal">${row.stale ? '上次已知小计' : '已知小计'}</small>` : e(money(null));
       const amount = (label, value, markup = false) => `<td class="numeric"><span class="cost-provider-mobile-label">${label}</span><span>${markup ? value : e(money(value))}</span></td>`;
       const more = (group) => `<button type="button" class="accounting-link" data-provider-group="${e(group.id)}">查看全部 ${group.accountCount} 个账号</button>`;
-      const labels = { upstream_missing: '上游数据待核验', archive_conflict: '历史归档冲突', site_incomplete: '主站数据不完整', history_unverified: '全天归属待核对', mapping_incomplete: '关联待核对', unlinked_key: '部分关联待核对', stale: '上次快照' };
+      const labels = { upstream_missing: '上游数据待核验', upstream_group_unmatched: '上游分组待核对', archive_conflict: '历史归档冲突', site_incomplete: '主站数据不完整', history_unverified: '全天归属待核对', mapping_incomplete: '关联待核对', unlinked_key: '部分关联待核对', stale: '上次快照' };
       const notices = [report.warning, ...(report.missingProviders || []).flatMap(provider => provider.reasons || []),
         report.groups?.some(group => group.archiveConflict) || report.group?.archiveConflict
           ? '历史归档与后续上游数据不一致，显示原已知金额，完整合计和差额待核对' : null,
-        report.siteComplete === false ? '主站用量不完整，账号及分组合计暂不可用' : null].filter(Boolean);
+        report.siteComplete === false ? '主站用量不完整，账号及分组合计暂不可用' : null,
+        summary?.providerAccountTotalStatus && summary.providerAccountTotalStatus !== 'available' ? summary.providerAccountTotalReason : null].filter(Boolean);
       let content;
       if (report.source === 'history_missing') content = '<p class="empty-state">该日暂无分组消费归档，主站账号及上游分组明细暂不可用</p>';
       else if (detail.view === 'groups') {
         const pending = (report.pendingProviders || []).find(provider => provider.id === detail.provider.id);
         content = `<div class="cost-provider-group-heading"><h3>主站在用分组</h3><small>${summary?.groupCount || 0} 个分组 · ${report.summary?.accountCount || 0} 个主站账号</small></div>`;
         if (summary?.groupCount) content += `<table class="cost-provider-group-table"><colgroup><col><col><col><col></colgroup><thead><tr><th>主站对应账号及消费</th><th>上游供应商分组</th><th class="numeric">主站消费合计</th><th class="numeric">供应商分组消费</th></tr></thead><tbody>${report.groups.map(group => `<tr data-provider-group-row="${e(group.id)}"><td><div class="supplier-group-accounts">${group.accounts.map(account => providerAccount(account, group.id)).join('')}${group.accountsTruncated ? more(group) : ''}</div></td><td><strong>${e(group.name)}</strong>${labels[group.status] ? `<small class="cost-provider-group-status">${labels[group.status]}</small>` : ''}</td>${amount('主站消费合计', group.main)}${amount('供应商分组消费', upstream(group), true)}</tr>`).join('')}</tbody><tfoot><tr><th scope="row" colspan="2">在用分组合计</th>${amount('主站消费合计', summary.groupMain)}${amount('供应商分组消费', upstream(summary, summary.groupUpstream), true)}</tr></tfoot></table>`;
-        else if (!summary?.pendingAccountCount) content += '<p class="empty-state">未找到该供应商的主站关联账号</p>';
-        if (summary?.pendingAccountCount) content += `<section class="cost-provider-pending"><h3>分组待核对账号（${summary.pendingAccountCount}）</h3><div class="supplier-group-accounts">${(pending?.accounts || []).map(account => providerAccount(account, 'pending')).join('')}</div>${!pending || pending.accountsTruncated ? `<button type="button" class="accounting-link" data-provider-group-pending>查看全部 ${summary.pendingAccountCount} 个待核对账号</button>` : ''}</section>`;
+        else if (!summary?.pendingAccountCount && summary?.unmatchedUpstream == null) content += '<p class="empty-state">未找到该供应商的主站关联账号</p>';
+        const pendingAmount = pending?.upstream ?? summary?.unmatchedUpstream;
+        if (summary?.pendingAccountCount || pendingAmount != null) content += `<section class="cost-provider-pending"><h3>分组待核对${summary.pendingAccountCount ? `账号（${summary.pendingAccountCount}）` : ''}</h3><div class="supplier-group-accounts">${(pending?.accounts || []).map(account => providerAccount(account, 'pending')).join('') || '<small class="muted">暂无可定位的主站账号</small>'}</div>${!pending || pending.accountsTruncated ? `<button type="button" class="accounting-link" data-provider-group-pending>查看全部 ${summary.pendingAccountCount} 个待核对账号</button>` : ''}${pendingAmount != null ? `<p class="muted">供应商待核对消费：${e(money(pendingAmount))} CNY · 该金额来自供应商账号日汇总减去已知 Key 分组消费，暂不计入差额</p>` : ''}</section>`;
       } else {
         const group = report.group;
         content = `<div class="cost-provider-group-heading"><h3>${detail.view === 'pending' ? '分组待核对账号' : e(group.name)}</h3><small>${report.pagination.total} 个账号${group ? ` · 主站 ${e(money(group.main))} / 上游 ${upstream(group)} CNY` : ''}</small></div><div class="cost-provider-account-list">${(group?.accounts || report.accounts || []).map(account => providerAccount(account, group?.id || 'pending')).join('') || '<p class="empty-state">暂无账号</p>'}</div>`;
       }
       const pagination = report.pagination;
-      return `<section data-provider-group-content="${e(detail.view)}"><div class="cost-provider-group-meta"><span>${e(detail.date)}</span><span>${e(report.timezone)} · CNY</span><span>${report.source === 'live' ? '今日实时' : report.source === 'archive' ? '历史归档' : '历史缺失'}${report.computedAt ? ` · ${e(h.formatDateTime(report.computedAt))}` : ''}</span></div><dl class="cost-provider-group-totals"><div><dt>主站对应账号消费</dt><dd data-provider-main-total>${e(money(summary?.main))}</dd></div><div><dt>供应商当日消费</dt><dd>${e(money(detail.provider.cost))}</dd></div></dl>${notices.length ? `<p class="accounting-notice" role="status">${notices.map(e).join('；')}</p>` : ''}${content}${pagination.totalPages > 1 ? pager('provider-group') : ''}</section>`;
+      const providerTotal = summary?.providerAccountTotalStatus ? summary.providerAccountTotalStatus === 'available' ? summary.providerAccountTotal : null
+        : detail.provider.cost;
+      const knownTotal = summary?.knownUpstreamAll ?? summary?.knownUpstream;
+      const totalStatus = summary?.providerAccountTotalStatus === 'unavailable' || summary?.providerAccountTotalStatus === 'partial' ? ' · 待核验' : summary?.providerAccountTotalStatus === 'stale' ? ' · 上次已知' : '';
+      return `<section data-provider-group-content="${e(detail.view)}"><div class="cost-provider-group-meta"><span>${e(detail.date)}</span><span>${e(report.timezone)} · CNY</span><span>${report.source === 'live' ? '今日实时' : report.source === 'archive' ? '历史归档' : '历史缺失'}${report.computedAt ? ` · ${e(h.formatDateTime(report.computedAt))}` : ''}</span></div><dl class="cost-provider-group-totals"><div><dt>主站对应账号消费</dt><dd data-provider-main-total>${e(money(summary?.main))}</dd></div><div><dt>供应商账号日总消费${totalStatus}</dt><dd>${e(money(providerTotal))}</dd></div><div><dt>已知 Key 分组小计</dt><dd>${e(money(knownTotal))}</dd></div></dl>${notices.length ? `<p class="accounting-notice" role="status">${notices.map(e).join('；')}</p>` : ''}${content}${pagination.totalPages > 1 ? pager('provider-group') : ''}</section>`;
     }
     function showProviderGroups(report) {
       const detail = state.providerDetail;

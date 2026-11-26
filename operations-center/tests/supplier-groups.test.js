@@ -66,6 +66,73 @@ test('real SQL groups all accounts by upstream group without account membership 
   assert(f.queries.every(sql => /^(SELECT|WITH|BEGIN|SET LOCAL|COMMIT|ROLLBACK)/.test(sql)));
 });
 
+test('supplier account totals expose the unassigned upstream residual without inventing a group', async t => {
+  const f = await fixture(t, { dailyTotals: { ling: { amount: 30, requests: 10 }, nova: { amount: 40, requests: 5 } } });
+  f.items[0].complete = false; f.items[0].accountCovered = false;
+  const report = await f.service.getReport({ date: f.date, providerId: 'ling' });
+  const summary = report.providerSummaries[0];
+  assert.equal(summary.providerAccountTotal, 30);
+  assert.equal(summary.providerAccountTotalStatus, 'available');
+  assert.equal(summary.knownUpstreamAll, 23);
+  assert.equal(summary.unmatchedUpstream, 7);
+  assert.equal(summary.unmatchedRequests, 4);
+  assert.equal(summary.diff, null);
+  assert.equal(report.pendingProviders[0].upstream, 7);
+  assert.equal(report.pendingProviders[0].status, 'upstream_group_unmatched');
+  assert.match(report.pendingProviders[0].reason, /已知 Key 分组/);
+  assert(!report.groups.some(group => group.name === '上游分组待核对'));
+  assert(report.providerSummaries.every(provider => provider.id === 'ling'));
+});
+
+test('a complete supplier total equal to known keys creates no residual row', async t => {
+  const f = await fixture(t, { dailyTotals: { ling: { amount: 23, requests: 6 } } });
+  const report = await f.service.getReport({ date: f.date, providerId: 'ling' });
+  const summary = report.providerSummaries[0];
+  assert.equal(summary.providerAccountTotal, 23);
+  assert.equal(summary.unmatchedUpstream, null);
+  assert.equal(report.pendingProviders[0].upstream, null);
+});
+
+test('a supplier total below known keys never becomes a negative residual', async t => {
+  const f = await fixture(t, { dailyTotals: { ling: { amount: 20, requests: 6 } } });
+  const report = await f.service.getReport({ date: f.date, providerId: 'ling' });
+  const summary = report.providerSummaries[0];
+  assert.equal(summary.providerAccountTotal, 20);
+  assert.equal(summary.unmatchedUpstream, null);
+  assert.match(summary.unmatchedReason, /小于已知 Key/);
+  assert.equal(report.pendingProviders[0].upstream, null);
+});
+
+test('a request-count deficit blocks residual allocation even when the amount is higher', async t => {
+  const f = await fixture(t, { dailyTotals: { ling: { amount: 30, requests: 5 } } });
+  f.items[0].complete = false; f.items[0].accountCovered = false;
+  const report = await f.service.getReport({ date: f.date, providerId: 'ling' });
+  assert.equal(report.providerSummaries[0].unmatchedUpstream, null);
+  assert.match(report.providerSummaries[0].unmatchedReason, /请求数小于/);
+});
+
+test('an unavailable account summary keeps the residual unknown', async t => {
+  const f = await fixture(t, { dailyTotals: { ling: { amount: 30, requests: 10 } } });
+  f.service.providerMonitor.getDailyCosts = async () => ({ source: 'old-contract' });
+  f.items[0].complete = false; f.items[0].accountCovered = false;
+  const report = await f.service.getReport({ date: f.date, providerId: 'ling' });
+  const summary = report.providerSummaries[0];
+  assert.equal(summary.providerAccountTotalStatus, 'unavailable');
+  assert.equal(summary.providerAccountTotal, null);
+  assert.equal(summary.unmatchedUpstream, null);
+  assert.equal(report.pendingProviders[0].upstream, null);
+});
+
+test('the archive worker retries a missing account summary even when groups are otherwise finalized', async t => {
+  const f = await fixture(t, { history: true, dailyTotals: { ling: { amount: 23, requests: 6 } } });
+  const yesterday = DateTime.fromISO(f.date).minus({ days: 1 }).toISODate();
+  const saved = f.store.get(f.service.scope(), yesterday);
+  saved.providerAccountTotals = null; saved.providerAccountTotalsStatus = 'unavailable';
+  f.store.save(f.service.scope(), yesterday, saved, true);
+  await f.service.tick();
+  assert.equal(f.store.get(f.service.scope(), yesterday).providerAccountTotalsStatus, 'available');
+});
+
 test('ambiguous supplier/group identity blocks comparison and does not allocate or duplicate usage', async t => {
   const f = await fixture(t), raw = await f.source.read('2026-11-24T16:00:00Z', '2026-11-25T16:00:00Z');
   const upstream = { items: structuredClone(f.items) }, settings = f.store.settings(f.service.scope());

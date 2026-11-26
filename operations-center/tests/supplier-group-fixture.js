@@ -9,12 +9,12 @@ const { SupplierGroupStore } = require('../src/supplier-group-store');
 const { SupplierGroupSource, keyIdentity } = require('../src/services/supplier-group-source');
 const { SupplierGroupService } = require('../src/services/supplier-group-service');
 
-async function supplierGroupFixture({ date = '2026-11-25', history = false, timeoutMs = 1000 } = {}) {
+async function supplierGroupFixture({ date = '2026-11-25', history = false, timeoutMs = 1000, dailyTotals = null } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'supplier-group-test-'));
   const config = loadConfig({ NODE_ENV: 'test', OPERATIONS_CENTER_AUTH_MODE: 'local', OPERATIONS_CENTER_ADMIN_PASSWORD: 'synthetic-admin-password',
     FINANCE_TIMEZONE: 'Asia/Shanghai', SUB2API_TIMEZONE: 'Asia/Shanghai', PROVIDER_MONITOR_BASE_URL: 'https://synthetic.example',
     DATABASE_URL: 'postgres://synthetic:example@local.invalid/example', OPERATIONS_CENTER_DATA_DIR: directory });
-  const database = new PGlite(), queries = [], controls = { calls: [], unavailable: false, delay: null,
+  const database = new PGlite(), queries = [], controls = { calls: [], dailyCalls: [], dailyTotals, unavailable: false, delay: null,
     clock: DateTime.fromISO(date, { zone: config.financeTimezone }).set({ hour: 12 }).toJSDate() };
   const pool = { connectionString: config.databaseUrl, async connect() { return {
     async query(sql, values) { queries.push(sql); return database.query(sql, values); }, release() {}
@@ -41,6 +41,20 @@ async function supplierGroupFixture({ date = '2026-11-25', history = false, time
     return { source: 'upstream_key_group_daily_v1', date: query.from, timezone: query.timezone, currency: 'CNY',
       providerFilter: 'scheduled_enabled', items: structuredClone(items) };
   } };
+  if (dailyTotals !== null) monitor.getDailyCosts = async query => {
+    controls.dailyCalls.push(query);
+    const providers = Object.entries(controls.dailyTotals || {}).map(([id, row]) => {
+      const source = items.find(item => item.id === id);
+      return { id, name: source?.name || id, cost: row.amount, requests: row.requests ?? null,
+        complete: row.complete !== false, reasons: row.reasons || [] };
+    });
+    return { source: 'upstream_daily_summary', scope: 'account', timezone: query.timezone, currency: 'CNY',
+      providerFilter: 'scheduled_enabled', items: [{ date: query.from, complete: providers.every(provider => provider.complete && provider.cost !== null),
+        cost: providers.every(provider => provider.cost !== null) ? providers.reduce((sum, provider) => sum + provider.cost, 0) : null,
+        requests: providers.every(provider => provider.requests !== null) ? providers.reduce((sum, provider) => sum + provider.requests, 0) : null,
+        providers }] };
+  };
+  controls.dailyTotals = dailyTotals;
   const service = new SupplierGroupService({ source, store, providerMonitor: monitor, config,
     now: () => new Date(controls.clock), timeoutMs });
   await database.exec(`CREATE TABLE accounts(id bigint PRIMARY KEY,name text,status text,credentials jsonb,updated_at timestamptz,deleted_at timestamptz);

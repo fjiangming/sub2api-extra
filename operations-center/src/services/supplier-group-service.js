@@ -14,6 +14,13 @@ const querySchema = z.object({ date: z.string().optional(), start: z.string().op
 const settingsSchema = z.object({ aliases: z.record(z.string().min(1).max(200), z.array(z.string().trim().min(2).max(120)).max(20)),
   alert: z.object({ enabled: z.boolean(), amount: z.number().finite().min(0).max(1000000), percent: z.number().finite().min(0).max(1000) }) });
 const text = z.string().max(200), amount = z.number().finite().nonnegative().nullable();
+const dailyAccountSchema = z.object({ source: z.literal('upstream_daily_summary'), scope: z.literal('account'),
+  timezone: z.string(), currency: z.literal('CNY'), providerFilter: z.literal('scheduled_enabled').optional(),
+  items: z.array(z.object({ date: z.string(), complete: z.boolean(), cost: amount,
+    requests: z.number().int().nonnegative().safe().nullable(), providers: z.array(z.object({
+      id: text.min(1), name: text, cost: amount, requests: z.number().int().nonnegative().safe().nullable(),
+      complete: z.boolean(), reasons: z.array(z.string().max(500)).max(20).optional().default([])
+    })).default([]) })).max(100) });
 const upstreamSchema = z.object({ source: z.literal('upstream_key_group_daily_v1'), date: z.string(), timezone: z.string(),
   currency: z.literal('CNY'), providerFilter: z.literal('scheduled_enabled'), items: z.array(z.object({
     id: text.min(1), name: text, complete: z.boolean(), accountCovered: z.boolean().optional().default(false),
@@ -37,6 +44,63 @@ function validateUpstream(value, date, timezone) {
       ? `${key.maskedKey.slice(0, 4)}...${key.maskedKey.slice(-4)}` : '***';
   }
   return parsed.data;
+}
+
+function validateDailyAccountTotals(value, date, timezone) {
+  const parsed = dailyAccountSchema.safeParse(value);
+  const item = parsed.success ? parsed.data.items.find(row => row.date === date) : null;
+  if (!parsed.success || parsed.data.timezone !== timezone || !item ||
+      new Set(item.providers.map(provider => provider.id)).size !== item.providers.length) {
+    return { status: 'unavailable', reason: '供应商账号日汇总接口版本不兼容或返回数据无效' };
+  }
+  const totals = Object.fromEntries(item.providers.map(provider => [provider.id, {
+    id: provider.id, name: provider.name, amount: provider.cost, requests: provider.requests,
+    complete: provider.complete === true && provider.cost !== null,
+    source: 'upstream_daily_summary', reasons: provider.reasons || []
+  }]));
+  return { status: 'available', source: 'upstream_daily_summary', totals };
+}
+
+function knownProviderUsage(report, providerId) {
+  const provider = report.upstreamSnapshot?.items?.find(item => item.id === providerId);
+  if (!provider) {
+    const groups = report.groups.filter(group => group.providerId === providerId);
+    return { amount: total(groups, 'knownUpstream'), requests: null, complete: false, keyCount: 0 };
+  }
+  let amountValue = new Decimal(0), requestsValue = 0, amountComplete = true, requestsComplete = true;
+  for (const key of provider.keys) {
+    if (key.cost === null) amountComplete = false;
+    else amountValue = amountValue.plus(key.cost);
+    if (key.requests === null) requestsComplete = false;
+    else requestsValue += key.requests;
+  }
+  const coverageIncomplete = provider.complete !== true || provider.accountCovered !== true || provider.stale === true ||
+    provider.archiveConflict === true || provider.keys.some(key => key.cost === null || key.requests === null ||
+      key.groupRef === null || key.complete !== true);
+  return { amount: amountComplete ? amountValue.toDecimalPlaces(8).toNumber() : null,
+    requests: requestsComplete ? requestsValue : null, complete: !coverageIncomplete && amountComplete, keyCount: provider.keys.length };
+}
+
+function unmatchedProviderUsage(report, providerId) {
+  if (report.providerAccountTotalsStatus !== 'available') return null;
+  const account = report.providerAccountTotals?.[providerId];
+  if (!account || !account.complete || account.amount === null) return null;
+  const known = knownProviderUsage(report, providerId);
+  if (known.amount === null) return null;
+  if (account.requests !== null && known.requests !== null && account.requests < known.requests) {
+    return { amount: null, requests: null, reason: '供应商账号请求数小于已知 Key 分组请求数，暂不分配差额' };
+  }
+  const residual = new Decimal(account.amount).minus(known.amount);
+  const tolerance = Decimal.max('0.0000001', new Decimal(account.amount).abs().times('0.0000000001'));
+  if (residual.lt(tolerance.neg())) return { amount: null, requests: null, reason: '供应商账号汇总小于已知 Key 分组金额，暂不分配差额' };
+  if (residual.lte(tolerance)) return { amount: 0, requests: 0, reason: null };
+  if (known.complete && account.requests !== null && known.requests !== null && account.requests === known.requests) {
+    return { amount: null, requests: null, reason: '供应商账号汇总与完整 Key 分组金额不一致，暂不分配差额' };
+  }
+  return { amount: residual.toDecimalPlaces(8).toNumber(),
+    requests: account.requests !== null && known.requests !== null && account.requests >= known.requests
+      ? account.requests - known.requests : null,
+    reason: '供应商账号日汇总减去已知 Key 分组金额，真实上游分组尚未定位' };
 }
 
 function archiveUpstream(previous, next) {
@@ -97,10 +161,16 @@ class SupplierGroupService {
         if (!this.allowed(date, archive)) throw new AppError('SUPPLIER_HISTORY_FETCH_FORBIDDEN', '资金日已变化', { status: 409 });
         const from = DateTime.fromISO(date, { zone: this.config.financeTimezone }).startOf('day');
         const to = from.plus({ days: 1 });
-        const [response, raw] = await Promise.all([
+        const dailyRead = typeof this.providerMonitor.getDailyCosts === 'function'
+          ? this.providerMonitor.getDailyCosts({ from: date, to: date, timezone: this.config.financeTimezone,
+            currency: 'CNY', ...(archive ? { archive: '1' } : {}) }, token, { signal: controller.signal })
+            .then(value => validateDailyAccountTotals(value, date, this.config.financeTimezone))
+            .catch(() => ({ status: 'unavailable', reason: '供应商账号日汇总暂不可用，无法计算待核对分组消费' }))
+          : null;
+        const [response, raw, daily] = await Promise.all([
           this.providerMonitor.getGroupDailyCosts({ from: date, to: date, timezone: this.config.financeTimezone,
             currency: 'CNY', ...(archive ? { archive: '1' } : {}) }, token, { signal: controller.signal }),
-          this.source.read(from.toUTC().toISO(), to.toUTC().toISO())
+          this.source.read(from.toUTC().toISO(), to.toUTC().toISO()), dailyRead
         ]);
         verify();
         const incoming = validateUpstream(response, date, this.config.financeTimezone);
@@ -111,6 +181,13 @@ class SupplierGroupService {
           const source = before?.finalized && before.siteComplete && !raw.complete && before.siteSnapshot
             ? before.siteSnapshot : { ...raw, accounts };
           const report = buildGroupReport(upstream, source, policy, date, this.now().toISOString());
+          if (dailyRead) {
+            report.providerAccountTotals = daily?.status === 'available' ? daily.totals : before?.providerAccountTotals || null;
+            report.providerAccountTotalsStatus = daily?.status === 'available' ? 'available'
+              : before?.providerAccountTotals ? 'stale' : 'unavailable';
+            report.providerAccountTotalsReason = daily?.status === 'available' ? null
+              : (daily?.reason || '供应商账号日汇总暂不可用，无法计算待核对分组消费');
+          }
           report.policy = policy; report.upstreamSnapshot = upstream; report.siteSnapshot = source;
           verify();
           return this.store.save(scope, date, report, archive);
@@ -127,7 +204,10 @@ class SupplierGroupService {
     const local = this.local(), yesterday = local.minus({ days: 1 }).toISODate();
     if (local.hour >= 1) {
       const saved = this.store.get(this.scope(), yesterday);
-      if (!saved?.finalized || !saved.siteComplete || saved.groups.some(g => !g.upstreamComplete) || saved.missingProviders.length) {
+      const accountTotalsMissing = typeof this.providerMonitor.getDailyCosts === 'function' &&
+        (saved?.providerAccountTotalsStatus !== 'available' || saved?.upstreamSnapshot?.items?.some(provider =>
+          saved.providerAccountTotals?.[provider.id]?.complete !== true));
+      if (!saved?.finalized || !saved.siteComplete || saved.groups.some(g => !g.upstreamComplete) || saved.missingProviders.length || accountTotalsMissing) {
         await this.collect(yesterday, { archive: true }).catch(() => {});
       }
     }
@@ -204,10 +284,36 @@ class SupplierGroupService {
       if (!byProvider.has(group.providerId)) byProvider.set(group.providerId, []);
       byProvider.get(group.providerId).push(group);
     }
+    const unmatchedByProvider = new Map();
+    if (report.providerAccountTotalsStatus === 'available') {
+      const ids = new Set([...byProvider.keys(), ...pendingByProvider.keys(), ...Object.keys(report.providerAccountTotals || {})]
+        .filter(id => !query.providerId || id === query.providerId));
+      for (const id of ids) {
+        const residual = unmatchedProviderUsage(report, id);
+        if (residual?.amount > 0) unmatchedByProvider.set(id, residual);
+      }
+    }
     for (const id of pendingByProvider.keys()) if (!byProvider.has(id)) byProvider.set(id, []);
+    for (const id of unmatchedByProvider.keys()) if (!byProvider.has(id)) byProvider.set(id, []);
     const providers = [...new Map([...report.groups.map(g => ({ id: g.providerId, name: g.providerName })),
-      ...report.missingProviders, ...report.mappings.flatMap(a => a.candidates)]
+      ...report.missingProviders, ...report.mappings.flatMap(a => a.candidates),
+      ...Object.values(report.providerAccountTotals || {}).map(p => ({ id: p.id, name: p.name }))]
       .map(p => [p.id, { id: p.id, name: p.name }])).values()];
+    const publicProviderTotals = id => {
+      if (!Object.hasOwn(report, 'providerAccountTotals')) return {};
+      const account = report.providerAccountTotals?.[id], knownAll = knownProviderUsage(report, id);
+      const usable = report.providerAccountTotalsStatus === 'available' && account?.complete === true;
+      const residual = unmatchedProviderUsage(report, id);
+      return { providerAccountTotal: usable ? account.amount : null,
+        providerAccountRequests: usable ? account.requests : null,
+        providerAccountTotalStatus: report.providerAccountTotalsStatus !== 'available' ? (report.providerAccountTotalsStatus || 'unavailable')
+          : account?.complete === true ? 'available' : account ? 'partial' : 'unavailable',
+        providerAccountTotalReason: account?.reasons?.length ? account.reasons.join('；') : report.providerAccountTotalsReason || null,
+        knownUpstreamAll: knownAll.amount,
+        unmatchedUpstream: usable && residual?.amount > 0 ? residual.amount : null,
+        unmatchedRequests: usable && residual?.amount > 0 ? residual.requests : null,
+        unmatchedReason: usable && residual?.amount > 0 ? residual.reason : residual?.reason || null };
+    };
     const result = { date, today, timezone: this.config.financeTimezone, currency: 'CNY', source: date === today ? 'live' : 'archive',
       computedAt: report.computedAt, siteComplete: report.siteComplete, settings, stale, warning,
       providers,
@@ -221,7 +327,8 @@ class SupplierGroupService {
         knownKeyCount: groups.reduce((count, group) => count + knownKeyCount(group), 0),
         stale: stale || groups.some(group => group.stale),
         main: report.siteComplete ? total([...groups, ...(pendingByProvider.get(id) || [])], 'main') : null,
-        diff: !stale && !pendingByProvider.has(id) && groups.every(g => g.comparable) ? total(groups, 'diff') : null })),
+        diff: !stale && !pendingByProvider.has(id) && groups.every(g => g.comparable) ? total(groups, 'diff') : null,
+        ...publicProviderTotals(id) })),
       missingProviders: report.missingProviders.filter(p => !query.providerId || p.id === query.providerId),
       summary: { groupCount: all.length, knownGroups: known.length, comparableGroups: comparable.length,
         upstream: known.length && !pending.length ? total(known, 'upstream') : null, main: report.siteComplete ? total([...matched, ...pending], 'main') : null,
@@ -267,16 +374,19 @@ class SupplierGroupService {
       const selected = page(filtered); result.mappings = selected.items; result.pagination = selected.pagination;
     } else {
       const rows = [...byProvider].flatMap(([id, groups]) => [...groups.map(group => ({ group })),
-        ...(pendingByProvider.has(id) ? [{ providerId: id }] : [])]);
+        ...(pendingByProvider.has(id) || unmatchedByProvider.has(id) ? [{ providerId: id }] : [])]);
       const selected = page(rows);
       result.groups = selected.items.filter(row => row.group).map(({ group }) => {
         const accounts = publicAccounts(group);
         return { ...publicGroup(group), accounts: accounts.slice(0, 10), accountsTruncated: accounts.length > 10 };
       });
       result.pendingProviders = selected.items.filter(row => row.providerId).map(({ providerId: id }) => {
-        const accounts = pendingByProvider.get(id);
+        const accounts = pendingByProvider.get(id) || [], residual = unmatchedByProvider.get(id);
         return { id, accounts: accounts.slice(0, 10).map(publicAccount), accountCount: accounts.length,
-          accountsTruncated: accounts.length > 10, main: report.siteComplete ? total(accounts, 'main') : null };
+          accountsTruncated: accounts.length > 10, main: accounts.length && report.siteComplete ? total(accounts, 'main') : null,
+          upstream: residual?.amount ?? null, requests: residual?.requests ?? null,
+          status: residual?.amount > 0 ? 'upstream_group_unmatched' : 'mapping_incomplete',
+          reason: residual?.reason || '供应商名称已匹配，但主站 Key 尚未定位到上游分组' };
       });
       result.pagination = selected.pagination;
     }

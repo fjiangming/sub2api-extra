@@ -41,7 +41,7 @@ async function subtotals(page, fixture, directory, name) {
     assert.match(await group.locator('td').nth(3).innerText(), /12[\s\S]*已知小计/);
     assert.match(await page.locator('.cost-provider-group-table tfoot').innerText(), /20[\s\S]*已知小计/);
     assert.equal(await page.locator('[data-provider-main-total]').innerText(), '47');
-    assert.match(await page.locator('.cost-provider-group-totals').innerText(), /供应商当日消费[\s\S]*23/);
+    assert.match(await page.locator('.cost-provider-group-totals').innerText(), /供应商账号日总消费[\s\S]*23/);
     await layout(page); await page.screenshot({ path: path.join(directory, `${name}-known-subtotal.png`), fullPage: true });
     await page.locator('[data-close]').click();
     Object.assign(fixture.items[0], structuredClone(original), { accountCovered: false, archiveConflict: true });
@@ -136,7 +136,7 @@ async function run() {
         assert.deepEqual(await page.locator('.cost-provider-group-table thead th').allTextContents(),
           ['主站对应账号及消费', '上游供应商分组', '主站消费合计', '供应商分组消费']);
         assert.equal(await page.locator('[data-provider-main-total]').innerText(), '47');
-        assert.match(await page.locator('.cost-provider-group-totals').innerText(), /供应商当日消费[\s\S]*23/);
+        assert.match(await page.locator('.cost-provider-group-totals').innerText(), /供应商账号日总消费[\s\S]*23/);
         const claude = page.locator('[data-provider-group-row]').filter({ hasText: 'Claude 标准' });
         assert.equal(await claude.locator('[data-provider-group-account]').count(), 3);
         assert.equal(await claude.locator('td').nth(2).locator('span').last().innerText(), '35');

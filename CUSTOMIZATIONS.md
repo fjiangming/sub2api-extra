@@ -1,5 +1,17 @@
 # 个性化功能维护台账
 
+## 2026-11-26：运营中心补充供应商分组消费残差核对
+
+用户要求在只改动运营中心的前提下修复供应商分组消费统计遗漏。本轮未修改 Provider Monitor、主站、数据库 schema 或资金记录，未连接生产、部署或提交 GitHub。运营中心复用既有 `daily-costs` 账号日汇总和 `group-daily-costs` Key 分组明细：当供应商账号总额高于已知 Key 分组金额时，按供应商生成“上游分组待核对”残差，并保留可按名称定位的主站待核对账号；不伪造真实分组名、不把残差计入正式差额，旧快照缺少账号汇总字段时保持原行为。账号汇总缺失、过期、低于已知金额或与完整 Key 金额矛盾时保持未知。
+
+- `operations-center/src/provider-monitor-client.js`：日账号汇总读取器沿用既有集成 Token / SSO，并传递取消信号。
+- `operations-center/src/services/supplier-group-service.js`：校验同日供应商账号汇总，保存可选的非敏感快照字段，计算已知 Key 分组与账号总额的正向残差，向供应商汇总和待核对行投影状态、请求数和原因；历史快照与旧接口保持兼容。
+- `operations-center/public/supplier-group-ui.js`、`operations-center/public/cost-accounting-ui.js`、`operations-center/public/cost-accounting.css`、`operations-center/public/index.html`：在供应商分组页和消费毛利日明细中展示供应商账号总额、已知 Key 小计及“上游分组待核对”金额，明确该金额不参与差额；更新静态资源版本并保持移动布局。
+- `operations-center/tests/provider-monitor-client.test.js`、`operations-center/tests/supplier-group-fixture.js`、`operations-center/tests/supplier-groups.test.js`、`operations-center/scripts/provider-group-browser-check.cjs`：覆盖取消传播、正向残差、无残差、负差额保护、账号分页 / 主站金额不重复和旧兼容路径，并同步分组明细视口回归文案。
+- `operations-center/docs/supplier-group-costs.md`：记录账号汇总残差口径及仅需升级运营中心的边界。
+
+验证：运营中心供应商分组专项 **30 项测试通过**，Provider Monitor 客户端专项 **9 项测试通过**，成本分析前端专项 **20 项测试通过**，供应商分组和消费毛利分组明细浏览器回归各 **5 个视口通过**（桌面、宽屏 / 嵌入、手机、窄屏、深色）。保留其他会话的未提交改动和未跟踪审计文档。
+
 ## 2026-11-26：补偿机会全体发放改为已注册用户快照
 
 用户要求补偿机会选择“所有用户”时只发送给发放时已经注册的用户，新注册用户不应自动获得旧批次机会。本轮仅修改活动中心，不修改主站、运营中心或 Provider Monitor，不部署服务器。

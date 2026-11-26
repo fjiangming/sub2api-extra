@@ -86,6 +86,18 @@ test('daily supplier costs use the read-only integration API with explicit dates
   assert.equal(calls.length, 1);
 });
 
+test('daily supplier cost reads propagate caller cancellation through the reader', async () => {
+  const client = new ProviderMonitorClient({ providerMonitorBaseUrl: 'https://monitor.example',
+    providerMonitorIntegrationToken: 'integration', providerMonitorRequestTimeoutMs: 1000
+  }, async (_url, { signal }) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+  }));
+  const controller = new AbortController();
+  const pending = client.getDailyCosts({ from: '2026-01-01', to: '2026-01-01' }, null, { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(pending, { code: 'PROVIDER_MONITOR_TIMEOUT' });
+});
+
 test('daily supplier costs exchange SSO and reject missing configuration or invalid sessions', async () => {
   const calls = [];
   const config = { providerMonitorBaseUrl: 'https://monitor.example', providerMonitorRequestTimeoutMs: 1000 };
