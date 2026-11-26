@@ -56,6 +56,20 @@ test('redemption face values match the operations balance-credit basis, net adju
   assert.equal(await source.total('1','2026-11-01T00:00:00.000Z'),0);
 });
 
+test('registered user snapshots include only active users created by the grant cutoff', async t => {
+  const db = new PGlite(); t.after(() => db.close());
+  await db.exec(`CREATE TABLE public.users(id bigint,status text,deleted_at timestamptz,created_at timestamptz);
+    INSERT INTO public.users VALUES
+      (1,'active',NULL,'2026-10-01T00:00:00Z'),
+      (42,'active',NULL,'2026-11-01T00:00:00Z'),
+      (43,'disabled',NULL,'2026-11-01T00:00:00Z'),
+      (44,'active','2026-11-02T00:00:00Z','2026-10-01T00:00:00Z'),
+      (45,'active',NULL,'2026-11-03T00:00:00Z')`);
+  const source = new RechargeSource(config(),{ pool: db });
+  assert.deepEqual(await source.registeredUserIds('2026-11-02T00:00:00Z'),['1','42']);
+  assert.deepEqual(await source.registeredUserIds('2026-11-04T00:00:00Z'),['1','42','45']);
+});
+
 test('only complete activity reward markers exclude a credit, matching operations gift detection', async t => {
   const db = await database(t);
   const code = 'AC-' + 'a'.repeat(48);

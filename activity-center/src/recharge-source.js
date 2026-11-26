@@ -13,6 +13,10 @@ WHERE r.used_by = $1::bigint AND r.used_by IS DISTINCT FROM 1
   AND COALESCE(r.notes, '') NOT LIKE '%补贴%'
   AND NOT (r.type = 'balance' AND COALESCE(r.code, '') ~ '^AC-[a-f0-9]{48}$'
     AND COALESCE(r.notes, '') ~ '^活动奖励; activity=recharge-lottery; reward=[a-f0-9-]{36}; batch=[a-f0-9-]{36}$')`;
+const REGISTERED_USER_IDS_SQL = `SELECT id::text AS user_id
+FROM public.users
+WHERE status = 'active' AND deleted_at IS NULL AND created_at <= $1::timestamptz
+ORDER BY id`;
 
 function minor(value) {
   if (!/^\d+$/.test(String(value)) || !Number.isSafeInteger(Number(value))) throw new AppError('RECHARGE_UNVERIFIED', '充值数据暂时无法核验', 503);
@@ -42,6 +46,21 @@ class RechargeSource {
       throw new AppError('RECHARGE_UNAVAILABLE', '暂时无法读取充值记录，请稍后重试', 503);
     } finally { this.active--; }
   }
+  async registeredUserIds(asOf = new Date().toISOString()) {
+    if (this.active >= 8) throw new AppError('SERVICE_BUSY', '当前访问人数较多，请稍后重试', 503);
+    this.active++;
+    try {
+      const timestamp = new Date(asOf);
+      if (!Number.isFinite(timestamp.getTime())) throw new AppError('USER_DIRECTORY_UNAVAILABLE', '已注册用户列表无法核验', 503);
+      const { rows } = await this.pool.query(REGISTERED_USER_IDS_SQL, [timestamp.toISOString()]);
+      const ids = rows.map(row => String(row.user_id || ''));
+      if (ids.some(id => !/^[1-9]\d{0,14}$/.test(id))) throw new AppError('USER_DIRECTORY_UNAVAILABLE', '已注册用户列表无法核验', 503);
+      return [...new Set(ids)];
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw new AppError('USER_DIRECTORY_UNAVAILABLE', '暂时无法读取已注册用户列表，请稍后重试', 503);
+    } finally { this.active--; }
+  }
   async inspectLegacyCredit(code) {
     if (!/^AC-[a-f0-9]{48}$/.test(code)) throw new AppError('CREDIT_LEGACY_REVIEW_REQUIRED', '原奖励入账信息需要核查', 409);
     if (this.active >= 8) throw new AppError('SERVICE_BUSY', '当前访问人数较多，请稍后重试', 503);
@@ -66,4 +85,4 @@ class RechargeSource {
   async close() { await this.pool?.end?.(); }
 }
 
-module.exports = { RechargeSource, REDEMPTION_SQL, minor };
+module.exports = { RechargeSource, REDEMPTION_SQL, REGISTERED_USER_IDS_SQL, minor };

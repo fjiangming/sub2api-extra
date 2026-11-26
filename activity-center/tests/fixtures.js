@@ -25,7 +25,8 @@ function fixture(t, options = {}) {
       return { redeem_code: { ...credited.get(row.credit_code) } };
     }
   };
-  const source = { value: 500000, calls: 0, async total() { this.calls++; if (this.error) throw this.error; return this.value; },
+  const source = { value: 500000, calls: 0, registered: ['42','99'], async total() { this.calls++; if (this.error) throw this.error; return this.value; },
+    async registeredUserIds() { if (this.error) throw this.error; return [...this.registered]; },
     async inspectLegacyCredit(code) { return { receipt: credited.get(code) || null,codeLimit: 32 }; } };
   const lottery = new Lottery(store, source, core);
   t.after(async () => { await lottery.close(); store.close(); });

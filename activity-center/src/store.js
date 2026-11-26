@@ -10,6 +10,7 @@ const { creditCode, creditNotes, legacyCredit } = require('./reward-credit');
 
 const ACTIVITY = Object.freeze({ id: 'recharge-lottery', name: '充值抽奖', kind: 'wheel' });
 const DEFAULT_COMPENSATION_PROFILE_ID = 'compensation-standard-v1';
+const STORE_SCHEMA_VERSION = 6;
 const MAX_PRIZE_THRESHOLD_MINOR = 1_000_000_000_000;
 const DEFAULT_PRIZE_CONFIG = Object.freeze(PRIZES.map(prize => Object.freeze({ amount: prize.amount, weight: prize.weight, minimum: prize.minimum })));
 const DEFAULT_REQUIRED_CASE = `CASE amount_minor ${PRIZES.filter(p => p.minimum > 0).map(p => `WHEN ${p.amount} THEN ${p.minimum}`).join(' ')} ELSE 0 END`;
@@ -113,7 +114,7 @@ class Store {
     this.db.pragma('synchronous = FULL');
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
-    if (this.db.pragma('user_version', { simple: true }) > 5) throw new Error('活动数据库版本高于当前程序');
+    if (this.db.pragma('user_version', { simple: true }) > STORE_SCHEMA_VERSION) throw new Error('活动数据库版本高于当前程序');
     let requiredColumnAdded = false;
     this.db.transaction(() => {
       this.db.exec(`
@@ -159,6 +160,7 @@ class Store {
         profile_name TEXT NOT NULL, weights_json TEXT NOT NULL, starts_at TEXT NOT NULL, expires_at TEXT,
         reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','disabled')),
         created_at TEXT NOT NULL, created_by TEXT NOT NULL,
+        snapshot_complete INTEGER NOT NULL DEFAULT 1 CHECK(snapshot_complete IN (0,1)),
         FOREIGN KEY(profile_id) REFERENCES compensation_profiles(id)
       );
       CREATE TABLE IF NOT EXISTS compensation_grant_users (
@@ -203,6 +205,10 @@ class Store {
       if (!this.db.pragma('table_info(campaign)').some(column => column.name === 'config_version')) this.db.exec('ALTER TABLE campaign ADD COLUMN config_version INTEGER NOT NULL DEFAULT 1');
       if (!this.db.pragma('table_info(campaign)').some(column => column.name === 'config_updated_at')) this.db.exec('ALTER TABLE campaign ADD COLUMN config_updated_at TEXT');
       if (!this.db.pragma('table_info(campaign)').some(column => column.name === 'config_updated_by')) this.db.exec('ALTER TABLE campaign ADD COLUMN config_updated_by TEXT');
+      if (!this.db.pragma('table_info(compensation_grants)').some(column => column.name === 'snapshot_complete')) {
+        this.db.exec('ALTER TABLE compensation_grants ADD COLUMN snapshot_complete INTEGER NOT NULL DEFAULT 0 CHECK(snapshot_complete IN (0,1))');
+        this.db.exec("UPDATE compensation_grants SET snapshot_complete=CASE WHEN audience='selected' THEN 1 ELSE 0 END");
+      }
       this.db.exec("UPDATE rewards SET credit_notes='活动奖励; activity=recharge-lottery; reward='||id||'; batch='||batch_id WHERE credit_notes IS NULL");
       if (requiredColumnAdded) this.db.exec(`UPDATE rewards SET required_recharge_minor=${DEFAULT_REQUIRED_CASE} WHERE chance_source='recharge'`);
       this.db.exec('CREATE INDEX IF NOT EXISTS rewards_source ON rewards(chance_source,created_at DESC,id)');
@@ -214,7 +220,7 @@ class Store {
         this.db.prepare('INSERT INTO compensation_profiles(id,name,weights_json,status,version,created_at,updated_at,created_by) VALUES (?,?,?,?,?,?,?,?)')
           .run(DEFAULT_COMPENSATION_PROFILE_ID,'补偿抽奖·标准 v1',weightsJson(COMPENSATION_DEFAULT_WEIGHTS),'enabled',1,at,at,'system');
       }
-      this.db.pragma('user_version = 5');
+      this.db.pragma(`user_version = ${STORE_SCHEMA_VERSION}`);
     }).immediate();
     this.db.transaction(() => {
       let campaign = this.db.prepare('SELECT * FROM campaign WHERE id=?').get(ACTIVITY.id);
@@ -249,7 +255,7 @@ class Store {
     const rows = this.db.prepare(`SELECT g.chance_count,COALESCE(u.used,0) AS used
       FROM compensation_grants g LEFT JOIN compensation_grant_users u ON u.grant_id=g.id AND u.user_id=?
       WHERE g.status='active' AND g.starts_at<=? AND (g.expires_at IS NULL OR g.expires_at>?)
-        AND (g.audience='all' OR u.user_id IS NOT NULL)`).all(userId,new Date(at).toISOString(),new Date(at).toISOString());
+        AND u.user_id IS NOT NULL`).all(userId,new Date(at).toISOString(),new Date(at).toISOString());
     return rows.reduce((sum,row) => sum + Math.max(0, row.chance_count - row.used), 0);
   }
   compensationCandidates(userId, at = this.now()) {
@@ -257,7 +263,7 @@ class Store {
     return this.db.prepare(`SELECT g.*,COALESCE(u.used,0) AS used,u.user_id AS allocated_user_id
       FROM compensation_grants g LEFT JOIN compensation_grant_users u ON u.grant_id=g.id AND u.user_id=?
       WHERE g.status='active' AND g.starts_at<=? AND (g.expires_at IS NULL OR g.expires_at>?)
-        AND (g.audience='all' OR u.user_id IS NOT NULL)
+        AND u.user_id IS NOT NULL
         AND g.chance_count>COALESCE(u.used,0)
       ORDER BY CASE WHEN g.expires_at IS NULL THEN 1 ELSE 0 END,g.expires_at,g.starts_at,g.created_at,g.id`).all(userId,timestamp,timestamp);
   }
@@ -297,7 +303,6 @@ class Store {
         if (compensationAvailable > 0) {
           while (candidateIndex < candidates.length && candidates[candidateIndex].used >= candidates[candidateIndex].chance_count) candidateIndex++;
           grant = candidates[candidateIndex];
-          if (grant.audience === 'all') this.db.prepare('INSERT OR IGNORE INTO compensation_grant_users(grant_id,user_id,used,created_at) VALUES (?,?,0,?)').run(grant.id,user.id,at);
           const changed = this.db.prepare('UPDATE compensation_grant_users SET used=used+1 WHERE grant_id=? AND user_id=? AND used<?')
             .run(grant.id,user.id,grant.chance_count).changes;
           if (changed !== 1) throw new AppError('CHANCES_CONFLICT', '补偿抽奖机会已被使用，请重试', 409);
@@ -441,12 +446,33 @@ class Store {
     }
     return this.compensationProfiles().find(profile => profile.id === id);
   }
-  createCompensationGrant({ audience, userIds = [], chanceCount, profileId, startsAt, expiresAt = null, reason }, actorId) {
+  compensationGrantsNeedingSnapshot() {
+    return this.db.prepare("SELECT id,created_at AS createdAt FROM compensation_grants WHERE audience='all' AND snapshot_complete=0 ORDER BY created_at,id").all();
+  }
+  snapshotCompensationGrant(id, userIds) {
+    const ids = [...new Set((userIds || []).map(value => String(value).trim()))];
+    if (ids.some(value => !/^[1-9]\d{0,14}$/.test(value))) throw new AppError('USER_DIRECTORY_UNAVAILABLE', '已注册用户列表无法核验', 503);
+    const at = new Date(this.now()).toISOString();
+    this.db.transaction(() => {
+      const grant = this.db.prepare("SELECT id FROM compensation_grants WHERE id=? AND audience='all' AND snapshot_complete=0").get(id);
+      if (!grant) return;
+      const insert = this.db.prepare('INSERT OR IGNORE INTO compensation_grant_users(grant_id,user_id,used,created_at) VALUES (?,?,0,?)');
+      for (const userId of ids) insert.run(id,userId,at);
+      this.db.prepare("UPDATE compensation_grants SET snapshot_complete=1 WHERE id=? AND audience='all' AND snapshot_complete=0").run(id);
+    }).immediate();
+    return this.compensationGrant(id);
+  }
+  createCompensationGrant({ audience, userIds = [], chanceCount, profileId, startsAt, expiresAt = null, reason }, actorId, snapshotUserIds = null) {
     if (!['all','selected'].includes(audience)) throw new AppError('INVALID_GRANT', '发放对象无效');
     const ids = [...new Set(userIds.map(value => String(value).trim()))];
     if (audience === 'selected' && !ids.length) throw new AppError('INVALID_GRANT', '指定用户不能为空');
     if (audience === 'all' && ids.length) throw new AppError('INVALID_GRANT', '全体用户发放不能包含指定用户');
     if (ids.some(value => !/^[1-9]\d{0,14}$/.test(value)) || ids.length > 100) throw new AppError('INVALID_GRANT', '指定用户 ID 无效');
+    const snapshotValues = Array.isArray(snapshotUserIds) ? snapshotUserIds : [];
+    const snapshot = audience === 'all' ? [...new Set(snapshotValues.map(value => String(value).trim()))] : ids;
+    if (audience === 'all' && (!Array.isArray(snapshotUserIds) || snapshot.some(value => !/^[1-9]\d{0,14}$/.test(value)))) {
+      throw new AppError('USER_DIRECTORY_UNAVAILABLE', '已注册用户列表无法核验', 503);
+    }
     if (!Number.isSafeInteger(chanceCount) || chanceCount < 1 || chanceCount > 100000) throw new AppError('INVALID_GRANT', '额外抽奖次数无效');
     const profile = this.db.prepare('SELECT * FROM compensation_profiles WHERE id=? AND status=\'enabled\'').get(profileId);
     if (!profile) throw new AppError('PROFILE_NOT_FOUND', '请选择启用中的概率方案', 409);
@@ -456,12 +482,12 @@ class Store {
     if (!cleanReason || cleanReason.length > 200) throw new AppError('INVALID_GRANT', '补偿原因不能为空且不超过 200 字');
     const id = crypto.randomUUID(); const at = new Date(this.now()).toISOString();
     this.db.transaction(() => {
-      this.db.prepare(`INSERT INTO compensation_grants(id,audience,chance_count,profile_id,profile_name,weights_json,starts_at,expires_at,reason,status,created_at,created_by)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(id,audience,chanceCount,profileId,profile.name,profile.weights_json,start,end,cleanReason,'active',at,actorId);
+      this.db.prepare(`INSERT INTO compensation_grants(id,audience,chance_count,profile_id,profile_name,weights_json,starts_at,expires_at,reason,status,created_at,created_by,snapshot_complete)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id,audience,chanceCount,profileId,profile.name,profile.weights_json,start,end,cleanReason,'active',at,actorId,1);
       const insert = this.db.prepare('INSERT INTO compensation_grant_users(grant_id,user_id,used,created_at) VALUES (?,?,0,?)');
-      for (const userId of audience === 'selected' ? ids : []) insert.run(id,userId,at);
+      for (const userId of snapshot) insert.run(id,userId,at);
       this.db.prepare('INSERT INTO compensation_audit(grant_id,profile_id,actor_id,action,detail,created_at) VALUES (?,?,?,?,?,?)')
-        .run(id,profileId,actorId,'grant_created',JSON.stringify({ audience, userIds: audience === 'selected' ? ids : [], chanceCount, reason: cleanReason }),at);
+        .run(id,profileId,actorId,'grant_created',JSON.stringify({ audience, userIds: snapshot, chanceCount, reason: cleanReason }),at);
     }).immediate();
     return this.compensationGrant(id);
   }

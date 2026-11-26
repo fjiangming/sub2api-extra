@@ -52,7 +52,7 @@ function bind() {
   $$('.probability-input').forEach(input => input.oninput = updateProbabilityTotal);
   $('#grant-form').onsubmit = event => {
     event.preventDefault();
-    const audience = $('input[name="audience"]:checked')?.value === 'selected' ? '指定用户' : '所有用户';
+    const audience = $('input[name="audience"]:checked')?.value === 'selected' ? '指定用户' : '所有已注册用户';
     const selected = $$('.user-chip').map(chip => chip.dataset.user);
     if (audience === '指定用户' && !selected.length) {
       $('#grant-feedback').className = 'feedback error';

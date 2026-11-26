@@ -27,6 +27,7 @@ async function startPreview({ port = 19927, seed = true, auditSeed = false } = {
     }
   };
   const source = { values, async total(id) { return values.get(id) || 0; },
+    async registeredUserIds() { return ['1','42','99']; },
     async inspectLegacyCredit(code) { return { receipt: credited.get(code) || null,codeLimit: 32 }; } };
   let roll = 0; const rolls = [0,5200,7200,8200,8700,8900,9400,9800];
   const runtime = createRuntime({ NODE_ENV: 'test',ACTIVITY_CENTER_PORT: String(port || 19927),

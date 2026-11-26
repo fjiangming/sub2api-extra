@@ -24,14 +24,29 @@ test('selected compensation grants are shared by multiple users and consumed bef
 
 test('all-user compensation grants do not require recharge history for a covered draw', async t => {
   const f = fixture(t); const standard = profile(f);
-  f.source.error = new Error('recharge database unavailable');
-  const grant = f.store.createCompensationGrant({ audience: 'all',chanceCount: 2,profileId: standard.id,startsAt: starts(f),reason: '系统维护补偿' },'1');
+  const grant = await f.lottery.createCompensationGrant({ audience: 'all',chanceCount: 2,profileId: standard.id,startsAt: starts(f),reason: '系统维护补偿' },'1');
   assert.equal(f.store.compensationAvailable(USER.id),2);
+  assert.equal(f.store.compensationAvailable('100'),0);
+  f.source.registered.push('100');
+  assert.equal(f.store.compensationAvailable('100'),0);
+  f.source.error = new Error('recharge database unavailable');
   assert.equal((await f.lottery.summary(USER.id)).available,2);
   const first = await f.lottery.draw(USER,crypto.randomUUID(),1); const second = await f.lottery.draw(USER,crypto.randomUUID(),1);
   assert.equal(f.source.calls,1); assert.equal(f.store.used(USER.id),0); assert.equal(f.store.compensationAvailable(USER.id),0);
   assert.ok(first.rewards.every(row => row.amountMinor === 50)); assert.ok(second.rewards.every(row => row.amountMinor === 50));
   await f.lottery.kick(); assert.equal(f.store.compensationSummary().usedChances,2); assert.equal(f.store.compensationGrant(grant.id).usedUsers,1);
+});
+
+test('all-user compensation grants snapshot legacy recipients without adding later registrations', async t => {
+  const f = fixture(t); const standard = profile(f); const id = crypto.randomUUID(); const at = new Date(f.now()).toISOString();
+  f.store.db.prepare(`INSERT INTO compensation_grants(id,audience,chance_count,profile_id,profile_name,weights_json,starts_at,expires_at,reason,status,created_at,created_by,snapshot_complete)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id,'all',2,standard.id,standard.name,JSON.stringify(standard.weights),at,null,'旧批次','active',at,'1',0);
+  assert.equal(f.store.compensationAvailable(USER.id),0);
+  f.source.value = 0;
+  assert.equal((await f.lottery.summary(USER.id,0)).available,2);
+  f.source.registered.push('100');
+  assert.equal(f.store.compensationAvailable('100'),0);
+  assert.deepEqual(f.store.db.prepare('SELECT user_id FROM compensation_grant_users WHERE grant_id=? ORDER BY user_id').all(id),[{ user_id: '42' },{ user_id: '99' }]);
 });
 
 test('compensation profiles use their own probabilities and never trigger threshold audit', async t => {

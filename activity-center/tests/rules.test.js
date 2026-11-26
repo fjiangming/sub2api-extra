@@ -33,7 +33,7 @@ test('recharge lottery rules default to the current values and persist admin cha
     assert.equal(store.detail(batch.rewards[0].id).audit.requiredMinor,100000);
     assert.equal(store.detail(batch.rewards[0].id).audit.status,'passed');
     store.close(); store = new Store(config(),{ filename,now: () => Date.parse('2026-11-24T00:00:00Z') });
-    assert.equal(store.db.pragma('user_version',{ simple: true }),5);
+    assert.equal(store.db.pragma('user_version',{ simple: true }),6);
     assert.equal(store.lotteryConfig().prizes.find(prize => prize.amountMinor === 1000).minimumMinor,200000);
   } finally { store?.close(); fs.rmSync(directory,{ recursive: true,force: true }); }
 });

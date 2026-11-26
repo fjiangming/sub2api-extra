@@ -85,9 +85,10 @@ function createApp({ config, auth, store, lottery }) {
   });
   admin.get('/compensation/grants', (req, res) => res.json(store.compensationGrants(parse(paging, req.query))));
   admin.get('/compensation/grants/:id', (req, res) => res.json(store.compensationGrant(parse(z.string().uuid(), req.params.id))));
-  admin.post('/compensation/grants', limit(30), auth.mutation(), (req, res) => {
+  admin.post('/compensation/grants', limit(30), auth.mutation(), async (req, res, next) => {
     const input = parse(grantInput, req.body);
-    res.status(201).json(store.createCompensationGrant(input, req.auth.user.id));
+    try { res.status(201).json(await lottery.createCompensationGrant(input, req.auth.user.id)); }
+    catch (error) { next(error); }
   });
   admin.post('/compensation/grants/:id/disable', limit(30), auth.mutation(), (req, res) => {
     res.json(store.disableCompensationGrant(parse(z.string().uuid(), req.params.id), req.auth.user.id));

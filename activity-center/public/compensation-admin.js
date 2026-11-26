@@ -49,7 +49,7 @@
   }
   function renderGrants(data) {
     $('comp-grant-rows').innerHTML = data.rows.length ? data.rows.map(row => {
-      const audience = row.audience === 'all' ? '所有用户' : `${row.selectedUsers} 个指定用户`;
+      const audience = row.audience === 'all' ? '所有已注册用户' : `${row.selectedUsers} 个指定用户`;
       const used = `${row.usedCount.toLocaleString('zh-CN')} 次`;
       const status = row.status === 'active' ? '<span class="paid">启用中</span>' : '<span class="muted">已停用</span>';
       const action = row.status === 'active' ? `<button class="icon-button" type="button" data-disable-grant="${esc(row.id)}" title="停用发放" aria-label="停用发放"><i data-lucide="pause-circle"></i></button>` : '<span class="muted">-</span>';
@@ -99,7 +99,7 @@
       const startsAt = $('comp-starts-at').value ? new Date($('comp-starts-at').value).toISOString() : new Date().toISOString();
       const expiresAt = $('comp-expires-at').value ? new Date($('comp-expires-at').value).toISOString() : null;
       const payload = { audience,userIds,chanceCount: Number($('comp-chance-count').value),profileId: $('comp-profile-select').value,startsAt,expiresAt,reason: $('comp-reason').value.trim() };
-      try { await ctx.api('admin/compensation/grants',{ method: 'POST',body: JSON.stringify(payload) }); feedback('comp-grant-feedback',`已生成${audience === 'all' ? '全体用户' : `${userIds.length} 个指定用户`}的发放记录，补偿机会将在有效期内使用。`); $('compensation-grant-form').reset(); $('comp-user-field').hidden = true; document.querySelector('input[name="comp-audience"][value="all"]').checked = true; document.querySelector('input[name="comp-audience"][value="all"]').closest('.choice-card').classList.add('selected'); setDefaultStart(); await load(); }
+      try { await ctx.api('admin/compensation/grants',{ method: 'POST',body: JSON.stringify(payload) }); feedback('comp-grant-feedback',`已生成${audience === 'all' ? '所有已注册用户' : `${userIds.length} 个指定用户`}的发放记录，补偿机会将在有效期内使用。`); $('compensation-grant-form').reset(); $('comp-user-field').hidden = true; document.querySelector('input[name="comp-audience"][value="all"]').checked = true; document.querySelector('input[name="comp-audience"][value="all"]').closest('.choice-card').classList.add('selected'); setDefaultStart(); await load(); }
       catch (error) { feedback('comp-grant-feedback',error.message,true); }
     };
     $('comp-reset-grant').onclick = () => setTimeout(() => { $('comp-user-field').hidden = true; document.querySelector('input[name="comp-audience"][value="all"]').checked = true; document.querySelectorAll('input[name="comp-audience"]').forEach(item => item.closest('.choice-card')?.classList.toggle('selected',item.checked)); setDefaultStart(); },0);

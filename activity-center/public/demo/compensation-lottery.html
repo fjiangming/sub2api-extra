@@ -51,7 +51,7 @@
             <fieldset>
               <legend>发放对象</legend>
               <div class="choice-grid">
-                <label class="choice-card selected"><input type="radio" name="audience" value="all" checked><span><strong>所有用户</strong><small>按每位用户发放</small></span></label>
+                <label class="choice-card selected"><input type="radio" name="audience" value="all" checked><span><strong>所有已注册用户</strong><small>按发放时用户快照</small></span></label>
                 <label class="choice-card"><input type="radio" name="audience" value="selected"><span><strong>指定用户</strong><small>按用户 ID 或邮箱</small></span></label>
               </div>
             </fieldset>
@@ -120,9 +120,9 @@
       <section class="panel records-panel" aria-labelledby="records-title">
         <div class="section-heading"><div><p class="eyebrow">可追溯</p><h2 id="records-title">补偿发放记录</h2></div><button id="refresh-records" class="icon-button" type="button" title="刷新记录" aria-label="刷新记录"><i data-lucide="refresh-cw"></i></button></div>
         <div class="table-scroll"><table class="records-table"><thead><tr><th>发放对象</th><th>次数</th><th>概率方案</th><th>原因</th><th>状态</th><th>操作时间</th></tr></thead><tbody id="record-rows">
-          <tr><td>所有用户</td><td>2 次 / 人</td><td>补偿抽奖·标准 v1</td><td>服务波动补偿</td><td><span class="status-text active-text">已生效</span></td><td>刚刚</td></tr>
+          <tr><td>所有已注册用户</td><td>2 次 / 人</td><td>补偿抽奖·标准 v1</td><td>服务波动补偿</td><td><span class="status-text active-text">已生效</span></td><td>刚刚</td></tr>
           <tr><td>#386、#412、#509</td><td>5 次 / 人</td><td>补偿抽奖·春节 v2</td><td>活动补发</td><td><span class="status-text active-text">已生效</span></td><td>2026-11-23 16:20</td></tr>
-          <tr><td>所有用户</td><td>1 次 / 人</td><td>补偿抽奖·标准 v1</td><td>系统维护补偿</td><td><span class="status-text muted-text">已结束</span></td><td>2026-11-18 09:00</td></tr>
+          <tr><td>所有已注册用户</td><td>1 次 / 人</td><td>补偿抽奖·标准 v1</td><td>系统维护补偿</td><td><span class="status-text muted-text">已结束</span></td><td>2026-11-18 09:00</td></tr>
         </tbody></table></div>
       </section>
     </main>

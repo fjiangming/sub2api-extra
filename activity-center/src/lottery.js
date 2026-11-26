@@ -4,8 +4,24 @@ const { AppError } = require('./errors');
 const { legacyCredit } = require('./reward-credit');
 
 class Lottery {
-  constructor(store, source, core) { Object.assign(this, { store, source, core, running: null, stopped: false }); }
+  constructor(store, source, core) { Object.assign(this, { store, source, core, running: null, snapshotting: null, stopped: false }); }
+  async prepareCompensationSnapshots() {
+    if (this.snapshotting) return this.snapshotting;
+    this.snapshotting = (async () => {
+      for (const grant of this.store.compensationGrantsNeedingSnapshot()) {
+        const userIds = await this.source.registeredUserIds(grant.createdAt);
+        this.store.snapshotCompensationGrant(grant.id, userIds);
+      }
+    })().finally(() => { this.snapshotting = null; });
+    return this.snapshotting;
+  }
+  async createCompensationGrant(input, actorId) {
+    await this.prepareCompensationSnapshots();
+    const snapshot = input.audience === 'all' ? await this.source.registeredUserIds(new Date(this.store.now()).toISOString()) : null;
+    return this.store.createCompensationGrant(input, actorId, snapshot);
+  }
   async summary(userId) {
+    await this.prepareCompensationSnapshots();
     const compensation = this.store.compensationAvailable(userId);
     let total;
     try { total = await this.source.total(userId, this.store.campaign.start_at); }
@@ -17,6 +33,7 @@ class Lottery {
     return this.store.summary(userId, total);
   }
   async draw(user, requestId, count) {
+    await this.prepareCompensationSnapshots();
     const existing = this.store.existing(user.id, requestId, count);
     if (existing) { this.kick(); return existing; }
     if (this.stopped) throw new AppError('SERVICE_STOPPING', '服务正在维护，请稍后重试', 503);
@@ -31,6 +48,7 @@ class Lottery {
   start() {
     this.timer = setInterval(() => this.kick(), 15000);
     this.timer.unref();
+    this.prepareCompensationSnapshots().catch(() => console.error('[activity-center] COMPENSATION_SNAPSHOT_ERROR'));
     this.kick();
   }
   kick() {
@@ -67,7 +85,7 @@ class Lottery {
       }
     }
   }
-  async close() { this.stopped = true; clearInterval(this.timer); await this.running; }
+  async close() { this.stopped = true; clearInterval(this.timer); await this.running; await this.snapshotting?.catch(() => {}); }
 }
 
 module.exports = { Lottery };

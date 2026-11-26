@@ -153,7 +153,10 @@ test('compensation management is admin-only, keeps independent profiles and supp
   assert.equal((await f.call('admin/compensation/profiles',admin,{}, { 'x-csrf-token': '' })).status,403);
   const grantResponse = await f.call('admin/compensation/grants',admin,{ audience:'selected',userIds:['42','99','42'],chanceCount:3,profileId:created.id,startsAt:new Date(f.now()).toISOString(),expiresAt:null,reason:'接口补偿测试' });
   assert.equal(grantResponse.status,201); const grant = await grantResponse.json(); assert.equal(grant.selectedUsers,2); assert.equal(grant.chanceCount,3);
-  const rows = await (await f.call('admin/compensation/grants?page=1',admin)).json(); assert.equal(rows.total,1); assert.equal(rows.rows[0].usedCount,0);
+  const allResponse = await f.call('admin/compensation/grants',admin,{ audience:'all',userIds:[],chanceCount:1,profileId:created.id,startsAt:new Date(f.now()).toISOString(),expiresAt:null,reason:'接口全体补偿测试' });
+  assert.equal(allResponse.status,201); const allGrant = await allResponse.json(); assert.equal(allGrant.audience,'all'); assert.equal(allGrant.selectedUsers,null);
+  f.source.registered.push('100'); assert.equal(f.store.compensationAvailable('100'),0);
+  const rows = await (await f.call('admin/compensation/grants?page=1',admin)).json(); assert.equal(rows.total,2); assert.equal(rows.rows[0].usedCount,0);
   assert.equal((await f.call(`admin/compensation/grants/${grant.id}/disable`,admin,{}, { origin:'https://evil.test' })).status,403);
   const disabled = await (await f.call(`admin/compensation/grants/${grant.id}/disable`,admin,{})).json(); assert.equal(disabled.status,'disabled');
   const audit = await (await f.call('admin/compensation/audit',admin)).json(); assert.ok(audit.rows.some(row => row.action === 'grant_created')); assert.ok(audit.rows.some(row => row.action === 'grant_disabled'));

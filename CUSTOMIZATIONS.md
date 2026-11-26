@@ -1,5 +1,17 @@
 # 个性化功能维护台账
 
+## 2026-11-26：补偿机会全体发放改为已注册用户快照
+
+用户要求补偿机会选择“所有用户”时只发送给发放时已经注册的用户，新注册用户不应自动获得旧批次机会。本轮仅修改活动中心，不修改主站、运营中心或 Provider Monitor，不部署服务器。
+
+- `activity-center/src/recharge-source.js`：通过既有 SELECT-only PostgreSQL 连接读取 `public.users` 的活动用户 ID，按批次创建时间 / 当前发放时间截取 `status='active'`、未删除且已注册的用户列表；读取失败时拒绝创建或迁移快照，不生成不完整批次。
+- `activity-center/src/lottery.js`、`activity-center/src/app.js`：管理员创建全体补偿批次前获取用户快照；服务启动 / 用户查询 / 抽奖前为旧的全体批次补齐按历史创建时间截取的用户快照，后续新注册用户不会被加入。
+- `activity-center/src/store.js`：SQLite schema 6 增加全体批次快照完成标记；全体与指定用户统一从 `compensation_grant_users` 快照读取并消费，移除按首次抽奖动态加入全体用户的逻辑，保留既有已用次数和历史批次。
+- `activity-center/views/compensation.html`、`activity-center/public/compensation-admin.js`、`activity-center/public/index.html`、`activity-center/public/demo/compensation-lottery.html`、`activity-center/public/demo/compensation-lottery.js`：管理员文案明确为“所有已注册用户 / 发放时快照”，更新缓存版本；Demo 同步语义。
+- `activity-center/tests/compensation.test.js`、`activity-center/tests/http.test.js`、`activity-center/tests/source.test.js`、`activity-center/tests/fixtures.js`、`activity-center/tests/rules.test.js`、`activity-center/tests/lottery.test.js`、`activity-center/scripts/preview.cjs`、`activity-center/README.md`：覆盖新用户不继承旧全体批次、旧批次迁移快照、接口发放、活跃 / 删除 / 创建时间过滤、schema 6 和只读用户表字段要求。
+
+验证：活动中心 `npm run check`、全量 **71 项测试**和 Chrome 桌面 / 手机 / 窄屏 / 深色浏览器回归全部通过；未连接生产、未修改数据库权限、未提交 GitHub 或部署。生产只读账号需要额外具备 `public.users(id,status,deleted_at,created_at)` 的 SELECT 权限。
+
 ## 2026-11-26：只读核对 51 GiB 计入容量与 JSONL 文件列表差额
 
 用户问汇总中 / 待上传 / 上传中之和为什么小于计入容量。北京时间 13:47–13:48 再次只读连接 `216.227.169.198`，在 `operations-center/docs/conversation-throughput-audit-20261126.md` 补充精确组成；未修改产品源码、配置、测试、任务或生产数据，不部署或提交。沿用 nice 19 / 96 MiB / 限时 readonly / query_only、低页缓存和无 PTY SSH，密码不入文件 / 输出；以短只读事务聚合轻量元数据，不读正文，不构造 Store 或迁移，连接已关闭。保留其他会话改动。
