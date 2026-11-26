@@ -190,15 +190,16 @@ test('memory deferrals preserve the single-delivery retry allowance and recover 
   assert.deepEqual(f.store.db.prepare('SELECT original FROM cl_records WHERE id=?').get(row.id).original,before);
 });
 
-test('capture scope and JSONL speed retain defaults and survive older clients omitting new fields',t=>{
-  const f=setup(t);assert.equal(f.push.policy().captureScope,'complete');assert.equal(f.push.policy().s3.jsonl.uploadMiBPerSecond,2);
-  const old=structuredClone(f.push.policy());delete old.captureScope;delete old.s3.jsonl.uploadMiBPerSecond;
+test('capture scope, JSONL speed and cleanup budget retain defaults and survive older clients omitting new fields',t=>{
+  const f=setup(t);assert.equal(f.push.policy().captureScope,'complete');assert.equal(f.push.policy().s3.jsonl.uploadMiBPerSecond,2);assert.equal(f.push.policy().s3.jsonl.cleanupBatchMiB,48);assert.equal(f.push.policy().s3.jsonl.streamingUpload,false);
+  const old=structuredClone(f.push.policy());delete old.captureScope;delete old.s3.jsonl.uploadMiBPerSecond;delete old.s3.jsonl.cleanupBatchMiB;delete old.s3.jsonl.streamingUpload;
   f.push.db.prepare('UPDATE cl_push_policies SET body=? WHERE version=1').run(f.store.seal(old,'push-policy:1'));
-  assert.equal(f.push.policy().captureScope,'complete');assert.equal(f.push.policy().s3.jsonl.uploadMiBPerSecond,2);
-  configure(f,{captureScope:'all',s3:{...f.push.policy().s3,jsonl:{...f.push.policy().s3.jsonl,uploadMiBPerSecond:0.5}}});
+  assert.equal(f.push.policy().captureScope,'complete');assert.equal(f.push.policy().s3.jsonl.uploadMiBPerSecond,2);assert.equal(f.push.policy().s3.jsonl.cleanupBatchMiB,48);assert.equal(f.push.policy().s3.jsonl.streamingUpload,false);
+  configure(f,{captureScope:'all',s3:{...f.push.policy().s3,jsonl:{...f.push.policy().s3.jsonl,uploadMiBPerSecond:0.5,cleanupBatchMiB:64,streamingUpload:true}}});
   const client=structuredClone(f.push.policy());delete client.captureScope;delete client.s3.jsonl.uploadMiBPerSecond;
-  f.push.configure(client);assert.equal(f.push.policy().captureScope,'all');assert.equal(f.push.policy().s3.jsonl.uploadMiBPerSecond,0.5);
+  f.push.configure(client);assert.equal(f.push.policy().captureScope,'all');assert.equal(f.push.policy().s3.jsonl.uploadMiBPerSecond,0.5);assert.equal(f.push.policy().s3.jsonl.cleanupBatchMiB,64);assert.equal(f.push.policy().s3.jsonl.streamingUpload,true);
   for(const rate of [0,0.24,64.1,Infinity])assert.throws(()=>configure(f,{s3:{...f.push.policy().s3,jsonl:{...f.push.policy().s3.jsonl,uploadMiBPerSecond:rate}}}));
+  for(const batch of [31,65,32.5,Infinity])assert.throws(()=>configure(f,{s3:{...f.push.policy().s3,jsonl:{...f.push.policy().s3.jsonl,cleanupBatchMiB:batch}}}));
   assert.throws(()=>configure(f,{captureScope:'completed-model'}));
   for(const value of [null,undefined,[],0,'invalid'])assert.throws(()=>f.push.configure(value),{code:'CONVERSATION_PUSH_INVALID'});
 });

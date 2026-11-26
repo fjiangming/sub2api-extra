@@ -11,6 +11,10 @@ const { processingBudgets } = require('./services/conversation-memory');
 const { prepareWithMemoryWait, withArchiveRetry } = require('./services/conversation-jsonl-flow');
 const { pushMetadataStatus } = require('./services/conversation-metadata');
 
+// Start an open-file upload only after one complete multipart part is ready.
+// The source record remains local until the whole object is Complete.
+const STREAMING_START_BYTES = 8 * 1024 ** 2;
+
 class ConversationJsonlStore {
   constructor(push, { maxFileBytes, memoryBudget = processingBudgets, memoryWaitMs = 30000 } = {}) {
     this.push = push; this.archive = push.archive; this.db = push.db; this.now = push.now;
@@ -64,7 +68,7 @@ class ConversationJsonlStore {
       uploaded_bytes,uploaded_parts,pause_reason,first_at,envelope_version
       FROM cl_push_jsonl_files ORDER BY created_at DESC,id DESC LIMIT 30`).all();
     const backlog = this.db.prepare(`SELECT COUNT(*) files,COALESCE(SUM(bytes),0) bytes,COALESCE(SUM(records),0) records,
-      MIN(NULLIF(first_at,0)) firstAt,MIN(created_at) queuedAt FROM cl_push_jsonl_files WHERE status IN ('open','pending','running','failed')`).get();
+      MIN(NULLIF(first_at,0)) firstAt,MIN(created_at) queuedAt FROM cl_push_jsonl_files WHERE status IN ('open','streaming','pending','running','failed')`).get();
     const retention = this.archive.policy().retention;
     backlog.expiryAt = retention && backlog.firstAt ? backlog.firstAt + retention * 86400000 : 0;
     backlog.atRisk = Boolean(backlog.expiryAt && backlog.expiryAt <= this.now() + 6 * 3600000);
@@ -103,13 +107,12 @@ class ConversationJsonlStore {
     const metadata = this.archive.seal(envelope.metadata, 'jsonl-metadata:' + job.id);
     if (this.archive.freeBytes() - metadata.length - 1048576 < this.archive.policy().reserve * 1024 ** 3) {
       this.defer(job, 'EXPORT_CAPACITY');
-      for (const file of this.db.prepare("SELECT id FROM cl_push_jsonl_files WHERE status='open'").all()) this.seal(file.id);
       return true;
     }
     return this.db.transaction(() => {
       const current = this.db.prepare('SELECT status FROM cl_push_jobs WHERE id=?').get(job.id);
       if (current?.status !== 'pending' || this.push.policy().version !== policy.version || this.push.validJob(job).cancel) return true;
-      let file = this.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE destination=? AND target_hash=? AND source=? AND model=? AND day=? AND status='open'")
+      let file = this.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE destination=? AND target_hash=? AND source=? AND model=? AND day=? AND status IN ('open','streaming') AND sealed_at=0 AND (upload_id='' OR upload_version=1) ORDER BY CASE status WHEN 'streaming' THEN 0 ELSE 1 END,created_at,id LIMIT 1")
         .get(job.destination,job.target_hash, job.source, envelope.metadata.model, day);
       if (file && (file.envelope_version !== job.envelope_version ||
         file.object_key !== objectKey(policy.s3.prefix, file.day, file.model, file.created_at, file.id))) {
@@ -134,13 +137,14 @@ class ConversationJsonlStore {
       return true;
     }).immediate();
   }
-  seal(id) {
-    return this.db.prepare("UPDATE cl_push_jsonl_files SET status='pending',sealed_at=?,next_at=?,updated_at=? WHERE id=? AND status='open'")
-      .run(this.now(), this.now(), this.now(), id).changes;
+  seal(id, { forcePending = false } = {}) {
+    const now = this.now();
+    return this.db.prepare("UPDATE cl_push_jsonl_files SET status=CASE WHEN status='open' OR (?=1 AND status='streaming' AND (lease_token='' OR lease_until<=?)) THEN 'pending' ELSE status END,sealed_at=CASE WHEN sealed_at=0 THEN ? ELSE sealed_at END,next_at=?,updated_at=? WHERE id=? AND status IN ('open','streaming') AND sealed_at=0")
+      .run(Number(forcePending), now, now, now, now, id).changes;
   }
   hasBacklog() {
     return Boolean(this.db.prepare("SELECT 1 FROM cl_push_jobs WHERE status IN ('pending','buffered','running','failed') LIMIT 1").get() ||
-      this.db.prepare("SELECT 1 FROM cl_push_jsonl_files WHERE status IN ('open','pending','running','failed') LIMIT 1").get() || this.push.automaticBacklog());
+      this.db.prepare("SELECT 1 FROM cl_push_jsonl_files WHERE status IN ('open','streaming','pending','running','failed') LIMIT 1").get() || this.push.automaticBacklog());
   }
   dayBacklog(file,destination) {
     const day=DateTime.fromISO(file.day,{zone:destination.jsonl.timezone}).startOf('day');
@@ -159,13 +163,20 @@ class ConversationJsonlStore {
     const policy = this.push.policy(); if (!this.enabled(policy)) return 0;
     let count = 0;
     const retention = this.archive.policy().retention;
-    for (const file of this.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE status='open'").all()) {
+    for (const file of this.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE status IN ('open','streaming') AND sealed_at=0").all()) {
       const destination=target(policy,file.destination);if(!destination||destination.type!=='s3'||destination.format!=='jsonl')continue;
       const backlog=this.db.prepare("SELECT 1 FROM cl_push_jobs WHERE destination=? AND status='pending' AND target_hash=? LIMIT 1").get(file.destination,file.target_hash);
+      // A file that already created a streaming multipart upload must not be
+      // left open when the strategy is switched back to normal uploads. Seal
+      // it first; the next claim resumes the same confirmed parts as a full
+      // file and never discards the local manifest.
+      const incompatibleUpload = file.upload_id !== '' && file.upload_version === 1 && !destination.jsonl.streamingUpload;
       const elapsed = destination.jsonl.flushMinutes && this.now() - file.created_at >= destination.jsonl.flushMinutes * 60000;
       const expiring = retention && file.first_at && file.first_at + retention * 86400000 <= this.now() + 6 * 3600000;
       const rollover=file.day<dayAt(this.now(),destination.jsonl.timezone);
-      if (elapsed || expiring || !backlog&&file.force_flush || rollover&&!this.dayBacklog(file,destination)) count += this.seal(file.id);
+      if (incompatibleUpload || elapsed || expiring || !backlog&&file.force_flush || rollover&&!this.dayBacklog(file,destination)) {
+        count += this.seal(file.id, { forcePending: incompatibleUpload && (file.status === 'open' || !file.lease_token || file.lease_until <= this.now()) });
+      }
     }
     return count;
   }
@@ -173,7 +184,7 @@ class ConversationJsonlStore {
     if (!this.enabled()) throw invalid('请先启用 S3 JSONL 推送', 'CONVERSATION_JSONL_DISABLED', 409);
     return this.db.transaction(() => {
       this.db.prepare('UPDATE cl_push_jsonl_control SET flush_before=? WHERE singleton=1').run(this.now());
-      const files = this.db.prepare("UPDATE cl_push_jsonl_files SET force_flush=1 WHERE status='open'").run().changes;
+      const files = this.db.prepare("UPDATE cl_push_jsonl_files SET force_flush=1 WHERE status IN ('open','streaming') AND sealed_at=0").run().changes;
       const ids=targets(this.push.policy()).filter(item=>item.type==='s3'&&item.format==='jsonl').map(item=>item.id);
       const queued = this.db.prepare(`SELECT COUNT(*) n FROM cl_push_jobs WHERE destination IN (${ids.map(()=>'?').join(',')}) AND status='pending'`).get(...ids).n;
       return { files, queued };
@@ -232,7 +243,7 @@ class ConversationJsonlStore {
     }
   }
   reconcile() {
-    const files = this.db.prepare(`SELECT * FROM cl_push_jsonl_files f WHERE (status IN ('open','pending','running','failed')
+    const files = this.db.prepare(`SELECT * FROM cl_push_jsonl_files f WHERE (status IN ('open','streaming','pending','running','failed')
       OR status='cancelled' AND EXISTS(SELECT 1 FROM cl_push_jsonl_members m WHERE m.file_id=f.id)) AND id>? ORDER BY id LIMIT 30`).all(this.reconcileCursor || '');
     this.reconcileCursor = files.at(-1)?.id || '';
     for (const file of files) {
@@ -250,58 +261,86 @@ class ConversationJsonlStore {
         .all(at, at, ...(expired ? [at] : []));
       for (const file of files) this.db.prepare("UPDATE cl_push_jobs SET attempts=?,error_code='DELIVERY_UNKNOWN',updated_at=? WHERE jsonl_file_id=? AND status='buffered'")
         .run(file.attempts, at, file.id);
-      return files.length;
+      const streaming = this.db.prepare(`UPDATE cl_push_jsonl_files SET status=CASE WHEN sealed_at>0 THEN 'pending' ELSE 'open' END,
+        attempts=MAX(0,attempts-1),pause_reason='',lease_token='',lease_until=0,error_code='DELIVERY_UNKNOWN',next_at=?,updated_at=?
+        WHERE status='streaming' ${expired ? 'AND lease_until>0 AND lease_until<=?' : ''} RETURNING id,attempts`).all(at, at, ...(expired ? [at] : []));
+      for (const file of streaming) this.db.prepare("UPDATE cl_push_jobs SET attempts=?,error_code='DELIVERY_UNKNOWN',updated_at=? WHERE jsonl_file_id=? AND status='buffered'")
+        .run(file.attempts, at, file.id);
+      return files.length + streaming.length;
     }).immediate();
   }
   claim() {
     const policy = this.push.policy(); if (!this.enabled(policy)) return null;
     return this.db.transaction(() => {
       const ids=targets(policy).filter(item=>item.type==='s3'&&item.format==='jsonl').map(item=>item.id);
+      // Recover an open streaming manifest created before a strategy toggle.
+      // The active worker, if any, will invalidate itself on the policy
+      // version check; an idle/restarted file can move directly to pending.
+      for (const file of this.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE destination IN (" + ids.map(()=>'?').join(',') + ") AND status IN ('open','streaming') AND sealed_at=0 AND upload_id!='' AND upload_version=1").all(...ids)) {
+        const destination = target(policy, file.destination);
+        if (destination?.type === 's3' && destination.format === 'jsonl' && !destination.jsonl.streamingUpload &&
+          (file.status === 'open' || !file.lease_token || file.lease_until <= this.now())) this.seal(file.id, { forcePending: true });
+      }
       const file = this.db.prepare(`SELECT * FROM cl_push_jsonl_files WHERE destination IN (${ids.map(()=>'?').join(',')}) AND status='pending' AND (upload_id='' OR upload_version=1) AND next_at<=? ORDER BY sealed_at,id LIMIT 1`).get(...ids,this.now());
-      if (!file) return null;
+      if (file) {
+        const token = crypto.randomUUID();
+        this.db.prepare("UPDATE cl_push_jsonl_files SET status='running',attempts=attempts+1,error_code='',http_status=0,lease_token=?,lease_until=?,updated_at=? WHERE id=? AND status='pending'")
+          .run(token, this.now() + (policy.timeoutSeconds + 30) * 3000, this.now(), file.id);
+        this.db.prepare("UPDATE cl_push_jobs SET status='buffered',attempts=?,error_code='',http_status=0,updated_at=? WHERE jsonl_file_id=? AND status IN ('buffered','failed')").run(file.attempts + 1, this.now(), file.id);
+        return { ...file, attempts: file.attempts + 1, error_code: '', http_status: 0, lease_token: token, streaming: false };
+      }
+      const openFiles = this.db.prepare(`SELECT * FROM cl_push_jsonl_files WHERE destination IN (${ids.map(()=>'?').join(',')}) AND status='open' AND sealed_at=0
+        AND (upload_id='' OR upload_version=1) AND (bytes>=? OR upload_id!='') ORDER BY CASE WHEN upload_id!='' THEN 0 ELSE 1 END,created_at,id`)
+        .all(...ids, STREAMING_START_BYTES);
+      const open = openFiles.find(row => target(policy, row.destination)?.type === 's3' && target(policy, row.destination)?.format === 'jsonl' && target(policy, row.destination)?.jsonl?.streamingUpload);
+      if (!open) return null;
       const token = crypto.randomUUID();
-      this.db.prepare("UPDATE cl_push_jsonl_files SET status='running',attempts=attempts+1,error_code='',http_status=0,lease_token=?,lease_until=?,updated_at=? WHERE id=? AND status='pending'")
-        .run(token, this.now() + (policy.timeoutSeconds + 30) * 3000, this.now(), file.id);
-      this.db.prepare("UPDATE cl_push_jobs SET status='buffered',attempts=?,error_code='',http_status=0,updated_at=? WHERE jsonl_file_id=? AND status IN ('buffered','failed')").run(file.attempts + 1, this.now(), file.id);
-      return { ...file, attempts: file.attempts + 1, error_code: '', http_status: 0, lease_token: token };
+      this.db.prepare("UPDATE cl_push_jsonl_files SET status='streaming',attempts=attempts+1,error_code='',http_status=0,lease_token=?,lease_until=?,updated_at=? WHERE id=? AND status='open' AND sealed_at=0")
+        .run(token, this.now() + (policy.timeoutSeconds + 30) * 3000, this.now(), open.id);
+      this.db.prepare("UPDATE cl_push_jobs SET status='buffered',attempts=?,error_code='',http_status=0,updated_at=? WHERE jsonl_file_id=? AND status IN ('buffered','failed')").run(open.attempts + 1, this.now(), open.id);
+      return { ...open, attempts: open.attempts + 1, error_code: '', http_status: 0, lease_token: token, streaming: true };
     }).immediate();
   }
   guard(file, policyVersion, archiveVersion) {
     const current = this.db.prepare(`SELECT status,lease_token,lease_until,
       (SELECT version FROM cl_push_policies ORDER BY version DESC LIMIT 1) push_version,
       (SELECT version FROM cl_policies ORDER BY version DESC LIMIT 1) archive_version FROM cl_push_jsonl_files WHERE id=?`).get(file.id);
-    if (current?.status !== 'running' || current.lease_token !== file.lease_token || current.push_version !== policyVersion ||
+    const activeStatus = file.streaming ? 'streaming' : 'running';
+    if (current?.status !== activeStatus || current.lease_token !== file.lease_token || current.push_version !== policyVersion ||
       current.archive_version !== archiveVersion) throw new Error('DELIVERY_INVALIDATED');
-    if (current.lease_until - this.now() < 60000 && !this.db.prepare("UPDATE cl_push_jsonl_files SET lease_until=? WHERE id=? AND status='running' AND lease_token=?")
-      .run(this.now() + 270000, file.id, file.lease_token).changes) throw new Error('DELIVERY_INVALIDATED');
+    if (current.lease_until - this.now() < 60000 && !this.db.prepare(`UPDATE cl_push_jsonl_files SET lease_until=? WHERE id=? AND status=? AND lease_token=?`)
+      .run(this.now() + 270000, file.id, activeStatus, file.lease_token).changes) throw new Error('DELIVERY_INVALIDATED');
   }
   uploadId(file, id) {
     return this.db.transaction(() => {
+      const activeStatus = file.streaming ? 'streaming' : 'running';
       const current = this.get(file.id);
-      if (current?.status === 'running' && current.lease_token === file.lease_token && current.upload_id === id && current.upload_version === 1) return 1;
-      const changed = this.db.prepare("UPDATE cl_push_jsonl_files SET upload_id=?,upload_version=1,uploaded_bytes=0,uploaded_parts=0,updated_at=? WHERE id=? AND status='running' AND lease_token=? AND upload_id=''")
-        .run(id, this.now(), file.id, file.lease_token).changes;
+      if (current?.status === activeStatus && current.lease_token === file.lease_token && current.upload_id === id && current.upload_version === 1) return 1;
+      const changed = this.db.prepare("UPDATE cl_push_jsonl_files SET upload_id=?,upload_version=1,uploaded_bytes=0,uploaded_parts=0,updated_at=? WHERE id=? AND status=? AND lease_token=? AND upload_id=''")
+        .run(id, this.now(), file.id, activeStatus, file.lease_token).changes;
       if (changed) this.db.prepare('DELETE FROM cl_push_jsonl_parts WHERE file_id=?').run(file.id);
       return changed;
     }).immediate();
   }
-  clearUpload(id, uploadId, leaseToken = '') {
+  clearUpload(id, uploadId, leaseToken = '', activeStatus = 'running') {
     return this.db.transaction(() => {
       const changed = this.db.prepare(`UPDATE cl_push_jsonl_files SET upload_id='',upload_version=0,uploaded_bytes=0,uploaded_parts=0 WHERE id=? AND upload_id=? AND
-        ${leaseToken ? "status='running' AND lease_token=?" : "status!='running'"}`).run(id, uploadId, ...(leaseToken ? [leaseToken] : [])).changes;
+        ${leaseToken ? 'status=? AND lease_token=?' : "status NOT IN ('running','streaming')"}`).run(id, uploadId, ...(leaseToken ? [activeStatus, leaseToken] : [])).changes;
       if (changed) this.db.prepare('DELETE FROM cl_push_jsonl_parts WHERE file_id=?').run(id);
       return changed;
     })();
   }
   abandonUpload(file, uploadId) {
-    return this.db.prepare("UPDATE cl_push_jsonl_files SET upload_version=0 WHERE id=? AND upload_id=? AND status='running' AND lease_token=?")
-      .run(file.id, uploadId, file.lease_token).changes;
+    const activeStatus = file.streaming ? 'streaming' : 'running';
+    return this.db.prepare("UPDATE cl_push_jsonl_files SET upload_version=0 WHERE id=? AND upload_id=? AND status=? AND lease_token=?")
+      .run(file.id, uploadId, activeStatus, file.lease_token).changes;
   }
   parts(file) { return this.db.prepare('SELECT number,bytes,etag,sha256 FROM cl_push_jsonl_parts WHERE file_id=? ORDER BY number').all(file.id); }
   savePart(file, uploadId, part) {
     return this.db.transaction(() => {
+      const activeStatus = file.streaming ? 'streaming' : 'running';
       const current = this.get(file.id);
-      if (current?.status !== 'running' || current.lease_token !== file.lease_token || current.upload_id !== uploadId) return false;
+      if (current?.status !== activeStatus || current.lease_token !== file.lease_token || current.upload_id !== uploadId) return false;
       if (part.number <= current.uploaded_parts) {
         const saved = this.db.prepare('SELECT bytes,etag,sha256 FROM cl_push_jsonl_parts WHERE file_id=? AND number=?').get(file.id, part.number);
         return Boolean(saved && saved.bytes === part.bytes && saved.etag === part.etag && saved.sha256 === part.sha256);
@@ -314,15 +353,19 @@ class ConversationJsonlStore {
     }).immediate();
   }
   pause(file, reason) {
-    this.db.prepare("UPDATE cl_push_jsonl_files SET pause_reason=?,updated_at=? WHERE id=? AND status='running' AND lease_token=? AND pause_reason!=?")
-      .run(reason, this.now(), file.id, file.lease_token, reason);
+    const activeStatus = file.streaming ? 'streaming' : 'running';
+    this.db.prepare("UPDATE cl_push_jsonl_files SET pause_reason=?,updated_at=? WHERE id=? AND status=? AND lease_token=? AND pause_reason!=?")
+      .run(reason, this.now(), file.id, activeStatus, file.lease_token, reason);
   }
-  async *envelopes(file, guard, checkpoint = async () => {}, local = action => withArchiveRetry(action, { guard })) {
+  async *envelopes(file, guard, checkpoint = async () => {}, local = action => withArchiveRetry(action, { guard }), { waitForMembers } = {}) {
     let ordinal = -1;
     while (true) {
       const members = await local(() => this.db.prepare(`SELECT m.job_id,m.ordinal,m.metadata,m.payload_source,m.fallback_reason,j.* FROM cl_push_jsonl_members m
         LEFT JOIN cl_push_jobs j ON j.id=m.job_id WHERE m.file_id=? AND m.ordinal>? ORDER BY m.ordinal LIMIT 20`).all(file.id, ordinal));
-      if (!members.length) break;
+      if (!members.length) {
+        if (waitForMembers && await waitForMembers()) continue;
+        break;
+      }
       for (const member of members) {
         const copy = {source:member.payload_source || member.source,fallbackReason:member.fallback_reason};
         let envelope = await prepareWithMemoryWait(() => local(() => {
@@ -341,13 +384,17 @@ class ConversationJsonlStore {
     const policy = this.push.policy(), deferred = ['EXPORT_MEMORY','ARCHIVE_BUSY','UPLOAD_STALLED','ABORTED'].includes(result.errorCode),
       attempts = Math.max(0,file.attempts-Number(deferred));
     const retry = deferred || result.retryable && attempts < policy.maxAttempts;
-    const status = retry ? 'pending' : result.status;
+    const current = this.get(file.id), destination = target(policy, file.destination), streamingEnabled = destination?.type === 's3' && destination.format === 'jsonl' && destination.jsonl?.streamingUpload;
+    if (retry && file.streaming && current?.sealed_at===0 && !streamingEnabled) this.seal(file.id);
+    const latest = this.get(file.id), keepOpen = retry && file.streaming && streamingEnabled && latest?.sealed_at===0;
+    const status = retry ? (keepOpen ? 'open' : 'pending') : result.status;
     const retryMs = deferred ? 5000 : Math.min(3600000, policy.retrySeconds * 1000 * 2 ** Math.max(0, attempts - 1));
     return this.db.transaction(() => {
+      const activeStatus = file.streaming ? 'streaming' : 'running';
       const changed = this.db.prepare(`UPDATE cl_push_jsonl_files SET status=?,attempts=?,error_code=?,http_status=?,sha256=?,next_at=?,lease_token='',lease_until=0,pause_reason='',updated_at=?,
-        upload_id=CASE WHEN ?='sent' THEN '' ELSE upload_id END WHERE id=? AND status='running' AND lease_token=?`)
+        upload_id=CASE WHEN ?='sent' THEN '' ELSE upload_id END WHERE id=? AND status=? AND lease_token=?`)
         .run(status, attempts, result.errorCode || '', result.httpStatus || 0, result.sha256 || '', this.now() + retryMs,
-          this.now(), status, file.id, file.lease_token).changes;
+          this.now(), status, file.id, activeStatus, file.lease_token).changes;
       if (!changed) return 0;
       this.db.prepare("UPDATE cl_push_jobs SET status=?,attempts=?,error_code=?,http_status=?,updated_at=? WHERE jsonl_file_id=? AND status='buffered'")
         .run(status === 'sent' ? 'sent' : status === 'failed' ? 'failed' : 'buffered', attempts, result.errorCode || '', result.httpStatus || 0, this.now(), file.id);
@@ -361,10 +408,14 @@ class ConversationJsonlStore {
     if (!file || file.status !== 'failed' || !this.enabled(policy,file.destination) || policy.source !== file.source || targetHash(policy, file.destination) !== file.target_hash) {
       throw invalid('请先核对 JSONL 文件、当前目标和日志副本', 'CONVERSATION_PUSH_RETRY_BLOCKED', 409);
     }
+    const destination = target(policy, file.destination);
+    const resumeStreaming = Boolean(destination?.type === 's3' && destination.format === 'jsonl' && destination.jsonl?.streamingUpload && file.sealed_at === 0);
+    if (!resumeStreaming && file.sealed_at === 0) this.db.prepare("UPDATE cl_push_jsonl_files SET sealed_at=?,updated_at=? WHERE id=? AND status='failed' AND sealed_at=0").run(this.now(), this.now(), id);
     this.db.transaction(() => {
-      this.db.prepare("UPDATE cl_push_jsonl_files SET status='pending',attempts=0,error_code='',next_at=?,updated_at=? WHERE id=? AND status='failed'").run(this.now(), this.now(), id);
+      this.db.prepare("UPDATE cl_push_jsonl_files SET status=?,attempts=0,error_code='',next_at=?,updated_at=? WHERE id=? AND status='failed'")
+        .run(resumeStreaming ? 'open' : 'pending', this.now(), this.now(), id);
     }).immediate();
-    return { id, status: 'pending' };
+    return { id, status: resumeStreaming ? 'open' : 'pending' };
   }
   cleanupMembers() {
     this.db.prepare(`DELETE FROM cl_push_jsonl_parts WHERE rowid IN (SELECT p.rowid FROM cl_push_jsonl_parts p

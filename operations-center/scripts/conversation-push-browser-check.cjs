@@ -115,7 +115,7 @@ async function main() {
             const first=writes.find(at=>at>Date.now()-61000);await new Promise(resolve=>setTimeout(resolve,Math.max(1,first+61000-Date.now())));
           }
         };
-        const names={webhookEnabled:'platformEnabled',webhookUrl:'platformUrl',webhookToken:'platformToken',s3Enabled:'platformEnabled',endpoint:'platformEndpoint',bucket:'platformBucket',accessKeyId:'platformAccessKey',secretAccessKey:'platformSecretKey',s3Format:'platformFormat',jsonlMaxGB:'platformMaxGB',jsonlTimezone:'platformTimezone',jsonlUploadRate:'platformRate'};
+        const names={webhookEnabled:'platformEnabled',webhookUrl:'platformUrl',webhookToken:'platformToken',s3Enabled:'platformEnabled',endpoint:'platformEndpoint',bucket:'platformBucket',accessKeyId:'platformAccessKey',secretAccessKey:'platformSecretKey',s3Format:'platformFormat',jsonlMaxGB:'platformMaxGB',jsonlTimezone:'platformTimezone',jsonlUploadRate:'platformRate',jsonlCleanupBatch:'platformCleanupBatchMiB',jsonlStreaming:'platformStreamingUpload'};
         const field=name=>page.locator(`#clp-form [name="${names[name]||name}"]`);
         const view=async name=>page.locator(`[data-clp-view="${name}"]`).click();
         const startPricing=async()=>{
@@ -154,7 +154,7 @@ async function main() {
         assert.equal(await field('automaticMode').inputValue(),'realtime');
         await field('automaticMode').selectOption('previous_day');
         await page.locator('#clpp-type').selectOption('s3');await page.locator('[data-clpp-add]').click();
-        assert.equal(await field('jsonlUploadRate').inputValue(),'2');
+        assert.equal(await field('jsonlUploadRate').inputValue(),'2');assert.equal(await field('jsonlCleanupBatch').inputValue(),'48');await field('jsonlCleanupBatch').fill('64');
         await field('endpoint').fill(targetUrl);await field('bucket').fill('demo-archive');await field('accessKeyId').fill('fictional-id');await field('secretAccessKey').fill('fictional-secret');
         await field('s3Format').selectOption('json');
         await page.locator('#clpp-type').selectOption('webhook');await page.locator('[data-clpp-add]').click();
@@ -163,7 +163,7 @@ async function main() {
         await edit('webhook');assert.equal(await field('webhookToken').inputValue(),'fictional-webhook-token');
         await page.evaluate(()=>conversationLogsUi.load());assert.equal(await field('webhookToken').inputValue(),'fictional-webhook-token');
         await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
-        await edit('s3');assert.equal(await field('secretAccessKey').inputValue(),'');await edit('webhook');assert.equal(await field('webhookToken').inputValue(),'');assert.equal(preview.push.store.list().total,0);
+        await edit('s3');assert.equal(await field('secretAccessKey').inputValue(),'');assert.equal(await field('jsonlCleanupBatch').inputValue(),'64');await edit('webhook');assert.equal(await field('webhookToken').inputValue(),'');assert.equal(preview.push.store.list().total,0);
         await edit('s3');await page.locator('[data-clpp-toggle=s3]').uncheck();
         assert.equal(await field('platformEnabled').isChecked(),false);
         await page.locator('[data-clpp-save]').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
@@ -250,10 +250,10 @@ async function main() {
         mode=200;const failedJobs=preview.push.store.list({status:'failed'}).items;
         for(const job of failedJobs){await page.locator(`[data-clp-retry="${job.id}"]`).click();await until(()=>preview.push.store.list({status:'sent'}).items.some(row=>row.id===job.id));}
         await page.locator('#clp-job-status').selectOption('');await waitJobs('sent',6);
-        await edit('s3');await field('s3Format').selectOption('jsonl');await field('endpoint').fill(jsonlTarget.url);await page.locator('[data-clpp-toggle=webhook]').uncheck();
+        await edit('s3');await field('s3Format').selectOption('jsonl');assert.equal(await field('jsonlStreaming').isChecked(),false);await field('jsonlStreaming').check();await field('endpoint').fill(jsonlTarget.url);await page.locator('[data-clpp-toggle=webhook]').uncheck();
         assert.equal(await field('jsonlMaxGB').inputValue(),'10');await field('jsonlTimezone').fill('Asia/Shanghai');await field('jsonlUploadRate').fill('1.5');
         await page.locator('#clp-save').click();await page.locator('#clp-message').filter({hasText:'已保存'}).waitFor();
-        assert.equal(preview.push.store.policy().s3.jsonl.uploadMiBPerSecond,1.5);
+        assert.equal(preview.push.store.policy().s3.jsonl.uploadMiBPerSecond,1.5);assert.equal(preview.push.store.policy().s3.jsonl.streamingUpload,true);
         await page.locator('[data-clp-test=s3]').click();await page.locator('#clp-test-s3').filter({hasText:'连接成功'}).waitFor();
         assert.equal(JSON.parse(jsonlTarget.completed[0].body.toString()).schema,'sub2api.conversation.test.v1');
         assert(jsonlTarget.completed[0].path.includes('/test/test-'));
@@ -318,7 +318,7 @@ async function main() {
         await edit('webhook');await field('webhookToken').fill('unsaved-sensitive-value');await refresh();assert.equal(await field('webhookToken').inputValue(),'unsaved-sensitive-value');
         await page.locator('#cl-tab-requests').click();assert.equal(await page.locator('#clp-form').count(),0);
         await page.locator('#cl-tab-push').click();await edit('webhook');assert.equal(await field('webhookToken').inputValue(),'');
-        assert.equal(await field('captureScope').inputValue(),'all');await edit('s3');assert.equal(await field('jsonlUploadRate').inputValue(),'1.5');await view('jobs');
+        assert.equal(await field('captureScope').inputValue(),'all');await edit('s3');assert.equal(await field('jsonlUploadRate').inputValue(),'1.5');assert.equal(await field('jsonlCleanupBatch').inputValue(),'64');await view('jobs');
         const retained=event(name+'-cleanup-original',{model:'Opus5',response:Buffer.from('{invalid').toString('base64')});preview.fixture.store.ingest(retained);
         await until(()=>preview.push.store.list().counts.some(row=>row.status==='buffered'&&row.count===1));
         await page.locator('#clp-flush').click();await waitJobs('sent',13);

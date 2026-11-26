@@ -16,12 +16,18 @@ const billingSchema = z.object({enabled:z.boolean(),version:z.number().int().pos
   rates:z.array(z.object({model:z.string().trim().min(1).max(160),price:priceSchema}).strict()).max(200)
     .refine(rows=>new Set(rows.map(row=>row.model)).size===rows.length)}).strict();
 const billingDefaults = () => ({enabled:false,version:1,rates:defaultStorageRates.map(row=>({...row}))});
-const jsonlDefaults = { maxFileBytes: 10000000000, timezone: 'Asia/Shanghai', flushMinutes: 0, uploadMiBPerSecond: 2 };
+const CLEANUP_BATCH_MIN_MIB = 32;
+const CLEANUP_BATCH_MAX_MIB = 64;
+const CLEANUP_BATCH_DEFAULT_MIB = 48;
+const jsonlDefaults = { maxFileBytes: 10000000000, timezone: 'Asia/Shanghai', flushMinutes: 0, uploadMiBPerSecond: 2,
+  cleanupBatchMiB: CLEANUP_BATCH_DEFAULT_MIB, streamingUpload: false };
 const jsonlSchema = z.object({
   maxFileBytes: z.number().int().min(1048576).max(10000000000),
   timezone: z.string().min(1).max(80).refine(value => { try { new Intl.DateTimeFormat('en', { timeZone: value }); return true; } catch { return false; } }),
   flushMinutes: z.number().int().min(0).max(1440),
-  uploadMiBPerSecond: z.number().min(0.25).max(64).default(2)
+  uploadMiBPerSecond: z.number().min(0.25).max(64).default(2),
+  cleanupBatchMiB: z.number().int().min(CLEANUP_BATCH_MIN_MIB).max(CLEANUP_BATCH_MAX_MIB).default(CLEANUP_BATCH_DEFAULT_MIB),
+  streamingUpload: z.boolean().default(false)
 }).strict();
 const webhookSchema = z.object({enabled:z.boolean(),name:z.string().trim().min(1).max(80).optional(),billing:billingSchema.optional(),
   url:z.string().trim().max(2048),token:secret,clearToken:z.boolean().optional()}).strict();
@@ -132,4 +138,4 @@ function targetHash(policy, destination) {
   if (value.type === 's3' && value.format === 'jsonl') Object.assign(identity,{format:'jsonl',timezone:value.jsonl.timezone});
   return crypto.createHash('sha256').update(JSON.stringify(identity)).digest('hex');
 }
-module.exports = {defaults,jsonlDefaults,defaultStorageRates,normalizePolicy,policySchema,parsePolicy,publicPolicy,targetHash,targets,target,targetPolicy,platformIdSchema,invalid};
+module.exports = {defaults,jsonlDefaults,CLEANUP_BATCH_MIN_MIB,CLEANUP_BATCH_MAX_MIB,CLEANUP_BATCH_DEFAULT_MIB,defaultStorageRates,normalizePolicy,policySchema,parsePolicy,publicPolicy,targetHash,targets,target,targetPolicy,platformIdSchema,invalid};

@@ -225,6 +225,65 @@ test('real multipart upload uses bounded 8 MiB parts, per-part checksums and fin
   assert.equal(file.sha256, crypto.createHash('sha256').update(receiver.completed[0].body).digest('hex'));
 });
 
+test('streaming JSONL uploads complete parts before sealing but publishes only after the final member', async t => {
+  let release, started;
+  const held = new Promise(resolve => { release = resolve; });
+  const firstPart = new Promise(resolve => { started = resolve; });
+  const receiver = await s3Receiver({ beforeRequest: async entry => {
+    if (entry.method === 'PUT' && entry.query.has('partNumber') && !started.done) {
+      started.done = true; started(); await held;
+    }
+  } });
+  t.after(() => receiver.close());
+  const f = setup(t); configure(f, receiver.url, { automatic: true, s3: { jsonl: { streamingUpload: true } } });
+  const request = Buffer.from(JSON.stringify({ model: 'Opus5', messages: [{ role: 'user', content: 'x'.repeat(9 * 1024 * 1024) }] }));
+  const first = event('streaming-first', { model: 'Opus5', request: request.toString('base64') });
+  f.store.ingest(first); f.push.scanAutomatic();
+  const sending = f.service.jsonl.tick();
+  await firstPart;
+  const open = f.jsonl.get(f.jsonl.list().files[0].id);
+  assert.equal(open.status, 'streaming'); assert.equal(open.sealed_at, 0);
+  assert.equal(receiver.completed.length, 0); assert.equal(receiver.objects.size, 0);
+
+  const second = event('streaming-second', { model: 'Opus5' });
+  f.store.ingest(second); f.push.scanAutomatic(); await f.service.jsonl.collect();
+  f.jsonl.flush(); await f.service.jsonl.collect();
+  release(); await sending;
+
+  const file = f.jsonl.get(f.jsonl.list().files[0].id);
+  assert.equal(file.status, 'sent', JSON.stringify(file)); assert.equal(receiver.completed.length, 1); assert.equal(receiver.uploads.size, 0);
+  assert.deepEqual(lines(receiver).map(row => row.request_id), [first.request_id, second.request_id]);
+  assert.equal(f.push.list({ status: 'sent' }).total, 2);
+});
+
+test('a strategy toggle seals an open streaming upload and resumes it as a normal file', async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close());
+  const f = setup(t); configure(f, receiver.url, { automatic: true, s3: { jsonl: { streamingUpload: true } } });
+  const request = Buffer.from(JSON.stringify({ model: 'Opus5', messages: [{ role: 'user', content: 'x'.repeat(9 * 1024 * 1024) }] }));
+  const row = event('streaming-toggle', { model: 'Opus5', request: request.toString('base64') });
+  f.store.ingest(row); f.push.scanAutomatic(); assert(f.jsonl.assignOne());
+  const original = f.jsonl.list().files[0];
+  // This is the state left by an older worker after it created Multipart.
+  f.jsonl.db.prepare("UPDATE cl_push_jsonl_files SET status='open',upload_id='legacy-upload',upload_version=1,uploaded_bytes=0,uploaded_parts=0 WHERE id=?").run(original.id);
+  configure(f, receiver.url, { automatic: true, s3: { jsonl: { streamingUpload: false } } });
+  const claimed = f.jsonl.claim();
+  assert(claimed); assert.equal(claimed.id, original.id); assert.equal(claimed.streaming, false);
+  const migrated = f.jsonl.get(original.id);
+  assert.equal(migrated.status, 'running'); assert(migrated.sealed_at > 0);
+  assert.equal(migrated.upload_id, 'legacy-upload'); assert.equal(migrated.upload_version, 1);
+  assert.equal(f.store.payload(row.id, 'original', 'request').body.toString(), request.toString());
+  f.jsonl.finish(claimed, { status: 'failed', errorCode: 'ABORTED', retryable: true });
+
+  const stale = event('streaming-toggle-stale', { model: 'Opus5' });
+  f.store.ingest(stale); f.push.scanAutomatic(); assert(f.jsonl.assignOne());
+  const staleFile = f.jsonl.list().files.find(file => file.id !== original.id);
+  f.jsonl.db.prepare("UPDATE cl_push_jsonl_files SET status='streaming',upload_id='stale-upload',upload_version=1,lease_token='',lease_until=0 WHERE id=?").run(staleFile.id);
+  const staleClaim = f.jsonl.claim();
+  assert(staleClaim); assert.equal(staleClaim.id, staleFile.id); assert.equal(staleClaim.streaming, false);
+  assert(f.jsonl.get(staleFile.id).sealed_at > 0);
+  f.jsonl.finish(staleClaim, { status: 'failed', errorCode: 'ABORTED', retryable: true });
+});
+
 test('single deliveries wait while JSONL owns the push worker instead of retaining two decoded bodies',async t=>{
   let unblock,entered;
   const held=new Promise(resolve=>{unblock=resolve;}),ready=new Promise(resolve=>{entered=resolve;});
@@ -495,6 +554,16 @@ test('disk reserve rejection keeps the complete archive and failed diagnostic up
   assert.equal(f.push.list().items[0].error_code, 'EXPORT_CAPACITY'); assert.equal(f.jsonl.list().files.length, 0);
   assert.equal(f.store.payload(row.id, 'original', 'request').body.toString(), rawRequest);
   assert.equal((await f.service.test('s3')).status, 'failed'); assert.equal(receiver.uploads.size, 0);
+});
+
+test('disk reserve rejection does not seal an existing open JSONL file', async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close()); const f = setup(t); configure(f, receiver.url, { automatic: true });
+  const first = event('space-open'); f.store.ingest(first); f.push.scanAutomatic(); await f.service.jsonl.tick();
+  const open = f.jsonl.list().files.find(file => file.status === 'open'); assert(open);
+  const second = event('space-deferred'); f.store.ingest(second); f.push.scanAutomatic(); f.store.freeBytes = () => 0;
+  await f.service.jsonl.tick();
+  assert.equal(f.push.list().items.find(row => row.record_id === second.id).error_code, 'EXPORT_CAPACITY');
+  assert.equal(f.jsonl.get(open.id).status, 'open');
 });
 
 test('JSONL multipart still blocks unsafe addresses and never trusts remote error fields', async () => {

@@ -67,7 +67,7 @@ async function session(transport, policy, outerSignal, guard, operation) {
 
 async function sendJsonl(transport, policy, file, envelopes, signal, {
   guard = () => {}, onCreated = () => {}, beforeComplete = () => {}, checkpoint = async () => {},
-  restoredParts = [], onPart = () => {}
+  restoredParts = [], onPart = () => {}, streaming = false, getFile = () => file
 } = {}) {
   const rate = (policy.s3.jsonl?.uploadMiBPerSecond ?? 2) * 1024 ** 2;
   return session(transport, policy, signal, guard, async request => {
@@ -75,17 +75,20 @@ async function sendJsonl(transport, policy, file, envelopes, signal, {
     let uploadId = file.upload_id;
     if (!uploadId) {
       await checkpoint();
+      const current = getFile() || file;
       const created = await request(new CreateMultipartUploadCommand({ ...target, ContentType: 'application/x-ndjson', ChecksumAlgorithm: 'SHA256',
-        Metadata: { 'file-id': file.id, 'record-count': String(file.records), 'source': file.source } }));
+        Metadata: { 'file-id': file.id, 'record-count': streaming ? 'streaming' : String(current.records), 'source': file.source,
+          ...(streaming ? { streaming: 'true' } : {}) } }));
       if (!created.UploadId) throw failure('MULTIPART_INVALID');
       uploadId = created.UploadId; await onCreated(uploadId);
     }
     if (restoredParts.length && !file.upload_id) throw failure('MULTIPART_CHECKPOINT_INVALID');
+    const initial = getFile() || file;
     let restoredBytes = 0;
     for (const [index, part] of restoredParts.entries()) {
       if (part.number !== index + 1 || !Number.isSafeInteger(part.bytes) || part.bytes < 1 || part.bytes > PART_BYTES ||
         typeof part.etag !== 'string' || !part.etag || part.etag.length > 4096 || !/^[A-Za-z0-9+/]{43}=$/.test(part.sha256) ||
-        restoredBytes + part.bytes > file.bytes || part.bytes !== PART_BYTES && restoredBytes + part.bytes !== file.bytes) throw failure('MULTIPART_CHECKPOINT_INVALID');
+        restoredBytes + part.bytes > initial.bytes || part.bytes !== PART_BYTES && restoredBytes + part.bytes !== initial.bytes) throw failure('MULTIPART_CHECKPOINT_INVALID');
       restoredBytes += part.bytes;
     }
     if (restoredParts.length !== (file.uploaded_parts || 0) || restoredBytes !== (file.uploaded_bytes || 0)) throw failure('MULTIPART_CHECKPOINT_INVALID');
@@ -93,6 +96,8 @@ async function sendJsonl(transport, policy, file, envelopes, signal, {
     const buffer = Buffer.allocUnsafe(PART_BYTES); let offset = 0, bytes = 0, records = 0, sinceYield = 0;
     const sendPart = async () => {
       await checkpoint(); await guard();
+      const current = getFile() || file;
+      if (streaming && offset < PART_BYTES && (!current.sealed_at || bytes !== current.bytes)) throw failure('UPLOAD_STALLED', true);
       const body = buffer.subarray(0, offset), checksum = crypto.createHash('sha256').update(body).digest('base64'), number = parts.length + 1;
       const saved = restoredParts[number - 1];
       let etag;
@@ -115,7 +120,8 @@ async function sendJsonl(transport, policy, file, envelopes, signal, {
       await checkpoint(); await guard(); records++;
       for (const chunk of jsonlChunks(deliveryBody(envelope))) {
         const source = Buffer.from(chunk); hash.update(source); bytes += source.length;
-        if (bytes > file.bytes) throw failure('JSONL_CONTENT_CHANGED');
+        const current = getFile() || file;
+        if (bytes > current.bytes) throw failure('JSONL_CONTENT_CHANGED');
         for (let index = 0; index < source.length;) {
           const length = Math.min(buffer.length - offset, source.length - index);
           source.copy(buffer, offset, index, index + length); offset += length; index += length;
@@ -126,8 +132,11 @@ async function sendJsonl(transport, policy, file, envelopes, signal, {
       }
       envelope = null;
     }
+    const current = getFile() || file;
     if (offset) await sendPart();
-    if (bytes !== file.bytes || records !== file.records || !parts.length || restoredParts.length > parts.length) throw failure('JSONL_CONTENT_CHANGED');
+    if (streaming && !current.sealed_at) throw failure('UPLOAD_STALLED', true);
+    const final = getFile() || file;
+    if (bytes !== final.bytes || records !== final.records || !parts.length || restoredParts.length > parts.length) throw failure('JSONL_CONTENT_CHANGED');
     await checkpoint(); await beforeComplete(); await guard();
     const completed = await request(new CompleteMultipartUploadCommand({ ...upload, MultipartUpload: { Parts: parts } }));
     return { status: 'sent', httpStatus: completed.$metadata.httpStatusCode, bytes, records, sha256: hash.digest('hex') };

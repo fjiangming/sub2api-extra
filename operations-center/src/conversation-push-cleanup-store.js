@@ -1,11 +1,11 @@
 'use strict';
 
 const { performance } = require('node:perf_hooks');
-const { targetHash,target,targets:policyTargets } = require('./services/conversation-push-policy');
+const { targetHash,target,targets:policyTargets,CLEANUP_BATCH_DEFAULT_MIB } = require('./services/conversation-push-policy');
 
-// Keep deletion in the background, but use larger bounded batches so a busy
-// archive does not spend most of its time reopening the same cleanup queue.
-const CLEANUP_BATCH_BYTES = 32 * 1024 ** 2;
+// Keep deletion in the background, but use a bounded default. The policy can
+// select 32-64 MiB; record and transaction-time limits remain in force.
+const CLEANUP_BATCH_BYTES = CLEANUP_BATCH_DEFAULT_MIB * 1024 ** 2;
 const CLEANUP_BATCH_RECORDS = 256;
 const CLEANUP_BATCH_MS = 40;
 const historyColumns = 'id,record_id,destination,source,delivery_source,delivery_fallback_reason,envelope_version,batch_id,status,attempts,next_at,created_at,updated_at,error_code,http_status,model,user_id,local_deleted_at,request_id';
@@ -29,8 +29,10 @@ class ConversationPushCleanupStore {
       CREATE INDEX IF NOT EXISTS cl_push_receipt_order ON cl_push_receipts(created_at DESC,id DESC);
       CREATE INDEX IF NOT EXISTS cl_push_history_order ON cl_push_jobs(created_at DESC,id DESC);
       CREATE INDEX IF NOT EXISTS cl_push_batch_unfinished ON cl_push_jobs(batch_id) WHERE status!='sent' OR http_status<200 OR http_status>=300;
+      DROP TRIGGER IF EXISTS cl_push_cleanup_sent;
       CREATE TRIGGER IF NOT EXISTS cl_push_cleanup_sent AFTER UPDATE OF status ON cl_push_jobs WHEN NEW.status='sent' AND OLD.status!='sent'
-        BEGIN INSERT OR IGNORE INTO cl_push_cleanup_queue(record_id,next_at) VALUES(NEW.record_id,NEW.updated_at); END;`);
+        BEGIN INSERT INTO cl_push_cleanup_queue(record_id,next_at) VALUES(NEW.record_id,NEW.updated_at)
+          ON CONFLICT(record_id) DO UPDATE SET next_at=MIN(cl_push_cleanup_queue.next_at,excluded.next_at),reason=''; END;`);
     return this;
   }
   status() {

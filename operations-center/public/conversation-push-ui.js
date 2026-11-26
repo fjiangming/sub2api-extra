@@ -8,7 +8,7 @@
     Object.assign(errors,{MULTIPART_RESTART:'远端上传已失效，将沿原路径重建',MULTIPART_CHECKPOINT_INVALID:'分片进度校验异常，将重建上传'});
     Object.assign(errors,{MASKED_READ_FAILED:'脱敏副本读取失败',EXPORT_REQUEST_ID:'归档请求 ID 缺失或无效，请检查对应日志'});
     Object.assign(errors,{ARCHIVE_BUSY:'归档暂忙，正文与进度保留，将自动重试',UPLOAD_STALLED:'上传后台失去响应，保留进度并自动恢复',JSONL_RECOVERY_RETRY:'上传恢复暂缓，将自动重试'});
-    const fileStates={open:'汇总中',pending:'待上传',running:'上传中',sent:'已送达',failed:'失败',cancelled:'已取消'};
+    const fileStates={open:'汇总中',streaming:'边汇总边上传',pending:'待上传',running:'上传中',sent:'已送达',failed:'失败',cancelled:'已取消'};
     const $=id=>container.querySelector('#clp-'+id),base='/api/conversation-logs/push/';
     let policy=null,dirty=false,busy=false,mounted=false,epoch=0,controller=null,jobsController=null,jobsSeq=0,timer=null,page=1,preview=null,batchBody=null,jobsError='';
     let platforms=null,view='platforms',billingPage=1,billingView='summary',billingController=null,billingSeq=0,jobsTableKey='';

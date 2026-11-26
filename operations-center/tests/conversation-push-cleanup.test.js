@@ -278,6 +278,15 @@ test('cleanup obeys worker priority and cross-process reader leases without dela
   assert.equal(f.push.list({ status: 'sent' }).total, 1);
 });
 
+test('a later sibling delivery wakes a cleanup row deferred by an earlier sibling', async t => {
+  const f = setup(t), [row] = await deliveredRows(f, 1), job = f.push.db.prepare('SELECT id FROM cl_push_jobs WHERE record_id=?').get(row.id), now = f.push.now();
+  f.push.db.prepare("UPDATE cl_push_cleanup_queue SET next_at=?,reason='delivery_pending' WHERE record_id=?").run(now + 30000, row.id);
+  f.push.db.prepare("UPDATE cl_push_jobs SET status='running',http_status=0,updated_at=? WHERE id=?").run(now, job.id);
+  f.push.db.prepare("UPDATE cl_push_jobs SET status='sent',http_status=200,updated_at=? WHERE id=?").run(now + 1, job.id);
+  const queue = f.push.db.prepare('SELECT next_at,reason FROM cl_push_cleanup_queue WHERE record_id=?').get(row.id);
+  assert.equal(queue.next_at, now + 1); assert.equal(queue.reason, '');
+});
+
 test('cleanup uses an indexed due queue and skips deferred records without starving confirmed siblings', async t => {
   const f = setup(t), rows = await deliveredRows(f, 3);
   const held = [...rows].sort((a, b) => a.id.localeCompare(b.id))[0];
@@ -370,6 +379,22 @@ test('large single-record deletions keep the accelerated cleanup interval bounde
   f.service.canWork = () => false; f.advance(); f.service.maintain(); assert.equal(calls, 2);
   f.service.canWork = () => true; f.service.canCleanup = () => false;
   f.service.maintain(); assert.equal(calls, 2);
+});
+
+test('cleanup byte budget follows the saved JSONL policy without changing the short transaction limits', t => {
+  const f = setup(t), now = f.push.now(); let options;
+  f.push.configure({ ...f.push.policy(), s3: { ...f.push.policy().s3,
+    jsonl: { ...f.push.policy().s3.jsonl, cleanupBatchMiB: 64 } } });
+  f.push.cleanup.batch = value => { options = value; return { deleted: 1, bytes: 64 * 1024 ** 2 }; };
+  f.service.maintain();
+  assert.equal(options.maxBytes, 64 * 1024 ** 2);
+  assert.equal(f.service.nextCleanup, now + 200);
+  assert.equal(options.maxRecords, undefined);
+  f.service.nextCleanup = 0; f.push.configure({ ...f.push.policy(), s3: { ...f.push.policy().s3,
+    jsonl: { ...f.push.policy().s3.jsonl, cleanupBatchMiB: 32 } } });
+  f.service.maintain();
+  assert.equal(options.maxBytes, 32 * 1024 ** 2);
+  assert.equal(f.service.nextCleanup, now + 400);
 });
 
 test('a successful file is cleaned during a different multipart upload without changing its bytes or checkpoints', async t => {

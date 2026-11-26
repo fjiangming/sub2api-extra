@@ -3221,3 +3221,38 @@ GitHub Actions 运行 `45390778277` 的镜像流程在 `Provider monitor billing
 | `CUSTOMIZATIONS.md` | 记录本次源码和测试改动。 |
 
 历史日志的对象键仍由日志自身的 `metadata.at` 和模型名计算：`前缀/原始日期/模型目录/带时间戳文件.jsonl`。因此历史任务后来入队或重试时不会按任务创建日期归档，也不会落入 `test` 目录；本轮新增测试覆盖跨日延后入队场景。没有新增容量配置、没有连接服务器、没有部署或提交 GitHub。
+
+## 2026-11-26：推送策略可配置后台清理批次并取消容量压力封卷
+
+用户要求在不阻断新日志保存、不过度占用主站资源的前提下提高清理速度；明确不在容量接近上限时自动封卷上传。本轮只修改运营中心，不修改主站、不增加服务器配置、不连接或部署服务器。
+
+| 文件 | 变更 |
+| --- | --- |
+| `operations-center/src/services/conversation-push-policy.js` | JSONL 策略新增 `cleanupBatchMiB`，默认 48、允许整数 32–64；旧策略缺字段自动补默认值，越界值拒绝保存。 |
+| `operations-center/src/conversation-push-cleanup-store.js` | 默认清理字节预算与策略默认值统一为 48 MiB，保留 256 条、40ms 和 SQLite 1ms 忙锁让行限制；兄弟目标后续送达时提前唤醒已延后的清理队列，避免无谓等待 30 秒。 |
+| `operations-center/src/services/conversation-push-service.js` | 每轮后台清理读取主 S3 JSONL 策略的批次值，并按实际预算计算下一轮间隔；配置异常回退安全默认值。 |
+| `operations-center/src/conversation-jsonl-store.js` | 容量预留不足时只暂缓当前新增汇总，不再封存已有开放 JSONL 文件；正常满卷、定时、跨日、手动和保留期规则不变。 |
+| `operations-center/public/conversation-platforms-ui.js`、`operations-center/public/index.html` | S3 平台设置增加 32–64 MiB 清理批次输入和资源 / 封卷边界说明，更新静态资源版本；附加平台保留同字段以兼容统一编辑器。 |
+| `operations-center/tests/conversation-push.test.js`、`tests/conversation-push-cleanup.test.js`、`tests/conversation-jsonl.test.js`、`scripts/conversation-push-browser-check.cjs` | 覆盖旧策略迁移、边界校验、策略预算传递 / 清理间隔、兄弟送达唤醒清理、容量不足不封开放卷、UI 默认值 / 保存 / 重载。 |
+| `operations-center/docs/conversation-jsonl-push.md`、`docs/conversation-logs.md`、`README.md` | 说明配置位置、32–64 MiB / 默认 48 MiB、主要资源影响、采集优先让行和不按容量压力自动封卷。 |
+
+验证：推送 / 清理 / JSONL 专项 **105 项全部通过**，运营中心完整 `npm run check`、静态语法检查、推送策略浏览器回归（桌面 / 手机 / 窄屏 / 深色）和 `git diff --check` 通过；本轮尚未提交 GitHub 或部署服务器。
+
+## 2026-11-26：JSONL 边汇总边 Multipart 上传安全模式
+
+用户确认开始按推荐方案改造“边汇总边上传”。本轮只改运营中心，不修改主站采集链路、计费契约或服务器配置，不部署、不提交 GitHub。新增策略开关默认关闭；开启后开放的日期 / 模型 JSONL 文件达到完整 8 MiB 分片才开始低优先级 Multipart 上传，仍遵守原 10 GB 文件上限、定时 / 跨日 / 手动封卷规则，不因容量接近上限自动封卷。
+
+| 文件 | 变更 |
+| --- | --- |
+| `operations-center/src/services/conversation-push-policy.js` | JSONL 策略增加 `streamingUpload` 布尔字段，旧策略缺失时默认 `false`，沿用严格策略校验和加密保存。 |
+| `operations-center/public/conversation-platforms-ui.js`、`public/conversation-push-ui.js`、`public/index.html` | S3 平台编辑器增加“边汇总边上传（安全模式）”开关及边界说明；文件列表增加“边汇总边上传”状态；更新静态资源缓存版本。 |
+| `operations-center/src/conversation-jsonl-store.js` | 开放卷达到 8 MiB 后可领取为 `streaming`；追加成员、封卷、容量不足、重启 / 租约恢复、分片回执、取消 / 重试和积压统计兼容该状态。未封卷失败可恢复为 open；策略关闭时先封卷再按静态文件路径重试；不同 S3 平台按各自开关判断。新增升级兼容：旧 worker 已创建 UploadId 但仍处于 open，或重启后留下无租约 streaming 状态的卷，在关闭边汇总开关后先安全封卷，再以普通文件方式沿用原 UploadId / 已确认分片续传，不删除本地正文。 |
+| `operations-center/src/services/conversation-jsonl-service.js` | 流式任务读取最新文件快照，持续等待新成员并周期续租；约五秒无新增时释放上传槽位，保留 upload ID / 分片进度，避免低流量文件阻塞已封卷历史；清理残留 Multipart 时排除正在 streaming 的文件。 |
+| `operations-center/src/services/conversation-jsonl-transport.js` | Multipart 创建时标记 streaming，动态校验最新字节 / 记录数；只上传完整分片，未封卷尾部不上传；封卷后最终校验 SHA-256、字节和记录数再 Complete，断点恢复沿用已确认分片且不提前发布对象。 |
+| `operations-center/tests/conversation-jsonl.test.js`、`tests/conversation-push.test.js` | 覆盖完整分片提前上传、追加成员、封卷后 Complete、Complete 前无远端对象、默认 / 旧策略迁移、开关保存、升级时旧 open UploadId 的安全封卷续传，以及容量不足不封开放卷。既有断点 / 租约 / 清理专项继续回归。 |
+| `operations-center/scripts/conversation-push-browser-check.cjs` | 增加 UI 开关默认关闭、保存开启和策略持久化检查；保留原桌面 / 手机 / 窄屏 / 深色推送回归。 |
+| `operations-center/docs/conversation-jsonl-push.md`、`docs/conversation-logs.md`、`README.md` | 记录安全模式、8 MiB 启动阈值与分片大小、Complete 前不可读、本地正文保留、空闲让出槽位及 CPU / I/O 影响边界。 |
+
+安全边界：单个分片成功不能授权删除本地原文，也不计为已送达；只有整个 JSONL 完成 Complete、最终内容校验通过且所有目标送达，既有“送达后清理”才会删除本地日志。开放卷空闲让出 worker 槽位会带来少量重复读取 / SHA-256 计算，但不进入主站用户请求链路，不能承诺严格零 CPU / I/O 影响。
+
+验证：`npm run check:conversation-jsonl` 通过；JSONL 专项 **39 项通过**，断点 / 租约专项 **46 项通过**，推送与清理专项 **68 项通过**，新增流式完整性与升级兼容回归通过；运营中心 `npm run check` 和 `git diff --check` 通过。未执行浏览器回归（本机未安装 Playwright），未连接服务器、未改服务器配置、未部署或提交 GitHub。

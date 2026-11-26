@@ -4,13 +4,15 @@ const { ConversationJsonlStore } = require('../conversation-jsonl-store');
 const { performance } = require('node:perf_hooks');
 const { failure, failureResult } = require('./conversation-push-transport');
 const { targetHash,targetPolicy } = require('./conversation-push-policy');
-const { waitForTurn, withArchiveRetry } = require('./conversation-jsonl-flow');
+const { delay, waitForTurn, withArchiveRetry } = require('./conversation-jsonl-flow');
 
 const LEASE_RECOVERY_INTERVAL_MS = 30000;
 const CHECKPOINT_TIMEOUT_MS = 120000;
 const COLLECTION_BUDGET_MS = 100;
 const DEFAULT_UPLOAD_CONCURRENCY = 2;
 const MAX_UPLOAD_CONCURRENCY = 2;
+const STREAMING_POLL_MS = 250;
+const STREAMING_IDLE_MS = 5000;
 
 function localFailure(error) {
   if (error.pushCode) return error;
@@ -60,7 +62,8 @@ class ConversationJsonlService {
       const now = this.store.now();
       for (const active of this._activeValues()) {
         const current = this.store.get(active.file.id);
-        if (current?.status !== 'running' || current.lease_token !== active.file.lease_token) this._invalidateActive(active, 'DELIVERY_INVALIDATED');
+        const activeStatus = active.file.streaming ? 'streaming' : 'running';
+        if (current?.status !== activeStatus || current.lease_token !== active.file.lease_token) this._invalidateActive(active, 'DELIVERY_INVALIDATED');
         else if ((current.lease_until > 0 && current.lease_until <= now) ||
           performance.now() - active.lastCheckpointAt >= CHECKPOINT_TIMEOUT_MS) this._invalidateActive(active, 'UPLOAD_STALLED');
       }
@@ -77,13 +80,13 @@ class ConversationJsonlService {
   async cleanup() {
     if (this.cleanupRunning) return this.cleanupRunning;
     this.cleanupRunning = (async () => {
-    const file = this.store.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE upload_id!='' AND status!='running' AND (status='cancelled' OR upload_version=0) AND next_at<=? ORDER BY updated_at LIMIT 1").get(this.store.now());
+    const file = this.store.db.prepare("SELECT * FROM cl_push_jsonl_files WHERE upload_id!='' AND status NOT IN ('running','streaming') AND (status='cancelled' OR upload_version=0) AND next_at<=? ORDER BY updated_at LIMIT 1").get(this.store.now());
     if (!file) return false;
     const current = this.store.push.policy();
     const policy = targetPolicy(targetHash(current, file.destination) === file.target_hash ? current : this.store.push.policy(file.policy_version),file.destination);
     const result = await this.transport.abortJsonl(policy, file);
     if (result.status === 'sent') this.store.clearUpload(file.id, file.upload_id);
-    else this.store.db.prepare("UPDATE cl_push_jsonl_files SET next_at=? WHERE id=? AND upload_id=? AND status!='running'")
+    else this.store.db.prepare("UPDATE cl_push_jsonl_files SET next_at=? WHERE id=? AND upload_id=? AND status NOT IN ('running','streaming')")
       .run(this.store.now() + 60000, file.id, file.upload_id);
     return result.status === 'sent';
     })().finally(() => { this.cleanupRunning = null; });
@@ -149,15 +152,39 @@ class ConversationJsonlService {
       const reason = await local(() => this.store.invalidReason(file, { full: true }));
       if (reason) { await local(() => this.store.cancel(file, reason)); return true; }
       const store = this.store;
+      const streaming = Boolean(file.streaming);
+      let observedRecords = file.records;
+      let idleSince = performance.now();
+      const waitForMembers = async () => {
+        if (!streaming) return false;
+        await checkpoint();
+        let current = await local(() => store.get(file.id));
+        if (!current || current.status !== 'streaming' || current.lease_token !== file.lease_token) throw failure('DELIVERY_INVALIDATED', true);
+        if (current.records > observedRecords) { observedRecords = current.records; idleSince = performance.now(); return true; }
+        if (current.sealed_at > 0) return false;
+        while (performance.now() - idleSince < STREAMING_IDLE_MS) {
+          await delay(STREAMING_POLL_MS, controller.signal);
+          await checkpoint();
+          current = await local(() => store.get(file.id));
+          if (!current || current.status !== 'streaming' || current.lease_token !== file.lease_token) throw failure('DELIVERY_INVALIDATED', true);
+          if (current.records > observedRecords) { observedRecords = current.records; idleSince = performance.now(); return true; }
+          if (current.sealed_at > 0) return false;
+        }
+        // Release the upload slot while the open file is idle. Its multipart
+        // checkpoint remains durable and the next worker can resume it after
+        // pending sealed files have been serviced.
+        return false;
+      };
       async function* envelopes() {
-        try { yield* store.envelopes(file, guard, checkpoint, local); }
+        try { yield* store.envelopes(file, guard, checkpoint, local, { waitForMembers: streaming ? waitForMembers : undefined }); }
         catch (error) { throw localFailure(error); }
       }
       const result = await this.transport.sendJsonl(policy, file, envelopes(), controller.signal, {
         guard, checkpoint, restoredParts: await local(() => this.store.parts(file)),
+        streaming, getFile: () => store.get(file.id),
         onCreated: id => { createdUploadId = id; return local(() => { if (!this.store.uploadId(file, id)) throw failure('DELIVERY_INVALIDATED', true); }); },
         onPart: (part, id) => local(() => { if (!this.store.savePart(file, id, part)) throw failure('DELIVERY_INVALIDATED', true); }),
-        beforeComplete: () => local(() => { if (this.store.invalidReason(file, { full: true })) throw failure('DELIVERY_INVALIDATED', true); })
+        beforeComplete: () => local(() => { const current = this.store.get(file.id); if (!current || this.store.invalidReason(current, { full: true })) throw failure('DELIVERY_INVALIDATED', true); })
       });
       if (result.status === 'sent') await guard();
       const uploadId = createdUploadId || file.upload_id;

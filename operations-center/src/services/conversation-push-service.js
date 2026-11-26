@@ -3,7 +3,7 @@
 const crypto = require('node:crypto');
 const { performance } = require('node:perf_hooks');
 const { setTimeout: delay } = require('node:timers/promises');
-const { publicPolicy,target,targetPolicy,invalid } = require('./conversation-push-policy');
+const { publicPolicy,target,targetPolicy,invalid,CLEANUP_BATCH_MIN_MIB,CLEANUP_BATCH_MAX_MIB } = require('./conversation-push-policy');
 const { ConversationPushTransport } = require('./conversation-push-transport');
 const { ConversationJsonlService } = require('./conversation-jsonl-service');
 const { dayAt, objectKey, jsonlBytes } = require('./conversation-jsonl-format');
@@ -11,6 +11,11 @@ const { processingBudgets } = require('./conversation-memory');
 const { CLEANUP_BATCH_BYTES } = require('../conversation-push-cleanup-store');
 
 const RECLAIM_IDLE_MS = 30000;
+
+function cleanupBatchBytes(policy) {
+  const mib = Number(policy?.s3?.jsonl?.cleanupBatchMiB);
+  return Number.isInteger(mib) && mib >= CLEANUP_BATCH_MIN_MIB && mib <= CLEANUP_BATCH_MAX_MIB ? mib * 1024 ** 2 : CLEANUP_BATCH_BYTES;
+}
 
 class ConversationPushService {
   constructor(store,{transport=new ConversationPushTransport(),jsonlOptions,canWork=() => true,canJsonlWork=canWork,canCleanup=() => true,memoryBudget=processingBudgets}={}) {
@@ -61,10 +66,12 @@ class ConversationPushService {
       }
       if (this.store.now()<this.nextCleanup) return;
       this.nextCleanup=this.store.now()+200;
-      if (!this.store.policy().enabled || !this.store.policy().deleteAfterPush) return;
+      const policy=this.store.policy();
+      if (!policy.enabled || !policy.deleteAfterPush) return;
       // Completed files can be cleaned while another file awaits the network.
-      const cleaned=this.store.cleanup.batch({canWork:()=>!this.stopping&&this.canWork()&&this.canCleanup()});
-      this.nextCleanup=this.store.now()+200*Math.max(1,Math.ceil(cleaned.bytes/CLEANUP_BATCH_BYTES));
+      const maxBytes=cleanupBatchBytes(policy);
+      const cleaned=this.store.cleanup.batch({maxBytes,canWork:()=>!this.stopping&&this.canWork()&&this.canCleanup()});
+      this.nextCleanup=this.store.now()+200*Math.max(1,Math.ceil(cleaned.bytes/maxBytes));
       this.reclaimWhenIdle();
       this.cleanupError='';
     } catch { this.cleanupError='LOCAL_CLEANUP_RETRY';this.nextCleanup=Math.max(this.nextCleanup,this.store.now()+1000); }
