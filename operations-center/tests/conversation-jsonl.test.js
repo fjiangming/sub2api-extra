@@ -99,6 +99,38 @@ test('historical files group by date and model, preserve raw HTTP/SSE/WS bytes a
   assert.equal(f.jsonl.db.prepare('SELECT COUNT(*) n FROM cl_push_jsonl_members').get().n, 0);
 });
 
+test('a historical record enqueued after rollover keeps its original date and model directory', async t => {
+  const receiver = await s3Receiver(); t.after(() => receiver.close());
+  const at = Date.parse('2026-06-25T15:59:59Z'), f = setup(t, { now: () => at + 86400000 }); configure(f, receiver.url);
+  const row = event('delayed-history', { at, model: 'Opus5.5' });
+  f.store.ingest(row); enqueue(f); await f.service.jsonl.tick();
+  assert.equal(receiver.completed.length, 1);
+  assert.match(receiver.completed[0].path, /\/2026-06-25\/Opus5\.5\/Opus5\.5-2026-06-25-/);
+  assert.equal(JSON.parse(receiver.completed[0].body).request_id, row.request_id);
+});
+
+test('the default JSONL worker uploads two independent files concurrently with separate leases', async t => {
+  let started = 0, release;
+  const bothStarted = new Promise(resolve => { release = resolve; });
+  let unblock; const gate = new Promise(resolve => { unblock = resolve; });
+  const receiver = await s3Receiver({ beforeRequest: async entry => {
+    if (entry.method === 'PUT' && entry.query.get('partNumber') === '1') {
+      started++;
+      if (started === 2) release();
+      await gate;
+    }
+  } }); t.after(() => receiver.close());
+  const f = setup(t); configure(f, receiver.url);
+  const first = event('parallel-a', { model: 'Opus5' }), second = event('parallel-b', { model: 'Fable5' });
+  f.store.ingest(first); f.store.ingest(second); enqueue(f);
+  assert(f.jsonl.assignOne()); assert(f.jsonl.assignOne());
+  for (const file of f.jsonl.list().files) f.jsonl.seal(file.id);
+  f.service.jsonl.wake(); await bothStarted;
+  assert.equal(f.service.jsonl.uploadConcurrency, 2);
+  assert.equal(f.service.jsonl.activeUploads.size, 2);
+  unblock(); await until(() => f.jsonl.list().counts.find(row => row.status === 'sent')?.count === 2);
+});
+
 test('a legacy open daily file is sealed without changing its key before new records use a model directory', async t => {
   const receiver = await s3Receiver(); t.after(() => receiver.close());
   const at = Date.parse('2026-06-25T08:00:00Z'), f = setup(t, { now: () => at });

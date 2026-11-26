@@ -361,11 +361,11 @@ test('cleanup yields to another SQLite writer promptly and restores its connecti
   } finally { if (writer.inTransaction) writer.exec('ROLLBACK'); writer.close(); }
 });
 
-test('large single-record deletions extend the next cleanup interval instead of bypassing the byte budget', t => {
+test('large single-record deletions keep the accelerated cleanup interval bounded', t => {
   const f = setup(t); let calls = 0;
   f.push.cleanup.batch = () => { calls++; return { deleted: 1, bytes: 20 * 1024 ** 2 }; };
   f.service.maintain(); assert.equal(calls, 1);
-  f.advance(999); f.service.maintain(); assert.equal(calls, 1);
+  f.advance(199); f.service.maintain(); assert.equal(calls, 1);
   f.advance(1); f.service.maintain(); assert.equal(calls, 2);
   f.service.canWork = () => false; f.advance(); f.service.maintain(); assert.equal(calls, 2);
   f.service.canWork = () => true; f.service.canCleanup = () => false;
