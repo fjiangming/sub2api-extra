@@ -134,6 +134,7 @@ class SupplierGroupService {
     if (stale) return 'stale';
     if (!group.upstreamComplete) return 'upstream_missing';
     if (group.main === null) return 'site_incomplete';
+    if (group.keys.some(k => k.accounts.some(a => a.historyVerified === false))) return 'history_unverified';
     if (group.mappingBlocked || group.keys.some(k => k.blocked)) return 'mapping_incomplete';
     if (!group.comparable) return 'unlinked_key';
     if (group.main === 0 && group.upstream === 0) return 'zero';
@@ -177,7 +178,8 @@ class SupplierGroupService {
       id: account.id, name: account.name, status: account.status, deleted: Boolean(account.deleted),
       main: report.siteComplete ? account.main : null, requests: account.requests,
       localGroups: account.localGroups.map(row => ({ ...row, main: report.siteComplete ? row.main : null })),
-      ...(!account.matched ? { reason: account.reason } : {})
+      ...(account.historyVerified === false ? { historyVerified: false } : {}),
+      ...(!account.matched || account.historyVerified === false ? { reason: account.reason } : {})
     });
     const publicAccounts = group => group.keys.flatMap(key => key.accounts).map(publicAccount);
     const byProvider = new Map();
@@ -205,7 +207,7 @@ class SupplierGroupService {
         diff: comparable.length && !pending.length ? total(comparable, 'diff') : null, accountCount: matched.length + pending.length,
         pendingAccountCount: pending.length,
         localGroupCount: new Set([...matched, ...pending].flatMap(a => a.localGroups.map(g => g.id))).size,
-        issueCount: mappings.filter(a => !a.matched).length,
+        issueCount: mappings.filter(a => !a.matched || a.historyVerified === false).length,
         unassignedProviderCount: query.providerId ? report.mappings.filter(a => !a.candidates.length).length : 0 } };
     if (query.groupId) {
       const group = scopedGroups.find(g => g.id === query.groupId);
@@ -238,7 +240,7 @@ class SupplierGroupService {
       result.pagination = query.view === 'accounts' ? accountPage.pagination : query.view === 'local' ? localPage.pagination : query.view === 'daily'
         ? { page: 1, total: 7, totalPages: 1 } : keyPage.pagination;
     } else if (query.view === 'mapping') {
-      const filtered = query.issuesOnly === '1' ? mappings.filter(a => !a.matched) : mappings;
+      const filtered = query.issuesOnly === '1' ? mappings.filter(a => !a.matched || a.historyVerified === false) : mappings;
       const selected = page(filtered); result.mappings = selected.items; result.pagination = selected.pagination;
     } else {
       const rows = [...byProvider].flatMap(([id, groups]) => [...groups.map(group => ({ group })),

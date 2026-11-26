@@ -229,6 +229,28 @@ test('an existing adapter cannot silently switch to manually replaced account cr
   assert.equal(await replacement.getAccessToken(), 'other-account-token');
 });
 
+test('active credential checks decrypt an unchanged payload once while detecting external edits and deletion', t => {
+  const context = fixture(t, async () => { throw new Error('No upstream request expected'); });
+  const provider = context.create({ adapterType: 'sub2api', authMode: 'token_pair',
+    credentials: { accessToken: 'first-account-token', refreshToken: 'first-refresh' } });
+  const connection = context.providers.get(provider.id, { forAdapter: true });
+  const derivation = t.mock.method(require('node:crypto'), 'scryptSync');
+  const session = context.providers.adapterContext(connection, context.balances.http);
+  for (let i = 0; i < 50; i++) {
+    session.verifyCredentials();
+    const credentials = session.getCredentials();
+    assert.equal(credentials.accessToken, 'first-account-token');
+    credentials.accessToken = 'must-not-change-cached-credentials';
+  }
+  assert.equal(derivation.mock.callCount(), 1);
+  context.providers.updateCredentials(provider.id, { accessToken: 'replacement-account-token' });
+  assert.throws(() => session.verifyCredentials(), { code: 'CONFIG_CHANGED' });
+  const replacement = context.providers.adapterContext(connection, context.balances.http);
+  assert.equal(replacement.getCredentials().accessToken, 'replacement-account-token');
+  context.providers.delete(provider.id);
+  assert.throws(() => replacement.getCredentials(), { code: 'PROVIDER_NOT_FOUND' });
+});
+
 test('notification failures preserve the fresh balance and remain visible in the check history', async (t) => {
   const context = fixture(t, async () => ({ data: { balance: 200 } }), {}, async () => { throw new Error('alert failed'); });
   const provider = context.create();

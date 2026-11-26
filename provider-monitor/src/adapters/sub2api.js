@@ -1147,6 +1147,124 @@ class Sub2ApiAdapter extends ProviderAdapter {
     return { amount, requests, currency: 'USD', subjectId: account.remoteId, scope: 'account' };
   }
 
+  async getDailyGroupUsageSnapshot({ date, timezone, fromAt, toAt, previous = null }) {
+    if (usesApiKey(this.connection)) {
+      throw new AppError('CAPABILITY_UNSUPPORTED', 'Account credentials are required for group snapshots', { status: 409 });
+    }
+    const invalid = () => new AppError('SCHEMA_MISMATCH', 'Incomplete or changing Sub2API usage snapshot', { status: 502 });
+    const id = value => {
+      if (typeof value === 'number' && !Number.isSafeInteger(value)) throw invalid();
+      if (!/^[1-9]\d{0,18}$/.test(String(value))) throw invalid();
+      return String(value);
+    };
+    const profile = await this.getAccount(), subjectId = id(profile.remoteId);
+    const from = Date.parse(fromAt), to = Date.parse(toAt), limit = 20000;
+    if (!Number.isFinite(from) || !Number.isFinite(to) || from >= to) throw invalid();
+    const page = async (number, size, order) => {
+      const query = new URLSearchParams({ start_date: date, end_date: date, timezone,
+        page: String(number), page_size: String(size), sort_by: 'id', sort_order: order });
+      const response = await this.authenticatedRequest(`/api/v1/usage?${query}`, { retries: 0 });
+      const data = unwrapEnvelope(response.data);
+      const total = summaryNumber(data?.total), pageSize = summaryNumber(data?.page_size);
+      if (!Array.isArray(data?.items) || summaryNumber(data.page) !== number ||
+          !Number.isSafeInteger(total) || !Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > size ||
+          data.items.length > pageSize || total < (number - 1) * pageSize + data.items.length) throw invalid();
+      return { items: data.items, total, pageSize, number };
+    };
+    const normalize = row => {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) throw invalid();
+      const amount = summaryNumber(row.actual_cost), at = Date.parse(row.created_at);
+      if (id(row.user_id) !== subjectId || amount === null || !Number.isFinite(at) || at < from || at >= to) throw invalid();
+      const groupRef = id(row.group_id);
+      if (row.group?.id != null && id(row.group.id) !== groupRef) throw invalid();
+      return { id: id(row.id), keyId: id(row.api_key_id), groupRef,
+        groupName: String(row.group?.name || groupRef).slice(0, 200), amount, at };
+    };
+    // Freeze both the last record and row count before reading ascending pages. Appended usage is for the next refresh.
+    const head = await page(1, 1, 'desc');
+    if (head.items.length !== Math.min(1, head.total)) throw invalid();
+    const sameRecord = (a, b) => ['id', 'keyId', 'groupRef', 'amount', 'at'].every(field => a[field] === b[field]);
+    const saved = previous && structuredClone(previous);
+    const account = saved?.account || { amount: 0, requests: 0, currency: 'USD', subjectId, scope: 'account' };
+    const keys = new Map();
+    if (saved) {
+      if (saved.date !== date || saved.timezone !== timezone || account.subjectId !== subjectId || account.scope !== 'account' ||
+          account.currency !== 'USD' || !Number.isSafeInteger(account.requests) || account.requests < 0 ||
+          !Number.isFinite(account.amount) || account.amount < 0 || !Array.isArray(saved.keys) ||
+          !Number.isSafeInteger(saved.pageSize) || saved.pageSize < 1 || saved.pageSize > 500) throw invalid();
+      let requests = 0, amount = 0;
+      for (const [keyId, rows] of saved.keys) {
+        if (!Array.isArray(rows)) throw invalid();
+        const groups = new Map();
+        for (const row of rows) {
+          if (!Number.isFinite(row.amount) || row.amount < 0 || !Number.isSafeInteger(row.requests) || row.requests < 1 || row.currency !== 'USD') throw invalid();
+          groups.set(id(row.groupRef), row); requests += row.requests; amount += row.amount;
+        }
+        if (groups.size !== rows.length) throw invalid();
+        keys.set(id(keyId), groups);
+      }
+      if (keys.size !== saved.keys.length || requests !== account.requests ||
+          Math.abs(amount - account.amount) > Math.max(1e-7, account.amount * 1e-10) ||
+          (account.requests > 0 && (!saved.anchor || !Number.isFinite(saved.anchor.at) || saved.anchor.at < from || saved.anchor.at >= to))) throw invalid();
+    }
+    const priorCount = account.requests;
+    if (head.total < priorCount) throw invalid();
+    if (head.total - priorCount > limit) throw new AppError('SOURCE_LIMIT', 'Daily group snapshot exceeds the unread usage record limit', { status: 502 });
+    const anchor = head.total ? normalize(head.items[0]) : null;
+    const result = pageSize => {
+      const rows = [...keys].map(([keyId, groups]) => [keyId, [...groups.values()]]);
+      return { account, keys: new Map(rows), state: { date, timezone, account, keys: rows, anchor, pageSize } };
+    };
+    if (head.total === priorCount) {
+      if (anchor && !sameRecord(anchor, saved.anchor)) throw invalid();
+      return result(saved?.pageSize || 500);
+    }
+    const rowBytes = Buffer.byteLength(JSON.stringify(head.items[0]));
+    let lastId = 0n, boundaryVerified = priorCount === 0, pageSize = Math.min(saved?.pageSize || 500, Math.max(1,
+      Math.floor((this.config.maxResponseBytes || 2 * 1024 * 1024) / (rowBytes * 2))));
+    const firstPage = priorCount ? Math.floor((priorCount - 1) / pageSize) + 1 : 1;
+    const consume = current => {
+      if (current.pageSize !== pageSize || current.total < head.total || !current.items.length) throw invalid();
+      for (const [index, raw] of current.items.entries()) {
+        const row = normalize(raw), rowId = BigInt(row.id);
+        if (rowId <= lastId || rowId > BigInt(anchor.id)) throw invalid();
+        lastId = rowId;
+        const position = (current.number - 1) * pageSize + index + 1;
+        if (position <= priorCount) {
+          if (position === priorCount) {
+            if (!sameRecord(row, saved.anchor)) throw invalid();
+            boundaryVerified = true;
+          } else if (rowId >= BigInt(saved.anchor.id)) throw invalid();
+          continue;
+        }
+        if (!boundaryVerified || account.requests >= head.total) throw invalid();
+        account.amount += row.amount; account.requests++;
+        if (!keys.has(row.keyId)) keys.set(row.keyId, new Map());
+        const groups = keys.get(row.keyId);
+        const group = groups.get(row.groupRef) || { groupRef: row.groupRef, groupName: row.groupName, amount: 0, requests: 0, currency: 'USD' };
+        group.groupName = row.groupName;
+        group.amount += row.amount; group.requests++;
+        groups.set(row.groupRef, group);
+        if (row.id === anchor.id) {
+          if (account.requests !== head.total || !sameRecord(row, anchor) || !Number.isFinite(account.amount)) throw invalid();
+          return true;
+        }
+      }
+      if (current.items.length < pageSize) throw invalid();
+      return false;
+    };
+    const first = await page(firstPage, pageSize, 'asc');
+    if (firstPage === 1) pageSize = first.pageSize;
+    if (consume(first)) return result(pageSize);
+    const lastPage = Math.ceil(head.total / pageSize);
+    for (let number = firstPage + 1; number <= lastPage; number += 3) {
+      const pages = await Promise.all(Array.from({ length: Math.min(3, lastPage - number + 1) },
+        (_, offset) => page(number + offset, pageSize, 'asc')));
+      for (const current of pages) if (consume(current)) return result(pageSize);
+    }
+    throw invalid();
+  }
+
   async getKeyDailyGroupUsage({ key, date, timezone }) {
     if (usesApiKey(this.connection) || !/^[1-9]\d*$/.test(String(key.remote_id))) {
       throw new AppError('CAPABILITY_UNSUPPORTED', 'Key group usage requires account credentials', { status: 409 });

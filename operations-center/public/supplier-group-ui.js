@@ -7,8 +7,8 @@ const SupplierGroupUi = (() => {
     const signed = value => value == null ? '—' : `${value > 0 ? '+' : ''}${money(value)}`;
     const pct = value => value == null ? '—' : h.formatPercent(value);
     const option = (value, text, selected) => `<option value="${e(value)}"${value === selected ? ' selected' : ''}>${e(text)}</option>`;
-    const labels = { comparable: '可比较', upstream_high: '上游偏高', upstream_above: '上游高于主站', upstream_missing: '上游数据缺失', site_incomplete: '主站数据不完整', unlinked_key: '有 Key 未关联', mapping_incomplete: '关联待核对', zero: '零消费', history_missing: '历史缺失', stale: '上次快照' };
-    const status = value => `<span class="supplier-group-status ${['upstream_high'].includes(value) ? 'bad' : ['upstream_missing', 'site_incomplete', 'unlinked_key', 'mapping_incomplete', 'history_missing', 'stale'].includes(value) ? 'warn' : ''}">${e(labels[value] || value)}</span>`;
+    const labels = { comparable: '可比较', upstream_high: '上游偏高', upstream_above: '上游高于主站', upstream_missing: '上游数据缺失', site_incomplete: '主站数据不完整', unlinked_key: '有 Key 未关联', mapping_incomplete: '关联待核对', history_unverified: '全天归属待核对', zero: '零消费', history_missing: '历史缺失', stale: '上次快照' };
+    const status = value => `<span class="supplier-group-status ${['upstream_high'].includes(value) ? 'bad' : ['upstream_missing', 'site_incomplete', 'unlinked_key', 'mapping_incomplete', 'history_unverified', 'history_missing', 'stale'].includes(value) ? 'warn' : ''}">${e(labels[value] || value)}</span>`;
     const link = (attr, value, text, label) => `<button type="button" class="accounting-link" ${attr}="${e(value)}"${label ? ` aria-label="${e(label)}" title="${e(label)}"` : ''}>${text}</button>`;
     const table = (headers, rows, cls = '') => `<div class="table-wrap"><table class="${cls}"><thead><tr>${headers.map(t => `<th>${t}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map(row => `<tr>${row.map((v, i) => `<td${headers[i].includes('CNY') || headers[i].includes('差额率') || headers[i] === '请求数' ? ' class="numeric"' : ''}>${v}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${headers.length}" class="empty-state">当前范围暂无记录</td></tr>`}</tbody></table></div>`;
     root.innerHTML = `<div class="supplier-group-toolbar">
@@ -16,7 +16,7 @@ const SupplierGroupUi = (() => {
       <div class="supplier-group-tools"><button type="button" class="icon-button" data-sg-view="mapping" aria-label="账号关联核对" title="账号关联核对" aria-pressed="false">${h.icon('list-checks')}<span data-sg-issue-count></span></button><button type="button" class="icon-button" data-sg-settings aria-label="简称与差额提醒" title="简称与差额提醒">${h.icon('sliders-horizontal')}</button></div><span class="muted" data-sg-meta></span></div>
       <p data-sg-warning class="accounting-notice" role="status" hidden></p><section id="sg-main-panel" aria-label="供应商分组消费" data-sg-content></section>
       <div class="accounting-pager"><span data-sg-page></span><div><button type="button" class="icon-button" data-sg-step="-1" aria-label="上一页" title="上一页">${h.icon('chevron-left')}</button><button type="button" class="icon-button" data-sg-step="1" aria-label="下一页" title="下一页">${h.icon('chevron-right')}</button></div></div>
-      <details class="accounting-rules"><summary>消费统计口径</summary><p>主站按账号的实际请求统计消费，跨主站分组累加，再汇总到对应上游分组。同一上游 Key 对应的多个账号分别列出，上游消费只计一次。排除 ID 1，保留停用或已删除账号的历史消费。</p><p>仅展示主站有关联账号的上游分组，零消费账号也保留。名称已定位供应商但分组未核验的账号单列待核对。供应商合计只包含所展示范围的全部分页，存在待核对账号时上游合计和差额保持未知。差额 = 主站合计 − 上游分组消费，未扣除抽奖和其他费用。</p><p>资金时区每日 01:00 首次归档前一天，今日实时。历史只读归档，没有归档时保持缺失，不按当前账号关系倒推历史。</p></details>
+      <details class="accounting-rules"><summary>消费统计口径</summary><p>主站按账号的实际请求统计消费，跨主站分组累加，再汇总到对应上游分组。同一上游 Key 对应的多个账号分别列出，上游消费只计一次。排除 ID 1，保留停用或已删除账号的历史消费。</p><p>仅展示主站有关联账号的上游分组，零消费账号也保留。名称已定位供应商但分组未核验的账号单列待核对。当前分组已唯一定位、全天身份历史未核验时，仍展示账号和消费，标记全天归属待核对，不核定差额。供应商合计包含所展示范围的全部分页；分组未定位时上游合计和差额保持未知。差额 = 主站合计 − 上游分组消费，未扣除抽奖和其他费用。</p><p>资金时区每日 01:00 首次归档前一天，今日实时。历史只读归档，没有归档时保持缺失，不按当前账号关系倒推历史。</p></details>
       <dialog class="accounting-dialog" data-sg-dialog aria-labelledby="sg-dialog-title"><header class="accounting-drawer-header"><h2 id="sg-dialog-title"></h2><button type="button" class="icon-button" data-sg-close aria-label="关闭" title="关闭">${h.icon('x')}</button></header><div class="accounting-drawer-body" data-sg-dialog-body></div></dialog>`;
     function render() {
       const r = state.report;
@@ -64,7 +64,7 @@ const SupplierGroupUi = (() => {
       return `<div class="supplier-group-heading"><button type="button" class="icon-button" data-sg-view="groups" aria-label="返回分组列表" title="返回分组列表">${h.icon('arrow-left')}</button><h2>账号关联核对</h2></div><div class="supplier-group-filter"><label class="supplier-group-check"><input type="checkbox" data-sg-issues${state.issuesOnly ? ' checked' : ''}>仅待核对</label></div>` +
         table(['主站账号', '供应商候选', 'Key / 上游分组', '主站消费 CNY', '状态', '依据'], (r.mappings || []).map(a => [
           `<strong>${e(a.name)}</strong><small>#${e(a.id)}${a.deleted ? ' · 已删除' : a.status !== 'active' ? ` · ${e(a.status || '状态未知')}` : ''}</small>`, a.candidates.map(p => e(p.name)).join('<br>') || '未定位',
-          `${e(a.maskedKey || '未核验')}<small>${e(a.groupName || '待核对')}</small>`, e(r.siteComplete ? money(a.main) : '—'), a.matched ? '已关联' : e(a.reason), link('data-sg-proof', a.id, '查看')]), 'supplier-group-account-table');
+          `${e(a.maskedKey || '未核验')}<small>${e(a.groupName || '待核对')}</small>`, e(r.siteComplete ? money(a.main) : '—'), a.matched ? a.historyVerified === false ? '当前已关联，全天归属待核对' : '已关联' : e(a.reason), link('data-sg-proof', a.id, '查看')]), 'supplier-group-account-table');
     }
     function renderDetail(g) {
       const tabs = [['accounts', '账号消费'], ['local', '按主站分组'], ['daily', '每日对比']];

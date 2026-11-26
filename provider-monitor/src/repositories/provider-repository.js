@@ -241,8 +241,15 @@ class ProviderRepository {
     return decryptJson(row.payload, this.config.secret);
   }
 
-  #credentialSnapshot(connection) {
-    const credentials = this.getCredentials(connection);
+  #credentialSnapshot(connection, cache) {
+    const row = this.db.prepare('SELECT payload FROM encrypted_credentials WHERE id = ?').get(connection.credential_id);
+    if (!row) throw new AppError('CREDENTIAL_NOT_FOUND', 'Provider credentials were not found', { status: 404 });
+    // Keep one decrypted payload per active context; every check still reads the current ciphertext.
+    if (cache.payload !== row.payload) {
+      cache.credentials = this.getCredentials(connection);
+      cache.payload = row.payload;
+    }
+    const credentials = structuredClone(cache.credentials);
     const key = JSON.stringify(credentials);
     const previous = this.credentialStates.get(connection.id);
     // Only our completed automatic rotations may be adopted by an existing read.
@@ -255,7 +262,8 @@ class ProviderRepository {
     const scope = (row) => JSON.stringify([row.adapter_type, row.base_url, row.auth_mode, row.credential_id,
       row.remote_user_id, row.account_dedupe_key, row.type_config_json]);
     const expectedScope = scope(connection);
-    const initial = this.#credentialSnapshot(connection);
+    const cache = {};
+    const initial = this.#credentialSnapshot(connection, cache);
     let credentials = initial.credentials;
     const currentConnection = () => {
       const current = this.get(connection.id, { forAdapter: true });
@@ -266,7 +274,7 @@ class ProviderRepository {
     };
     const readCurrent = () => {
       const current = currentConnection();
-      const snapshot = this.#credentialSnapshot(current);
+      const snapshot = this.#credentialSnapshot(current, cache);
       if (snapshot.epoch !== initial.epoch) {
         throw new AppError('CONFIG_CHANGED', 'Provider credentials changed during upstream read', { status: 409 });
       }

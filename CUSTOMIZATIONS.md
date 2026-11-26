@@ -1,5 +1,20 @@
 # 个性化功能维护台账
 
+## 2026-11-26：分离当前分组与全天归属、减少解密并统一今日统计截点
+
+用户要求继续修复此前只读诊断中的三项故障。本轮仅在本地改造、测试；使用服务器现有会话执行只读 GET 核验真实接口，不写生产数据库、配置或凭据，不部署、不提交 / 推送 GitHub，不操作用户余额。保留既有维护记录、独立 `provider-monitor/tests/daily-cost.test.js` 修改及未跟踪审计文件。
+
+- `operations-center/src/services/supplier-group-matcher.js`、`supplier-group-service.js`：名称与完整 Key 唯一核验即可展示对应账号及当前上游分组，独立返回全天 `historyVerified`；既有 changed 标记保持，未知全天身份的账号消费按当前关联只展示一次，受影响组 / 供应商不核定差额，身份变化不能使其他可能受影响组误计差额。核对列表同时包含未关联和全天归属待核对账号，原历史快照仍只读。
+- `operations-center/public/supplier-group-ui.js`、`public/index.html`：显示“全天归属待核对”及当前已关联状态，保留账号第一列、上游分组第二列与未知差额，更新脚本资源版本。
+- `provider-monitor/src/repositories/provider-repository.js`：每个活动上下文只缓存一份密文对应的解密结果，每次核验仍读取当前配置及密文，返回独立凭据副本；外部替换 / 删除使在途读取失败，自动刷新仍走原 epoch / 并发协调，不新增进程级明文缓存。
+- `provider-monitor/src/adapters/sub2api.js`、`services/group-daily-cost-service.js`：今日 Sub2API 使用完整用量明细固定最新记录 ID / 当时条数，账号、Key 与实际分组来自同一批记录；新增请求留到下次刷新，不再将不同时间的实时总额强行比较。已核验截点保存到原快照 JSON，后续验证边界后仅累加新增，重启可继续，不重新扫描全天或重复累计。严格校验来源、排序、分页、原边界 / 终点锚点、条数、金额 / 日期 / 账号和目录覆盖；每次最多 20,000 条新增明细、按原响应体预算每页最多 500 条，后续最多三页并发；首次无截点时适用全天上限，已有截点的日累计可超过此值。原超时、迟到 / 跨日 / 配置失效、历史只补未知及已知值冻结保持，不因同一批明细的数学加总跳过目录覆盖检查。
+- `operations-center/tests/supplier-groups.test.js`、`scripts/supplier-group-browser-check.cjs`、`provider-monitor/tests/group-daily-cost.test.js`、`balance-monitor.test.js`：覆盖已有 changed=1 仍展示唯一当前分组、账号跨组累加 / 历史差额未知、凭据只解密一次但外部变更和刷新保护保持、实时追加记录的共同截点、缺页 / 重复 / 锚点变更 / 无效字段 / 上限、响应体预算和三页并发，以及 42 个目录 Key 仅三次 HTTP 的完整采集。增加截点序列化 / 恢复、无新增头部复用、旧边界删除拒绝 / 原快照不被修改、日累计超过 20,000 条仍只读新增和 SQLite 原行覆盖防重回归。
+- `operations-center/docs/supplier-group-costs.md`、`docs/supplier-group-link-audit-20261126.md`、`provider-monitor/README.md`、本台账：记录新状态、今日统计截点、接口要求与上限，以及真实只读验证。需更新运营中心及供应商监控，无新增配置、依赖或 schema；此前未归档历史不能按当前关系重建。
+
+验证：Provider Monitor 完整 **379 项**（0 失败 / 取消 / 跳过，约 74 秒），运营中心分组 / 成本界面 **33 项**、`npm run check`、分组桌面 / 宽屏 / 390px / 320px / 深色偏好 **5 组**、原核算 **4 组**浏览器及最终 diff --check 通过；已复核无 Toast 遮挡的桌面 / 窄屏截图。截图在会话可视化目录 `supplier-group-fixes`，本机隔离预览为 `http://127.0.0.1:19885/preview`（PID 72264），不连接生产。真实只读适配器验收：tuokeapi 4,013 条 / 1,270ms，增量 2 请求 / 155ms 得到新增 1 条；lingsu 85 条 / 164ms、apiclub 96 条 / 279ms，无新增时各 1 请求 / 约 80ms 复用截点。一次共用两轮六秒预算的 tuokeapi 探测超时，分开验证单次预算后均完成；这些是适配器样本，不代表整个页面或稳定 SLA。详见审计文档。收尾两个实际 `/healthz` 均 200、仍为 f9c424b、重启计数 0；没有替换服务器文件或写生产快照，SSH 均关闭。独立 `daily-cost.test.js` hash 仍为 `0fa91265bd5c576f8ce53debb11c399d3768312d`，原维护和未跟踪文件保留。连接脚本一次 sudo 输入错误曾回显登录密码，已修正并告知用户更换，未写入文件或仓库。未提交 GitHub、构建镜像或部署。
+
+用户随后明确要求提交 GitHub。本次仅提交上述供应商分组展示、凭据解密和固定截点增量采集修复及相关测试 / 文档，推送 `origin/main`；其他维护章节、独立 Provider Monitor 测试及未跟踪审计文档保留本地。按最终完整提交 SHA 核对 GitHub 测试和镜像工作流；本次不连接或部署服务器。
+
 ## 2026-11-26：修复供应商账号缺失并改为账号优先列表
 
 用户要求连接服务器分析关联账号缺失，并将供应商下列表第一列改为主站账号、第二列改为上游分组，仅保留主站在用分组。本轮只读诊断 216.227.169.198，核对两个服务实际 revision 为 `5371db2c86be725a696dd9b547ec7d9128ec4ac0`。真实目录存在完整指纹，但 apiclub / lingsu 的分组采集在 6 秒截止时仍未完成，旧代码丢弃目录；另有泛用 updated_at 引起身份稳定性否决。详见新增 `operations-center/docs/supplier-group-link-audit-20261126.md`，没有保存密码、完整 Key 或 Token，没有修改生产配置、数据库、余额或容器，未提交 GitHub 或部署。
@@ -15,6 +30,8 @@
 验证：运营中心供应商分组 **18 项**、Provider Monitor 分组 **12 项**专项通过；运营中心 `npm run check` 及最终前端语法检查、分组桌面 / 宽屏 / 390px / 320px / 深色偏好 **5 组**浏览器、原消费毛利 / 现金收支 **4 组**浏览器回归及 `git diff --check` 通过，未运行无关全量测试。截图保留于本会话可视化目录 `supplier-accounts-first`，已复核桌面及窄屏；本机隔离预览 `http://127.0.0.1:19884/preview`（PID 69752），使用虚构数据，不请求生产。收尾只读确认两组件健康 HTTP 200、重启计数均 0、revision 保持原值，SSH 已关闭。原 Provider Monitor 独立测试工作文件 hash 仍为 `0fa91265bd5c576f8ce53debb11c399d3768312d`，其他未提交文档及维护章节保留。未提交 GitHub 或部署。
 
 用户随后明确要求提交 GitHub。本次仅提交上述供应商账号关联、账号优先列表、相关测试 / 文档和本节台账，推送 `origin/main`；其他维护章节、Provider Monitor 独立测试与未跟踪审计文档保留本地。推送前核对远端同步与暂存范围，按最终完整提交 SHA 核对 GitHub 自动测试和镜像构建状态，不连接或部署服务器。
+
+用户再次要求连接服务器分析供应商归属已显示、上游分组仍缺失的问题。北京时间 01:12 至 01:17 只读复查，确认两组件均已运行 `f9c424b6c40e60db27fdc2f023103792ebc8b49d`。更新 `operations-center/docs/supplier-group-link-audit-20261126.md`：tuokeapi #360 / #368 已唯一匹配分组 26、lingsu #356 已匹配分组 20，却被既有 `changed=1` / `stable=false` 拦截；分组展示与历史消费可信度尚未解耦。另复现 lingsu 102 次重复凭据解密耗 4,703ms、导致 6 秒超时；tuokeapi 分组 / 汇总两次实时查询间新增 1 次请求，触发严格相等校验并将有效消费置为未知。单独 GET 均能返回兼容的分组及消费。未改产品源码、配置、测试、服务器数据或容器，仅补诊断文档和本台账；未提交或部署，不因只读诊断重跑产品测试。收尾健康均 HTTP 200、重启计数 0，SSH 已关闭，其他会话改动保留。
 
 ## 2026-11-25：供应商分组消费改为简版账号对照表
 

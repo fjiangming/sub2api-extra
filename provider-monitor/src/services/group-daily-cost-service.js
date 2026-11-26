@@ -137,7 +137,10 @@ class GroupDailyCostService {
       const adapter = createAdapter(connection.adapter_type, context);
       const catalog = previous?._catalog || this.catalog(info.id);
       if (catalog.length > 500 || !catalog.length) throw new Error('incomplete catalog');
-      const account = previous?._account || await budget.run(() => adapter.getDailyUsageSummary({ date: query.from,
+      const snapshot = !archive && adapter.getDailyGroupUsageSnapshot
+        ? await budget.run(() => adapter.getDailyGroupUsageSnapshot({ date: query.from, timezone: query.timezone,
+          fromAt: period.from, toAt: period.to, previous: cached?._configKey === initialConfigKey ? cached._usageSnapshot : null })) : null;
+      const account = snapshot?.account || previous?._account || await budget.run(() => adapter.getDailyUsageSummary({ date: query.from,
         timezone: query.timezone, fromAt: period.from, toAt: period.to }));
       if (account.scope !== 'account' || !account.subjectId || typeof account.amount !== 'number' || !Number.isFinite(account.amount) ||
           account.amount < 0 || !/^[A-Z][A-Z0-9_-]{0,11}$/.test(account.currency) ||
@@ -163,9 +166,10 @@ class GroupDailyCostService {
               }));
               continue;
             }
-            if (!adapter.getKeyDailyGroupUsage) throw new Error('unsupported');
-            const rows = await budget.run(() => adapter.getKeyDailyGroupUsage({ key, date: query.from,
-              timezone: query.timezone, fromAt: period.from, toAt: period.to }));
+            if (!snapshot && !adapter.getKeyDailyGroupUsage) throw new Error('unsupported');
+            const rows = snapshot ? [...(snapshot.keys.get(String(key.remote_id)) || [])]
+              : await budget.run(() => adapter.getKeyDailyGroupUsage({ key, date: query.from,
+                timezone: query.timezone, fromAt: period.from, toAt: period.to }));
             if (!rows.length) {
               const observed = cached?.keys.filter(k => k.id === key.id && k.identity === base.identity && k.upstreamAmount !== null);
               // Zero usage has no log group; historical membership requires an observation from that day.
@@ -203,7 +207,7 @@ class GroupDailyCostService {
           new URL(connection.base_url).origin, String(account.subjectId)])).digest('hex'),
         keys, reasons: covered ? [] : ['Key 消费合计未覆盖上游账号日汇总，不认定分组消费完整'],
         computedAt: this.now().toISOString(), _configKey: this.configKey(this.providers.get(info.id, { forAdapter: true })),
-        _archived: archive, _catalog: catalog, _account: account, _settingsKey: digest(settings) };
+        _archived: archive, _catalog: catalog, _account: account, _usageSnapshot: snapshot?.state || null, _settingsKey: digest(settings) };
       this.db.prepare(`INSERT INTO provider_group_daily_costs VALUES(?,?,?,?,?) ON CONFLICT(provider_id,date,timezone)
         DO UPDATE SET payload=excluded.payload,fetched_at=excluded.fetched_at`)
         .run(info.id, query.from, query.timezone, JSON.stringify(result), result.computedAt);

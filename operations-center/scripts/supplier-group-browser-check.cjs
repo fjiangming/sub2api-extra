@@ -107,6 +107,7 @@ async function run() {
         await layout(page); await page.screenshot({ path: path.join(directory, `${spec.name}-settings.png`), fullPage: true });
         await page.getByRole('button', { name: '保存设置', exact: true }).click();
         await until(page, () => !document.querySelector('[data-sg-dialog]').open && document.querySelectorAll('.supplier-group-account-table tbody tr').length === 12);
+        await until(page, () => !document.querySelector('.toast'));
         assert.deepEqual(fixture.store.settings(fixture.service.scope()).aliases.ling, ['灵枢专线', 'LS']);
         assert.deepEqual(fixture.store.settings(fixture.service.scope()).aliases.nova, ['NR']);
         await page.getByRole('button', { name: '返回分组列表', exact: true }).click();
@@ -143,6 +144,32 @@ async function run() {
           await page.screenshot({ path: path.join(directory, `${spec.name}-missing-upstream.png`), fullPage: true });
         } finally {
           fixture.items[0].keys = originalKeys;
+          await fixture.service.collect(fixture.date);
+        }
+
+        const scope = fixture.service.scope();
+        try {
+          fixture.store.db.prepare("UPDATE sg_observations SET changed=1 WHERE scope=? AND date=? AND account_id IN ('11','12')").run(scope, fixture.date);
+          const collected = await fixture.service.collect(fixture.date);
+          const group = collected.groups.find(g => g.groupRef === 'claude');
+          await page.locator('[data-sg-date]').dispatchEvent('change');
+          await until(page, () => document.querySelector('[data-sg-content]')?.textContent.includes('全天归属待核对'));
+          const row = page.locator(`[data-sg-row="${group.id}"]`);
+          assert.equal(await row.locator('.supplier-group-account').count(), 3);
+          assert.match(await row.locator('.supplier-group-name').innerText(), /Claude 标准/);
+          assert.match(await row.locator('.supplier-group-main').innerText(), /35$/);
+          assert.match(await row.locator('.supplier-group-upstream').innerText(), /15$/);
+          assert.match(await row.locator('.supplier-group-diff').innerText(), /—$/);
+          await layout(page); await page.evaluate(() => scrollTo(0, 0));
+          await page.screenshot({ path: path.join(directory, `${spec.name}-identity-unverified.png`), fullPage: true });
+          await page.getByRole('button', { name: '账号关联核对', exact: true }).click();
+          await until(page, () => document.querySelector('.supplier-group-account-table')?.textContent.includes('当前已关联，全天归属待核对'));
+          await page.locator('[data-sg-issues]').check();
+          await until(page, () => document.querySelectorAll('.supplier-group-account-table tbody tr').length === 5);
+          await page.getByRole('button', { name: '返回分组列表', exact: true }).click();
+          await until(page, () => Boolean(document.querySelector('.supplier-group-table')));
+        } finally {
+          fixture.store.db.prepare("UPDATE sg_observations SET changed=0 WHERE scope=? AND date=? AND account_id IN ('11','12')").run(scope, fixture.date);
           await fixture.service.collect(fixture.date);
         }
 

@@ -31,6 +31,20 @@ function fixture(t, { count = 1, ...options } = {}) {
     if (state.unavailable) throw new Error('synthetic unavailable');
     let data;
     if (url.pathname === '/api/v1/user/profile') data = { id: 7, username: 'synthetic' };
+    else if (url.pathname === '/api/v1/usage') {
+      if (state.groupsError) throw new Error('synthetic usage endpoint missing');
+      const records = state.records || state.groups.flatMap(group => Array.from({ length: group.requests }, () => ({
+        group_id: group.group_id, group: { id: group.group_id, name: group.group_name },
+        actual_cost: group.actual_cost === null ? null : group.actual_cost / group.requests
+      })));
+      const known = records.reduce((sum, row) => sum + (row.actual_cost || 0), 0);
+      if (!state.records && state.amount > known) records.push({ api_key_id: 999, group_id: 9, actual_cost: state.amount - known });
+      const sorted = records.map((row, i) => ({ id: i + 1, user_id: 7, api_key_id: 123,
+        created_at: '2026-11-25T00:00:00Z', ...row })).sort((a, b) => a.id - b.id);
+      if (url.searchParams.get('sort_order') === 'desc') sorted.reverse();
+      const page = Number(url.searchParams.get('page')), pageSize = Number(url.searchParams.get('page_size'));
+      data = { items: sorted.slice((page - 1) * pageSize, page * pageSize), total: sorted.length, page, page_size: pageSize };
+    }
     else if (url.pathname.includes('snapshot-v2')) {
       if (state.groupsError) throw new Error('synthetic group endpoint missing'); data = { groups: state.groups };
     } else if (url.pathname.endsWith('/usage/stats')) data = { total_actual_cost: state.amount, total_requests: state.requests };
@@ -46,10 +60,11 @@ test('daily upstream group reads use actual historical groups and verified accou
   const f = fixture(t), report = await f.service.report(query), p = report.items[0];
   assert.equal(p.complete, true); assert.equal(p.keys[0].cost, 6); assert.equal(p.keys[0].groupRef, '9');
   assert.equal(p.keys[0].identity, costKeyIdentity('synthetic-group-key-001122334455'));
-  const group = f.calls.find(c => c.url.pathname.includes('snapshot-v2'));
-  assert.equal(group.url.searchParams.get('api_key_id'), '123'); assert.equal(group.url.searchParams.get('timezone'), 'Asia/Shanghai');
+  const group = f.calls.find(c => c.url.pathname === '/api/v1/usage');
+  assert.equal(group.url.searchParams.get('sort_by'), 'id'); assert.equal(group.url.searchParams.get('timezone'), 'Asia/Shanghai');
+  assert.equal(f.calls.length, 3); assert(!f.calls.some(c => c.url.pathname.includes('/usage/stats')));
   assert(f.calls.every(c => c.options.retries === 0 && c.options.timeoutMs <= 6000));
-  assert.doesNotMatch(JSON.stringify(report), /_configKey|_catalog|_account|synthetic-access|subjectId/);
+  assert.doesNotMatch(JSON.stringify(report), /_configKey|_catalog|_account|_usageSnapshot|synthetic-access|subjectId/);
   const calls = f.calls.length; assert.equal((await f.service.report(query)).items[0].cached, true); assert.equal(f.calls.length, calls);
 });
 
@@ -74,12 +89,13 @@ test('failed daily reads retain today catalog identities with unknown costs with
 
 test('invalid/duplicate group totals fail atomically and real empty days remain confirmed zero', async t => {
   const f = fixture(t);
-  f.states[0].groups.push({ group_id: 10, group_name: 'invalid', actual_cost: null, requests: 0 });
+  f.states[0].groups.push({ group_id: 10, group_name: 'invalid', actual_cost: null, requests: 1 });
   let p = (await f.service.report(query)).items[0]; assert.equal(p.complete, false); assert.equal(p.keys.length, 1); assert.equal(p.keys[0].cost, null);
   f.setClock('2026-11-25T04:02:00Z'); f.states[0].amount = 0; f.states[0].requests = 0; f.states[0].groups = [];
   p = (await f.service.report(query)).items[0]; assert.equal(p.complete, true); assert.equal(p.keys[0].cost, 0); assert.equal(p.keys[0].groupRef, '9');
-  f.setClock('2026-11-25T04:04:00Z'); f.states[0].groups = [{ group_id: 9, actual_cost: 0, requests: 0 }, { group_id: 9, actual_cost: 0, requests: 0 }];
-  p = (await f.service.report(query)).items[0]; assert.equal(p.complete, false); assert.equal(p.keys[0].cost, null);
+  f.setClock('2026-11-25T04:04:00Z'); f.states[0].records = [
+    { id: 1, group_id: 9, actual_cost: 0 }, { id: 1, group_id: 9, actual_cost: 0 }];
+  p = (await f.service.report(query)).items[0]; assert.equal(p.complete, false); assert.equal(p.stale, true); assert.equal(p.keys[0].cost, 0);
 });
 
 test('group sums must cover the whole upstream account and duplicated supplier accounts are blocked', async t => {
@@ -135,11 +151,11 @@ test('report deadlines include queued providers and late completions cannot save
 
 test('provider configuration and finance day changes invalidate in-flight writes', async t => {
   const f = fixture(t);
-  f.states[0].before = url => { if (url.pathname.includes('snapshot')) f.setClock('2026-11-27T04:00:00Z'); };
+  f.states[0].before = url => { if (url.pathname === '/api/v1/usage') f.setClock('2026-11-27T04:00:00Z'); };
   let r = await f.service.report(query); assert.equal(r.items[0].complete, false);
   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM provider_group_daily_costs').get().n, 0);
   f.setClock('2026-11-25T04:00:00Z'); f.states[0].before = url => {
-    if (url.pathname.includes('snapshot')) f.providers.update(f.states[0].provider.id, { enabled: false });
+    if (url.pathname === '/api/v1/usage') f.providers.update(f.states[0].provider.id, { enabled: false });
   };
   r = await f.service.report(query); assert.equal(r.items[0].complete, false);
   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM provider_group_daily_costs').get().n, 0);
@@ -154,6 +170,140 @@ function adapter(type, handler) {
 const day = { key: { remote_id: '123', name: 'shared-name' }, date: query.from, timezone: query.timezone,
   fromAt: '2026-11-24T16:00:00Z', toAt: '2026-11-25T16:00:00Z' };
 const log = (id, extra = {}) => ({ id, token_id: 123, type: 2, quota: 1000, created_at: Date.parse('2026-11-25T00:00:00Z') / 1000, group: 'historical', ...extra });
+
+const usageRow = (id, extra = {}) => ({ id, user_id: 7, api_key_id: 123, group_id: 9,
+  group: { id: 9, name: 'Historical group' }, actual_cost: 0.5, created_at: '2026-11-25T00:00:00Z', ...extra });
+function snapshotAdapter(records, { beforePage, afterPage, pageSizeLimit = 1000 } = {}) {
+  const calls = [];
+  const a = adapter('sub2api', async url => {
+    calls.push(url);
+    if (url.pathname === '/api/v1/user/profile') return { code: 0, data: { id: 7 } };
+    assert.equal(url.pathname, '/api/v1/usage');
+    assert.equal(url.searchParams.get('sort_by'), 'id');
+    await beforePage?.(url, records);
+    const page = Number(url.searchParams.get('page')), size = Math.min(pageSizeLimit, Number(url.searchParams.get('page_size')));
+    const sorted = [...records].sort((a, b) => a.id - b.id);
+    if (url.searchParams.get('sort_order') === 'desc') sorted.reverse();
+    const data = { total: sorted.length, page, page_size: size, items: sorted.slice((page - 1) * size, page * size) };
+    await afterPage?.(data, url);
+    return { code: 0, data };
+  });
+  return { a, calls };
+}
+
+test('Sub2API account, keys and groups share one fixed record boundary while live usage keeps increasing', async () => {
+  const records = Array.from({ length: 1001 }, (_, i) => usageRow(i + 1, { api_key_id: i % 2 ? 124 : 123 }));
+  const { a, calls } = snapshotAdapter(records, { pageSizeLimit: 500, beforePage(url, rows) {
+    if (url.searchParams.get('sort_order') === 'asc') rows.push(usageRow(rows.length + 1, { actual_cost: 500 }));
+  } });
+  const snapshot = await a.getDailyGroupUsageSnapshot(day);
+  assert.equal(snapshot.account.amount, 500.5); assert.equal(snapshot.account.requests, 1001);
+  assert.equal(snapshot.keys.get('123')[0].amount, 250.5);
+  assert.equal(snapshot.keys.get('124')[0].amount, 250);
+  assert.equal(calls.length, 5);
+  assert.deepEqual(calls.slice(2).map(url => url.searchParams.get('page_size')), ['500', '500', '500']);
+  assert(records.length > snapshot.account.requests);
+});
+
+test('Sub2API snapshots reject missing pages, ignored sorting, changing anchors, invalid costs and record limits', async () => {
+  const cases = [
+    (d, url) => { if (url.searchParams.get('sort_order') === 'asc') d.items.reverse(); },
+    (d, url) => { if (url.searchParams.get('sort_order') === 'asc') d.items.pop(); },
+    (d, url) => { if (url.searchParams.get('sort_order') === 'asc') d.items[1] = d.items[0]; },
+    (d, url) => { if (url.searchParams.get('sort_order') === 'asc') d.items[2] = { ...d.items[2], actual_cost: 12 }; },
+    d => { d.items[0] = { ...d.items[0], actual_cost: null }; },
+    d => { d.items[0] = { ...d.items[0], group_id: null }; },
+    d => { d.items[0] = { ...d.items[0], api_key_id: null }; },
+    d => { d.items[0] = { ...d.items[0], user_id: 8 }; },
+    d => { d.items[0] = { ...d.items[0], created_at: day.toAt }; },
+    d => { delete d.total; },
+    d => { d.page = 2; },
+    d => { d.page_size = 0; }
+  ];
+  for (const afterPage of cases) {
+    const { a } = snapshotAdapter([usageRow(1), usageRow(2), usageRow(3)], { afterPage });
+    await assert.rejects(a.getDailyGroupUsageSnapshot(day), { code: 'SCHEMA_MISMATCH' });
+  }
+  const { a, calls } = snapshotAdapter([usageRow(1)], { afterPage(d) { d.total = 20001; } });
+  await assert.rejects(a.getDailyGroupUsageSnapshot(day), { code: 'SOURCE_LIMIT' });
+  assert.equal(calls.length, 2);
+});
+
+test('Sub2API persists a verified cutoff for incremental refreshes and refuses deleted or changed boundaries', async () => {
+  const records = Array.from({ length: 1200 }, (_, i) => usageRow(i + 1));
+  const { a, calls } = snapshotAdapter(records);
+  const first = await a.getDailyGroupUsageSnapshot(day), saved = JSON.parse(JSON.stringify(first.state));
+  records.push(usageRow(1201, { actual_cost: 2 }));
+  const before = calls.length;
+  const next = await a.getDailyGroupUsageSnapshot({ ...day, previous: saved });
+  assert.equal(calls.length - before, 2);
+  assert.equal(calls.at(-1).searchParams.get('page'), '3');
+  assert.equal(next.account.requests, 1201); assert.equal(next.account.amount, 602);
+  assert.equal(next.keys.get('123')[0].amount, 602);
+  assert.equal(saved.account.requests, 1200); assert.equal(saved.account.amount, 600);
+  const count = calls.length;
+  assert.equal((await a.getDailyGroupUsageSnapshot({ ...day, previous: next.state })).account.amount, 602);
+  assert.equal(calls.length - count, 1);
+  records.shift(); records.push(usageRow(1202), usageRow(1203));
+  await assert.rejects(a.getDailyGroupUsageSnapshot({ ...day, previous: next.state }), { code: 'SCHEMA_MISMATCH' });
+  assert.equal(next.account.requests, 1201);
+  await assert.rejects(a.getDailyGroupUsageSnapshot({ ...day, previous: { ...saved, timezone: 'UTC' } }), { code: 'SCHEMA_MISMATCH' });
+});
+
+test('Sub2API incremental snapshots continue beyond the initial record limit without rereading the whole day', async () => {
+  const records = Array.from({ length: 20000 }, (_, i) => usageRow(i + 1));
+  const { a, calls } = snapshotAdapter(records);
+  const first = await a.getDailyGroupUsageSnapshot(day);
+  records.push(usageRow(20001));
+  const count = calls.length;
+  const next = await a.getDailyGroupUsageSnapshot({ ...day, previous: JSON.parse(JSON.stringify(first.state)) });
+  assert.equal(next.account.requests, 20001); assert.equal(next.account.amount, 10000.5);
+  assert.equal(calls.length - count, 3);
+  assert.deepEqual(calls.slice(-2).map(url => url.searchParams.get('page')), ['40', '41']);
+});
+
+test('Sub2API snapshot pages respect the configured response budget without exposing full log payloads', async () => {
+  const { a, calls } = snapshotAdapter([usageRow(1, { unused_payload: 'x'.repeat(80000) }), usageRow(2, { unused_payload: 'x'.repeat(80000) })]);
+  a.config.maxResponseBytes = 256000;
+  const snapshot = await a.getDailyGroupUsageSnapshot(day);
+  assert.equal(snapshot.account.requests, 2);
+  assert.equal(calls[2].searchParams.get('page_size'), '1');
+  assert(!JSON.stringify([...snapshot.keys]).includes('unused_payload'));
+});
+
+test('Sub2API snapshot pagination uses at most three concurrent reads and aggregates pages in order', async () => {
+  let active = 0, maximum = 0;
+  const { a } = snapshotAdapter(Array.from({ length: 10 }, (_, i) => usageRow(i + 1)), { pageSizeLimit: 2,
+    async beforePage(url) {
+      if (url.searchParams.get('sort_order') !== 'asc' || url.searchParams.get('page') === '1') return;
+      active++; maximum = Math.max(maximum, active);
+      await new Promise(resolve => setImmediate(resolve));
+    },
+    afterPage(data, url) { if (url.searchParams.get('sort_order') === 'asc' && data.page > 1) active--; }
+  });
+  const result = await a.getDailyGroupUsageSnapshot(day);
+  assert.equal(result.account.amount, 5); assert.equal(result.account.requests, 10);
+  assert.equal(maximum, 3); assert.equal(active, 0);
+});
+
+test('42 catalog keys use one bounded account snapshot without repeating requests or credential derivations', async t => {
+  const f = fixture(t), state = f.states[0];
+  for (let i = 1; i < 42; i++) f.db.prepare(`INSERT INTO remote_keys(id,connection_id,remote_id,name,status,primary_group_ref,metadata_json,first_seen_at,last_seen_at)
+    VALUES(?,?,?,'Additional key','active','9','{}','2026-01-01','2026-01-01')`).run(`additional-${i}`, state.provider.id, String(123 + i));
+  state.records = Array.from({ length: 42 }, (_, i) => usageRow(i + 1, { api_key_id: 123 + i, actual_cost: 1 }));
+  const derivation = t.mock.method(require('node:crypto'), 'scryptSync');
+  const result = (await f.service.report(query)).items[0];
+  assert.equal(result.complete, true); assert.equal(result.accountCovered, true);
+  assert.equal(result.keys.length, 42); assert.equal(result.keys.reduce((sum, k) => sum + k.cost, 0), 21);
+  assert.equal(f.calls.length, 3);
+  assert(derivation.mock.callCount() <= 5);
+  state.records.push(usageRow(43, { actual_cost: 2 }));
+  f.setClock('2026-11-25T04:02:00Z');
+  const next = (await f.service.report(query)).items[0];
+  assert.equal(next.complete, true); assert.equal(next.keys.reduce((sum, k) => sum + k.cost, 0), 22);
+  assert.equal(f.calls.length, 6);
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM provider_group_daily_costs').get().n, 1);
+});
 
 test('New API group logs verify exact token IDs, actual group, units, timestamps and complete pagination', async () => {
   const seen = [], a = adapter('new-api', url => {

@@ -145,7 +145,11 @@ test('missing detailed usage or native coverage stays unknown, including deleted
 test('day observations reject rotations but preserve previously observed historical identity', async t => {
   const f = await fixture(t); await f.service.collect(f.date);
   await f.database.query("UPDATE accounts SET credentials=$1::jsonb,updated_at='2026-11-25T03:00:00Z' WHERE id=11", [JSON.stringify({ api_key: f.secrets[2] })]);
-  let r = await f.service.collect(f.date); assert.equal(r.mappings.find(a => a.id === '11').matched, false);
+  let r = await f.service.collect(f.date); assert.equal(r.mappings.find(a => a.id === '11').matched, true);
+  assert.equal(r.mappings.find(a => a.id === '11').historyVerified, false);
+  assert.equal(r.mappings.find(a => a.id === '11').groupName, 'GPT 优选');
+  assert.equal(r.groups.find(g => g.groupRef === 'gpt').diff, null);
+  assert.equal(r.groups.find(g => g.groupRef === 'claude').diff, null);
   assert.match(r.mappings.find(a => a.id === '11').reason, /身份/);
   const previous = f.store.observe('other', f.date, [{ id: '1', identity: 'old', name: 'old', updatedAt: '2026-11-24T00:00:00Z' }], [],
     '2026-11-24T16:00:00Z', '2026-11-25T16:00:00Z');
@@ -164,7 +168,8 @@ test('unchanged observed credentials tolerate later account updates but actual i
   await f.database.exec("UPDATE accounts SET name='灵枢 API 新名称',updated_at='2026-11-25T03:01:00Z' WHERE id=11");
   report = await f.service.collect(f.date);
   const account = report.mappings.find(a => a.id === '11');
-  assert.equal(account.matched, false); assert.equal(account.providerId, 'ling');
+  assert.equal(account.matched, true); assert.equal(account.providerId, 'ling');
+  assert.equal(account.historyVerified, false);
   assert.match(account.reason, /身份/);
 });
 
@@ -186,6 +191,34 @@ test('name-identified accounts remain visible without upstream keys and keep cro
   const mapping = await f.service.getReport({ date: f.date, providerId: 'ling', view: 'mapping' });
   assert(mapping.mappings.every(a => a.providerId === 'ling' && !a.matched));
   assert(!JSON.stringify(report).includes(f.secrets[0]));
+});
+
+test('previously flagged identities retain a unique current group and all account costs without claiming daily comparability', async t => {
+  const f = await fixture(t);
+  await f.service.collect(f.date);
+  const scope = f.service.scope();
+  f.store.db.prepare("UPDATE sg_observations SET changed=1 WHERE scope=? AND date=? AND account_id IN ('11','12')").run(scope, f.date);
+  const collected = await f.service.collect(f.date);
+  const accounts = collected.mappings.filter(a => ['11', '12'].includes(a.id));
+  assert(accounts.every(a => a.matched && a.historyVerified === false && a.groupName === 'Claude 标准'));
+  const report = await f.service.getReport({ date: f.date, providerId: 'ling' });
+  const group = report.groups.find(g => g.groupRef === 'claude');
+  assert.equal(group.accountCount, 3); assert.equal(group.main, 35); assert.equal(group.upstream, 15);
+  assert.equal(group.status, 'history_unverified'); assert.equal(group.diff, null);
+  assert.equal(group.accounts.find(a => a.id === '11').main, 23);
+  assert.deepEqual(group.accounts.find(a => a.id === '11').localGroups.map(g => g.main), [20, 3]);
+  assert.match(group.accounts.find(a => a.id === '11').reason, /当前分组已唯一定位/);
+  assert.equal(report.providerSummaries[0].main, 47); assert.equal(report.providerSummaries[0].diff, null);
+  assert.deepEqual(report.pendingProviders[0].accounts.map(a => a.id), ['91']);
+  const issues = await f.service.getReport({ date: f.date, providerId: 'ling', view: 'mapping' });
+  assert.deepEqual(issues.mappings.map(a => a.id), ['11', '12', '91']);
+  assert.equal(f.store.db.prepare("SELECT changed FROM sg_observations WHERE scope=? AND date=? AND account_id='11'").get(scope, f.date).changed, 1);
+  f.controls.clock = new Date('2026-11-26T04:00:00Z');
+  const calls = f.controls.calls.length;
+  const history = await f.service.getReport({ date: f.date, providerId: 'ling' });
+  assert.equal(history.groups.find(g => g.id === group.id).diff, null);
+  assert.equal(f.controls.calls.length, calls);
+  assert(!JSON.stringify([report, issues]).includes(keyIdentity(f.secrets[0])));
 });
 
 test('unused upstream groups are excluded before totals and pagination while zero-use accounts stay', async t => {

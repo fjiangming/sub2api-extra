@@ -46,18 +46,25 @@ function buildGroupReport(upstream, source, settings, date, at) {
       candidates: candidates.map(p => ({ id: p.id, name: p.name })), main, requests: total(usage, 'requests'),
       localGroups: usage.map(row => ({ id: row.group_id || 'unknown', name: row.group_name || `分组 #${row.group_id || '未知'}`,
         main: total([row], 'amount'), requests: Number(row.requests) })),
-      matched: false, method: full.length ? '完整名称' : '简称包含' };
+      matched: false, historyVerified: account.stable === true, method: full.length ? '完整名称' : '简称包含' };
     if (candidates.length === 1) Object.assign(mapping, { providerId: candidates[0].id, providerName: candidates[0].name });
-    if (!account.stable) mapping.reason = '当日账号身份发生变化或缺少有效历史依据';
-    else if (!candidates.length) mapping.reason = '名称未匹配供应商';
+    if (!candidates.length) mapping.reason = '名称未匹配供应商';
     else if (!targets.length) mapping.reason = candidates.length > 1 ? '供应商候选不唯一，Key 未能核验' : '完整 Key 未匹配';
     else if (targets.length > 1) mapping.reason = 'Key 对应多个供应商或当日上游分组';
     else {
       const target = targets[0];
       Object.assign(mapping, { matched: true, providerId: target.provider.id, providerName: target.provider.name,
         groupId: target.group.id, groupName: target.group.name, keyId: target.key.id, maskedKey: target.key.maskedKey,
-        reason: '名称与完整 Key 指纹交叉核验唯一' });
+        reason: account.stable ? '名称与完整 Key 指纹交叉核验唯一'
+          : '当前分组已唯一定位；当日账号身份发生变化或缺少有效历史依据，全天消费归属待核对' });
       target.key.accounts.push(mapping);
+      if (!account.stable) {
+        target.key.blocked = true;
+        target.group.reasons.push('已展示当前关联账号的全天消费；账号身份历史未核验，差额暂不核定');
+        if (usage.length) for (const group of groups.values()) {
+          if (candidates.some(p => p.id === group.providerId)) group.mappingBlocked = true;
+        }
+      }
     }
     if (!mapping.matched) {
       const possible = keyTargets.get(account.identity) || [];
@@ -80,6 +87,7 @@ function buildGroupReport(upstream, source, settings, date, at) {
     group.requests = total(accounts, 'requests');
     group.comparable = source.complete && group.upstreamComplete && !group.mappingBlocked && group.keys.every(k => k.accounts.length > 0 && !k.blocked);
     if (group.mappingBlocked || group.keys.some(k => k.blocked)) group.reasons.push('存在可能属于该分组的待核对账号，主站金额仅为已关联小计');
+    group.reasons = unique(group.reasons);
     group.diff = group.comparable ? new Decimal(group.main).minus(group.upstream).toDecimalPlaces(8).toNumber() : null;
     group.rate = group.diff !== null && group.main > 0 ? new Decimal(group.diff).div(group.main).times(100).toDecimalPlaces(4).toNumber() : null;
   }
