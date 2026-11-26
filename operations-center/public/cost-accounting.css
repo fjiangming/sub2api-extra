@@ -115,6 +115,65 @@
 .accounting-search label { min-width: 0; max-width: 100%; }
 .accounting-link { background: transparent; border: 0; padding: 4px 0; color: var(--green); text-align: left; }
 .cost-provider-refresh { color: var(--green); }
+.cost-provider-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cost-provider-actions .button { padding: 6px 9px; min-height: 34px; white-space: nowrap; }
+.accounting-dialog.cost-provider-group-dialog { width: min(920px, 100%); }
+.cost-provider-group-dialog .accounting-drawer-header h2 { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.cost-provider-group-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--muted); font-size: 12px; margin-bottom: 16px; }
+.cost-provider-group-totals { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 0 0 24px; }
+.cost-provider-group-totals dt { font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+.cost-provider-group-totals dd { font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; margin: 0; overflow-wrap: anywhere; }
+.cost-provider-group-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; margin-bottom: 12px; }
+.accounting-drawer-body .cost-provider-group-heading h3 { margin: 0; }
+.cost-provider-group-heading small { color: var(--muted); font-size: 12px; }
+.cost-provider-group-table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.cost-provider-group-table col:nth-child(1) { width: 39%; }
+.cost-provider-group-table col:nth-child(2) { width: 23%; }
+.cost-provider-group-table col:nth-child(3),.cost-provider-group-table col:nth-child(4) { width: 19%; }
+.cost-provider-group-table th { position: static; white-space: normal; font-size: 12px; font-weight: 500; background: var(--surface-subtle); color: var(--muted); }
+.cost-provider-group-table td,.cost-provider-group-table th { padding: 13px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.cost-provider-group-table .numeric { font-variant-numeric: tabular-nums; }
+.cost-provider-group-table tfoot td,.cost-provider-group-table tfoot th { background: var(--surface-subtle); color: var(--text); font-weight: 600; border-bottom: 0; }
+.accounting-drawer-body .cost-provider-group-status { display: inline-block; color: var(--amber); background: var(--amber-soft); padding: 3px 6px; border-radius: 3px; }
+.cost-provider-group-dialog .supplier-group-account-splits > small { color: var(--muted); font-size: 12px; }
+.cost-provider-group-dialog .supplier-group-split { min-width: 0; }
+.cost-provider-group-dialog .supplier-group-split span { overflow-wrap: anywhere; }
+.cost-provider-group-dialog .supplier-group-split span:last-child { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.cost-provider-pending { border-top: 1px solid var(--line); padding-top: 4px; margin-top: 20px; }
+.cost-provider-account-list { display: grid; gap: 0; }
+.cost-provider-account-list .supplier-group-account { padding: 13px 0; border-bottom: 1px solid var(--line); }
+.cost-provider-mobile-label { display: none; }
+@media(max-width:680px) {
+  .cost-provider-daily-list table,.cost-provider-daily-list tbody { display: block; width: 100%; }
+  .cost-provider-daily-list thead { display: none; }
+  .cost-provider-daily-list tbody > tr { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px 12px; padding: 14px 0; border-top: 1px solid var(--line); }
+  .cost-provider-daily-list td { display: block; border: 0; padding: 0; overflow-wrap: anywhere; }
+  .cost-provider-daily-list td:nth-child(2) { text-align: right; }
+  .cost-provider-daily-list td:nth-child(3) { font-size: 12px; align-self: center; }
+  .cost-provider-daily-list td:nth-child(4) { justify-self: end; }
+  .cost-provider-actions { flex-wrap: nowrap; gap: 6px; }
+  .cost-provider-group-dialog .accounting-drawer-header { gap: 8px; padding: 14px; }
+  .cost-provider-group-dialog .accounting-drawer-body { padding: 16px 14px; }
+  .cost-provider-group-dialog .accounting-drawer-header h2 { font-size: 16px; }
+  .cost-provider-group-table,.cost-provider-group-table tbody,.cost-provider-group-table tfoot { display: block; width: 100%; }
+  .cost-provider-group-table colgroup,.cost-provider-group-table thead { display: none; }
+  .cost-provider-group-table tbody > tr { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-areas: 'group group' 'accounts accounts' 'main upstream'; gap: 12px 8px; padding: 16px 0; border-top: 1px solid var(--line); }
+  .cost-provider-group-table td,.cost-provider-group-table th { display: block; border: 0; padding: 0; }
+  .cost-provider-group-table tbody td:nth-child(1) { grid-area: accounts; }
+  .cost-provider-group-table tbody td:nth-child(2) { grid-area: group; }
+  .cost-provider-group-table tbody td:nth-child(3) { grid-area: main; }
+  .cost-provider-group-table tbody td:nth-child(4) { grid-area: upstream; }
+  .cost-provider-group-table .numeric { text-align: left; }
+  .cost-provider-group-table tfoot > tr { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); padding: 13px 10px; gap: 10px 8px; background: var(--surface-subtle); }
+  .cost-provider-group-table tfoot th { grid-column: 1 / -1; }
+  .cost-provider-mobile-label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 11px; font-weight: 400; }
+  .cost-provider-group-dialog .supplier-group-account summary { min-height: 38px; align-items: center; }
+  .cost-provider-group-dialog .supplier-group-account summary > svg { margin-top: 0; }
+}
+@media(pointer:coarse) {
+  .cost-provider-actions .icon-button,.cost-provider-actions .button { min-width: 44px; min-height: 44px; }
+  .cost-provider-group-dialog .supplier-group-account summary { min-height: 44px; }
+}
 .cost-provider-refresh.is-loading svg { animation: cost-provider-refresh-spin 800ms linear infinite; }
 @keyframes cost-provider-refresh-spin { to { transform: rotate(360deg); } }
 .accounting-rules { margin-top: 20px; padding: 14px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }

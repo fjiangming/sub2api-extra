@@ -6,7 +6,11 @@ const { startPreview: accountingPreview } = require('./accounting-preview.cjs');
 async function startPreview({ port = 0 } = {}) {
   const fixture = await supplierGroupFixture({ date: DateTime.now().setZone('Asia/Shanghai').toISODate(), history: true, timeoutMs: 10000 });
   try {
-    const preview = await accountingPreview({ port, supplierGroups: fixture.service });
+    const preview = await accountingPreview({ port, supplierGroups: fixture.service, dailyProviders: fixture.items.map(provider => ({
+      id: provider.id, name: provider.name, complete: provider.complete,
+      cost: provider.complete ? provider.keys.reduce((total, key) => total + key.cost, 0) : null,
+      reasons: provider.complete ? [] : ['上游分组消费不完整']
+    })) });
     return { ...preview, fixture, async close() { await preview.close(); await fixture.close(); } };
   } catch (error) { await fixture.close(); throw error; }
 }

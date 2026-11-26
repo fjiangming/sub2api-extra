@@ -6,13 +6,13 @@ const CostAccountingUi = (() => {
     if (!root) return null;
     const e = h.escapeHtml, q = selector => root.querySelector(selector), base = '/api/cost-analysis/cash';
     const state = { tab: 'automatic', report: null, active: false, request: 0, automaticPage: 1, cashPage: 1,
-      providers: [], search: '', direction: 'all', origin: 'all', dialogRequest: 0 };
+      providers: [], search: '', direction: 'all', origin: 'all', dialogRequest: 0, expandedProviderAccounts: new Set() };
     const money = value => value == null ? '暂不可用' : h.formatMoney(value, '', 8);
     const pct = value => value == null ? '-' : h.formatPercent(value);
     const option = (key, label, selected) => `<option value="${e(key)}"${key === selected ? ' selected' : ''}>${e(label)}</option>`;
     const button = (attr, value, label = '详情') => `<button type="button" class="accounting-link" ${attr}="${e(value)}">${label}</button>`;
     const iconButton = (attr, value, iconName, title, extra = '') => `<button type="button" class="icon-button ${extra}" ${attr}="${e(value)}" title="${e(title)}" aria-label="${e(title)}">${h.icon(iconName)}</button>`;
-    const table = (headers, rows) => `<div class="table-wrap"><table><thead><tr>${headers.map(label => `<th>${label}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map(row => `<tr>${row.map(value => `<td>${value}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${headers.length}" class="empty-state">暂无记录</td></tr>`}</tbody></table></div>`;
+    const table = (headers, rows, cls = '') => `<div class="table-wrap${cls ? ` ${cls}` : ''}"><table><thead><tr>${headers.map(label => `<th>${label}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.map(row => `<tr>${row.map(value => `<td>${value}</td>`).join('')}</tr>`).join('') : `<tr><td colspan="${headers.length}" class="empty-state">暂无记录</td></tr>`}</tbody></table></div>`;
     const pager = name => `<div class="accounting-pager"><span data-${name}-page></span><div>${[-1, 1].map(step => `<button type="button" class="icon-button" data-${name}-step="${step}" title="${step < 0 ? '上一页' : '下一页'}" aria-label="${step < 0 ? '上一页' : '下一页'}">${h.icon(step < 0 ? 'chevron-left' : 'chevron-right')}</button>`).join('')}</div></div>`;
     const metric = (title, value, hint, action, format = money) => `<button type="button" class="accounting-metric" data-metric="${e(action)}"><span>${e(title)}</span><strong class="${value < 0 ? 'negative-value' : ''}" title="${e(format(value))}">${e(format(value))}</strong><small>${e(hint)}</small></button>`;
     root.innerHTML = `
@@ -38,7 +38,7 @@ const CostAccountingUi = (() => {
         </section>
       </section>
       <details class="accounting-rules"><summary>统计范围与数据来源</summary><p>消费毛利 = 主站实际消费 − 启用定时检查的供应商账号实际消费 − 当日充值抽奖所得。主站消费不含 ID 1；包含余额、赠送与订阅产生的用量，充值额度和余额独立展示。抽奖所得按兑换记录的 used_at 资金日归集，供应商充值只计现金支出，不重复扣入消费毛利。</p><p>自动收入恢复已使用余额兑换的入账口径，按使用日期统计正负额度；排除 ID 1、补贴及新旧充值抽奖奖励，以及并发、订阅、邀请等非金额兑换，已有有效排除事实沿用。关联支付订单不重复相加；未关联兑换的已付款订单按实收补充。额度可能含赠送、优惠，不等同渠道实收。手工收付按实际日期统计，所有金额统一按人民币原数值计算，历史 USD 100 计为人民币 100 元。</p><p>第一行按所选期间统计，列表搜索只筛记录。第二行的历史收入、历史支出、历史抽奖所得与累计净结余从资金时区 2026-10-01（含当天）累计至今，不受日期和粒度影响。累计净结余 = 该日起累计入账 − 该日起累计支出 − 历史抽奖所得 − 当前用户余额；余额排除 ID 1 及已删除用户。历史来源或余额缺失时保留未知，源站同步前已清理的数据无法恢复。</p><p>历史日报每日 01:00 自动归档，今天实时统计；缺失来源自动重试，未知不当零。消费毛利、净现金流和累计净结余均不表示经营净利润。</p></details>
-      <dialog class="accounting-dialog" data-dialog aria-labelledby="accounting-drawer-title"><header class="accounting-drawer-header"><h2 id="accounting-drawer-title"></h2><button type="button" class="icon-button" data-close title="关闭" aria-label="关闭">${h.icon('x')}</button></header><div class="accounting-drawer-body" data-drawer></div></dialog>`;
+      <dialog class="accounting-dialog" data-dialog aria-labelledby="accounting-drawer-title"><header class="accounting-drawer-header"><button type="button" class="icon-button" data-provider-group-back hidden title="返回供应商列表" aria-label="返回供应商列表">${h.icon('arrow-left')}</button><h2 id="accounting-drawer-title"></h2><button type="button" class="icon-button" data-close title="关闭" aria-label="关闭">${h.icon('x')}</button></header><div class="accounting-drawer-body" data-drawer></div></dialog>`;
 
     const supplierGroups = window.SupplierGroupUi?.create(h, (() => {
       const section = document.createElement('section'); section.id = 'accounting-groups'; section.hidden = true;
@@ -54,8 +54,13 @@ const CostAccountingUi = (() => {
     }
     new ResizeObserver(fitMetrics).observe(root);
     function readyIcons() { h.refreshIcons(); requestAnimationFrame(fitMetrics); }
-    function drawer(title, body) {
+    function drawer(title, body, { supplier = false } = {}) {
+      state.providerGroupController?.abort(); state.providerGroupController = null;
+      if (!supplier) state.providerDetail = null;
       ++state.dialogRequest; q('#accounting-drawer-title').textContent = title; q('[data-drawer]').innerHTML = body;
+      q('[data-dialog]').classList.toggle('cost-provider-group-dialog', supplier);
+      const back = q('[data-provider-group-back]'); back.hidden = !supplier;
+      back.title = back.ariaLabel = state.providerDetail?.view === 'groups' ? '返回供应商列表' : '返回分组列表';
       if (!q('[data-dialog]').open) q('[data-dialog]').showModal(); readyIcons();
     }
     function pageState(name, p) {
@@ -155,7 +160,7 @@ const CostAccountingUi = (() => {
         schedule(automatic && report.archive?.pendingDays && report.archive.ready ? 5000 : 60000);
       } catch (error) { if (request !== state.request || !state.active) return; q('[data-notice]').hidden = false; q('[data-notice]').textContent = `${error.message}，稍后自动重试`; schedule(); throw error; }
     }
-    function leave() { state.active = false; ++state.request; ++state.dialogRequest; clearTimeout(state.timer); supplierGroups?.leave(); if (q('[data-dialog]').open) q('[data-dialog]').close(); }
+    function leave() { state.active = false; ++state.request; ++state.dialogRequest; state.providerGroupController?.abort(); clearTimeout(state.timer); supplierGroups?.leave(); if (q('[data-dialog]').open) q('[data-dialog]').close(); }
     async function changeTab(tab) {
       if (!['automatic', 'cash', 'groups'].includes(tab)) return; supplierGroups?.leave(); state.tab = tab; state.report = null;
       for (const key of ['automatic', 'cash', 'groups']) { q(`[data-tab="${key}"]`).setAttribute('aria-selected', String(key === tab)); q(`[data-tab="${key}"]`).tabIndex = key === tab ? 0 : -1; q(`#accounting-${key}`).hidden = key !== tab; }
@@ -167,10 +172,82 @@ const CostAccountingUi = (() => {
     function dayDetail(date) {
       const row = state.report.items.find(row => row.date === date); if (!row) return;
       const notices = [...new Set([...(row.notices || []), ...(row.lastAttempt?.errorCode ? row.lastAttempt.notices : [])])];
-      drawer(`${date} · 消费与毛利`, `<div data-open-day="${e(date)}">${table(['项目', 'CNY'], [['主站消费', money(row.siteConsumption)], ['供应商消费', money(row.supplierConsumption)], ['当日抽奖所得', money(row.lotteryReward)], ['消费毛利', money(row.profit)], ['毛利率', pct(row.margin)]])}<h3>供应商账号消费</h3>${table(['供应商', 'CNY', '数据状态', '操作'], (row.providers || []).map(provider => [e(provider.name), money(provider.cost), e(provider.complete ? '数据完整' : (provider.reasons || ['自动重试']).join('；')), iconButton('data-provider-refresh', provider.id, 'refresh-cw', `刷新 ${provider.name} 消费`, `cost-provider-refresh" data-provider-date="${e(date)}`)]))}<p class="muted">${row.mode === 'live' ? '今日实时' : '历史归档'} · ${e(row.computedAt ? h.formatDateTime(row.computedAt) : '等待同步')}</p>${row.complete && row.lastAttempt?.errorCode ? '<p class="muted">更新失败，保留最后一次完整归档，后台自动重试。</p>' : ''}${notices.length ? `<details><summary>来源状态</summary>${notices.map(text => `<p>${e(text)}</p>`).join('')}</details>` : ''}</div>`);
+      const providers = table(['供应商', 'CNY', '数据状态', '操作'], (row.providers || []).map(provider => [
+        e(provider.name), `<span class="cost-provider-mobile-label">供应商消费 CNY</span>${e(money(provider.cost))}`,
+        e(provider.complete ? '数据完整' : (provider.reasons || ['自动重试']).join('；')),
+        `<div class="cost-provider-actions">${iconButton('data-provider-refresh', provider.id, 'refresh-cw', `刷新 ${provider.name} 消费`, `cost-provider-refresh" data-provider-date="${e(date)}`)}<button type="button" class="button secondary" data-provider-groups="${e(provider.id)}" data-provider-date="${e(date)}" aria-label="${e(`查看 ${provider.name} 分组明细`)}">${h.icon('list-tree')}<span>分组明细</span></button></div>`
+      ]), 'cost-provider-daily-list');
+      drawer(`${date} · 消费与毛利`, `<div data-open-day="${e(date)}">${table(['项目', 'CNY'], [['主站消费', money(row.siteConsumption)], ['供应商消费', money(row.supplierConsumption)], ['当日抽奖所得', money(row.lotteryReward)], ['消费毛利', money(row.profit)], ['毛利率', pct(row.margin)]])}<h3>供应商账号消费</h3>${providers}<p class="muted">${row.mode === 'live' ? '今日实时' : '历史归档'} · ${e(row.computedAt ? h.formatDateTime(row.computedAt) : '等待同步')}</p>${row.complete && row.lastAttempt?.errorCode ? '<p class="muted">更新失败，保留最后一次完整归档，后台自动重试。</p>' : ''}${notices.length ? `<details><summary>来源状态</summary>${notices.map(text => `<p>${e(text)}</p>`).join('')}</details>` : ''}</div>`);
+    }
+    function providerAccount(account, groupId) {
+      const id = `${groupId}:${account.id}`;
+      return `<details class="supplier-group-account" data-provider-group-account="${e(id)}"${state.expandedProviderAccounts.has(id) ? ' open' : ''}><summary aria-label="${e(`${account.name}，消费 ${money(account.main)}，查看主站分组明细`)}">${h.icon('chevron-right')}<span class="supplier-group-account-name">${e(account.name)}</span><span class="supplier-group-account-amount">${e(money(account.main))}</span></summary><div class="supplier-group-account-splits"><small>账号 #${e(account.id)}${account.deleted ? ' · 已删除，保留历史' : account.status !== 'active' ? ' · 当前停用，保留消费' : ''}</small>${account.reason ? `<small>${e(account.reason)}</small>` : ''}${account.localGroups.length ? account.localGroups.map(row => `<div class="supplier-group-split"><span>${e(row.name)}</span><span>${e(money(row.main))}</span></div>`).join('') : '<small>当日无消费</small>'}</div></details>`;
+    }
+    function renderProviderGroups(report) {
+      const detail = state.providerDetail, summary = report.providerSummaries.find(row => row.id === detail.provider.id);
+      const amount = (label, value) => `<td class="numeric"><span class="cost-provider-mobile-label">${label}</span><span>${e(money(value))}</span></td>`;
+      const more = (group) => `<button type="button" class="accounting-link" data-provider-group="${e(group.id)}">查看全部 ${group.accountCount} 个账号</button>`;
+      const labels = { upstream_missing: '上游数据缺失', site_incomplete: '主站数据不完整', history_unverified: '全天归属待核对', mapping_incomplete: '关联待核对', unlinked_key: '部分关联待核对', stale: '上次快照' };
+      const notices = [report.warning, ...(report.missingProviders || []).flatMap(provider => provider.reasons || []),
+        report.siteComplete === false ? '主站用量不完整，账号及分组合计暂不可用' : null].filter(Boolean);
+      let content;
+      if (report.source === 'history_missing') content = '<p class="empty-state">该日暂无分组消费归档，主站账号及上游分组明细暂不可用</p>';
+      else if (detail.view === 'groups') {
+        const pending = (report.pendingProviders || []).find(provider => provider.id === detail.provider.id);
+        content = `<div class="cost-provider-group-heading"><h3>主站在用分组</h3><small>${summary?.groupCount || 0} 个分组 · ${report.summary?.accountCount || 0} 个主站账号</small></div>`;
+        if (summary?.groupCount) content += `<table class="cost-provider-group-table"><colgroup><col><col><col><col></colgroup><thead><tr><th>主站对应账号及消费</th><th>上游供应商分组</th><th class="numeric">主站消费合计</th><th class="numeric">供应商分组消费</th></tr></thead><tbody>${report.groups.map(group => `<tr data-provider-group-row="${e(group.id)}"><td><div class="supplier-group-accounts">${group.accounts.map(account => providerAccount(account, group.id)).join('')}${group.accountsTruncated ? more(group) : ''}</div></td><td><strong>${e(group.name)}</strong>${labels[group.status] ? `<small class="cost-provider-group-status">${labels[group.status]}</small>` : ''}</td>${amount('主站消费合计', group.main)}${amount('供应商分组消费', group.upstream)}</tr>`).join('')}</tbody><tfoot><tr><th scope="row" colspan="2">在用分组合计</th>${amount('主站消费合计', summary.groupMain)}${amount('供应商分组消费', summary.groupUpstream)}</tr></tfoot></table>`;
+        else if (!summary?.pendingAccountCount) content += '<p class="empty-state">未找到该供应商的主站关联账号</p>';
+        if (summary?.pendingAccountCount) content += `<section class="cost-provider-pending"><h3>分组待核对账号（${summary.pendingAccountCount}）</h3><div class="supplier-group-accounts">${(pending?.accounts || []).map(account => providerAccount(account, 'pending')).join('')}</div>${!pending || pending.accountsTruncated ? `<button type="button" class="accounting-link" data-provider-group-pending>查看全部 ${summary.pendingAccountCount} 个待核对账号</button>` : ''}</section>`;
+      } else {
+        const group = report.group;
+        content = `<div class="cost-provider-group-heading"><h3>${detail.view === 'pending' ? '分组待核对账号' : e(group.name)}</h3><small>${report.pagination.total} 个账号${group ? ` · 主站 ${e(money(group.main))} / 上游 ${e(money(group.upstream))} CNY` : ''}</small></div><div class="cost-provider-account-list">${(group?.accounts || report.accounts || []).map(account => providerAccount(account, group?.id || 'pending')).join('') || '<p class="empty-state">暂无账号</p>'}</div>`;
+      }
+      const pagination = report.pagination;
+      return `<section data-provider-group-content="${e(detail.view)}"><div class="cost-provider-group-meta"><span>${e(detail.date)}</span><span>${e(report.timezone)} · CNY</span><span>${report.source === 'live' ? '今日实时' : report.source === 'archive' ? '历史归档' : '历史缺失'}${report.computedAt ? ` · ${e(h.formatDateTime(report.computedAt))}` : ''}</span></div><dl class="cost-provider-group-totals"><div><dt>主站对应账号消费</dt><dd data-provider-main-total>${e(money(summary?.main))}</dd></div><div><dt>供应商当日消费</dt><dd>${e(money(detail.provider.cost))}</dd></div></dl>${notices.length ? `<p class="accounting-notice" role="status">${notices.map(e).join('；')}</p>` : ''}${content}${pagination.totalPages > 1 ? pager('provider-group') : ''}</section>`;
+    }
+    function showProviderGroups(report) {
+      const detail = state.providerDetail;
+      drawer(`${detail.provider.name} · 分组消费`, renderProviderGroups(report), { supplier: true });
+      if (report.pagination.totalPages > 1) pageState('provider-group', report.pagination);
+    }
+    async function loadProviderGroups() {
+      const detail = state.providerDetail;
+      drawer(`${detail.provider.name} · 分组消费`, '<p class="empty-state" role="status" aria-busy="true">正在读取分组消费…</p>', { supplier: true });
+      q('[data-dialog]').scrollTop = 0;
+      const request = state.dialogRequest, controller = new AbortController(); state.providerGroupController = controller;
+      const params = { date: detail.date, providerId: detail.provider.id, view: detail.view, page: detail.page, pageSize: 20,
+        ...(detail.view === 'accounts' ? { groupId: detail.groupId } : {}) };
+      try {
+        const report = await h.api(`/api/cost-analysis/supplier-groups?${new URLSearchParams(params)}`, { signal: controller.signal });
+        if (!state.active || !h.isActive() || request !== state.dialogRequest || !q('[data-dialog]').open) return;
+        detail.page = report.pagination.page;
+        if (detail.view === 'groups') { detail.groupsReport = report; detail.groupsPage = detail.page; }
+        showProviderGroups(report);
+      } catch (error) {
+        if (!state.active || controller.signal.aborted || request !== state.dialogRequest || !q('[data-dialog]').open) return;
+        drawer(`${detail.provider.name} · 分组消费`, `<p class="accounting-notice" role="alert">${e(error.message)}</p><button type="button" class="button secondary" data-provider-group-retry>${h.icon('refresh-cw')}<span>重试</span></button>`, { supplier: true });
+      }
+    }
+    function openProviderGroups(date, providerId) {
+      const provider = state.report.items.find(row => row.date === date)?.providers?.find(row => String(row.id) === providerId);
+      if (!provider) return;
+      const selection = `${date}:${providerId}`;
+      if (state.expandedProviderSelection !== selection) { state.expandedProviderAccounts.clear(); state.expandedProviderSelection = selection; }
+      state.providerDetail = { date, provider: { ...provider, id: providerId }, view: 'groups', page: 1, groupsPage: 1 };
+      return loadProviderGroups();
+    }
+    function backProviderGroups() {
+      const detail = state.providerDetail;
+      if (!detail) return;
+      if (detail.view === 'groups') { dayDetail(detail.date); q(`[data-provider-groups="${CSS.escape(detail.provider.id)}"]`)?.focus(); }
+      else {
+        detail.view = 'groups'; detail.page = detail.groupsPage; detail.groupId = '';
+        if (detail.groupsReport) showProviderGroups(detail.groupsReport); else return loadProviderGroups();
+      }
     }
     async function refreshProvider(date, providerId, node) {
       if (state.providerRefresh) return;
+      const dialogRequest = state.dialogRequest;
       state.providerRefresh = true;
       node.disabled = true; node.setAttribute('aria-busy', 'true'); node.classList.add('is-loading');
       try {
@@ -180,7 +257,7 @@ const CostAccountingUi = (() => {
         if (!state.active || !h.isActive()) return;
         h.toast(result.reused ? '已读取历史归档，供应商消费保持不变' : '供应商消费已刷新', 'success');
         await load({ poll: true });
-        if (state.active && q('[data-dialog]').open) dayDetail(date);
+        if (state.active && dialogRequest === state.dialogRequest && q('[data-dialog]').open) dayDetail(date);
       } finally {
         state.providerRefresh = false;
         if (node.isConnected) { node.disabled = false; node.removeAttribute('aria-busy'); node.classList.remove('is-loading'); }
@@ -236,6 +313,16 @@ const CostAccountingUi = (() => {
         if (node.dataset.detailTab) { for (const key of ['days', 'providers']) { const active = key === node.dataset.detailTab; q(`[data-detail-tab="${key}"]`).setAttribute('aria-selected', String(active)); q(`[data-detail-tab="${key}"]`).tabIndex = active ? 0 : -1; q(`#cost-detail-${key}`).hidden = !active; } return; }
         if (node.dataset.command) return command(node.dataset.command); if (node.dataset.day) return dayDetail(node.dataset.day);
         if (node.dataset.providerRefresh) return refreshProvider(node.dataset.providerDate, node.dataset.providerRefresh, node);
+        if (node.dataset.providerGroups) return openProviderGroups(node.dataset.providerDate, node.dataset.providerGroups);
+        if (node.hasAttribute('data-provider-group-back')) return backProviderGroups();
+        if (node.hasAttribute('data-provider-group-retry')) return loadProviderGroups();
+        if (state.providerDetail && (node.dataset.providerGroup || node.hasAttribute('data-provider-group-pending') || node.dataset.providerGroupStep)) {
+          const detail = state.providerDetail;
+          if (node.dataset.providerGroup) { detail.groupId = node.dataset.providerGroup; detail.view = 'accounts'; detail.page = 1; }
+          else if (node.hasAttribute('data-provider-group-pending')) { detail.view = 'pending'; detail.page = 1; }
+          else detail.page += Number(node.dataset.providerGroupStep);
+          return loadProviderGroups();
+        }
         if (node.dataset.automaticDayStep) { state.automaticPage += Number(node.dataset.automaticDayStep); return renderAutomaticDays(); }
         if (node.dataset.cashStep) { state.cashPage += Number(node.dataset.cashStep); return load(); }
         if (node.dataset.balanceStep) return balanceDetail(state.balancePage + Number(node.dataset.balanceStep), state.balanceSearch);
@@ -253,6 +340,12 @@ const CostAccountingUi = (() => {
       }; run().catch(error => h.toast(error.message, 'error'));
     });
     root.addEventListener('change', event => { if (['direction', 'category'].includes(event.target.name)) updateFields(); });
+    root.addEventListener('toggle', event => {
+      const account = event.target;
+      if (!account.matches('details[data-provider-group-account]') || !account.isConnected) return;
+      if (account.open) state.expandedProviderAccounts.add(account.dataset.providerGroupAccount);
+      else state.expandedProviderAccounts.delete(account.dataset.providerGroupAccount);
+    }, true);
     root.addEventListener('submit', event => {
       event.preventDefault(); const form = event.target;
       if (form.matches('[data-cash-search]')) { Object.assign(state, Object.fromEntries(new FormData(form)), { cashPage: 1 }); load().catch(error => h.toast(error.message, 'error')); return; }
@@ -283,7 +376,11 @@ const CostAccountingUi = (() => {
       event.preventDefault(); const tabs = [...tab.parentElement.querySelectorAll('[role="tab"]')], index = tabs.indexOf(tab);
       const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length; tabs[next].click(); tabs[next].focus();
     });
-    q('[data-dialog]').addEventListener('cancel', () => { ++state.dialogRequest; });
+    q('[data-dialog]').addEventListener('cancel', event => {
+      if (state.providerDetail) { event.preventDefault(); backProviderGroups()?.catch(error => h.toast(error.message, 'error')); }
+      else ++state.dialogRequest;
+    });
+    q('[data-dialog]').addEventListener('close', () => { ++state.dialogRequest; state.providerGroupController?.abort(); state.providerDetail = null; });
     document.addEventListener('visibilitychange', () => { if (document.hidden) clearTimeout(state.timer); else if (state.active && h.isActive()) schedule(1000); });
     document.getElementById('cost-accounting-add').addEventListener('click', () => { if (state.active) entryForm().catch(error => h.toast(error.message, 'error')); });
     return { load, leave, state };

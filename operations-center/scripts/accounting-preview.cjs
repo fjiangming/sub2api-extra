@@ -20,7 +20,7 @@ const { CostAnalysisService } = require('../src/services/cost-analysis-service')
 const { DailyProfitService } = require('../src/services/daily-profit-service');
 const { dateInTimezone, addUtcDays } = require('../src/services/metrics-service');
 
-async function startPreview({ port = 0, supplierGroups = null } = {}) {
+async function startPreview({ port = 0, supplierGroups = null, dailyProviders = null } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cost-accounting-preview-'));
   const password = crypto.randomBytes(24).toString('hex');
   const config = loadConfig({ NODE_ENV: 'test', OPERATIONS_CENTER_AUTH_MODE: 'local', OPERATIONS_CENTER_ADMIN_PASSWORD: password,
@@ -35,12 +35,17 @@ async function startPreview({ port = 0, supplierGroups = null } = {}) {
   const dailyStore = new DailyProfitStore(directory); dailyStore.initialize();
   const controls = { supplierUnavailable: false, supplierCalls: 0 };
   const monitor = { configured: () => true, integrationToken: 'synthetic',
-    listProviders: async () => [{ id: 'alpha', name: 'Sub2API 示例上游', enabled: true, currency: 'USD', adapterType: 'sub2api' }, { id: 'beta', name: 'New API 示例上游', enabled: true, currency: 'USD', adapterType: 'new-api' }],
+    listProviders: async () => dailyProviders ? dailyProviders.map(provider => ({ id: provider.id, name: provider.name, enabled: true, currency: 'CNY', adapterType: 'sub2api' }))
+      : [{ id: 'alpha', name: 'Sub2API 示例上游', enabled: true, currency: 'USD', adapterType: 'sub2api' }, { id: 'beta', name: 'New API 示例上游', enabled: true, currency: 'USD', adapterType: 'new-api' }],
     createDailyCostsReader: async () => async input => {
       controls.supplierCalls++;
+      const providers = dailyProviders ? structuredClone(dailyProviders) : [
+        { id: 'alpha', name: 'Sub2API 示例上游', cost: 12, complete: true },
+        { id: 'beta', name: 'New API 示例上游', cost: controls.supplierUnavailable ? null : 6.5, complete: !controls.supplierUnavailable, reasons: controls.supplierUnavailable ? ['上游连接暂不可用'] : [] }
+      ];
+      const complete = providers.every(provider => provider.complete);
       return { source: 'upstream_daily_summary', scope: 'account', providerFilter: 'scheduled_enabled', currency: 'CNY', timezone: config.financeTimezone,
-        range: { start: input.from, end: input.to }, items: [{ date: input.from, cost: controls.supplierUnavailable ? null : 18.5, complete: !controls.supplierUnavailable,
-          providers: [{ id: 'alpha', name: 'Sub2API 示例上游', cost: 12, complete: true }, { id: 'beta', name: 'New API 示例上游', cost: controls.supplierUnavailable ? null : 6.5, complete: !controls.supplierUnavailable, reasons: controls.supplierUnavailable ? ['上游连接暂不可用'] : [] }] }] };
+        range: { start: input.from, end: input.to }, items: [{ date: input.from, cost: complete ? providers.reduce((total, provider) => total + provider.cost, 0) : null, complete, providers }] };
     },
     getFinancialBalances: async () => ({ currency: 'CNY', providerFilter: 'scheduled_enabled', complete: true, total: 3150,
       items: [{ id: 'alpha', name: 'Sub2API 示例上游', available: 4000, currency: 'USD', cashValue: 2000, complete: true, capturedAt: new Date().toISOString() }, { id: 'beta', name: 'New API 示例上游', available: 1150, currency: 'USD', cashValue: 1150, complete: true, capturedAt: new Date().toISOString() }] }) };
@@ -76,14 +81,17 @@ async function startPreview({ port = 0, supplierGroups = null } = {}) {
   }
   await analysis.getProviders({ refresh: true });
   const history = Array.from({ length: 30 }, (_, index) => ({ date: addUtcDays(start, index) }));
+  const archivedProviders = dailyProviders || [{ id: 'alpha', name: 'Sub2API 示例上游', cost: 12, complete: true },
+    { id: 'beta', name: 'New API 示例上游', cost: 6.5, complete: true }];
+  const supplierComplete = archivedProviders.every(provider => provider.complete);
+  const supplierConsumption = supplierComplete ? archivedProviders.reduce((total, provider) => total + provider.cost, 0) : null;
   // Seed synthetic archives explicitly; previews obey the same no-history-fetch policy.
   for (const { date } of history) {
     dailyStore.enqueue(daily.scope(), date);
     dailyStore.finish(dailyStore.claim(daily.scope()), { row: { date, complete: false,
-      siteConsumption: null, siteComplete: false, supplierConsumption: 18.5, supplierComplete: true,
+      siteConsumption: null, siteComplete: false, supplierConsumption, supplierComplete,
       lotteryReward: 0, lotteryComplete: true, profit: null, margin: null, supplierRequests: null,
-      providers: [{ id: 'alpha', name: 'Sub2API 示例上游', cost: 12, complete: true },
-        { id: 'beta', name: 'New API 示例上游', cost: 6.5, complete: true }] }, notices: [] });
+      providers: structuredClone(archivedProviders) }, notices: [] });
   }
   dailyStore.enqueueDays(daily.scope(), history);
   await daily.drain({ limit: 30 });

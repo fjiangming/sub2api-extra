@@ -7,7 +7,7 @@ const { buildGroupReport, total } = require('./supplier-group-matcher');
 
 const querySchema = z.object({ date: z.string().optional(), start: z.string().optional(), end: z.string().optional(),
   providerId: z.string().max(200).optional(), groupId: z.string().regex(/^[a-f0-9]{32}$/).optional(),
-  keyId: z.string().max(200).optional(), view: z.enum(['groups', 'mapping', 'accounts', 'keys', 'local', 'daily']).default('groups'),
+  keyId: z.string().max(200).optional(), view: z.enum(['groups', 'mapping', 'pending', 'accounts', 'keys', 'local', 'daily']).default('groups'),
   issuesOnly: z.enum(['0', '1']).default('1'), page: z.coerce.number().int().min(1).max(100000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20) });
 const settingsSchema = z.object({ aliases: z.record(z.string().min(1).max(200), z.array(z.string().trim().min(2).max(120)).max(20)),
@@ -197,6 +197,8 @@ class SupplierGroupService {
       providerSummaries: [...byProvider].map(([id, groups]) => ({ id, name: providers.find(p => p.id === id).name,
         groupCount: groups.length, knownGroups: groups.filter(g => g.upstream !== null).length,
         pendingAccountCount: pendingByProvider.get(id)?.length || 0,
+        groupMain: report.siteComplete ? total(groups, 'main') : null,
+        groupUpstream: groups.length && groups.every(g => g.upstream !== null) ? total(groups, 'upstream') : null,
         upstream: !pendingByProvider.has(id) && groups.every(g => g.upstream !== null) ? total(groups, 'upstream') : null,
         knownUpstream: total(groups, 'knownUpstream'),
         main: report.siteComplete ? total([...groups, ...(pendingByProvider.get(id) || [])], 'main') : null,
@@ -239,6 +241,9 @@ class SupplierGroupService {
         }) };
       result.pagination = query.view === 'accounts' ? accountPage.pagination : query.view === 'local' ? localPage.pagination : query.view === 'daily'
         ? { page: 1, total: 7, totalPages: 1 } : keyPage.pagination;
+    } else if (query.view === 'pending') {
+      const selected = page(pending);
+      result.accounts = selected.items.map(publicAccount); result.pagination = selected.pagination;
     } else if (query.view === 'mapping') {
       const filtered = query.issuesOnly === '1' ? mappings.filter(a => !a.matched || a.historyVerified === false) : mappings;
       const selected = page(filtered); result.mappings = selected.items; result.pagination = selected.pagination;

@@ -35,7 +35,7 @@ test('real SQL groups all accounts by upstream group without account membership 
   assert.deepEqual(claude.accounts[0].localGroups.map(g => g.main), [20, 3]);
   assert.equal(claude.accountsTruncated, false);
   assert.deepEqual(r.providerSummaries.find(p => p.id === 'ling'), {
-    id: 'ling', name: '灵枢 API', groupCount: 2, knownGroups: 2, pendingAccountCount: 1,
+    id: 'ling', name: '灵枢 API', groupCount: 2, knownGroups: 2, pendingAccountCount: 1, groupMain: 47, groupUpstream: 23,
     upstream: null, knownUpstream: 23, main: 47, diff: null
   });
   assert.equal(r.providerSummaries.find(p => p.id === 'nova').diff, null);
@@ -118,6 +118,7 @@ test('a partial upstream group contributes only to the known subtotal and never 
   const report = await f.service.getReport({ date: f.date });
   const provider = report.providerSummaries.find(provider => provider.id === 'ling');
   assert.equal(provider.main, 47);
+  assert.equal(provider.groupMain, 47); assert.equal(provider.groupUpstream, null);
   assert.equal(provider.upstream, null); assert.equal(provider.diff, null);
   assert.equal(provider.knownGroups, 1); assert.equal(provider.groupCount, 2);
   assert.equal(provider.knownUpstream, 20);
@@ -137,7 +138,7 @@ test('missing detailed usage or native coverage stays unknown, including deleted
   assert(r.groups.every(g => g.main === null && g.diff === null));
   const incomplete = await f.service.getReport({ date: f.date });
   assert(incomplete.groups.every(group => group.accounts.every(account => account.main === null && account.localGroups.every(local => local.main === null))));
-  assert(incomplete.providerSummaries.every(provider => provider.main === null && provider.diff === null));
+  assert(incomplete.providerSummaries.every(provider => provider.main === null && provider.groupMain === null && provider.diff === null));
   await f.database.exec('DELETE FROM usage_dashboard_daily');
   const raw = await f.source.read('2026-11-24T16:00:00Z', '2026-11-25T16:00:00Z'); assert.equal(raw.complete, false);
 });
@@ -251,6 +252,44 @@ test('pending previews paginate without losing supplier totals or exposing crede
   assert.equal(new Set(pages.flatMap(page => page.mappings.map(a => a.id))).size, 17);
   assert(pages.every(page => page.providerSummaries[0].main === 47));
   assert(!JSON.stringify([report, pages]).includes(f.secrets[0]));
+});
+
+test('daily supplier details keep mapped totals separate and paginate only pending accounts without rereading history', async t => {
+  const f = await fixture(t);
+  await f.database.query(`INSERT INTO accounts SELECT n,'灵枢 API 未定位 ' || n,'active',$1::jsonb,'2026-01-01T00:00:00Z',NULL
+    FROM generate_series(100,111) n`, [JSON.stringify({ api_key: f.secrets[9] })]);
+  await f.database.exec(`INSERT INTO usage_logs(user_id,account_id,group_id,actual_cost,created_at)
+    SELECT 2,n,1,0.1,'2026-11-25T00:00:00Z' FROM generate_series(100,111) n;
+    INSERT INTO usage_logs(user_id,account_id,group_id,actual_cost,created_at) VALUES(2,91,1,0.07,'2026-11-25T00:00:00Z');
+    UPDATE usage_dashboard_daily SET total_requests=23`);
+  await f.service.collect(f.date);
+  f.store.db.prepare("UPDATE sg_observations SET changed=1 WHERE scope=? AND date=? AND account_id='11'").run(f.service.scope(), f.date);
+  await f.service.collect(f.date);
+  for (const page of [1, 2, 3]) {
+    const report = await f.service.getReport({ date: f.date, providerId: 'ling', pageSize: 1, page });
+    const summary = report.providerSummaries[0];
+    assert.equal(summary.main, 48.27); assert.equal(summary.groupMain, 47); assert.equal(summary.groupUpstream, 23);
+    assert.equal(summary.upstream, null); assert.equal(summary.pendingAccountCount, 13);
+    assert.equal(report.summary.accountCount, 17);
+  }
+  const pages = await Promise.all([1, 2].map(page => f.service.getReport({ date: f.date, providerId: 'ling', view: 'pending', pageSize: 10, page })));
+  assert.deepEqual(pages.map(page => page.accounts.length), [10, 3]);
+  assert(pages.every(page => page.pagination.total === 13));
+  const accounts = pages.flatMap(page => page.accounts);
+  assert.equal(new Set(accounts.map(account => account.id)).size, 13);
+  assert(!accounts.some(account => account.id === '11'), 'Current matches with unverified history are not unassigned');
+  assert(accounts.some(account => account.id === '91' && account.main === 0.07));
+  const other = await f.service.getReport({ date: f.date, providerId: 'nova', view: 'pending' });
+  assert.equal(other.accounts.length, 0);
+  const payload = JSON.stringify(pages);
+  assert(!payload.includes(f.secrets[9])); assert(!payload.includes(keyIdentity(f.secrets[9])));
+  assert(accounts.every(account => !('identity' in account) && !('candidates' in account)));
+  f.controls.clock = new Date('2026-11-27T04:00:00Z');
+  const calls = f.controls.calls.length, queries = f.queries.length;
+  await f.database.exec('DELETE FROM accounts; DELETE FROM usage_logs');
+  const history = await f.service.getReport({ date: f.date, providerId: 'ling', view: 'pending', pageSize: 10 });
+  assert.deepEqual(history.accounts, pages[0].accounts);
+  assert.equal(f.controls.calls.length, calls); assert.equal(f.queries.length, queries);
 });
 
 test('archive retries retain confirmed upstream values and allow incomplete main-site data to fill', async t => {

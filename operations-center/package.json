@@ -5,7 +5,7 @@
   "description": "Stateless operations analytics and retention control plane for Sub2API",
   "main": "src/server.js",
   "scripts": {
-    "precheck": "node --check src/services/billing-import-groups.js && node --check src/services/billing-import-tasks.js && node --check src/daily-profit-store.js && node --check src/services/daily-profit-service.js && node --check src/services/cost-analysis-service.js && node --check src/accounting-store.js && node --check src/services/accounting-source.js && node --check src/services/accounting-service.js && node --check src/services/cash-flow-service.js && node --check src/services/recharge-credit.js && node --check public/cost-accounting-ui.js && node --check scripts/accounting-preview.cjs && node --check scripts/accounting-browser-check.cjs",
+    "precheck": "node --check src/services/billing-import-groups.js && node --check src/services/billing-import-tasks.js && node --check src/daily-profit-store.js && node --check src/services/daily-profit-service.js && node --check src/services/cost-analysis-service.js && node --check src/accounting-store.js && node --check src/services/accounting-source.js && node --check src/services/accounting-service.js && node --check src/services/cash-flow-service.js && node --check src/services/recharge-credit.js && node --check public/cost-accounting-ui.js && node --check scripts/accounting-preview.cjs && node --check scripts/accounting-browser-check.cjs && node --check scripts/provider-group-browser-check.cjs",
     "start": "node --env-file=.env src/server.js",
     "dev": "node --env-file=.env --watch src/server.js",
     "preview:group-monitor": "node scripts/group-monitor-preview.cjs",
@@ -18,6 +18,7 @@
     "check:supplier-groups-ui": "node scripts/supplier-group-browser-check.cjs",
     "check:supplier-groups": "node --check src/supplier-group-store.js && node --check src/services/supplier-group-source.js && node --check src/services/supplier-group-matcher.js && node --check src/services/supplier-group-service.js && node --check public/supplier-group-ui.js && node --check tests/supplier-group-fixture.js && node --check tests/supplier-groups.test.js && node --check scripts/supplier-group-preview.cjs && node --check scripts/supplier-group-browser-check.cjs",
     "check:accounting-ui": "node scripts/accounting-browser-check.cjs",
+    "check:provider-group-ui": "node scripts/provider-group-browser-check.cjs",
     "check:billing-import-ui": "node scripts/billing-import-browser-check.cjs",
     "preview:request-errors": "node scripts/request-errors-preview.cjs",
     "check:request-errors-ui": "node scripts/request-errors-browser-check.cjs",
