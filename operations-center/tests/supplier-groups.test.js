@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { DateTime } = require('luxon');
 const { supplierGroupFixture } = require('./supplier-group-fixture');
 const { keyIdentity } = require('../src/services/supplier-group-source');
-const { buildGroupReport } = require('../src/services/supplier-group-matcher');
+const { buildGroupReport, canonicalizeKeys } = require('../src/services/supplier-group-matcher');
 const { SupplierGroupStore } = require('../src/supplier-group-store');
 const { ProviderMonitorClient } = require('../src/provider-monitor-client');
 const { createApp } = require('../src/app');
@@ -28,6 +28,7 @@ test('real SQL groups all accounts by upstream group without account membership 
   assert.equal(r.summary.pendingAccountCount, 1);
   const claude = r.groups.find(g => g.groupRef === 'claude');
   assert.equal(claude.upstream, 15); assert.equal(claude.main, 35); assert.equal(claude.accountCount, 3);
+  assert.equal(claude.sharedKeyCount, 1); assert.equal(claude.sharedAccountCount, 2);
   assert.equal(claude.localGroupCount, 3); assert.equal(claude.diff, 20); assert.equal(claude.status, 'comparable');
   assert.deepEqual(claude.accounts.map(a => [a.id, a.name, a.main]), [
     ['11', '灵枢 API Claude 主账号', 23], ['12', '灵枢 Claude 备用', 7], ['13', '灵枢 API Claude 高倍率', 5]
@@ -36,7 +37,8 @@ test('real SQL groups all accounts by upstream group without account membership 
   assert.equal(claude.accountsTruncated, false);
   assert.deepEqual(r.providerSummaries.find(p => p.id === 'ling'), {
     id: 'ling', name: '灵枢 API', groupCount: 2, knownGroups: 2, pendingAccountCount: 1, groupMain: 47, groupUpstream: 23,
-    upstream: null, knownUpstream: 23, knownKeyCount: 3, stale: false, main: 47, diff: null
+    upstream: null, knownUpstream: 23, knownKeyCount: 3, stale: false, main: 47, diff: null,
+    sharedKeyCount: 1, sharedAccountCount: 2
   });
   assert.equal(r.providerSummaries.find(p => p.id === 'nova').diff, null);
   assert.equal(r.providerSummaries.find(p => p.id === 'zen').upstream, null);
@@ -50,6 +52,10 @@ test('real SQL groups all accounts by upstream group without account membership 
   assert.equal(detail.group.keys.find(k => k.id === 'k1').upstream, 12);
   assert.equal(detail.group.keys.find(k => k.id === 'k1').main, 30);
   assert.equal(detail.group.keys.find(k => k.id === 'k1').accountCount, 2);
+  assert.equal(detail.group.keys.find(k => k.id === 'k1').sharedAccountCount, 2);
+  const detailAll = await f.service.getReport({ date: f.date, groupId: claude.id, keyId: 'k1', pageSize: 100 });
+  assert.deepEqual(detailAll.group.accounts.map(account => account.id), ['11', '12', '13']);
+  assert.equal(detailAll.group.accounts.find(account => account.id === '11').sharedKeyAccountCount, 2);
   assert.equal(detail.pagination.total, 2); assert.equal(detail.group.localGroups.reduce((s, g) => s + g.main, 0), 25);
   const local = await f.service.getReport({ date: f.date, groupId: claude.id, view: 'local', pageSize: 100 });
   assert.equal(local.group.localGroups.reduce((s, g) => s + g.main, 0), 35);
@@ -64,6 +70,14 @@ test('real SQL groups all accounts by upstream group without account membership 
   assert(!publicData.includes(keyIdentity(f.secrets[0]))); assert(!publicData.includes(f.secrets[0]));
   assert(!publicData.includes('upstreamSnapshot')); assert(!publicData.includes('siteSnapshot'));
   assert(f.queries.every(sql => /^(SELECT|WITH|BEGIN|SET LOCAL|COMMIT|ROLLBACK)/.test(sql)));
+});
+
+test('identical upstream rows for one key are canonicalized once', () => {
+  const row = { id: 'k1', identity: 'a'.repeat(64), groupRef: 'claude', cost: 12, upstreamAmount: 12, requests: 4 };
+  const keys = canonicalizeKeys([row, { ...row }]);
+  assert.equal(keys.length, 1);
+  assert.equal(keys[0].duplicateKeyCount, 2);
+  assert.match(keys[0].reasons[0], /重复返回/);
 });
 
 test('supplier account totals expose the unassigned upstream residual without inventing a group', async t => {

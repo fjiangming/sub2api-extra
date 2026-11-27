@@ -96,7 +96,10 @@ test('supplier margin alerts expose channels in system settings and cost analysi
   assert.match(supplierUi, /收益率高亮阈值/);
   assert.match(supplierUi, /通知渠道/);
   assert.match(supplierUi, /marginAlert/);
+  assert.match(supplierUi, /共享 Key/);
+  assert.match(supplierUi, /上游消费只计一次/);
   assert.match(accountingUi, /supplier-group-low-margin/);
+  assert.match(accountingUi, /共享 Key/);
   assert.match(accountingUi, /let content = ''/);
 });
 

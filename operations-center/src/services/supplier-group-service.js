@@ -4,7 +4,7 @@ const { DateTime } = require('luxon');
 const Decimal = require('decimal.js');
 const { z } = require('zod');
 const { AppError } = require('../errors');
-const { buildGroupReport, total } = require('./supplier-group-matcher');
+const { buildGroupReport, total, canonicalizeKeys, canonicalizeUpstream } = require('./supplier-group-matcher');
 
 const querySchema = z.object({ date: z.string().optional(), start: z.string().optional(), end: z.string().optional(),
   providerId: z.string().max(200).optional(), groupId: z.string().regex(/^[a-f0-9]{32}$/).optional(),
@@ -70,17 +70,18 @@ function knownProviderUsage(report, providerId) {
     return { amount: total(groups, 'knownUpstream'), requests: null, complete: false, keyCount: 0 };
   }
   let amountValue = new Decimal(0), requestsValue = 0, amountComplete = true, requestsComplete = true;
-  for (const key of provider.keys) {
+  const keys = canonicalizeKeys(provider.keys || []);
+  for (const key of keys) {
     if (key.cost === null) amountComplete = false;
     else amountValue = amountValue.plus(key.cost);
     if (key.requests === null) requestsComplete = false;
     else requestsValue += key.requests;
   }
   const coverageIncomplete = provider.complete !== true || provider.accountCovered !== true || provider.stale === true ||
-    provider.archiveConflict === true || provider.keys.some(key => key.cost === null || key.requests === null ||
+    provider.archiveConflict === true || keys.some(key => key.cost === null || key.requests === null ||
       key.groupRef === null || key.complete !== true);
   return { amount: amountComplete ? amountValue.toDecimalPlaces(8).toNumber() : null,
-    requests: requestsComplete ? requestsValue : null, complete: !coverageIncomplete && amountComplete, keyCount: provider.keys.length };
+    requests: requestsComplete ? requestsValue : null, complete: !coverageIncomplete && amountComplete, keyCount: keys.length };
 }
 
 function unmatchedProviderUsage(report, providerId) {
@@ -184,8 +185,9 @@ class SupplierGroupService {
           this.source.read(from.toUTC().toISO(), to.toUTC().toISO()), dailyRead
         ]);
         verify();
-        const incoming = validateUpstream(response, date, this.config.financeTimezone);
-        const upstream = before?.finalized && before.upstreamSnapshot ? archiveUpstream(before.upstreamSnapshot, incoming) : incoming;
+        const incoming = canonicalizeUpstream(validateUpstream(response, date, this.config.financeTimezone));
+        const upstream = before?.finalized && before.upstreamSnapshot
+          ? archiveUpstream(canonicalizeUpstream(before.upstreamSnapshot), incoming) : incoming;
         const defaults = this.store.settings(scope);
         const policy = before?.finalized ? { ...defaults, ...(before.policy || {}),
           alert: { ...defaults.alert, ...(before.policy?.alert || {}) },
@@ -322,10 +324,19 @@ class SupplierGroupService {
       id: account.id, name: account.name, status: account.status, deleted: Boolean(account.deleted),
       main: report.siteComplete ? account.main : null, requests: account.requests,
       localGroups: account.localGroups.map(row => ({ ...row, main: report.siteComplete ? row.main : null })),
+      ...(account.sharedKeyAccountCount > 1 ? { sharedKeyAccountCount: account.sharedKeyAccountCount } : {}),
       ...(account.historyVerified === false ? { historyVerified: false } : {}),
       ...(!account.matched || account.historyVerified === false ? { reason: account.reason } : {})
     });
-    const publicAccounts = group => group.keys.flatMap(key => key.accounts).map(publicAccount);
+    const publicAccounts = group => {
+      const accounts = [], seen = new Set();
+      for (const key of group.keys) for (const account of key.accounts) {
+        const id = String(account.id);
+        if (seen.has(id)) continue;
+        seen.add(id); accounts.push(account);
+      }
+      return accounts.map(publicAccount);
+    };
     const byProvider = new Map();
     for (const group of all) {
       if (!byProvider.has(group.providerId)) byProvider.set(group.providerId, []);
@@ -381,6 +392,11 @@ class SupplierGroupService {
         stale: stale || groups.some(group => group.stale),
         main: report.siteComplete ? total([...groups, ...(pendingByProvider.get(id) || [])], 'main') : null,
         diff: !stale && !pendingByProvider.has(id) && groups.every(g => g.comparable) ? total(groups, 'diff') : null,
+        ...(groups.reduce((count, group) => count + (group.sharedKeyCount || 0), 0) > 0 ? {
+          sharedKeyCount: groups.reduce((count, group) => count + (group.sharedKeyCount || 0), 0),
+          sharedAccountCount: new Set(groups.flatMap(group => (group.keys || []).filter(key => key.accountCount > 1)
+            .flatMap(key => key.accounts.map(account => String(account.id))))).size
+        } : {}),
         ...publicProviderTotals(id) })),
       missingProviders: report.missingProviders.filter(p => !query.providerId || p.id === query.providerId),
       summary: { groupCount: all.length, knownGroups: known.length, comparableGroups: comparable.length,
@@ -398,7 +414,12 @@ class SupplierGroupService {
       const accounts = publicAccounts(group), accountPage = page(accounts);
       const accountById = new Map(accounts.map(account => [account.id, account]));
       const local = new Map();
-      for (const account of group.keys.flatMap(k => k.accounts)) for (const row of account.localGroups) {
+      const sourceAccounts = [], sourceAccountIds = new Set();
+      for (const key of group.keys) for (const account of key.accounts) {
+        if (sourceAccountIds.has(String(account.id))) continue;
+        sourceAccountIds.add(String(account.id)); sourceAccounts.push(account);
+      }
+      for (const account of sourceAccounts) for (const row of account.localGroups) {
         const previous = local.get(row.id) || { id: row.id, name: row.name, main: 0, requests: 0, accountIds: [] };
         previous.main = total([previous, row], 'main'); previous.requests += row.requests;
         if (!previous.accountIds.includes(account.id)) previous.accountIds.push(account.id);

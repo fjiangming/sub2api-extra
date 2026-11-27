@@ -1,5 +1,16 @@
 # 个性化功能维护台账
 
+## 2026-11-27：供应商共享 Key 的消费汇总与列表提示
+
+用户反馈 tuoke 存在多个主站账号绑定同一个上游供应商分组 Key，导致分组消费难以核对。本轮只修改运营中心，保留供应商上游金额按 Key 计一次、主站账号消费按不同账号全部累加的计费对账口径；未修改主站、Provider Monitor 或部署配置。
+
+- `operations-center/src/services/supplier-group-matcher.js`：规范化历史 / 上游 Key 行，合并同一身份与上游分组的完全重复行并记录重复次数；对共享 Key 的账号、分组记录共享数量，按账号 ID 去重后计算主站合计、请求数和本地分组合计。
+- `operations-center/src/services/supplier-group-service.js`：归档前规范化上下游快照，供应商已知消费小计复用相同去重规则；接口列表和本地分组明细按账号 ID 去重，并公开共享 Key 的账号数量 / 分组数量，避免同一账号重复展示或重复汇总。
+- `operations-center/public/supplier-group-ui.js`、`public/cost-accounting-ui.js`、`public/cost-accounting.css`：在供应商分组列表、消费毛利抽屉和账号展开详情中提示共享 Key 的账号数，并明确上游消费只计一次；保留收益率和异常状态展示。
+- `operations-center/tests/supplier-groups.test.js`、`tests/frontend-layout.test.js`：覆盖同一 Key 多账号的主站合计、共享字段、列表去重，以及重复上游行只计一次；增加前端共享 Key 文案回归。
+
+验证：供应商分组共享 Key 专项测试、前端结构测试、目标文件语法检查和 `git diff --check` 通过后提交 GitHub。本轮未部署服务器。
+
 ## 2026-11-27：持续写入期间渐进释放 SQLite 可复用页
 
 用户确认日志持续写入时“完全空闲”窗口很少，要求在尽量不影响主站用户的情况下自动释放物理文件中的可复用页。本轮只修改运营中心推送后台、清理测试和说明文档；未修改主站采集协议、服务器配置或生产数据。

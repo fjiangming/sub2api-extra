@@ -4,7 +4,52 @@ const Decimal = require('decimal.js');
 const norm = value => String(value || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 const total = (items, field) => items.reduce((sum, item) => sum.plus(item[field] ?? 0), new Decimal(0)).toDecimalPlaces(8).toNumber();
 const unique = values => [...new Set(values)];
+const uniqueAccounts = accounts => {
+  const seen = new Set();
+  return accounts.filter(account => {
+    const id = String(account.id);
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+};
 const groupId = (provider, group) => crypto.createHash('sha256').update(JSON.stringify([provider, group])).digest('hex').slice(0, 32);
+
+function sameValue(left, right) {
+  return left === right || (left !== null && right !== null && Number.isFinite(Number(left)) &&
+    Number.isFinite(Number(right)) && new Decimal(left).eq(right));
+}
+
+function canonicalizeKeys(keys) {
+  const seen = new Map(), result = [];
+  for (const key of keys) {
+    // A provider can expose the same secret more than once in one upstream
+    // group. Identical usage rows describe one key and must be counted once;
+    // conflicting rows remain separate so the report stays non-comparable.
+    const signature = key.identity && key.groupRef !== null ? `${key.identity}\0${key.groupRef}` : null;
+    const previous = signature ? seen.get(signature) : null;
+    if (!previous) {
+      const copy = { ...key };
+      if (signature) seen.set(signature, copy);
+      result.push(copy);
+      continue;
+    }
+    const identical = sameValue(previous.cost, key.cost) && sameValue(previous.upstreamAmount, key.upstreamAmount) &&
+      sameValue(previous.requests, key.requests);
+    if (!identical) {
+      result.push({ ...key });
+      continue;
+    }
+    previous.duplicateKeyCount = (previous.duplicateKeyCount || 1) + 1;
+    previous.reasons = unique([...(previous.reasons || []), '同一上游 Key 在同一分组重复返回，已合并一次']);
+  }
+  return result;
+}
+
+function canonicalizeUpstream(upstream) {
+  return { ...upstream, items: upstream.items.map(provider => ({ ...provider, keys: canonicalizeKeys(provider.keys) })) };
+}
+
 function aliases(provider, settings) {
   const stem = norm(String(provider.name).replace(/\s*api\s*$/i, ''));
   const configured = Object.hasOwn(settings.aliases, provider.id) ? settings.aliases[provider.id] : [];
@@ -12,12 +57,14 @@ function aliases(provider, settings) {
     v.length >= 2 && !['api', 'https', 'http', 'com', 'cn', 'vip', 'relay', 'cloud', 'provider', '供应商'].includes(v)));
 }
 function buildGroupReport(upstream, source, settings, date, at) {
-  const names = upstream.items.map(provider => ({ provider, full: norm(provider.name), aliases: aliases(provider, settings) }));
+  const normalized = canonicalizeUpstream(upstream);
+  const names = normalized.items.map(provider => ({ provider, full: norm(provider.name), aliases: aliases(provider, settings) }));
   const groups = new Map(), keyTargets = new Map();
-  for (const provider of upstream.items) for (const key of provider.keys) {
+  for (const provider of normalized.items) for (const key of provider.keys) {
     const item = { id: key.id, name: key.name, maskedKey: key.maskedKey, upstream: key.cost,
       upstreamComplete: key.complete === true && provider.accountCovered === true && !provider.stale && !provider.archiveConflict,
-      accounts: [], blocked: false, reasons: key.reasons || [] };
+      accounts: [], blocked: false, reasons: key.reasons || [],
+      ...(key.duplicateKeyCount > 1 ? { duplicateKeyCount: key.duplicateKeyCount } : {}) };
     let group = null;
     if (key.groupRef !== null) {
       const id = groupId(provider.id, key.groupRef);
@@ -82,9 +129,21 @@ function buildGroupReport(upstream, source, settings, date, at) {
     mappings.push(mapping);
   }
   for (const group of groups.values()) {
-    for (const key of group.keys) { key.main = source.complete ? total(key.accounts, 'main') : null; key.requests = total(key.accounts, 'requests'); }
-    const accounts = group.keys.flatMap(k => k.accounts);
-    group.accountCount = unique(accounts.map(a => a.id)).length;
+    for (const key of group.keys) {
+      key.accounts = uniqueAccounts(key.accounts);
+      key.accountCount = key.accounts.length;
+      if (key.accountCount > 1) {
+        key.sharedAccountCount = key.accountCount;
+        for (const account of key.accounts) account.sharedKeyAccountCount = Math.max(account.sharedKeyAccountCount || 0, key.accountCount);
+      }
+      key.main = source.complete ? total(key.accounts, 'main') : null;
+      key.requests = total(key.accounts, 'requests');
+    }
+    const accounts = uniqueAccounts(group.keys.flatMap(k => k.accounts));
+    group.accountCount = accounts.length;
+    group.sharedKeyCount = group.keys.filter(key => key.accountCount > 1).length;
+    group.sharedAccountCount = uniqueAccounts(group.keys.filter(key => key.accountCount > 1).flatMap(key => key.accounts)).length;
+    group.duplicateKeyCount = group.keys.reduce((sum, key) => sum + Math.max(0, (key.duplicateKeyCount || 1) - 1), 0);
     group.localGroupCount = unique(accounts.flatMap(a => a.localGroups.map(g => g.id))).length;
     group.upstreamComplete = group.keys.every(k => k.upstreamComplete);
     group.upstream = group.upstreamComplete ? total(group.keys, 'upstream') : null;
@@ -97,7 +156,7 @@ function buildGroupReport(upstream, source, settings, date, at) {
     group.diff = group.comparable ? new Decimal(group.main).minus(group.upstream).toDecimalPlaces(8).toNumber() : null;
     group.rate = group.diff !== null && group.main > 0 ? new Decimal(group.diff).div(group.main).times(100).toDecimalPlaces(4).toNumber() : null;
   }
-  const missingProviders = upstream.items.filter(p => !p.keys.length).map(p => ({ id: p.id, name: p.name, reasons: p.reasons }));
+  const missingProviders = normalized.items.filter(p => !p.keys.length).map(p => ({ id: p.id, name: p.name, reasons: p.reasons }));
   return { date, computedAt: at, siteComplete: source.complete, groups: [...groups.values()], mappings, missingProviders };
 }
-module.exports = { buildGroupReport, total, groupId, aliases };
+module.exports = { buildGroupReport, total, groupId, aliases, canonicalizeKeys, canonicalizeUpstream };
