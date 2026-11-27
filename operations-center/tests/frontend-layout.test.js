@@ -85,22 +85,25 @@ test('system settings exposes guarded database setup and cleanup configuration',
   assert.match(script, /settings\.setupRequired \? 'settings'/);
 });
 
-test('supplier margin alerts expose channels in system settings and cost analysis', () => {
-  const supplierUi = fs.readFileSync(path.join(__dirname, '..', 'public', 'supplier-group-ui.js'), 'utf8');
+test('supplier settings live in cost analysis and daily provider details', () => {
   const accountingUi = fs.readFileSync(path.join(__dirname, '..', 'public', 'cost-accounting-ui.js'), 'utf8');
   assert.match(html, /<h2>消息提醒渠道<\/h2>/);
   assert.match(html, /id="notification-channel-list"/);
   assert.match(html, /id="notification-channel-form"/);
   assert.match(script, /loadNotificationChannels\(\)/);
   assert.match(script, /\/api\/settings\/notification-channels/);
-  assert.match(supplierUi, /收益率高亮阈值/);
-  assert.match(supplierUi, /通知渠道/);
-  assert.match(supplierUi, /marginAlert/);
-  assert.match(supplierUi, /共享 Key/);
-  assert.match(supplierUi, /上游消费只计一次/);
+  assert.doesNotMatch(html, /supplier-group-ui\.js/);
+  assert.match(accountingUi, /data-supplier-settings/);
+  assert.match(accountingUi, /供应商简称会参与主站账号名称匹配/);
+  assert.match(accountingUi, /上游超出主站消费时提醒（全部供应商）/);
+  assert.match(accountingUi, /收益率低于阈值时发送提醒（全部供应商）/);
+  assert.match(accountingUi, /marginAlertChannels/);
+  assert.match(accountingUi, /\/api\/cost-analysis\/supplier-groups\/settings/);
   assert.match(accountingUi, /supplier-group-low-margin/);
   assert.match(accountingUi, /共享 Key/);
   assert.match(accountingUi, /let content = ''/);
+  assert.doesNotMatch(accountingUi, /SupplierGroupUi\?\.create/);
+  assert.doesNotMatch(accountingUi, /data-tab="groups"/);
 });
 
 test('navigation keeps tab selection state and keyboard controls in sync', () => {

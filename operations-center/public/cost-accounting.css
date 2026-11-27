@@ -37,7 +37,7 @@
 .supplier-group-account-name { overflow-wrap: anywhere; min-width: 0; font-size: 13px; }
 .supplier-group-account-amount { font-variant-numeric: tabular-nums; font-size: 13px; text-align: right; overflow-wrap: anywhere; max-width: 110px; }
 .supplier-group-account-splits { margin: 2px 0 8px 20px; padding-left: 10px; border-left: 2px solid var(--line); display: grid; gap: 8px; }
-#accounting-groups .supplier-group-account-splits > small { margin: 0; }
+.supplier-group-account-splits > small { margin: 0; }
 .supplier-group-account-splits .supplier-group-split { gap: 8px; color: var(--text); }
 .supplier-group-table tfoot th,.supplier-group-table tfoot td { background: var(--surface-subtle); border-bottom: 0; font-weight: 600; color: var(--text); }
 .supplier-group-table tfoot .negative-value { color: var(--red); }
@@ -45,12 +45,10 @@
 .supplier-group-rate-cell { white-space: nowrap; }
 .supplier-group-mobile-label { display: none; }
 .supplier-group-account-table { min-width: 740px; background: var(--surface); }
-#accounting-groups td,#accounting-groups th { padding: 11px 10px; }
-#accounting-groups td small { display: block; color: var(--muted); margin-top: 4px; }
 .supplier-group-status { color: var(--green); background: var(--green-soft); border-radius: 4px; padding: 3px 7px; font-size: 12px; white-space: nowrap; }
 .supplier-group-status.warn { color: var(--amber); background: var(--amber-soft); }
 .supplier-group-status.bad { color: var(--red); background: var(--red-soft); }
-.supplier-group-subtotal,#accounting-groups td .supplier-group-subtotal,.accounting-drawer-body td .supplier-group-subtotal { color: var(--amber); font-size: 11px; font-weight: 400; }
+.supplier-group-subtotal,.accounting-drawer-body td .supplier-group-subtotal { color: var(--amber); font-size: 11px; font-weight: 400; }
 .supplier-group-shared-note { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 1.4; }
 .supplier-group-account-splits .supplier-group-shared-note { color: var(--green); }
 .supplier-group-heading { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 18px; }
@@ -69,9 +67,9 @@
   .supplier-group-table,.supplier-group-table tbody,.supplier-group-table tfoot { display: block; width: 100%; }
   .supplier-group-table colgroup,.supplier-group-table thead { display: none; }
   .supplier-group-table tbody > tr { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-areas: 'accounts accounts' 'name name' 'main upstream' 'diff rate'; gap: 12px 8px; padding: 16px 0; border-top: 1px solid var(--line); }
-  #accounting-groups .supplier-group-table td,#accounting-groups .supplier-group-table th { padding: 0; border-bottom: 0; }
+  .supplier-group-table td,.supplier-group-table th { padding: 0; border-bottom: 0; }
   .supplier-group-table .supplier-group-name { grid-area: name; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
-  #accounting-groups .supplier-group-table .supplier-group-name > small,.supplier-group-table .supplier-group-name .supplier-group-status { margin: 0; }
+  .supplier-group-table .supplier-group-name > small,.supplier-group-table .supplier-group-name .supplier-group-status { margin: 0; }
   .supplier-group-table .supplier-group-accounts-cell { grid-area: accounts; }
   .supplier-group-table .supplier-group-main { grid-area: main; }
   .supplier-group-table .supplier-group-upstream { grid-area: upstream; }
@@ -103,6 +101,8 @@
 .accounting-section { border-top: 1px solid var(--line); padding-top: 18px; margin-top: 20px; min-width: 0; }
 .accounting-section h2 { font-size: 15px; margin: 0; }
 .accounting-section .panel-heading { padding: 0 0 12px; }
+.accounting-heading-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; min-width: 0; }
+.accounting-heading-actions .muted { overflow-wrap: anywhere; text-align: right; }
 .accounting-section table { background: var(--surface); }
 .accounting-section td, .accounting-section th { padding: 11px 10px; }
 .accounting-section td small { display: block; color: var(--muted); margin-top: 4px; }

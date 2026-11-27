@@ -528,6 +528,10 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
     if (!supplierGroups) throw new AppError('SUPPLIER_GROUP_UNAVAILABLE', '供应商分组消费暂不可用，请检查模块初始化状态', { status: 503 });
     res.set('Cache-Control', 'no-store').json(await supplierGroups.getReport(req.query, { accessToken: req.auth.upstreamAccessToken || null }));
   }));
+  api.get('/cost-analysis/supplier-groups/settings', (req, res) => {
+    if (!supplierGroups) throw new AppError('SUPPLIER_GROUP_UNAVAILABLE', '供应商分组消费暂不可用', { status: 503 });
+    res.set('Cache-Control', 'no-store').json(supplierGroups.getSettings());
+  });
   api.put('/cost-analysis/supplier-groups/settings', csrf,
     rateLimit({ windowMs: 60000, limit: 30, standardHeaders: true, legacyHeaders: false }), (req, res) => {
       if (!supplierGroups) throw new AppError('SUPPLIER_GROUP_UNAVAILABLE', '供应商分组消费暂不可用', { status: 503 });

@@ -244,6 +244,9 @@ class SupplierGroupService {
     if (!parsed.success || Object.keys(parsed.data.aliases).length > 500) throw new AppError('INVALID_REQUEST', '供应商简称或差额提醒参数无效', { status: 400 });
     return this.store.configure(this.scope(), parsed.data, actor, this.now().toISOString());
   }
+  getSettings() {
+    return this.store.settings(this.scope());
+  }
   async notifyLowMargin(report, scope, date, accessToken = null) {
     const policy = report?.policy?.marginAlert;
     const channelIds = [...new Set((policy?.channelIds || []).map(id => String(id).trim()).filter(Boolean))].sort();

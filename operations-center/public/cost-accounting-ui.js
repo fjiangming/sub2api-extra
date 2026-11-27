@@ -6,7 +6,8 @@ const CostAccountingUi = (() => {
     if (!root) return null;
     const e = h.escapeHtml, q = selector => root.querySelector(selector), base = '/api/cost-analysis/cash';
     const state = { tab: 'automatic', report: null, active: false, request: 0, automaticPage: 1, cashPage: 1,
-      providers: [], search: '', direction: 'all', origin: 'all', dialogRequest: 0, expandedProviderAccounts: new Set() };
+      providers: [], search: '', direction: 'all', origin: 'all', dialogRequest: 0, expandedProviderAccounts: new Set(),
+      supplierSettings: null, supplierAliasProvider: '', supplierNotificationChannels: [] };
     const money = value => value == null ? '暂不可用' : h.formatMoney(value, '', 8);
     const pct = value => value == null ? '-' : h.formatPercent(value);
     const option = (key, label, selected) => `<option value="${e(key)}"${key === selected ? ' selected' : ''}>${e(label)}</option>`;
@@ -17,11 +18,11 @@ const CostAccountingUi = (() => {
     const metric = (title, value, hint, action, format = money) => `<button type="button" class="accounting-metric" data-metric="${e(action)}"><span>${e(title)}</span><strong class="${value < 0 ? 'negative-value' : ''}" title="${e(format(value))}">${e(format(value))}</strong><small>${e(hint)}</small></button>`;
     root.innerHTML = `
       <div class="accounting-tabs" role="tablist" aria-label="成本分析视图">
-        ${[['automatic', '消费毛利'], ['cash', '现金收支'], ['groups', '供应商分组消费']].map(([key, label]) => `<button type="button" id="accounting-tab-${key}" role="tab" aria-controls="accounting-${key}" aria-selected="${key === 'automatic'}" tabindex="${key === 'automatic' ? 0 : -1}" data-tab="${key}">${label}</button>`).join('')}
+        ${[['automatic', '消费毛利'], ['cash', '现金收支']].map(([key, label]) => `<button type="button" id="accounting-tab-${key}" role="tab" aria-controls="accounting-${key}" aria-selected="${key === 'automatic'}" tabindex="${key === 'automatic' ? 0 : -1}" data-tab="${key}">${label}</button>`).join('')}
       </div><div data-notice class="accounting-notice" role="status" hidden></div>
       <section id="accounting-automatic" role="tabpanel" aria-labelledby="accounting-tab-automatic">
         <div class="accounting-metrics" data-automatic-metrics></div><div class="accounting-aux" data-automatic-meta></div>
-        <section class="accounting-section"><div class="panel-heading"><h2>消费与毛利趋势</h2><span class="muted" data-automatic-range></span></div><div id="accounting-automatic-chart" class="chart" role="img" aria-label="主站消费、供应商消费、抽奖所得及消费毛利趋势"></div></section>
+        <section class="accounting-section"><div class="panel-heading"><h2>消费与毛利趋势</h2><div class="accounting-heading-actions"><button type="button" class="icon-button" data-supplier-settings title="供应商简称与提醒设置" aria-label="供应商简称与提醒设置">${h.icon('sliders-horizontal')}</button><span class="muted" data-automatic-range></span></div></div><div id="accounting-automatic-chart" class="chart" role="img" aria-label="主站消费、供应商消费、抽奖所得及消费毛利趋势"></div></section>
         <section class="accounting-section"><div class="panel-heading accounting-detail-heading"><div class="accounting-subtabs" role="tablist" aria-label="消费明细">${[['days', '每日明细'], ['providers', '供应商汇总']].map(([key, label]) => `<button type="button" id="cost-detail-tab-${key}" role="tab" aria-controls="cost-detail-${key}" aria-selected="${key === 'days'}" tabindex="${key === 'days' ? 0 : -1}" data-detail-tab="${key}">${label}</button>`).join('')}</div><span class="muted" data-automatic-day-meta></span></div>
           <div id="cost-detail-days" role="tabpanel" aria-labelledby="cost-detail-tab-days"><div class="table-wrap"><table class="accounting-automatic-table"><thead><tr><th>日期</th><th class="numeric">主站消费</th><th class="numeric">供应商消费</th><th class="numeric">当日抽奖所得</th><th class="numeric">消费毛利</th><th class="numeric">毛利率</th><th class="numeric">请求数</th><th>数据状态</th><th>操作</th></tr></thead><tbody data-automatic-days></tbody><tfoot data-automatic-total></tfoot></table></div>${pager('automatic-day')}</div>
           <div id="cost-detail-providers" role="tabpanel" aria-labelledby="cost-detail-tab-providers" hidden><div data-provider-summary></div></div>
@@ -39,12 +40,6 @@ const CostAccountingUi = (() => {
       </section>
       <details class="accounting-rules"><summary>统计范围与数据来源</summary><p>消费毛利 = 主站实际消费 − 启用定时检查的供应商账号实际消费 − 当日充值抽奖所得。主站消费不含 ID 1；包含余额、赠送与订阅产生的用量，充值额度和余额独立展示。抽奖所得按兑换记录的 used_at 资金日归集，供应商充值只计现金支出，不重复扣入消费毛利。</p><p>自动收入恢复已使用余额兑换的入账口径，按使用日期统计正负额度；排除 ID 1、补贴及新旧充值抽奖奖励，以及并发、订阅、邀请等非金额兑换，已有有效排除事实沿用。关联支付订单不重复相加；未关联兑换的已付款订单按实收补充。额度可能含赠送、优惠，不等同渠道实收。手工收付按实际日期统计，所有金额统一按人民币原数值计算，历史 USD 100 计为人民币 100 元。</p><p>第一行按所选期间统计，列表搜索只筛记录。第二行的历史收入、历史支出、历史抽奖所得与累计净结余从资金时区 2026-10-01（含当天）累计至今，不受日期和粒度影响。累计净结余 = 该日起累计入账 − 该日起累计支出 − 历史抽奖所得 − 当前用户余额；余额排除 ID 1 及已删除用户。历史来源或余额缺失时保留未知，源站同步前已清理的数据无法恢复。</p><p>历史日报每日 01:00 自动归档，今天实时统计；缺失来源自动重试，未知不当零。消费毛利、净现金流和累计净结余均不表示经营净利润。</p></details>
       <dialog class="accounting-dialog" data-dialog aria-labelledby="accounting-drawer-title"><header class="accounting-drawer-header"><button type="button" class="icon-button" data-provider-group-back hidden title="返回供应商列表" aria-label="返回供应商列表">${h.icon('arrow-left')}</button><h2 id="accounting-drawer-title"></h2><button type="button" class="icon-button" data-close title="关闭" aria-label="关闭">${h.icon('x')}</button></header><div class="accounting-drawer-body" data-drawer></div></dialog>`;
-
-    const supplierGroups = window.SupplierGroupUi?.create(h, (() => {
-      const section = document.createElement('section'); section.id = 'accounting-groups'; section.hidden = true;
-      section.setAttribute('role', 'tabpanel'); section.setAttribute('aria-labelledby', 'accounting-tab-groups');
-      q('.accounting-rules').before(section); return section;
-    })());
 
     function fitMetrics() {
       root.querySelectorAll('.accounting-metric strong').forEach(node => {
@@ -81,6 +76,66 @@ const CostAccountingUi = (() => {
       notice.textContent = `${r.archive?.pendingDays ? `${r.archive.pendingDays} 天历史数据正在后台同步或重试。` : ''}${s.completeDays !== s.days ? `数据完整 ${s.completeDays}/${s.days} 天，完整日期毛利小计 ${money(r.completeSubtotal?.profit)} CNY。缺失日期留空。` : ''}`;
       renderMeta(); renderAutomaticDays(); renderProviders();
       renderChart('accounting-automatic-chart', r.periods, [['siteConsumption', '主站消费', '#176b4d'], ['supplierConsumption', '供应商消费', '#b05a3c'], ['lotteryReward', '抽奖所得', '#8a5a9b'], ['profit', '消费毛利', '#2d5ea8']], 'CNY'); readyIcons();
+    }
+    function supplierProviderList(extra = []) {
+      const providers = new Map();
+      for (const row of state.report?.items || []) for (const provider of row.providers || []) {
+        if (provider?.id && !providers.has(String(provider.id))) providers.set(String(provider.id), { id: String(provider.id), name: provider.name || provider.id });
+      }
+      for (const provider of [...state.providers, ...extra]) {
+        if (provider?.id && !providers.has(String(provider.id))) providers.set(String(provider.id), { id: String(provider.id), name: provider.name || provider.id });
+      }
+      for (const id of Object.keys(state.supplierSettings?.aliases || {})) {
+        if (!providers.has(String(id))) providers.set(String(id), { id: String(id), name: String(id) });
+      }
+      return [...providers.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+    }
+    function captureSupplierAlias() {
+      const field = q('[data-supplier-alias]');
+      if (!field || !state.supplierAliasProvider || !state.supplierSettings) return;
+      state.supplierSettings.aliases[state.supplierAliasProvider] = field.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+    }
+    function updateSupplierAliasField() {
+      const field = q('[data-supplier-alias]');
+      if (field && state.supplierSettings) field.value = (state.supplierSettings.aliases[state.supplierAliasProvider] || []).join('\n');
+    }
+    async function openSupplierSettings() {
+      const request = state.dialogRequest;
+      const [settingsResult, channelsResult, providersResult] = await Promise.allSettled([
+        h.api('/api/cost-analysis/supplier-groups/settings'),
+        h.api('/api/settings/notification-channels'),
+        h.api('/api/cost-analysis/providers')
+      ]);
+      if (!state.active || request !== state.dialogRequest) return;
+      if (settingsResult.status !== 'fulfilled') throw settingsResult.reason;
+      const settings = settingsResult.value || {};
+      state.supplierSettings = {
+        aliases: settings.aliases && typeof settings.aliases === 'object' ? JSON.parse(JSON.stringify(settings.aliases)) : {},
+        alert: { enabled: true, amount: 10, percent: 5, ...(settings.alert || {}) },
+        marginAlert: { enabled: true, threshold: 10, channelIds: [], ...(settings.marginAlert || {}) }
+      };
+      state.supplierSettings.marginAlert.channelIds = [...new Set((state.supplierSettings.marginAlert.channelIds || []).map(String))];
+      state.supplierNotificationChannels = channelsResult.status === 'fulfilled' ? (channelsResult.value?.items || []) : [];
+      const providers = supplierProviderList(providersResult.status === 'fulfilled' ? (providersResult.value?.items || []) : []);
+      state.supplierAliasProvider = providers[0]?.id || Object.keys(state.supplierSettings.aliases)[0] || '';
+      const channelSize = Math.min(5, Math.max(2, state.supplierNotificationChannels.length || 2));
+      const channelOptions = state.supplierNotificationChannels.map(channel => `<option value="${e(channel.id)}"${state.supplierSettings.marginAlert.channelIds.includes(String(channel.id)) ? ' selected' : ''}>${e(`${channel.name}${channel.enabled ? '' : '（停用）'}`)}</option>`).join('');
+      drawer('供应商简称与提醒设置', `<form class="accounting-form" data-supplier-settings-form>
+        <p class="accounting-wide muted">供应商简称会参与主站账号名称匹配；当账号名称不含供应商全称时可配置，留空则只使用供应商全称。下面两类提醒对全部供应商分组生效。</p>
+        <label class="accounting-wide">供应商<select name="aliasProvider" data-supplier-alias-provider>${providers.map(provider => option(provider.id, provider.name, state.supplierAliasProvider)).join('') || '<option value="">当前期间暂无供应商</option>'}</select></label>
+        <label class="accounting-wide">供应商简称（每行一个）<textarea data-supplier-alias maxlength="2400"${providers.length ? '' : ' disabled'}>${e((state.supplierSettings.aliases[state.supplierAliasProvider] || []).join('\n'))}</textarea></label>
+        <hr class="accounting-wide">
+        <label class="supplier-group-check accounting-wide"><input type="checkbox" name="supplierAlertEnabled"${state.supplierSettings.alert.enabled ? ' checked' : ''}>上游超出主站消费时提醒（全部供应商）</label>
+        <label>超出金额至少（CNY）<input name="supplierAlertAmount" type="number" min="0" max="1000000" step="any" value="${e(state.supplierSettings.alert.amount)}" required></label>
+        <label>超出比例至少（%）<input name="supplierAlertPercent" type="number" min="0" max="1000" step="any" value="${e(state.supplierSettings.alert.percent)}" required></label>
+        <hr class="accounting-wide">
+        <label class="supplier-group-check accounting-wide"><input type="checkbox" name="marginAlertEnabled"${state.supplierSettings.marginAlert.enabled ? ' checked' : ''}>收益率低于阈值时发送提醒（全部供应商）</label>
+        <label>收益率高亮阈值（%）<input name="marginAlertThreshold" type="number" min="0" max="1000" step="any" value="${e(state.supplierSettings.marginAlert.threshold)}" required></label>
+        <label class="accounting-wide">通知渠道<select name="marginAlertChannels" multiple size="${channelSize}">${channelOptions || '<option disabled>请先在系统设置中配置渠道</option>'}</select></label>
+        <p class="accounting-wide muted">只有数据完整且可比较的分组会触发收益率提醒；历史冲突、待核对和上游数据缺失不会发送。</p>
+        <p class="accounting-wide form-error" data-supplier-settings-error role="alert" hidden></p>
+        <div class="accounting-wide form-actions"><button type="submit" class="button primary">${h.icon('save')}<span>保存设置</span></button><button type="button" class="button secondary" data-close>取消</button></div>
+      </form>`);
     }
     function renderMeta() {
       const value = (source, amount) => source === undefined ? '读取中' : money(amount);
@@ -128,7 +183,6 @@ const CostAccountingUi = (() => {
     }
     async function load({ refresh = false, poll = false } = {}) {
       state.active = true; clearTimeout(state.timer); const request = ++state.request, automatic = state.tab === 'automatic';
-      if (state.tab === 'groups') return supplierGroups?.load({ refresh });
       if (poll && Date.now() - (state.liveRefreshedAt || 0) >= 60000) poll = false;
       if (automatic && !poll) state.liveRefreshedAt = Date.now();
       const query = { ...h.query(), ...(refresh ? { refresh: '1' } : {}), ...(poll ? { poll: '1' } : {}) };
@@ -160,13 +214,13 @@ const CostAccountingUi = (() => {
         schedule(automatic && report.archive?.pendingDays && report.archive.ready ? 5000 : 60000);
       } catch (error) { if (request !== state.request || !state.active) return; q('[data-notice]').hidden = false; q('[data-notice]').textContent = `${error.message}，稍后自动重试`; schedule(); throw error; }
     }
-    function leave() { state.active = false; ++state.request; ++state.dialogRequest; state.providerGroupController?.abort(); clearTimeout(state.timer); supplierGroups?.leave(); if (q('[data-dialog]').open) q('[data-dialog]').close(); }
+    function leave() { state.active = false; ++state.request; ++state.dialogRequest; state.providerGroupController?.abort(); clearTimeout(state.timer); if (q('[data-dialog]').open) q('[data-dialog]').close(); }
     async function changeTab(tab) {
-      if (!['automatic', 'cash', 'groups'].includes(tab)) return; supplierGroups?.leave(); state.tab = tab; state.report = null;
-      for (const key of ['automatic', 'cash', 'groups']) { q(`[data-tab="${key}"]`).setAttribute('aria-selected', String(key === tab)); q(`[data-tab="${key}"]`).tabIndex = key === tab ? 0 : -1; q(`#accounting-${key}`).hidden = key !== tab; }
-      document.getElementById('cost-accounting-add').hidden = tab === 'groups';
-      document.getElementById('cost-analysis-filter').hidden = tab === 'groups';
-      root.querySelector(':scope > .accounting-rules').hidden = tab === 'groups';
+      if (!['automatic', 'cash'].includes(tab)) return; state.tab = tab; state.report = null;
+      for (const key of ['automatic', 'cash']) { q(`[data-tab="${key}"]`).setAttribute('aria-selected', String(key === tab)); q(`[data-tab="${key}"]`).tabIndex = key === tab ? 0 : -1; q(`#accounting-${key}`).hidden = key !== tab; }
+      document.getElementById('cost-accounting-add').hidden = false;
+      document.getElementById('cost-analysis-filter').hidden = false;
+      root.querySelector(':scope > .accounting-rules').hidden = false;
       q('[data-notice]').hidden = true; await load(); h.resizeCharts();
     }
     function dayDetail(date) {
@@ -326,6 +380,7 @@ const CostAccountingUi = (() => {
         if (node.hasAttribute('data-close')) { ++state.dialogRequest; q('[data-dialog]').close(); return; }
         if (node.dataset.tab) return changeTab(node.dataset.tab);
         if (node.dataset.detailTab) { for (const key of ['days', 'providers']) { const active = key === node.dataset.detailTab; q(`[data-detail-tab="${key}"]`).setAttribute('aria-selected', String(active)); q(`[data-detail-tab="${key}"]`).tabIndex = active ? 0 : -1; q(`#cost-detail-${key}`).hidden = !active; } return; }
+        if (node.hasAttribute('data-supplier-settings')) return openSupplierSettings();
         if (node.dataset.command) return command(node.dataset.command); if (node.dataset.day) return dayDetail(node.dataset.day);
         if (node.dataset.providerRefresh) return refreshProvider(node.dataset.providerDate, node.dataset.providerRefresh, node);
         if (node.dataset.providerGroups) return openProviderGroups(node.dataset.providerDate, node.dataset.providerGroups);
@@ -354,7 +409,11 @@ const CostAccountingUi = (() => {
         }
       }; run().catch(error => h.toast(error.message, 'error'));
     });
-    root.addEventListener('change', event => { if (['direction', 'category'].includes(event.target.name)) updateFields(); });
+    root.addEventListener('change', event => {
+      const node = event.target;
+      if (node.hasAttribute('data-supplier-alias-provider')) { captureSupplierAlias(); state.supplierAliasProvider = node.value; updateSupplierAliasField(); return; }
+      if (['direction', 'category'].includes(node.name)) updateFields();
+    });
     root.addEventListener('toggle', event => {
       const account = event.target;
       if (!account.matches('details[data-provider-group-account]') || !account.isConnected) return;
@@ -365,6 +424,32 @@ const CostAccountingUi = (() => {
       event.preventDefault(); const form = event.target;
       if (form.matches('[data-cash-search]')) { Object.assign(state, Object.fromEntries(new FormData(form)), { cashPage: 1 }); load().catch(error => h.toast(error.message, 'error')); return; }
       if (form.matches('[data-balance-search]')) { balanceDetail(1, form.elements.search.value).catch(error => h.toast(error.message, 'error')); return; }
+      if (form.matches('[data-supplier-settings-form]')) {
+        if (state.saving || !state.supplierSettings) return;
+        const run = async () => {
+          state.saving = true; const submit = form.querySelector('[type="submit"]'); submit.disabled = true;
+          try {
+            captureSupplierAlias();
+            state.supplierSettings.alert = {
+              enabled: form.elements.supplierAlertEnabled.checked,
+              amount: Number(form.elements.supplierAlertAmount.value),
+              percent: Number(form.elements.supplierAlertPercent.value)
+            };
+            state.supplierSettings.marginAlert = {
+              enabled: form.elements.marginAlertEnabled.checked,
+              threshold: Number(form.elements.marginAlertThreshold.value),
+              channelIds: [...form.elements.marginAlertChannels.selectedOptions].map(option => option.value)
+            };
+            const saved = await h.api('/api/cost-analysis/supplier-groups/settings', { method: 'PUT', body: JSON.stringify(state.supplierSettings) });
+            state.supplierSettings = saved;
+            q('[data-dialog]').close(); h.toast('供应商简称与提醒设置已保存', 'success');
+          } catch (error) {
+            const node = form.querySelector('[data-supplier-settings-error]');
+            if (node?.isConnected) { node.textContent = error.message; node.hidden = false; } else h.toast(error.message, 'error');
+          } finally { state.saving = false; submit.disabled = false; }
+        };
+        run(); return;
+      }
       if (!form.matches('[data-entry-form]') || state.saving) return;
       const run = async () => {
         state.saving = true; const submit = form.querySelector('[type="submit"]'); submit.disabled = true;

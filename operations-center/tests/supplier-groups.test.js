@@ -651,6 +651,9 @@ test('HTTP group report/settings require administrator session and CSRF, and rej
   const login = await fetch(`${url}/api/auth/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'synthetic-admin-password' }) });
   const cookie = login.headers.get('set-cookie').split(';')[0], session = await login.json();
   let r = await fetch(`${url}/api/cost-analysis/supplier-groups`, { headers: { cookie } }); assert.equal(r.status, 200); assert.equal(r.headers.get('cache-control'), 'no-store');
+  r = await fetch(`${url}/api/cost-analysis/supplier-groups/settings`, { headers: { cookie } });
+  assert.equal(r.status, 200); assert.equal(r.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(await r.json(), f.store.settings(f.service.scope()));
   const options = { method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(f.store.settings(f.service.scope())) };
   assert.equal((await fetch(`${url}/api/cost-analysis/supplier-groups/settings`, options)).status, 403);
   options.headers['x-csrf-token'] = session.csrfToken; assert.equal((await fetch(`${url}/api/cost-analysis/supplier-groups/settings`, options)).status, 200);
