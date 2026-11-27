@@ -169,6 +169,32 @@ class ConversationPushStore {
     const ready=cutoff === null ? waiting : this.db.prepare('SELECT COUNT(*) count FROM cl_push_auto_waiting WHERE at<?').get(cutoff).count;
     return {waiting,ready,mode:policy.automaticMode,timezone:policy.s3.jsonl.timezone};
   }
+  historicalBacklog() {
+    const metadata=pushMetadataStatus(this.db),policy=this.policy();
+    if (!metadata.ready) return {ready:false,indexed:metadata.indexed,total:metadata.total,records:null,bytes:null,timezone:policy.s3.jsonl.timezone};
+    const active=policyTargets(policy).filter(item=>item.enabled && (item.type==='s3'||item.type==='webhook'));
+    const base={ready:true,timezone:policy.s3.jsonl.timezone,records:0,bytes:0,queuedRecords:0,queuedBytes:0,
+      unassignedRecords:0,unassignedBytes:0,failedRecords:0,failedBytes:0,unavailableRecords:0,unavailableBytes:0,excludedRecords:0,excludedBytes:0,firstAt:null,lastAt:null};
+    if (!policy.enabled || !active.length) return base;
+    const ids=active.map(item=>item.id),placeholders=ids.map(()=>'?').join(',');
+    const unresolved=ids.map(() => `(NOT EXISTS(SELECT 1 FROM cl_push_receipts p WHERE p.record_id=m.id AND p.destination=?)
+      AND NOT EXISTS(SELECT 1 FROM cl_push_jobs d WHERE d.record_id=m.id AND d.destination=? AND d.status='sent'))`).join(' OR ');
+    const rows=this.db.prepare(`SELECT m.*,EXISTS(SELECT 1 FROM cl_push_jobs j WHERE j.record_id=m.id AND j.destination IN (${placeholders})) has_job,
+      EXISTS(SELECT 1 FROM cl_push_jobs j WHERE j.record_id=m.id AND j.destination IN (${placeholders}) AND j.status IN ('pending','buffered','running')) queued
+      FROM cl_record_metadata m WHERE m.at<? AND m.fingerprint!='' AND (${unresolved})`).all(
+        ...ids,...ids,DateTime.fromMillis(this.now(),{zone:policy.s3.jsonl.timezone}).startOf('day').toMillis(),...ids.flatMap(id=>[id,id]));
+    const archivePolicy=this.archive.policy();
+    for(const row of rows){
+      const size=Math.max(0,Number(row.bytes)||0),allowed=this.allowed(row,archivePolicy);
+      if(!allowed){base.excludedRecords++;base.excludedBytes+=size;continue;}
+      if(!this.copyReady(row,policy.source,archivePolicy,policy)){base.unavailableRecords++;base.unavailableBytes+=size;continue;}
+      base.records++;base.bytes+=size;base.firstAt=base.firstAt===null?row.at:Math.min(base.firstAt,row.at);base.lastAt=base.lastAt===null?row.at:Math.max(base.lastAt,row.at);
+      if(row.queued){base.queuedRecords++;base.queuedBytes+=size;}
+      else if(row.has_job){base.failedRecords++;base.failedBytes+=size;}
+      else {base.unassignedRecords++;base.unassignedBytes+=size;}
+    }
+    return base;
+  }
   automaticBacklog({ start, end, model, destination } = {}) {
     const policy=this.policy();
     if (!policy.enabled || !policy.automatic || !policyTargets(policy).some(item=>item.enabled&&(!destination||item.id===destination))) return false;
@@ -345,7 +371,7 @@ class ConversationPushStore {
     const total=this.db.prepare('SELECT COUNT(*) n FROM cl_push_jobs j'+where).get(...args).n + (!query.status || query.status==='sent'?this.db.prepare('SELECT COUNT(*) n FROM cl_push_receipts').get().n:0);
     const items=this.db.prepare(`SELECT ${historyColumns} FROM ${historySource} j${where} ORDER BY j.created_at DESC,j.id LIMIT 20 OFFSET ?`).all(...args,(page-1)*20);
     const stats=this.db.prepare('SELECT code,count,updated_at FROM cl_push_scan_stats WHERE policy_version=? ORDER BY code').all(this.policy().version);
-    return {items,page,pages:Math.ceil(total/20),total,counts:this.historyCounts(),metadataIndex:pushMetadataStatus(this.db),
+    return {items,page,pages:Math.ceil(total/20),total,counts:this.historyCounts(),metadataIndex:pushMetadataStatus(this.db),historicalBacklog:this.historicalBacklog(),
       skipped:stats.filter(row=>!row.code.startsWith('ORIGINAL_FALLBACK:')),
       fallbacks:stats.filter(row=>row.code.startsWith('ORIGINAL_FALLBACK:')).map(row=>({...row,code:row.code.slice('ORIGINAL_FALLBACK:'.length)})),
       batches:this.db.prepare('SELECT id,created_at,matched,eligible,created FROM cl_push_batches ORDER BY created_at DESC LIMIT 10').all()};

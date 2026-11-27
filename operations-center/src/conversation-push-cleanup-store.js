@@ -26,6 +26,7 @@ class ConversationPushCleanupStore {
         local_deleted_at INTEGER NOT NULL,request_id TEXT NOT NULL,object_key TEXT NOT NULL,sha256 TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS cl_push_receipt_expiry ON cl_push_receipts(local_deleted_at);
       CREATE INDEX IF NOT EXISTS cl_push_receipt_batch ON cl_push_receipts(batch_id);
+      CREATE INDEX IF NOT EXISTS cl_push_receipt_record_destination ON cl_push_receipts(record_id,destination);
       CREATE INDEX IF NOT EXISTS cl_push_receipt_order ON cl_push_receipts(created_at DESC,id DESC);
       CREATE INDEX IF NOT EXISTS cl_push_history_order ON cl_push_jobs(created_at DESC,id DESC);
       CREATE INDEX IF NOT EXISTS cl_push_batch_unfinished ON cl_push_jobs(batch_id) WHERE status!='sent' OR http_status<200 OR http_status>=300;

@@ -1,5 +1,32 @@
 # 个性化功能维护台账
 
+## 2026-11-27：在对话日志页面展示计入容量构成
+
+用户要求说明“计入容量”由哪些部分组成，并在运营中心页面显示各部分占用大小。本轮只修改运营中心本地源码、静态资源版本、测试和说明文档；未部署服务器、未修改服务器配置、未修改主站代码。
+
+- `operations-center/src/conversation-log-store.js`：在现有数据库 / WAL / SHM 统计基础上增加主库有效页 `databaseChargedBytes` 及 `storage.breakdown`，明确可复用 SQLite 页从主库文件占用中扣除，保留原容量判定与兼容字段。
+- `operations-center/public/conversation-logs-ui.js`、`operations-center/public/conversation-logs.css`、`operations-center/public/index.html`：采集状态页增加“计入容量构成”区域，展示主库有效页、WAL、SHM、计入容量合计、主库文件实际占用和可复用空间，并更新静态资源缓存版本；原有容量上限、文件占用和磁盘可用指标保留。
+- `operations-center/tests/conversation-clear.test.js`、`operations-center/scripts/conversation-logs-live-browser-check.cjs`：覆盖分项字段、物理占用与计入容量公式、状态接口投影，以及桌面 / 移动视口上的分项显示。
+- `operations-center/docs/conversation-logs.md`：补充容量构成公式和页面显示口径。
+
+公式：`计入容量 = 主库有效页 + WAL 文件 + SHM 文件`；`主库有效页 = archive.sqlite 文件大小 - SQLite 可复用页`。`文件占用 = 主库文件 + WAL + SHM`，因此可复用页只保留在物理文件占用中，不计入容量上限。新增计算仅复用已有 stat / PRAGMA 结果，不读取正文，不增加采集或推送路径上的工作。
+
+验证：`conversation-clear.test.js` 与对话日志核心测试共 **29 项通过**，运营中心相关语法检查和 `git diff --check` 通过；浏览器回归脚本因当前工作区未安装 `playwright` 未执行。未提交 GitHub，未构建镜像，未部署服务器。
+
+## 2026-11-27：显示历史未推送占用并补安排 11 月 25 日历史日志
+
+用户要求分析 11 月 25 日数据未推送原因、在运营中心显示历史未推送数据占用，并连接服务器把历史未推数据安排到对应日期目录。本轮只修改运营中心源码与回归测试；未更新镜像、未修改服务器配置或主站代码。只读核对服务器 `216.227.169.198` 后确认 11 月 25 日保留 5,566 条、归档计入约 10.22 GiB，全部没有推送任务；其到达序号为 1–5,566，而自动游标已推进至 83,333，原因是自动策略启用 / 重置游标时仅跟踪启用后的新到达记录，历史记录不会自动回扫。现有 11 月 25 日已送达文件属于此前其他记录，不代表这 5,566 条已送达。
+
+- `operations-center/src/conversation-push-store.js`：增加轻量 `historicalBacklog()` 统计，按当前启用目标、当前用户 / 模型规则和副本可用性统计当前日期之前尚未确认送达的条数、归档占用字节、已入队 / 未安排 / 失败分类及日期边界；仅读取 `cl_record_metadata`、任务和送达凭证，不读取正文 BLOB，不改变自动游标。
+- `operations-center/src/conversation-push-cleanup-store.js`：增加送达凭证按 `record_id,destination` 的索引，避免历史未送达状态刷新对大表逐行扫描。
+- `operations-center/public/conversation-push-ui.js`：在历史推送准备状态旁展示历史未送达条数和归档占用，索引准备期间显示准备中。
+- `operations-center/tests/conversation-push.test.js`：覆盖自动游标跳过的历史日志统计、字节占用、未安排到入队状态变化。
+- `operations-center/docs/conversation-jsonl-push.md`：补充历史未送达统计含义及按日期 / 模型分批预览、确认、入队和失败续传的手动流程。
+
+服务器操作：通过既有运营中心容器的本地数据库连接，仅按 `2026-11-25` 日期和当前启用 S3 目标执行一次预览 / 幂等批次入队，预览匹配 5,566 条、排除 0、不可用 0、重复 0，批次 `9b1a0b2e-6f69-4b44-a525-112520260001` 已创建 5,566 个任务；当前容器后台已开始生成 `2026-11-25` 下按模型分组的 JSONL 文件，未停止现有 11 月 27 日任务、未删除日志、未重启容器、未改变推送策略或桶配置。服务器当前旧镜像尚未包含本轮“历史未推送占用”展示代码，需后续更新运营中心镜像后页面才会显示该字段。
+
+验证：语法检查通过；`conversation-push.test.js` **42 项通过**，`conversation-push-schedule.test.js` **18 项通过**。本轮未提交 / 推送 GitHub，未部署本地源码；服务器补推为真实生产队列操作，后续应持续观察批次状态和对应日期 JSONL 文件的完整送达。
+
 ## 2026-11-26：运营中心补充供应商分组消费残差核对
 
 用户要求在只改动运营中心的前提下修复供应商分组消费统计遗漏。本轮未修改 Provider Monitor、主站、数据库 schema 或资金记录，未连接生产、部署或提交 GitHub。运营中心复用既有 `daily-costs` 账号日汇总和 `group-daily-costs` Key 分组明细：当供应商账号总额高于已知 Key 分组金额时，按供应商生成“上游分组待核对”残差，并保留可按名称定位的主站待核对账号；不伪造真实分组名、不把残差计入正式差额，旧快照缺少账号汇总字段时保持原行为。账号汇总缺失、过期、低于已知金额或与完整 Key 金额矛盾时保持未知。

@@ -154,8 +154,11 @@ class ConversationLogStore {
         accountingReady = true;
       }
     } catch { /* Unavailable page statistics fall back to the full physical size. */ }
-    return { physicalBytes, databaseBytes, walBytes, shmBytes, reusableBytes,
-      quotaBytes: physicalBytes - reusableBytes, accountingReady };
+    const databaseChargedBytes = Math.max(0, databaseBytes - reusableBytes);
+    const quotaBytes = databaseChargedBytes + walBytes + shmBytes;
+    return { physicalBytes, databaseBytes, databaseChargedBytes, walBytes, shmBytes, reusableBytes,
+      quotaBytes, accountingReady,
+      breakdown: { databaseBytes, databaseChargedBytes, walBytes, shmBytes, reusableBytes, physicalBytes, quotaBytes } };
   }
   metadataStatus() { return metadataStatus(this.db); }
   backfillMetadata() { return backfillMetadata(this.db); }

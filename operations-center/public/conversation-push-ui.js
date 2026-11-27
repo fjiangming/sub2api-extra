@@ -153,6 +153,9 @@
       $('automatic-status').textContent=[policy.enabled&&policy.automatic?schedule:'自动计划已暂停',automatic?.waiting?`待自动核对 ${number(automatic.waiting)} 条，已到日期 ${number(automatic.ready)} 条`:''].filter(Boolean).join(' · ');
       const index=value.metadataIndex;
       $('index').textContent=index&&!index.ready?`历史推送准备中 · 已就绪 ${number(index.indexed)} / ${number(index.total)} 条，后台会继续处理`:'';
+      const history=value.historicalBacklog;
+      if(history?.ready && history.records) $('index').textContent += `${$('index').textContent?' · ':''}历史未送达 ${number(history.records)} 条 · 占用 ${size(history.bytes)}${history.queuedRecords?` · 已入队 ${number(history.queuedRecords)} 条`:''}`;
+      else if(history && !history.ready) $('index').textContent += `${$('index').textContent?' · ':''}历史未送达统计准备中`;
       const cleanup=value.cleanup;
       $('cleanup').hidden=!cleanup?.enabled;
       $('cleanup').textContent=cleanup?.enabled?`送达后清理 · 已清理 ${number(cleanup.deleted)} 条 · 已移除 ${size(cleanup.bytes)} · 待核对 ${number(cleanup.pending)} 条${cleanup.error?' · 本地清理暂缓，后台将重试':''}`:'';

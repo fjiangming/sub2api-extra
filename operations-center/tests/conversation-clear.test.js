@@ -98,6 +98,24 @@ test('unavailable or invalid page statistics fall back to physical capacity and 
   }
 });
 
+test('storage status exposes the charged capacity breakdown and keeps reusable pages separate', t => {
+  const { f } = capacityFixture(t);
+  const usage = f.store.storageUsage(), parts = usage.breakdown;
+  assert.equal(usage.databaseChargedBytes, usage.databaseBytes - usage.reusableBytes);
+  assert.equal(parts.databaseBytes, usage.databaseBytes);
+  assert.equal(parts.databaseChargedBytes, usage.databaseChargedBytes);
+  assert.equal(parts.walBytes, usage.walBytes);
+  assert.equal(parts.shmBytes, usage.shmBytes);
+  assert.equal(parts.reusableBytes, usage.reusableBytes);
+  assert.equal(parts.physicalBytes, usage.physicalBytes);
+  assert.equal(parts.quotaBytes, usage.quotaBytes);
+  assert.equal(parts.databaseChargedBytes + parts.walBytes + parts.shmBytes, parts.quotaBytes);
+  assert.equal(usage.databaseChargedBytes + usage.reusableBytes + usage.walBytes + usage.shmBytes, usage.physicalBytes);
+  const status = f.store.status();
+  assert.equal(status.storage.breakdown.quotaBytes, status.storage.quotaBytes);
+  assert.equal(status.storage.breakdown.databaseChargedBytes + status.storage.breakdown.walBytes + status.storage.breakdown.shmBytes, status.storage.quotaBytes);
+});
+
 test('explicit history clear deletes every model, user, copy and derived index while preserving policies and new arrivals', t => {
   const f = fixture();t.after(() => f.close());
   for (const [index,mode] of ['dual','masked','original'].entries()) {

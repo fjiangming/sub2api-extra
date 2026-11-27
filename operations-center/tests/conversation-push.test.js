@@ -256,6 +256,18 @@ test('manual batches bind preview to content and policy, deduplicate, and requir
   assert.equal(f.push.claim(),null);assert.equal(f.push.list().items[0].error_code,'COLLECTION_EXCLUDED');
 });
 
+test('push status reports eligible historical records skipped by the automatic cursor',t=>{
+  const now=Date.parse('2026-11-27T04:00:00Z'),f=setup(t,{now:()=>now});configure(f,{automatic:true,source:'original'});
+  const old=event('historical-backlog',{at:now-2*86400000}),current=event('historical-current',{at:now});
+  f.store.ingest(old);f.store.ingest(current);
+  const before=f.push.list().historicalBacklog;
+  assert.equal(before.ready,true);assert.equal(before.records,1);assert(before.bytes>0);assert.equal(before.unassignedRecords,1);assert.equal(before.queuedRecords,0);
+  const input={filter:{request_id:old.request_id},destinations:['webhook']},preview=f.push.preview(input);
+  f.push.enqueue({...input,previewToken:preview.previewToken,batchId:crypto.randomUUID()});
+  const after=f.push.list().historicalBacklog;
+  assert.equal(after.records,1);assert.equal(after.queuedRecords,1);assert.equal(after.unassignedRecords,0);
+});
+
 test('preview, enqueue, automatic scan and job history use compact metadata with unchanged content versions',t=>{
   const f=setup(t);configure(f,{automatic:true,captureScope:'all'});
   const row=event('push-compact');f.store.ingest(row);

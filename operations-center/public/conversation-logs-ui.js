@@ -192,10 +192,20 @@
     async function loadBodies(current) { await Promise.all(['request','response'].map(side => loadPayload(side,current))); }
     function renderCollection() {
       const storage = status.storage;
+      const storageValue = key => storage?.[key] ?? storage?.breakdown?.[key] ?? null;
+      const physicalBytes = storageValue('physicalBytes') ?? status.diskBytes;
+      const reusableBytes = storageValue('reusableBytes') ?? 0;
+      const walBytes = storageValue('walBytes') ?? 0;
+      const shmBytes = storageValue('shmBytes') ?? 0;
+      const databaseBytes = storageValue('databaseBytes') ?? Math.max(0, physicalBytes - walBytes - shmBytes);
+      const databaseChargedBytes = storageValue('databaseChargedBytes') ?? Math.max(0, databaseBytes - reusableBytes);
+      const quotaBytes = storageValue('quotaBytes') ?? Math.max(0, databaseChargedBytes + walBytes + shmBytes);
+      const accountingNote = storage?.accountingReady === false ? 'SQLite 页统计暂不可用，当前按主库文件 + WAL + SHM 全额计入；统计恢复后会重新核算可复用空间。' : '主库中已释放、可由 SQLite 复用的空间不计入容量；数据库文件实际占用还包括这部分可复用空间。';
+      const capacityBreakdown = storage ? `<section class="cl-capacity-breakdown" aria-label="计入容量构成"><div class="cl-capacity-heading"><strong>计入容量构成</strong><span>${bytes(databaseChargedBytes)} + ${bytes(walBytes)} + ${bytes(shmBytes)} = ${bytes(quotaBytes)}</span></div><p class="cl-muted">计入容量 = 主库有效页 + WAL 日志文件 + SHM 共享文件。${accountingNote}</p><div class="cl-capacity-parts">${[['主库有效页',databaseChargedBytes],['WAL 日志文件',walBytes],['SHM 共享文件',shmBytes],['计入容量合计',quotaBytes],['主库文件实际占用',databaseBytes],['可复用空间（已扣除）',reusableBytes]].map(([label,value]) => `<div><span>${label}</span><strong>${bytes(value)}</strong></div>`).join('')}</div></section>` : '';
       const space = [['计入容量',bytes(storage?.quotaBytes ?? status.diskBytes)],['容量上限',bytes(status.policy.capacity * 1073741824)],['文件占用',bytes(status.diskBytes)],
         ...(storage ? [['可复用空间',bytes(storage.reusableBytes)]] : []),['磁盘可用',bytes(status.freeBytes)]];
       const lastError = status.lastError === 'capacity' && storage && !storage.pauseReason ? '' : status.lastError;
-      $('collection').innerHTML = `<div class="cl-section-heading"><h2>采集状态</h2><span>${!status.policy.enabled ? '保存已关闭' : storageNotice() || '已启用保存'}</span></div>${facts([['最近策略读取',time(status.lastContact)],['归档尝试',num(status.records)],['不完整 / 缺失',num(status.gaps)],['采集端累计丢弃',num(status.collectorDropped)],...space,['保存版本',modeNames[status.policy.mode]],['保留时长',status.policy.retention ? status.policy.retention + ' 天' : '永久'],['正文采集',status.collectorVersion === 2 ? '完整正文 · 无单条截断' : '等待新版采集器'],['最近异常',reasons[lastError] || lastError || '无']])}<div class="cl-notice amber">用户对话优先。内存、队列或存储不足时放弃归档；上游断流只保留实际收到的部分并标记不完整。完整采集不代表模型执行成功。</div>`;
+      $('collection').innerHTML = `<div class="cl-section-heading"><h2>采集状态</h2><span>${!status.policy.enabled ? '保存已关闭' : storageNotice() || '已启用保存'}</span></div>${capacityBreakdown}${facts([['最近策略读取',time(status.lastContact)],['归档尝试',num(status.records)],['不完整 / 缺失',num(status.gaps)],['采集端累计丢弃',num(status.collectorDropped)],...space,['保存版本',modeNames[status.policy.mode]],['保留时长',status.policy.retention ? status.policy.retention + ' 天' : '永久'],['正文采集',status.collectorVersion === 2 ? '完整正文 · 无单条截断' : '等待新版采集器'],['最近异常',reasons[lastError] || lastError || '无']])}<div class="cl-notice amber">用户对话优先。内存、队列或存储不足时放弃归档；上游断流只保留实际收到的部分并标记不完整。完整采集不代表模型执行成功。</div>`;
       const section = document.createElement('section'); section.id = 'cl-history-repair'; section.className = 'clp-section cl-model-cleanup'; $('collection').append(section);
     }
     function renderPolicy(value) {

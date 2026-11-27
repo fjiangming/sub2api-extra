@@ -137,6 +137,11 @@ async function main() {
           assert.equal(await field('文件占用').innerText(), '32.00 GiB');
           assert.equal(await field('可复用空间').innerText(), reason === 'capacity' ? '2.00 GiB' : '31.00 GiB');
           assert.equal(await field('磁盘可用').innerText(), reason === 'disk_reserve' ? '5.00 GiB' : '44.00 GiB');
+          await page.locator('.cl-capacity-breakdown').filter({ hasText: '计入容量构成' }).waitFor();
+          await page.locator('.cl-capacity-parts').filter({ hasText: '主库有效页' }).waitFor();
+          const charged = reason === 'capacity' ? '30.00 GiB' : '1.00 GiB';
+          assert.equal(await page.locator('.cl-capacity-parts > div').filter({ hasText: '主库有效页' }).locator('strong').innerText(), charged);
+          assert.equal(await page.locator('.cl-capacity-parts > div').filter({ hasText: '可复用空间' }).locator('strong').innerText(), reason === 'capacity' ? '2.00 GiB' : '31.00 GiB');
           await layout(); await page.screenshot({ path: path.join(directory, name + '-storage-' + (reason || 'recovered') + '.png'), fullPage: true });
         }
         await page.unroute('**/api/conversation-logs/status', spaceRoute);
