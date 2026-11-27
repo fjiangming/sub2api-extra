@@ -142,7 +142,7 @@ function frameAncestorSources(config) {
   return [...sources];
 }
 
-function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, supplierGroups, accounting, cashFlow, messages, domainAccess, groupMonitor, conversations, conversationArchive, conversationRead, conversationExport, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
+function createApp({ config, database, auth, inspector, metrics, profiles, latency, requestErrors, telemetry, costAnalysis, dailyProfit, supplierGroups, providerMonitor, accounting, cashFlow, messages, domainAccess, groupMonitor, conversations, conversationArchive, conversationRead, conversationExport, conversationPush, conversationCleanup, conversationRepair, billingRecovery, billingImports, storage, retention, scheduler, sub2api, settings }) {
   const app = express();
   if (config.trustProxy) app.set('trust proxy', 1);
   app.disable('x-powered-by');
@@ -625,6 +625,27 @@ function createApp({ config, database, auth, inspector, metrics, profiles, laten
   api.put('/settings/sub2api-credentials', csrf, asyncRoute(async (req, res) => {
     const input = parse(sub2ApiCredentialsSchema, req.body || {});
     res.json(await settings.updateSub2ApiCredentials(input));
+  }));
+  api.get('/settings/notification-channels', asyncRoute(async (req, res) => {
+    if (!providerMonitor) throw new AppError('PROVIDER_MONITOR_UNAVAILABLE', '消息渠道服务暂不可用', { status: 503 });
+    res.set('Cache-Control', 'no-store').json(await providerMonitor.listNotificationChannels(req.auth.upstreamAccessToken || null));
+  }));
+  api.post('/settings/notification-channels', csrf, asyncRoute(async (req, res) => {
+    if (!providerMonitor) throw new AppError('PROVIDER_MONITOR_UNAVAILABLE', '消息渠道服务暂不可用', { status: 503 });
+    res.status(201).json(await providerMonitor.saveNotificationChannel(req.body || {}, null, req.auth.upstreamAccessToken || null));
+  }));
+  api.put('/settings/notification-channels/:id', csrf, asyncRoute(async (req, res) => {
+    if (!providerMonitor) throw new AppError('PROVIDER_MONITOR_UNAVAILABLE', '消息渠道服务暂不可用', { status: 503 });
+    res.json(await providerMonitor.saveNotificationChannel(req.body || {}, req.params.id, req.auth.upstreamAccessToken || null));
+  }));
+  api.delete('/settings/notification-channels/:id', csrf, asyncRoute(async (req, res) => {
+    if (!providerMonitor) throw new AppError('PROVIDER_MONITOR_UNAVAILABLE', '消息渠道服务暂不可用', { status: 503 });
+    await providerMonitor.deleteNotificationChannel(req.params.id, req.auth.upstreamAccessToken || null);
+    res.status(204).end();
+  }));
+  api.post('/settings/notification-channels/:id/test', csrf, asyncRoute(async (req, res) => {
+    if (!providerMonitor) throw new AppError('PROVIDER_MONITOR_UNAVAILABLE', '消息渠道服务暂不可用', { status: 503 });
+    res.json(await providerMonitor.testNotificationChannel(req.params.id, req.auth.upstreamAccessToken || null));
   }));
 
   api.get('/retention/policy', (_req, res) => res.json(retention.getPolicy()));

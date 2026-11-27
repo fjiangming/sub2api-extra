@@ -5,21 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Sub2API 运营中心</title>
-  <link rel="stylesheet" href="/styles.css?v=20261030-1">
+  <link rel="stylesheet" href="/styles.css?v=20261127-notification-channels-1">
   <link rel="stylesheet" href="/user-profiles.css?v=20261013-1">
   <link rel="stylesheet" href="/user-messages.css?v=20261019-1">
   <link rel="stylesheet" href="/latency.css?v=20261020-1">
   <link rel="stylesheet" href="/request-errors.css?v=20261102-1">
   <link rel="stylesheet" href="/group-monitor.css?v=20261122-1">
   <link rel="stylesheet" href="/billing-recovery.css?v=20261029-2">
-  <link rel="stylesheet" href="/cost-accounting.css?v=20261126-group-costs-4">
+  <link rel="stylesheet" href="/cost-accounting.css?v=20261127-supplier-margin-alert-1">
   <link rel="stylesheet" href="/domain-access.css?v=20261113-1">
   <link rel="stylesheet" href="/conversation-logs.css?v=20261127-physical-capacity-1">
   <script src="/vendor/echarts.js" defer></script>
   <script src="/vendor/lucide.js" defer></script>
   <script src="/cost-analysis-ui.js?v=20260929-3" defer></script>
-  <script src="/supplier-group-ui.js?v=20261126-group-costs-4" defer></script>
-  <script src="/cost-accounting-ui.js?v=20261126-group-costs-4" defer></script>
+  <script src="/supplier-group-ui.js?v=20261127-supplier-margin-alert-1" defer></script>
+  <script src="/cost-accounting-ui.js?v=20261127-supplier-margin-alert-1" defer></script>
   <script src="/user-profiles-ui.js?v=20261013-1" defer></script>
   <script src="/vendor/dompurify.js" defer></script>
   <script src="/user-messages-ui.js?v=20261019-1" defer></script>
@@ -36,7 +36,7 @@
   <script src="/conversation-logs-ui.js?v=20261127-physical-capacity-1" defer></script>
   <script src="/billing-recovery-ui.js?v=20261023-1" defer></script>
   <script src="/billing-import-ui.js?v=20261030-1" defer></script>
-  <script src="/app.js?v=20261122-group-monitor-1" defer></script>
+  <script src="/app.js?v=20261127-notification-channels-1" defer></script>
 </head>
 <body>
   <div id="login-view" class="login-view" hidden>
@@ -780,6 +780,12 @@
               <div class="form-actions"><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存设置</span></button></div>
             </form>
           </section>
+
+          <section class="panel">
+            <div class="panel-heading"><div><h2>消息提醒渠道</h2><p>供应商分组低收益率提醒使用 Provider Monitor 中保存的加密凭据</p></div><button id="notification-channel-add" class="button secondary" type="button"><i data-lucide="plus"></i><span>新增渠道</span></button></div>
+            <div id="notification-channel-error" class="form-error" role="alert" hidden></div>
+            <div id="notification-channel-list" class="notification-channel-list"></div>
+          </section>
         </section>
       </main>
     </div>
@@ -826,6 +832,22 @@
     <header class="um-dialog-heading"><h2 id="um-confirm-title">确认发送</h2><button id="um-confirm-close" class="icon-button" type="button" title="关闭确认" aria-label="关闭确认"><i data-lucide="x"></i></button></header>
     <div class="um-confirm-body"><p id="um-confirm-description"></p><h3 id="um-confirm-subject"></h3><div id="um-confirm-content" class="um-markdown"></div><p id="um-confirm-error" class="form-error" role="alert" hidden></p></div>
     <footer class="um-dialog-footer"><button id="um-confirm-cancel" class="button secondary" type="button">取消</button><button id="um-confirm-submit" class="button primary" type="button"><i data-lucide="send"></i><span>确认发送</span></button></footer>
+  </dialog>
+  <dialog id="notification-channel-dialog" class="accounting-dialog" aria-labelledby="notification-channel-title">
+    <header class="accounting-drawer-header"><h2 id="notification-channel-title">新增消息渠道</h2><button id="notification-channel-close" class="icon-button" type="button" title="关闭" aria-label="关闭"><i data-lucide="x"></i></button></header>
+    <form id="notification-channel-form" class="settings-form notification-channel-form" autocomplete="off">
+      <input name="id" type="hidden">
+      <div class="settings-grid">
+        <label>渠道名称<input name="name" maxlength="120" required></label>
+        <label>渠道类型<select name="type"><option value="webhook">Webhook</option><option value="telegram">Telegram</option><option value="gotify">Gotify</option><option value="bark">Bark</option><option value="email">Email</option><option value="wecom">企业微信</option><option value="serverchan">Server酱</option><option value="dingtalk">钉钉</option><option value="feishu">飞书</option></select></label>
+      </div>
+      <label class="check-row"><input name="enabled" type="checkbox" checked><span>启用该渠道</span></label>
+      <label>渠道配置 JSON<textarea name="config" rows="6" maxlength="20000" placeholder='例如 {"url":"https://example.com/webhook"}'></textarea></label>
+      <label>凭据 JSON<textarea name="credentials" rows="5" maxlength="20000" placeholder='例如 {"token":"..."}；编辑时留空表示保留原凭据'></textarea></label>
+      <p class="muted">配置字段沿用 Provider Monitor 的消息渠道格式；凭据由上游加密保存，页面只显示脱敏字段。</p>
+      <p id="notification-channel-form-error" class="form-error" role="alert" hidden></p>
+      <div class="form-actions"><button class="button primary" type="submit"><i data-lucide="save"></i><span>保存渠道</span></button><button id="notification-channel-cancel" class="button secondary" type="button">取消</button></div>
+    </form>
   </dialog>
 
   <div id="toast-region" class="toast-region" aria-live="polite"></div>

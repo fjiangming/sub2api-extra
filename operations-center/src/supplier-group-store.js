@@ -14,6 +14,9 @@ class SupplierGroupStore {
       CREATE TABLE IF NOT EXISTS sg_observations(scope TEXT NOT NULL,date TEXT NOT NULL,account_id TEXT NOT NULL,
       payload TEXT NOT NULL,changed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(scope,date,account_id));
       CREATE TABLE IF NOT EXISTS sg_settings(scope TEXT PRIMARY KEY,payload TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS sg_margin_alerts(scope TEXT NOT NULL,date TEXT NOT NULL,group_id TEXT NOT NULL,
+      threshold TEXT NOT NULL,channel_hash TEXT NOT NULL,sent_at TEXT NOT NULL,
+      PRIMARY KEY(scope,date,group_id,threshold,channel_hash));
       CREATE TABLE IF NOT EXISTS sg_audit(id INTEGER PRIMARY KEY,scope TEXT NOT NULL,actor TEXT NOT NULL,
       before_json TEXT NOT NULL,after_json TEXT NOT NULL,created_at TEXT NOT NULL);`);
   }
@@ -38,11 +41,30 @@ class SupplierGroupStore {
       const prior = stored && JSON.parse(stored.payload);
       const updated = Date.parse(account.updatedAt);
       // A later-day rotation must not rewrite a previously observed historical identity.
-      if (prior && updated >= Date.parse(to)) return { ...prior, stable: !stored.changed };
+      const sameIdentity = prior && prior.identity === account.identity && prior.name === account.name;
+      if (prior && updated >= Date.parse(to)) {
+        // Older workers treated a routine late `updated_at` touch as an
+        // identity change. Clear that legacy false positive once the current
+        // identity and name still match; actual rotations remain blocked.
+        if (sameIdentity && stored.changed) {
+          const repaired = { ...prior, stable: true };
+          this.db.prepare('UPDATE sg_observations SET payload=?,changed=0 WHERE scope=? AND date=? AND account_id=?')
+            .run(JSON.stringify(repaired), scope, date, account.id);
+          return repaired;
+        }
+        return { ...prior, stable: !stored.changed };
+      }
       const first = firstByAccount.get(account.id);
-      const unchanged = prior && !stored.changed && prior.identity === account.identity && prior.name === account.name;
-      const stable = unchanged || (Number.isFinite(updated) && updated < Date.parse(to) && (first === undefined || updated <= first));
-      const changed = Boolean(stored?.changed || (prior && (prior.identity !== account.identity || prior.name !== account.name)) || !stable);
+      const legacyLateUpdate = Boolean(sameIdentity && stored?.changed && Number.isFinite(updated) && updated >= Date.parse(to));
+      const unchanged = Boolean(sameIdentity && (!stored.changed || legacyLateUpdate));
+      // accounts.updated_at is touched by ordinary reads on the main site. For a
+      // first observation, a valid identity and name are the useful evidence;
+      // updated_at alone must not turn an otherwise matchable day into an
+      // all-day ownership warning. Subsequent observations still block actual
+      // identity/name changes through `unchanged` and `changed`.
+      const firstIdentityKnown = !prior && Boolean(account.identity) && Boolean(account.name);
+      const stable = unchanged || firstIdentityKnown || (Number.isFinite(updated) && updated < Date.parse(to) && (first === undefined || updated <= first));
+      const changed = Boolean((stored?.changed && !legacyLateUpdate) || (prior && !sameIdentity) || !stable);
       this.db.prepare(`INSERT INTO sg_observations VALUES(?,?,?,?,?) ON CONFLICT(scope,date,account_id)
         DO UPDATE SET payload=excluded.payload,changed=excluded.changed`)
         .run(scope, date, account.id, JSON.stringify(account), changed ? 1 : 0);
@@ -51,7 +73,12 @@ class SupplierGroupStore {
   }
   settings(scope) {
     const row = this.db.prepare('SELECT payload FROM sg_settings WHERE scope=?').get(scope);
-    return row ? JSON.parse(row.payload) : { aliases: {}, alert: { enabled: true, amount: 10, percent: 5 } };
+    const value = row ? JSON.parse(row.payload) : {};
+    return {
+      aliases: value.aliases && typeof value.aliases === 'object' ? value.aliases : {},
+      alert: { enabled: true, amount: 10, percent: 5, ...(value.alert || {}) },
+      marginAlert: { enabled: true, threshold: 10, channelIds: [], ...(value.marginAlert || {}) }
+    };
   }
   configure(scope, settings, actor, at) {
     this.db.transaction(() => {
@@ -62,6 +89,16 @@ class SupplierGroupStore {
         .run(scope, JSON.stringify(settings));
     })();
     return settings;
+  }
+  claimMarginAlert(scope, date, groupId, threshold, channelHash, at) {
+    const result = this.db.prepare(`INSERT INTO sg_margin_alerts(scope,date,group_id,threshold,channel_hash,sent_at)
+      VALUES(?,?,?,?,?,?) ON CONFLICT(scope,date,group_id,threshold,channel_hash) DO NOTHING`)
+      .run(scope, date, groupId, String(threshold), channelHash, at);
+    return result.changes === 1;
+  }
+  releaseMarginAlert(scope, date, groupId, threshold, channelHash) {
+    this.db.prepare('DELETE FROM sg_margin_alerts WHERE scope=? AND date=? AND group_id=? AND threshold=? AND channel_hash=?')
+      .run(scope, date, groupId, String(threshold), channelHash);
   }
   close() { this.db?.close(); this.db = null; }
 }

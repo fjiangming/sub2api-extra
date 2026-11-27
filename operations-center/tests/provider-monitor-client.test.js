@@ -180,3 +180,36 @@ test('error mappings use integration or administrator-scoped SSO and pass the bo
   }
   await assert.rejects(new ProviderMonitorClient({}).getRequestErrorMappings({}), { code: 'PROVIDER_MONITOR_NOT_CONFIGURED' });
 });
+
+test('notification channel proxy uses integration auth for management and dispatch', async () => {
+  const calls = [];
+  const client = new ProviderMonitorClient({ providerMonitorBaseUrl: 'https://monitor.example',
+    providerMonitorIntegrationToken: 'integration-token', providerMonitorRequestTimeoutMs: 1000
+  }, async (url, options) => {
+    calls.push({ url, options });
+    return response(200, url.endsWith('/notification-channels') ? { items: [{ id: 'channel-1' }] } : { items: [] });
+  });
+  assert.deepEqual(await client.listNotificationChannels(), { items: [{ id: 'channel-1' }] });
+  await client.saveNotificationChannel({ name: 'alerts', type: 'webhook', config: {} });
+  await client.testNotificationChannel('channel-1');
+  await client.dispatchNotification({ title: 'low margin', severity: 'warning', message: 'test' }, ['channel-1']);
+  assert.deepEqual(calls.map(call => [new URL(call.url).pathname, call.options.method || 'GET', call.options.headers.authorization]), [
+    ['/api/integrations/notification-channels', 'GET', 'Bearer integration-token'],
+    ['/api/integrations/notification-channels', 'POST', 'Bearer integration-token'],
+    ['/api/integrations/notification-channels/channel-1/test', 'POST', 'Bearer integration-token'],
+    ['/api/integrations/notifications/dispatch', 'POST', 'Bearer integration-token']
+  ]);
+});
+
+test('notification channel mutations exchange SSO and forward the CSRF token without an integration token', async () => {
+  const calls = [];
+  const client = new ProviderMonitorClient({ providerMonitorBaseUrl: 'https://monitor.example',
+    providerMonitorRequestTimeoutMs: 1000
+  }, async (url, options) => {
+    calls.push({ url, options });
+    return response(200, url.endsWith('/api/auth/sso') ? { sessionToken: 'monitor-session', csrfToken: 'csrf-1' } : { id: 'channel-1' });
+  });
+  await client.saveNotificationChannel({ name: 'alerts', type: 'webhook', config: {} }, null, 'admin-token');
+  assert.deepEqual(calls.map(call => call.options.headers.authorization), ['Bearer admin-token', 'Session monitor-session']);
+  assert.equal(calls[1].options.headers['x-csrf-token'], 'csrf-1');
+});

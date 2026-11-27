@@ -271,6 +271,13 @@ const notificationSchema = z.object({
   config: z.record(z.string(), z.any()).optional(),
   credentials: z.record(z.string(), z.any()).optional()
 });
+const integrationNotificationEventSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  severity: z.enum(['info', 'warning', 'error', 'critical']).default('warning'),
+  message: z.string().trim().min(1).max(10000),
+  triggered_at: z.string().datetime({ offset: true }).optional(),
+  details: z.record(z.string(), z.any()).optional()
+});
 const rechargeAlertSimulationSchema = z.object({
   connectionId: z.string().uuid(),
   channelId: z.string().uuid().optional().nullable(),
@@ -1065,6 +1072,34 @@ function createApplication(options = {}) {
     if (!secureTokenEqual(bearerToken(req), config.integrationToken)) return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
     try { res.set('Cache-Control', 'no-store').json(await groupDailyCosts.report(req.query)); } catch (error) { next(error); }
   });
+  app.get('/api/integrations/notification-channels', (req, res, next) => {
+    if (!secureTokenEqual(bearerToken(req), config.integrationToken)) return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
+    res.set('Cache-Control', 'no-store').json({ items: notifications.listChannels() });
+  });
+  app.post('/api/integrations/notification-channels', (req, res, next) => {
+    if (!secureTokenEqual(bearerToken(req), config.integrationToken)) return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
+    const channel = notifications.save(validate(notificationSchema, req.body || {}));
+    res.status(201).json(channel);
+  });
+  app.put('/api/integrations/notification-channels/:id', (req, res, next) => {
+    if (!secureTokenEqual(bearerToken(req), config.integrationToken)) return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
+    res.json(notifications.save(validate(notificationSchema.partial(), req.body || {}), req.params.id));
+  });
+  app.delete('/api/integrations/notification-channels/:id', (req, res, next) => {
+    if (!secureTokenEqual(bearerToken(req), config.integrationToken)) return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
+    notifications.delete(req.params.id);
+    res.status(204).end();
+  });
+  app.post('/api/integrations/notification-channels/:id/test', asyncRoute(async (req, res, next) => {
+    if (!secureTokenEqual(bearerToken(req), config.integrationToken)) return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
+    res.json(await notifications.test(req.params.id));
+  }));
+  app.post('/api/integrations/notifications/dispatch', asyncRoute(async (req, res, next) => {
+    if (!secureTokenEqual(bearerToken(req), config.integrationToken)) return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));
+    const input = validate(z.object({ event: integrationNotificationEventSchema, channelIds: z.array(z.string().trim().min(1).max(100)).max(100) }), req.body || {});
+    const event = { ...input.event, id: crypto.randomUUID(), triggered_at: input.event.triggered_at || nowIso() };
+    res.json({ items: await notifications.dispatch(event, { channelIds: input.channelIds }) });
+  }));
   app.get('/api/integrations/latency-samples', (req, res, next) => {
     if (!secureTokenEqual(bearerToken(req), config.integrationToken)) {
       return next(new AppError('INTEGRATION_AUTH_REQUIRED', 'A valid integration token is required', { status: 401 }));

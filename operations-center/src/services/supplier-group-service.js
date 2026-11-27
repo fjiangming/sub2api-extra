@@ -12,7 +12,9 @@ const querySchema = z.object({ date: z.string().optional(), start: z.string().op
   issuesOnly: z.enum(['0', '1']).default('1'), page: z.coerce.number().int().min(1).max(100000).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20) });
 const settingsSchema = z.object({ aliases: z.record(z.string().min(1).max(200), z.array(z.string().trim().min(2).max(120)).max(20)),
-  alert: z.object({ enabled: z.boolean(), amount: z.number().finite().min(0).max(1000000), percent: z.number().finite().min(0).max(1000) }) });
+  alert: z.object({ enabled: z.boolean(), amount: z.number().finite().min(0).max(1000000), percent: z.number().finite().min(0).max(1000) }),
+  marginAlert: z.object({ enabled: z.boolean().default(true), threshold: z.number().finite().min(0).max(1000).default(10),
+    channelIds: z.array(z.string().trim().min(1).max(100)).max(100).default([]) }).default({ enabled: true, threshold: 10, channelIds: [] }) });
 const text = z.string().max(200), amount = z.number().finite().nonnegative().nullable();
 const dailyAccountSchema = z.object({ source: z.literal('upstream_daily_summary'), scope: z.literal('account'),
   timezone: z.string(), currency: z.literal('CNY'), providerFilter: z.literal('scheduled_enabled').optional(),
@@ -107,6 +109,15 @@ function archiveUpstream(previous, next) {
   const providers = new Map(next.items.map(p => [p.id, p]));
   for (const old of previous.items) {
     const current = providers.get(old.id);
+    // A stale response explicitly means that the upstream adapter kept its
+    // previous snapshot. It carries no new financial evidence and must not be
+    // compared with the frozen value as if it were an authoritative reading.
+    if (current?.stale === true) {
+      const reason = '上游分组本次读取失败，保留上次快照；完整合计和差额待核对';
+      providers.set(old.id, { ...old, stale: true,
+        reasons: [...new Set([...(old.reasons || []), ...(current.reasons || []), reason])] });
+      continue;
+    }
     if (!current || (old.complete && old.accountCovered && !old.stale)) { providers.set(old.id, old); continue; }
     const knownIds = new Set(old.keys.filter(k => k.cost !== null).map(k => k.id));
     const frozen = old.keys.filter(k => knownIds.has(k.id));
@@ -175,8 +186,12 @@ class SupplierGroupService {
         verify();
         const incoming = validateUpstream(response, date, this.config.financeTimezone);
         const upstream = before?.finalized && before.upstreamSnapshot ? archiveUpstream(before.upstreamSnapshot, incoming) : incoming;
-        const policy = before?.finalized ? before.policy : this.store.settings(scope);
-        return this.store.db.transaction(() => {
+        const defaults = this.store.settings(scope);
+        const policy = before?.finalized ? { ...defaults, ...(before.policy || {}),
+          alert: { ...defaults.alert, ...(before.policy?.alert || {}) },
+          marginAlert: { ...defaults.marginAlert, ...(before.policy?.marginAlert || {}) }
+        } : defaults;
+        const saved = this.store.db.transaction(() => {
           const accounts = this.store.observe(scope, date, raw.accounts, raw.usage, from.toUTC().toISO(), to.toUTC().toISO());
           const source = before?.finalized && before.siteComplete && !raw.complete && before.siteSnapshot
             ? before.siteSnapshot : { ...raw, accounts };
@@ -192,6 +207,8 @@ class SupplierGroupService {
           verify();
           return this.store.save(scope, date, report, archive);
         })();
+        await this.notifyLowMargin(saved, scope, date, token);
+        return saved;
       })();
       return Promise.race([work, new Promise((_, reject) => {
         timer = setTimeout(() => { const error = new AppError('SUPPLIER_GROUP_TIMEOUT', '分组消费统计超时，请稍后重试', { status: 504 }); controller.abort(error); reject(error); }, this.timeoutMs);
@@ -205,9 +222,10 @@ class SupplierGroupService {
     if (local.hour >= 1) {
       const saved = this.store.get(this.scope(), yesterday);
       const accountTotalsMissing = typeof this.providerMonitor.getDailyCosts === 'function' &&
-        (saved?.providerAccountTotalsStatus !== 'available' || saved?.upstreamSnapshot?.items?.some(provider =>
-          saved.providerAccountTotals?.[provider.id]?.complete !== true));
-      if (!saved?.finalized || !saved.siteComplete || saved.groups.some(g => !g.upstreamComplete) || saved.missingProviders.length || accountTotalsMissing) {
+        (saved?.upstreamSnapshot?.items || []).some(provider => provider.stale !== true && provider.archiveConflict !== true &&
+          (saved.providerAccountTotalsStatus !== 'available' || saved.providerAccountTotals?.[provider.id]?.complete !== true));
+      const unresolvedGroups = saved?.groups?.some(g => !g.upstreamComplete && !g.stale && !g.archiveConflict);
+      if (!saved?.finalized || !saved.siteComplete || unresolvedGroups || saved.missingProviders.length || accountTotalsMissing) {
         await this.collect(yesterday, { archive: true }).catch(() => {});
       }
     }
@@ -223,6 +241,35 @@ class SupplierGroupService {
     const parsed = settingsSchema.safeParse(input);
     if (!parsed.success || Object.keys(parsed.data.aliases).length > 500) throw new AppError('INVALID_REQUEST', '供应商简称或差额提醒参数无效', { status: 400 });
     return this.store.configure(this.scope(), parsed.data, actor, this.now().toISOString());
+  }
+  async notifyLowMargin(report, scope, date, accessToken = null) {
+    const policy = report?.policy?.marginAlert;
+    const channelIds = [...new Set((policy?.channelIds || []).map(id => String(id).trim()).filter(Boolean))].sort();
+    const threshold = Number(policy?.threshold);
+    if (policy?.enabled !== true || !Number.isFinite(threshold) || channelIds.length === 0 ||
+        typeof this.providerMonitor?.dispatchNotification !== 'function' ||
+        !this.providerMonitor.configured?.() || (!this.providerMonitor.integrationToken && !accessToken)) return;
+    const channelHash = crypto.createHash('sha256').update(JSON.stringify(channelIds)).digest('hex');
+    for (const group of report.groups || []) {
+      if (group.comparable !== true || !Number.isFinite(group.rate) || group.rate >= threshold) continue;
+      if (!this.store.claimMarginAlert(scope, date, group.id, threshold, channelHash, this.now().toISOString())) continue;
+      try {
+        const response = await this.providerMonitor.dispatchNotification({
+          title: '供应商分组收益率低于阈值', severity: 'warning',
+          message: `${group.providerName} / ${group.name} 收益率 ${group.rate.toFixed(2)}%，低于阈值 ${threshold.toFixed(2)}%`,
+          triggered_at: this.now().toISOString(),
+          details: { date, providerId: group.providerId, providerName: group.providerName, groupId: group.id,
+            groupName: group.name, main: group.main, upstream: group.upstream, diff: group.diff,
+            rate: group.rate, threshold }
+        }, channelIds, accessToken);
+        const items = Array.isArray(response?.items) ? response.items : Array.isArray(response) ? response : [];
+        if (items.length === 0 || items.every(item => item?.status === 'rejected')) {
+          this.store.releaseMarginAlert(scope, date, group.id, threshold, channelHash);
+        }
+      } catch {
+        this.store.releaseMarginAlert(scope, date, group.id, threshold, channelHash);
+      }
+    }
   }
   status(group, alert, stale = false) {
     if (group.archiveConflict) return 'archive_conflict';
@@ -300,8 +347,14 @@ class SupplierGroupService {
       ...Object.values(report.providerAccountTotals || {}).map(p => ({ id: p.id, name: p.name }))]
       .map(p => [p.id, { id: p.id, name: p.name }])).values()];
     const publicProviderTotals = id => {
-      if (!Object.hasOwn(report, 'providerAccountTotals')) return {};
-      const account = report.providerAccountTotals?.[id], knownAll = knownProviderUsage(report, id);
+      const knownAll = knownProviderUsage(report, id);
+      if (!Object.hasOwn(report, 'providerAccountTotals')) {
+        if (typeof this.providerMonitor.getDailyCosts !== 'function') return {};
+        return { providerAccountTotal: null, providerAccountRequests: null, providerAccountTotalStatus: 'legacy',
+          providerAccountTotalReason: '旧快照未包含供应商账号日汇总，无法计算未定位分组消费',
+          knownUpstreamAll: knownAll.amount, unmatchedUpstream: null, unmatchedRequests: null, unmatchedReason: null };
+      }
+      const account = report.providerAccountTotals?.[id];
       const usable = report.providerAccountTotalsStatus === 'available' && account?.complete === true;
       const residual = unmatchedProviderUsage(report, id);
       return { providerAccountTotal: usable ? account.amount : null,

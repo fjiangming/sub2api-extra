@@ -148,6 +148,49 @@ class ProviderMonitorClient {
       headers: { authorization: `Session ${session.sessionToken}`, 'x-csrf-token': session.csrfToken || '' }, body: JSON.stringify(query) });
   }
 
+  async listNotificationChannels(accessToken = null) {
+    return this.#notificationRequest('/notification-channels', { accessToken });
+  }
+
+  async saveNotificationChannel(input, id = null, accessToken = null) {
+    return this.#notificationRequest(`/notification-channels${id ? `/${encodeURIComponent(id)}` : ''}`, {
+      accessToken, method: id ? 'PUT' : 'POST', body: JSON.stringify(input)
+    });
+  }
+
+  async deleteNotificationChannel(id, accessToken = null) {
+    return this.#notificationRequest(`/notification-channels/${encodeURIComponent(id)}`, {
+      accessToken, method: 'DELETE'
+    });
+  }
+
+  async testNotificationChannel(id, accessToken = null) {
+    return this.#notificationRequest(`/notification-channels/${encodeURIComponent(id)}/test`, {
+      accessToken, method: 'POST', body: '{}'
+    });
+  }
+
+  async dispatchNotification(event, channelIds, accessToken = null) {
+    return this.#notificationRequest('/notifications/dispatch', {
+      accessToken, method: 'POST', body: JSON.stringify({ event, channelIds })
+    });
+  }
+
+  async #notificationRequest(path, { accessToken = null, method = 'GET', body } = {}) {
+    if (!this.baseUrl) throw new AppError('PROVIDER_MONITOR_NOT_CONFIGURED', '未配置供应商监控地址', { status: 503 });
+    if (this.integrationToken) return this.#request(`/api/integrations${path}`, {
+      method, body, headers: { authorization: `Bearer ${this.integrationToken}` }
+    });
+    if (!accessToken) throw new AppError('PROVIDER_MONITOR_AUTH_NOT_CONFIGURED', '消息渠道需要管理员认证或集成 Token', { status: 409 });
+    const session = await this.#request('/api/auth/sso', {
+      method: 'POST', headers: { authorization: `Bearer ${accessToken}` }, body: '{}'
+    });
+    if (!session?.sessionToken) throw new AppError('PROVIDER_MONITOR_INVALID_RESPONSE', '供应商监控未返回有效会话', { status: 502 });
+    const headers = { authorization: `Session ${session.sessionToken}` };
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') headers['x-csrf-token'] = session.csrfToken || '';
+    return this.#request(`/api${path}`, { method, body, headers });
+  }
+
   async #request(endpoint, options = {}) {
     const controller = new AbortController();
     let rejectDeadline;

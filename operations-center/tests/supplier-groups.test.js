@@ -254,6 +254,24 @@ test('day observations reject rotations but preserve previously observed histori
     '2026-11-24T16:00:00Z', '2026-11-25T16:00:00Z'); assert.equal(next[0].identity, 'old');
 });
 
+test('first observation with a valid identity does not use a late business updated_at as a rotation signal', async t => {
+  const f = await fixture(t);
+  const rows = f.store.observe('first-observation', f.date, [{ id: '1', identity: 'identity', name: '供应商账号', updatedAt: '2026-11-26T14:24:40+08:00' }],
+    [{ account_id: '1', first_at: '2026-11-25T19:41:29+08:00' }], '2026-11-24T16:00:00Z', '2026-11-25T16:00:00Z');
+  assert.equal(rows[0].stable, true);
+});
+
+test('legacy late-updated observations are repaired when identity and name still match', async t => {
+  const f = await fixture(t);
+  const scope = 'legacy-late-update';
+  const account = { id: '1', identity: 'identity', name: '供应商账号', updatedAt: '2026-11-26T14:24:40+08:00' };
+  f.store.db.prepare('INSERT INTO sg_observations(scope,date,account_id,payload,changed) VALUES(?,?,?,?,1)')
+    .run(scope, f.date, account.id, JSON.stringify(account));
+  const rows = f.store.observe(scope, f.date, [account], [], '2026-11-24T16:00:00Z', '2026-11-25T16:00:00Z');
+  assert.equal(rows[0].stable, true);
+  assert.equal(f.store.db.prepare('SELECT changed FROM sg_observations WHERE scope=? AND date=? AND account_id=?').get(scope, f.date, account.id).changed, 0);
+});
+
 test('unchanged observed credentials tolerate later account updates but actual identity changes stay blocked', async t => {
   const f = await fixture(t);
   await f.service.collect(f.date);
@@ -442,6 +460,64 @@ test('partial historical archives keep known amounts and explicitly flag conflic
   f.controls.clock = new Date('2026-11-28T04:00:00Z');
   await f.service.getReport({ date: f.date });
   assert.equal(f.controls.calls.length, calls); assert.equal(f.queries.length, queries);
+});
+
+test('stale upstream snapshots retain the known values without creating archive conflicts', async t => {
+  const f = await fixture(t); f.controls.clock = new Date('2026-11-25T18:00:00Z');
+  Object.assign(f.items[0], { complete: false, accountCovered: false });
+  await f.service.collect(f.date, { archive: true });
+  Object.assign(f.items[0], { stale: true, reasons: ['本次读取失败，保留上次快照'], complete: false, accountCovered: false });
+  f.items[0].keys[0].cost = 99; f.items[0].keys[0].upstreamAmount = 99;
+  await f.service.collect(f.date, { archive: true });
+  const report = await f.service.getReport({ date: f.date, providerId: 'ling' });
+  const group = report.groups.find(row => row.groupRef === 'claude');
+  assert.equal(group.status, 'stale');
+  assert.equal(group.archiveConflict, false);
+  assert.equal(group.knownUpstream, 15);
+  assert.equal(group.diff, null);
+  assert.match(group.reasons.join(''), /上次快照/);
+});
+
+test('low margin notifications are sent once for comparable groups and ignored for incomplete groups', async t => {
+  const f = await fixture(t);
+  const notifications = [];
+  f.service.providerMonitor.dispatchNotification = async (event, channelIds) => (notifications.push({ event, channelIds }), { items: [{ status: 'fulfilled' }] });
+  const policy = f.store.settings(f.service.scope());
+  policy.marginAlert = { enabled: true, threshold: 10, channelIds: ['channel-1'] };
+  f.service.configure(policy, { id: 'admin' });
+  const report = await f.service.getReport({ date: f.date });
+  assert(notifications.some(item => item.event.details.groupName === 'Pro'));
+  assert(notifications.every(item => item.channelIds[0] === 'channel-1'));
+  const count = notifications.length;
+  await f.service.collect(f.date);
+  assert.equal(notifications.length, count);
+  assert(report.groups.some(group => group.rate < 10 && group.comparable));
+});
+
+test('low margin notifications can use the administrator SSO when integration auth is absent', async t => {
+  const f = await fixture(t);
+  f.service.providerMonitor.integrationToken = null;
+  const notifications = [];
+  f.service.providerMonitor.dispatchNotification = async (event, channelIds, accessToken) =>
+    (notifications.push({ event, channelIds, accessToken }), { items: [{ status: 'fulfilled' }] });
+  const policy = f.store.settings(f.service.scope());
+  policy.marginAlert = { enabled: true, threshold: 10, channelIds: ['channel-1'] };
+  f.service.configure(policy, { id: 'admin' });
+  await f.service.getReport({ date: f.date }, { accessToken: 'admin-sso-token' });
+  assert(notifications.length > 0);
+  assert.equal(notifications[0].accessToken, 'admin-sso-token');
+});
+
+test('low margin notification claims are released when no selected channel is available', async t => {
+  const f = await fixture(t);
+  let sends = 0;
+  f.service.providerMonitor.dispatchNotification = async () => (sends += 1, { items: [] });
+  const policy = f.store.settings(f.service.scope());
+  policy.marginAlert = { enabled: true, threshold: 10, channelIds: ['channel-1'] };
+  f.service.configure(policy, { id: 'admin' });
+  await f.service.getReport({ date: f.date });
+  await f.service.collect(f.date);
+  assert.equal(sends, 2);
 });
 
 test('missing later historical values retain known subtotals without claiming a numeric conflict', async t => {

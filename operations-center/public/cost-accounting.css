@@ -15,8 +15,10 @@
 .supplier-group-table { table-layout: fixed; background: var(--surface); }
 .supplier-group-table col:nth-child(1) { width: 38%; }
 .supplier-group-table col:nth-child(2) { width: 17%; }
-.supplier-group-table col:nth-child(3),.supplier-group-table col:nth-child(5) { width: 14%; }
-.supplier-group-table col:nth-child(4) { width: 17%; }
+.supplier-group-table col:nth-child(3) { width: 13%; }
+.supplier-group-table col:nth-child(4) { width: 16%; }
+.supplier-group-table col:nth-child(5) { width: 12%; }
+.supplier-group-table col:nth-child(6) { width: 10%; }
 .supplier-group-table th { position: static; white-space: normal; background: var(--surface-subtle); color: var(--muted); font-weight: 500; }
 .supplier-group-table th small { display: block; margin-top: 3px; font-size: 11px; font-weight: 400; }
 .supplier-group-table tbody tr:hover { background: var(--surface); }
@@ -39,6 +41,8 @@
 .supplier-group-account-splits .supplier-group-split { gap: 8px; color: var(--text); }
 .supplier-group-table tfoot th,.supplier-group-table tfoot td { background: var(--surface-subtle); border-bottom: 0; font-weight: 600; color: var(--text); }
 .supplier-group-table tfoot .negative-value { color: var(--red); }
+.supplier-group-low-margin { color: var(--red); background: var(--red-soft); font-weight: 700; }
+.supplier-group-rate-cell { white-space: nowrap; }
 .supplier-group-mobile-label { display: none; }
 .supplier-group-account-table { min-width: 740px; background: var(--surface); }
 #accounting-groups td,#accounting-groups th { padding: 11px 10px; }
@@ -62,7 +66,7 @@
 @media(max-width:900px) {
   .supplier-group-table,.supplier-group-table tbody,.supplier-group-table tfoot { display: block; width: 100%; }
   .supplier-group-table colgroup,.supplier-group-table thead { display: none; }
-  .supplier-group-table tbody > tr { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); grid-template-areas: 'accounts accounts accounts' 'name name name' 'main upstream diff'; gap: 12px 8px; padding: 16px 0; border-top: 1px solid var(--line); }
+  .supplier-group-table tbody > tr { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-areas: 'accounts accounts' 'name name' 'main upstream' 'diff rate'; gap: 12px 8px; padding: 16px 0; border-top: 1px solid var(--line); }
   #accounting-groups .supplier-group-table td,#accounting-groups .supplier-group-table th { padding: 0; border-bottom: 0; }
   .supplier-group-table .supplier-group-name { grid-area: name; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
   #accounting-groups .supplier-group-table .supplier-group-name > small,.supplier-group-table .supplier-group-name .supplier-group-status { margin: 0; }
@@ -70,12 +74,13 @@
   .supplier-group-table .supplier-group-main { grid-area: main; }
   .supplier-group-table .supplier-group-upstream { grid-area: upstream; }
   .supplier-group-table .supplier-group-diff { grid-area: diff; }
+  .supplier-group-table .supplier-group-rate-cell { grid-area: rate; }
   .supplier-group-table .numeric { text-align: left; }
   .supplier-group-mobile-label { display: block; margin-bottom: 4px; font-size: 11px; color: var(--muted); font-weight: 400; }
   .supplier-group-accounts { gap: 4px; }
   .supplier-group-account summary { min-height: 44px; align-items: center; }
   .supplier-group-account summary > svg { margin-top: 0; }
-  .supplier-group-table tfoot > tr { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px 8px; padding: 12px 10px; background: var(--surface-subtle); }
+  .supplier-group-table tfoot > tr { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px 8px; padding: 12px 10px; background: var(--surface-subtle); }
   .supplier-group-table tfoot th { grid-column: 1 / -1; }
 }
 @media(pointer:coarse) {
@@ -130,10 +135,13 @@
 .cost-provider-group-table { width: 100%; table-layout: fixed; border-collapse: collapse; }
 .cost-provider-group-table col:nth-child(1) { width: 39%; }
 .cost-provider-group-table col:nth-child(2) { width: 23%; }
-.cost-provider-group-table col:nth-child(3),.cost-provider-group-table col:nth-child(4) { width: 19%; }
+.cost-provider-group-table col:nth-child(3) { width: 16%; }
+.cost-provider-group-table col:nth-child(4) { width: 16%; }
+.cost-provider-group-table col:nth-child(5) { width: 10%; }
 .cost-provider-group-table th { position: static; white-space: normal; font-size: 12px; font-weight: 500; background: var(--surface-subtle); color: var(--muted); }
 .cost-provider-group-table td,.cost-provider-group-table th { padding: 13px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
 .cost-provider-group-table .numeric { font-variant-numeric: tabular-nums; }
+.cost-provider-group-table .supplier-group-low-margin { color: var(--red); background: var(--red-soft); font-weight: 700; }
 .cost-provider-group-table tfoot td,.cost-provider-group-table tfoot th { background: var(--surface-subtle); color: var(--text); font-weight: 600; border-bottom: 0; }
 .accounting-drawer-body .cost-provider-group-status { display: inline-block; color: var(--amber); background: var(--amber-soft); padding: 3px 6px; border-radius: 3px; }
 .cost-provider-group-dialog .supplier-group-account-splits > small { color: var(--muted); font-size: 12px; }
@@ -159,12 +167,13 @@
   .cost-provider-group-totals { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
   .cost-provider-group-table,.cost-provider-group-table tbody,.cost-provider-group-table tfoot { display: block; width: 100%; }
   .cost-provider-group-table colgroup,.cost-provider-group-table thead { display: none; }
-  .cost-provider-group-table tbody > tr { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-areas: 'group group' 'accounts accounts' 'main upstream'; gap: 12px 8px; padding: 16px 0; border-top: 1px solid var(--line); }
+  .cost-provider-group-table tbody > tr { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); grid-template-areas: 'group group' 'accounts accounts' 'main upstream' 'rate rate'; gap: 12px 8px; padding: 16px 0; border-top: 1px solid var(--line); }
   .cost-provider-group-table td,.cost-provider-group-table th { display: block; border: 0; padding: 0; }
   .cost-provider-group-table tbody td:nth-child(1) { grid-area: accounts; }
   .cost-provider-group-table tbody td:nth-child(2) { grid-area: group; }
   .cost-provider-group-table tbody td:nth-child(3) { grid-area: main; }
   .cost-provider-group-table tbody td:nth-child(4) { grid-area: upstream; }
+  .cost-provider-group-table tbody td:nth-child(5) { grid-area: rate; }
   .cost-provider-group-table .numeric { text-align: left; }
   .cost-provider-group-table tfoot > tr { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); padding: 13px 10px; gap: 10px 8px; background: var(--surface-subtle); }
   .cost-provider-group-table tfoot th { grid-column: 1 / -1; }

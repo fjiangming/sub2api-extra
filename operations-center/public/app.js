@@ -1442,10 +1442,57 @@ async function loadSettings() {
   setPageMeta('连接、权限、安全闸门与运行配置');
   const data = await api('/api/settings');
   renderSettingsStatus(data);
+  await loadNotificationChannels();
   setConnection(!data.setupRequired, data.setupRequired ? '等待数据库配置' : '配置正常');
   if (!$('settings-checks').children.length) {
     $('settings-checks').innerHTML = emptyRow(3, '尚未运行依赖检查');
   }
+}
+
+const notificationChannelLabels = { webhook: 'Webhook', telegram: 'Telegram', gotify: 'Gotify', bark: 'Bark', email: 'Email', wecom: '企业微信', serverchan: 'Server酱', dingtalk: '钉钉', feishu: '飞书' };
+function showNotificationChannelError(message = '') {
+  const node = $('notification-channel-error'); node.textContent = message; node.hidden = !message;
+}
+function renderNotificationChannels(items = []) {
+  const root = $('notification-channel-list');
+  if (!items.length) { root.innerHTML = '<p class="empty-state">尚未配置消息提醒渠道</p>'; return; }
+  root.innerHTML = items.map(channel => `<div class="notification-channel-row"><div><strong>${escapeHtml(channel.name)}</strong><small>${escapeHtml(notificationChannelLabels[channel.type] || channel.type)} · ${channel.enabled ? '已启用' : '已停用'}${(channel.credentialFields || []).length ? ` · ${(channel.credentialFields || []).map(field => `${escapeHtml(field.name)}=${escapeHtml(field.masked)}`).join('、')}` : ''}</small></div><div class="notification-channel-actions"><button type="button" class="icon-button" data-notification-action="edit" data-channel-id="${escapeHtml(channel.id)}" title="编辑渠道" aria-label="编辑渠道">${icon('pencil')}</button><button type="button" class="icon-button" data-notification-action="test" data-channel-id="${escapeHtml(channel.id)}" title="发送测试" aria-label="发送测试">${icon('send')}</button><button type="button" class="icon-button" data-notification-action="delete" data-channel-id="${escapeHtml(channel.id)}" title="删除渠道" aria-label="删除渠道">${icon('trash-2')}</button></div></div>`).join('');
+  refreshIcons();
+}
+async function loadNotificationChannels() {
+  try { const data = await api('/api/settings/notification-channels'); state.notificationChannels = data.items || []; showNotificationChannelError(); renderNotificationChannels(state.notificationChannels); }
+  catch (error) { state.notificationChannels = []; showNotificationChannelError(error.message); renderNotificationChannels([]); }
+}
+function openNotificationChannelEditor(channel = null) {
+  const form = $('notification-channel-form'); form.reset();
+  form.elements.id.value = channel?.id || ''; form.elements.name.value = channel?.name || ''; form.elements.type.value = channel?.type || 'webhook';
+  form.elements.enabled.checked = channel ? channel.enabled !== false : true;
+  form.elements.config.value = JSON.stringify(channel?.config || {}, null, 2);
+  form.elements.credentials.value = '';
+  $('notification-channel-title').textContent = channel ? '编辑消息渠道' : '新增消息渠道';
+  showSettingsFormError('notification-channel-form-error');
+  $('notification-channel-dialog').showModal(); refreshIcons();
+}
+async function saveNotificationChannel(event) {
+  event.preventDefault(); const form = event.currentTarget, button = form.querySelector('[type="submit"]'); button.disabled = true; showSettingsFormError('notification-channel-form-error');
+  try {
+    const config = form.elements.config.value.trim() ? JSON.parse(form.elements.config.value) : {};
+    const credentials = form.elements.credentials.value.trim() ? JSON.parse(form.elements.credentials.value) : undefined;
+    const payload = { name: form.elements.name.value.trim(), type: form.elements.type.value, enabled: form.elements.enabled.checked, config, ...(credentials ? { credentials } : {}) };
+    const id = form.elements.id.value; await api(`/api/settings/notification-channels${id ? `/${encodeURIComponent(id)}` : ''}`, { method: id ? 'PUT' : 'POST', body: JSON.stringify(payload) });
+    $('notification-channel-dialog').close(); toast('消息渠道已保存'); await loadNotificationChannels();
+  } catch (error) { showSettingsFormError('notification-channel-form-error', error.message.includes('JSON') ? '配置或凭据必须是有效 JSON' : error.message); }
+  finally { button.disabled = false; }
+}
+async function handleNotificationChannelAction(event) {
+  const button = event.target.closest('[data-notification-action]'); if (!button) return;
+  const channel = (state.notificationChannels || []).find(item => item.id === button.dataset.channelId); if (!channel) return;
+  try {
+    if (button.dataset.notificationAction === 'edit') return openNotificationChannelEditor(channel);
+    if (button.dataset.notificationAction === 'test') { button.disabled = true; await api(`/api/settings/notification-channels/${encodeURIComponent(channel.id)}/test`, { method: 'POST', body: '{}' }); toast('测试通知已发送'); }
+    if (button.dataset.notificationAction === 'delete' && window.confirm(`确认删除“${channel.name}”？`)) { await api(`/api/settings/notification-channels/${encodeURIComponent(channel.id)}`, { method: 'DELETE' }); toast('消息渠道已删除'); }
+    await loadNotificationChannels();
+  } catch (error) { toast(error.message, 'error'); } finally { button.disabled = false; }
 }
 
 function databaseSetupPayload() {
@@ -1867,6 +1914,11 @@ $('database-test-button').addEventListener('click', testDatabaseAdministrator);
 $('database-provision-form').addEventListener('submit', provisionDatabase);
 $('cleanup-settings-form').addEventListener('submit', saveCleanupSettings);
 $('sub2api-credential-form').addEventListener('submit', saveSub2ApiCredentials);
+$('notification-channel-add').addEventListener('click', () => openNotificationChannelEditor());
+$('notification-channel-close').addEventListener('click', () => $('notification-channel-dialog').close());
+$('notification-channel-cancel').addEventListener('click', () => $('notification-channel-dialog').close());
+$('notification-channel-form').addEventListener('submit', saveNotificationChannel);
+$('notification-channel-list').addEventListener('click', handleNotificationChannelAction);
 $('sub2api-credential-form').elements.mode.addEventListener('change', updateCredentialFields);
 $('cleanup-settings-form').elements.enabled.addEventListener('change', updateCleanupControlState);
 $('database-provision-form').elements.createMaintenance.addEventListener('change', (event) => {

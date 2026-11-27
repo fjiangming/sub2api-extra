@@ -3295,3 +3295,23 @@ GitHub Actions 运行 `45390778277` 的镜像流程在 `Provider monitor billing
 安全边界：单个分片成功不能授权删除本地原文，也不计为已送达；只有整个 JSONL 完成 Complete、最终内容校验通过且所有目标送达，既有“送达后清理”才会删除本地日志。开放卷空闲让出 worker 槽位会带来少量重复读取 / SHA-256 计算，但不进入主站用户请求链路，不能承诺严格零 CPU / I/O 影响。
 
 验证：`npm run check:conversation-jsonl` 通过；JSONL 专项 **39 项通过**，断点 / 租约专项 **46 项通过**，推送与清理专项 **68 项通过**，新增流式完整性与升级兼容回归通过；运营中心 `npm run check` 和 `git diff --check` 通过。未执行浏览器回归（本机未安装 Playwright），未连接服务器、未改服务器配置、未部署或提交 GitHub。
+
+## 2026-11-27：供应商分组异常兼容与低收益率消息提醒
+
+用户要求排查 11 月 25、26、27 日供应商分组消费中的“全天归属待核对”“历史归档冲突”“上次快照”等状态，并在运营中心增加收益率监控和消息提醒。本轮已完成生产只读分析，未修改服务器、主站业务数据或部署；代码变更仍在本地工作区。
+
+排查结论：11 月 25 日旧归档生成时尚未保存 `providerAccountTotals`，属于字段升级前的历史快照；“全天归属待核对”主要由主站 `accounts.updated_at` 被普通业务访问刷新导致，不能单独视为凭据变化；“历史归档冲突”来自历史重试把 Provider Monitor 的 stale / partial 返回与已冻结金额比较；“上次快照”表示上游适配器超时后沿用上一版数据，只能展示已知金额，不能用于完整差额或收益率判断。
+
+| 文件 | 变更 |
+| --- | --- |
+| `operations-center/src/supplier-group-store.js`、`src/services/supplier-group-service.js` | 首次观察不再因晚更新的 `updated_at` 单独阻断有效账号；重新观察时会清理旧规则留下的同身份晚更新 false positive，后续实际身份 / 名称变化仍标记待核对。stale 上游保留旧快照且不制造归档冲突；旧快照缺少账号日汇总时公开为 `legacy`；历史重试跳过 stale / archive conflict；保存后对可信分组执行低收益率通知。 |
+| `operations-center/src/provider-monitor-client.js`、`src/app.js`、`src/server.js` | 增加 Provider Monitor 消息渠道的列表、增改删、测试及通知派发代理，支持集成 Token 与管理员 SSO/CSRF；低收益通知沿用当前采集请求的 SSO 凭据，未配置集成 Token 时手动刷新仍可提醒。 |
+| `provider-monitor/src/server.js` | 增加集成 Token 保护的消息渠道管理和通知派发接口，复用既有 `NotificationService` 与加密凭据存储。 |
+| `operations-center/public/index.html`、`public/app.js`、`public/styles.css` | 系统设置增加消息提醒渠道管理面板，支持渠道配置 JSON、加密凭据录入、测试和删除；更新静态资源缓存版本。 |
+| `operations-center/public/supplier-group-ui.js`、`public/cost-accounting-ui.js`、`public/cost-accounting.css` | 供应商分组及消费毛利明细增加收益率列；按可配置阈值高亮；分组设置增加开关、阈值和多选通知渠道；初始化成本分析分组抽屉内容，避免出现 `undefined`；异常、stale、历史冲突及不可比较数据不触发提醒。 |
+| `operations-center/src/supplier-group-store.js` | 新增 `sg_margin_alerts` 去重表，按日期、分组、阈值和渠道集合去重；没有可用渠道、派发全部失败或异常时释放记录允许重试。 |
+| `operations-center/tests/supplier-groups.test.js`、`tests/provider-monitor-client.test.js`、`tests/frontend-layout.test.js`、`provider-monitor/tests/integration-providers-api.test.js` | 覆盖首次及旧记录稳定性修复、stale/归档兼容、低收益通知去重、集成 Token / SSO 通知派发、渠道代理、集成 Token 接口脱敏和前端设置/收益率结构。 |
+
+配置说明：`marginAlert.enabled` 默认开启，`threshold` 默认 10（百分比），`channelIds` 默认空数组；选择渠道后，分组数据完整可比较且收益率低于阈值时发送通知，服务间集成 Token 和管理员 SSO 均可用于派发。收益率 = `(主站消费 - 供应商分组消费) / 主站消费 × 100%`，异常数据不会用不完整金额触发提醒。
+
+验证：专项测试 `operations-center/tests/supplier-groups.test.js`、`provider-monitor-client.test.js`、`frontend-layout.test.js`、`cost-analysis-ui.test.js`、`provider-monitor/tests/integration-providers-api.test.js` 及既有通知测试均通过；目标文件 `node --check`、`npm run check` 和 `git diff --check` 通过。未提交 GitHub，未部署服务器。

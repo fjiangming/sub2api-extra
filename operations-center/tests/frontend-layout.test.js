@@ -85,6 +85,21 @@ test('system settings exposes guarded database setup and cleanup configuration',
   assert.match(script, /settings\.setupRequired \? 'settings'/);
 });
 
+test('supplier margin alerts expose channels in system settings and cost analysis', () => {
+  const supplierUi = fs.readFileSync(path.join(__dirname, '..', 'public', 'supplier-group-ui.js'), 'utf8');
+  const accountingUi = fs.readFileSync(path.join(__dirname, '..', 'public', 'cost-accounting-ui.js'), 'utf8');
+  assert.match(html, /<h2>消息提醒渠道<\/h2>/);
+  assert.match(html, /id="notification-channel-list"/);
+  assert.match(html, /id="notification-channel-form"/);
+  assert.match(script, /loadNotificationChannels\(\)/);
+  assert.match(script, /\/api\/settings\/notification-channels/);
+  assert.match(supplierUi, /收益率高亮阈值/);
+  assert.match(supplierUi, /通知渠道/);
+  assert.match(supplierUi, /marginAlert/);
+  assert.match(accountingUi, /supplier-group-low-margin/);
+  assert.match(accountingUi, /let content = ''/);
+});
+
 test('navigation keeps tab selection state and keyboard controls in sync', () => {
   assert.match(script, /setAttribute\('aria-selected', String\(active\)\)/);
   assert.match(script, /\['ArrowLeft', 'ArrowRight', 'Home', 'End'\]/);
