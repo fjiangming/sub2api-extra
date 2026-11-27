@@ -82,7 +82,10 @@ class ConversationLogStore {
     this.directory = path.join(directory, 'conversation-logs'); this.now = now; this.timezone = timezone;
     this.processingLimits = processingLimits;
     this.freeBytes = freeBytes || (() => { const stat = fs.statfsSync(this.directory); return Number(stat.bavail) * Number(stat.bsize); });
-    this.usedBytes = usedBytes || (() => this.storageUsage().quotaBytes);
+    this.capacityBasis = usedBytes ? 'custom' : 'physical';
+    // The configured archive capacity is a physical footprint cap. The logical
+    // quota remains available in storageUsage() for reporting and reconciliation.
+    this.usedBytes = usedBytes || (() => this.storageUsage().physicalBytes);
     this.lastContact = 0; this.lastError = null; this.collectorDropped = 0;
   }
   initialize() {
@@ -495,9 +498,10 @@ class ConversationLogStore {
     const metadataIndex = this.metadataStatus();
     const counts = this.db.prepare("SELECT COUNT(*) records,COALESCE(SUM(bytes),0) bytes,COALESCE(SUM(complete=0),0) gaps,COALESCE(SUM(processing_error!='' OR reason='redaction_failed'),0) processingFailures,COALESCE(SUM(processing_pending),0) processingPending FROM cl_record_metadata").get();
     if (!metadataIndex.ready) { counts.records = metadataIndex.total; counts.bytes = null; counts.gaps = null; counts.processingFailures = null; counts.processingPending = this.db.prepare('SELECT COUNT(*) n FROM cl_processing').get().n; }
-    const policy = this.policy(), storage = this.storageUsage(), quotaBytes = this.usedBytes(), freeBytes = this.freeBytes();
-    storage.quotaBytes = quotaBytes;
-    storage.pauseReason = quotaBytes + 1048576 >= policy.capacity * 1024 ** 3 ? 'capacity'
+    const policy = this.policy(), storage = this.storageUsage(), capacityBytes = this.usedBytes(), freeBytes = this.freeBytes();
+    storage.capacityBytes = capacityBytes;
+    storage.capacityBasis = this.capacityBasis;
+    storage.pauseReason = capacityBytes + 1048576 >= policy.capacity * 1024 ** 3 ? 'capacity'
       : freeBytes - 1048576 < policy.reserve * 1024 ** 3 ? 'disk_reserve' : '';
     return { ...counts, metadataIndex, ...this.liveStatus(), redactionVersion: REDACTION_VERSION, policy, diskBytes: storage.physicalBytes, storage, freeBytes, timezone: this.timezone,
       coverage: ['HTTP JSON / SSE (including TLS fingerprint and transport fallbacks)', 'OpenAI pooled WebSocket / passthrough messages'],

@@ -117,10 +117,11 @@ async function main() {
         let spacePause = '';
         const spaceRoute = async route => {
           const response = await route.fetch(), value = await response.json(), gib = 1024 ** 3;
-          value.policy.capacity = 30; value.policy.reserve = 10;
+          value.policy.capacity = spacePause === 'capacity' ? 30 : 40; value.policy.reserve = 10;
           value.freeBytes = (spacePause === 'disk_reserve' ? 5 : 44) * gib;
           value.diskBytes = 32 * gib; value.lastError = 'capacity';
           value.storage = { ...value.storage, physicalBytes: value.diskBytes,
+            capacityBytes: value.diskBytes,
             quotaBytes: (spacePause === 'capacity' ? 30 : 1) * gib,
             reusableBytes: (spacePause === 'capacity' ? 2 : 31) * gib, pauseReason: spacePause };
           await route.fulfill({ response, json: value });
@@ -130,17 +131,18 @@ async function main() {
           spacePause = reason;
           await page.locator('#cl-tab-collection').click();
           if (notice) await page.locator('#cl-notice').filter({ hasText: notice }).waitFor();
-          else await page.waitForFunction(() => document.querySelector('#cl-metrics')?.textContent.includes('1.00 GiB') && !document.querySelector('#cl-notice')?.textContent.includes('暂停'));
+          else await page.waitForFunction(() => document.querySelector('#cl-metrics')?.textContent.includes('32.00 GiB') && !document.querySelector('#cl-notice')?.textContent.includes('暂停'));
           const field = label => page.locator('#cl-collection dt', { hasText: label }).locator('..').locator('dd');
-          await field('文件占用').filter({ hasText: '32.00 GiB' }).waitFor();
+          await field('实际占用（阈值）').filter({ hasText: '32.00 GiB' }).waitFor();
           await field('可复用空间').filter({ hasText: reason === 'capacity' ? '2.00 GiB' : '31.00 GiB' }).waitFor();
-          assert.equal(await field('文件占用').innerText(), '32.00 GiB');
+          assert.equal(await field('实际占用（阈值）').innerText(), '32.00 GiB');
           assert.equal(await field('可复用空间').innerText(), reason === 'capacity' ? '2.00 GiB' : '31.00 GiB');
           assert.equal(await field('磁盘可用').innerText(), reason === 'disk_reserve' ? '5.00 GiB' : '44.00 GiB');
-          await page.locator('.cl-capacity-breakdown').filter({ hasText: '计入容量构成' }).waitFor();
-          await page.locator('.cl-capacity-parts').filter({ hasText: '主库有效页' }).waitFor();
+          await page.locator('.cl-capacity-breakdown').filter({ hasText: '对话日志容量阈值' }).waitFor();
+          await page.locator('.cl-capacity-parts').filter({ hasText: '实际占用合计' }).waitFor();
           const charged = reason === 'capacity' ? '30.00 GiB' : '1.00 GiB';
-          assert.equal(await page.locator('.cl-capacity-parts > div').filter({ hasText: '主库有效页' }).locator('strong').innerText(), charged);
+          assert.equal(await page.locator('.cl-capacity-parts > div').filter({ hasText: '计入容量（参考）' }).locator('strong').innerText(), charged);
+          assert.equal(await page.locator('.cl-capacity-parts > div').filter({ hasText: '实际占用合计' }).locator('strong').innerText(), '32.00 GiB');
           assert.equal(await page.locator('.cl-capacity-parts > div').filter({ hasText: '可复用空间' }).locator('strong').innerText(), reason === 'capacity' ? '2.00 GiB' : '31.00 GiB');
           await layout(); await page.screenshot({ path: path.join(directory, name + '-storage-' + (reason || 'recovered') + '.png'), fullPage: true });
         }

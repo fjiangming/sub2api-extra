@@ -51,18 +51,17 @@ function capacityFixture(t) {
   return { f, space, policy, gib, mib };
 }
 
-test('clearing an archive restores reception without shrinking its physical file or raising capacity', t => {
+test('clearing an archive does not bypass a physical capacity cap while the file remains large', t => {
   const { f, policy, gib, mib } = capacityFixture(t);
   const status = f.store.status();
   assert(status.diskBytes > gib); assert(status.storage.reusableBytes > 4 * mib);
-  assert(status.storage.quotaBytes + mib < gib); assert.equal(status.storage.pauseReason, '');
-  assert.equal(f.store.collectorPolicy().enabled, true); assert.equal(f.store.lastError, null);
+  assert(status.storage.capacityBytes > gib);
+  assert(status.storage.quotaBytes + mib < gib); assert.equal(status.storage.pauseReason, 'capacity');
+  assert.equal(f.store.collectorPolicy().enabled, false); assert.equal(f.store.lastError, 'capacity');
   assert.deepEqual(f.store.policy(), policy);
   const fresh = event('capacity-new', { policy_version: policy.version });
-  assert(f.store.receive(fresh).accepted); assert(f.store.processPending(fresh.id));
-  assert.equal(f.store.payload(fresh.id, 'original', 'request').body.toString('base64'), fresh.request);
-  assert.equal(f.store.payload(fresh.id, 'original', 'response').body.toString('base64'), fresh.response);
-  assert.equal(f.store.status().records, 1);
+  assert.deepEqual(f.store.receive(fresh), { accepted: false, reason: 'capacity' });
+  assert.equal(f.store.status().records, 0);
 });
 
 test('reusable pages never bypass WAL accounting or the actual free-disk reserve', t => {
@@ -71,10 +70,10 @@ test('reusable pages never bypass WAL accounting or the actual free-disk reserve
   assert.equal(f.store.collectorPolicy().enabled, false);
   assert.equal(f.store.status().storage.pauseReason, 'capacity');
   assert.deepEqual(f.store.receive(event('wal-full', { policy_version: policy.version })), { accepted: false, reason: 'capacity' });
-  space.wal = 0; space.free = 0;
+  space.wal = 0; const diskPolicy = f.store.configure({ ...f.store.policy(), capacity: 3 }); space.free = 0;
   assert.equal(f.store.collectorPolicy().enabled, false);
   assert.equal(f.store.status().storage.pauseReason, 'disk_reserve');
-  assert.deepEqual(f.store.receive(event('disk-full', { policy_version: policy.version })), { accepted: false, reason: 'capacity' });
+  assert.deepEqual(f.store.receive(event('disk-full', { policy_version: diskPolicy.version })), { accepted: false, reason: 'capacity' });
   assert.equal(f.store.status().records, 0);
   space.free = 100 * gib; assert.equal(f.store.collectorPolicy().enabled, true);
 });
@@ -113,6 +112,7 @@ test('storage status exposes the charged capacity breakdown and keeps reusable p
   assert.equal(usage.databaseChargedBytes + usage.reusableBytes + usage.walBytes + usage.shmBytes, usage.physicalBytes);
   const status = f.store.status();
   assert.equal(status.storage.breakdown.quotaBytes, status.storage.quotaBytes);
+  assert.equal(status.storage.capacityBytes, status.storage.physicalBytes);
   assert.equal(status.storage.breakdown.databaseChargedBytes + status.storage.breakdown.walBytes + status.storage.breakdown.shmBytes, status.storage.quotaBytes);
 });
 

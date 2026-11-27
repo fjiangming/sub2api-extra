@@ -1,5 +1,17 @@
 # 个性化功能维护台账
 
+## 2026-11-27：容量上限改按对话日志物理占用判断
+
+用户确认整机空间由外部监控负责，要求运营中心的日志容量上限只按对话日志自身的实际物理占用判断。本轮只修改运营中心本地源码、页面、测试和说明文档；未部署服务器、未修改服务器配置、未修改主站代码。
+
+- `operations-center/src/conversation-log-store.js`：默认容量使用 `archive.sqlite`、WAL 和 SHM 的物理文件合计 `physicalBytes`，新增 `storage.capacityBytes` / `capacityBasis` 供状态接口和页面明确阈值口径；`quotaBytes` 继续保留为扣除 SQLite 可复用页后的参考统计，不再作为默认容量上限判定。
+- `operations-center/public/conversation-logs-ui.js`、`operations-center/scripts/conversation-logs-live-browser-check.cjs`、`operations-center/public/index.html`：采集状态和策略页面改为显示“实际占用（阈值）”，同时保留“计入容量（参考）”；容量构成说明改为主库文件 + WAL + SHM 的实际占用公式，更新静态资源缓存版本和视口回归断言。
+- `operations-center/docs/conversation-logs.md`：说明物理占用是日志容量上限口径，计入容量只用于参考；磁盘预留仍是独立的整机写入应急保护，不与日志容量上限混用。
+
+实际占用变化可能受 SQLite 可复用页、WAL 和 checkpoint 影响；清理记录后文件不一定立即缩小，因此达到物理上限后不会因为可复用页增加而自动降低阈值占用。新增判断只读取已有文件 stat，默认不读取正文；外部整机监控可按可用空间动态调整日志容量上限。
+
+验证：容量 / 对话日志 / 接收核心测试 **48 项通过**，JSONL、推送清理和重处理专项 **85 项通过**，相关语法检查和 `git diff --check` 通过；浏览器回归脚本因当前工作区未安装 `playwright` 未执行。未提交 GitHub，未构建镜像，未部署服务器。
+
 ## 2026-11-27：在对话日志页面展示计入容量构成
 
 用户要求说明“计入容量”由哪些部分组成，并在运营中心页面显示各部分占用大小。本轮只修改运营中心本地源码、静态资源版本、测试和说明文档；未部署服务器、未修改服务器配置、未修改主站代码。
