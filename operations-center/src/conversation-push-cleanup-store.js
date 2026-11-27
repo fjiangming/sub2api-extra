@@ -130,6 +130,10 @@ class ConversationPushCleanupStore {
       this.db.pragma(`incremental_vacuum(${Math.max(1, Math.min(1024, Math.trunc(pages)))})`);
       this.db.pragma('wal_checkpoint(PASSIVE)');
       this.db.pragma('wal_checkpoint(TRUNCATE)');
+      return true;
+    } catch (error) {
+      if (/^SQLITE_(?:BUSY|LOCKED)/.test(error.code || '')) return false;
+      throw error;
     } finally { this.db.pragma(`busy_timeout = ${timeout}`); }
   }
   prune() {

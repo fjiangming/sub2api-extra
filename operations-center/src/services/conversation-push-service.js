@@ -11,6 +11,10 @@ const { processingBudgets } = require('./conversation-memory');
 const { CLEANUP_BATCH_BYTES } = require('../conversation-push-cleanup-store');
 
 const RECLAIM_IDLE_MS = 30000;
+const RECLAIM_ACTIVE_MS = 30000;
+const RECLAIM_ACTIVE_PAGES = 128;
+const RECLAIM_PRESSURE_PAGES = 1024;
+const RECLAIM_PRESSURE_RATIO = 0.8;
 
 function cleanupBatchBytes(policy) {
   const mib = Number(policy?.s3?.jsonl?.cleanupBatchMiB);
@@ -45,9 +49,10 @@ class ConversationPushService {
   status(query) { return {...this.store.list(query),automatic:this.store.automaticStatus(),jsonl:this.jsonl.store.list(),cleanup:{...this.store.cleanup.status(),error:this.cleanupError},lastError:this.jsonl.lastError||this.lastError,lastRun:this.jsonl.lastRun||this.lastRun,enabled:this.store.policy().enabled}; }
   maintain() {
     this.pricingPause=this.stopping?'stopped':!this.canWork()||!this.canCleanup()?'foreground':this.active||this.testing||this.jsonl.active?'push':'';
-    if(this.pricingPause)this.reclaimIdleSince=null;
+    if(this.pricingPause==='foreground'||this.pricingPause==='stopped')this.reclaimIdleSince=null;
     if (this.stopping || !this.canWork() || !this.canCleanup()) return;
     try {
+      this.reclaimWhenIdle();
       if (!this.pricingPause && this.store.now()>=this.nextMaintenance) {
         this.nextMaintenance=this.store.now()+1000;
         const pricing=this.store.pricing.pending(),policy=this.store.policy();
@@ -78,14 +83,25 @@ class ConversationPushService {
   }
   reclaimWhenIdle() {
     const now=this.store.now();
-    if(this.stopping||this.pricingPause||this.running||this.jsonl.running||!this.canWork()||!this.canCleanup()||this.store.pricing.pending()||
-      this.jsonl.store.hasBacklog()||this.store.db.prepare('SELECT 1 FROM cl_payload_leases WHERE expires_at>? LIMIT 1').get(now)) {
+    const foregroundBlocked=this.stopping||this.pricingPause==='foreground'||this.pricingPause==='stopped'||!this.canWork()||!this.canCleanup()||
+      this.store.pricing.pending()||this.store.db.prepare('SELECT 1 FROM cl_payload_leases WHERE expires_at>? LIMIT 1').get(now);
+    if(foregroundBlocked) {
       this.reclaimIdleSince=null;return;
     }
     if(this.reclaimIdleSince===null)this.reclaimIdleSince=now;
-    if(now-this.reclaimIdleSince<RECLAIM_IDLE_MS||now<this.nextReclaim)return;
-    this.nextReclaim=now+RECLAIM_IDLE_MS;
-    if(this.store.db.pragma('freelist_count',{simple:true})>0)this.store.cleanup.reclaim({pages:128});
+    // A small vacuum slice can run between network awaits. Payload leases and
+    // foreground gates still make it yield before touching an active reader.
+    const busy=Boolean(this.running||this.active||this.jsonl.running||this.jsonl.active||this.testing);
+    const interval=busy?RECLAIM_ACTIVE_MS:RECLAIM_IDLE_MS;
+    if(now-this.reclaimIdleSince<interval||now<this.nextReclaim)return;
+    this.nextReclaim=now+interval;
+    let freePages, usage;
+    try { freePages=this.store.db.pragma('freelist_count',{simple:true}); usage=this.store.archive.storageUsage(); }
+    catch(error) { if (/^SQLITE_(?:BUSY|LOCKED)/.test(error.code||'')) return; throw error; }
+    if(freePages<=0)return;
+    const capacity=this.store.archive.policy().capacity*1024**3;
+    const desired=usage.physicalBytes>=capacity*RECLAIM_PRESSURE_RATIO?RECLAIM_PRESSURE_PAGES:RECLAIM_ACTIVE_PAGES;
+    this.store.cleanup.reclaim({pages:Math.min(desired,freePages)});
   }
   preview(input) { return this.store.preview(input); }
   async enqueue(input) {

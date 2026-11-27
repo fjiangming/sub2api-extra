@@ -185,35 +185,36 @@ test('background reclamation releases quota and physical pages without a full VA
   assert(f.store.storageUsage().physicalBytes < before.physicalBytes);
 });
 
-test('physical shrinking yields to pending deliveries while logical deletion and quota reuse continue', async t => {
+test('physical shrinking runs in bounded slices during an active delivery', async t => {
   const f = setup(t), [sent] = await deliveredRows(f, 1, {
     request: Buffer.from(JSON.stringify({ input: 'x'.repeat(2 * 1024 ** 2) })).toString('base64')
   });
-  const pending = event('reclaim-pending'); f.enqueue(pending);
   const before = f.store.storageUsage().quotaBytes, calls = [], reclaim = f.push.cleanup.reclaim.bind(f.push.cleanup);
   f.push.cleanup.reclaim = options => { calls.push(options); reclaim(options); };
-  f.service.maintain(); assert(!exists(f, sent)); assert(exists(f, pending));
+  f.service.maintain(); assert(!exists(f, sent));
   assert(f.store.storageUsage().quotaBytes < before);
   assert(f.store.db.pragma('freelist_count', { simple: true }) > 128);
-  f.advance(); f.service.maintain(); assert.equal(calls.length, 0);
-  assert.equal(f.service.reclaimIdleSince, null);
-  await f.service.tick(); f.advance(200); f.service.maintain(); assert(!exists(f, pending));
-  f.advance(29800); f.service.maintain(); assert.equal(calls.length, 0);
-  f.advance(200); f.service.maintain(); assert.deepEqual(calls, [{ pages: 128 }]);
+  f.service.active = { controller: new AbortController() };
+  f.service.reclaimIdleSince = f.push.now() - 60000;
+  f.service.maintain(); assert.deepEqual(calls, [{ pages: 128 }]);
   f.advance(29800); f.service.maintain(); assert.equal(calls.length, 1);
-  f.advance(200); f.service.maintain(); assert.deepEqual(calls, [{ pages: 128 }, { pages: 128 }]);
+  const usage = f.store.storageUsage(); f.push.archive.storageUsage = () => ({ ...usage, physicalBytes: 9 * 1024 ** 3 });
+  f.advance(200); f.service.maintain(); assert.deepEqual(calls, [{ pages: 128 }, { pages: 1024 }]);
 });
 
-test('automatic arrivals, open JSONL tails and failed files retain priority over physical shrinking', t => {
+test('automatic arrivals and open JSONL tails allow bounded reclaim without a payload reader', t => {
   const f = setup(t, { automatic: true });
   f.push.configure({ ...f.push.policy(), webhook: { ...f.push.policy().webhook, enabled: false },
     s3: { ...f.push.policy().s3, enabled: true, endpoint: 'https://storage.example/', bucket: 'fictional-reclaim', accessKeyId: 'fictional', secretAccessKey: 'fictional' } });
+  const seed = event('reclaim-active-seed', { request: Buffer.from(JSON.stringify({ input: 'x'.repeat(2 * 1024 ** 2) })).toString('base64') });
+  f.store.ingest(seed); f.store.db.pragma('wal_checkpoint(TRUNCATE)'); f.store.db.prepare('DELETE FROM cl_records WHERE id=?').run(seed.id);
   const calls = [];
   f.push.cleanup.reclaim = options => calls.push(options);
   const held = () => {
     f.service.reclaimIdleSince = f.push.now() - 60000;
-    f.service.maintain(); assert.equal(f.service.reclaimIdleSince, null);
-    assert.equal(calls.length, 0); f.advance();
+    f.service.jsonl.active = { controller: new AbortController() };
+    const before = calls.length; f.service.maintain(); assert.equal(calls.length, before + 1);
+    f.service.jsonl.active = null; f.advance();
   };
   f.store.ingest(event('reclaim-unscanned', { at: f.push.now() })); held();
   assert.equal(f.push.scanAutomatic().created, 1); held();
@@ -223,7 +224,7 @@ test('automatic arrivals, open JSONL tails and failed files retain priority over
   f.store.db.prepare("UPDATE cl_push_jobs SET status='failed' WHERE jsonl_file_id=?").run(file.id); held();
 });
 
-test('foreground work, readers, pricing and stop/start reset the physical shrinking idle window', async t => {
+test('foreground work, readers, pricing and stop/start reset the physical shrinking window', async t => {
   const f = setup(t), service = f.service;
   const reset = block => {
     service.reclaimIdleSince = f.push.now() - 60000; block();
@@ -232,8 +233,7 @@ test('foreground work, readers, pricing and stop/start reset the physical shrink
   reset(() => { service.canWork = () => false; }); service.canWork = () => true;
   reset(() => { service.canCleanup = () => false; }); service.canCleanup = () => true;
   const release = holdPayloads(f.store.db, f.push.now); t.after(release);
-  reset(() => {}); release();
-  reset(() => { service.jsonl.active = {}; }); service.jsonl.active = null;
+  release();
   service.reclaimIdleSince = f.push.now() - 60000;
   f.push.configure({ ...f.push.policy(), webhook: { ...f.push.policy().webhook,
     billing: { enabled: true, rates: [{ model: 'example-model', price: '1' }] } } });

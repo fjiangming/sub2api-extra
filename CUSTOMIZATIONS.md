@@ -1,5 +1,18 @@
 # 个性化功能维护台账
 
+## 2026-11-27：持续写入期间渐进释放 SQLite 可复用页
+
+用户确认日志持续写入时“完全空闲”窗口很少，要求在尽量不影响主站用户的情况下自动释放物理文件中的可复用页。本轮只修改运营中心推送后台、清理测试和说明文档；未修改主站采集协议、服务器配置或生产数据。
+
+- `operations-center/src/services/conversation-push-service.js`：推送 / JSONL 网络等待期间，在没有正文读取租约、前台工作或定价任务时也执行有界 `incremental_vacuum`；普通批次最多 128 页（约 512 KiB），物理占用达到日志容量 80% 时最多 1024 页（约 4 MiB），SQLite 忙时跳过并下次重试。保留独立低优先级和主站请求让行，不执行全库 `VACUUM`。
+- `operations-center/src/conversation-push-cleanup-store.js`：增量回收遇到 SQLite BUSY / LOCKED 时返回可重试结果，不把前台写入竞争误报为推送清理失败。
+- `operations-center/tests/conversation-push-cleanup.test.js`：覆盖持续推送 / 开放 JSONL 文件期间的回收、容量压力批量提升、正文读取租约和前台优先级让行。
+- `operations-center/docs/conversation-logs.md`、`operations-center/docs/conversation-reliability.md`：记录回收触发条件、批量上限、影响边界和不执行全量压缩的约束。
+
+增量回收只在事件循环间隙执行，单次最多 4 MiB，可能产生有限磁盘 I/O / SQLite 写锁竞争；不读取正文、不改变日志字节、不影响上传断点。可复用页是否能立即归还操作系统仍取决于 SQLite 空页位置，无法承诺一次回收释放全部空间。
+
+验证：推送 / 推送调度 / 存储计费 / 送达清理专项 **98 项通过**；本轮未提交 GitHub、未构建镜像、未更新服务器。
+
 ## 2026-11-27：容量上限改按对话日志物理占用判断
 
 用户确认整机空间由外部监控负责，要求运营中心的日志容量上限只按对话日志自身的实际物理占用判断。本轮只修改运营中心本地源码、页面、测试和说明文档；未部署服务器、未修改服务器配置、未修改主站代码。
